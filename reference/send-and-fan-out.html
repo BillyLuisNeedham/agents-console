@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Send and Fan-Out</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+  </head>
+  <body>
+    <main>
+      <header class="reference-header">
+        <p class="eyebrow">Reference · Agent graphs</p>
+        <h1>Send and fan-out</h1>
+        <p class="lede">When work splits, what does each worker see, and how do the writes come back together?</p>
+      </header>
+
+      <section class="reference-grid" aria-label="Fan-out primitives">
+        <article class="term">
+          <strong>Same-snapshot fan-out</strong>
+          Multiple normal edges, or a conditional edge returning node-name strings. Every destination runs in the next super-step and reads the same starting state.
+        </article>
+        <article class="term">
+          <strong>Send</strong>
+          <code>new Send(nodeName, args)</code>. Schedules one invocation of that node whose input is <code>args</code>, not the shared snapshot. Count and payloads are decided at runtime.
+        </article>
+        <article class="term">
+          <strong>Map</strong>
+          The list of Sends. One task per item, private input, all concurrent in one super-step.
+        </article>
+        <article class="term">
+          <strong>Reduce</strong>
+          The reducer on the channel those tasks write. Required: a last-value channel throws on concurrent writes.
+        </article>
+        <article class="term">
+          <strong>Fan-in</strong>
+          A node with an edge from the mapped node runs <em>once</em> after that super-step, seeing the reduced state.
+        </article>
+        <article class="term">
+          <strong>Command.goto</strong>
+          Can hold node names or Sends. Returned from a node, optionally with <code>update</code>. Do not also attach a static edge from the same node.
+        </article>
+      </section>
+
+      <section>
+        <h2>Rules that bite</h2>
+        <ul>
+          <li>Target must be an <code>addNode</code> name. Not validated at compile. Not <code>END</code>.</li>
+          <li>Parallel writes to one channel need a reducer. Concat order is not guaranteed — key the items.</li>
+          <li>One thrown task discards the super-step. Checkpointer: successful tasks stay done; retried nodes start over.</li>
+          <li>Recursion limit counts super-steps. A thousand Sends is one step.</li>
+          <li>Dependent work is a normal or conditional edge, not a Send.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Minimal shape</h2>
+        <pre class="card"><code>(state) =&gt; state.items.map((item) =&gt; new Send("work", { item }))</code></pre>
+      </section>
+
+      <section>
+        <h2>Primary sources</h2>
+        <ul class="source-list">
+          <li><a href="https://docs.langchain.com/oss/javascript/langgraph/graph-api">Graph API — Send, Command, recursion limit</a></li>
+          <li><a href="https://docs.langchain.com/oss/javascript/langgraph/use-graph-api">Use the Graph API — branches and map-reduce</a></li>
+        </ul>
+      </section>
+
+      <nav class="footer-nav" aria-label="Reference navigation">
+        <a href="../lessons/0004-send-and-dynamic-fan-out.html">Back to Lesson 4</a>
+        <a href="./agent-graph-vocabulary.html">Vocabulary</a>
+      </nav>
+    </main>
+  </body>
+</html>

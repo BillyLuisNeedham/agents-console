@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent Graph Vocabulary</title>
+    <link rel="stylesheet" href="../assets/lesson.css">
+  </head>
+  <body>
+    <main>
+      <header class="reference-header">
+        <p class="eyebrow">Reference · Agent graphs</p>
+        <h1>Vocabulary</h1>
+        <p class="lede">The small set of words needed to reason about graph-based agent systems without getting trapped in framework jargon.</p>
+      </header>
+
+      <section class="reference-grid" aria-label="Agent graph vocabulary">
+        <article class="term">
+          <strong>Agentic system</strong>
+          Any system that combines an LLM with tools, retrieval, memory, or orchestration to perform work. Anthropic uses this as the umbrella term for both workflows and agents.
+        </article>
+        <article class="term">
+          <strong>Workflow</strong>
+          An agentic system whose path is predefined in code. Routing, prompt chains, and fixed approval gates are workflows.
+        </article>
+        <article class="term">
+          <strong>Agent</strong>
+          An agentic system where the model dynamically directs the next action from environmental feedback. The loop decides; the code provides tools and boundaries.
+        </article>
+        <article class="term">
+          <strong>Graph</strong>
+          An explicit control-flow structure for an agentic system. Nodes perform work; edges choose what runs next; state records what the run knows.
+        </article>
+        <article class="term">
+          <strong>State</strong>
+          The current snapshot of the graph run: task, messages, decisions, intermediate results, and progress markers.
+        </article>
+        <article class="term">
+          <strong>Node</strong>
+          A function that receives state and returns a partial state update. It may call an LLM, use a tool, or run ordinary deterministic code.
+        </article>
+        <article class="term">
+          <strong>Edge</strong>
+          A transition from one node to another. Fixed edges always run; conditional edges choose destinations from state.
+        </article>
+        <article class="term">
+          <strong>Entry point</strong>
+          The first node(s) that run when a graph starts, declared with an edge from the virtual <code>START</code> node. Multiple entry points run in parallel; a conditional entry point routes from <code>START</code> based on input.
+        </article>
+        <article class="term">
+          <strong>Recursion limit</strong>
+          The maximum super-steps a single graph execution may take — 25 by default — before the runtime raises <code>GraphRecursionError</code>. The seatbelt that makes a loop without an exit fail loudly.
+        </article>
+        <article class="term">
+          <strong>Channel</strong>
+          One key in the state schema, with its own merge rule. Each channel receives updates independently, so two nodes writing different channels never conflict.
+        </article>
+        <article class="term">
+          <strong>Reducer</strong>
+          The merge rule for one state field, `(current, update) =&gt; newValue`. It decides whether a node update overwrites, appends, accumulates, or otherwise combines with existing state. Default is overwrite.
+        </article>
+        <article class="term">
+          <strong>Super-step</strong>
+          One execution round in the graph runtime. Nodes activated by the previous round may run in parallel, then their updates become input to the next round.
+        </article>
+        <article class="term">
+          <strong>Checkpoint</strong>
+          A persisted snapshot of graph state at a super-step boundary. It enables resumption, recovery, time travel, and human approval workflows.
+        </article>
+        <article class="term">
+          <strong>Thread</strong>
+          A scoped run or conversation identified by <code>thread_id</code>. Checkpoints are stored against a thread so it can be resumed later.
+        </article>
+        <article class="term">
+          <strong>Interrupt</strong>
+          A deliberate pause inside a node, usually to wait for human input. Resuming supplies the value that the paused function receives.
+        </article>
+        <article class="term">
+          <strong>Store</strong>
+          Long-term memory outside one graph thread. Use it for user preferences, facts, and shared knowledge that should cross conversations or runs.
+        </article>
+        <article class="term">
+          <strong>Command</strong>
+          A LangGraph primitive that can combine a state update with dynamic routing, or resume an interrupted run with a value.
+        </article>
+        <article class="term">
+          <strong>Send</strong>
+          A LangGraph primitive for dynamic fan-out: create one invocation of a node for each item in a list, each with its own input state.
+        </article>
+      </section>
+
+      <section class="callout">
+        <h2>Fast mental test</h2>
+        <p>When reading an agent architecture, ask four questions:</p>
+        <ol>
+          <li><strong>State:</strong> what does the system remember?</li>
+          <li><strong>Nodes:</strong> where does work happen?</li>
+          <li><strong>Edges:</strong> who chooses what happens next?</li>
+          <li><strong>Checkpoints:</strong> can execution pause, resume, or be audited?</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Primary sources</h2>
+        <ul class="source-list">
+          <li><a href="https://www.anthropic.com/engineering/building-effective-agents">Anthropic: Building effective agents</a></li>
+          <li><a href="https://docs.langchain.com/oss/javascript/langgraph/graph-api">LangGraph.js Graph API</a></li>
+          <li><a href="https://docs.langchain.com/oss/javascript/langgraph/persistence">LangGraph.js persistence</a></li>
+          <li><a href="https://research.google/pubs/pregel-a-system-for-large-scale-graph-processing/">Google Research: Pregel</a></li>
+        </ul>
+      </section>
+
+      <nav class="footer-nav" aria-label="Reference navigation">
+        <a href="../lessons/0001-what-agent-graphs-add.html">Back to Lesson 1</a>
+        <a href="../RESOURCES.md">Resource list</a>
+      </nav>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent graph · live</title>
+    <style>
+      :root {
+        --bg: #16140f;
+        --card: #221f18;
+        --ink: #f3ead3;
+        --muted: #9a907c;
+        --line: #3a3428;
+        --ready: #c4a35a;
+        --done: #6f9e6b;
+        --hot: #d4784a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.45 ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      header {
+        padding: 1.25rem 1.5rem 0.5rem;
+      }
+      h1 { font-size: 1.15rem; font-weight: 600; margin: 0; }
+      .meta { color: var(--muted); font-size: 0.85rem; margin-top: 0.25rem; }
+      main {
+        display: grid;
+        gap: 1rem;
+        padding: 1rem 1.5rem 2rem;
+        grid-template-columns: 1fr 1fr;
+      }
+      @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+      section {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1rem 1.1rem;
+      }
+      h2 { font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 0.75rem; }
+      .nodes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+      .node {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.25rem 0.7rem;
+        font-size: 0.85rem;
+      }
+      .node.next { border-color: var(--hot); color: var(--hot); }
+      .tickets { display: grid; gap: 0.4rem; }
+      .ticket {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        border-bottom: 1px solid var(--line);
+        padding: 0.35rem 0;
+      }
+      .done { color: var(--done); }
+      .pending { color: var(--ready); }
+      pre {
+        white-space: pre-wrap;
+        font: 12px/1.4 ui-monospace, monospace;
+        margin: 0;
+        max-height: 18rem;
+        overflow: auto;
+        color: #e6dcc0;
+      }
+      ul { margin: 0; padding-left: 1.1rem; color: var(--muted); }
+      .wide { grid-column: 1 / -1; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Workflow graph</h1>
+      <p class="meta" id="meta">connecting…</p>
+    </header>
+    <main>
+      <section>
+        <h2>Nodes</h2>
+        <div class="nodes" id="nodes"></div>
+      </section>
+      <section>
+        <h2>Tickets</h2>
+        <div class="tickets" id="tickets"></div>
+      </section>
+      <section>
+        <h2>Packet</h2>
+        <pre id="packet"></pre>
+      </section>
+      <section>
+        <h2>Spec</h2>
+        <pre id="spec"></pre>
+      </section>
+      <section>
+        <h2>Interrupt</h2>
+        <pre id="interrupt"></pre>
+      </section>
+      <section>
+        <h2>Log</h2>
+        <ul id="log"></ul>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
