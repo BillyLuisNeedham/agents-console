@@ -294,16 +294,57 @@ body {
   flex-shrink: 0;
 }
 
+.canvas-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.canvas-edge-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.canvas-edge-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.canvas-edge-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .canvas-viewport {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   position: relative;
   background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.canvas-viewport.canvas-panning {
+  cursor: grabbing;
 }
 
 .canvas-world {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .canvas-edges {
@@ -316,15 +357,15 @@ body {
 .canvas-edge {
   fill: none;
   stroke: var(--border);
-  stroke-width: 1.5;
+}
+
+.canvas-edge-label {
+  fill: var(--text-dim);
+  font-family: var(--mono);
 }
 
 .canvas-arrow {
   fill: var(--border);
-}
-
-.canvas-edge-conditional {
-  stroke-dasharray: 4 3;
 }
 
 .node-card {
@@ -333,6 +374,13 @@ body {
   border-radius: 6px;
   background: var(--bg-panel);
   overflow: hidden;
+  cursor: grab;
+}
+
+.node-card-dragging {
+  cursor: grabbing;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  z-index: 2;
 }
 
 .node-card-active {

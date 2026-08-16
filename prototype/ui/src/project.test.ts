@@ -5,7 +5,10 @@ import type { Thread } from "@langchain/langgraph-sdk";
 import {
   applyStreamPart,
   initRun,
+  edgePath,
   layoutGraph,
+  mergeLayout,
+  parseStoredLayout,
   projectChannels,
   projectLog,
   projectNodeCards,
@@ -14,8 +17,10 @@ import {
   projectStartRun,
   projectThreadSummary,
   projectTopology,
+  strokeWidthForZoom,
   syncRunValues,
   visibleThreads,
+  zoomAtCursor,
   type RunProjection,
 } from "./project";
 
@@ -354,6 +359,101 @@ describe("layoutGraph", () => {
     expect(positions.writeSpec).toEqual({ x: 300, y: 196 });
     expect(positions.deadlockGate).toEqual({ x: 620, y: 596 });
     expect(positions.mystery).toEqual({ x: 640, y: 16 });
+  });
+});
+
+describe("mergeLayout", () => {
+  const defaults = {
+    writeSpec: { x: 300, y: 196 },
+    approveSpec: { x: 300, y: 376 },
+  };
+
+  it("overrides defaults with stored positions and drops unknown ids", () => {
+    expect(
+      mergeLayout(defaults, {
+        writeSpec: { x: 10, y: 20 },
+        leftover: { x: 1, y: 2 },
+      }),
+    ).toEqual({
+      writeSpec: { x: 10, y: 20 },
+      approveSpec: { x: 300, y: 376 },
+    });
+  });
+
+  it("returns the defaults when nothing is stored", () => {
+    expect(mergeLayout(defaults, {})).toEqual(defaults);
+  });
+});
+
+describe("parseStoredLayout", () => {
+  it("keeps finite x/y pairs and drops anything else", () => {
+    expect(
+      parseStoredLayout({
+        writeSpec: { x: 10, y: 20 },
+        approveSpec: { x: "no", y: 1 },
+        schedule: { x: 1 },
+        review: null,
+        implementTicket: { x: Number.NaN, y: 0 },
+      }),
+    ).toEqual({ writeSpec: { x: 10, y: 20 } });
+  });
+
+  it("returns empty for non-objects", () => {
+    expect(parseStoredLayout(null)).toEqual({});
+    expect(parseStoredLayout("nope")).toEqual({});
+    expect(parseStoredLayout([{ x: 1, y: 2 }])).toEqual({});
+  });
+});
+
+describe("edgePath", () => {
+  const source = { x: 300, y: 196, w: 280, h: 80 };
+  const target = { x: 300, y: 376, w: 280, h: 80 };
+
+  it("routes downward elbows through a mid-Y horizontal", () => {
+    expect(edgePath(source, target, "ortho")).toEqual({
+      d: "M 440 276 L 440 326 L 440 326 L 440 376",
+      lx: 446,
+      ly: 326,
+    });
+  });
+
+  it("draws a straight segment between the facing edges", () => {
+    expect(edgePath(source, target, "straight")).toEqual({
+      d: "M 440 276 L 440 376",
+      lx: 446,
+      ly: 326,
+    });
+  });
+
+  it("leaves the top of the source when the target sits above", () => {
+    expect(edgePath(target, source, "ortho").d).toBe(
+      "M 440 376 L 440 326 L 440 326 L 440 276",
+    );
+  });
+});
+
+describe("zoomAtCursor", () => {
+  it("keeps the world point under the cursor stationary", () => {
+    expect(zoomAtCursor({ x: 0, y: 0, zoom: 1 }, { x: 100, y: 100 }, 2)).toEqual({
+      x: -100,
+      y: -100,
+      zoom: 2,
+    });
+  });
+
+  it("clamps at the zoom ceiling and does not shift the view", () => {
+    expect(zoomAtCursor({ x: 8, y: 8, zoom: 2.5 }, { x: 40, y: 40 }, 2)).toEqual({
+      x: 8,
+      y: 8,
+      zoom: 2.5,
+    });
+  });
+});
+
+describe("strokeWidthForZoom", () => {
+  it("keeps a 1.5px stroke visually constant", () => {
+    expect(strokeWidthForZoom(2)).toBe(0.75);
+    expect(strokeWidthForZoom(0.5)).toBe(3);
   });
 });
 

@@ -5,11 +5,20 @@
 
 import {
   TICKET_POOLS,
+  edgePath,
+  mergeLayout,
+  parseStoredLayout,
+  strokeWidthForZoom,
+  zoomAtCursor,
+  type CardBox,
   type ChannelView,
+  type EdgeMode,
   type NodeCardView,
+  type Point,
   type ThreadSummary,
   type TicketView,
   type TopologyEdge,
+  type ViewTransform,
 } from "./project";
 
 export interface StartFormModel {
@@ -189,6 +198,277 @@ function renderRail(model: AppModel, handlers: Handlers): HTMLElement {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
 const CARD_WIDTH = 280;
+const LAYOUT_KEY = "console-canvas-layout";
+const DRAG_THRESHOLD = 4;
+const WORLD_MIN_WIDTH = 960;
+
+const nodePos = new Map<string, Point>();
+const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
+let edgeMode: EdgeMode = "ortho";
+
+type Drag =
+  | {
+      kind: "node";
+      nodeId: string;
+      startX: number;
+      startY: number;
+      startNode: Point;
+      moved: boolean;
+    }
+  | {
+      kind: "pan";
+      startX: number;
+      startY: number;
+      startView: Point;
+      moved: boolean;
+    };
+
+interface DrawnEdge {
+  el: SVGPathElement;
+  label: SVGTextElement | null;
+  source: string;
+  target: string;
+  conditional: boolean;
+}
+
+interface CanvasBind {
+  viewport: HTMLElement;
+  world: HTMLElement;
+  svg: SVGSVGElement;
+  nodesById: Map<string, HTMLElement>;
+  edgeEls: DrawnEdge[];
+}
+
+let canvas: CanvasBind | null = null;
+let drag: Drag | null = null;
+
+function readStored(): Record<string, Point> {
+  try {
+    return parseStoredLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
+  } catch {
+    return {};
+  }
+}
+
+function writeStored(): void {
+  const stored: Record<string, Point> = {};
+  for (const [id, pos] of nodePos) stored[id] = pos;
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
+  } catch {
+    // quota or private mode: layout just will not persist
+  }
+}
+
+function seedPositions(cards: NodeCardView[]): void {
+  const defaults: Record<string, Point> = {};
+  for (const card of cards) defaults[card.id] = { x: card.x, y: card.y };
+  const merged = mergeLayout(defaults, readStored());
+  for (const card of cards) {
+    if (!nodePos.has(card.id)) nodePos.set(card.id, merged[card.id] ?? { x: card.x, y: card.y });
+  }
+}
+
+function resetLayout(cards: NodeCardView[]): void {
+  nodePos.clear();
+  try {
+    localStorage.removeItem(LAYOUT_KEY);
+  } catch {
+    // ignore
+  }
+  for (const card of cards) nodePos.set(card.id, { x: card.x, y: card.y });
+}
+
+function cardBox(el: HTMLElement): CardBox {
+  return { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+}
+
+function posOf(card: NodeCardView): Point {
+  return nodePos.get(card.id) ?? { x: card.x, y: card.y };
+}
+
+function applyTransform(): void {
+  if (!canvas) return;
+  canvas.world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
+  paintStrokeScale();
+}
+
+function paintStrokeScale(): void {
+  if (!canvas) return;
+  const width = strokeWidthForZoom(view.zoom);
+  const dash = `${4 / view.zoom} ${3 / view.zoom}`;
+  for (const edge of canvas.edgeEls) {
+    edge.el.setAttribute("stroke-width", String(width));
+    if (edge.conditional) edge.el.setAttribute("stroke-dasharray", dash);
+    edge.label?.setAttribute("font-size", String(10 / view.zoom));
+  }
+}
+
+function updateEdges(): void {
+  if (!canvas) return;
+  const boxes = new Map<string, CardBox>();
+  for (const [id, el] of canvas.nodesById) boxes.set(id, cardBox(el));
+  for (const edge of canvas.edgeEls) {
+    const source = boxes.get(edge.source);
+    const target = boxes.get(edge.target);
+    if (!source || !target) continue;
+    const geom = edgePath(source, target, edgeMode);
+    edge.el.setAttribute("d", geom.d);
+    edge.label?.setAttribute("x", String(geom.lx));
+    edge.label?.setAttribute("y", String(geom.ly));
+  }
+  paintStrokeScale();
+}
+
+function applyPositions(): void {
+  if (!canvas) return;
+  for (const [id, card] of canvas.nodesById) {
+    const pos = nodePos.get(id);
+    if (!pos) continue;
+    card.style.left = `${pos.x}px`;
+    card.style.top = `${pos.y}px`;
+  }
+}
+
+function zoomBy(factor: number): void {
+  if (!canvas) return;
+  const rect = canvas.viewport.getBoundingClientRect();
+  const next = zoomAtCursor(view, { x: rect.width / 2, y: rect.height / 2 }, factor);
+  view.x = next.x;
+  view.y = next.y;
+  view.zoom = next.zoom;
+  applyTransform();
+}
+
+function resetView(): void {
+  if (!canvas) return;
+  view.zoom = 1;
+  const rect = canvas.viewport.getBoundingClientRect();
+  view.x = Math.max(8, (rect.width - WORLD_MIN_WIDTH) / 2);
+  view.y = 8;
+  view.seeded = true;
+  applyTransform();
+}
+
+function endDrag(event?: PointerEvent): void {
+  if (!drag) return;
+  if (event && canvas) {
+    try {
+      canvas.viewport.releasePointerCapture(event.pointerId);
+    } catch {
+      // never captured or already released
+    }
+  }
+  if (canvas) {
+    for (const card of canvas.nodesById.values()) card.classList.remove("node-card-dragging");
+    canvas.viewport.classList.remove("canvas-panning");
+  }
+  if (drag.kind === "node" && drag.moved) writeStored();
+  drag = null;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pointerup", (event) => endDrag(event));
+  window.addEventListener("pointercancel", (event) => endDrag(event));
+}
+
+function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+  const svg = world.querySelector("svg.canvas-edges");
+  if (!(svg instanceof SVGSVGElement)) return;
+  const nodesById = new Map<string, HTMLElement>();
+  for (const el of world.querySelectorAll<HTMLElement>("[data-node-id]")) {
+    const id = el.dataset.nodeId;
+    if (id) nodesById.set(id, el);
+  }
+  canvas = { viewport, world, svg, nodesById, edgeEls: [] };
+  if (!view.seeded && viewport.clientWidth > 0) {
+    view.seeded = true;
+    view.x = Math.max(8, (viewport.clientWidth - WORLD_MIN_WIDTH) / 2);
+    view.y = 8;
+  }
+  applyTransform();
+  fitWorld(world);
+  drawEdges(world, edges);
+  updateEdges();
+
+  viewport.addEventListener("pointerdown", (event) => {
+    if (drag) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const card = target?.closest(".node-card");
+    const interactive = target?.closest("button, input, select, textarea, a, summary, label");
+    if (card instanceof HTMLElement && !interactive) {
+      const id = card.dataset.nodeId ?? "";
+      drag = {
+        kind: "node",
+        nodeId: id,
+        startX: event.clientX,
+        startY: event.clientY,
+        startNode: { ...(nodePos.get(id) ?? { x: 0, y: 0 }) },
+        moved: false,
+      };
+    } else if (!card) {
+      drag = {
+        kind: "pan",
+        startX: event.clientX,
+        startY: event.clientY,
+        startView: { x: view.x, y: view.y },
+        moved: false,
+      };
+    } else {
+      return;
+    }
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch {
+      // pointer already gone
+    }
+  });
+
+  viewport.addEventListener("pointermove", (event) => {
+    if (!drag || !canvas) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    drag.moved = true;
+    if (drag.kind === "node") {
+      const next = { x: drag.startNode.x + dx / view.zoom, y: drag.startNode.y + dy / view.zoom };
+      nodePos.set(drag.nodeId, next);
+      const el = canvas.nodesById.get(drag.nodeId);
+      if (el) {
+        el.style.left = `${next.x}px`;
+        el.style.top = `${next.y}px`;
+        el.classList.add("node-card-dragging");
+      }
+      fitWorld(canvas.world);
+      updateEdges();
+    } else {
+      view.x = drag.startView.x + dx;
+      view.y = drag.startView.y + dy;
+      canvas.viewport.classList.add("canvas-panning");
+      applyTransform();
+    }
+  });
+
+  viewport.addEventListener("pointerup", (event) => endDrag(event));
+  viewport.addEventListener("pointercancel", (event) => endDrag(event));
+  viewport.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      const next = zoomAtCursor(
+        view,
+        { x: event.clientX - rect.left, y: event.clientY - rect.top },
+        Math.exp(-event.deltaY * 0.0015),
+      );
+      view.x = next.x;
+      view.y = next.y;
+      view.zoom = next.zoom;
+      applyTransform();
+    },
+    { passive: false },
+  );
+}
 
 function ticketRow(t: TicketView): HTMLElement {
   return h(
@@ -230,12 +510,13 @@ function renderCard(card: NodeCardView): HTMLElement {
     card.channels.length > 0
       ? card.channels.map(renderCardChannel)
       : [h("div", { class: "dim" }, "—")];
+  const pos = posOf(card);
   return h(
     "div",
     {
       class: `node-card node-card-${card.status}`,
       "data-node-id": card.id,
-      style: `left:${card.x}px;top:${card.y}px;width:${CARD_WIDTH}px`,
+      style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
     h(
       "div",
@@ -248,16 +529,25 @@ function renderCard(card: NodeCardView): HTMLElement {
 }
 
 function worldSize(cards: NodeCardView[]): { width: number; height: number } {
-  let width = 960;
+  let width = WORLD_MIN_WIDTH;
   let height = 400;
   for (const card of cards) {
-    width = Math.max(width, card.x + CARD_WIDTH + 48);
-    height = Math.max(height, card.y + 48);
+    const pos = posOf(card);
+    width = Math.max(width, pos.x + CARD_WIDTH + 48);
+    height = Math.max(height, pos.y + 48);
   }
   return { width, height };
 }
 
 function renderCanvasHeader(model: AppModel): HTMLElement {
+  const edgeToggle = h("input", {
+    type: "checkbox",
+    checked: edgeMode === "ortho",
+  }) as HTMLInputElement;
+  edgeToggle.addEventListener("change", () => {
+    edgeMode = edgeToggle.checked ? "ortho" : "straight";
+    updateEdges();
+  });
   return h(
     "div",
     { class: "canvas-header" },
@@ -268,6 +558,30 @@ function renderCanvasHeader(model: AppModel): HTMLElement {
       model.selectedId ? `thread · ${model.selectedId}` : "no thread selected",
     ),
     model.streamError ? h("span", { class: "error-inline" }, model.streamError) : null,
+    h(
+      "div",
+      { class: "canvas-tools" },
+      h("label", { class: "canvas-edge-toggle", title: "edge routing" }, edgeToggle, "right angles"),
+      h("button", { class: "btn", title: "zoom out", onclick: () => zoomBy(1 / 1.25) }, "−"),
+      h("button", { class: "btn", title: "zoom in", onclick: () => zoomBy(1.25) }, "+"),
+      h("button", { class: "btn", title: "reset pan and zoom", onclick: () => resetView() }, "reset"),
+      h(
+        "button",
+        {
+          class: "btn",
+          title: "restore default card positions",
+          onclick: () => {
+            resetLayout(model.cards);
+            applyPositions();
+            if (canvas) {
+              fitWorld(canvas.world);
+              updateEdges();
+            }
+          },
+        },
+        "reset layout",
+      ),
+    ),
   );
 }
 
@@ -307,37 +621,44 @@ function fitWorld(world: HTMLElement): void {
 
 function drawEdges(world: HTMLElement, edges: TopologyEdge[]): void {
   const svg = world.querySelector("svg.canvas-edges");
-  if (!(svg instanceof SVGElement)) return;
+  if (!(svg instanceof SVGSVGElement) || !canvas) return;
   for (const child of [...svg.children]) {
     if (child.tagName.toLowerCase() !== "defs") child.remove();
   }
-  const boxes = new Map<string, { x: number; y: number; w: number; h: number }>();
-  for (const el of world.querySelectorAll<HTMLElement>("[data-node-id]")) {
-    const id = el.dataset.nodeId;
-    if (!id) continue;
-    boxes.set(id, { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
-  }
+  canvas.edgeEls = [];
+  const boxes = new Map<string, CardBox>();
+  for (const [id, el] of canvas.nodesById) boxes.set(id, cardBox(el));
   for (const edge of edges) {
-    const s = boxes.get(edge.source);
-    const t = boxes.get(edge.target);
-    if (!s || !t) continue;
-    const sx = s.x + s.w / 2;
-    const sy = s.y + s.h / 2;
-    const tx = t.x + t.w / 2;
-    const ty = t.y + t.h / 2;
-    const up = ty < sy;
-    const outY = up ? s.y : s.y + s.h;
-    const inY = up ? t.y + t.h : t.y;
-    const midY = (outY + inY) / 2;
+    const source = boxes.get(edge.source);
+    const target = boxes.get(edge.target);
+    if (!source || !target) continue;
+    const geom = edgePath(source, target, edgeMode);
     const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("d", `M ${sx} ${outY} L ${sx} ${midY} L ${tx} ${midY} L ${tx} ${inY}`);
+    path.setAttribute("d", geom.d);
     path.setAttribute(
       "class",
       "canvas-edge" + (edge.conditional ? " canvas-edge-conditional" : ""),
     );
     path.setAttribute("marker-end", `url(#${ARROW_ID})`);
     svg.appendChild(path);
+    let label: SVGTextElement | null = null;
+    if (edge.data) {
+      label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("class", "canvas-edge-label");
+      label.setAttribute("x", String(geom.lx));
+      label.setAttribute("y", String(geom.ly));
+      label.textContent = edge.data;
+      svg.appendChild(label);
+    }
+    canvas.edgeEls.push({
+      el: path,
+      label,
+      source: edge.source,
+      target: edge.target,
+      conditional: edge.conditional === true,
+    });
   }
+  paintStrokeScale();
 }
 
 function renderMain(model: AppModel): HTMLElement {
@@ -382,11 +703,15 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
 // ---------------------------------------------------------------------------
 
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
+  endDrag();
+  seedPositions(model.cards);
   const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model));
   root.replaceChildren(h("div", { class: "shell" }, content, renderLogDrawer(model, handlers)));
   const world = root.querySelector(".canvas-world");
-  if (world instanceof HTMLElement) {
-    fitWorld(world);
-    drawEdges(world, model.edges);
+  const viewport = root.querySelector(".canvas-viewport");
+  if (world instanceof HTMLElement && viewport instanceof HTMLElement) {
+    bindCanvas(viewport, world, model.edges);
+  } else {
+    canvas = null;
   }
 }

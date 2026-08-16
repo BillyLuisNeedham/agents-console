@@ -341,8 +341,10 @@ const SPINE: Record<string, { x: number; y: number }> = {
   END: { x: 300, y: 1096 },
 };
 
-export function layoutGraph(nodes: TopologyNode[]): Record<string, { x: number; y: number }> {
-  const positions: Record<string, { x: number; y: number }> = {};
+export type Point = { x: number; y: number };
+
+export function layoutGraph(nodes: TopologyNode[]): Record<string, Point> {
+  const positions: Record<string, Point> = {};
   let unknown = 0;
   for (const node of nodes) {
     const seeded = SPINE[node.id];
@@ -353,6 +355,92 @@ export function layoutGraph(nodes: TopologyNode[]): Record<string, { x: number; 
     }
   }
   return positions;
+}
+
+export function mergeLayout(
+  defaults: Record<string, Point>,
+  stored: Record<string, Point>,
+): Record<string, Point> {
+  const positions: Record<string, Point> = {};
+  for (const [id, pos] of Object.entries(defaults)) {
+    positions[id] = stored[id] ?? pos;
+  }
+  return positions;
+}
+
+export function parseStoredLayout(raw: unknown): Record<string, Point> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const positions: Record<string, Point> = {};
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const x = (value as { x?: unknown }).x;
+    const y = (value as { y?: unknown }).y;
+    if (typeof x !== "number" || typeof y !== "number") continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    positions[id] = { x, y };
+  }
+  return positions;
+}
+
+export type EdgeMode = "ortho" | "straight";
+
+export interface CardBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export function edgePath(
+  source: CardBox,
+  target: CardBox,
+  mode: EdgeMode,
+): { d: string; lx: number; ly: number } {
+  const sx = source.x + source.w / 2;
+  const sy = source.y + source.h / 2;
+  const tx = target.x + target.w / 2;
+  const ty = target.y + target.h / 2;
+  const up = ty < sy;
+  const outY = up ? source.y : source.y + source.h;
+  const inY = up ? target.y + target.h : target.y;
+  if (mode === "ortho") {
+    const midY = (outY + inY) / 2;
+    return {
+      d: `M ${sx} ${outY} L ${sx} ${midY} L ${tx} ${midY} L ${tx} ${inY}`,
+      lx: sx + 6,
+      ly: midY,
+    };
+  }
+  return {
+    d: `M ${sx} ${outY} L ${tx} ${inY}`,
+    lx: (sx + tx) / 2 + 6,
+    ly: (outY + inY) / 2,
+  };
+}
+
+export const MIN_ZOOM = 0.25;
+export const MAX_ZOOM = 2.5;
+
+export interface ViewTransform {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export function zoomAtCursor(
+  view: ViewTransform,
+  cursor: Point,
+  factor: number,
+): ViewTransform {
+  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.zoom * factor));
+  if (zoom === view.zoom) return view;
+  const wx = (cursor.x - view.x) / view.zoom;
+  const wy = (cursor.y - view.y) / view.zoom;
+  return { x: cursor.x - wx * zoom, y: cursor.y - wy * zoom, zoom };
+}
+
+export function strokeWidthForZoom(zoom: number): number {
+  return 1.5 / zoom;
 }
 
 const NODE_CHANNELS: Record<string, string[]> = {
