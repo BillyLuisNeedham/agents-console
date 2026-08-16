@@ -124,6 +124,39 @@ export function projectLog(raw: unknown): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Start-run form: form fields in, run payload out
+// ---------------------------------------------------------------------------
+
+/** Ticket pools a run can start from, passed to the graph as configurable.ticketDir. */
+export const TICKET_POOLS = ["tickets/", "mock-tickets/", "mock-tickets-deadlock/"] as const;
+
+export interface StartForm {
+  topic: string;
+  ticketDir: string;
+  packet: string;
+}
+
+export interface StartRequest {
+  input: Raw;
+  config: Raw;
+}
+
+/**
+ * The payload for starting a run. Null when the topic is blank (the form
+ * blocks submission). A blank packet is omitted entirely so the graph falls
+ * back to its demo packet.
+ */
+export function projectStartRun(form: StartForm): StartRequest | null {
+  const topic = form.topic.trim();
+  if (!topic) return null;
+  const packet = form.packet.trim();
+  return {
+    input: { topic, ...(packet ? { packet } : {}) },
+    config: { configurable: { ticketDir: form.ticketDir } },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Run projection: stream events in, view model out
 // ---------------------------------------------------------------------------
 
@@ -171,7 +204,13 @@ export function syncRunValues(run: RunProjection, values: unknown): RunProjectio
 
 export function applyStreamPart(run: RunProjection, part: StreamPart): RunProjection {
   if (part.event === "values") {
-    return syncRunValues(run, part.data);
+    const values = asValues(part.data);
+    if (!values) return run;
+    // An interrupt lands as a values part holding only __interrupt__: run
+    // bookkeeping, not a State snapshot. Keep the last real snapshot.
+    const keys = Object.keys(values);
+    if (keys.length > 0 && keys.every((key) => key.startsWith("__"))) return run;
+    return syncRunValues(run, values);
   }
   if (part.event === "updates") {
     const update = asValues(part.data);

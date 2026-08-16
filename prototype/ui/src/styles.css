@@ -157,6 +157,59 @@ body {
   flex: 1;
 }
 
+/* --------------------------------------------------------- start-run form */
+
+.start-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.start-form h2 {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.start-form .field {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.start-form .field:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.start-form .field:disabled {
+  opacity: 0.5;
+}
+
+.start-form textarea.field {
+  resize: vertical;
+  min-height: 56px;
+}
+
+.start-form .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.start-form .btn:disabled:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
 .thread-list {
   flex: 1;
   overflow-y: auto;

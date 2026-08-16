@@ -1,12 +1,22 @@
 /**
- * Console — walking skeleton plus live streaming. A left rail lists threads
- * (Console-created by default, show-all toggle); selecting one renders its
- * channels as a plain list, joins any in-flight run's stream, and updates
- * state, log and node statuses live as super-steps land.
+ * Console — walking skeleton plus live streaming and run start. A left rail
+ * holds a start-run form (topic, ticket pool, optional packet) and lists
+ * threads (Console-created by default, show-all toggle); selecting one
+ * renders its channels as a plain list, joins any in-flight run's stream,
+ * and updates state, log and node statuses live as super-steps land.
  */
 
 import "./styles.css";
-import { findActiveRun, getThread, joinRun, listThreads, makeClient } from "./client";
+import {
+  createThread,
+  findActiveRun,
+  getAssistantId,
+  getThread,
+  joinRun,
+  listThreads,
+  makeClient,
+  streamRun,
+} from "./client";
 import type { Raw } from "./project";
 import {
   applyStreamPart,
@@ -14,8 +24,10 @@ import {
   projectChannels,
   projectLog,
   projectNodes,
+  projectStartRun,
   projectThreadSummary,
   syncRunValues,
+  TICKET_POOLS,
   visibleThreads,
   type RunProjection,
 } from "./project";
@@ -37,6 +49,13 @@ const state = {
   abort: null as AbortController | null,
   logOpen: false,
   error: null as string | null,
+  start: {
+    topic: "",
+    ticketDir: TICKET_POOLS[0] as string,
+    packet: "",
+    starting: false,
+    error: null as string | null,
+  },
 };
 
 function model(): AppModel {
@@ -57,10 +76,22 @@ function model(): AppModel {
     streaming: state.run.streaming,
     streamError: state.run.streamError,
     error: state.error,
+    start: state.start,
   };
 }
 
+/**
+ * Rebuild the DOM from the model. Form fields are controlled from state, so
+ * a rebuild would drop focus and cursor position; both are restored here for
+ * whichever start-form field was being edited.
+ */
 function render(): void {
+  const active = document.activeElement;
+  const field = active instanceof HTMLElement ? active.getAttribute("data-field") : null;
+  const selection =
+    active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
   renderApp(root, model(), {
     onSelectThread: (threadId) => void selectThread(threadId),
     onToggleShowAll: (showAll) => {
@@ -72,12 +103,107 @@ function render(): void {
       render();
     },
     onRefresh: () => void load(),
+    onStartField: (field, value) => {
+      state.start = { ...state.start, [field]: value, error: null };
+      render();
+    },
+    onStartRun: () => void startRun(),
   });
+  if (field) {
+    const el = root.querySelector(`[data-field="${field}"]`);
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      el.focus();
+      if (selection) el.setSelectionRange(selection.start, selection.end);
+    } else if (el instanceof HTMLSelectElement) {
+      el.focus();
+    }
+  }
 }
 
 function stopStream(): void {
   state.abort?.abort();
   state.abort = null;
+}
+
+/**
+ * Start a run from the rail form: create a thread tagged with the topic,
+ * invoke the graph on it (ticket pool via configurable.ticketDir, packet
+ * only when given), and stream it live. The new thread becomes the
+ * selection, so the run strip and channels track it as super-steps land.
+ */
+async function startRun(): Promise<void> {
+  const request = projectStartRun(state.start);
+  if (!request || state.start.starting) return;
+  stopStream();
+  state.start = { ...state.start, starting: true, error: null };
+  render();
+  const controller = new AbortController();
+  state.abort = controller;
+  let assistantId: string;
+  let thread: Thread<Raw>;
+  try {
+    assistantId = await getAssistantId(client);
+    thread = await createThread(client, state.start.topic.trim());
+  } catch (err) {
+    state.start = {
+      ...state.start,
+      starting: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    render();
+    return;
+  }
+  if (controller.signal.aborted) {
+    state.start = { ...state.start, starting: false };
+    render();
+    return;
+  }
+  state.threads = [thread, ...state.threads];
+  state.selectedId = thread.thread_id;
+  state.selected = thread;
+  state.run = { ...initRun(), streaming: true };
+  state.start = {
+    topic: "",
+    ticketDir: state.start.ticketDir,
+    packet: "",
+    starting: true,
+    error: null,
+  };
+  render();
+  try {
+    await streamRun(
+      client,
+      thread.thread_id,
+      assistantId,
+      request.input,
+      {
+        onPart: (part) => {
+          if (controller.signal.aborted || state.selectedId !== thread.thread_id) return;
+          state.run = applyStreamPart(state.run, part);
+          render();
+        },
+        onError: (message) => {
+          state.run = { ...state.run, streaming: false, streamError: message };
+          render();
+        },
+        onDone: () => {
+          state.run = { ...state.run, streaming: false };
+        },
+      },
+      controller.signal,
+      request.config,
+    );
+  } catch (err) {
+    if (!controller.signal.aborted) {
+      state.run = {
+        ...state.run,
+        streaming: false,
+        streamError: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+  state.start = { ...state.start, starting: false };
+  await load();
 }
 
 /** Join the selected thread's in-flight run, if it has one. */

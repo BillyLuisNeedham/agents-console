@@ -3,7 +3,21 @@
  * flows in through `renderApp`; all user intent flows out through `Handlers`.
  */
 
-import type { ChannelView, NodeView, ThreadSummary, TicketView } from "./project";
+import {
+  TICKET_POOLS,
+  type ChannelView,
+  type NodeView,
+  type ThreadSummary,
+  type TicketView,
+} from "./project";
+
+export interface StartFormModel {
+  topic: string;
+  ticketDir: string;
+  packet: string;
+  starting: boolean;
+  error: string | null;
+}
 
 export interface AppModel {
   threads: ThreadSummary[];
@@ -16,6 +30,7 @@ export interface AppModel {
   streaming: boolean;
   streamError: string | null;
   error: string | null;
+  start: StartFormModel;
 }
 
 export interface Handlers {
@@ -23,6 +38,8 @@ export interface Handlers {
   onToggleShowAll: (showAll: boolean) => void;
   onToggleLog: () => void;
   onRefresh: () => void;
+  onStartField: (field: "topic" | "ticketDir" | "packet", value: string) => void;
+  onStartRun: () => void;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(
@@ -53,8 +70,70 @@ function fmtTime(iso: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Left rail: thread list + show-all toggle
+// Left rail: start-run form + thread list + show-all toggle
 // ---------------------------------------------------------------------------
+
+function renderStartForm(model: AppModel, handlers: Handlers): HTMLElement {
+  const start = model.start;
+
+  const topic = h("input", {
+    class: "field",
+    type: "text",
+    placeholder: "topic",
+    value: start.topic,
+    "data-field": "start-topic",
+    disabled: start.starting || null,
+  }) as HTMLInputElement;
+  topic.addEventListener("input", () => handlers.onStartField("topic", topic.value));
+
+  const pool = h("select", {
+    class: "field",
+    "data-field": "start-pool",
+    disabled: start.starting || null,
+  }) as HTMLSelectElement;
+  for (const dir of TICKET_POOLS) {
+    pool.append(h("option", { value: dir }, dir));
+  }
+  pool.value = start.ticketDir;
+  pool.addEventListener("change", () => handlers.onStartField("ticketDir", pool.value));
+
+  const packet = h(
+    "textarea",
+    {
+      class: "field",
+      rows: 4,
+      placeholder: "packet (optional — blank uses the demo packet)",
+      "data-field": "start-packet",
+      disabled: start.starting || null,
+    },
+    start.packet,
+  ) as HTMLTextAreaElement;
+  packet.addEventListener("input", () => handlers.onStartField("packet", packet.value));
+
+  const form = h(
+    "form",
+    { class: "start-form" },
+    h("h2", {}, "start a run"),
+    topic,
+    pool,
+    packet,
+    h(
+      "button",
+      {
+        class: "btn",
+        disabled: start.starting || start.topic.trim() === "" || null,
+      },
+      start.starting ? "starting…" : "start run",
+    ),
+    start.error ? h("span", { class: "error-inline" }, start.error) : null,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handlers.onStartRun();
+  });
+  return form;
+}
+
 
 function renderRail(model: AppModel, handlers: Handlers): HTMLElement {
   const toggle = h("input", { type: "checkbox", checked: model.showAll }) as HTMLInputElement;
@@ -97,6 +176,7 @@ function renderRail(model: AppModel, handlers: Handlers): HTMLElement {
       h("label", { class: "dim checkrow" }, toggle, "show all"),
       h("button", { class: "btn", onclick: () => handlers.onRefresh() }, "refresh"),
     ),
+    renderStartForm(model, handlers),
     list,
   );
 }

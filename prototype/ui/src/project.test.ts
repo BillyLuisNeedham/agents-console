@@ -8,6 +8,7 @@ import {
   projectChannels,
   projectLog,
   projectNodes,
+  projectStartRun,
   projectThreadSummary,
   syncRunValues,
   visibleThreads,
@@ -206,6 +207,14 @@ describe("applyStreamPart", () => {
     ]);
   });
 
+  it("keeps the last full snapshot when a values part carries only interrupt bookkeeping", () => {
+    const run = play(initRun(), [
+      { event: "values", data: { topic: "demo", spec: "s" } },
+      { event: "values", data: { __interrupt__: [{ id: "x", value: {} }] } },
+    ]);
+    expect(run.values).toEqual({ topic: "demo", spec: "s" });
+  });
+
   it("ignores non-object updates payloads", () => {
     const run = applyStreamPart(initRun(), { event: "updates", data: null });
     expect(run.activeNodes).toEqual([]);
@@ -231,6 +240,42 @@ describe("applyStreamPart", () => {
     expect(run.streamError).toBe("boom");
     run = applyStreamPart(run, { event: "messages", data: ["junk"] });
     expect(run.streamError).toBe("boom");
+  });
+});
+
+describe("projectStartRun", () => {
+  it("rejects a blank topic", () => {
+    expect(projectStartRun({ topic: "", ticketDir: "tickets/", packet: "" })).toBeNull();
+    expect(projectStartRun({ topic: "   ", ticketDir: "tickets/", packet: "" })).toBeNull();
+  });
+
+  it("trims the topic and puts the ticket pool under configurable.ticketDir", () => {
+    const request = projectStartRun({
+      topic: "  demo run  ",
+      ticketDir: "mock-tickets-deadlock/",
+      packet: "",
+    });
+    expect(request?.input.topic).toBe("demo run");
+    expect(request?.config).toEqual({
+      configurable: { ticketDir: "mock-tickets-deadlock/" },
+    });
+  });
+
+  it("includes trimmed packet text when given", () => {
+    const request = projectStartRun({
+      topic: "demo",
+      ticketDir: "tickets/",
+      packet: "  # Packet\n\nreal decisions  ",
+    });
+    expect(request?.input.packet).toBe("# Packet\n\nreal decisions");
+  });
+
+  it("omits the packet key when blank, so the graph falls back to the demo packet", () => {
+    for (const packet of ["", "   \n  "]) {
+      const request = projectStartRun({ topic: "demo", ticketDir: "tickets/", packet });
+      expect(request).not.toBeNull();
+      expect("packet" in (request?.input ?? {})).toBe(false);
+    }
   });
 });
 

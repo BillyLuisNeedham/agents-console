@@ -8,11 +8,11 @@ import type { Raw, StreamPart } from "./project";
 
 export const DEV_SERVER_URL = "http://localhost:2024";
 
-export function makeClient(): Client {
-  return new Client({ apiUrl: DEV_SERVER_URL, apiKey: null });
+export function makeClient(): Client<Raw> {
+  return new Client<Raw>({ apiUrl: DEV_SERVER_URL, apiKey: null });
 }
 
-export async function listThreads(client: Client): Promise<Thread<Raw>[]> {
+export async function listThreads(client: Client<Raw>): Promise<Thread<Raw>[]> {
   return client.threads.search<Raw>({
     limit: 50,
     sortBy: "updated_at",
@@ -20,8 +20,13 @@ export async function listThreads(client: Client): Promise<Thread<Raw>[]> {
   });
 }
 
-export async function getThread(client: Client, threadId: string): Promise<Thread<Raw>> {
+export async function getThread(client: Client<Raw>, threadId: string): Promise<Thread<Raw>> {
   return client.threads.get<Raw>(threadId);
+}
+
+/** Create a Console-tagged thread. The label is the run's topic. */
+export async function createThread(client: Client<Raw>, label: string): Promise<Thread<Raw>> {
+  return client.threads.create({ metadata: { label, origin: "ui" } });
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +59,7 @@ async function consume(
 }
 
 /** The id of the run currently executing on a thread, if there is one. */
-export async function findActiveRun(client: Client, threadId: string): Promise<string | null> {
+export async function findActiveRun(client: Client<Raw>, threadId: string): Promise<string | null> {
   const runs = await client.runs.list(threadId);
   const active = runs.find((run) => run.status === "running" || run.status === "pending");
   return active?.run_id ?? null;
@@ -62,7 +67,7 @@ export async function findActiveRun(client: Client, threadId: string): Promise<s
 
 /** Join an in-flight run's stream, from wherever it has got to. */
 export async function joinRun(
-  client: Client,
+  client: Client<Raw>,
   threadId: string,
   runId: string,
   handlers: StreamHandlers,
@@ -77,7 +82,7 @@ export async function joinRun(
 
 /** Start a run on a thread and stream it to completion. */
 export async function streamRun(
-  client: Client,
+  client: Client<Raw>,
   threadId: string,
   assistantId: string,
   input: Raw,
@@ -95,7 +100,7 @@ export async function streamRun(
 }
 
 /** The dev server registers one assistant per graph in langgraph.json. */
-export async function getAssistantId(client: Client): Promise<string> {
+export async function getAssistantId(client: Client<Raw>): Promise<string> {
   const assistants = await client.assistants.search({ limit: 1 });
   const first = assistants[0];
   if (!first) throw new Error("no assistant registered on the dev server");
