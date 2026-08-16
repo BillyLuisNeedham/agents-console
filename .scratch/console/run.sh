@@ -401,9 +401,7 @@ drivers_for() {
 # An empty line means "use ~/.issue-runner", which is the normal case: the
 # default is set once there, and an Issue only appears here when it differs.
 assign_for() {
-  case "$1" in
-    *) echo "" ;;
-  esac
+  echo "opencode opencode/grok-4.6"
 }
 
 # The subagent roster. On claude this JSON defines the agents. On opencode and
