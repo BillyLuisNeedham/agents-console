@@ -270,16 +270,148 @@ body {
 .main {
   flex: 1;
   min-width: 0;
-  overflow-y: auto;
-  padding: 16px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
 .placeholder {
   padding: 24px;
   text-align: center;
+}
+
+/* ------------------------------------------------------------- graph canvas */
+
+.canvas-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+
+.canvas-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  background: var(--bg);
+}
+
+.canvas-world {
+  position: relative;
+}
+
+.canvas-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.canvas-edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.canvas-arrow {
+  fill: var(--border);
+}
+
+.canvas-edge-conditional {
+  stroke-dasharray: 4 3;
+}
+
+.node-card {
+  position: absolute;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.node-card-active {
+  border-color: var(--status-running);
+  box-shadow: 0 0 0 1px var(--status-running) inset;
+}
+
+.node-card-next {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.node-card-ran {
+  border-color: var(--status-done);
+}
+
+.node-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-panel-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.node-card-id {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.node-card-state {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.node-state-active {
+  color: var(--status-running);
+  font-weight: 700;
+}
+
+.node-state-next {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.node-state-ran {
+  color: var(--status-done);
+}
+
+.node-card-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.card-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.card-pre {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+  font-size: 11px;
+  max-height: 140px;
+  overflow: auto;
+}
+
+.card-text {
+  color: var(--text);
 }
 
 .channel {

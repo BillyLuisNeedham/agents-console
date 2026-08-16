@@ -1,9 +1,7 @@
 /**
- * Console — walking skeleton plus live streaming and run start. A left rail
- * holds a start-run form (topic, ticket pool, optional packet) and lists
- * threads (Console-created by default, show-all toggle); selecting one
- * renders its channels as a plain list, joins any in-flight run's stream,
- * and updates state, log and node statuses live as super-steps land.
+ * Console — a left rail (start-run form + thread list) and a graph canvas.
+ * Topology comes from the dev server; cards show per-node channels; the
+ * updates stream highlights running and next nodes as super-steps land.
  */
 
 import "./styles.css";
@@ -11,21 +9,22 @@ import {
   createThread,
   findActiveRun,
   getAssistantId,
+  getGraph,
   getThread,
   joinRun,
   listThreads,
   makeClient,
   streamRun,
 } from "./client";
-import type { Raw } from "./project";
+import type { Raw, Topology } from "./project";
 import {
   applyStreamPart,
   initRun,
-  projectChannels,
   projectLog,
-  projectNodes,
+  projectNodeCards,
   projectStartRun,
   projectThreadSummary,
+  projectTopology,
   syncRunValues,
   TICKET_POOLS,
   visibleThreads,
@@ -45,6 +44,7 @@ const state = {
   showAll: false,
   selectedId: null as string | null,
   selected: null as Thread<Raw> | null,
+  topology: { nodes: [], edges: [] } as Topology,
   run: initRun() as RunProjection,
   abort: null as AbortController | null,
   logOpen: false,
@@ -69,10 +69,14 @@ function model(): AppModel {
     threads: summaries,
     showAll: state.showAll,
     selectedId: selected?.thread_id ?? null,
-    channels: projectChannels(selected ? state.run.values : null),
+    cards: projectNodeCards(
+      state.topology,
+      selected ? state.run : null,
+      selected?.interrupts,
+    ),
+    edges: state.topology.edges,
     log: projectLog(selected ? state.run.values : null),
     logOpen: state.logOpen,
-    nodes: selected ? projectNodes(state.run) : [],
     streaming: state.run.streaming,
     streamError: state.run.streamError,
     error: state.error,
@@ -129,7 +133,7 @@ function stopStream(): void {
  * Start a run from the rail form: create a thread tagged with the topic,
  * invoke the graph on it (ticket pool via configurable.ticketDir, packet
  * only when given), and stream it live. The new thread becomes the
- * selection, so the run strip and channels track it as super-steps land.
+ * selection, so the canvas tracks it as super-steps land.
  */
 async function startRun(): Promise<void> {
   const request = projectStartRun(state.start);
@@ -263,8 +267,18 @@ async function selectThread(threadId: string): Promise<void> {
   void watch(threadId);
 }
 
+async function loadTopology(): Promise<void> {
+  try {
+    const assistantId = await getAssistantId(client);
+    state.topology = projectTopology(await getGraph(client, assistantId));
+  } catch {
+    // Keep any topology we already have; an empty canvas is the empty state.
+  }
+}
+
 async function load(): Promise<void> {
   try {
+    await loadTopology();
     state.threads = await listThreads(client);
     state.error = null;
     const visible = visibleThreads(state.threads, state.showAll);

@@ -5,11 +5,15 @@ import type { Thread } from "@langchain/langgraph-sdk";
 import {
   applyStreamPart,
   initRun,
+  layoutGraph,
   projectChannels,
   projectLog,
+  projectNodeCards,
+  projectNodeChannels,
   projectNodes,
   projectStartRun,
   projectThreadSummary,
+  projectTopology,
   syncRunValues,
   visibleThreads,
   type RunProjection,
@@ -230,6 +234,17 @@ describe("applyStreamPart", () => {
     expect(run.activeNodes).toEqual(["approveSpec"]);
   });
 
+  it("maps an interrupt-only updates part onto the node that raised it", () => {
+    const run = play(initRun(), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
+    ]);
+    expect(projectNodes(run)).toEqual([
+      { node: "writeSpec", status: "ran" },
+      { node: "approveSpec", status: "active" },
+    ]);
+  });
+
   it("hides internal __-prefixed channels from the channel list", () => {
     const channels = projectChannels({ topic: "x", __interrupt__: [{ id: "x" }] });
     expect(channels.map((c) => c.name)).toEqual(["topic"]);
@@ -290,5 +305,174 @@ describe("syncRunValues", () => {
   it("keeps the previous snapshot when the new one is not an object", () => {
     const run = syncRunValues(initRun({ topic: "keep" }), null);
     expect(run.values).toEqual({ topic: "keep" });
+  });
+});
+
+describe("projectTopology", () => {
+  it("maps a getGraph payload onto nodes and edges", () => {
+    const topology = projectTopology({
+      nodes: [
+        { id: "__start__" },
+        { id: "writeSpec", name: "writeSpec" },
+        { id: 7 },
+      ],
+      edges: [
+        { source: "__start__", target: "writeSpec", conditional: false },
+        { source: "writeSpec", target: "approveSpec", conditional: true, data: "ok" },
+      ],
+    });
+    expect(topology.nodes).toEqual([
+      { id: "__start__" },
+      { id: "writeSpec", name: "writeSpec" },
+      { id: "7" },
+    ]);
+    expect(topology.edges).toEqual([
+      { source: "__start__", target: "writeSpec", conditional: false },
+      { source: "writeSpec", target: "approveSpec", conditional: true, data: "ok" },
+    ]);
+  });
+
+  it("returns an empty topology for missing or malformed payloads", () => {
+    expect(projectTopology(null)).toEqual({ nodes: [], edges: [] });
+    expect(projectTopology({ nodes: "nope" })).toEqual({ nodes: [], edges: [] });
+    expect(projectTopology({ nodes: [{}, { id: "ok" }], edges: [{ source: "a" }] })).toEqual({
+      nodes: [{ id: "ok" }],
+      edges: [],
+    });
+  });
+});
+
+describe("layoutGraph", () => {
+  it("places the known spine and parks unknown nodes in a fallback column", () => {
+    const positions = layoutGraph([
+      { id: "__start__" },
+      { id: "writeSpec" },
+      { id: "deadlockGate" },
+      { id: "mystery" },
+    ]);
+    expect(positions["__start__"]).toEqual({ x: 300, y: 16 });
+    expect(positions.writeSpec).toEqual({ x: 300, y: 196 });
+    expect(positions.deadlockGate).toEqual({ x: 620, y: 596 });
+    expect(positions.mystery).toEqual({ x: 640, y: 16 });
+  });
+});
+
+describe("projectNodeChannels", () => {
+  const values = {
+    topic: "demo",
+    packetSource: "stub",
+    packet: "packet text",
+    spec: "# Spec",
+    specApproved: false,
+    tickets: [
+      { id: "T1", title: "first", blockedBy: [], status: "done" },
+      { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" },
+      { id: "T3", title: "third", blockedBy: [], status: "running" },
+    ],
+    log: ["writeSpec: drafted"],
+  };
+
+  it("shows only the spec on approveSpec", () => {
+    expect(projectNodeChannels("approveSpec", values).map((c) => c.name)).toEqual(["spec"]);
+  });
+
+  it("shows only pending tickets on deadlockGate", () => {
+    const channels = projectNodeChannels("deadlockGate", values);
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toEqual({
+      name: "tickets",
+      kind: "tickets",
+      tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
+    });
+  });
+
+  it("shows the ticket list on review", () => {
+    const channels = projectNodeChannels("review", values);
+    expect(channels.map((c) => c.name)).toEqual(["tickets"]);
+    if (channels[0]?.kind === "tickets") {
+      expect(channels[0].tickets.map((t) => t.id)).toEqual(["T1", "T2", "T3"]);
+    }
+  });
+
+  it("does not leak the log or unrelated channels onto a card", () => {
+    const names = projectNodeChannels("writeSpec", values).map((c) => c.name);
+    expect(names).toEqual(["spec"]);
+    expect(names).not.toContain("log");
+    expect(names).not.toContain("topic");
+  });
+});
+
+describe("projectNodeCards", () => {
+  const topology = projectTopology({
+    nodes: [
+      { id: "__start__" },
+      { id: "writeSpec" },
+      { id: "approveSpec" },
+      { id: "schedule" },
+    ],
+    edges: [
+      { source: "__start__", target: "writeSpec" },
+      { source: "writeSpec", target: "approveSpec" },
+      { source: "approveSpec", target: "schedule", conditional: true },
+      { source: "approveSpec", target: "__end__", conditional: true },
+    ],
+  });
+
+  it("renders every topology node, idle when no run has started", () => {
+    const cards = projectNodeCards(topology, null);
+    expect(cards.map((c) => c.id)).toEqual(["__start__", "writeSpec", "approveSpec", "schedule"]);
+    expect(cards.every((c) => c.status === "idle")).toBe(true);
+    expect(cards[0]?.name).toBe("START");
+  });
+
+  it("marks the latest updates node active and its unvisited targets next", () => {
+    const run = play(initRun({ spec: "# Spec" }), [
+      { event: "updates", data: { writeSpec: { spec: "# Spec" } } },
+    ]);
+    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
+    expect(byId.writeSpec?.status).toBe("active");
+    expect(byId.approveSpec?.status).toBe("next");
+    expect(byId.__start__?.status).toBe("idle");
+    expect(byId.schedule?.status).toBe("idle");
+    expect(byId.approveSpec?.channels.map((c) => c.name)).toEqual(["spec"]);
+  });
+
+  it("marks earlier super-steps as ran once a later node is active", () => {
+    const run = play(initRun(), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { approveSpec: {} } },
+    ]);
+    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
+    expect(byId.writeSpec?.status).toBe("ran");
+    expect(byId.approveSpec?.status).toBe("active");
+    expect(byId.schedule?.status).toBe("idle");
+  });
+
+  it("does not treat expanded conditional edges as next", () => {
+    const run = play(initRun(), [{ event: "updates", data: { approveSpec: {} } }]);
+    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
+    expect(byId.approveSpec?.status).toBe("active");
+    expect(byId.schedule?.status).toBe("idle");
+    expect(byId.writeSpec?.status).toBe("idle");
+  });
+
+  it("puts the deadlock hint on the deadlockGate card", () => {
+    const cards = projectNodeCards(
+      { nodes: [{ id: "deadlockGate" }], edges: [] },
+      initRun({
+        tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
+      }),
+      {
+        ns: [{ value: { kind: "deadlock", hint: "reload the pool or abort", pending: ["T2"] } }],
+      },
+    );
+    expect(cards[0]?.channels).toEqual([
+      {
+        name: "tickets",
+        kind: "tickets",
+        tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
+      },
+      { name: "hint", kind: "text", text: "reload the pool or abort" },
+    ]);
   });
 });

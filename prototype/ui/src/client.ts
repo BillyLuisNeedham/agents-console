@@ -106,3 +106,8 @@ export async function getAssistantId(client: Client<Raw>): Promise<string> {
   if (!first) throw new Error("no assistant registered on the dev server");
   return first.assistant_id;
 }
+
+/** Compiled graph topology: nodes and edges as the dev server reports them. */
+export async function getGraph(client: Client<Raw>, assistantId: string): Promise<unknown> {
+  return client.assistants.getGraph(assistantId);
+}

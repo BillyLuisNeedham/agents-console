@@ -202,6 +202,27 @@ export function syncRunValues(run: RunProjection, values: unknown): RunProjectio
   return { ...run, values: asValues(values) ?? run.values };
 }
 
+const INTERRUPT_NODE: Record<string, string> = {
+  "approve-spec": "approveSpec",
+  deadlock: "deadlockGate",
+  review: "review",
+};
+
+function nodesFromInterrupt(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const nodes: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const value = (item as { value?: unknown }).value;
+    if (!value || typeof value !== "object") continue;
+    const kind = (value as { kind?: unknown }).kind;
+    if (typeof kind !== "string") continue;
+    const node = INTERRUPT_NODE[kind];
+    if (node && !nodes.includes(node)) nodes.push(node);
+  }
+  return nodes;
+}
+
 export function applyStreamPart(run: RunProjection, part: StreamPart): RunProjection {
   if (part.event === "values") {
     const values = asValues(part.data);
@@ -215,8 +236,10 @@ export function applyStreamPart(run: RunProjection, part: StreamPart): RunProjec
   if (part.event === "updates") {
     const update = asValues(part.data);
     if (!update) return run;
-    // Internal keys like __interrupt__ are not nodes; node chips name nodes.
-    const active = Object.keys(update).filter((key) => !key.startsWith("__"));
+    // Internal keys like __interrupt__ are not nodes. An interrupt-only
+    // part still names the node that raised it, via value.kind.
+    const named = Object.keys(update).filter((key) => !key.startsWith("__"));
+    const active = named.length > 0 ? named : nodesFromInterrupt(update.__interrupt__);
     if (active.length === 0) return run;
     const visited = [...run.visitedNodes];
     for (const node of active) {
@@ -239,4 +262,190 @@ export function projectNodes(run: RunProjection): NodeView[] {
     node,
     status: run.activeNodes.includes(node) ? "active" : "ran",
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Topology + canvas cards
+// ---------------------------------------------------------------------------
+
+export interface TopologyNode {
+  id: string;
+  name?: string;
+}
+
+export interface TopologyEdge {
+  source: string;
+  target: string;
+  conditional?: boolean;
+  data?: string;
+}
+
+export interface Topology {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+}
+
+export type CardStatus = "idle" | "ran" | "active" | "next";
+
+export interface NodeCardView {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  status: CardStatus;
+  channels: ChannelView[];
+}
+
+export function projectTopology(raw: unknown): Topology {
+  if (!raw || typeof raw !== "object") return { nodes: [], edges: [] };
+  const graph = raw as { nodes?: unknown; edges?: unknown };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  return {
+    nodes: nodes.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const id = (item as { id?: unknown }).id;
+      if (id == null) return [];
+      const name = (item as { name?: unknown }).name;
+      return [{ id: String(id), ...(typeof name === "string" ? { name } : {}) }];
+    }),
+    edges: edges.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const source = (item as { source?: unknown }).source;
+      const target = (item as { target?: unknown }).target;
+      if (source == null || target == null) return [];
+      const conditional = (item as { conditional?: unknown }).conditional;
+      const data = (item as { data?: unknown }).data;
+      return [
+        {
+          source: String(source),
+          target: String(target),
+          ...(typeof conditional === "boolean" ? { conditional } : {}),
+          ...(typeof data === "string" ? { data } : {}),
+        },
+      ];
+    }),
+  };
+}
+
+const SPINE: Record<string, { x: number; y: number }> = {
+  __start__: { x: 300, y: 16 },
+  START: { x: 300, y: 16 },
+  writeSpec: { x: 300, y: 196 },
+  approveSpec: { x: 300, y: 376 },
+  schedule: { x: 300, y: 556 },
+  implementTicket: { x: 300, y: 736 },
+  deadlockGate: { x: 620, y: 596 },
+  review: { x: 300, y: 916 },
+  __end__: { x: 300, y: 1096 },
+  END: { x: 300, y: 1096 },
+};
+
+export function layoutGraph(nodes: TopologyNode[]): Record<string, { x: number; y: number }> {
+  const positions: Record<string, { x: number; y: number }> = {};
+  let unknown = 0;
+  for (const node of nodes) {
+    const seeded = SPINE[node.id];
+    if (seeded) positions[node.id] = seeded;
+    else {
+      positions[node.id] = { x: 640, y: 16 + unknown * 160 };
+      unknown += 1;
+    }
+  }
+  return positions;
+}
+
+const NODE_CHANNELS: Record<string, string[]> = {
+  __start__: ["topic", "packet"],
+  START: ["topic", "packet"],
+  writeSpec: ["spec"],
+  approveSpec: ["spec"],
+  schedule: ["tickets"],
+  implementTicket: ["tickets"],
+  deadlockGate: ["tickets"],
+  review: ["tickets"],
+};
+
+function displayName(id: string, name?: string): string {
+  if (name) return name;
+  if (id === "__start__") return "START";
+  if (id === "__end__") return "END";
+  return id;
+}
+
+export function projectNodeChannels(nodeId: string, raw: unknown): ChannelView[] {
+  const values = asValues(raw) ?? {};
+  const names = NODE_CHANNELS[nodeId] ?? [];
+  const channels: ChannelView[] = [];
+  for (const name of names) {
+    if (!(name in values)) continue;
+    const channel = projectChannel(name, values[name]);
+    if (nodeId === "deadlockGate" && channel.kind === "tickets") {
+      channels.push({
+        ...channel,
+        tickets: channel.tickets.filter((ticket) => ticket.status === "pending"),
+      });
+    } else {
+      channels.push(channel);
+    }
+  }
+  return channels;
+}
+
+function deadlockHint(interrupts: unknown): string | null {
+  if (!interrupts || typeof interrupts !== "object") return null;
+  for (const list of Object.values(interrupts as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const value = (item as { value?: unknown }).value;
+      if (!value || typeof value !== "object") continue;
+      const payload = value as { kind?: unknown; hint?: unknown };
+      if (payload.kind === "deadlock" && typeof payload.hint === "string") return payload.hint;
+    }
+  }
+  return null;
+}
+
+export function projectNodeCards(
+  topology: Topology,
+  run: RunProjection | null,
+  interrupts?: unknown,
+): NodeCardView[] {
+  const positions = layoutGraph(topology.nodes);
+  const active = new Set(run?.activeNodes ?? []);
+  const visited = new Set(run?.visitedNodes ?? []);
+  const next = new Set<string>();
+  if (run) {
+    for (const edge of topology.edges) {
+      if (edge.conditional) continue;
+      if (active.has(edge.source) && !active.has(edge.target) && !visited.has(edge.target)) {
+        next.add(edge.target);
+      }
+    }
+  }
+  const values = run?.values ?? {};
+  const hint = deadlockHint(interrupts);
+  return topology.nodes.map((node) => {
+    const status: CardStatus = active.has(node.id)
+      ? "active"
+      : next.has(node.id)
+        ? "next"
+        : visited.has(node.id)
+          ? "ran"
+          : "idle";
+    const pos = positions[node.id] ?? { x: 0, y: 0 };
+    const channels = projectNodeChannels(node.id, values);
+    if (node.id === "deadlockGate" && hint) {
+      channels.push({ name: "hint", kind: "text", text: hint });
+    }
+    return {
+      id: node.id,
+      name: displayName(node.id, node.name),
+      x: pos.x,
+      y: pos.y,
+      status,
+      channels,
+    };
+  });
 }
