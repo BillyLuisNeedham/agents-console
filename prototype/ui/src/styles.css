@@ -297,6 +297,45 @@ body {
   color: var(--status-done);
 }
 
+/* -------------------------------------------------------------- run strip */
+
+.run-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.chip-node {
+  color: var(--status-done);
+}
+
+.chip-node.chip-active {
+  color: var(--status-running);
+  background: rgba(210, 153, 34, 0.12);
+}
+
+.dot-live {
+  background: var(--accent);
+  margin-left: 0;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.error-inline {
+  color: var(--interrupt);
+  font-size: 11px;
+}
+
 /* ------------------------------------------------------------- log drawer */
 
 .log-drawer {

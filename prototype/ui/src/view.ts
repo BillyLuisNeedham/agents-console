@@ -3,7 +3,7 @@
  * flows in through `renderApp`; all user intent flows out through `Handlers`.
  */
 
-import type { ChannelView, ThreadSummary, TicketView } from "./project";
+import type { ChannelView, NodeView, ThreadSummary, TicketView } from "./project";
 
 export interface AppModel {
   threads: ThreadSummary[];
@@ -12,6 +12,9 @@ export interface AppModel {
   channels: ChannelView[];
   log: string[];
   logOpen: boolean;
+  nodes: NodeView[];
+  streaming: boolean;
+  streamError: string | null;
   error: string | null;
 }
 
@@ -130,6 +133,20 @@ function renderChannel(channel: ChannelView): HTMLElement {
   return h("section", { class: "channel" }, h("h3", { class: "channel-name" }, channel.name), body);
 }
 
+function renderRunStrip(model: AppModel): HTMLElement | null {
+  if (model.nodes.length === 0 && !model.streaming && !model.streamError) return null;
+  const chips = model.nodes.map((n) =>
+    h("span", { class: `chip chip-node${n.status === "active" ? " chip-active" : ""}` }, n.node),
+  );
+  return h(
+    "div",
+    { class: "run-strip" },
+    model.streaming ? h("span", { class: "dot dot-live", title: "streaming" }) : null,
+    ...chips,
+    model.streamError ? h("span", { class: "error-inline" }, model.streamError) : null,
+  );
+}
+
 function renderMain(model: AppModel): HTMLElement {
   const main = h("div", { class: "main" });
   if (model.error) {
@@ -140,6 +157,8 @@ function renderMain(model: AppModel): HTMLElement {
     main.append(h("div", { class: "dim placeholder" }, "select a thread"));
     return main;
   }
+  const strip = renderRunStrip(model);
+  if (strip) main.append(strip);
   if (model.channels.length === 0) {
     main.append(h("div", { class: "dim placeholder" }, "thread has no state yet"));
     return main;

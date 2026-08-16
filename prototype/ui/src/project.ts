@@ -111,7 +111,7 @@ export function projectChannels(raw: unknown): ChannelView[] {
   if (!values) return [];
   const known = CHANNEL_ORDER.filter((name) => name in values);
   const extra = Object.keys(values)
-    .filter((name) => !CHANNEL_ORDER.includes(name) && name !== "log")
+    .filter((name) => !CHANNEL_ORDER.includes(name) && name !== "log" && !name.startsWith("__"))
     .sort();
   return [...known, ...extra].map((name) => projectChannel(name, values[name]));
 }
@@ -121,4 +121,83 @@ export function projectLog(raw: unknown): string[] {
   const log = values?.log;
   if (!Array.isArray(log)) return [];
   return log.filter((line): line is string => typeof line === "string");
+}
+
+// ---------------------------------------------------------------------------
+// Run projection: stream events in, view model out
+// ---------------------------------------------------------------------------
+
+/**
+ * One part of a run's stream. The Console streams `values` + `updates` only;
+ * anything else the server sends is ignored by the projection.
+ */
+export interface StreamPart {
+  event: string;
+  data: unknown;
+}
+
+export interface NodeView {
+  node: string;
+  status: "ran" | "active";
+}
+
+/**
+ * What a live run has told us so far. `values` is the latest full State
+ * snapshot (the source of truth for channels and log); the node lists come
+ * from `updates` parts, one per super-step.
+ */
+export interface RunProjection {
+  values: Raw;
+  visitedNodes: string[];
+  activeNodes: string[];
+  streaming: boolean;
+  streamError: string | null;
+}
+
+export function initRun(values?: unknown): RunProjection {
+  return {
+    values: asValues(values) ?? {},
+    visitedNodes: [],
+    activeNodes: [],
+    streaming: false,
+    streamError: null,
+  };
+}
+
+/** Replace the snapshot (e.g. after a re-fetch) without losing node tracking. */
+export function syncRunValues(run: RunProjection, values: unknown): RunProjection {
+  return { ...run, values: asValues(values) ?? run.values };
+}
+
+export function applyStreamPart(run: RunProjection, part: StreamPart): RunProjection {
+  if (part.event === "values") {
+    return syncRunValues(run, part.data);
+  }
+  if (part.event === "updates") {
+    const update = asValues(part.data);
+    if (!update) return run;
+    // Internal keys like __interrupt__ are not nodes; node chips name nodes.
+    const active = Object.keys(update).filter((key) => !key.startsWith("__"));
+    if (active.length === 0) return run;
+    const visited = [...run.visitedNodes];
+    for (const node of active) {
+      if (!visited.includes(node)) visited.push(node);
+    }
+    return { ...run, activeNodes: active, visitedNodes: visited };
+  }
+  if (part.event === "error") {
+    const data = asValues(part.data);
+    const message =
+      typeof data?.message === "string" ? data.message : "the run stream reported an error";
+    return { ...run, streamError: message };
+  }
+  return run;
+}
+
+/** Node chips in first-seen order; the latest super-step's nodes are active. */
+export function projectNodes(run: RunProjection): NodeView[] {
+  return run.visitedNodes.map((node) => ({
+    node,
+    status: run.activeNodes.includes(node) ? "active" : "ran",
+  }));
 }

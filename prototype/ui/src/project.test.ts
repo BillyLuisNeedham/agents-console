@@ -3,10 +3,15 @@
 import { describe, expect, it } from "bun:test";
 import type { Thread } from "@langchain/langgraph-sdk";
 import {
+  applyStreamPart,
+  initRun,
   projectChannels,
   projectLog,
+  projectNodes,
   projectThreadSummary,
+  syncRunValues,
   visibleThreads,
+  type RunProjection,
 } from "./project";
 
 type Raw = Record<string, unknown>;
@@ -135,5 +140,110 @@ describe("projectLog", () => {
   it("is empty when there is no log", () => {
     expect(projectLog({})).toEqual([]);
     expect(projectLog(null)).toEqual([]);
+  });
+});
+
+function play(run: RunProjection, parts: { event: string; data: unknown }[]): RunProjection {
+  return parts.reduce(applyStreamPart, run);
+}
+
+describe("applyStreamPart", () => {
+  it("seeds from an existing snapshot and replaces it on each values part", () => {
+    let run = initRun({ topic: "old", log: ["a"] });
+    run = applyStreamPart(run, { event: "values", data: { topic: "new", log: ["a", "b"] } });
+    expect(projectChannels(run.values).map((c) => c.name)).toContain("topic");
+    expect(projectLog(run.values)).toEqual(["a", "b"]);
+    expect(run.streaming).toBe(false);
+  });
+
+  it("tracks normal super-step progression through updates parts", () => {
+    const run = play(initRun(), [
+      { event: "values", data: { topic: "demo" } },
+      { event: "updates", data: { writeSpec: { spec: "s" } } },
+      { event: "values", data: { topic: "demo", spec: "s" } },
+      { event: "updates", data: { approveSpec: { specApproved: true } } },
+      { event: "updates", data: { schedule: {} } },
+      { event: "updates", data: { implementTicket: { tickets: [] } } },
+    ]);
+    expect(projectNodes(run)).toEqual([
+      { node: "writeSpec", status: "ran" },
+      { node: "approveSpec", status: "ran" },
+      { node: "schedule", status: "ran" },
+      { node: "implementTicket", status: "active" },
+    ]);
+  });
+
+  it("does not duplicate a node when a fan-out runs it across super-steps", () => {
+    const run = play(initRun(), [
+      { event: "updates", data: { schedule: {} } },
+      { event: "updates", data: { implementTicket: {} } },
+      { event: "updates", data: { implementTicket: {} } },
+    ]);
+    expect(run.visitedNodes).toEqual(["schedule", "implementTicket"]);
+    expect(run.activeNodes).toEqual(["implementTicket"]);
+  });
+
+  it("keeps log append ordering from values snapshots; updates never append", () => {
+    const run = play(initRun(), [
+      { event: "values", data: { log: ["writeSpec: spec from packet + pool"] } },
+      { event: "updates", data: { approveSpec: { log: ["spec approved"] } } },
+      {
+        event: "values",
+        data: { log: ["writeSpec: spec from packet + pool", "spec approved"] },
+      },
+      { event: "updates", data: { schedule: { log: ["schedule: T1, T3"] } } },
+      {
+        event: "values",
+        data: {
+          log: ["writeSpec: spec from packet + pool", "spec approved", "schedule: T1, T3"],
+        },
+      },
+    ]);
+    expect(projectLog(run.values)).toEqual([
+      "writeSpec: spec from packet + pool",
+      "spec approved",
+      "schedule: T1, T3",
+    ]);
+  });
+
+  it("ignores non-object updates payloads", () => {
+    const run = applyStreamPart(initRun(), { event: "updates", data: null });
+    expect(run.activeNodes).toEqual([]);
+    expect(run.visitedNodes).toEqual([]);
+  });
+
+  it("does not treat internal keys like __interrupt__ as nodes", () => {
+    const run = play(initRun(), [
+      { event: "updates", data: { approveSpec: {} } },
+      { event: "updates", data: { __interrupt__: [{ id: "x", value: {} }] } },
+    ]);
+    expect(run.visitedNodes).toEqual(["approveSpec"]);
+    expect(run.activeNodes).toEqual(["approveSpec"]);
+  });
+
+  it("hides internal __-prefixed channels from the channel list", () => {
+    const channels = projectChannels({ topic: "x", __interrupt__: [{ id: "x" }] });
+    expect(channels.map((c) => c.name)).toEqual(["topic"]);
+  });
+
+  it("records error parts and ignores unknown events", () => {
+    let run = applyStreamPart(initRun(), { event: "error", data: { message: "boom" } });
+    expect(run.streamError).toBe("boom");
+    run = applyStreamPart(run, { event: "messages", data: ["junk"] });
+    expect(run.streamError).toBe("boom");
+  });
+});
+
+describe("syncRunValues", () => {
+  it("replaces the snapshot but keeps node tracking", () => {
+    let run = play(initRun(), [{ event: "updates", data: { writeSpec: {} } }]);
+    run = syncRunValues(run, { topic: "refreshed" });
+    expect(run.values).toEqual({ topic: "refreshed" });
+    expect(run.visitedNodes).toEqual(["writeSpec"]);
+  });
+
+  it("keeps the previous snapshot when the new one is not an object", () => {
+    const run = syncRunValues(initRun({ topic: "keep" }), null);
+    expect(run.values).toEqual({ topic: "keep" });
   });
 });
