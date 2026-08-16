@@ -11,9 +11,11 @@ import {
   parseStoredLayout,
   projectChannels,
   projectLog,
+  projectInterruptForm,
   projectNodeCards,
   projectNodeChannels,
   projectNodes,
+  projectResume,
   projectStartRun,
   projectThreadSummary,
   projectTopology,
@@ -573,6 +575,124 @@ describe("projectNodeCards", () => {
         tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
       },
       { name: "hint", kind: "text", text: "reload the pool or abort" },
+    ]);
+  });
+});
+
+const T1 = { id: "T1", title: "first", blockedBy: [], status: "done" as const };
+const T2 = { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" as const };
+
+describe("projectInterruptForm", () => {
+  it("projects an approve-spec payload onto the approveSpec form", () => {
+    const form = projectInterruptForm(
+      {
+        graph: [
+          {
+            value: {
+              kind: "approve-spec",
+              spec: "# Spec",
+              tickets: [T1, T2],
+            },
+          },
+        ],
+      },
+      "approveSpec",
+    );
+    expect(form).toEqual({
+      kind: "approve-spec",
+      spec: "# Spec",
+      tickets: [T1, T2],
+      raw: { kind: "approve-spec", spec: "# Spec", tickets: [T1, T2] },
+    });
+  });
+
+  it("projects a deadlock payload onto the deadlockGate form", () => {
+    const form = projectInterruptForm(
+      {
+        ns: [
+          {
+            value: {
+              kind: "deadlock",
+              pending: ["T2"],
+              hint: "no ticket can start; resume with reload to re-read the pool, or abort",
+            },
+          },
+        ],
+      },
+      "deadlockGate",
+    );
+    expect(form).toEqual({
+      kind: "deadlock",
+      pending: ["T2"],
+      hint: "no ticket can start; resume with reload to re-read the pool, or abort",
+      raw: {
+        kind: "deadlock",
+        pending: ["T2"],
+        hint: "no ticket can start; resume with reload to re-read the pool, or abort",
+      },
+    });
+  });
+
+  it("projects a review payload onto the review form with ticket ids for retry", () => {
+    const tickets = [
+      { id: "T1", title: "first", blockedBy: [], status: "done" as const },
+      { id: "T3", title: "third", blockedBy: [], status: "done" as const },
+    ];
+    const form = projectInterruptForm({ graph: [{ value: { kind: "review", tickets } }] }, "review");
+    expect(form?.kind).toBe("review");
+    if (form?.kind === "review") {
+      expect(form.tickets.map((t) => t.id)).toEqual(["T1", "T3"]);
+    }
+  });
+
+  it("returns null when the node does not own a pending interrupt", () => {
+    expect(projectInterruptForm({ graph: [{ value: { kind: "review", tickets: [] } }] }, "approveSpec")).toBeNull();
+    expect(projectInterruptForm({}, "review")).toBeNull();
+  });
+});
+
+describe("projectResume", () => {
+  it("wraps reject as the Command resume that returns the run to writeSpec", () => {
+    expect(projectResume({ action: "reject" })).toEqual({
+      command: { resume: { action: "reject" } },
+    });
+  });
+
+  it("wraps review retry with the chosen ticket ids", () => {
+    expect(projectResume({ action: "retry", ids: ["T1", "T3"] })).toEqual({
+      command: { resume: { action: "retry", ids: ["T1", "T3"] } },
+    });
+  });
+});
+
+describe("projectNodeCards interrupt status", () => {
+  it("marks the owning card interrupted and attaches the form", () => {
+    const cards = projectNodeCards(
+      { nodes: [{ id: "approveSpec" }, { id: "writeSpec" }], edges: [] },
+      play(initRun({ spec: "# Spec" }), [
+        { event: "updates", data: { writeSpec: {} } },
+        { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
+      ]),
+      {
+        graph: [{ value: { kind: "approve-spec", spec: "# Spec", tickets: [T1] } }],
+      },
+    );
+    const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
+    expect(byId.approveSpec?.status).toBe("interrupted");
+    expect(byId.approveSpec?.interrupt?.kind).toBe("approve-spec");
+    expect(byId.writeSpec?.status).toBe("ran");
+    expect(byId.writeSpec?.interrupt).toBeNull();
+  });
+
+  it("after reject, a writeSpec updates part makes writeSpec active again", () => {
+    const run = play(initRun(), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
+      { event: "updates", data: { writeSpec: { spec: "rewritten" } } },
+    ]);
+    expect(projectNodes(run)).toEqual([
+      { node: "writeSpec", status: "active" },
+      { node: "approveSpec", status: "ran" },
     ]);
   });
 });

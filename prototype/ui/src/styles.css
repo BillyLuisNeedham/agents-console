@@ -397,6 +397,98 @@ body {
   border-color: var(--status-done);
 }
 
+.node-card-interrupted {
+  border-color: var(--interrupt);
+  animation: interrupt-pulse 1.6s ease-in-out infinite;
+}
+
+.node-state-interrupted {
+  color: var(--interrupt);
+  font-weight: 700;
+}
+
+@keyframes interrupt-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(248, 81, 73, 0);
+  }
+}
+
+.interrupt-box {
+  border: 1px solid var(--interrupt);
+  background: rgba(248, 81, 73, 0.08);
+  border-radius: 4px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.interrupt-kind {
+  color: var(--interrupt);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.interrupt-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.interrupt-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.interrupt-check input {
+  accent-color: var(--interrupt);
+}
+
+.interrupt-spec {
+  max-height: 220px;
+}
+
+.interrupt-raw summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.interrupt-raw pre {
+  margin: 6px 0 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+  font-size: 10px;
+  overflow: auto;
+  color: var(--text-dim);
+  max-height: 160px;
+  white-space: pre-wrap;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-danger {
+  border-color: var(--interrupt);
+  color: var(--interrupt);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .node-card-head {
   display: flex;
   justify-content: space-between;

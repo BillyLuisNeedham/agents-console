@@ -13,6 +13,8 @@ import {
   type CardBox,
   type ChannelView,
   type EdgeMode,
+  type InterruptDecision,
+  type InterruptFormView,
   type NodeCardView,
   type Point,
   type ThreadSummary,
@@ -50,6 +52,7 @@ export interface Handlers {
   onRefresh: () => void;
   onStartField: (field: "topic" | "ticketDir" | "packet", value: string) => void;
   onStartRun: () => void;
+  onResume: (decision: InterruptDecision) => void;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(
@@ -499,17 +502,98 @@ function renderCardChannel(channel: ChannelView): HTMLElement {
 }
 
 function statusLabel(status: NodeCardView["status"]): string {
+  if (status === "interrupted") return "interrupted";
   if (status === "active") return "running";
   if (status === "next") return "next";
   if (status === "ran") return "ran";
   return "idle";
 }
 
-function renderCard(card: NodeCardView): HTMLElement {
+function renderInterruptForm(form: InterruptFormView, handlers: Handlers): HTMLElement {
+  const box = h("div", { class: "interrupt-box" }, h("div", { class: "interrupt-kind" }, `interrupt · ${form.kind}`));
+  if (form.kind === "approve-spec") {
+    box.append(
+      h("div", { class: "dim" }, "spec waiting for your call"),
+      h("pre", { class: "card-pre interrupt-spec" }, form.spec || "—"),
+      ...form.tickets.map(ticketRow),
+      h(
+        "div",
+        { class: "interrupt-actions" },
+        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "approve" }) }, "approve"),
+        h("button", { class: "btn btn-danger", onclick: () => handlers.onResume({ action: "reject" }) }, "reject"),
+      ),
+    );
+  } else if (form.kind === "deadlock") {
+    box.append(
+      h("div", { class: "dim" }, "blocked tickets can't start"),
+      h(
+        "div",
+        { class: "ticket-row" },
+        ...form.pending.map((id) => h("span", { class: "chip chip-pending" }, id)),
+      ),
+      h("div", { class: "card-text" }, form.hint),
+      h(
+        "div",
+        { class: "interrupt-actions" },
+        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "reload" }) }, "reload"),
+        h("button", { class: "btn btn-danger", onclick: () => handlers.onResume({ action: "abort" }) }, "abort"),
+      ),
+    );
+  } else {
+    const checks = new Map<string, HTMLInputElement>();
+    const rows = form.tickets.map((ticket) => {
+      const cb = h("input", { type: "checkbox", value: ticket.id }) as HTMLInputElement;
+      checks.set(ticket.id, cb);
+      return h(
+        "label",
+        { class: "checkrow interrupt-check" },
+        cb,
+        h("span", { class: `chip chip-${ticket.status}` }, ticket.id),
+        h("span", { class: "dim" }, ticket.title),
+      );
+    });
+    const retry = h("button", { class: "btn" }, "retry") as HTMLButtonElement;
+    retry.disabled = true;
+    retry.addEventListener("click", () => {
+      const ids = [...checks.entries()].filter(([, cb]) => cb.checked).map(([id]) => id);
+      handlers.onResume({ action: "retry", ids });
+    });
+    for (const [, cb] of checks) {
+      cb.addEventListener("change", () => {
+        retry.disabled = ![...checks.values()].some((c) => c.checked);
+      });
+    }
+    box.append(
+      h("div", { class: "dim" }, "all tickets implemented — your call"),
+      ...rows,
+      h(
+        "div",
+        { class: "interrupt-actions" },
+        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "approve" }) }, "approve"),
+        retry,
+        h("button", { class: "btn", onclick: () => handlers.onResume({ action: "replan" }) }, "replan"),
+      ),
+    );
+  }
+  box.append(
+    h(
+      "details",
+      { class: "interrupt-raw" },
+      h("summary", {}, "raw payload"),
+      h("pre", {}, JSON.stringify(form.raw, null, 2)),
+    ),
+  );
+  return box;
+}
+
+function renderCard(card: NodeCardView, handlers: Handlers): HTMLElement {
   const body =
     card.channels.length > 0
       ? card.channels.map(renderCardChannel)
-      : [h("div", { class: "dim" }, "—")];
+      : card.interrupt
+        ? []
+        : [h("div", { class: "dim" }, "—")];
+  if (card.interrupt) body.push(renderInterruptForm(card.interrupt, handlers));
   const pos = posOf(card);
   return h(
     "div",
@@ -661,7 +745,7 @@ function drawEdges(world: HTMLElement, edges: TopologyEdge[]): void {
   paintStrokeScale();
 }
 
-function renderMain(model: AppModel): HTMLElement {
+function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
   const main = h("div", { class: "main" });
   if (model.error) {
     main.append(h("div", { class: "error" }, model.error));
@@ -676,7 +760,7 @@ function renderMain(model: AppModel): HTMLElement {
     class: "canvas-world",
     style: `width:${size.width}px;height:${size.height}px`,
   });
-  world.append(makeSvg(), ...model.cards.map(renderCard));
+  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card, handlers)));
   const viewport = h("div", { class: "canvas-viewport" }, world);
   main.append(renderCanvasHeader(model), viewport);
   return main;
@@ -705,7 +789,7 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
   seedPositions(model.cards);
-  const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model));
+  const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model, handlers));
   root.replaceChildren(h("div", { class: "shell" }, content, renderLogDrawer(model, handlers)));
   const world = root.querySelector(".canvas-world");
   const viewport = root.querySelector(".canvas-viewport");

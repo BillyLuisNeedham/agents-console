@@ -14,9 +14,10 @@ import {
   joinRun,
   listThreads,
   makeClient,
+  resumeRun,
   streamRun,
 } from "./client";
-import type { Raw, Topology } from "./project";
+import type { InterruptDecision, Raw, Topology } from "./project";
 import {
   applyStreamPart,
   initRun,
@@ -112,6 +113,7 @@ function render(): void {
       render();
     },
     onStartRun: () => void startRun(),
+    onResume: (decision) => void resume(decision),
   });
   if (field) {
     const el = root.querySelector(`[data-field="${field}"]`);
@@ -207,6 +209,55 @@ async function startRun(): Promise<void> {
     }
   }
   state.start = { ...state.start, starting: false };
+  await load();
+}
+
+/**
+ * Resume the selected thread from its interrupt. The Command resume payload
+ * is the decision the form collected; the run keeps streaming into the same
+ * projection as a start-run.
+ */
+async function resume(decision: InterruptDecision): Promise<void> {
+  const threadId = state.selectedId;
+  if (!threadId || state.run.streaming) return;
+  stopStream();
+  const controller = new AbortController();
+  state.abort = controller;
+  state.run = { ...state.run, streaming: true, streamError: null };
+  render();
+  try {
+    const assistantId = await getAssistantId(client);
+    if (controller.signal.aborted || state.selectedId !== threadId) return;
+    await resumeRun(
+      client,
+      threadId,
+      assistantId,
+      decision,
+      {
+        onPart: (part) => {
+          if (controller.signal.aborted || state.selectedId !== threadId) return;
+          state.run = applyStreamPart(state.run, part);
+          render();
+        },
+        onError: (message) => {
+          state.run = { ...state.run, streaming: false, streamError: message };
+          render();
+        },
+        onDone: () => {
+          state.run = { ...state.run, streaming: false };
+        },
+      },
+      controller.signal,
+    );
+  } catch (err) {
+    if (!controller.signal.aborted) {
+      state.run = {
+        ...state.run,
+        streaming: false,
+        streamError: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
   await load();
 }
 

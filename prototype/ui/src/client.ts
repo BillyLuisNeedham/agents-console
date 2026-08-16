@@ -4,7 +4,7 @@
  */
 
 import { Client, type Thread } from "@langchain/langgraph-sdk";
-import type { Raw, StreamPart } from "./project";
+import { projectResume, type InterruptDecision, type Raw, type StreamPart } from "./project";
 
 export const DEV_SERVER_URL = "http://localhost:2024";
 
@@ -74,6 +74,23 @@ export async function joinRun(
   signal: AbortSignal,
 ): Promise<void> {
   const stream = client.runs.joinStream(threadId, runId, {
+    signal,
+    streamMode: [...STREAM_MODE],
+  });
+  await consume(stream, handlers, signal);
+}
+
+/** Resume an interrupted run with the SDK Command payload and stream it live. */
+export async function resumeRun(
+  client: Client<Raw>,
+  threadId: string,
+  assistantId: string,
+  decision: InterruptDecision,
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+): Promise<void> {
+  const stream = client.runs.stream(threadId, assistantId, {
+    ...projectResume(decision),
     signal,
     streamMode: [...STREAM_MODE],
   });

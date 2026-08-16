@@ -285,7 +285,20 @@ export interface Topology {
   edges: TopologyEdge[];
 }
 
-export type CardStatus = "idle" | "ran" | "active" | "next";
+export type CardStatus = "idle" | "ran" | "active" | "next" | "interrupted";
+
+export type InterruptDecision =
+  | { action: "approve" }
+  | { action: "reject" }
+  | { action: "reload" }
+  | { action: "abort" }
+  | { action: "retry"; ids: string[] }
+  | { action: "replan" };
+
+export type InterruptFormView =
+  | { kind: "approve-spec"; spec: string; tickets: TicketView[]; raw: unknown }
+  | { kind: "deadlock"; pending: string[]; hint: string; raw: unknown }
+  | { kind: "review"; tickets: TicketView[]; raw: unknown };
 
 export interface NodeCardView {
   id: string;
@@ -294,6 +307,12 @@ export interface NodeCardView {
   y: number;
   status: CardStatus;
   channels: ChannelView[];
+  interrupt: InterruptFormView | null;
+}
+
+/** SDK Command resume payload for the decision the form collected. */
+export function projectResume(decision: InterruptDecision): { command: { resume: InterruptDecision } } {
+  return { command: { resume: decision } };
 }
 
 export function projectTopology(raw: unknown): Topology {
@@ -481,15 +500,50 @@ export function projectNodeChannels(nodeId: string, raw: unknown): ChannelView[]
 }
 
 function deadlockHint(interrupts: unknown): string | null {
-  if (!interrupts || typeof interrupts !== "object") return null;
+  const form = projectInterruptForm(interrupts, "deadlockGate");
+  return form?.kind === "deadlock" ? form.hint : null;
+}
+
+const NODE_INTERRUPT_KIND: Record<string, InterruptFormView["kind"]> = {
+  approveSpec: "approve-spec",
+  deadlockGate: "deadlock",
+  review: "review",
+};
+
+function interruptValueOf(item: unknown): Raw | null {
+  if (!item || typeof item !== "object") return null;
+  return asValues((item as { value?: unknown }).value);
+}
+
+export function projectInterruptForm(interrupts: unknown, nodeId: string): InterruptFormView | null {
+  const want = NODE_INTERRUPT_KIND[nodeId];
+  if (!want || !interrupts || typeof interrupts !== "object") return null;
   for (const list of Object.values(interrupts as Record<string, unknown>)) {
     if (!Array.isArray(list)) continue;
     for (const item of list) {
-      if (!item || typeof item !== "object") continue;
-      const value = (item as { value?: unknown }).value;
-      if (!value || typeof value !== "object") continue;
-      const payload = value as { kind?: unknown; hint?: unknown };
-      if (payload.kind === "deadlock" && typeof payload.hint === "string") return payload.hint;
+      const value = interruptValueOf(item);
+      if (!value || value.kind !== want) continue;
+      if (want === "approve-spec") {
+        return {
+          kind: "approve-spec",
+          spec: typeof value.spec === "string" ? value.spec : "",
+          tickets: projectTickets(value.tickets),
+          raw: value,
+        };
+      }
+      if (want === "deadlock") {
+        return {
+          kind: "deadlock",
+          pending: Array.isArray(value.pending) ? value.pending.map(String) : [],
+          hint: typeof value.hint === "string" ? value.hint : "",
+          raw: value,
+        };
+      }
+      return {
+        kind: "review",
+        tickets: projectTickets(value.tickets),
+        raw: value,
+      };
     }
   }
   return null;
@@ -515,13 +569,16 @@ export function projectNodeCards(
   const values = run?.values ?? {};
   const hint = deadlockHint(interrupts);
   return topology.nodes.map((node) => {
-    const status: CardStatus = active.has(node.id)
-      ? "active"
-      : next.has(node.id)
-        ? "next"
-        : visited.has(node.id)
-          ? "ran"
-          : "idle";
+    const interrupt = projectInterruptForm(interrupts, node.id);
+    const status: CardStatus = interrupt
+      ? "interrupted"
+      : active.has(node.id)
+        ? "active"
+        : next.has(node.id)
+          ? "next"
+          : visited.has(node.id)
+            ? "ran"
+            : "idle";
     const pos = positions[node.id] ?? { x: 0, y: 0 };
     const channels = projectNodeChannels(node.id, values);
     if (node.id === "deadlockGate" && hint) {
@@ -534,6 +591,7 @@ export function projectNodeCards(
       y: pos.y,
       status,
       channels,
+      interrupt,
     };
   });
 }
