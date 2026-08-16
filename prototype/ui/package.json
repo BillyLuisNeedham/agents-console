@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Console — a custom UI for driving the agent graph on the local LangGraph dev server.",
+  "description": "Console: a custom UI for driving the agent graph on the local LangGraph dev server.",
   "scripts": {
     "dev": "vite",
     "test": "bun test",

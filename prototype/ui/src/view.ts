@@ -10,6 +10,7 @@ import {
   parseStoredLayout,
   strokeWidthForZoom,
   isTicketCardId,
+  layoutStorageKey,
   zoomAtCursor,
   type CardBox,
   type ChannelView,
@@ -121,7 +122,7 @@ function renderStartForm(model: AppModel, handlers: Handlers): HTMLElement {
     {
       class: "field",
       rows: 4,
-      placeholder: "packet (optional — blank uses the demo packet)",
+      placeholder: "packet (optional; blank uses the demo packet)",
       "data-field": "start-packet",
       disabled: start.starting || null,
     },
@@ -201,7 +202,7 @@ function renderRail(model: AppModel, handlers: Handlers): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
-// Main panel: graph canvas — node cards + edges
+// Main panel: graph canvas, node cards + edges
 // ---------------------------------------------------------------------------
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -215,6 +216,7 @@ const nodePos = new Map<string, Point>();
 const expandedTickets = new Set<string>();
 const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
 let edgeMode: EdgeMode = "ortho";
+let layoutThreadId: string | null = null;
 
 type Positioned = { id: string; x: number; y: number };
 
@@ -263,8 +265,11 @@ function readStored(): Record<string, Point> {
 }
 
 function writeStored(): void {
-  const stored: Record<string, Point> = {};
-  for (const [id, pos] of nodePos) stored[id] = pos;
+  const stored = readStored();
+  for (const [id, pos] of nodePos) stored[layoutStorageKey(id, layoutThreadId)] = pos;
+  for (const key of Object.keys(stored)) {
+    if (key.startsWith("ticket:")) delete stored[key];
+  }
   try {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
   } catch {
@@ -273,22 +278,34 @@ function writeStored(): void {
 }
 
 function seedPositions(cards: Positioned[]): void {
+  const stored = readStored();
   const defaults: Record<string, Point> = {};
-  for (const card of cards) defaults[card.id] = { x: card.x, y: card.y };
-  const merged = mergeLayout(defaults, readStored());
+  const overrides: Record<string, Point> = {};
+  for (const card of cards) {
+    defaults[card.id] = { x: card.x, y: card.y };
+    const saved = stored[layoutStorageKey(card.id, layoutThreadId)];
+    if (saved) overrides[card.id] = saved;
+  }
+  const merged = mergeLayout(defaults, overrides);
   for (const card of cards) {
     if (!nodePos.has(card.id)) nodePos.set(card.id, merged[card.id] ?? { x: card.x, y: card.y });
   }
 }
 
 function resetLayout(cards: Positioned[]): void {
-  nodePos.clear();
+  const stored = readStored();
+  for (const card of cards) {
+    delete stored[layoutStorageKey(card.id, layoutThreadId)];
+    nodePos.set(card.id, { x: card.x, y: card.y });
+  }
+  for (const key of Object.keys(stored)) {
+    if (key.startsWith("ticket:")) delete stored[key];
+  }
   try {
-    localStorage.removeItem(LAYOUT_KEY);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
   } catch {
     // ignore
   }
-  for (const card of cards) nodePos.set(card.id, { x: card.x, y: card.y });
 }
 
 function cardBox(el: HTMLElement): CardBox {
@@ -521,7 +538,7 @@ function renderCardChannel(channel: ChannelView): HTMLElement {
     return h("div", { class: "card-channels" }, ...channel.tickets.map(ticketRow));
   }
   if (channel.kind === "pre") {
-    return h("pre", { class: "card-pre" }, snippet(channel.text, 8) || "—");
+    return h("pre", { class: "card-pre" }, snippet(channel.text, 8) || "-");
   }
   if (channel.kind === "json") {
     return h("pre", { class: "card-pre" }, snippet(channel.json, 8));
@@ -542,7 +559,7 @@ function renderInterruptForm(form: InterruptFormView, handlers: Handlers): HTMLE
   if (form.kind === "approve-spec") {
     box.append(
       h("div", { class: "dim" }, "spec waiting for your call"),
-      h("pre", { class: "card-pre interrupt-spec" }, form.spec || "—"),
+      h("pre", { class: "card-pre interrupt-spec" }, form.spec || "-"),
       ...form.tickets.map(ticketRow),
       h(
         "div",
@@ -592,7 +609,7 @@ function renderInterruptForm(form: InterruptFormView, handlers: Handlers): HTMLE
       });
     }
     box.append(
-      h("div", { class: "dim" }, "all tickets implemented — your call"),
+      h("div", { class: "dim" }, "all tickets implemented; your call"),
       ...rows,
       h(
         "div",
@@ -664,7 +681,7 @@ function renderCard(card: NodeCardView, handlers: Handlers): HTMLElement {
       ? card.channels.map(renderCardChannel)
       : card.interrupt
         ? []
-        : [h("div", { class: "dim" }, "—")];
+        : [h("div", { class: "dim" }, "-")];
   if (card.interrupt) body.push(renderInterruptForm(card.interrupt, handlers));
   const pos = posOf(card);
   return h(
@@ -847,7 +864,7 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
 // ---------------------------------------------------------------------------
 
 function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
-  const lines = model.log.length > 0 ? model.log.join("\n") : "— no log lines yet —";
+  const lines = model.log.length > 0 ? model.log.join("\n") : "- no log lines yet -";
   return h(
     "div",
     { class: "log-drawer" + (model.logOpen ? " log-open" : "") },
@@ -868,7 +885,7 @@ function renderInspectorChannel(channel: ChannelView): HTMLElement {
         ? h("div", { class: "channel-body dim" }, "no tickets")
         : h("div", { class: "channel-body" }, ...channel.tickets.map(ticketRow));
   } else if (channel.kind === "pre") {
-    body = h("pre", { class: "channel-pre" }, channel.text || "—");
+    body = h("pre", { class: "channel-pre" }, channel.text || "-");
   } else if (channel.kind === "json") {
     body = h("pre", { class: "channel-pre" }, channel.json);
   } else {
@@ -881,7 +898,7 @@ function renderInspectorDrawer(model: AppModel, handlers: Handlers): HTMLElement
   const body =
     model.inspector.length > 0
       ? h("div", { class: "inspector-channels" }, ...model.inspector.map(renderInspectorChannel))
-      : h("div", { class: "inspector-empty dim" }, "— no state yet —");
+      : h("div", { class: "inspector-empty dim" }, "- no state yet -");
   return h(
     "div",
     { class: "inspector-drawer" + (model.inspectorOpen ? " inspector-open" : "") },
@@ -907,6 +924,12 @@ function renderDrawers(model: AppModel, handlers: Handlers): HTMLElement {
 
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
+  if (model.selectedId !== layoutThreadId) {
+    for (const id of [...nodePos.keys()]) {
+      if (isTicketCardId(id)) nodePos.delete(id);
+    }
+    layoutThreadId = model.selectedId;
+  }
   const liveTicketIds = new Set(model.ticketCards.map((card) => card.id));
   for (const id of [...expandedTickets]) {
     if (!liveTicketIds.has(id)) expandedTickets.delete(id);

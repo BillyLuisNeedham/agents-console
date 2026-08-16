@@ -4,9 +4,11 @@ import { describe, expect, it } from "bun:test";
 import type { Thread } from "@langchain/langgraph-sdk";
 import {
   applyStreamPart,
+  finishRun,
   initRun,
   edgePath,
   layoutGraph,
+  layoutStorageKey,
   mergeLayout,
   parseStoredLayout,
   projectChannels,
@@ -591,6 +593,23 @@ describe("projectNodeCards", () => {
     expect(byId.writeSpec?.status).toBe("idle");
   });
 
+  it("uses the interrupt payload's pending list on deadlockGate when values disagree", () => {
+    const cards = projectNodeCards(
+      { nodes: [{ id: "deadlockGate" }], edges: [] },
+      initRun({
+        tickets: [
+          { id: "T1", title: "first", blockedBy: [], status: "pending" },
+          { id: "T2", title: "second", blockedBy: ["T1"], status: "done" },
+        ],
+      }),
+      {
+        ns: [{ value: { kind: "deadlock", hint: "reload", pending: ["T2"] } }],
+      },
+    );
+    const tickets = cards[0]?.channels.find((channel) => channel.kind === "tickets");
+    expect(tickets?.kind === "tickets" ? tickets.tickets.map((t) => t.id) : []).toEqual(["T2"]);
+  });
+
   it("puts the deadlock hint on the deadlockGate card", () => {
     const cards = projectNodeCards(
       { nodes: [{ id: "deadlockGate" }], edges: [] },
@@ -727,6 +746,34 @@ describe("projectNodeCards interrupt status", () => {
       { node: "writeSpec", status: "active" },
       { node: "approveSpec", status: "ran" },
     ]);
+  });
+});
+
+describe("finishRun", () => {
+  it("clears the active highlight so a finished run is not left running", () => {
+    const run = finishRun(
+      play(initRun(), [{ event: "updates", data: { review: {} } }]),
+    );
+    expect(run.streaming).toBe(false);
+    expect(run.activeNodes).toEqual([]);
+    expect(run.visitedNodes).toEqual(["review"]);
+    const byId = Object.fromEntries(
+      projectNodeCards(
+        { nodes: [{ id: "review" }, { id: "__end__" }], edges: [{ source: "review", target: "__end__" }] },
+        run,
+      ).map((c) => [c.id, c]),
+    );
+    expect(byId.review?.status).toBe("ran");
+    expect(byId.__end__?.status).toBe("idle");
+  });
+});
+
+describe("layoutStorageKey", () => {
+  it("scopes ticket cards to the thread and leaves graph nodes global", () => {
+    expect(layoutStorageKey("writeSpec", "thread-a")).toBe("writeSpec");
+    expect(layoutStorageKey("ticket:T1", "thread-a")).toBe("thread-a:ticket:T1");
+    expect(layoutStorageKey("ticket:T1", "thread-b")).toBe("thread-b:ticket:T1");
+    expect(layoutStorageKey("ticket:T1", null)).toBe("ticket:T1");
   });
 });
 

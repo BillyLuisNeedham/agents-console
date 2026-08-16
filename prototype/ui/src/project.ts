@@ -1,6 +1,6 @@
 /**
  * Projection seam: pure mapping from SDK thread shapes to the view model the
- * DOM layer renders. No SDK calls, no DOM — fixtures in, view model out.
+ * DOM layer renders. No SDK calls, no DOM: fixtures in, view model out.
  */
 
 import type { Thread } from "@langchain/langgraph-sdk";
@@ -202,11 +202,20 @@ export function syncRunValues(run: RunProjection, values: unknown): RunProjectio
   return { ...run, values: asValues(values) ?? run.values };
 }
 
-const INTERRUPT_NODE: Record<string, string> = {
-  "approve-spec": "approveSpec",
-  deadlock: "deadlockGate",
+/** Clear the live highlight when a stream ends so the last node is not left "running". */
+export function finishRun(run: RunProjection): RunProjection {
+  return { ...run, streaming: false, activeNodes: [] };
+}
+
+const INTERRUPT_KIND_BY_NODE = {
+  approveSpec: "approve-spec",
+  deadlockGate: "deadlock",
   review: "review",
-};
+} as const;
+
+const INTERRUPT_NODE: Record<string, string> = Object.fromEntries(
+  Object.entries(INTERRUPT_KIND_BY_NODE).map(([node, kind]) => [kind, node]),
+);
 
 function nodesFromInterrupt(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -499,16 +508,26 @@ export function projectNodeChannels(nodeId: string, raw: unknown): ChannelView[]
   return channels;
 }
 
-function deadlockHint(interrupts: unknown): string | null {
-  const form = projectInterruptForm(interrupts, "deadlockGate");
-  return form?.kind === "deadlock" ? form.hint : null;
+function nodeChannelsForCard(
+  nodeId: string,
+  values: Raw,
+  interrupt: InterruptFormView | null,
+): ChannelView[] {
+  if (interrupt?.kind === "deadlock") {
+    const known = new Map(projectTickets(values.tickets).map((ticket) => [ticket.id, ticket]));
+    return [
+      {
+        name: "tickets",
+        kind: "tickets",
+        tickets: interrupt.pending.map(
+          (id) => known.get(id) ?? { id, title: "", blockedBy: [], status: "pending" as const },
+        ),
+      },
+      { name: "hint", kind: "text", text: interrupt.hint },
+    ];
+  }
+  return projectNodeChannels(nodeId, values);
 }
-
-const NODE_INTERRUPT_KIND: Record<string, InterruptFormView["kind"]> = {
-  approveSpec: "approve-spec",
-  deadlockGate: "deadlock",
-  review: "review",
-};
 
 function interruptValueOf(item: unknown): Raw | null {
   if (!item || typeof item !== "object") return null;
@@ -516,7 +535,7 @@ function interruptValueOf(item: unknown): Raw | null {
 }
 
 export function projectInterruptForm(interrupts: unknown, nodeId: string): InterruptFormView | null {
-  const want = NODE_INTERRUPT_KIND[nodeId];
+  const want = INTERRUPT_KIND_BY_NODE[nodeId as keyof typeof INTERRUPT_KIND_BY_NODE];
   if (!want || !interrupts || typeof interrupts !== "object") return null;
   for (const list of Object.values(interrupts as Record<string, unknown>)) {
     if (!Array.isArray(list)) continue;
@@ -567,7 +586,6 @@ export function projectNodeCards(
     }
   }
   const values = run?.values ?? {};
-  const hint = deadlockHint(interrupts);
   return topology.nodes.map((node) => {
     const interrupt = projectInterruptForm(interrupts, node.id);
     const status: CardStatus = interrupt
@@ -580,10 +598,7 @@ export function projectNodeCards(
             ? "ran"
             : "idle";
     const pos = positions[node.id] ?? { x: 0, y: 0 };
-    const channels = projectNodeChannels(node.id, values);
-    if (node.id === "deadlockGate" && hint) {
-      channels.push({ name: "hint", kind: "text", text: hint });
-    }
+    const channels = nodeChannelsForCard(node.id, values, interrupt);
     return {
       id: node.id,
       name: displayName(node.id, node.name),
@@ -619,6 +634,11 @@ export function ticketCardId(ticketId: string): string {
 
 export function isTicketCardId(id: string): boolean {
   return id.startsWith(TICKET_CARD_PREFIX);
+}
+
+/** Ticket cards share ids across threads; graph nodes do not. */
+export function layoutStorageKey(cardId: string, threadId: string | null): string {
+  return isTicketCardId(cardId) && threadId ? `${threadId}:${cardId}` : cardId;
 }
 
 export function projectTicketCards(run: RunProjection | null): TicketCardView[] {

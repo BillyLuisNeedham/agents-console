@@ -1,5 +1,5 @@
 /**
- * Console — a left rail (start-run form + thread list) and a graph canvas.
+ * Console: a left rail (start-run form + thread list) and a graph canvas.
  * Topology comes from the dev server; cards show per-node channels; the
  * updates stream highlights running and next nodes as super-steps land.
  * Ticket cards spawn from the tickets channel beside implementTicket.
@@ -18,10 +18,12 @@ import {
   makeClient,
   resumeRun,
   streamRun,
+  type StreamHandlers,
 } from "./client";
 import type { InterruptDecision, Raw, Topology } from "./project";
 import {
   applyStreamPart,
+  finishRun,
   initRun,
   projectChannels,
   projectLog,
@@ -145,6 +147,26 @@ function stopStream(): void {
   state.abort = null;
 }
 
+function bindStream(threadId: string, controller: AbortController): StreamHandlers {
+  return {
+    onPart: (part) => {
+      if (controller.signal.aborted || state.selectedId !== threadId) return;
+      state.run = applyStreamPart(state.run, part);
+      render();
+    },
+    onError: (message) => {
+      if (controller.signal.aborted || state.selectedId !== threadId) return;
+      state.run = { ...state.run, streaming: false, streamError: message };
+      render();
+    },
+    onDone: () => {
+      if (controller.signal.aborted || state.selectedId !== threadId) return;
+      state.run = finishRun(state.run);
+      render();
+    },
+  };
+}
+
 /**
  * Start a run from the rail form: create a thread tagged with the topic,
  * invoke the graph on it (ticket pool via configurable.ticketDir, packet
@@ -196,20 +218,7 @@ async function startRun(): Promise<void> {
       thread.thread_id,
       assistantId,
       request.input,
-      {
-        onPart: (part) => {
-          if (controller.signal.aborted || state.selectedId !== thread.thread_id) return;
-          state.run = applyStreamPart(state.run, part);
-          render();
-        },
-        onError: (message) => {
-          state.run = { ...state.run, streaming: false, streamError: message };
-          render();
-        },
-        onDone: () => {
-          state.run = { ...state.run, streaming: false };
-        },
-      },
+      bindStream(thread.thread_id, controller),
       controller.signal,
       request.config,
     );
@@ -247,20 +256,7 @@ async function resume(decision: InterruptDecision): Promise<void> {
       threadId,
       assistantId,
       decision,
-      {
-        onPart: (part) => {
-          if (controller.signal.aborted || state.selectedId !== threadId) return;
-          state.run = applyStreamPart(state.run, part);
-          render();
-        },
-        onError: (message) => {
-          state.run = { ...state.run, streaming: false, streamError: message };
-          render();
-        },
-        onDone: () => {
-          state.run = { ...state.run, streaming: false };
-        },
-      },
+      bindStream(threadId, controller),
       controller.signal,
     );
   } catch (err) {
@@ -285,21 +281,15 @@ async function watch(threadId: string): Promise<void> {
     if (!runId || controller.signal.aborted || state.selectedId !== threadId) return;
     state.run = { ...state.run, streaming: true, streamError: null };
     render();
+    const handlers = bindStream(threadId, controller);
     await joinRun(
       client,
       threadId,
       runId,
       {
-        onPart: (part) => {
-          state.run = applyStreamPart(state.run, part);
-          render();
-        },
-        onError: (message) => {
-          state.run = { ...state.run, streaming: false, streamError: message };
-          render();
-        },
+        ...handlers,
         onDone: () => {
-          state.run = { ...state.run, streaming: false };
+          handlers.onDone();
           void load();
         },
       },
@@ -360,7 +350,7 @@ async function load(): Promise<void> {
       state.run = syncRunValues(state.run, state.selected.values);
     }
   } catch (err) {
-    state.error = `dev server unreachable at http://localhost:2024 — is \`langgraphjs dev\` running? (${
+    state.error = `dev server unreachable at http://localhost:2024; is \`langgraphjs dev\` running? (${
       err instanceof Error ? err.message : String(err)
     })`;
   }
