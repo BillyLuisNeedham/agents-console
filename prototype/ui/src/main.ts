@@ -3,6 +3,7 @@
  * Topology comes from the dev server; cards show per-node channels; the
  * updates stream highlights running and next nodes as super-steps land.
  * Ticket cards spawn from the tickets channel beside implementTicket.
+ * Bottom drawers hold the log and the full State inspector.
  */
 
 import "./styles.css";
@@ -22,6 +23,7 @@ import type { InterruptDecision, Raw, Topology } from "./project";
 import {
   applyStreamPart,
   initRun,
+  projectChannels,
   projectLog,
   projectNodeCards,
   projectStartRun,
@@ -52,6 +54,7 @@ const state = {
   run: initRun() as RunProjection,
   abort: null as AbortController | null,
   logOpen: false,
+  inspectorOpen: false,
   error: null as string | null,
   start: {
     topic: "",
@@ -83,6 +86,8 @@ function model(): AppModel {
     edges: [...state.topology.edges, ...projectTicketEdges(ticketCards)],
     log: projectLog(selected ? state.run.values : null),
     logOpen: state.logOpen,
+    inspector: projectChannels(selected ? state.run.values : null),
+    inspectorOpen: state.inspectorOpen,
     streaming: state.run.streaming,
     streamError: state.run.streamError,
     error: state.error,
@@ -110,6 +115,10 @@ function render(): void {
     },
     onToggleLog: () => {
       state.logOpen = !state.logOpen;
+      render();
+    },
+    onToggleInspector: () => {
+      state.inspectorOpen = !state.inspectorOpen;
       render();
     },
     onRefresh: () => void load(),

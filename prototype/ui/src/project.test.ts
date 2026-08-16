@@ -140,6 +140,37 @@ describe("projectChannels", () => {
     const channels = projectChannels({ specApproved: true });
     expect(channels[0]).toEqual({ name: "specApproved", kind: "text", text: "true" });
   });
+
+  it("follows the latest values snapshot so the inspector updates per super-step", () => {
+    const first = applyStreamPart(initRun(), {
+      event: "values",
+      data: { topic: "demo", packet: "p1", log: ["a"] },
+    });
+    expect(projectChannels(first.values)).toEqual([
+      { name: "topic", kind: "text", text: "demo" },
+      { name: "packet", kind: "pre", text: "p1" },
+    ]);
+
+    const second = applyStreamPart(first, {
+      event: "values",
+      data: {
+        topic: "demo",
+        packet: "p1",
+        spec: "# Spec",
+        specApproved: false,
+        tickets: [{ id: "T1", title: "first", blockedBy: [], status: "pending" }],
+        log: ["a", "b"],
+      },
+    });
+    expect(projectChannels(second.values).map((c) => c.name)).toEqual([
+      "topic",
+      "packet",
+      "spec",
+      "specApproved",
+      "tickets",
+    ]);
+    expect(projectNodeChannels("writeSpec", second.values).map((c) => c.name)).toEqual(["spec"]);
+  });
 });
 
 describe("projectLog", () => {

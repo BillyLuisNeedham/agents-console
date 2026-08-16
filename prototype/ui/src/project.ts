@@ -67,7 +67,7 @@ export function visibleThreads(threads: Thread<Raw>[], showAll: boolean): Thread
 // Channels (selected thread)
 // ---------------------------------------------------------------------------
 
-/** Channels of the graph's State, in the order the detail panel shows them. */
+/** Channels of the graph's State, in the order the inspector shows them. */
 const CHANNEL_ORDER = ["topic", "packetSource", "packet", "spec", "specApproved", "tickets"];
 
 const PRE_CHANNELS = new Set(["packet", "spec"]);

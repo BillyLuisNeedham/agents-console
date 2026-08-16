@@ -42,6 +42,8 @@ export interface AppModel {
   edges: TopologyEdge[];
   log: string[];
   logOpen: boolean;
+  inspector: ChannelView[];
+  inspectorOpen: boolean;
   streaming: boolean;
   streamError: string | null;
   error: string | null;
@@ -52,6 +54,7 @@ export interface Handlers {
   onSelectThread: (threadId: string) => void;
   onToggleShowAll: (showAll: boolean) => void;
   onToggleLog: () => void;
+  onToggleInspector: () => void;
   onRefresh: () => void;
   onStartField: (field: "topic" | "ticketDir" | "packet", value: string) => void;
   onStartRun: () => void;
@@ -840,7 +843,7 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
-// Bottom drawer: the log channel, collapsible
+// Bottom drawers: log channel and full State inspector, side by side
 // ---------------------------------------------------------------------------
 
 function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
@@ -850,10 +853,53 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
     { class: "log-drawer" + (model.logOpen ? " log-open" : "") },
     h(
       "button",
-      { class: "log-bar", onclick: () => handlers.onToggleLog() },
+      { class: "drawer-bar", onclick: () => handlers.onToggleLog() },
       `log (${model.log.length}) ${model.logOpen ? "▾" : "▴"}`,
     ),
     model.logOpen ? h("pre", { class: "log-lines" }, lines) : null,
+  );
+}
+
+function renderInspectorChannel(channel: ChannelView): HTMLElement {
+  let body: HTMLElement;
+  if (channel.kind === "tickets") {
+    body =
+      channel.tickets.length === 0
+        ? h("div", { class: "channel-body dim" }, "no tickets")
+        : h("div", { class: "channel-body" }, ...channel.tickets.map(ticketRow));
+  } else if (channel.kind === "pre") {
+    body = h("pre", { class: "channel-pre" }, channel.text || "—");
+  } else if (channel.kind === "json") {
+    body = h("pre", { class: "channel-pre" }, channel.json);
+  } else {
+    body = h("div", { class: "channel-body" }, channel.text);
+  }
+  return h("div", { class: "channel" }, h("div", { class: "channel-name" }, channel.name), body);
+}
+
+function renderInspectorDrawer(model: AppModel, handlers: Handlers): HTMLElement {
+  const body =
+    model.inspector.length > 0
+      ? h("div", { class: "inspector-channels" }, ...model.inspector.map(renderInspectorChannel))
+      : h("div", { class: "inspector-empty dim" }, "— no state yet —");
+  return h(
+    "div",
+    { class: "inspector-drawer" + (model.inspectorOpen ? " inspector-open" : "") },
+    h(
+      "button",
+      { class: "drawer-bar", onclick: () => handlers.onToggleInspector() },
+      `state (${model.inspector.length}) ${model.inspectorOpen ? "▾" : "▴"}`,
+    ),
+    model.inspectorOpen ? body : null,
+  );
+}
+
+function renderDrawers(model: AppModel, handlers: Handlers): HTMLElement {
+  return h(
+    "div",
+    { class: "drawers" },
+    renderLogDrawer(model, handlers),
+    renderInspectorDrawer(model, handlers),
   );
 }
 
@@ -870,7 +916,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
   }
   seedPositions(canvasCards(model));
   const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model, handlers));
-  root.replaceChildren(h("div", { class: "shell" }, content, renderLogDrawer(model, handlers)));
+  root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
   const world = root.querySelector(".canvas-world");
   const viewport = root.querySelector(".canvas-viewport");
   if (world instanceof HTMLElement && viewport instanceof HTMLElement) {

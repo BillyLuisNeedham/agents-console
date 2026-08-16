@@ -699,17 +699,30 @@ body {
   font-size: 11px;
 }
 
-/* ------------------------------------------------------------- log drawer */
+/* ---------------------------------------------------------- bottom drawers */
 
-.log-drawer {
+.drawers {
+  display: flex;
   flex-shrink: 0;
+  align-items: flex-start;
   border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.log-drawer,
+.inspector-drawer {
+  flex: 1;
+  min-width: 0;
   background: var(--bg-panel);
   display: flex;
   flex-direction: column;
 }
 
-.log-bar {
+.inspector-drawer {
+  border-left: 1px solid var(--border);
+}
+
+.drawer-bar {
   background: var(--bg-panel-2);
   color: var(--text);
   border: none;
@@ -722,7 +735,7 @@ body {
   letter-spacing: 0.04em;
 }
 
-.log-bar:hover {
+.drawer-bar:hover {
   color: var(--accent);
 }
 
@@ -735,4 +748,24 @@ body {
   border-top: 1px solid var(--border);
   font-size: 12px;
   white-space: pre-wrap;
+}
+
+.inspector-channels,
+.inspector-empty {
+  height: 32vh;
+  overflow: auto;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.inspector-channels {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inspector-empty {
+  padding: 10px 12px;
+  font-size: 12px;
 }
