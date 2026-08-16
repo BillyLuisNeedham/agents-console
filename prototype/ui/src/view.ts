@@ -9,6 +9,7 @@ import {
   mergeLayout,
   parseStoredLayout,
   strokeWidthForZoom,
+  isTicketCardId,
   zoomAtCursor,
   type CardBox,
   type ChannelView,
@@ -18,6 +19,7 @@ import {
   type NodeCardView,
   type Point,
   type ThreadSummary,
+  type TicketCardView,
   type TicketView,
   type TopologyEdge,
   type ViewTransform,
@@ -36,6 +38,7 @@ export interface AppModel {
   showAll: boolean;
   selectedId: string | null;
   cards: NodeCardView[];
+  ticketCards: TicketCardView[];
   edges: TopologyEdge[];
   log: string[];
   logOpen: boolean;
@@ -206,8 +209,11 @@ const DRAG_THRESHOLD = 4;
 const WORLD_MIN_WIDTH = 960;
 
 const nodePos = new Map<string, Point>();
+const expandedTickets = new Set<string>();
 const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
 let edgeMode: EdgeMode = "ortho";
+
+type Positioned = { id: string; x: number; y: number };
 
 type Drag =
   | {
@@ -263,7 +269,7 @@ function writeStored(): void {
   }
 }
 
-function seedPositions(cards: NodeCardView[]): void {
+function seedPositions(cards: Positioned[]): void {
   const defaults: Record<string, Point> = {};
   for (const card of cards) defaults[card.id] = { x: card.x, y: card.y };
   const merged = mergeLayout(defaults, readStored());
@@ -272,7 +278,7 @@ function seedPositions(cards: NodeCardView[]): void {
   }
 }
 
-function resetLayout(cards: NodeCardView[]): void {
+function resetLayout(cards: Positioned[]): void {
   nodePos.clear();
   try {
     localStorage.removeItem(LAYOUT_KEY);
@@ -286,8 +292,23 @@ function cardBox(el: HTMLElement): CardBox {
   return { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
 }
 
-function posOf(card: NodeCardView): Point {
+function posOf(card: Positioned): Point {
   return nodePos.get(card.id) ?? { x: card.x, y: card.y };
+}
+
+function canvasCards(model: AppModel): Positioned[] {
+  return [...model.cards, ...model.ticketCards];
+}
+
+function toggleTicketExpand(id: string): void {
+  if (expandedTickets.has(id)) expandedTickets.delete(id);
+  else expandedTickets.add(id);
+  const el = canvas?.nodesById.get(id);
+  el?.classList.toggle("ticket-card-expanded", expandedTickets.has(id));
+  if (canvas) {
+    fitWorld(canvas.world);
+    updateEdges();
+  }
 }
 
 function applyTransform(): void {
@@ -366,8 +387,12 @@ function endDrag(event?: PointerEvent): void {
     for (const card of canvas.nodesById.values()) card.classList.remove("node-card-dragging");
     canvas.viewport.classList.remove("canvas-panning");
   }
+  const clicked =
+    event != null && drag.kind === "node" && !drag.moved && isTicketCardId(drag.nodeId);
+  const clickedId = drag.kind === "node" ? drag.nodeId : "";
   if (drag.kind === "node" && drag.moved) writeStored();
   drag = null;
+  if (clicked) toggleTicketExpand(clickedId);
 }
 
 if (typeof window !== "undefined") {
@@ -586,6 +611,50 @@ function renderInterruptForm(form: InterruptFormView, handlers: Handlers): HTMLE
   return box;
 }
 
+function renderTicketCard(card: TicketCardView): HTMLElement {
+  const pos = posOf(card);
+  const expanded = expandedTickets.has(card.id);
+  const blocked =
+    card.status === "pending" && card.blockedBy.length > 0
+      ? h("div", { class: "dim ticket-card-blocked" }, `blockedBy ${card.blockedBy.join(", ")}`)
+      : null;
+  const details = h(
+    "div",
+    { class: "ticket-card-details" },
+    h("div", { class: "card-text" }, `id ${card.ticketId}`),
+    h("div", { class: "card-text" }, card.title),
+    h("div", { class: "dim" }, `status ${card.status}`),
+    h(
+      "div",
+      { class: "dim" },
+      card.blockedBy.length > 0 ? `blockedBy ${card.blockedBy.join(", ")}` : "blockedBy none",
+    ),
+  );
+  return h(
+    "div",
+    {
+      class:
+        `node-card ticket-card ticket-card-${card.status}` +
+        (expanded ? " ticket-card-expanded" : ""),
+      "data-node-id": card.id,
+      style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
+    },
+    h(
+      "div",
+      { class: "node-card-head" },
+      h("span", { class: "node-card-id" }, card.ticketId),
+      h("span", { class: `node-card-state ticket-state-${card.status}` }, card.status),
+    ),
+    h(
+      "div",
+      { class: "node-card-body" },
+      h("div", { class: "card-text ticket-card-summary" }, card.title),
+      blocked,
+      details,
+    ),
+  );
+}
+
 function renderCard(card: NodeCardView, handlers: Handlers): HTMLElement {
   const body =
     card.channels.length > 0
@@ -612,7 +681,7 @@ function renderCard(card: NodeCardView, handlers: Handlers): HTMLElement {
   );
 }
 
-function worldSize(cards: NodeCardView[]): { width: number; height: number } {
+function worldSize(cards: Positioned[]): { width: number; height: number } {
   let width = WORLD_MIN_WIDTH;
   let height = 400;
   for (const card of cards) {
@@ -655,7 +724,7 @@ function renderCanvasHeader(model: AppModel): HTMLElement {
           class: "btn",
           title: "restore default card positions",
           onclick: () => {
-            resetLayout(model.cards);
+            resetLayout(canvasCards(model));
             applyPositions();
             if (canvas) {
               fitWorld(canvas.world);
@@ -755,12 +824,16 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
     main.append(h("div", { class: "dim placeholder" }, "graph topology not loaded"));
     return main;
   }
-  const size = worldSize(model.cards);
+  const size = worldSize(canvasCards(model));
   const world = h("div", {
     class: "canvas-world",
     style: `width:${size.width}px;height:${size.height}px`,
   });
-  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card, handlers)));
+  world.append(
+    makeSvg(),
+    ...model.cards.map((card) => renderCard(card, handlers)),
+    ...model.ticketCards.map(renderTicketCard),
+  );
   const viewport = h("div", { class: "canvas-viewport" }, world);
   main.append(renderCanvasHeader(model), viewport);
   return main;
@@ -788,7 +861,14 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
 
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
-  seedPositions(model.cards);
+  const liveTicketIds = new Set(model.ticketCards.map((card) => card.id));
+  for (const id of [...expandedTickets]) {
+    if (!liveTicketIds.has(id)) expandedTickets.delete(id);
+  }
+  for (const id of [...nodePos.keys()]) {
+    if (isTicketCardId(id) && !liveTicketIds.has(id)) nodePos.delete(id);
+  }
+  seedPositions(canvasCards(model));
   const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model, handlers));
   root.replaceChildren(h("div", { class: "shell" }, content, renderLogDrawer(model, handlers)));
   const world = root.querySelector(".canvas-world");

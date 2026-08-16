@@ -595,3 +595,45 @@ export function projectNodeCards(
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Ticket cards (Send fan-out)
+// ---------------------------------------------------------------------------
+
+export interface TicketCardView {
+  id: string;
+  ticketId: string;
+  title: string;
+  blockedBy: string[];
+  status: TicketView["status"];
+  x: number;
+  y: number;
+}
+
+const TICKET_FAN = { x: 640, y: 736, dy: 160 };
+const TICKET_CARD_PREFIX = "ticket:";
+
+export function ticketCardId(ticketId: string): string {
+  return `${TICKET_CARD_PREFIX}${ticketId}`;
+}
+
+export function isTicketCardId(id: string): boolean {
+  return id.startsWith(TICKET_CARD_PREFIX);
+}
+
+export function projectTicketCards(run: RunProjection | null): TicketCardView[] {
+  if (!run) return [];
+  return projectTickets(run.values.tickets).map((ticket, index) => ({
+    id: ticketCardId(ticket.id),
+    ticketId: ticket.id,
+    title: ticket.title,
+    blockedBy: ticket.blockedBy,
+    status: ticket.status,
+    x: TICKET_FAN.x,
+    y: TICKET_FAN.y + index * TICKET_FAN.dy,
+  }));
+}
+
+export function projectTicketEdges(cards: TicketCardView[]): TopologyEdge[] {
+  return cards.map((card) => ({ source: "schedule", target: card.id }));
+}

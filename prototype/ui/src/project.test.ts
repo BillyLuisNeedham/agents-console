@@ -18,6 +18,8 @@ import {
   projectResume,
   projectStartRun,
   projectThreadSummary,
+  projectTicketCards,
+  projectTicketEdges,
   projectTopology,
   strokeWidthForZoom,
   syncRunValues,
@@ -694,5 +696,64 @@ describe("projectNodeCards interrupt status", () => {
       { node: "writeSpec", status: "active" },
       { node: "approveSpec", status: "ran" },
     ]);
+  });
+});
+
+describe("projectTicketCards", () => {
+  const t1 = { id: "T1", title: "first", blockedBy: [] as string[], status: "running" as const };
+  const t2 = { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" as const };
+  const t3 = { id: "T3", title: "third", blockedBy: [] as string[], status: "running" as const };
+
+  it("spawns one card per ticket beside implementTicket with a schedule edge", () => {
+    const cards = projectTicketCards(initRun({ tickets: [t1, t2, t3] }));
+    expect(cards.map((c) => c.ticketId)).toEqual(["T1", "T2", "T3"]);
+    expect(cards.map((c) => c.id)).toEqual(["ticket:T1", "ticket:T2", "ticket:T3"]);
+    expect(cards.map((c) => c.x)).toEqual([640, 640, 640]);
+    expect(cards.map((c) => c.y)).toEqual([736, 896, 1056]);
+    expect(projectTicketEdges(cards)).toEqual([
+      { source: "schedule", target: "ticket:T1" },
+      { source: "schedule", target: "ticket:T2" },
+      { source: "schedule", target: "ticket:T3" },
+    ]);
+  });
+
+  it("tracks ticket status pending → running → done through values parts", () => {
+    const ticket = (status: "pending" | "running" | "done") => ({
+      id: "T1",
+      title: "first",
+      blockedBy: [] as string[],
+      status,
+    });
+    let run = initRun({ tickets: [ticket("pending")] });
+    expect(projectTicketCards(run)[0]?.status).toBe("pending");
+    run = applyStreamPart(run, { event: "values", data: { tickets: [ticket("running")] } });
+    expect(projectTicketCards(run)[0]?.status).toBe("running");
+    run = applyStreamPart(run, { event: "values", data: { tickets: [ticket("done")] } });
+    expect(projectTicketCards(run)[0]?.status).toBe("done");
+  });
+
+  it("keeps blockedBy on a pending card", () => {
+    const cards = projectTicketCards(initRun({ tickets: [t2] }));
+    expect(cards[0]?.blockedBy).toEqual(["T1"]);
+    expect(cards[0]?.status).toBe("pending");
+  });
+
+  it("keeps done cards in the projection so they stay on the canvas", () => {
+    const cards = projectTicketCards(
+      initRun({
+        tickets: [
+          { id: "T1", title: "first", blockedBy: [], status: "done" },
+          { id: "T3", title: "third", blockedBy: [], status: "done" },
+        ],
+      }),
+    );
+    expect(cards.map((c) => c.ticketId)).toEqual(["T1", "T3"]);
+    expect(cards.every((c) => c.status === "done")).toBe(true);
+  });
+
+  it("returns no cards when there is no run or no tickets", () => {
+    expect(projectTicketCards(null)).toEqual([]);
+    expect(projectTicketCards(initRun())).toEqual([]);
+    expect(projectTicketEdges([])).toEqual([]);
   });
 });

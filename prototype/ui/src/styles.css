@@ -622,6 +622,44 @@ body {
   color: var(--status-done);
 }
 
+.ticket-card-running {
+  border-color: var(--status-running);
+}
+
+.ticket-card-done {
+  opacity: 0.55;
+}
+
+.ticket-state-pending {
+  color: var(--status-pending);
+}
+
+.ticket-state-running {
+  color: var(--status-running);
+  font-weight: 700;
+}
+
+.ticket-state-done {
+  color: var(--status-done);
+}
+
+.ticket-card-details {
+  display: none;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ticket-card-expanded .ticket-card-details {
+  display: flex;
+}
+
+.ticket-card-expanded .ticket-card-blocked,
+.ticket-card-expanded .ticket-card-summary {
+  display: none;
+}
+
 /* -------------------------------------------------------------- run strip */
 
 .run-strip {

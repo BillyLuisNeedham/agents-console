@@ -2,6 +2,7 @@
  * Console — a left rail (start-run form + thread list) and a graph canvas.
  * Topology comes from the dev server; cards show per-node channels; the
  * updates stream highlights running and next nodes as super-steps land.
+ * Ticket cards spawn from the tickets channel beside implementTicket.
  */
 
 import "./styles.css";
@@ -25,6 +26,8 @@ import {
   projectNodeCards,
   projectStartRun,
   projectThreadSummary,
+  projectTicketCards,
+  projectTicketEdges,
   projectTopology,
   syncRunValues,
   TICKET_POOLS,
@@ -66,6 +69,7 @@ function model(): AppModel {
     state.selected && visible.some((t) => t.thread_id === state.selected?.thread_id)
       ? state.selected
       : null;
+  const ticketCards = projectTicketCards(selected ? state.run : null);
   return {
     threads: summaries,
     showAll: state.showAll,
@@ -75,7 +79,8 @@ function model(): AppModel {
       selected ? state.run : null,
       selected?.interrupts,
     ),
-    edges: state.topology.edges,
+    ticketCards,
+    edges: [...state.topology.edges, ...projectTicketEdges(ticketCards)],
     log: projectLog(selected ? state.run.values : null),
     logOpen: state.logOpen,
     streaming: state.run.streaming,
