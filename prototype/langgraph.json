@@ -1,0 +1,5 @@
+{
+  "graphs": { "graph": "./src/graph.ts:graph" },
+  "node_version": "24",
+  "env": ".env"
+}

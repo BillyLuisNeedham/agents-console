@@ -2,6 +2,16 @@
 
 Why I'm doing this: judging whether an explicit agent graph is worth adding to my grill → spec → tickets → review workflow, and whether it should become a reusable skill.
 
+## Status (2026-08-15)
+
+- Grill node removed from the graph. The packet is the graph's entry point: `--packet <file>` supplies one; without it, a demo packet is generated. The interactive grill stays outside the graph.
+- Ticket pool replaced T1/T2/T3: `--tickets <dir>` reads one front-matter `.md` file per ticket (`id`, `blockedBy`; `status` is graph-owned). `prototype/tickets/` holds the demo pool.
+- Deadlock (pool can't advance) is now an interrupt: resume with `reload` (re-reads the pool dir — fix the files first) or `abort`.
+- Default thread id is timestamped (`run-…`), plus `--fresh` to wipe a thread.
+- Checkpoint history works end-to-end (full saver `list()`), and the UI shows live ticket states (done/running/blocked/ready), a "waiting on you" banner, and the history.
+- npm is the command interface, bun stays the runtime: `npm start` / `npm run smoke` / `npm run typecheck` all work. One lockfile (`bun.lock`).
+- Lesson learned: a node that both has outgoing edges and returns a `Command({goto})` misbehaves — the edge write competes with the Command's goto. Nodes that return Commands must route only via `Command.goto` (see `deadlockGate`, `review`).
+
 ## End state
 
 - The workflow works end-to-end for real: grill → spec → tickets → implement → review, one run.

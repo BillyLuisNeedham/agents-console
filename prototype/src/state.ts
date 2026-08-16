@@ -5,17 +5,14 @@ export const ticketSchema = z.object({
   id: z.string(),
   title: z.string(),
   blockedBy: z.array(z.string()),
-  status: z.enum(["pending", "done"]),
+  status: z.enum(["pending", "running", "done"]),
 });
 
 export type Ticket = z.infer<typeof ticketSchema>;
 
 export const GraphState = new StateSchema({
   topic: z.string().default(""),
-  stubGrill: z.boolean().default(false),
-  opencodeSessionId: z.string().default(""),
-  grillStatus: z.enum(["idle", "failed", "done"]).default("idle"),
-  lastError: z.string().default(""),
+  packetSource: z.enum(["file", "stub"]).default("stub"),
   packet: z.string().default(""),
   spec: z.string().default(""),
   specApproved: z.boolean().default(false),
@@ -45,17 +42,4 @@ export function readyTickets(tickets: Ticket[]): Ticket[] {
       ticket.status !== "done" &&
       ticket.blockedBy.every((id) => byId.get(id)?.status === "done"),
   );
-}
-
-export function scenarioTickets(): Ticket[] {
-  return [
-    { id: "T1", title: "Write CONTEXT.md", blockedBy: [], status: "pending" },
-    {
-      id: "T2",
-      title: "Implement the graph runtime",
-      blockedBy: ["T1"],
-      status: "pending",
-    },
-    { id: "T3", title: "Write lesson 3", blockedBy: [], status: "pending" },
-  ];
 }

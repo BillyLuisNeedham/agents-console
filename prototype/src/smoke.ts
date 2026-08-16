@@ -1,16 +1,23 @@
 import { Command, isInterrupted } from "@langchain/langgraph";
-import { compileGraph } from "./graph.ts";
+import { buildGraph } from "./graph.ts";
+import { protoRoot } from "./paths.ts";
+import { demoPacket, loadTicketPool } from "./tickets.ts";
 
-const graph = compileGraph();
+const { graph } = buildGraph();
 const config = {
-  configurable: { thread_id: `smoke-${Date.now()}` },
+  configurable: {
+    thread_id: `smoke-${Date.now()}`,
+    ticketDir: `${protoRoot}/tickets`,
+  },
   durability: "sync" as const,
   recursionLimit: 50,
 };
 
 let input: Parameters<typeof graph.invoke>[0] = {
   topic: "smoke",
-  stubGrill: true,
+  packet: demoPacket("smoke"),
+  packetSource: "stub",
+  tickets: loadTicketPool(`${protoRoot}/tickets`),
 };
 
 for (let i = 0; i < 8; i++) {
@@ -24,11 +31,7 @@ for (let i = 0; i < 8; i++) {
     result.__interrupt__[0]?.value as { kind?: string } | undefined
   )?.kind;
   console.log("interrupt", kind);
-  if (kind === "approve-spec") {
-    input = new Command({ resume: { action: "approve" } });
-    continue;
-  }
-  if (kind === "review") {
+  if (kind === "approve-spec" || kind === "review") {
     input = new Command({ resume: { action: "approve" } });
     continue;
   }

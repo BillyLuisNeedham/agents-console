@@ -1,99 +1,55 @@
 import { Command, END, interrupt, Send } from "@langchain/langgraph";
-import { runGrill } from "./opencode.ts";
-import {
-  GraphState,
-  readyTickets,
-  scenarioTickets,
-  type Ticket,
-} from "./state.ts";
+import { join } from "node:path";
+import { protoRoot } from "./paths.ts";
+import { demoPacket, loadTicketPool } from "./tickets.ts";
+import { GraphState, readyTickets, type Ticket } from "./state.ts";
 
 type State = typeof GraphState.State;
+type Config = { configurable?: { thread_id?: string; ticketDir?: string } };
 
-export type GrillDecision = { action: "resume" | "reset" };
 export type SpecDecision = { action: "approve" | "reject" };
 export type ReviewDecision =
   | { action: "approve" }
   | { action: "retry"; ids: string[] }
   | { action: "replan" };
+export type DeadlockDecision = { action: "reload" | "abort" };
 
-export async function grill(
-  state: State,
-  config: { configurable?: { thread_id?: string } },
-) {
-  const threadId = config.configurable?.thread_id ?? "demo";
-
-  if (state.stubGrill && state.grillStatus !== "done") {
-    return {
-      grillStatus: "done" as const,
-      packet: stubPacket(state.topic),
-      log: ["grill: stub packet"],
-    };
-  }
-
-  let sessionId = state.opencodeSessionId;
-  let reset = false;
-  if (state.grillStatus === "failed") {
-    const decision = interrupt({
-      kind: "grill-failed",
-      sessionId,
-      reason: state.lastError,
-    }) as GrillDecision;
-    reset = decision.action === "reset";
-    if (reset) sessionId = "";
-  }
-
-  const result = await runGrill({
-    topic: state.topic,
-    threadId,
-    sessionId: sessionId || undefined,
-    reset,
-  });
-
-  if (!result.ok) {
-    return {
-      grillStatus: "failed" as const,
-      opencodeSessionId: result.sessionId,
-      lastError: result.error,
-      log: [`grill failed: ${result.error}`],
-    };
-  }
-
-  return {
-    grillStatus: "done" as const,
-    opencodeSessionId: result.sessionId,
-    packet: result.packet,
-    lastError: "",
-    log: ["grill wrote packet"],
-  };
-}
-
-export function routeAfterGrill(state: State) {
-  return state.grillStatus === "done" ? "writeSpec" : "grill";
-}
-
-export function writeSpec(state: State) {
-  const tickets = scenarioTickets();
+export function writeSpec(state: State, config: Config) {
+  const tickets =
+    state.tickets.length > 0
+      ? state.tickets
+      : loadTicketPool(
+          config.configurable?.ticketDir ?? join(protoRoot, "tickets"),
+        );
+  const hasPacket = state.packet.trim().length > 0;
+  const packet = hasPacket ? state.packet : demoPacket(state.topic);
+  const packetSource = hasPacket ? state.packetSource : "stub";
   const spec = [
-    "# Spec (stub)",
+    "# Spec",
     "",
     `Topic: ${state.topic}`,
     "",
     "## Packet",
     "",
-    state.packet.trim() || "_(empty packet)_",
+    packet.trim() || "_(empty packet)_",
     "",
     "## Tickets",
-    ...tickets.map(
-      (ticket) =>
-        `- ${ticket.id}: ${ticket.title}` +
-        (ticket.blockedBy.length ? ` (after ${ticket.blockedBy.join(", ")})` : ""),
-    ),
+    ...(tickets.length
+      ? tickets.map(
+          (ticket) =>
+            `- ${ticket.id}: ${ticket.title}` +
+            (ticket.blockedBy.length
+              ? ` (after ${ticket.blockedBy.join(", ")})`
+              : ""),
+        )
+      : ["_(pool empty)_"]),
   ].join("\n");
   return {
     spec,
     specApproved: false,
-    tickets,
-    log: ["writeSpec: stub spec + T1 T2 T3"],
+    ...(state.tickets.length ? {} : { tickets }),
+    ...(hasPacket ? {} : { packet, packetSource }),
+    log: ["writeSpec: spec from packet + pool"],
   };
 }
 
@@ -113,20 +69,56 @@ export function routeAfterSpec(state: State) {
   return state.specApproved ? "schedule" : "writeSpec";
 }
 
-export function schedule() {
-  return {};
+export function schedule(state: State) {
+  const pending = state.tickets.filter((ticket) => ticket.status === "pending");
+  if (pending.length === 0) return {};
+  const ready = readyTickets(state.tickets);
+  return {
+    tickets: ready.map((ticket) => ({
+      ...ticket,
+      status: "running" as const,
+    })),
+    log: [`schedule: ${ready.map((t) => t.id).join(", ")}`],
+  };
 }
 
 export function routeReady(state: State) {
   if (state.tickets.length === 0) return "review";
   if (state.tickets.every((ticket) => ticket.status === "done")) return "review";
   const ready = readyTickets(state.tickets);
-  if (ready.length === 0) {
-    throw new Error("ticket deadlock: pending work with no ready tickets");
-  }
+  if (ready.length === 0) return "deadlockGate";
   return ready.map(
     (ticket) => new Send("implementTicket", { ticket, spec: state.spec }),
   );
+}
+
+export function deadlockGate(state: State, config: Config) {
+  const pending = state.tickets
+    .filter((ticket) => ticket.status !== "done")
+    .map((ticket) => ticket.id);
+  const decision = interrupt({
+    kind: "deadlock",
+    pending,
+    hint: "no ticket can start; resume with reload to re-read the pool, or abort",
+  }) as DeadlockDecision;
+
+  if (decision.action === "abort") {
+    return new Command({
+      update: { log: ["deadlock: abort"] },
+      goto: END,
+    });
+  }
+  const ticketDir = config.configurable?.ticketDir;
+  const tickets = ticketDir
+    ? loadTicketPool(ticketDir)
+    : state.tickets.map((ticket) => ({ ...ticket, status: "pending" as const }));
+  return new Command({
+    update: {
+      tickets,
+      log: [`deadlock: reloaded pool from ${ticketDir ?? "state"}`],
+    },
+    goto: "schedule",
+  });
 }
 
 export async function implementTicket(input: { ticket: Ticket; spec: string }) {
@@ -159,7 +151,10 @@ export function review(state: State) {
     return new Command({
       update: {
         specApproved: false,
-        tickets: scenarioTickets(),
+        tickets: state.tickets.map((ticket) => ({
+          ...ticket,
+          status: "pending" as const,
+        })),
         log: ["review: replan"],
       },
       goto: "writeSpec",
@@ -170,22 +165,4 @@ export function review(state: State) {
     update: { log: ["review: approved"] },
     goto: END,
   });
-}
-
-function stubPacket(topic: string): string {
-  return [
-    "# Packet",
-    "",
-    `Topic: ${topic}`,
-    "",
-    "## Decisions",
-    "- Use LangGraph.js for this course's prototype.",
-    "- Tickets fan out with blockedBy; Review is one gate at the end.",
-    "",
-    "## Context",
-    "Stub packet so the rest of the graph can be poked without an interview.",
-    "",
-    "## Suggested skills",
-    "- to-spec",
-  ].join("\n");
 }
