@@ -57,3 +57,7 @@ _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
 **Review**:
 The final human judgment of finished ticket work, after implement tickets have run.
 _Avoid_: per-ticket lint, typecheck (those are not Review)
+
+**Console**:
+Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them.
+_Avoid_: dashboard, Studio (the LangGraph UI it replaces)
