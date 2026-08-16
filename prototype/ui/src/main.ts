@@ -1,60 +1,94 @@
 /**
- * Console (prototype) — entry point.
- *
- * Reads `?variant=` (default "A"), loads the ShellContext (live or mock), and
- * renders the matching variant into #app, plus the floating switcher.
+ * Console — walking skeleton. A left rail lists threads (Console-created by
+ * default, show-all toggle); selecting one renders its channels as a plain
+ * list, with the log channel in a collapsible bottom drawer.
  */
 
 import "./styles.css";
-import { loadContext, type ShellContext } from "./data";
-import { mountSwitcher } from "./switcher";
-import { VariantA } from "./variants/VariantA";
-import { VariantB } from "./variants/VariantB";
-import { VariantC } from "./variants/VariantC";
-
-export type VariantRender = (root: HTMLElement, ctx: ShellContext) => void;
-
-export interface VariantDef {
-  id: string;
-  label: string;
-  render: VariantRender;
-}
-
-export const VARIANTS: VariantDef[] = [
-  { id: "A", label: "Thread List", render: VariantA },
-  { id: "B", label: "Tabbed Ops", render: VariantB },
-  { id: "C", label: "Graph View", render: VariantC },
-];
+import { getThread, listThreads, makeClient } from "./client";
+import type { Raw } from "./project";
+import { projectChannels, projectLog, projectThreadSummary, visibleThreads } from "./project";
+import { renderApp, type AppModel } from "./view";
+import type { Thread } from "@langchain/langgraph-sdk";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
 const root: HTMLElement = appRoot;
 
-let ctx: ShellContext | null = null;
+const client = makeClient();
 
-function currentVariantId(): string {
-  const id = new URLSearchParams(window.location.search).get("variant");
-  return id && VARIANTS.some((v) => v.id === id) ? id : "A";
+const state = {
+  threads: [] as Thread<Raw>[],
+  showAll: false,
+  selectedId: null as string | null,
+  selected: null as Thread<Raw> | null,
+  logOpen: false,
+  error: null as string | null,
+};
+
+function model(): AppModel {
+  const visible = visibleThreads(state.threads, state.showAll);
+  const summaries = visible.map(projectThreadSummary);
+  const selected =
+    state.selected && visible.some((t) => t.thread_id === state.selected?.thread_id)
+      ? state.selected
+      : null;
+  return {
+    threads: summaries,
+    showAll: state.showAll,
+    selectedId: selected?.thread_id ?? null,
+    channels: projectChannels(selected?.values ?? null),
+    log: projectLog(selected?.values ?? null),
+    logOpen: state.logOpen,
+    error: state.error,
+  };
 }
 
-function renderVariant(id: string): void {
-  if (!ctx) return;
-  const def = VARIANTS.find((v) => v.id === id) ?? VARIANTS[0];
-  root.replaceChildren();
-  def.render(root, ctx);
+function render(): void {
+  renderApp(root, model(), {
+    onSelectThread: (threadId) => void selectThread(threadId),
+    onToggleShowAll: (showAll) => {
+      state.showAll = showAll;
+      render();
+    },
+    onToggleLog: () => {
+      state.logOpen = !state.logOpen;
+      render();
+    },
+    onRefresh: () => void load(),
+  });
 }
 
-async function rerender(id: string): Promise<void> {
-  const url = new URL(window.location.href);
-  url.searchParams.set("variant", id);
-  window.history.replaceState({}, "", url);
-  renderVariant(id);
+async function selectThread(threadId: string): Promise<void> {
+  state.selectedId = threadId;
+  try {
+    state.selected = await getThread(client, threadId);
+    state.error = null;
+  } catch (err) {
+    state.error = `failed to load thread: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  render();
 }
 
-async function main(): Promise<void> {
-  ctx = await loadContext();
-  renderVariant(currentVariantId());
-  mountSwitcher(currentVariantId(), VARIANTS, (id) => void rerender(id));
+async function load(): Promise<void> {
+  try {
+    state.threads = await listThreads(client);
+    state.error = null;
+    const visible = visibleThreads(state.threads, state.showAll);
+    const stillThere = visible.some((t) => t.thread_id === state.selectedId);
+    if (!stillThere) {
+      const first = visible[0] ?? null;
+      state.selectedId = first?.thread_id ?? null;
+      state.selected = first ?? null;
+    } else if (state.selectedId) {
+      state.selected = await getThread(client, state.selectedId);
+    }
+  } catch (err) {
+    state.error = `dev server unreachable at http://localhost:2024 — is \`langgraphjs dev\` running? (${
+      err instanceof Error ? err.message : String(err)
+    })`;
+  }
+  render();
 }
 
-void main();
+void load();
