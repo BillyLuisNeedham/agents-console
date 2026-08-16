@@ -1,0 +1,19 @@
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "THROWAWAY UI layout prototype — a custom Console replacing LangGraph Studio for the local dev server.",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@langchain/langgraph-sdk": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
