@@ -1,4 +1,4 @@
-<!-- state: id=04 blocked-by=02 status=ready -->
+<!-- state: id=04 blocked-by=02 status=done -->
 
 # 04 — Graph canvas: node cards, edges, live highlighting
 
@@ -8,10 +8,10 @@ The graph-centric canvas. Topology is fetched from `client.assistants.getGraph(a
 
 ## Acceptance criteria
 
-- [ ] Canvas renders the real graph topology from the dev server, not a hardcoded copy
-- [ ] Each node card shows only its relevant channels
-- [ ] Running and next nodes highlight live as `updates` events arrive
-- [ ] The plain state list from ticket 1 is gone
+- [x] Canvas renders the real graph topology from the dev server, not a hardcoded copy
+- [x] Each node card shows only its relevant channels
+- [x] Running and next nodes highlight live as `updates` events arrive
+- [x] The plain state list from ticket 1 is gone
 
 ## Blocked by
 
@@ -69,3 +69,13 @@ index.cjs
 ```
 
 Nothing above is confirmed. Read the log before you trust any part of this Issue.
+
+## Notes
+
+- Live `GET /assistants/{id}/graph` confirmed (server 200). Nodes: `__start__`, `writeSpec`, `approveSpec`, `schedule`, `deadlockGate`, `implementTicket`, `review`, `__end__`. Conditional edges are expanded: `approveSpec` and `schedule` list every reachable target. Canvas will render what the server reports.
+- Previous 04 agent wrote no code. Resume is clean on top of 01–03 (`client.ts` / `project.ts` / `view.ts` / `main.ts`).
+- Issue 05 owns pan/zoom/drag/persistence/edge-toggle. 04 is topology cards, per-node channels, updates-driven highlight, and removing the plain list.
+- Highlighting: `updates` keys = running (`active`). Unvisited outgoing targets of non-conditional edges = `next`. Expanded conditional edges are still drawn (dashed) but do not light `next`, or the whole graph would flash after `approveSpec`.
+- Proven live: `approveSpec` interrupts before emitting an `approveSpec` updates key. The updates part is only `{ __interrupt__: [{ value: { kind: "approve-spec" } }] }`. Mapping `kind` → node is what makes the interrupted card highlight.
+- Layout: seeded spine for known ids (Variant C positions, `__start__`/`__end__` names), fallback column for anything else. Topology itself is never hardcoded.
+- deadlockGate hint lives on the interrupt payload (issue 06). 04 shows pending tickets on that card.

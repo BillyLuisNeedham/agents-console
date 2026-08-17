@@ -109,10 +109,11 @@ Author everything below. One `/my-issue-runner` interview fills it in.
 In this order: your Issue, then the files this job's context lives in.
 
 - `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words.
-- The parent spec, GitHub issue #1: `gh issue view 1 --repo BillyLuisNeedham/agents-console` — the full design your Issue is one slice of.
+- `.scratch/console/spec-detail-and-resizable-drawers.md` — the spec this iteration implements. Issues 10 to 13 build it; Issue 14 reviews against it.
+- The parent spec, GitHub issue #1: `gh issue view 1 --repo BillyLuisNeedham/agents-console` — the earlier design this iteration extends.
 - `prototype/NOTES.md` — prototype status and lessons learned.
 - `prototype/src/graph.ts`, `state.ts`, `nodes.ts` — the backend your UI drives. Read them; never change them.
-- Issues 04–07 only: `prototype/ui/src/variants/VariantC.ts` — the approved spike. Port its canvas interactions; do not revive variants A or B.
+- `prototype/ui/src/variants/VariantC.ts` — the unimported spike. Reference for how a node Detail and a bottom drawer can look and behave. Port behaviour; do not import it or revive its parallel data layer.
 
 ## Commit message format
 
@@ -131,8 +132,9 @@ One commit per Issue. Commit only the paths your Issue touches — never `.scrat
 - Streaming is `values` + `updates` only. No `messages`/`debug` modes.
 - `prototype/.env` and `prototype/scripts/.env` are gitignored secrets. Never print or commit them.
 - Tests run with `bun test`; types with `tsc --noEmit` (in `prototype/ui/` once it has its own tsconfig, repo-level scripts otherwise).
+- Issue 14 is a review Issue. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
 
 ## Which Issues are expected to stop
 
-- 03, 04, 06, 07 — end-to-end verification needs the live dev server. If it is down, checkpoint is correct behaviour, not failure.
-- 09 — stops if the review finds a spec-vs-code disagreement that is Billy's call, not the agent's.
+- 10, 11, 12, 13 — end-to-end verification needs the live dev server. If it is down, checkpoint is correct behaviour, not failure.
+- 14 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.

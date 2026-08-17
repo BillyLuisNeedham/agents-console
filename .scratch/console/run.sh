@@ -384,14 +384,14 @@ on_interrupt() {
 # Author everything below. One /my-issue-runner interview fills it in.
 
 ISSUES_DIR="$DIR/issues"
-MAX_ISSUES_DEFAULT=9
+MAX_ISSUES_DEFAULT=5
 
 # Which skill or skills drive each Issue, in order. The first one is invoked as
 # the prompt; the rest are dispatched as subagents. At most one skill carrying
 # disable-model-invocation is allowed, and it must be first.
 drivers_for() {
   case "$1" in
-    09) echo "code-review" ;;
+    14) echo "code-review" ;;
     *) echo "implement" ;;
   esac
 }
@@ -401,7 +401,10 @@ drivers_for() {
 # An empty line means "use ~/.issue-runner", which is the normal case: the
 # default is set once there, and an Issue only appears here when it differs.
 assign_for() {
-  echo "opencode opencode/grok-4.6"
+  case "$1" in
+    14) echo "opencode kimi-for-coding-oauth/k3" ;;
+    *) echo "opencode opencode-go/deepseek-v4-pro" ;;
+  esac
 }
 
 # The subagent roster. On claude this JSON defines the agents. On opencode and

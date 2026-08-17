@@ -59,5 +59,9 @@ The final human judgment of finished ticket work, after implement tickets have r
 _Avoid_: per-ticket lint, typecheck (those are not Review)
 
 **Console**:
-Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them.
+Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail.
 _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
+
+**Detail**:
+The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live.
+_Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
