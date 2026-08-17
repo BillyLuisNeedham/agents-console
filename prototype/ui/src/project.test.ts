@@ -10,6 +10,7 @@ import {
   layoutGraph,
   layoutStorageKey,
   mergeLayout,
+  nextNodeSelection,
   parseStoredLayout,
   projectChannels,
   projectLog,
@@ -774,6 +775,20 @@ describe("layoutStorageKey", () => {
     expect(layoutStorageKey("ticket:T1", "thread-a")).toBe("thread-a:ticket:T1");
     expect(layoutStorageKey("ticket:T1", "thread-b")).toBe("thread-b:ticket:T1");
     expect(layoutStorageKey("ticket:T1", null)).toBe("ticket:T1");
+  });
+});
+
+describe("nextNodeSelection", () => {
+  it("selects a node when nothing is selected", () => {
+    expect(nextNodeSelection(null, "writeSpec")).toBe("writeSpec");
+  });
+
+  it("swaps to a different node", () => {
+    expect(nextNodeSelection("writeSpec", "approveSpec")).toBe("approveSpec");
+  });
+
+  it("clears when the selected node is clicked again", () => {
+    expect(nextNodeSelection("writeSpec", "writeSpec")).toBeNull();
   });
 });
 

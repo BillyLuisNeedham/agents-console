@@ -769,3 +769,46 @@ body {
   padding: 10px 12px;
   font-size: 12px;
 }
+
+/* ------------------------------------------------------------ detail panel */
+
+.detail {
+  display: none;
+}
+
+.detail-open {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 340px;
+  width: 340px;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow-y: auto;
+}
+
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-panel-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detail-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-status {
+  font-size: 12px;
+}

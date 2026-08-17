@@ -11,6 +11,7 @@ import {
   strokeWidthForZoom,
   isTicketCardId,
   layoutStorageKey,
+  nextNodeSelection,
   zoomAtCursor,
   type CardBox,
   type ChannelView,
@@ -60,6 +61,7 @@ export interface Handlers {
   onStartField: (field: "topic" | "ticketDir" | "packet", value: string) => void;
   onStartRun: () => void;
   onResume: (decision: InterruptDecision) => void;
+  onSelectNode: (nodeId: string | null) => void;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(
@@ -256,6 +258,11 @@ interface CanvasBind {
 let canvas: CanvasBind | null = null;
 let drag: Drag | null = null;
 
+// Detail panel selection: module scope so it survives the full-DOM rebuild on
+// every render (streaming updates never close the panel or lose the selection).
+let selectedNodeId: string | null = null;
+let onSelectNode: ((nodeId: string | null) => void) | null = null;
+
 function readStored(): Record<string, Point> {
   try {
     return parseStoredLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
@@ -396,6 +403,8 @@ function resetView(): void {
 
 function endDrag(event?: PointerEvent): void {
   if (!drag) return;
+  const nodeId = drag.kind === "node" ? drag.nodeId : "";
+  const wasClick = event != null && drag.kind === "node" && !drag.moved;
   if (event && canvas) {
     try {
       canvas.viewport.releasePointerCapture(event.pointerId);
@@ -407,12 +416,21 @@ function endDrag(event?: PointerEvent): void {
     for (const card of canvas.nodesById.values()) card.classList.remove("node-card-dragging");
     canvas.viewport.classList.remove("canvas-panning");
   }
-  const clicked =
-    event != null && drag.kind === "node" && !drag.moved && isTicketCardId(drag.nodeId);
-  const clickedId = drag.kind === "node" ? drag.nodeId : "";
   if (drag.kind === "node" && drag.moved) writeStored();
   drag = null;
-  if (clicked) toggleTicketExpand(clickedId);
+  if (!wasClick || !nodeId) return;
+  if (isTicketCardId(nodeId)) toggleTicketExpand(nodeId);
+  else selectNode(nodeId);
+}
+
+function selectNode(nodeId: string): void {
+  selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+  onSelectNode?.(selectedNodeId);
+}
+
+function closeDetail(): void {
+  selectedNodeId = null;
+  onSelectNode?.(null);
 }
 
 if (typeof window !== "undefined") {
@@ -860,6 +878,36 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
+// Detail panel: right-hand flex sibling for the selected node card
+// ---------------------------------------------------------------------------
+
+function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+  const detail = h("div", { class: "detail" });
+  const card = selectedNodeId ? model.cards.find((c) => c.id === selectedNodeId) : null;
+  if (!card) return detail;
+  detail.classList.add("detail-open");
+  detail.append(
+    h(
+      "div",
+      { class: "detail-head" },
+      h("span", { class: "detail-title" }, card.name),
+      h(
+        "button",
+        { class: "btn", title: "close detail", onclick: () => closeDetail() },
+        "✕",
+      ),
+    ),
+    h(
+      "div",
+      { class: "detail-body" },
+      h("div", { class: "dim" }, "status"),
+      h("div", { class: `detail-status node-state-${card.status}` }, statusLabel(card.status)),
+    ),
+  );
+  return detail;
+}
+
+// ---------------------------------------------------------------------------
 // Bottom drawers: log channel and full State inspector, side by side
 // ---------------------------------------------------------------------------
 
@@ -924,6 +972,7 @@ function renderDrawers(model: AppModel, handlers: Handlers): HTMLElement {
 
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
+  onSelectNode = handlers.onSelectNode;
   if (model.selectedId !== layoutThreadId) {
     for (const id of [...nodePos.keys()]) {
       if (isTicketCardId(id)) nodePos.delete(id);
@@ -938,7 +987,13 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     if (isTicketCardId(id) && !liveTicketIds.has(id)) nodePos.delete(id);
   }
   seedPositions(canvasCards(model));
-  const content = h("div", { class: "content" }, renderRail(model, handlers), renderMain(model, handlers));
+  const content = h(
+    "div",
+    { class: "content" },
+    renderRail(model, handlers),
+    renderMain(model, handlers),
+    renderDetail(model, handlers),
+  );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
   const world = root.querySelector(".canvas-world");
   const viewport = root.querySelector(".canvas-viewport");

@@ -612,6 +612,20 @@ export function projectNodeCards(
 }
 
 // ---------------------------------------------------------------------------
+// Detail panel selection
+// ---------------------------------------------------------------------------
+
+/**
+ * The next Detail selection after a node-card press-release. Clicking the
+ * selected node again clears the selection; clicking any other node swaps to
+ * it. Ticket-card clicks never reach this: the view layer routes those to
+ * expand, not select.
+ */
+export function nextNodeSelection(current: string | null, clicked: string): string | null {
+  return current === clicked ? null : clicked;
+}
+
+// ---------------------------------------------------------------------------
 // Ticket cards (Send fan-out)
 // ---------------------------------------------------------------------------
 

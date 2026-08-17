@@ -130,6 +130,7 @@ function render(): void {
     },
     onStartRun: () => void startRun(),
     onResume: (decision) => void resume(decision),
+    onSelectNode: () => render(),
   });
   if (field) {
     const el = root.querySelector(`[data-field="${field}"]`);
