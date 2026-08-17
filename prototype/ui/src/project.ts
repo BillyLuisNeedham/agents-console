@@ -677,6 +677,19 @@ export function nextNodeSelection(current: string | null, clicked: string): stri
 }
 
 // ---------------------------------------------------------------------------
+// Drawers height clamp
+// ---------------------------------------------------------------------------
+
+export const DRAWER_MIN_VH = 15;
+export const DRAWER_MAX_VH = 80;
+export const DRAWER_DEFAULT_VH = 32;
+
+/** Clamp a drawer height in vh units to the shared bounds. */
+export function clampDrawersHeight(vh: number): number {
+  return Math.min(DRAWER_MAX_VH, Math.max(DRAWER_MIN_VH, vh));
+}
+
+// ---------------------------------------------------------------------------
 // Ticket cards (Send fan-out)
 // ---------------------------------------------------------------------------
 

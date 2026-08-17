@@ -4,6 +4,9 @@ import { describe, expect, it } from "bun:test";
 import type { Thread } from "@langchain/langgraph-sdk";
 import {
   applyStreamPart,
+  clampDrawersHeight,
+  DRAWER_MAX_VH,
+  DRAWER_MIN_VH,
   finishRun,
   initRun,
   edgePath,
@@ -791,6 +794,26 @@ describe("nextNodeSelection", () => {
 
   it("clears when the selected node is clicked again", () => {
     expect(nextNodeSelection("writeSpec", "writeSpec")).toBeNull();
+  });
+});
+
+describe("clampDrawersHeight", () => {
+  it("clamps below the minimum to the floor", () => {
+    expect(clampDrawersHeight(0)).toBe(DRAWER_MIN_VH);
+    expect(clampDrawersHeight(-12)).toBe(DRAWER_MIN_VH);
+    expect(clampDrawersHeight(14.99)).toBe(DRAWER_MIN_VH);
+  });
+
+  it("clamps above the maximum to the ceiling", () => {
+    expect(clampDrawersHeight(100)).toBe(DRAWER_MAX_VH);
+    expect(clampDrawersHeight(80.01)).toBe(DRAWER_MAX_VH);
+    expect(clampDrawersHeight(Number.POSITIVE_INFINITY)).toBe(DRAWER_MAX_VH);
+  });
+
+  it("passes values inside the range through unchanged", () => {
+    expect(clampDrawersHeight(15)).toBe(15);
+    expect(clampDrawersHeight(32)).toBe(32);
+    expect(clampDrawersHeight(80)).toBe(80);
   });
 });
 

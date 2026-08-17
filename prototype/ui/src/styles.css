@@ -703,10 +703,29 @@ body {
 
 .drawers {
   display: flex;
+  flex-direction: column;
   flex-shrink: 0;
-  align-items: flex-start;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+.drawer-handle {
+  flex: 0 0 auto;
+  height: 8px;
+  cursor: ns-resize;
+  background: var(--bg-panel-2);
+  border-bottom: 1px solid var(--border);
+  touch-action: none;
+  user-select: none;
+}
+
+.drawer-handle:hover {
+  background: var(--accent);
+}
+
+.drawer-row {
+  display: flex;
+  align-items: flex-start;
 }
 
 .log-drawer,
@@ -742,7 +761,6 @@ body {
 .log-lines {
   margin: 0;
   padding: 10px 12px;
-  height: 32vh;
   overflow: auto;
   background: var(--bg);
   border-top: 1px solid var(--border);
@@ -752,7 +770,6 @@ body {
 
 .inspector-channels,
 .inspector-empty {
-  height: 32vh;
   overflow: auto;
   background: var(--bg);
   border-top: 1px solid var(--border);

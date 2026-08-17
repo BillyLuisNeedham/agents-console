@@ -5,6 +5,8 @@
 
 import {
   TICKET_POOLS,
+  clampDrawersHeight,
+  DRAWER_DEFAULT_VH,
   edgePath,
   mergeLayout,
   parseStoredLayout,
@@ -265,6 +267,11 @@ let drag: Drag | null = null;
 // every render (streaming updates never close the panel or lose the selection).
 let selectedNodeId: string | null = null;
 let onSelectNode: ((nodeId: string | null) => void) | null = null;
+
+// Drawers strip height: module scope so it survives re-renders while the run
+// streams. One shared vh height drives both drawer bodies.
+let drawersHeight = DRAWER_DEFAULT_VH;
+let drawerDrag: { startY: number; startHeight: number } | null = null;
 
 function readStored(): Record<string, Point> {
   try {
@@ -955,7 +962,9 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
       { class: "drawer-bar", onclick: () => handlers.onToggleLog() },
       `log (${model.log.length}) ${model.logOpen ? "▾" : "▴"}`,
     ),
-    model.logOpen ? h("pre", { class: "log-lines" }, lines) : null,
+    model.logOpen
+      ? h("pre", { class: "log-lines", style: `height:${drawersHeight}vh` }, lines)
+      : null,
   );
 }
 
@@ -979,8 +988,16 @@ function renderInspectorChannel(channel: ChannelView): HTMLElement {
 function renderInspectorDrawer(model: AppModel, handlers: Handlers): HTMLElement {
   const body =
     model.inspector.length > 0
-      ? h("div", { class: "inspector-channels" }, ...model.inspector.map(renderInspectorChannel))
-      : h("div", { class: "inspector-empty dim" }, "- no state yet -");
+      ? h(
+          "div",
+          { class: "inspector-channels", style: `height:${drawersHeight}vh` },
+          ...model.inspector.map(renderInspectorChannel),
+        )
+      : h(
+          "div",
+          { class: "inspector-empty dim", style: `height:${drawersHeight}vh` },
+          "- no state yet -",
+        );
   return h(
     "div",
     { class: "inspector-drawer" + (model.inspectorOpen ? " inspector-open" : "") },
@@ -993,19 +1010,59 @@ function renderInspectorDrawer(model: AppModel, handlers: Handlers): HTMLElement
   );
 }
 
+function drawerBodies(): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(".log-lines, .inspector-channels, .inspector-empty"),
+  );
+}
+
+function applyDrawersHeight(): void {
+  const height = `${drawersHeight}vh`;
+  for (const body of drawerBodies()) body.style.height = height;
+}
+
+function bindDrawerHandle(handle: HTMLElement): void {
+  handle.addEventListener("pointerdown", (event) => {
+    if (drawerDrag) return;
+    drawerDrag = { startY: event.clientY, startHeight: drawersHeight };
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // pointer already gone
+    }
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!drawerDrag) return;
+    const dy = event.clientY - drawerDrag.startY;
+    const vhPerPx = 100 / window.innerHeight;
+    drawersHeight = clampDrawersHeight(drawerDrag.startHeight - dy * vhPerPx);
+    applyDrawersHeight();
+  });
+  handle.addEventListener("pointerup", () => {
+    drawerDrag = null;
+  });
+  handle.addEventListener("pointercancel", () => {
+    drawerDrag = null;
+  });
+}
+
 function renderDrawers(model: AppModel, handlers: Handlers): HTMLElement {
-  return h(
+  const handle = h("div", { class: "drawer-handle", title: "drag to resize drawers" });
+  bindDrawerHandle(handle);
+  const row = h(
     "div",
-    { class: "drawers" },
+    { class: "drawer-row" },
     renderLogDrawer(model, handlers),
     renderInspectorDrawer(model, handlers),
   );
+  return h("div", { class: "drawers" }, handle, row);
 }
 
 // ---------------------------------------------------------------------------
 
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
+  drawerDrag = null;
   onSelectNode = handlers.onSelectNode;
   if (model.selectedId !== layoutThreadId) {
     for (const id of [...nodePos.keys()]) {
