@@ -13,10 +13,12 @@ import {
   nextNodeSelection,
   parseStoredLayout,
   projectChannels,
+  projectDetail,
   projectLog,
   projectInterruptForm,
   projectNodeCards,
   projectNodeChannels,
+  projectNodeStateSlice,
   projectNodes,
   projectResume,
   projectStartRun,
@@ -848,5 +850,117 @@ describe("projectTicketCards", () => {
     expect(projectTicketCards(null)).toEqual([]);
     expect(projectTicketCards(initRun())).toEqual([]);
     expect(projectTicketEdges([])).toEqual([]);
+  });
+});
+
+describe("projectNodeStateSlice", () => {
+  const values = {
+    topic: "demo",
+    packetSource: "stub",
+    packet: "packet text",
+    spec: "# Spec",
+    specApproved: false,
+    tickets: [T1, T2],
+    log: ["writeSpec: drafted"],
+  };
+
+  it("keeps only the channels the node owns, as raw values", () => {
+    expect(projectNodeStateSlice("writeSpec", values)).toEqual({ spec: "# Spec" });
+    expect(projectNodeStateSlice("schedule", values)).toEqual({ tickets: [T1, T2] });
+  });
+
+  it("returns an empty slice for a node with no channels and for missing values", () => {
+    expect(projectNodeStateSlice("review", null)).toEqual({});
+    expect(projectNodeStateSlice("__end__", values)).toEqual({});
+  });
+});
+
+describe("projectDetail", () => {
+  const topology = projectTopology({
+    nodes: [
+      { id: "__start__" },
+      { id: "writeSpec" },
+      { id: "approveSpec" },
+      { id: "schedule" },
+    ],
+    edges: [
+      { source: "__start__", target: "writeSpec" },
+      { source: "writeSpec", target: "approveSpec" },
+      { source: "approveSpec", target: "schedule", conditional: true },
+    ],
+  });
+
+  const values = {
+    topic: "demo",
+    packetSource: "stub",
+    packet: "packet text",
+    spec: "# Spec\nline two",
+    specApproved: false,
+    tickets: [T1, T2],
+    log: ["writeSpec: drafted"],
+  };
+
+  it("returns null for a node not in the topology", () => {
+    expect(projectDetail("missing", topology, initRun(values))).toBeNull();
+  });
+
+  it("projects name, status, full channels and the raw state slice for an active node", () => {
+    const run = play(initRun(values), [{ event: "updates", data: { writeSpec: {} } }]);
+    const detail = projectDetail("writeSpec", topology, run);
+    expect(detail).not.toBeNull();
+    expect(detail?.name).toBe("writeSpec");
+    expect(detail?.status).toBe("active");
+    expect(detail?.channels).toEqual([{ name: "spec", kind: "pre", text: "# Spec\nline two" }]);
+    expect(detail?.stateSlice).toEqual({ spec: "# Spec\nline two" });
+    expect(detail?.interrupt).toBeNull();
+  });
+
+  it("marks the unvisited target of the active node next", () => {
+    const run = play(initRun(values), [{ event: "updates", data: { writeSpec: {} } }]);
+    expect(projectDetail("approveSpec", topology, run)?.status).toBe("next");
+  });
+
+  it("marks an earlier node ran once a later node is active", () => {
+    const run = play(initRun(values), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { approveSpec: {} } },
+    ]);
+    expect(projectDetail("writeSpec", topology, run)?.status).toBe("ran");
+    expect(projectDetail("approveSpec", topology, run)?.status).toBe("active");
+  });
+
+  it("carries the full channels and the interrupt form for an interrupted node", () => {
+    const run = play(initRun(values), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
+    ]);
+    const detail = projectDetail(
+      "approveSpec",
+      topology,
+      run,
+      {
+        graph: [{ value: { kind: "approve-spec", spec: "# Spec\nline two", tickets: [T1, T2] } }],
+      },
+    );
+    expect(detail?.status).toBe("interrupted");
+    expect(detail?.interrupt?.kind).toBe("approve-spec");
+    expect(detail?.channels).toEqual([{ name: "spec", kind: "pre", text: "# Spec\nline two" }]);
+    expect(detail?.stateSlice).toEqual({ spec: "# Spec\nline two" });
+  });
+
+  it("projects the tickets channel and its raw slice on schedule", () => {
+    const run = play(initRun(values), [
+      { event: "updates", data: { writeSpec: {} } },
+      { event: "updates", data: { approveSpec: {} } },
+      { event: "updates", data: { schedule: {} } },
+    ]);
+    const detail = projectDetail("schedule", topology, run);
+    expect(detail?.status).toBe("active");
+    const tickets = detail?.channels.find((channel) => channel.kind === "tickets");
+    expect(tickets?.kind === "tickets" ? tickets.tickets.map((t) => t.id) : []).toEqual([
+      "T1",
+      "T2",
+    ]);
+    expect(detail?.stateSlice).toEqual({ tickets: [T1, T2] });
   });
 });

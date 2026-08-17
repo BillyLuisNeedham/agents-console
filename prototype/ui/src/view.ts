@@ -15,11 +15,13 @@ import {
   zoomAtCursor,
   type CardBox,
   type ChannelView,
+  type DetailView,
   type EdgeMode,
   type InterruptDecision,
   type InterruptFormView,
   type NodeCardView,
   type Point,
+  type Raw,
   type ThreadSummary,
   type TicketCardView,
   type TicketView,
@@ -50,6 +52,7 @@ export interface AppModel {
   streamError: string | null;
   error: string | null;
   start: StartFormModel;
+  detail: DetailView | null;
 }
 
 export interface Handlers {
@@ -881,16 +884,35 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
 // Detail panel: right-hand flex sibling for the selected node card
 // ---------------------------------------------------------------------------
 
+function renderDetailChannel(channel: ChannelView): HTMLElement {
+  if (channel.kind === "tickets") {
+    if (channel.tickets.length === 0) return h("div", { class: "dim" }, "no tickets");
+    return h("div", { class: "detail-channels" }, ...channel.tickets.map(ticketRow));
+  }
+  if (channel.kind === "pre") {
+    return h("pre", { class: "detail-pre" }, channel.text || "-");
+  }
+  if (channel.kind === "json") {
+    return h("pre", { class: "detail-pre" }, channel.json);
+  }
+  return h("div", { class: "card-text" }, channel.text);
+}
+
+function renderStateSlice(slice: Raw): HTMLElement {
+  const json = JSON.stringify(slice, null, 2);
+  return h("pre", { class: "detail-pre" }, json === "{}" ? "- empty -" : json);
+}
+
 function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
   const detail = h("div", { class: "detail" });
-  const card = selectedNodeId ? model.cards.find((c) => c.id === selectedNodeId) : null;
-  if (!card) return detail;
+  const view = model.detail;
+  if (!view) return detail;
   detail.classList.add("detail-open");
   detail.append(
     h(
       "div",
       { class: "detail-head" },
-      h("span", { class: "detail-title" }, card.name),
+      h("span", { class: "detail-title" }, view.name),
       h(
         "button",
         { class: "btn", title: "close detail", onclick: () => closeDetail() },
@@ -901,7 +923,13 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
       "div",
       { class: "detail-body" },
       h("div", { class: "dim" }, "status"),
-      h("div", { class: `detail-status node-state-${card.status}` }, statusLabel(card.status)),
+      h("div", { class: `detail-status node-state-${view.status}` }, statusLabel(view.status)),
+      h("div", { class: "dim" }, "channels"),
+      ...(view.channels.length > 0
+        ? view.channels.map(renderDetailChannel)
+        : [h("div", { class: "dim" }, "no channels for this node")]),
+      h("div", { class: "dim" }, "raw state"),
+      renderStateSlice(view.stateSlice),
     ),
   );
   return detail;

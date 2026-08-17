@@ -26,6 +26,7 @@ import {
   finishRun,
   initRun,
   projectChannels,
+  projectDetail,
   projectLog,
   projectNodeCards,
   projectStartRun,
@@ -55,6 +56,7 @@ const state = {
   topology: { nodes: [], edges: [] } as Topology,
   run: initRun() as RunProjection,
   abort: null as AbortController | null,
+  selectedNodeId: null as string | null,
   logOpen: false,
   inspectorOpen: false,
   error: null as string | null,
@@ -94,6 +96,14 @@ function model(): AppModel {
     streamError: state.run.streamError,
     error: state.error,
     start: state.start,
+    detail: state.selectedNodeId
+      ? projectDetail(
+          state.selectedNodeId,
+          state.topology,
+          selected ? state.run : null,
+          selected?.interrupts,
+        )
+      : null,
   };
 }
 
@@ -130,7 +140,10 @@ function render(): void {
     },
     onStartRun: () => void startRun(),
     onResume: (decision) => void resume(decision),
-    onSelectNode: () => render(),
+    onSelectNode: (nodeId) => {
+      state.selectedNodeId = nodeId;
+      render();
+    },
   });
   if (field) {
     const el = root.querySelector(`[data-field="${field}"]`);

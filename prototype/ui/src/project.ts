@@ -568,35 +568,38 @@ export function projectInterruptForm(interrupts: unknown, nodeId: string): Inter
   return null;
 }
 
+function resolveNodeStatus(
+  nodeId: string,
+  topology: Topology,
+  run: RunProjection | null,
+  interrupt: InterruptFormView | null,
+): CardStatus {
+  if (interrupt) return "interrupted";
+  const active = new Set(run?.activeNodes ?? []);
+  const visited = new Set(run?.visitedNodes ?? []);
+  if (active.has(nodeId)) return "active";
+  if (run) {
+    for (const edge of topology.edges) {
+      if (edge.conditional) continue;
+      if (active.has(edge.source) && !active.has(edge.target) && !visited.has(edge.target)) {
+        if (edge.target === nodeId) return "next";
+      }
+    }
+  }
+  if (visited.has(nodeId)) return "ran";
+  return "idle";
+}
+
 export function projectNodeCards(
   topology: Topology,
   run: RunProjection | null,
   interrupts?: unknown,
 ): NodeCardView[] {
   const positions = layoutGraph(topology.nodes);
-  const active = new Set(run?.activeNodes ?? []);
-  const visited = new Set(run?.visitedNodes ?? []);
-  const next = new Set<string>();
-  if (run) {
-    for (const edge of topology.edges) {
-      if (edge.conditional) continue;
-      if (active.has(edge.source) && !active.has(edge.target) && !visited.has(edge.target)) {
-        next.add(edge.target);
-      }
-    }
-  }
   const values = run?.values ?? {};
   return topology.nodes.map((node) => {
     const interrupt = projectInterruptForm(interrupts, node.id);
-    const status: CardStatus = interrupt
-      ? "interrupted"
-      : active.has(node.id)
-        ? "active"
-        : next.has(node.id)
-          ? "next"
-          : visited.has(node.id)
-            ? "ran"
-            : "idle";
+    const status = resolveNodeStatus(node.id, topology, run, interrupt);
     const pos = positions[node.id] ?? { x: 0, y: 0 };
     const channels = nodeChannelsForCard(node.id, values, interrupt);
     return {
@@ -609,6 +612,54 @@ export function projectNodeCards(
       interrupt,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Detail content
+// ---------------------------------------------------------------------------
+
+export interface DetailView {
+  name: string;
+  status: CardStatus;
+  channels: ChannelView[];
+  stateSlice: Raw;
+  interrupt: InterruptFormView | null;
+}
+
+/** The raw State values for the channels a node owns, keyed by channel name. */
+export function projectNodeStateSlice(nodeId: string, raw: unknown): Raw {
+  const values = asValues(raw) ?? {};
+  const names = NODE_CHANNELS[nodeId] ?? [];
+  const slice: Raw = {};
+  for (const name of names) {
+    if (name in values) slice[name] = values[name];
+  }
+  return slice;
+}
+
+/**
+ * The Detail view model for a selected node: name, status, full channels, its
+ * slice of the raw State, and the interrupt form view if one is pending. Reuses
+ * the same per-node channel selection and interrupt form projection the cards
+ * use; null when the node is not in the topology.
+ */
+export function projectDetail(
+  nodeId: string,
+  topology: Topology,
+  run: RunProjection | null,
+  interrupts?: unknown,
+): DetailView | null {
+  const node = topology.nodes.find((n) => n.id === nodeId);
+  if (!node) return null;
+  const values = run?.values ?? {};
+  const interrupt = projectInterruptForm(interrupts, nodeId);
+  return {
+    name: displayName(nodeId, node.name),
+    status: resolveNodeStatus(nodeId, topology, run, interrupt),
+    channels: nodeChannelsForCard(nodeId, values, interrupt),
+    stateSlice: projectNodeStateSlice(nodeId, values),
+    interrupt,
+  };
 }
 
 // ---------------------------------------------------------------------------

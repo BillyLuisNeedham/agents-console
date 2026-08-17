@@ -812,3 +812,21 @@ body {
 .detail-status {
   font-size: 12px;
 }
+
+.detail-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-pre {
+  margin: 0;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: auto;
+}
