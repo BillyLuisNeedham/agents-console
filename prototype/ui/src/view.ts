@@ -930,6 +930,12 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
         : [h("div", { class: "dim" }, "no channels for this node")]),
       h("div", { class: "dim" }, "raw state"),
       renderStateSlice(view.stateSlice),
+      ...(view.interrupt
+        ? [
+            h("div", { class: "dim" }, "interrupt"),
+            renderInterruptForm(view.interrupt, handlers),
+          ]
+        : []),
     ),
   );
   return detail;
