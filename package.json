@@ -1,5 +1,5 @@
 {
-  "name": "agent-graph-prototype",
+  "name": "agent-console",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,6 +1,6 @@
 # Agent Graphs
 
-Billy is judging whether an explicit agent graph is a useful addition to his grill → spec → tickets → implement workflow.
+The Console is Billy's UI for driving an agent graph thread — the graph rendered as node cards on a canvas, with interrupts answered inline. This file is the domain model the code and the UI are written in.
 
 ## Language
 

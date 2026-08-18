@@ -1,5 +1,7 @@
-prototype/node_modules/
-prototype/.run/
-prototype/dist/
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
 .scratch/console/runs/
 .scratch/console/verify-*.ts
