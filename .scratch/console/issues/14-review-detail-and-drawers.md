@@ -1,4 +1,4 @@
-<!-- state: id=14 blocked-by=10,11,12,13 status=checkpoint -->
+<!-- state: id=14 blocked-by=10,11,12,13 status=done -->
 
 # 14 — Review the Detail panel and resizable drawers iteration
 
@@ -51,3 +51,7 @@ Summary: Standards has 5 findings, all judgement-call smells; worst is the third
 1. Completed: the full two-axis review of commits aeb4ab5 through 04f6a61 against the spec and the repo standards, written above. All 23 acceptance criteria of Issues 10 to 13 verified as genuinely true, by reading the code, by the 82 seam tests, and by re-running verify-10 through verify-13 against the live dev server (all pass). No code changed; this Issue touched only its own file (and committed Issue 10's orphaned done-bookkeeping).
 2. What the human has to do: the review is substantively clean but not literally finding-free, and this Issue has no fix authority. Decide on the five Standards smells and the three Spec nits above. The only ones worth a decision are the channel-kind cascade triplication (extract a shared renderer, or accept per the truncate-versus-full intent) and the "running" label (rename to "active" to match the spec, or amend the spec's vocabulary). Everything else is recorded for the deferred view-module split.
 3. After deciding: either close this Issue as done (if all findings are accepted or deferred) or queue follow-up Issues for whichever findings you want fixed.
+
+## Decision
+
+Billy closed the review as done on 2026-08-18. The five Standards smells and the deadlock/selection nits are accepted and deferred to the planned view-module split. The "running" versus "active" wording is settled by amending the spec's US 3 vocabulary to "running", matching `statusLabel`.

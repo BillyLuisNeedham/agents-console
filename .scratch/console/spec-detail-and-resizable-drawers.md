@@ -16,7 +16,7 @@ The bottom drawers strip gains a drag handle on its top edge. Dragging it up mak
 
 1. As Billy, I want to click a node card so that a Detail panel opens for that node.
 2. As Billy, I want the Detail to show the node's name, so that I know what I am looking at.
-3. As Billy, I want the Detail to show the node's status (idle, ran, active, next, interrupted), so that I can see where the run is.
+3. As Billy, I want the Detail to show the node's status (idle, ran, running, next, interrupted), so that I can see where the run is.
 4. As Billy, I want the Detail to show the node's channels in full, so that I am not reading truncated card content.
 5. As Billy, I want the Detail to show the node's slice of the raw state, so that I can inspect exactly what the run knows.
 6. As Billy, I want the Detail to show the node's pending interrupt form when one exists, so that I can see what the run is waiting on.
