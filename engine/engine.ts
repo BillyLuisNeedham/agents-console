@@ -1,4 +1,9 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
@@ -35,20 +40,30 @@ export interface PoolConfig {
   roster?: string;
 }
 
+export type InterruptKind = "checkpoint" | "crash" | "deadlock";
+
+export interface Interrupt {
+  ticketId: string;
+  kind: InterruptKind;
+  body: string;
+}
+
 export interface PoolState {
   tickets: Record<string, TicketStatus>;
   log: string[];
   outcomes: Record<string, Outcome>;
   config: PoolConfig;
+  interrupts: Interrupt[];
 }
 
 export interface PoolUpdate {
   tickets?: Record<string, TicketStatus>;
   log?: string[];
   outcomes?: Record<string, Outcome>;
+  interrupts?: Interrupt[];
 }
 
-export type RunPhase = "running" | "done" | "stalled";
+export type RunPhase = "running" | "done" | "quiescent" | "stalled";
 
 export interface PoolSnapshot {
   seq: number;
@@ -66,6 +81,9 @@ export interface PoolRun {
   phase: Exclude<RunPhase, "running">;
   final: PoolState;
   snapshots: PoolSnapshot[];
+  interrupts: Interrupt[];
+  resume: (ticketId: string, note?: string) => Promise<PoolRun>;
+  close: () => void;
 }
 
 const reduceTickets = (
@@ -83,6 +101,11 @@ const reduceOutcomes = (
   update: NonNullable<PoolUpdate["outcomes"]>,
 ): PoolState["outcomes"] => ({ ...current, ...update });
 
+const reduceInterrupts = (
+  _current: PoolState["interrupts"],
+  update: NonNullable<PoolUpdate["interrupts"]>,
+): PoolState["interrupts"] => update;
+
 function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   return {
     tickets: update.tickets
@@ -92,6 +115,9 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
     outcomes: update.outcomes
       ? reduceOutcomes(state.outcomes, update.outcomes)
       : state.outcomes,
+    interrupts: update.interrupts
+      ? reduceInterrupts(state.interrupts, update.interrupts)
+      : state.interrupts,
     config: state.config,
   };
 }
@@ -105,6 +131,30 @@ export function readyTickets(
       tickets[marker.id] === "ready" &&
       marker.blockedBy.every((id) => tickets[id] === "done"),
   );
+}
+
+interface Assignment {
+  harness: string;
+  model: string;
+  drivers: string;
+}
+
+interface Session {
+  poolDir: string;
+  issuesDir: string;
+  runsDir: string;
+  agentMd: string;
+  cwd: string;
+  harnesses: Record<string, HarnessCommand>;
+  assignments: Map<string, Assignment>;
+  markers: TicketMarker[];
+  state: PoolState;
+  snapshots: PoolSnapshot[];
+  store: CheckpointStore;
+  storeOpen: boolean;
+  superStep: number;
+  resumeChain: Promise<PoolRun | null>;
+  onSnapshot?: (snapshot: PoolSnapshot) => void;
 }
 
 export async function runPool(options: RunOptions): Promise<PoolRun> {
@@ -126,79 +176,287 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
     ]),
   );
 
-  let state: PoolState = {
-    tickets: Object.fromEntries(markers.map((m) => [m.id, m.status])),
-    log: [],
-    outcomes: {},
-    config,
+  const session: Session = {
+    poolDir,
+    issuesDir,
+    runsDir,
+    agentMd,
+    cwd,
+    harnesses,
+    assignments,
+    markers,
+    state: {
+      tickets: Object.fromEntries(markers.map((m) => [m.id, m.status])),
+      log: [],
+      outcomes: {},
+      config,
+      interrupts: [],
+    },
+    snapshots: [],
+    store: new CheckpointStore(poolDir),
+    storeOpen: true,
+    superStep: 0,
+    resumeChain: Promise.resolve(null),
+    onSnapshot: options.onSnapshot,
   };
 
-  const snapshots: PoolSnapshot[] = [];
+  return drive(session);
+}
+
+async function drive(session: Session): Promise<PoolRun> {
   const emit = (phase: RunPhase) => {
-    const snapshot: PoolSnapshot = { seq: snapshots.length, phase, state };
-    snapshots.push(snapshot);
-    options.onSnapshot?.(snapshot);
+    const snapshot: PoolSnapshot = {
+      seq: session.snapshots.length,
+      phase,
+      state: session.state,
+    };
+    session.snapshots.push(snapshot);
+    session.onSnapshot?.(snapshot);
   };
 
-  const store = new CheckpointStore(poolDir);
-  let phase: Exclude<RunPhase, "running">;
+  emit("running");
   try {
-    emit("running");
-    let superStep = 0;
     for (;;) {
-      const ready = readyTickets(markers, state.tickets);
+      reconcileDeadlocks(session);
+      const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
-      superStep += 1;
-      state = applyUpdate(state, {
+      session.superStep += 1;
+      session.state = applyUpdate(session.state, {
         tickets: Object.fromEntries(
           ready.map((marker) => [marker.id, "in-progress" as const]),
         ),
         log: [
-          `super-step ${superStep}: ${ready.map((m) => m.id).join(", ")}`,
+          `super-step ${session.superStep}: ${ready.map((m) => m.id).join(", ")}`,
         ],
       });
       emit("running");
-      const snapshot = state;
+      const snapshot = session.state;
 
-      const updates = await Promise.all(
+      const results = await Promise.all(
         ready.map((marker) =>
-          runTicket(marker, snapshot, assignments.get(marker.id)!, {
-            poolDir,
-            runsDir,
-            issuesDir,
-            agentMd,
-            harnesses,
-            cwd,
+          runTicket(marker, snapshot, session.assignments.get(marker.id)!, {
+            poolDir: session.poolDir,
+            runsDir: session.runsDir,
+            issuesDir: session.issuesDir,
+            agentMd: session.agentMd,
+            harnesses: session.harnesses,
+            cwd: session.cwd,
           }),
         ),
       );
 
       let joined = snapshot;
-      for (const update of updates) {
+      for (const { update } of results) {
         joined = applyUpdate(joined, update);
       }
-      state = joined;
-      store.write(state);
+      session.state = joined;
+      for (const { marker, status, logPath } of results) {
+        if (status === "checkpoint") {
+          raiseInterrupt(session, {
+            ticketId: marker.id,
+            kind: "checkpoint",
+            body: extractBrief(marker.file),
+          });
+        } else if (status === "in-progress") {
+          raiseInterrupt(session, {
+            ticketId: marker.id,
+            kind: "crash",
+            body: logPath,
+          });
+        }
+      }
+      session.store.write(session.state);
       emit("running");
     }
-
-    const pending = markers
-      .map((m) => m.id)
-      .filter((id) => state.tickets[id] !== "done");
-    phase = pending.length === 0 ? "done" : "stalled";
-    state = applyUpdate(state, {
-      log: [
-        phase === "done"
-          ? "pool done: every ticket reached done"
-          : `pool stalled: ${pending.join(", ")} cannot run`,
-      ],
-    });
-    store.write(state);
-    emit(phase);
-  } finally {
-    store.close();
+  } catch (error) {
+    closeStore(session);
+    throw error;
   }
-  return { phase: phase!, final: state, snapshots };
+
+  const pending = session.markers
+    .map((m) => m.id)
+    .filter((id) => session.state.tickets[id] !== "done");
+  let phase: Exclude<RunPhase, "running">;
+  if (pending.length === 0) {
+    phase = "done";
+  } else if (session.state.interrupts.length > 0) {
+    phase = "quiescent";
+  } else {
+    phase = "stalled";
+  }
+  session.state = applyUpdate(session.state, {
+    log: [
+      phase === "done"
+        ? "pool done: every ticket reached done"
+        : phase === "quiescent"
+          ? `pool quiescent: interrupts pending for ${session.state.interrupts
+              .map((i) => i.ticketId)
+              .join(", ")}`
+          : `pool stalled: ${pending.join(", ")} cannot run`,
+    ],
+  });
+  session.store.write(session.state);
+  emit(phase);
+  if (phase !== "quiescent") closeStore(session);
+  return {
+    phase,
+    final: session.state,
+    snapshots: session.snapshots,
+    interrupts: session.state.interrupts,
+    resume: (ticketId, note) => enqueueResume(session, ticketId, note),
+    close: () => closeStore(session),
+  };
+}
+
+function closeStore(session: Session): void {
+  if (!session.storeOpen) return;
+  session.storeOpen = false;
+  session.store.close();
+}
+
+function enqueueResume(
+  session: Session,
+  ticketId: string,
+  note?: string,
+): Promise<PoolRun> {
+  const queued = session.resumeChain.then(() =>
+    resumeTicket(session, ticketId, note),
+  );
+  session.resumeChain = queued.catch(() => null);
+  return queued;
+}
+
+async function resumeTicket(
+  session: Session,
+  ticketId: string,
+  note?: string,
+): Promise<PoolRun> {
+  const interrupt = session.state.interrupts.find(
+    (i) => i.ticketId === ticketId,
+  );
+  if (!interrupt) {
+    throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+  }
+  session.markers = loadPoolMarkers(session.issuesDir);
+  const marker = session.markers.find((m) => m.id === ticketId);
+  if (!marker) {
+    throw new Error(
+      `resume: ticket ${ticketId} has no Issue file in ${session.issuesDir}`,
+    );
+  }
+  for (const m of session.markers) {
+    if (!session.assignments.has(m.id)) {
+      session.assignments.set(
+        m.id,
+        resolveAssignment(m, session.state.config, session.harnesses),
+      );
+    }
+  }
+  if (marker.status !== "done") {
+    writeMarkerStatus(marker.file, "ready");
+    marker.status = "ready";
+  }
+  if (note && note.trim()) {
+    appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
+  }
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(
+      session.markers.map((m) => [m.id, m.status]),
+    ),
+    interrupts: session.state.interrupts.filter(
+      (i) => i.ticketId !== ticketId,
+    ),
+    log: [
+      `interrupt answered for ${ticketId} (${interrupt.kind}): ` +
+        (marker.status === "done" ? "already done on disk" : "resumed"),
+    ],
+  });
+  return drive(session);
+}
+
+function raiseInterrupt(session: Session, interrupt: Interrupt): void {
+  if (
+    session.state.interrupts.some(
+      (i) => i.ticketId === interrupt.ticketId && i.kind === interrupt.kind,
+    )
+  ) {
+    return;
+  }
+  session.state = applyUpdate(session.state, {
+    interrupts: [...session.state.interrupts, interrupt],
+    log: [
+      `interrupt raised for ${interrupt.ticketId} (${interrupt.kind})` +
+        (interrupt.kind === "deadlock" ? `: ${interrupt.body}` : ""),
+    ],
+  });
+}
+
+function reconcileDeadlocks(session: Session): void {
+  const { markers, state } = session;
+  const resumable = new Set(
+    state.interrupts
+      .filter((i) => i.kind !== "deadlock")
+      .map((i) => i.ticketId),
+  );
+  const deadlocked = new Set(
+    state.interrupts
+      .filter((i) => i.kind === "deadlock")
+      .map((i) => i.ticketId),
+  );
+  const canComplete = (id: string, visiting: Set<string>): boolean => {
+    const status = state.tickets[id];
+    if (status === "done" || status === "in-progress") return true;
+    if (resumable.has(id)) return true;
+    if (deadlocked.has(id)) return false;
+    if (visiting.has(id)) return false;
+    const marker = markers.find((m) => m.id === id);
+    if (!marker) return false;
+    visiting.add(id);
+    const ok = marker.blockedBy.every((b) => canComplete(b, visiting));
+    visiting.delete(id);
+    return ok;
+  };
+
+  const cleared = state.interrupts.filter(
+    (i) => i.kind === "deadlock" && canComplete(i.ticketId, new Set()),
+  );
+  const raised = markers.filter(
+    (marker) =>
+      state.tickets[marker.id] !== "done" &&
+      !resumable.has(marker.id) &&
+      !deadlocked.has(marker.id) &&
+      !canComplete(marker.id, new Set()),
+  );
+  if (cleared.length === 0 && raised.length === 0) return;
+
+  let interrupts = state.interrupts.filter(
+    (i) => !cleared.some((c) => c.ticketId === i.ticketId && c.kind === i.kind),
+  );
+  const log: string[] = cleared.map(
+    (i) => `interrupt cleared for ${i.ticketId} (deadlock): blockers can complete again`,
+  );
+  for (const marker of raised) {
+    const blocking = marker.blockedBy.filter(
+      (id) => !canComplete(id, new Set()),
+    );
+    const interrupt: Interrupt = {
+      ticketId: marker.id,
+      kind: "deadlock",
+      body: `blockers can never complete: ${blocking.join(", ")}`,
+    };
+    interrupts = [...interrupts, interrupt];
+    log.push(`interrupt raised for ${marker.id} (deadlock): ${interrupt.body}`);
+  }
+  session.state = applyUpdate(session.state, { interrupts, log });
+}
+
+function extractBrief(issueFile: string): string {
+  const lines = readFileSync(issueFile, "utf8").split("\n");
+  const start = lines.findIndex((line) => line.startsWith("## Brief"));
+  if (start === -1) return "(no Brief section in the Issue file)";
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => line.startsWith("## "));
+  return (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
 }
 
 interface TicketEnv {
@@ -210,10 +468,11 @@ interface TicketEnv {
   cwd: string;
 }
 
-interface Assignment {
-  harness: string;
-  model: string;
-  drivers: string;
+interface TicketResult {
+  marker: TicketMarker;
+  status: TicketStatus;
+  logPath: string;
+  update: PoolUpdate;
 }
 
 async function runTicket(
@@ -221,7 +480,7 @@ async function runTicket(
   snapshot: PoolState,
   assignment: Assignment,
   env: TicketEnv,
-): Promise<PoolUpdate> {
+): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
   const logPath = join(env.runsDir, `${marker.id}.log`);
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
@@ -263,12 +522,17 @@ async function runTicket(
   const outcome = readOutcome(outcomePath);
 
   return {
-    tickets: { [marker.id]: status },
-    log: [
-      `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
-        (outcome ? "" : ", no outcome recorded"),
-    ],
-    ...(outcome ? { outcomes: { [marker.id]: outcome } } : {}),
+    marker,
+    status,
+    logPath,
+    update: {
+      tickets: { [marker.id]: status },
+      log: [
+        `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
+          (outcome ? "" : ", no outcome recorded"),
+      ],
+      ...(outcome ? { outcomes: { [marker.id]: outcome } } : {}),
+    },
   };
 }
 

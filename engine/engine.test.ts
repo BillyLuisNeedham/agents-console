@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -48,6 +54,7 @@ function makePool(spec: PoolSpec): string {
 
 interface StubBehaviour {
   status?: "done" | "checkpoint" | "keep";
+  statuses?: ("done" | "checkpoint" | "keep")[];
   outcome?: { summary: string; commitSha: string | null } | null;
   exitCode?: number;
 }
@@ -55,6 +62,7 @@ interface StubBehaviour {
 interface StubRig {
   harnesses: Record<string, HarnessCommand>;
   spawned: Record<string, SpawnContext>;
+  spawnOrder: string[];
 }
 
 function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
@@ -77,10 +85,17 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
     ].join("\n"),
   );
   const spawned: Record<string, SpawnContext> = {};
+  const spawnOrder: string[] = [];
+  const spawnCounts: Record<string, number> = {};
   const stub: HarnessCommand = (ctx) => {
     spawned[ctx.id] = ctx;
+    spawnOrder.push(ctx.id);
+    const n = spawnCounts[ctx.id] ?? 0;
+    spawnCounts[ctx.id] = n + 1;
     const b = behaviour[ctx.id] ?? {};
-    const status = b.status ?? "done";
+    const status = b.statuses
+      ? b.statuses[Math.min(n, b.statuses.length - 1)]
+      : (b.status ?? "done");
     const outcome =
       b.outcome === null
         ? ""
@@ -100,7 +115,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       String(b.exitCode ?? 0),
     ];
   };
-  return { harnesses: { stub }, spawned };
+  return { harnesses: { stub }, spawned, spawnOrder };
 }
 
 const stubConfig: PoolConfig = {
@@ -407,13 +422,16 @@ describe("checkpoints", () => {
   });
 });
 
-describe("stops", () => {
-  it("records a checkpoint marker read back from the harness and stalls", async () => {
+describe("interrupts", () => {
+  it("raises a checkpoint interrupt carrying the Issue's Brief", async () => {
     const poolDir = makePool({
       tickets: [
         {
           file: "01-a.md",
           marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body:
+            "# 01\n\n## Brief\n\n1. did the first half\n" +
+            "2. human must pick a name\n\n## Notes\n\nunrelated",
         },
         {
           file: "02-b.md",
@@ -426,13 +444,21 @@ describe("stops", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    expect(run.phase).toBe("stalled");
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "checkpoint",
+        body: "1. did the first half\n2. human must pick a name",
+      },
+    ]);
     expect(run.final.tickets["01"]).toBe("checkpoint");
     expect(run.final.tickets["02"]).toBe("ready");
-    expect(run.final.log.at(-1)).toBe("pool stalled: 01, 02 cannot run");
+    expect(run.snapshots.at(-1)?.phase).toBe("quiescent");
+    expect(run.snapshots.at(-1)?.state.interrupts).toHaveLength(1);
   });
 
-  it("treats an exit with no status set as still in-progress and stalls", async () => {
+  it("raises a crash interrupt carrying the log path when no status is set", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -446,10 +472,301 @@ describe("stops", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "crash",
+        body: join(poolDir, "runs", "01.log"),
+      },
+    ]);
+    expect(run.final.log.some((line) => line.includes("exited 1"))).toBe(true);
+  });
+
+  it("raises deadlock interrupts for a blocked-by cycle without spawning", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=02 status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "deadlock",
+        body: "blockers can never complete: 02",
+      },
+      {
+        ticketId: "02",
+        kind: "deadlock",
+        body: "blockers can never complete: 01",
+      },
+    ]);
+  });
+
+  it("keeps ready siblings running while a ticket is interrupted", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=none status=ready -->",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=02 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.final.log).toContain("super-step 1: 01, 02");
+    expect(run.final.log).toContain("super-step 2: 03");
+    expect(run.final.tickets).toEqual({
+      "01": "checkpoint",
+      "02": "done",
+      "03": "done",
+    });
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.phase).toBe("quiescent");
+  });
+
+  it("resume-with-answer restarts the ticket and continues the pool", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { statuses: ["checkpoint", "done"] },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    const snapshotsBefore = run.snapshots.length;
+
+    const resumed = await run.resume("01", "carry on with option two");
+
+    expect(resumed.phase).toBe("done");
+    expect(resumed.interrupts).toEqual([]);
+    expect(resumed.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(rig.spawnOrder).toEqual(["01", "01", "02"]);
+    expect(resumed.snapshots.length).toBeGreaterThan(snapshotsBefore);
+    expect(resumed.final.log).toContain(
+      "interrupt answered for 01 (checkpoint): resumed",
+    );
+    const markerLines = ["01-a.md", "02-b.md"].map(
+      (file) =>
+        readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0],
+    );
+    for (const line of markerLines) {
+      expect(line).toContain("status=done");
+    }
+  });
+
+  it("appends the resume note to the Issue file", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    await run.resume("01", "picked the name Foo");
+
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Resume note");
+    expect(issueText).toContain("picked the name Foo");
+  });
+
+  it("rejects resuming a ticket with no pending interrupt", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    await expect(run.resume("02")).rejects.toThrow(/no pending interrupt/);
+  });
+
+  it("resumes a deadlock after the pool files are fixed", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=02 status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual([
+      "deadlock",
+      "deadlock",
+    ]);
+
+    writeFileSync(
+      join(poolDir, "issues", "02-b.md"),
+      "<!-- state: id=02 blocked-by=none status=ready -->\n\n# 02\n",
+    );
+    const resumed = await run.resume("02", "broke the cycle");
+
+    expect(resumed.phase).toBe("done");
+    expect(resumed.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual(["02", "01"]);
+  });
+
+  it("distinguishes quiescent from done in emitted state", async () => {
+    const stuckDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const stuck = await runPool({
+      poolDir: stuckDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+
+    const cleanDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const clean = await runPool({
+      poolDir: cleanDir,
+      harnesses: stubHarness({}).harnesses,
+    });
+
+    expect(stuck.phase).toBe("quiescent");
+    expect(stuck.interrupts).toHaveLength(1);
+    expect(stuck.snapshots.at(-1)?.phase).toBe("quiescent");
+    expect(clean.phase).toBe("done");
+    expect(clean.interrupts).toEqual([]);
+    expect(clean.snapshots.at(-1)?.phase).toBe("done");
+  });
+
+  it("raises a deadlock interrupt for a blocker id that does not exist", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=99 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "deadlock",
+        body: "blockers can never complete: 99",
+      },
+    ]);
+  });
+
+  it("reports stalled when nothing can run and no interrupt explains it", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
     expect(run.phase).toBe("stalled");
-    expect(run.final.tickets["01"]).toBe("in-progress");
-    expect(
-      run.final.log.some((line) => line.includes("exited 1")),
-    ).toBe(true);
+    expect(run.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual([]);
+    expect(run.final.log.at(-1)).toBe("pool stalled: 01 cannot run");
+  });
+
+  it("resumes a crash interrupt by re-running the ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["keep", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts[0]?.kind).toBe("crash");
+
+    const resumed = await run.resume("01");
+
+    expect(resumed.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "01"]);
+    expect(resumed.final.log).toContain(
+      "interrupt answered for 01 (crash): resumed",
+    );
   });
 });
