@@ -1,9 +1,11 @@
 import {
   appendFileSync,
+  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
 } from "node:fs";
+import { once } from "node:events";
 import { join, relative } from "node:path";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
@@ -38,6 +40,7 @@ export interface PoolConfig {
   defaults?: { harness?: string; model?: string; drivers?: string };
   assign?: Record<string, TicketAssignment>;
   roster?: string;
+  agents?: string;
 }
 
 export type InterruptKind = "checkpoint" | "crash" | "deadlock";
@@ -623,6 +626,7 @@ async function runTicket(
     driver,
     harness: assignment.harness,
     model: assignment.model,
+    agents: snapshot.config.agents,
     logPath,
     outcomePath,
     cwd: env.cwd,
@@ -652,18 +656,38 @@ async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
 ): Promise<number> {
+  // env is passed explicitly: Bun resolves argv[0] against a cached PATH
+  // unless an env is given, and the parent environment at spawn time is
+  // what the child should inherit.
   const proc = Bun.spawn(argv, {
     cwd: ctx.cwd,
+    env: { ...process.env },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  // Both streams land in one log writer in arrival order, and land live,
+  // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
+  // is still running, and a crash log reads in the order the output
+  // happened.
+  const log = createWriteStream(ctx.logPath);
+  const pump = async (stream: ReadableStream<Uint8Array>) => {
+    for await (const chunk of stream) {
+      if (!log.write(chunk)) {
+        await once(log, "drain");
+      }
+    }
+  };
+  const [exitCode] = await Promise.all([
     proc.exited,
+    pump(proc.stdout),
+    pump(proc.stderr),
   ]);
-  await Bun.write(ctx.logPath, stdout + stderr);
+  await new Promise<void>((resolve, reject) => {
+    log.end((error: Error | null | undefined) =>
+      error ? reject(error) : resolve(),
+    );
+  });
   return exitCode;
 }
 

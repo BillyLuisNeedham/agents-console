@@ -6,6 +6,7 @@ export interface SpawnContext {
   driver: string;
   harness: string;
   model: string;
+  agents?: string;
   logPath: string;
   outcomePath: string;
   cwd: string;
@@ -25,6 +26,9 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     ctx.model,
     "--permission-mode",
     "auto",
+    // The roster JSON the glued prompt promises claude. opencode and cursor
+    // get the roster as prose only, same as run.sh.
+    ...(ctx.agents ? ["--agents", ctx.agents] : []),
     "--output-format",
     "text",
   ],
@@ -40,6 +44,18 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     "--model",
     ctx.model,
     "--auto",
+  ],
+  // UNPROVEN: written from Cursor's CLI docs, not yet run on a real queue.
+  cursor: (ctx) => [
+    "agent",
+    "-p",
+    ctx.prompt,
+    "--model",
+    ctx.model,
+    "--force",
+    "--trust",
+    "--output-format",
+    "text",
   ],
 };
 

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -382,6 +383,232 @@ describe("glued prompt", () => {
 
     const logText = await Bun.file(join(poolDir, "runs", "01.log")).text();
     expect(typeof logText).toBe("string");
+  });
+});
+
+describe("harness CLIs", () => {
+  // Fake CLI binaries on PATH exercise the real default harnesses: the
+  // engine resolves the console.json harness name to a binary and launches
+  // it in the shape run.sh proved. Each fake records its argv one argument
+  // per file (argv.0, argv.1, ...) so assertions see exact strings, newline-
+  // carrying prompts included.
+
+  interface FakeCli {
+    binDir: string;
+    recordDir: string;
+  }
+
+  function fakeCli(
+    poolDir: string,
+    binary: string,
+    argExtract: string[],
+    opts: { setDone?: boolean; exitCode?: number } = {},
+  ): FakeCli {
+    const binDir = join(poolDir, "bin");
+    const recordDir = join(poolDir, "record");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(binDir, binary),
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'out="$FAKE_RECORD_DIR"',
+        "i=0",
+        'for a in "$@"; do printf \'%s\' "$a" > "$out/argv.$i"; i=$((i+1)); done',
+        // Distinguish a closed stdin (instant EOF, what the engine sets up)
+        // from an open one (the read would block until the timeout).
+        "start=$SECONDS",
+        "if read -t 2 _line; then stdin=data",
+        "elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open",
+        "else stdin=eof; fi",
+        'printf \'%s\' "$stdin" > "$out/stdin"',
+        ...argExtract,
+        ...(opts.setDone ?? true
+          ? ['sed -i "1s/status=[a-z-]*/status=done/" "$rel"']
+          : []),
+        `echo "fake ${binary} ran"`,
+        `exit ${opts.exitCode ?? 0}`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(binDir, binary), 0o755);
+    return { binDir, recordDir };
+  }
+
+  // claude and cursor take the whole prompt after -p; its first line is
+  // "/<driver> <issueRel>".
+  const extractFromPrintFlag = [
+    'prompt=""',
+    "while [ $# -gt 0 ]; do",
+    '  case "$1" in',
+    '    -p) prompt="$2"; shift 2 ;;',
+    "    *) shift ;;",
+    "  esac",
+    "done",
+    'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
+  ];
+
+  // opencode takes the message after --command <driver>; its first line is
+  // the bare issueRel.
+  const extractFromCommandMessage = [
+    'seen=0; msg=""',
+    'for a in "$@"; do',
+    '  if [ "$seen" = "2" ]; then msg="$a"; break; fi',
+    '  if [ "$seen" = "1" ]; then seen=2; fi',
+    '  if [ "$a" = "--command" ]; then seen=1; fi',
+    "done",
+    'rel="$(printf \'%s\' "$msg" | head -1)"',
+  ];
+
+  function recordedArgs(recordDir: string): string[] {
+    const args: string[] = [];
+    for (let i = 0; ; i++) {
+      const path = join(recordDir, `argv.${i}`);
+      if (!existsSync(path)) break;
+      args.push(readFileSync(path, "utf8"));
+    }
+    return args;
+  }
+
+  async function withFakePath(
+    fake: FakeCli,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const originalPath = process.env.PATH;
+    const originalRecord = process.env.FAKE_RECORD_DIR;
+    process.env.PATH = `${fake.binDir}:${originalPath}`;
+    process.env.FAKE_RECORD_DIR = fake.recordDir;
+    try {
+      await fn();
+    } finally {
+      process.env.PATH = originalPath;
+      if (originalRecord === undefined) delete process.env.FAKE_RECORD_DIR;
+      else process.env.FAKE_RECORD_DIR = originalRecord;
+    }
+  }
+
+  function oneTicketPool(
+    harness: string,
+    model: string,
+    extra?: Partial<PoolConfig>,
+  ): string {
+    return makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: { defaults: { harness, model }, ...extra },
+      agentMd: "# Runner agent instructions\n\nDo the thing.",
+    });
+  }
+
+  it("spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode", async () => {
+    const agents =
+      '{"deepseek":{"description":"General-purpose subagent","prompt":"Do the reading.","model":"deepseek"}}';
+    const poolDir = oneTicketPool("claude", "claude-test", { agents });
+    const fake = fakeCli(poolDir, "claude", extractFromPrintFlag);
+
+    let run: Awaited<ReturnType<typeof runPool>>;
+    await withFakePath(fake, async () => {
+      run = await runPool({ poolDir });
+    });
+
+    expect(run!.phase).toBe("done");
+    const argv = recordedArgs(fake.recordDir);
+    expect(argv[0]).toBe("-p");
+    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
+    expect(argv[1]).toContain("Standing instructions for this job:");
+    expect(argv.slice(2)).toEqual([
+      "--model",
+      "claude-test",
+      "--permission-mode",
+      "auto",
+      "--agents",
+      agents,
+      "--output-format",
+      "text",
+    ]);
+    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
+    const logText = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
+    expect(logText).toContain("fake claude ran");
+  });
+
+  it("drives opencode through --command with the bare driver name and the issue path leading the message", async () => {
+    const poolDir = oneTicketPool("opencode", "opencode-test");
+    const fake = fakeCli(poolDir, "opencode", extractFromCommandMessage);
+
+    let run: Awaited<ReturnType<typeof runPool>>;
+    await withFakePath(fake, async () => {
+      run = await runPool({ poolDir });
+    });
+
+    expect(run!.phase).toBe("done");
+    const argv = recordedArgs(fake.recordDir);
+    expect(argv[0]).toBe("run");
+    expect(argv[1]).toBe("--command");
+    expect(argv[2]).toBe("implement");
+    expect(argv[3]).toMatch(/^issues\/01-a\.md\n/);
+    expect(argv[3]).toContain("Standing instructions for this job:");
+    expect(argv[3]).not.toContain("/implement");
+    expect(argv.slice(4)).toEqual(["--model", "opencode-test", "--auto"]);
+    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
+  });
+
+  it("launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh)", async () => {
+    const poolDir = oneTicketPool("cursor", "cursor-test");
+    const fake = fakeCli(poolDir, "agent", extractFromPrintFlag);
+
+    let run: Awaited<ReturnType<typeof runPool>>;
+    await withFakePath(fake, async () => {
+      run = await runPool({ poolDir });
+    });
+
+    expect(run!.phase).toBe("done");
+    const argv = recordedArgs(fake.recordDir);
+    expect(argv[0]).toBe("-p");
+    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
+    expect(argv.slice(2)).toEqual([
+      "--model",
+      "cursor-test",
+      "--force",
+      "--trust",
+      "--output-format",
+      "text",
+    ]);
+    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
+  });
+
+  it("drives status from the marker a spawned CLI leaves behind, done or untouched alike", async () => {
+    const doneDir = oneTicketPool("claude", "claude-test");
+    const doneFake = fakeCli(doneDir, "claude", extractFromPrintFlag);
+    let run: Awaited<ReturnType<typeof runPool>>;
+    await withFakePath(doneFake, async () => {
+      run = await runPool({ poolDir: doneDir });
+    });
+    expect(run!.phase).toBe("done");
+    expect(run!.final.tickets["01"]).toBe("done");
+
+    const crashDir = oneTicketPool("claude", "claude-test");
+    const crashFake = fakeCli(crashDir, "claude", extractFromPrintFlag, {
+      setDone: false,
+      exitCode: 1,
+    });
+    await withFakePath(crashFake, async () => {
+      run = await runPool({ poolDir: crashDir });
+    });
+    expect(run!.phase).toBe("quiescent");
+    expect(run!.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "crash",
+        body: join(crashDir, "runs", "01.log"),
+      },
+    ]);
+    expect(markerLine(crashDir, "01-a.md")).toContain("status=in-progress");
   });
 });
 
