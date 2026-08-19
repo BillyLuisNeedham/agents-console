@@ -22,6 +22,13 @@ export class CheckpointStore {
     ]);
   }
 
+  latest(): unknown | null {
+    const row = this.db
+      .query("SELECT state FROM checkpoints ORDER BY seq DESC LIMIT 1")
+      .get() as { state: string } | null;
+    return row ? JSON.parse(row.state) : null;
+  }
+
   close(): void {
     this.db.close();
   }

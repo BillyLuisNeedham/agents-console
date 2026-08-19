@@ -200,6 +200,7 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
     onSnapshot: options.onSnapshot,
   };
 
+  rehydrate(session);
   return drive(session);
 }
 
@@ -229,6 +230,7 @@ async function drive(session: Session): Promise<PoolRun> {
           `super-step ${session.superStep}: ${ready.map((m) => m.id).join(", ")}`,
         ],
       });
+      writeMarkers(session);
       emit("running");
       const snapshot = session.state;
 
@@ -252,11 +254,7 @@ async function drive(session: Session): Promise<PoolRun> {
       session.state = joined;
       for (const { marker, status, logPath } of results) {
         if (status === "checkpoint") {
-          raiseInterrupt(session, {
-            ticketId: marker.id,
-            kind: "checkpoint",
-            body: extractBrief(marker.file),
-          });
+          raiseInterrupt(session, checkpointInterrupt(marker));
         } else if (status === "in-progress") {
           raiseInterrupt(session, {
             ticketId: marker.id,
@@ -265,7 +263,7 @@ async function drive(session: Session): Promise<PoolRun> {
           });
         }
       }
-      session.store.write(session.state);
+      persist(session);
       emit("running");
     }
   } catch (error) {
@@ -295,7 +293,7 @@ async function drive(session: Session): Promise<PoolRun> {
           : `pool stalled: ${pending.join(", ")} cannot run`,
     ],
   });
-  session.store.write(session.state);
+  persist(session);
   emit(phase);
   if (phase !== "quiescent") closeStore(session);
   return {
@@ -306,6 +304,114 @@ async function drive(session: Session): Promise<PoolRun> {
     resume: (ticketId, note) => enqueueResume(session, ticketId, note),
     close: () => closeStore(session),
   };
+}
+
+const ENGINE_RESET_NOTE =
+  "\n---\n\n## Brief, written by the engine\n\n" +
+  "The engine process stopped while this ticket was in-progress (killed, " +
+  "crashed, or the machine restarted), so the work is part done at best " +
+  "and the agent left no brief. The ticket is back to ready; read the " +
+  "working tree before it runs again.\n";
+
+// Rehydration: the last checkpoint restores the run's channels, but the
+// line-1 markers are the truth for ticket statuses and win on any
+// disagreement. An in-progress marker with no pending interrupt means the
+// agent holding it died with the last process, so it goes back to ready
+// with a note on the Issue, matching run.sh's interrupt semantics. A
+// stored interrupt whose marker says done or ready (a human answered or
+// reset it on disk) is stale and clears. A checkpoint marker with no
+// stored interrupt (a pool run.sh halted) re-raises its interrupt from
+// the Brief. Outcome files on disk win over the checkpoint, so a ticket
+// that finished before a mid-super-step kill still passes its outcome
+// downstream.
+function rehydrate(session: Session): void {
+  const stored = session.store.latest() as Partial<PoolState> | null;
+  const log: string[] = [];
+  if (stored) {
+    session.state = {
+      tickets: session.state.tickets,
+      log: Array.isArray(stored.log) ? stored.log : [],
+      outcomes: stored.outcomes ?? {},
+      config: session.state.config,
+      interrupts: Array.isArray(stored.interrupts) ? stored.interrupts : [],
+    };
+    log.push(
+      `rehydrated from checkpoint: ${session.state.interrupts.length} ` +
+        `interrupt(s), ${Object.keys(session.state.outcomes).length} ` +
+        "outcome(s) restored",
+    );
+  }
+  const interrupted = new Set(session.state.interrupts.map((i) => i.ticketId));
+  for (const marker of session.markers) {
+    if (marker.status === "in-progress" && !interrupted.has(marker.id)) {
+      writeMarkerStatus(marker.file, "ready");
+      appendFileSync(marker.file, ENGINE_RESET_NOTE);
+      marker.status = "ready";
+      log.push(
+        `ticket ${marker.id}: marker was in-progress with no live agent; ` +
+          "back to ready",
+      );
+    }
+  }
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(
+      session.markers.map((marker) => [marker.id, marker.status]),
+    ),
+  });
+  const stale = session.state.interrupts.filter((i) => {
+    const status = session.state.tickets[i.ticketId];
+    return status === "done" || status === "ready";
+  });
+  if (stale.length > 0) {
+    session.state = applyUpdate(session.state, {
+      interrupts: session.state.interrupts.filter((i) => !stale.includes(i)),
+      log: stale.map(
+        (i) =>
+          `interrupt cleared for ${i.ticketId} (${i.kind}): marker says ` +
+          session.state.tickets[i.ticketId],
+      ),
+    });
+  }
+  for (const marker of session.markers) {
+    if (
+      marker.status === "checkpoint" &&
+      !session.state.interrupts.some((i) => i.ticketId === marker.id)
+    ) {
+      raiseInterrupt(session, checkpointInterrupt(marker));
+    }
+  }
+  const recovered: Record<string, Outcome> = {};
+  for (const marker of session.markers) {
+    if (marker.status !== "done") continue;
+    const outcome = readOutcome(
+      join(session.runsDir, `${marker.id}.outcome.json`),
+    );
+    if (outcome) recovered[marker.id] = outcome;
+  }
+  if (Object.keys(recovered).length > 0) {
+    session.state = applyUpdate(session.state, { outcomes: recovered });
+  }
+  if (log.length > 0) {
+    session.state = applyUpdate(session.state, { log });
+  }
+}
+
+// Markers dual-write: every checkpoint write is preceded by bringing the
+// line-1 markers on disk into agreement with state, so the pool directory is
+// always inspectable by run.sh and the markers stay the shared truth.
+function writeMarkers(session: Session): void {
+  for (const marker of session.markers) {
+    const status = session.state.tickets[marker.id];
+    if (status && status !== marker.status) {
+      writeMarkerStatus(marker.file, status);
+      marker.status = status;
+    }
+  }
+}
+
+function persist(session: Session): void {
+  writeMarkers(session);
+  session.store.write(session.state);
 }
 
 function closeStore(session: Session): void {
@@ -450,6 +556,14 @@ function reconcileDeadlocks(session: Session): void {
   session.state = applyUpdate(session.state, { interrupts, log });
 }
 
+function checkpointInterrupt(marker: TicketMarker): Interrupt {
+  return {
+    ticketId: marker.id,
+    kind: "checkpoint",
+    body: extractBrief(marker.file),
+  };
+}
+
 function extractBrief(issueFile: string): string {
   const lines = readFileSync(issueFile, "utf8").split("\n");
   const start = lines.findIndex((line) => line.startsWith("## Brief"));
@@ -500,8 +614,6 @@ async function runTicket(
     upstream,
     outcomePath,
   });
-
-  writeMarkerStatus(marker.file, "in-progress");
 
   const ctx: SpawnContext = {
     id: marker.id,

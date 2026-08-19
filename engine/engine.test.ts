@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -726,24 +727,32 @@ describe("interrupts", () => {
     ]);
   });
 
-  it("reports stalled when nothing can run and no interrupt explains it", async () => {
+  it("keeps a crashed ticket's interrupt pending across rehydration", async () => {
     const poolDir = makePool({
       tickets: [
         {
           file: "01-a.md",
-          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
         },
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness({ "01": { statuses: ["keep", "done"] } });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(first.interrupts[0]?.kind).toBe("crash");
+    first.close();
 
-    expect(run.phase).toBe("stalled");
-    expect(run.interrupts).toEqual([]);
-    expect(rig.spawnOrder).toEqual([]);
-    expect(run.final.log.at(-1)).toBe("pool stalled: 01 cannot run");
+    // The marker still reads in-progress, but the pending crash interrupt
+    // means a human has not looked yet: rehydration must not silently
+    // re-run the ticket.
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(second.phase).toBe("quiescent");
+    expect(second.interrupts[0]?.kind).toBe("crash");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    const resumed = await second.resume("01");
+    expect(resumed.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "01"]);
   });
 
   it("resumes a crash interrupt by re-running the ticket", async () => {
@@ -768,5 +777,464 @@ describe("interrupts", () => {
     expect(resumed.final.log).toContain(
       "interrupt answered for 01 (crash): resumed",
     );
+  });
+});
+
+function markerLine(poolDir: string, file: string): string {
+  return readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0];
+}
+
+function markerStatuses(poolDir: string, files: string[]): Record<string, string> {
+  return Object.fromEntries(
+    files.map((file) => [
+      file.slice(0, 2),
+      /status=([a-z-]+)/.exec(markerLine(poolDir, file))?.[1] ?? "",
+    ]),
+  );
+}
+
+function setMarker(poolDir: string, file: string, status: string): void {
+  const path = join(poolDir, "issues", file);
+  const raw = readFileSync(path, "utf8");
+  const lines = raw.split("\n");
+  lines[0] = lines[0].replace(/status=[a-z-]+/, `status=${status}`);
+  writeFileSync(path, lines.join("\n"));
+}
+
+async function waitFor(cond: () => boolean, ms = 10000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (cond()) return;
+    await Bun.sleep(50);
+  }
+  throw new Error("waitFor: timed out");
+}
+
+describe("durability", () => {
+  it("keeps the line-1 markers in agreement with every emitted snapshot", async () => {
+    const files = ["01-a.md", "02-b.md"];
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const disagreements: string[] = [];
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      onSnapshot: (snapshot) => {
+        const markers = markerStatuses(poolDir, files);
+        for (const [id, status] of Object.entries(snapshot.state.tickets)) {
+          if (markers[id] !== status) {
+            disagreements.push(
+              `seq ${snapshot.seq}: state says ${id}=${status}, marker says ${markers[id]}`,
+            );
+          }
+        }
+      },
+    });
+
+    expect(disagreements).toEqual([]);
+    expect(run.phase).toBe("quiescent");
+    const db = new Database(join(poolDir, "console.db"), { readonly: true });
+    const row = db
+      .query("SELECT state FROM checkpoints ORDER BY seq DESC LIMIT 1")
+      .get() as { state: string };
+    db.close();
+    expect(JSON.parse(row.state).tickets).toEqual(
+      markerStatuses(poolDir, files),
+    );
+    run.close();
+  });
+
+  it("re-runs a ticket whose marker was reset to ready after the checkpoint said done", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({}).harnesses,
+    });
+    expect(first.phase).toBe("done");
+
+    // run.sh reset 02: the marker on disk is the truth, the checkpoint's
+    // done is stale.
+    setMarker(poolDir, "02-b.md", "ready");
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["02"]);
+  });
+
+  it("clears a stored interrupt whose ticket the marker says is done", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // The human finished 01 by hand. The marker wins over the stored
+    // checkpoint interrupt.
+    setMarker(poolDir, "01-a.md", "done");
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("done");
+    expect(second.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual(["02"]);
+    expect(second.final.log).toContain(
+      "interrupt cleared for 01 (checkpoint): marker says done",
+    );
+  });
+
+  it("resets an in-progress marker to ready: the agent holding it died with the process", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(
+      run.final.log.some((line) =>
+        line.includes("back to ready"),
+      ),
+    ).toBe(true);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Brief, written by the engine");
+    expect(issueText).toContain("back to ready");
+  });
+
+  it("clears a stored interrupt whose marker a human reset to ready", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // run.sh reset 01: the human answered on disk. The stored interrupt
+    // must not linger into the next engine run.
+    setMarker(poolDir, "01-a.md", "ready");
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("done");
+    expect(second.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(second.final.log).toContain(
+      "interrupt cleared for 01 (checkpoint): marker says ready",
+    );
+  });
+
+  it("restores a pending interrupt across a restart and keeps it answerable", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    expect(first.final.tickets["03"]).toBe("done");
+    first.close();
+
+    const rig = stubHarness({ "01": { status: "done" } });
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("quiescent");
+    expect(second.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    expect(rig.spawnOrder).toEqual([]);
+
+    const resumed = await second.resume("01", "the name is Foo");
+    expect(resumed.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Resume note");
+    expect(issueText).toContain("the name is Foo");
+  });
+
+  it("resumes a killed engine mid-super-step without re-running done tickets", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    writeFileSync(
+      join(poolDir, "agent.sh"),
+      [
+        "#!/usr/bin/env bash",
+        'issue="$1"; id="$2"; outcome_path="$3"',
+        'if [ "$id" = "01" ]; then',
+        '  sed -i "1s/status=[a-z-]*/status=done/" "$issue"',
+        '  printf \'%s\' \'{"summary":"recovered-01","commitSha":"sha-01"}\' > "$outcome_path"',
+        "  exit 0",
+        "fi",
+        "sleep 60",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(poolDir, "fixture.ts"),
+      [
+        "const [enginePath, poolDir] = process.argv.slice(2);",
+        "const { runPool } = await import(enginePath);",
+        "const harnesses = {",
+        "  stub: (ctx: { issuePath: string; id: string; outcomePath: string }) => [",
+        '    "bash",',
+        "    `${poolDir}/agent.sh`,",
+        "    ctx.issuePath,",
+        "    ctx.id,",
+        "    ctx.outcomePath,",
+        "  ],",
+        "};",
+        "await runPool({ poolDir, harnesses });",
+        "",
+      ].join("\n"),
+    );
+
+    const proc = Bun.spawn(
+      ["bun", join(poolDir, "fixture.ts"), join(import.meta.dir, "engine.ts"), poolDir],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    try {
+      await waitFor(
+        () =>
+          markerLine(poolDir, "01-a.md").includes("status=done") &&
+          markerLine(poolDir, "02-b.md").includes("status=in-progress"),
+      );
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+
+    const rig = stubHarness({});
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["02"]);
+    expect(
+      run.final.log.some(
+        (line) => line.includes("02") && line.includes("back to ready"),
+      ),
+    ).toBe(true);
+    // 01 finished before the kill but no checkpoint landed; its outcome
+    // file on disk still wins over the (absent) checkpoint.
+    expect(run.final.outcomes["01"]).toEqual({
+      summary: "recovered-01",
+      commitSha: "sha-01",
+    });
+  });
+
+  it("picks up a pool run.sh halted: a checkpoint marker becomes an answerable interrupt", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=checkpoint -->",
+          body: "# 02\n\n## Brief\n\nrun.sh stopped here",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=02 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(first.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(first.interrupts).toEqual([
+      { ticketId: "02", kind: "checkpoint", body: "run.sh stopped here" },
+    ]);
+
+    const resumed = await first.resume("02");
+    expect(resumed.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["02", "03"]);
+  });
+
+  it("stays inspectable and continuable by run.sh after a part-run", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const engine = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(engine.phase).toBe("quiescent");
+    engine.close();
+
+    const homeDir = join(poolDir, "home");
+    const binDir = join(poolDir, "bin");
+    mkdirSync(homeDir);
+    mkdirSync(binDir);
+    writeFileSync(
+      join(homeDir, ".issue-runner"),
+      "harness=claude\nmodel=stub-model\n",
+    );
+    writeFileSync(
+      join(binDir, "claude"),
+      [
+        "#!/usr/bin/env bash",
+        'prompt=""',
+        "while [ $# -gt 0 ]; do",
+        '  case "$1" in',
+        '    -p) prompt="$2"; shift 2 ;;',
+        "    *) shift ;;",
+        "  esac",
+        "done",
+        'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
+        'sed -i "1s/status=[a-z-]*/status=done/" "$rel"',
+        'echo "fake claude worked $rel"',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(binDir, "claude"), 0o755);
+    writeFileSync(
+      join(poolDir, "run.sh"),
+      readFileSync(
+        join(import.meta.dir, "..", ".scratch", "console-pool", "run.sh"),
+        "utf8",
+      ),
+    );
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      PATH: `${binDir}:${process.env.PATH}`,
+    };
+    Bun.spawnSync(["git", "init"], { cwd: poolDir, stdout: "ignore", stderr: "ignore" });
+
+    const status = Bun.spawnSync(["bash", "run.sh", "status"], {
+      cwd: poolDir,
+      env,
+    });
+    const board = status.stdout.toString();
+    expect(status.exitCode).toBe(0);
+    expect(board).toMatch(/01\s+checkpoint/);
+    expect(board).toMatch(/02\s+ready/);
+    expect(board).toMatch(/03\s+done/);
+
+    const reset = Bun.spawnSync(["bash", "run.sh", "reset", "01"], {
+      cwd: poolDir,
+      env,
+    });
+    expect(reset.exitCode).toBe(0);
+
+    const continued = Bun.spawnSync(["bash", "run.sh"], {
+      cwd: poolDir,
+      env,
+    });
+    const output = continued.stdout.toString();
+    expect(continued.exitCode).toBe(0);
+    expect(output).toContain("fake claude worked issues/01-a.md");
+    expect(output).toContain("fake claude worked issues/02-b.md");
+    expect(output).not.toContain("fake claude worked issues/03-c.md");
+    expect(markerStatuses(poolDir, ["01-a.md", "02-b.md", "03-c.md"])).toEqual({
+      "01": "done",
+      "02": "done",
+      "03": "done",
+    });
   });
 });
