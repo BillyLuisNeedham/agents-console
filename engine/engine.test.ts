@@ -1007,7 +1007,8 @@ describe("interrupts", () => {
   });
 });
 
-function markerLine(poolDir: string, file: string): string {  return readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0];
+function markerLine(poolDir: string, file: string): string {
+  return readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0];
 }
 
 function markerStatuses(poolDir: string, files: string[]): Record<string, string> {

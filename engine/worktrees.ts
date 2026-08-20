@@ -25,10 +25,14 @@ export function git(repoRoot: string, args: string[]): GitProbe {
   };
 }
 
+function refExists(repoRoot: string, ref: string): boolean {
+  return git(repoRoot, ["rev-parse", "--verify", ref]).ok;
+}
+
 // Worktree mode needs a real repo with at least one commit; without one the
 // engine runs tickets in the main checkout, exactly as before.
 export function gitAvailable(repoRoot: string): boolean {
-  return git(repoRoot, ["rev-parse", "--verify", "HEAD"]).ok;
+  return refExists(repoRoot, "HEAD");
 }
 
 export function branchFor(ticketId: string): string {
@@ -42,7 +46,7 @@ export function worktreePathFor(repoRoot: string, ticketId: string): string {
 }
 
 export function branchExists(repoRoot: string, ticketId: string): boolean {
-  return git(repoRoot, ["rev-parse", "--verify", branchFor(ticketId)]).ok;
+  return refExists(repoRoot, branchFor(ticketId));
 }
 
 // A parked branch or worktree (left by a checkpoint, a crash or a conflict)
@@ -90,7 +94,7 @@ export interface MergeResult {
 // left half-merged; the caller surfaces the conflict. A missing branch means
 // a human finished the job by hand and cleaned up, which counts as merged.
 export function mergeBranch(repoRoot: string, branch: string): MergeResult {
-  if (!git(repoRoot, ["rev-parse", "--verify", branch]).ok) {
+  if (!refExists(repoRoot, branch)) {
     return { ok: true, conflicted: [], detail: `branch ${branch} is gone` };
   }
   const merge = git(repoRoot, ["merge", "--no-edit", branch]);

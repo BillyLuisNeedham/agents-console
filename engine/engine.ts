@@ -546,6 +546,22 @@ async function resumeTicket(
   return drive(session);
 }
 
+// The dual-write leaves the Issue file dirty on the working branch and git
+// refuses a merge that would touch a dirty file, so the Issue steps aside
+// for the merge and comes straight back: its content already matches the
+// worktree copy, whether or not the agent committed it.
+function mergeWithIssueAside(
+  session: Session,
+  marker: TicketMarker,
+  branch: string,
+): MergeResult {
+  const aside = `${marker.file}.pool-aside`;
+  renameSync(marker.file, aside);
+  const result = mergeBranch(session.cwd, branch);
+  renameSync(aside, marker.file);
+  return result;
+}
+
 // Resuming a merge-conflict interrupt re-attempts the merge. A human who
 // resolved it by hand in the main checkout sees "Already up to date" and a
 // deleted branch counts as resolved; a fresh conflict refreshes the
@@ -562,10 +578,7 @@ async function resumeMerge(
     path: worktreePathFor(session.cwd, marker.id),
     branch,
   };
-  const aside = `${marker.file}.pool-aside`;
-  renameSync(marker.file, aside);
-  const result = mergeBranch(session.cwd, branch);
-  renameSync(aside, marker.file);
+  const result = mergeWithIssueAside(session, marker, branch);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
@@ -590,7 +603,8 @@ async function resumeMerge(
   return drive(session);
 }
 
-function raiseInterrupt(session: Session, interrupt: Interrupt): void {  if (
+function raiseInterrupt(session: Session, interrupt: Interrupt): void {
+  if (
     session.state.interrupts.some(
       (i) => i.ticketId === interrupt.ticketId && i.kind === interrupt.kind,
     )
@@ -743,20 +757,13 @@ function readBack(marker: TicketMarker, plan: TicketPlan): TicketStatus {
   return "in-progress";
 }
 
-// Merging one finished ticket's branch onto the pool's working branch. The
-// dual-write leaves the Issue file dirty on the working branch and git
-// refuses a merge that would touch a dirty file, so the Issue steps aside
-// for the merge and comes straight back: its content already matches the
-// worktree copy, whether or not the agent committed it.
+// Merging one finished ticket's branch onto the pool's working branch.
 function mergeTicket(
   session: Session,
   marker: TicketMarker,
   worktree: WorktreeInfo,
 ): MergeResult {
-  const aside = `${marker.file}.pool-aside`;
-  renameSync(marker.file, aside);
-  const result = mergeBranch(session.cwd, worktree.branch);
-  renameSync(aside, marker.file);
+  const result = mergeWithIssueAside(session, marker, worktree.branch);
   if (result.ok) removeWorktree(session.cwd, worktree);
   return result;
 }
