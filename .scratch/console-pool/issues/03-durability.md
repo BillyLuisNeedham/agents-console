@@ -1,4 +1,4 @@
-<!-- state: id=03 blocked-by=01 status=ready -->
+<!-- state: id=03 blocked-by=01 status=done -->
 
 # 03 — Durability and rehydration
 
@@ -10,12 +10,12 @@ The engine's durability story. Line-1 state markers are dual-written alongside e
 
 ## Acceptance criteria
 
-- [ ] Every checkpoint write is accompanied by the corresponding line-1 marker writes
-- [ ] On rehydration, a marker that disagrees with the checkpoint wins
-- [ ] A killed engine resumes the same pool from rehydrated state without re-running done tickets
-- [ ] Pending interrupts survive a restart and are still answerable
-- [ ] A pool part-run by the engine can be inspected by `run.sh status` and continued by it
-- [ ] Covered by engine-seam tests, including a kill-mid-super-step scenario
+- [x] Every checkpoint write is accompanied by the corresponding line-1 marker writes
+- [x] On rehydration, a marker that disagrees with the checkpoint wins
+- [x] A killed engine resumes the same pool from rehydrated state without re-running done tickets
+- [x] Pending interrupts survive a restart and are still answerable
+- [x] A pool part-run by the engine can be inspected by `run.sh status` and continued by it
+- [x] Covered by engine-seam tests, including a kill-mid-super-step scenario
 
 ## Blocked by
 
@@ -23,49 +23,31 @@ The engine's durability story. Line-1 state markers are dual-written alongside e
 
 ---
 
-## Brief, written by the runner
+## Notes
 
-The agent stopped without setting its own status, last seen as 'in-progress'. It crashed, ran out of context, or was killed. It had no chance to write a brief or to commit.
+- The previous agent on this Issue crashed before writing anything (its runner brief is below, kept for the record). This run started from a clean tree: no engine changes had survived.
+- Rehydration (`rehydrate` in engine/engine.ts) runs once at `runPool` start, before the drive loop. The last sqlite checkpoint restores the `log`, `outcomes` and `interrupts` channels; the `tickets` channel always comes from the line-1 markers, so markers win every disagreement. `CheckpointStore.latest()` reads the newest row.
+- Marker semantics at load: `in-progress` with no pending interrupt means the agent died with the last process, so the marker goes back to `ready` and the engine appends a `## Brief, written by the engine` note to the Issue (run.sh's rule that a stop leaves a trace in the Issue). `in-progress` with a pending crash interrupt is left alone: the interrupt says a human has not looked yet. A stored interrupt whose marker says `done` or `ready` (a human answered or `run.sh reset` it on disk) is stale and clears. A `checkpoint` marker with no stored interrupt (a pool run.sh halted) re-raises its interrupt from the Brief, which is what makes run.sh pools answerable in the engine.
+- Outcomes re-read from `runs/<id>.outcome.json` for done tickets, disk winning over the checkpoint. This is what recovers a finished ticket's outcome after a kill mid-super-step, where the ticket completed but no checkpoint landed (proven by the kill test: 01's outcome survives with zero checkpoint rows).
+- Dual-write: `persist(session)` (write markers, then sqlite) is the only path that writes checkpoints, and the in-progress marker write moved from `runTicket` up into the drive loop, so the markers on disk agree with state at every emitted snapshot. The AC1 test asserts exactly that through `onSnapshot`.
+- run.sh interop test copies the real `.scratch/console-pool/run.sh` into a temp pool, fakes `claude` on PATH and HOME for `~/.issue-runner`, and `git init`s (no commits, so preflight's dirty-tracked-files refusal passes with everything untracked). It proves `run.sh status` reads the engine's board and `run.sh` continues the pool without re-running the done ticket.
+- `stalled` is now unreachable through the public seam by construction (every non-done marker funnels to ready or to an interrupt), so the old stalled test was replaced rather than ported. The phase stays in `RunPhase` as a defensive residue. (Inference: no marker combination reaches it after rehydration.)
 
-- Stopped: 2026-08-18 22:52
-- Log: `.scratch/console-pool/runs/03.log`
-- Working tree at the stop:
+## Review findings, and what changed because of them
 
-```
- M .scratch/console-pool/issues/01-pool-engine-skeleton.md
- M .scratch/console-pool/issues/02-interrupt-engine.md
- M .scratch/console-pool/issues/03-durability.md
-?? .scratch/console-pool/runs/
-```
+Two-axis review (standards + spec, parallel sub-agents) ran on the working tree before commit. Acted on:
 
-Last lines of the log:
+- A stored interrupt survived a human `run.sh reset` (marker back to ready): the ticket re-ran but the interrupt lingered in state for ever. Rehydration now clears stored interrupts for markers that say ready as well as done, with a test.
+- The in-progress reset left no trace on the Issue file, breaking run.sh's shared rule. The engine now appends a `## Brief, written by the engine` note when it resets a stranded in-progress marker.
+- Outcomes were restored only from the checkpoint, so a kill mid-super-step lost a finished ticket's outcome even though its outcome file was on disk. Done tickets' outcome files now win at rehydration; the kill test asserts the recovery.
+- The checkpoint-interrupt literal was built in two places (drive loop and rehydration); extracted to `checkpointInterrupt(marker)`.
+- The tickets channel merge in rehydration now goes through `applyUpdate` like every other mutation, instead of poking the map directly.
 
-```
--rwxr-xr-x 1 billy billy 16244 Aug 18 22:10 run.sh
--rw-r--r-- 1 billy billy 13136 Aug 18 21:50 spec-ticket-pools.md
-81a74ba console: add interrupt engine with checkpoint, crash, and deadlock interrupts
-4e96563 console: add the pool engine walking skeleton
-41ac900 console-pool: ticket queue, spec, and runner for the pool engine
-12aea8c remove the lessons; promote the console prototype to the repo root
-591fb52 console: close the Detail review, accept findings and fix the spec vocab
-98cb424 console: review the Detail panel and resizable drawers iteration
-04f6a61 console: add a drag handle to resize the bottom drawers
-527d7a2 console: answer interrupts from the Detail panel
- M .scratch/console-pool/issues/01-pool-engine-skeleton.md
- M .scratch/console-pool/issues/02-interrupt-engine.md
- M .scratch/console-pool/issues/03-durability.md
-?? .scratch/console-pool/runs/
-[0m
-[0m• [0mRead spec and engine state[90m Deepseek Agent[0m
-[0m✓ [0mRead spec and engine state[90m Deepseek Agent[0m
-[0m→ [0mRead engine/engine.ts
-Now let me read the engine code itself, since the substance is mine to write.
-[0m→ [0mRead engine/pool.ts
-[0m→ [0mRead engine/checkpoints.ts
-[0m→ [0mRead engine/engine.test.ts
-Now let me read `run.sh` to understand the interop seam for AC5.
-[0m→ [0mRead .scratch/console-pool/run.sh
-[91m[1mError: [0mYou've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/code/#pricing
-```
+Noted, not acted on:
 
-Nothing above is confirmed. Read the log before you trust any part of this Issue.
+- `CheckpointStore.latest()` does not guard `JSON.parse`. sqlite commits are atomic per row, so a torn row is not a realistic kill artifact; a corrupt db should fail loudly at startup anyway.
+- Standards axis flagged that `persist` has three call sites with different ordering against `emit`. Deliberate: the pre-spawn emit needs markers written but no checkpoint yet (a super-step start is not a checkpoint boundary, per the spec's "checkpoint after each super-step").
+
+## Brief, written by the runner (2026-08-18, superseded)
+
+The first agent on this Issue stopped without setting its own status: it hit a usage-limit error mid-read, before writing any code. Its brief and log tail are in `.scratch/console-pool/runs/03.log`. Nothing from that run survived in the tree; this Issue was worked fresh.
