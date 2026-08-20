@@ -8,6 +8,7 @@ import {
   renameSync,
 } from "node:fs";
 import { once } from "node:events";
+import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
@@ -17,7 +18,7 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
-import { buildPrompt } from "./prompt.ts";
+import { buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
   type HarnessCommand,
@@ -26,6 +27,9 @@ import {
 import {
   branchExists,
   branchFor,
+  commitMerge,
+  currentBranch,
+  git,
   gitAvailable,
   mergeBranch,
   prepareWorktree,
@@ -54,9 +58,15 @@ export interface PoolConfig {
   assign?: Record<string, TicketAssignment>;
   roster?: string;
   agents?: string;
+  resolver?: string;
 }
 
-export type InterruptKind = "checkpoint" | "crash" | "deadlock" | "merge-conflict";
+export type InterruptKind =
+  | "checkpoint"
+  | "crash"
+  | "deadlock"
+  | "merge-conflict"
+  | "merge-approval";
 
 export interface Interrupt {
   ticketId: string;
@@ -91,6 +101,7 @@ export interface RunOptions {
   poolDir: string;
   harnesses?: Record<string, HarnessCommand>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
+  issueRunnerPath?: string;
 }
 
 export interface PoolRun {
@@ -99,6 +110,8 @@ export interface PoolRun {
   snapshots: PoolSnapshot[];
   interrupts: Interrupt[];
   resume: (ticketId: string, note?: string) => Promise<PoolRun>;
+  approve: (ticketId: string, note?: string) => Promise<PoolRun>;
+  reject: (ticketId: string, note?: string) => Promise<PoolRun>;
   close: () => void;
 }
 
@@ -172,6 +185,8 @@ interface Session {
   superStep: number;
   resumeChain: Promise<PoolRun | null>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
+  issueRunnerPath: string;
+  resolverAttempts: Map<string, { files: string[]; note: string }>;
 }
 
 export async function runPool(options: RunOptions): Promise<PoolRun> {
@@ -216,6 +231,8 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
     superStep: 0,
     resumeChain: Promise.resolve(null),
     onSnapshot: options.onSnapshot,
+    issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
+    resolverAttempts: new Map(),
   };
 
   rehydrate(session);
@@ -307,10 +324,7 @@ async function drive(session: Session): Promise<PoolRun> {
             ],
           });
         } else {
-          raiseInterrupt(
-            session,
-            mergeConflictInterrupt(session, merge.marker, merge.result),
-          );
+          await handleMergeConflict(session, merge.marker, merge.result);
         }
       }
       for (const { marker, status, logPath } of results) {
@@ -364,7 +378,9 @@ async function drive(session: Session): Promise<PoolRun> {
     final: session.state,
     snapshots: session.snapshots,
     interrupts: session.state.interrupts,
-    resume: (ticketId, note) => enqueueResume(session, ticketId, note),
+    resume: (ticketId, note) => enqueueAnswer(session, ticketId, note, undefined),
+    approve: (ticketId, note) => enqueueAnswer(session, ticketId, note, true),
+    reject: (ticketId, note) => enqueueAnswer(session, ticketId, note, false),
     close: () => closeStore(session),
   };
 }
@@ -422,6 +438,7 @@ function rehydrate(session: Session): void {
     ),
   });
   const stale = session.state.interrupts.filter((i) => {
+    if (i.kind === "merge-conflict" || i.kind === "merge-approval") return false;
     const status = session.state.tickets[i.ticketId];
     return status === "done" || status === "ready";
   });
@@ -483,22 +500,24 @@ function closeStore(session: Session): void {
   session.store.close();
 }
 
-function enqueueResume(
+function enqueueAnswer(
   session: Session,
   ticketId: string,
   note?: string,
+  approve?: boolean,
 ): Promise<PoolRun> {
   const queued = session.resumeChain.then(() =>
-    resumeTicket(session, ticketId, note),
+    answerTicket(session, ticketId, note, approve),
   );
   session.resumeChain = queued.catch(() => null);
   return queued;
 }
 
-async function resumeTicket(
+async function answerTicket(
   session: Session,
   ticketId: string,
   note?: string,
+  approve?: boolean,
 ): Promise<PoolRun> {
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === ticketId,
@@ -523,6 +542,16 @@ async function resumeTicket(
   }
   if (interrupt.kind === "merge-conflict") {
     return resumeMerge(session, marker, interrupt, note);
+  }
+  if (interrupt.kind === "merge-approval") {
+    if (approve === undefined) {
+      throw new Error(
+        `answer: use approve() or reject() for the merge-approval interrupt ` +
+          `on ticket ${ticketId}`,
+      );
+    }
+    if (approve) return approveMerge(session, marker, interrupt, note);
+    return rejectMerge(session, marker, interrupt, note);
   }
   if (marker.status !== "done") {
     writeMarkerStatus(marker.file, "ready");
@@ -598,6 +627,280 @@ async function resumeMerge(
     log: [
       `interrupt answered for ${marker.id} (merge-conflict): merge landed` +
         (result.detail.endsWith("is gone") ? ` (${result.detail})` : ""),
+    ],
+  });
+  return drive(session);
+}
+
+const RESOLVER_DRIVER = "resolve";
+
+interface ResolverSpec {
+  harness: string;
+  model: string;
+}
+
+interface ResolverAttempt {
+  resolved: boolean;
+  note: string;
+}
+
+// The resolver agent for a conflicting merge: the harness comes from
+// console.json's resolver= key, falling back to the ~/.issue-runner default,
+// with the model resolved the same way. An explicit "none" (or empty) resolver
+// opts out of the resolver, so the conflict takes the manual path; an explicit
+// resolver that names an unknown harness fails fast, matching how a ticket's
+// unknown harness is rejected. No configured resolver at all also means the
+// manual path.
+function resolveResolver(session: Session): ResolverSpec | null {
+  const config = session.state.config;
+  const explicit = config.resolver?.trim();
+  if (explicit === "" || explicit === "none") return null;
+  let harness = explicit;
+  let model = config.defaults?.model;
+  if (!harness || !model) {
+    const runner = readIssueRunner(session.issueRunnerPath);
+    if (!harness) harness = runner?.harness;
+    if (!model) model = runner?.model;
+  }
+  if (!harness || !model) return null;
+  if (!session.harnesses[harness]) {
+    if (explicit) {
+      throw new Error(
+        `pool config: resolver names unknown harness '${explicit}'. ` +
+          `Known: ${Object.keys(session.harnesses).sort().join(", ")}`,
+      );
+    }
+    return null;
+  }
+  return { harness, model };
+}
+
+function readIssueRunner(
+  path: string,
+): { harness?: string; model?: string } | null {
+  if (!existsSync(path)) return null;
+  const fields = new Map<string, string>();
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) fields.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+  }
+  return { harness: fields.get("harness"), model: fields.get("model") };
+}
+
+function readResolverResult(
+  path: string,
+): { resolved: boolean; note?: string } | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed?.resolved !== "boolean") return null;
+    return {
+      resolved: parsed.resolved,
+      note: typeof parsed.note === "string" ? parsed.note : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// A conflict hands the conflicted state to the resolver agent: the resolver
+// reproduces the conflict in the parked worktree, stages a resolution without
+// committing, and the engine routes the result. A resolved attempt becomes an
+// approval interrupt (authority stays with the human); a failed or absent one
+// takes the manual path with the failure noted.
+async function handleMergeConflict(
+  session: Session,
+  marker: TicketMarker,
+  result: MergeResult,
+): Promise<void> {
+  const worktree: WorktreeInfo = {
+    path: worktreePathFor(session.cwd, marker.id),
+    branch: branchFor(marker.id),
+  };
+  const resolver = resolveResolver(session);
+  if (!resolver) {
+    raiseInterrupt(
+      session,
+      manualMergeInterrupt(
+        session,
+        marker,
+        result,
+        "no resolver harness available (set console.json resolver= or a " +
+          "~/.issue-runner default)",
+      ),
+    );
+    return;
+  }
+  const attempt = await runResolver(session, marker, worktree, resolver, result);
+  session.resolverAttempts.set(marker.id, {
+    files: result.conflicted,
+    note: attempt.note,
+  });
+  if (attempt.resolved) {
+    raiseInterrupt(
+      session,
+      approvalInterrupt(session, marker, result, attempt.note),
+    );
+  } else {
+    // Discard whatever the resolver left in the worktree, restoring the
+    // parked branch, before taking the manual path.
+    git(worktree.path, ["merge", "--abort"]);
+    raiseInterrupt(
+      session,
+      manualMergeInterrupt(session, marker, result, attempt.note),
+    );
+  }
+}
+
+async function runResolver(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+  resolver: ResolverSpec,
+  result: MergeResult,
+): Promise<ResolverAttempt> {
+  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
+  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
+  const prompt = buildResolverPrompt({
+    id: marker.id,
+    worktree: worktree.path,
+    branch: worktree.branch,
+    workingBranch: currentBranch(session.cwd),
+    files: result.conflicted,
+    outcomePath,
+  });
+  const ctx: SpawnContext = {
+    id: marker.id,
+    issuePath: marker.file,
+    issueRel: relative(session.cwd, marker.file),
+    prompt,
+    driver: RESOLVER_DRIVER,
+    harness: resolver.harness,
+    model: resolver.model,
+    agents: session.state.config.agents,
+    logPath,
+    outcomePath,
+    cwd: worktree.path,
+  };
+  const argv = session.harnesses[resolver.harness](ctx);
+  const exitCode = await spawnToLog(argv, ctx);
+  const outcome = readResolverResult(outcomePath);
+  if (exitCode === 0 && outcome?.resolved) {
+    return { resolved: true, note: outcome.note || "(resolver gave no note)" };
+  }
+  const reason =
+    exitCode !== 0
+      ? `resolver exited ${exitCode}`
+      : outcome
+        ? outcome.note || "resolver reported no resolution"
+        : "resolver produced no resolution";
+  return { resolved: false, note: reason };
+}
+
+function approvalInterrupt(
+  session: Session,
+  marker: TicketMarker,
+  result: MergeResult,
+  attemptNote: string,
+): Interrupt {
+  return {
+    ticketId: marker.id,
+    kind: "merge-approval",
+    body:
+      `The resolver agent resolved the merge conflict for ticket ${marker.id}.\n` +
+      `It attempted: ${attemptNote}\n` +
+      `conflicted files: ${result.conflicted.join(", ") || "(none listed)"}\n` +
+      `the resolution is staged on branch ${branchFor(marker.id)}; approve to ` +
+      "commit it and continue, or reject to resolve by hand.",
+  };
+}
+
+// Approving commits the resolver's staged resolution (an in-progress merge in
+// the worktree becomes a merge commit on the branch, so the follow-up merge
+// fast-forwards), then the pool continues automatically.
+async function approveMerge(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  note?: string,
+): Promise<PoolRun> {
+  const worktree: WorktreeInfo = {
+    path: worktreePathFor(session.cwd, marker.id),
+    branch: branchFor(marker.id),
+  };
+  commitMerge(worktree);
+  if (note && note.trim()) {
+    appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
+  }
+  const result = mergeWithIssueAside(session, marker, worktree.branch);
+  if (!result.ok) {
+    session.state = applyUpdate(session.state, {
+      interrupts: [
+        ...session.state.interrupts.filter((i) => i !== interrupt),
+        manualMergeInterrupt(
+          session,
+          marker,
+          result,
+          "the resolver's resolution did not merge cleanly on approval",
+        ),
+      ],
+      log: [`merge after resolver approval for ${marker.id} still conflicts`],
+    });
+    return drive(session);
+  }
+  removeWorktree(session.cwd, worktree);
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `interrupt answered for ${marker.id} (merge-approval): resolver ` +
+        "resolution committed",
+    ],
+  });
+  return drive(session);
+}
+
+// Rejecting discards the resolver's staged resolution (the parked branch is
+// restored) and converts the approval into a manual-resolution interrupt
+// carrying the conflicted state plus the agent's attempt, for Billy to resolve.
+async function rejectMerge(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  note?: string,
+): Promise<PoolRun> {
+  const worktree: WorktreeInfo = {
+    path: worktreePathFor(session.cwd, marker.id),
+    branch: branchFor(marker.id),
+  };
+  const attempt = session.resolverAttempts.get(marker.id);
+  git(worktree.path, ["merge", "--abort"]);
+  if (note && note.trim()) {
+    appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
+  }
+  const result: MergeResult = {
+    ok: false,
+    conflicted: attempt?.files ?? [],
+    detail: "",
+  };
+  const base = mergeConflictInterrupt(session, marker, result);
+  // In the normal flow the in-memory attempt record carries the note; after a
+  // restart the recorded approval interrupt (which holds the same note) stands
+  // in, so the agent's attempt is not lost.
+  const body = attempt
+    ? manualMergeInterrupt(
+        session,
+        marker,
+        result,
+        `${attempt.note} (resolution rejected by the human)`,
+      ).body
+    : `${base.body}\nThe resolver's rejected resolution said: ${interrupt.body}`;
+  session.state = applyUpdate(session.state, {
+    interrupts: [
+      ...session.state.interrupts.filter((i) => i !== interrupt),
+      { ...base, body },
+    ],
+    log: [
+      `merge-approval rejected for ${marker.id}: converted to manual resolution`,
     ],
   });
   return drive(session);
@@ -790,6 +1093,21 @@ function mergeConflictInterrupt(
       (result.detail ? `git said: ${result.detail}\n` : "") +
       "resolve the conflict and resume this ticket; the merge is " +
       "re-attempted on resume.",
+  };
+}
+
+// The manual-resolution interrupt: the resolver path's merge-conflict, with
+// what the resolver tried noted for the human.
+function manualMergeInterrupt(
+  session: Session,
+  marker: TicketMarker,
+  result: MergeResult,
+  attemptNote: string,
+): Interrupt {
+  const base = mergeConflictInterrupt(session, marker, result);
+  return {
+    ...base,
+    body: `${base.body}\nThe resolver agent attempted: ${attemptNote}`,
   };
 }
 

@@ -124,6 +124,13 @@ const stubConfig: PoolConfig = {
   defaults: { harness: "stub", model: "stub-model" },
 };
 
+// The manual merge-conflict path without a resolver: explicit resolver="none"
+// means no resolver harness, so a conflict takes the manual path directly.
+const noResolverConfig: PoolConfig = {
+  ...stubConfig,
+  resolver: "none",
+};
+
 describe("pool loading", () => {
   it("rejects a pool with a missing line-1 marker", async () => {
     const poolDir = makePool({
@@ -1734,7 +1741,7 @@ describe("worktrees", () => {
     const { poolDir, git } = makeGitPool(
       {
         tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
-        config: stubConfig,
+        config: noResolverConfig,
       },
       { "shared.txt": "base\n" },
     );
@@ -1809,7 +1816,7 @@ describe("worktrees", () => {
           readyTicket("02"),
           readyTicket("03", "02"),
         ],
-        config: stubConfig,
+        config: noResolverConfig,
       },
       { "shared.txt": "base\n" },
     );
@@ -1911,4 +1918,356 @@ describe("worktrees", () => {
       git(["branch", "--list", "pool/*"]).stdout.toString().trim(),
     ).toBe("");
   }, 15000);
+
+  describe("resolver agent", () => {
+  interface ResolverBehaviour {
+    resolved?: boolean;
+    note?: string;
+    exitCode?: number;
+    conflictFile?: string;
+    resolution?: string;
+    recordDir?: string;
+  }
+
+  function resolverStub(
+    poolDir: string,
+    behaviour: Record<string, ResolverBehaviour>,
+  ): {
+    harnesses: Record<string, HarnessCommand>;
+    spawned: Record<string, SpawnContext>;
+    spawnOrder: string[];
+  } {
+    const stubPath = join(poolDir, "resolver-stub.sh");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome="$1"; plan="$2"; worktree="$3"',
+        'source "$plan"',
+        ': "${CONFLICT_FILE:=}" "${RESOLUTION:=}" "${RECORD_DIR:=}"',
+        'git -C "$worktree" merge "$WORKING_BRANCH" >/dev/null 2>&1 || true',
+        'if [ "$RESOLVED" = "1" ]; then',
+        '  if [ -n "$CONFLICT_FILE" ]; then',
+        '    printf \'%s\\n\' "$RESOLUTION" > "$worktree/$CONFLICT_FILE"',
+        '    git -C "$worktree" add "$CONFLICT_FILE"',
+        "  fi",
+        '  printf \'{"resolved": true, "note": "%s"}\' "$NOTE" > "$outcome"',
+        "else",
+        '  printf \'{"resolved": false, "note": "%s"}\' "$NOTE" > "$outcome"',
+        "fi",
+        'if [ -n "$RECORD_DIR" ]; then',
+        '  mkdir -p "$RECORD_DIR"',
+        '  git -C "$worktree" branch --show-current > "$RECORD_DIR/branch"',
+        '  git -C "$worktree" rev-parse --verify MERGE_HEAD > "$RECORD_DIR/mergehead" 2>/dev/null || true',
+        "fi",
+        'exit "$EXIT"',
+        "",
+      ].join("\n"),
+    );
+    const spawned: Record<string, SpawnContext> = {};
+    const spawnOrder: string[] = [];
+    const stub: HarnessCommand = (ctx) => {
+      spawned[ctx.id] = ctx;
+      spawnOrder.push(ctx.id);
+      const b = behaviour[ctx.id] ?? { resolved: false, note: "no behaviour" };
+      const planPath = join(poolDir, `resolver-plan-${ctx.id}.sh`);
+      const quote = (value: string) => JSON.stringify(value);
+      const lines = [
+        "WORKING_BRANCH=main",
+        `RESOLVED=${b.resolved ? "1" : ""}`,
+        `NOTE=${quote(b.note ?? "")}`,
+        `EXIT=${b.exitCode ?? 0}`,
+      ];
+      if (b.conflictFile) lines.push(`CONFLICT_FILE=${quote(b.conflictFile)}`);
+      if (b.resolution) lines.push(`RESOLUTION=${quote(b.resolution)}`);
+      if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
+      writeFileSync(planPath, lines.join("\n") + "\n");
+      return ["bash", stubPath, ctx.outcomePath, planPath, ctx.cwd];
+    };
+    return {
+      harnesses: { "resolver-stub": stub },
+      spawned,
+      spawnOrder,
+    };
+  }
+
+  const resolverConfig: PoolConfig = {
+    ...stubConfig,
+    resolver: "resolver-stub",
+  };
+
+  it("spawns the resolver on a conflict, raises an approval interrupt, and approve commits the merge and continues", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03", "02")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "resolved-by-agent",
+        note: "kept both lines",
+        recordDir: join(poolDir, "res-rec"),
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "02": "done",
+      "03": "done",
+    });
+    expect(run.interrupts).toHaveLength(1);
+    const interrupt = run.interrupts[0];
+    expect(interrupt.ticketId).toBe("02");
+    expect(interrupt.kind).toBe("merge-approval");
+    expect(interrupt.body).toContain("resolver agent resolved");
+    expect(interrupt.body).toContain("kept both lines");
+
+    // The resolver ran in 02's parked worktree on branch pool/02 and left the
+    // resolution staged: the resolution is not yet committed, MERGE_HEAD set.
+    expect(resolver.spawnOrder).toEqual(["02"]);
+    expect(resolver.spawned["02"].cwd).toBe(
+      join(poolDir, ".git", "pool-worktrees", "02"),
+    );
+    expect(readFileSync(join(poolDir, "res-rec", "branch"), "utf8").trim()).toBe(
+      "pool/02",
+    );
+    expect(
+      readFileSync(join(poolDir, "res-rec", "mergehead"), "utf8").trim(),
+    ).toBeTruthy();
+
+    const approved = await run.approve("02");
+    expect(approved.phase).toBe("done");
+    expect(approved.interrupts).toEqual([]);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
+      "resolved-by-agent\n",
+    );
+    expect(approved.final.tickets["03"]).toBe("done");
+    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(
+      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+    ).toBe(false);
+  }, 15000);
+
+  it("reject converts the approval to a manual interrupt carrying the attempt, and resume completes the merge", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "resolved-by-agent",
+        note: "kept both lines",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+
+    const rejected = await run.reject("02", "the resolver dropped a field");
+    expect(rejected.phase).toBe("quiescent");
+    expect(rejected.interrupts).toHaveLength(1);
+    expect(rejected.interrupts[0].kind).toBe("merge-conflict");
+    expect(rejected.interrupts[0].body).toContain("resolver agent attempted");
+    expect(rejected.interrupts[0].body).toContain("kept both lines");
+    expect(rejected.interrupts[0].body).toContain("shared.txt");
+    // The rejection note was appended to the Issue as a durable resume note.
+    expect(
+      readFileSync(join(poolDir, "issues", "02-t.md"), "utf8"),
+    ).toContain("the resolver dropped a field");
+    // The staged resolution was discarded: the branch is back to its own
+    // commits and the working branch still holds 01's content.
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
+    expect(
+      git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).exitCode,
+    ).not.toBe(0);
+
+    // Billy resolves by hand in the main checkout, then resumes.
+    git(["checkout", "--", "issues/02-t.md"]);
+    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    writeFileSync(join(poolDir, "shared.txt"), "manual-resolution\n");
+    git(["add", "shared.txt"]);
+    git(["commit", "-qm", "resolve pool/02 manually"]);
+
+    const resumed = await rejected.resume("02");
+    expect(resumed.phase).toBe("done");
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
+      "manual-resolution\n",
+    );
+  }, 15000);
+
+  it("a resolver that fails takes the manual path with the failure noted", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": { resolved: false, note: "could not reconcile the schema" },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    const interrupt = run.interrupts[0];
+    expect(interrupt.kind).toBe("merge-conflict");
+    expect(interrupt.body).toContain("resolver agent attempted");
+    expect(interrupt.body).toContain("could not reconcile the schema");
+
+    // Manual resolution then resume completes the merge.
+    git(["checkout", "--", "issues/02-t.md"]);
+    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    writeFileSync(join(poolDir, "shared.txt"), "manual\n");
+    git(["add", "shared.txt"]);
+    git(["commit", "-qm", "resolve pool/02"]);
+    const resumed = await run.resume("02");
+    expect(resumed.phase).toBe("done");
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("manual\n");
+  }, 15000);
+
+  it("falls back to the ~/.issue-runner default harness when resolver= is unset", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: stubConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const runnerFile = join(poolDir, "issue-runner");
+    writeFileSync(runnerFile, "harness=resolver-stub\nmodel=resolver-model\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "fallback-resolved",
+        note: "via default",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+      issueRunnerPath: runnerFile,
+    });
+
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+    expect(run.interrupts[0].body).toContain("via default");
+    expect(resolver.spawnOrder).toEqual(["02"]);
+  }, 15000);
+
+  it("fails fast when an explicit resolver names an unknown harness", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: { ...stubConfig, resolver: "does-not-exist" },
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+
+    await expect(
+      runPool({ poolDir, harnesses: rig.harnesses }),
+    ).rejects.toThrow(/resolver names unknown harness 'does-not-exist'/);
+  }, 15000);
+  });
 });

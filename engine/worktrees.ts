@@ -35,6 +35,19 @@ export function gitAvailable(repoRoot: string): boolean {
   return refExists(repoRoot, "HEAD");
 }
 
+export function currentBranch(repoRoot: string): string {
+  const probe = git(repoRoot, ["branch", "--show-current"]);
+  return probe.out || "main";
+}
+
+// Completes an in-progress merge in a worktree: the resolver leaves a staged
+// resolution and a MERGE_HEAD in the worktree, and committing turns it into a
+// merge commit on the ticket's branch, making the working branch an ancestor
+// so the follow-up merge fast-forwards.
+export function commitMerge(worktree: WorktreeInfo): GitProbe {
+  return git(worktree.path, ["commit", "-qm", `merge ${worktree.branch} by resolver`]);
+}
+
 export function branchFor(ticketId: string): string {
   return `pool/${ticketId}`;
 }

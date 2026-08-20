@@ -1,5 +1,36 @@
 import type { Outcome } from "./engine.ts";
 
+export interface ResolverPromptParts {
+  id: string;
+  worktree: string;
+  branch: string;
+  workingBranch: string;
+  files: string[];
+  outcomePath: string;
+}
+
+export function buildResolverPrompt(parts: ResolverPromptParts): string {
+  return [
+    `Resolve the git merge conflict for ticket ${parts.id}.`,
+    "",
+    `You are in the git worktree at ${parts.worktree}, with branch ` +
+      `${parts.branch} checked out. The pool's working branch is ` +
+      parts.workingBranch + ".",
+    "",
+    `To reproduce the conflict, run: git merge ${parts.workingBranch}`,
+    "Then resolve each conflicted file " +
+      `(${parts.files.join(", ") || "see git status"}), stage the resolution ` +
+      "with git add, and DO NOT commit.",
+    "",
+    "When you have staged a resolution, write JSON to " +
+      `${parts.outcomePath}: {"resolved": true, "note": "what you did, in a ` +
+      "sentence or two\"}",
+    "",
+    'If you cannot resolve it, write {"resolved": false, "note": "why"} and exit.',
+    "",
+  ].join("\n");
+}
+
 export interface PromptParts {
   driver: string;
   chain: string[];
