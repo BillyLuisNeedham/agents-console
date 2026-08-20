@@ -402,6 +402,7 @@ drivers_for() {
 # default is set once there, and an Issue only appears here when it differs.
 assign_for() {
   case "$1" in
+    06|07|08|09|10) echo "opencode opencode-go/deepseek-v4-flash" ;;
     *) echo "" ;;
   esac
 }
@@ -414,7 +415,7 @@ assign_for() {
 # own, so delegating a skill never quietly downgrades the work.
 AGENTS='{
   "deepseek": {
-    "description": "General-purpose subagent for reading, searching and mechanical work. On opencode this maps to the deepseek agent, DeepSeek V4 Flash.",
+    "description": "General-purpose subagent for reading, searching and mechanical work. On opencode this maps to the deepseek agent, DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.",
     "prompt": "You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.",
     "model": "deepseek"
   }
@@ -422,6 +423,6 @@ AGENTS='{
 
 # The same roster as plain words. This text is glued into the prompt on every
 # harness, so it is the only part of the roster opencode and cursor ever see.
-ROSTER_TEXT='- deepseek (DeepSeek V4 Flash): general-purpose subagent. Dispatch it for the reading, the searching and the mechanical work. Keep the judgement and the substance of the Issue on your own model.'
+ROSTER_TEXT='- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own model.'
 
 main "$@"

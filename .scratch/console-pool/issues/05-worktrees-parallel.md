@@ -1,4 +1,4 @@
-<!-- state: id=05 blocked-by=01 status=checkpoint -->
+<!-- state: id=05 blocked-by=01 status=ready -->
 
 # 05 — Worktrees and parallel super-steps
 
