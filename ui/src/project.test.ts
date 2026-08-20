@@ -1,429 +1,269 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import type { Thread } from "@langchain/langgraph-sdk";
 import {
-  applyStreamPart,
   clampDrawersHeight,
   DRAWER_MAX_VH,
   DRAWER_MIN_VH,
-  finishRun,
-  initRun,
   edgePath,
-  layoutGraph,
+  isTicketCardId,
   layoutStorageKey,
   mergeLayout,
   nextNodeSelection,
   parseStoredLayout,
-  projectChannels,
+  phaseLabel,
   projectDetail,
   projectLog,
-  projectInterruptForm,
-  projectNodeCards,
-  projectNodeChannels,
-  projectNodeStateSlice,
-  projectNodes,
-  projectResume,
-  projectStartRun,
-  projectThreadSummary,
-  projectTicketCards,
-  projectTicketEdges,
-  projectTopology,
+  projectPool,
+  projectPoolEdges,
+  REVIEW_CARD_ID,
+  START_CARD_ID,
   strokeWidthForZoom,
-  syncRunValues,
-  visibleThreads,
+  ticketCardId,
+  ticketDepth,
   zoomAtCursor,
-  type RunProjection,
+  type PoolSnapshot,
+  type PoolStatus,
+  type PoolTicketState,
 } from "./project";
 
-type Raw = Record<string, unknown>;
-
-function thread(overrides: Partial<Thread<Raw>> = {}): Thread<Raw> {
+function ticket(
+  id: string,
+  overrides: Partial<PoolTicketState> = {},
+): PoolTicketState {
   return {
-    thread_id: "t-1",
-    created_at: "2026-08-16T10:00:00Z",
-    updated_at: "2026-08-16T10:05:00Z",
-    state_updated_at: "2026-08-16T10:05:00Z",
-    metadata: {},
-    status: "idle",
-    values: {},
-    interrupts: {},
+    id,
+    title: `ticket ${id}`,
+    blockedBy: [],
+    status: "ready",
     ...overrides,
   };
 }
 
-describe("projectThreadSummary", () => {
-  it("uses metadata.label and metadata.origin when present", () => {
-    const summary = projectThreadSummary(
-      thread({ metadata: { label: "my run", origin: "ui" } }),
-    );
-    expect(summary.threadId).toBe("t-1");
-    expect(summary.label).toBe("my run");
-    expect(summary.origin).toBe("ui");
+function snapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
+  return {
+    seq: 0,
+    phase: "running",
+    state: {
+      tickets: [],
+      log: [],
+      outcomes: {},
+      interrupts: [],
+      config: {},
+    },
+    ...overrides,
+  };
+}
+
+describe("ticketCardId / isTicketCardId / layoutStorageKey", () => {
+  it("prefixes ticket ids and leaves utility ids alone", () => {
+    expect(ticketCardId("01")).toBe("ticket:01");
+    expect(isTicketCardId("ticket:01")).toBe(true);
+    expect(isTicketCardId(START_CARD_ID)).toBe(false);
+    expect(isTicketCardId(REVIEW_CARD_ID)).toBe(false);
   });
 
-  it("falls back to the thread id and unknown origin", () => {
-    const summary = projectThreadSummary(thread());
-    expect(summary.label).toBe("t-1");
-    expect(summary.origin).toBe("unknown");
-  });
-
-  it("counts pending interrupts across namespaces", () => {
-    const summary = projectThreadSummary(
-      thread({
-        interrupts: {
-          "ns/a": [{ id: "1", value: { kind: "approve-spec" } }],
-          "ns/b": [{ id: "2", value: { kind: "review" } }, { id: "3", value: { kind: "review" } }],
-        },
-      }),
-    );
-    expect(summary.interruptCount).toBe(3);
-  });
-});
-
-describe("visibleThreads", () => {
-  const uiThread = thread({ thread_id: "ui-1", metadata: { origin: "ui" } });
-  const otherThread = thread({ thread_id: "smoke-1", metadata: {} });
-
-  it("defaults to Console-created threads only", () => {
-    const visible = visibleThreads([uiThread, otherThread], false);
-    expect(visible.map((t) => t.thread_id)).toEqual(["ui-1"]);
-  });
-
-  it("shows everything when the toggle is on", () => {
-    const visible = visibleThreads([uiThread, otherThread], true);
-    expect(visible.map((t) => t.thread_id)).toEqual(["ui-1", "smoke-1"]);
+  it("keys stored positions by the card id alone (one pool per server)", () => {
+    expect(layoutStorageKey("ticket:01")).toBe("ticket:01");
+    expect(layoutStorageKey(START_CARD_ID)).toBe(START_CARD_ID);
   });
 });
 
-describe("projectChannels", () => {
-  it("renders known channels in graph order, with tickets structured", () => {
-    const channels = projectChannels({
-      log: ["writeSpec: spec from packet + pool"],
-      specApproved: false,
-      topic: "demo",
-      packetSource: "stub",
-      packet: "packet text",
-      spec: "# Spec",
-      tickets: [
-        { id: "T1", title: "first", blockedBy: [], status: "done" },
-        { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" },
-      ],
-    });
-    expect(channels.map((c) => c.name)).toEqual([
-      "topic",
-      "packetSource",
-      "packet",
-      "spec",
-      "specApproved",
-      "tickets",
+describe("ticketDepth", () => {
+  const tickets = [
+    ticket("A"),
+    ticket("B", { blockedBy: ["A"] }),
+    ticket("C", { blockedBy: ["B"] }),
+    ticket("D", { blockedBy: ["A", "C"] }),
+  ];
+
+  it("is 0 for a leaf and grows with the longest blocker chain", () => {
+    expect(ticketDepth("A", tickets)).toBe(0);
+    expect(ticketDepth("B", tickets)).toBe(1);
+    expect(ticketDepth("C", tickets)).toBe(2);
+    expect(ticketDepth("D", tickets)).toBe(3);
+  });
+
+  it("returns 0 for an unknown ticket", () => {
+    expect(ticketDepth("zzz", tickets)).toBe(0);
+  });
+});
+
+describe("projectPoolEdges", () => {
+  it("draws start, blocked-by, and review edges for a small pool", () => {
+    const tickets = [
+      ticket("A"),
+      ticket("B", { blockedBy: ["A"] }),
+      ticket("C", { blockedBy: ["B"] }),
+    ];
+    const edges = projectPoolEdges(tickets);
+    expect(edges).toEqual([
+      { source: START_CARD_ID, target: "ticket:A" },
+      { source: "ticket:A", target: REVIEW_CARD_ID },
+      { source: "ticket:A", target: "ticket:B" },
+      { source: "ticket:B", target: REVIEW_CARD_ID },
+      { source: "ticket:B", target: "ticket:C" },
+      { source: "ticket:C", target: REVIEW_CARD_ID },
     ]);
-    const tickets = channels.find((c) => c.name === "tickets");
-    expect(tickets?.kind).toBe("tickets");
-    if (tickets?.kind === "tickets") {
-      expect(tickets.tickets).toEqual([
-        { id: "T1", title: "first", blockedBy: [], status: "done" },
-        { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" },
-      ]);
+  });
+
+  it("starts every blockerless ticket and links every blocked-by edge", () => {
+    const tickets = [
+      ticket("A"),
+      ticket("B"),
+      ticket("C", { blockedBy: ["A", "B"] }),
+    ];
+    const edges = projectPoolEdges(tickets);
+    const starts = edges.filter((e) => e.source === START_CARD_ID);
+    expect(starts.map((e) => e.target).sort()).toEqual(["ticket:A", "ticket:B"]);
+    expect(edges).toContainEqual({ source: "ticket:A", target: "ticket:C" });
+    expect(edges).toContainEqual({ source: "ticket:B", target: "ticket:C" });
+  });
+});
+
+describe("projectPool", () => {
+  it("renders start, each ticket, and review as cards with statuses and edges", () => {
+    const snap = snapshot({
+      seq: 3,
+      phase: "quiescent",
+      state: {
+        tickets: [
+          ticket("A", { status: "done" }),
+          ticket("B", { status: "in-progress", blockedBy: ["A"] }),
+          ticket("C", { status: "checkpoint", blockedBy: ["B"] }),
+          ticket("D", { status: "ready", blockedBy: ["B"] }),
+        ],
+        log: ["super-step 1: A"],
+        outcomes: { A: { summary: "done A", commitSha: "abc" } },
+        interrupts: [{ ticketId: "C", kind: "checkpoint", body: "brief" }],
+        config: {},
+      },
+    });
+    const view = projectPool(snap);
+    expect(view.seq).toBe(3);
+    expect(view.phase).toBe("quiescent");
+    expect(view.cards.map((c) => c.id)).toEqual([
+      START_CARD_ID,
+      "ticket:A",
+      "ticket:B",
+      "ticket:C",
+      "ticket:D",
+      REVIEW_CARD_ID,
+    ]);
+    const a = view.cards.find((c) => c.id === "ticket:A");
+    expect(a && a.kind === "ticket" ? a.status : null).toBe("done");
+    const b = view.cards.find((c) => c.id === "ticket:B");
+    expect(b && b.kind === "ticket" ? b.status : null).toBe("in-progress");
+    const c = view.cards.find((c) => c.id === "ticket:C");
+    expect(c && c.kind === "ticket" ? c.status : null).toBe("checkpoint");
+    expect(c && c.kind === "ticket" ? c.interrupt?.kind : null).toBe("checkpoint");
+    const d = view.cards.find((c) => c.id === "ticket:D");
+    expect(d && d.kind === "ticket" ? d.status : null).toBe("ready");
+    expect(view.log).toEqual(["super-step 1: A"]);
+  });
+
+  it("attaches the outcome to a done ticket", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "done" })],
+        outcomes: { A: { summary: "did the thing", commitSha: "sha1" } },
+        interrupts: [],
+        log: [],
+        config: {},
+      },
+    });
+    const view = projectPool(snap);
+    const a = view.cards.find((c) => c.id === "ticket:A");
+    expect(a && a.kind === "ticket" ? a.outcome : null).toEqual({
+      summary: "did the thing",
+      commitSha: "sha1",
+    });
+  });
+
+  it("stays empty for an empty pool", () => {
+    const view = projectPool(snapshot());
+    expect(view.cards.map((c) => c.id)).toEqual([START_CARD_ID, REVIEW_CARD_ID]);
+    expect(view.edges).toEqual([]);
+  });
+});
+
+describe("projectDetail", () => {
+  it("projects a ticket's status, blockers, outcome and interrupt", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "checkpoint", blockedBy: ["X"] })],
+        outcomes: {},
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "the brief" }],
+        log: [],
+        config: {},
+      },
+    });
+    const detail = projectDetail(snap, "ticket:A");
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.status).toBe("checkpoint");
+      expect(detail.blockedBy).toEqual(["X"]);
+      expect(detail.interrupt?.body).toBe("the brief");
     }
   });
 
-  it("excludes the log channel (it lives in the drawer)", () => {
-    const channels = projectChannels({ topic: "x", log: ["a", "b"] });
-    expect(channels.some((c) => c.name === "log")).toBe(false);
+  it("projects a utility card", () => {
+    const detail = projectDetail(snapshot(), START_CARD_ID);
+    expect(detail).toEqual({ kind: "utility", id: START_CARD_ID, label: "start" });
   });
 
-  it("appends unknown channels as json after the known ones", () => {
-    const channels = projectChannels({ topic: "x", extra: { nested: 1 } });
-    expect(channels.map((c) => c.name)).toEqual(["topic", "extra"]);
-    expect(channels[1].kind).toBe("json");
+  it("returns null for a card not in the pool", () => {
+    expect(projectDetail(snapshot(), "ticket:zzz")).toBeNull();
   });
+});
 
-  it("returns no channels for missing or non-object values", () => {
-    expect(projectChannels(null)).toEqual([]);
-    expect(projectChannels([{ topic: "x" }])).toEqual([]);
-  });
-
-  it("renders booleans and numbers as text", () => {
-    const channels = projectChannels({ specApproved: true });
-    expect(channels[0]).toEqual({ name: "specApproved", kind: "text", text: "true" });
-  });
-
-  it("follows the latest values snapshot so the inspector updates per super-step", () => {
-    const first = applyStreamPart(initRun(), {
-      event: "values",
-      data: { topic: "demo", packet: "p1", log: ["a"] },
-    });
-    expect(projectChannels(first.values)).toEqual([
-      { name: "topic", kind: "text", text: "demo" },
-      { name: "packet", kind: "pre", text: "p1" },
-    ]);
-
-    const second = applyStreamPart(first, {
-      event: "values",
-      data: {
-        topic: "demo",
-        packet: "p1",
-        spec: "# Spec",
-        specApproved: false,
-        tickets: [{ id: "T1", title: "first", blockedBy: [], status: "pending" }],
-        log: ["a", "b"],
-      },
-    });
-    expect(projectChannels(second.values).map((c) => c.name)).toEqual([
-      "topic",
-      "packet",
-      "spec",
-      "specApproved",
-      "tickets",
-    ]);
-    expect(projectNodeChannels("writeSpec", second.values).map((c) => c.name)).toEqual(["spec"]);
+describe("phaseLabel", () => {
+  it("labels the phases", () => {
+    expect(phaseLabel("running")).toBe("running");
+    expect(phaseLabel("quiescent")).toBe("waiting on you");
+    expect(phaseLabel("done")).toBe("done");
+    expect(phaseLabel("stalled")).toBe("stalled");
   });
 });
 
 describe("projectLog", () => {
-  it("extracts string log lines in order", () => {
-    expect(projectLog({ log: ["a", "b"] })).toEqual(["a", "b"]);
-  });
-
-  it("drops non-string entries", () => {
+  it("extracts string log lines and drops the rest", () => {
     expect(projectLog({ log: ["a", 42, "b"] })).toEqual(["a", "b"]);
   });
 
-  it("is empty when there is no log", () => {
+  it("is empty without a log", () => {
     expect(projectLog({})).toEqual([]);
     expect(projectLog(null)).toEqual([]);
   });
 });
 
-function play(run: RunProjection, parts: { event: string; data: unknown }[]): RunProjection {
-  return parts.reduce(applyStreamPart, run);
-}
-
-describe("applyStreamPart", () => {
-  it("seeds from an existing snapshot and replaces it on each values part", () => {
-    let run = initRun({ topic: "old", log: ["a"] });
-    run = applyStreamPart(run, { event: "values", data: { topic: "new", log: ["a", "b"] } });
-    expect(projectChannels(run.values).map((c) => c.name)).toContain("topic");
-    expect(projectLog(run.values)).toEqual(["a", "b"]);
-    expect(run.streaming).toBe(false);
-  });
-
-  it("tracks normal super-step progression through updates parts", () => {
-    const run = play(initRun(), [
-      { event: "values", data: { topic: "demo" } },
-      { event: "updates", data: { writeSpec: { spec: "s" } } },
-      { event: "values", data: { topic: "demo", spec: "s" } },
-      { event: "updates", data: { approveSpec: { specApproved: true } } },
-      { event: "updates", data: { schedule: {} } },
-      { event: "updates", data: { implementTicket: { tickets: [] } } },
-    ]);
-    expect(projectNodes(run)).toEqual([
-      { node: "writeSpec", status: "ran" },
-      { node: "approveSpec", status: "ran" },
-      { node: "schedule", status: "ran" },
-      { node: "implementTicket", status: "active" },
-    ]);
-  });
-
-  it("does not duplicate a node when a fan-out runs it across super-steps", () => {
-    const run = play(initRun(), [
-      { event: "updates", data: { schedule: {} } },
-      { event: "updates", data: { implementTicket: {} } },
-      { event: "updates", data: { implementTicket: {} } },
-    ]);
-    expect(run.visitedNodes).toEqual(["schedule", "implementTicket"]);
-    expect(run.activeNodes).toEqual(["implementTicket"]);
-  });
-
-  it("keeps log append ordering from values snapshots; updates never append", () => {
-    const run = play(initRun(), [
-      { event: "values", data: { log: ["writeSpec: spec from packet + pool"] } },
-      { event: "updates", data: { approveSpec: { log: ["spec approved"] } } },
-      {
-        event: "values",
-        data: { log: ["writeSpec: spec from packet + pool", "spec approved"] },
-      },
-      { event: "updates", data: { schedule: { log: ["schedule: T1, T3"] } } },
-      {
-        event: "values",
-        data: {
-          log: ["writeSpec: spec from packet + pool", "spec approved", "schedule: T1, T3"],
-        },
-      },
-    ]);
-    expect(projectLog(run.values)).toEqual([
-      "writeSpec: spec from packet + pool",
-      "spec approved",
-      "schedule: T1, T3",
-    ]);
-  });
-
-  it("keeps the last full snapshot when a values part carries only interrupt bookkeeping", () => {
-    const run = play(initRun(), [
-      { event: "values", data: { topic: "demo", spec: "s" } },
-      { event: "values", data: { __interrupt__: [{ id: "x", value: {} }] } },
-    ]);
-    expect(run.values).toEqual({ topic: "demo", spec: "s" });
-  });
-
-  it("ignores non-object updates payloads", () => {
-    const run = applyStreamPart(initRun(), { event: "updates", data: null });
-    expect(run.activeNodes).toEqual([]);
-    expect(run.visitedNodes).toEqual([]);
-  });
-
-  it("does not treat internal keys like __interrupt__ as nodes", () => {
-    const run = play(initRun(), [
-      { event: "updates", data: { approveSpec: {} } },
-      { event: "updates", data: { __interrupt__: [{ id: "x", value: {} }] } },
-    ]);
-    expect(run.visitedNodes).toEqual(["approveSpec"]);
-    expect(run.activeNodes).toEqual(["approveSpec"]);
-  });
-
-  it("maps an interrupt-only updates part onto the node that raised it", () => {
-    const run = play(initRun(), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
-    ]);
-    expect(projectNodes(run)).toEqual([
-      { node: "writeSpec", status: "ran" },
-      { node: "approveSpec", status: "active" },
-    ]);
-  });
-
-  it("hides internal __-prefixed channels from the channel list", () => {
-    const channels = projectChannels({ topic: "x", __interrupt__: [{ id: "x" }] });
-    expect(channels.map((c) => c.name)).toEqual(["topic"]);
-  });
-
-  it("records error parts and ignores unknown events", () => {
-    let run = applyStreamPart(initRun(), { event: "error", data: { message: "boom" } });
-    expect(run.streamError).toBe("boom");
-    run = applyStreamPart(run, { event: "messages", data: ["junk"] });
-    expect(run.streamError).toBe("boom");
-  });
-});
-
-describe("projectStartRun", () => {
-  it("rejects a blank topic", () => {
-    expect(projectStartRun({ topic: "", ticketDir: "tickets/", packet: "" })).toBeNull();
-    expect(projectStartRun({ topic: "   ", ticketDir: "tickets/", packet: "" })).toBeNull();
-  });
-
-  it("trims the topic and puts the ticket pool under configurable.ticketDir", () => {
-    const request = projectStartRun({
-      topic: "  demo run  ",
-      ticketDir: "mock-tickets-deadlock/",
-      packet: "",
-    });
-    expect(request?.input.topic).toBe("demo run");
-    expect(request?.config).toEqual({
-      configurable: { ticketDir: "mock-tickets-deadlock/" },
-    });
-  });
-
-  it("includes trimmed packet text when given", () => {
-    const request = projectStartRun({
-      topic: "demo",
-      ticketDir: "tickets/",
-      packet: "  # Packet\n\nreal decisions  ",
-    });
-    expect(request?.input.packet).toBe("# Packet\n\nreal decisions");
-  });
-
-  it("omits the packet key when blank, so the graph falls back to the demo packet", () => {
-    for (const packet of ["", "   \n  "]) {
-      const request = projectStartRun({ topic: "demo", ticketDir: "tickets/", packet });
-      expect(request).not.toBeNull();
-      expect("packet" in (request?.input ?? {})).toBe(false);
-    }
-  });
-});
-
-describe("syncRunValues", () => {
-  it("replaces the snapshot but keeps node tracking", () => {
-    let run = play(initRun(), [{ event: "updates", data: { writeSpec: {} } }]);
-    run = syncRunValues(run, { topic: "refreshed" });
-    expect(run.values).toEqual({ topic: "refreshed" });
-    expect(run.visitedNodes).toEqual(["writeSpec"]);
-  });
-
-  it("keeps the previous snapshot when the new one is not an object", () => {
-    const run = syncRunValues(initRun({ topic: "keep" }), null);
-    expect(run.values).toEqual({ topic: "keep" });
-  });
-});
-
-describe("projectTopology", () => {
-  it("maps a getGraph payload onto nodes and edges", () => {
-    const topology = projectTopology({
-      nodes: [
-        { id: "__start__" },
-        { id: "writeSpec", name: "writeSpec" },
-        { id: 7 },
-      ],
-      edges: [
-        { source: "__start__", target: "writeSpec", conditional: false },
-        { source: "writeSpec", target: "approveSpec", conditional: true, data: "ok" },
-      ],
-    });
-    expect(topology.nodes).toEqual([
-      { id: "__start__" },
-      { id: "writeSpec", name: "writeSpec" },
-      { id: "7" },
-    ]);
-    expect(topology.edges).toEqual([
-      { source: "__start__", target: "writeSpec", conditional: false },
-      { source: "writeSpec", target: "approveSpec", conditional: true, data: "ok" },
-    ]);
-  });
-
-  it("returns an empty topology for missing or malformed payloads", () => {
-    expect(projectTopology(null)).toEqual({ nodes: [], edges: [] });
-    expect(projectTopology({ nodes: "nope" })).toEqual({ nodes: [], edges: [] });
-    expect(projectTopology({ nodes: [{}, { id: "ok" }], edges: [{ source: "a" }] })).toEqual({
-      nodes: [{ id: "ok" }],
-      edges: [],
-    });
-  });
-});
-
-describe("layoutGraph", () => {
-  it("places the known spine and parks unknown nodes in a fallback column", () => {
-    const positions = layoutGraph([
-      { id: "__start__" },
-      { id: "writeSpec" },
-      { id: "deadlockGate" },
-      { id: "mystery" },
-    ]);
-    expect(positions["__start__"]).toEqual({ x: 300, y: 16 });
-    expect(positions.writeSpec).toEqual({ x: 300, y: 196 });
-    expect(positions.deadlockGate).toEqual({ x: 620, y: 596 });
-    expect(positions.mystery).toEqual({ x: 640, y: 16 });
+describe("layout", () => {
+  it("places leaves above their dependents and review at the bottom", () => {
+    const tickets = [ticket("A"), ticket("B", { blockedBy: ["A"] })];
+    const view = projectPool(snapshot({ state: { tickets, log: [], outcomes: {}, interrupts: [], config: {} } }));
+    const pos = (id: string) => view.cards.find((c) => c.id === id);
+    expect(pos("ticket:A")?.y).toBeLessThan(pos("ticket:B")?.y ?? 0);
+    expect(pos("ticket:B")?.y).toBeLessThan(pos(REVIEW_CARD_ID)?.y ?? 0);
+    expect(pos(START_CARD_ID)?.y).toBeLessThan(pos("ticket:A")?.y ?? 0);
   });
 });
 
 describe("mergeLayout", () => {
   const defaults = {
-    writeSpec: { x: 300, y: 196 },
-    approveSpec: { x: 300, y: 376 },
+    "ticket:A": { x: 100, y: 200 },
+    "ticket:B": { x: 300, y: 400 },
   };
 
   it("overrides defaults with stored positions and drops unknown ids", () => {
     expect(
-      mergeLayout(defaults, {
-        writeSpec: { x: 10, y: 20 },
-        leftover: { x: 1, y: 2 },
-      }),
+      mergeLayout(defaults, { "ticket:A": { x: 1, y: 2 }, leftover: { x: 3, y: 4 } }),
     ).toEqual({
-      writeSpec: { x: 10, y: 20 },
-      approveSpec: { x: 300, y: 376 },
+      "ticket:A": { x: 1, y: 2 },
+      "ticket:B": { x: 300, y: 400 },
     });
   });
 
-  it("returns the defaults when nothing is stored", () => {
+  it("returns defaults when nothing is stored", () => {
     expect(mergeLayout(defaults, {})).toEqual(defaults);
   });
 });
@@ -432,13 +272,11 @@ describe("parseStoredLayout", () => {
   it("keeps finite x/y pairs and drops anything else", () => {
     expect(
       parseStoredLayout({
-        writeSpec: { x: 10, y: 20 },
-        approveSpec: { x: "no", y: 1 },
-        schedule: { x: 1 },
-        review: null,
-        implementTicket: { x: Number.NaN, y: 0 },
+        "ticket:A": { x: 10, y: 20 },
+        "ticket:B": { x: "no", y: 1 },
+        START: { x: 1 },
       }),
-    ).toEqual({ writeSpec: { x: 10, y: 20 } });
+    ).toEqual({ "ticket:A": { x: 10, y: 20 } });
   });
 
   it("returns empty for non-objects", () => {
@@ -500,490 +338,21 @@ describe("strokeWidthForZoom", () => {
   });
 });
 
-describe("projectNodeChannels", () => {
-  const values = {
-    topic: "demo",
-    packetSource: "stub",
-    packet: "packet text",
-    spec: "# Spec",
-    specApproved: false,
-    tickets: [
-      { id: "T1", title: "first", blockedBy: [], status: "done" },
-      { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" },
-      { id: "T3", title: "third", blockedBy: [], status: "running" },
-    ],
-    log: ["writeSpec: drafted"],
-  };
-
-  it("shows only the spec on approveSpec", () => {
-    expect(projectNodeChannels("approveSpec", values).map((c) => c.name)).toEqual(["spec"]);
+describe("clampDrawersHeight", () => {
+  it("clamps below the minimum and above the maximum", () => {
+    expect(clampDrawersHeight(0)).toBe(DRAWER_MIN_VH);
+    expect(clampDrawersHeight(100)).toBe(DRAWER_MAX_VH);
   });
 
-  it("shows only pending tickets on deadlockGate", () => {
-    const channels = projectNodeChannels("deadlockGate", values);
-    expect(channels).toHaveLength(1);
-    expect(channels[0]).toEqual({
-      name: "tickets",
-      kind: "tickets",
-      tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
-    });
-  });
-
-  it("shows the ticket list on review", () => {
-    const channels = projectNodeChannels("review", values);
-    expect(channels.map((c) => c.name)).toEqual(["tickets"]);
-    if (channels[0]?.kind === "tickets") {
-      expect(channels[0].tickets.map((t) => t.id)).toEqual(["T1", "T2", "T3"]);
-    }
-  });
-
-  it("does not leak the log or unrelated channels onto a card", () => {
-    const names = projectNodeChannels("writeSpec", values).map((c) => c.name);
-    expect(names).toEqual(["spec"]);
-    expect(names).not.toContain("log");
-    expect(names).not.toContain("topic");
-  });
-});
-
-describe("projectNodeCards", () => {
-  const topology = projectTopology({
-    nodes: [
-      { id: "__start__" },
-      { id: "writeSpec" },
-      { id: "approveSpec" },
-      { id: "schedule" },
-    ],
-    edges: [
-      { source: "__start__", target: "writeSpec" },
-      { source: "writeSpec", target: "approveSpec" },
-      { source: "approveSpec", target: "schedule", conditional: true },
-      { source: "approveSpec", target: "__end__", conditional: true },
-    ],
-  });
-
-  it("renders every topology node, idle when no run has started", () => {
-    const cards = projectNodeCards(topology, null);
-    expect(cards.map((c) => c.id)).toEqual(["__start__", "writeSpec", "approveSpec", "schedule"]);
-    expect(cards.every((c) => c.status === "idle")).toBe(true);
-    expect(cards[0]?.name).toBe("START");
-  });
-
-  it("marks the latest updates node active and its unvisited targets next", () => {
-    const run = play(initRun({ spec: "# Spec" }), [
-      { event: "updates", data: { writeSpec: { spec: "# Spec" } } },
-    ]);
-    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
-    expect(byId.writeSpec?.status).toBe("active");
-    expect(byId.approveSpec?.status).toBe("next");
-    expect(byId.__start__?.status).toBe("idle");
-    expect(byId.schedule?.status).toBe("idle");
-    expect(byId.approveSpec?.channels.map((c) => c.name)).toEqual(["spec"]);
-  });
-
-  it("marks earlier super-steps as ran once a later node is active", () => {
-    const run = play(initRun(), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { approveSpec: {} } },
-    ]);
-    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
-    expect(byId.writeSpec?.status).toBe("ran");
-    expect(byId.approveSpec?.status).toBe("active");
-    expect(byId.schedule?.status).toBe("idle");
-  });
-
-  it("does not treat expanded conditional edges as next", () => {
-    const run = play(initRun(), [{ event: "updates", data: { approveSpec: {} } }]);
-    const byId = Object.fromEntries(projectNodeCards(topology, run).map((c) => [c.id, c]));
-    expect(byId.approveSpec?.status).toBe("active");
-    expect(byId.schedule?.status).toBe("idle");
-    expect(byId.writeSpec?.status).toBe("idle");
-  });
-
-  it("uses the interrupt payload's pending list on deadlockGate when values disagree", () => {
-    const cards = projectNodeCards(
-      { nodes: [{ id: "deadlockGate" }], edges: [] },
-      initRun({
-        tickets: [
-          { id: "T1", title: "first", blockedBy: [], status: "pending" },
-          { id: "T2", title: "second", blockedBy: ["T1"], status: "done" },
-        ],
-      }),
-      {
-        ns: [{ value: { kind: "deadlock", hint: "reload", pending: ["T2"] } }],
-      },
-    );
-    const tickets = cards[0]?.channels.find((channel) => channel.kind === "tickets");
-    expect(tickets?.kind === "tickets" ? tickets.tickets.map((t) => t.id) : []).toEqual(["T2"]);
-  });
-
-  it("puts the deadlock hint on the deadlockGate card", () => {
-    const cards = projectNodeCards(
-      { nodes: [{ id: "deadlockGate" }], edges: [] },
-      initRun({
-        tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
-      }),
-      {
-        ns: [{ value: { kind: "deadlock", hint: "reload the pool or abort", pending: ["T2"] } }],
-      },
-    );
-    expect(cards[0]?.channels).toEqual([
-      {
-        name: "tickets",
-        kind: "tickets",
-        tickets: [{ id: "T2", title: "second", blockedBy: ["T1"], status: "pending" }],
-      },
-      { name: "hint", kind: "text", text: "reload the pool or abort" },
-    ]);
-  });
-});
-
-const T1 = { id: "T1", title: "first", blockedBy: [], status: "done" as const };
-const T2 = { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" as const };
-
-describe("projectInterruptForm", () => {
-  it("projects an approve-spec payload onto the approveSpec form", () => {
-    const form = projectInterruptForm(
-      {
-        graph: [
-          {
-            value: {
-              kind: "approve-spec",
-              spec: "# Spec",
-              tickets: [T1, T2],
-            },
-          },
-        ],
-      },
-      "approveSpec",
-    );
-    expect(form).toEqual({
-      kind: "approve-spec",
-      spec: "# Spec",
-      tickets: [T1, T2],
-      raw: { kind: "approve-spec", spec: "# Spec", tickets: [T1, T2] },
-    });
-  });
-
-  it("projects a deadlock payload onto the deadlockGate form", () => {
-    const form = projectInterruptForm(
-      {
-        ns: [
-          {
-            value: {
-              kind: "deadlock",
-              pending: ["T2"],
-              hint: "no ticket can start; resume with reload to re-read the pool, or abort",
-            },
-          },
-        ],
-      },
-      "deadlockGate",
-    );
-    expect(form).toEqual({
-      kind: "deadlock",
-      pending: ["T2"],
-      hint: "no ticket can start; resume with reload to re-read the pool, or abort",
-      raw: {
-        kind: "deadlock",
-        pending: ["T2"],
-        hint: "no ticket can start; resume with reload to re-read the pool, or abort",
-      },
-    });
-  });
-
-  it("projects a review payload onto the review form with ticket ids for retry", () => {
-    const tickets = [
-      { id: "T1", title: "first", blockedBy: [], status: "done" as const },
-      { id: "T3", title: "third", blockedBy: [], status: "done" as const },
-    ];
-    const form = projectInterruptForm({ graph: [{ value: { kind: "review", tickets } }] }, "review");
-    expect(form?.kind).toBe("review");
-    if (form?.kind === "review") {
-      expect(form.tickets.map((t) => t.id)).toEqual(["T1", "T3"]);
-    }
-  });
-
-  it("returns null when the node does not own a pending interrupt", () => {
-    expect(projectInterruptForm({ graph: [{ value: { kind: "review", tickets: [] } }] }, "approveSpec")).toBeNull();
-    expect(projectInterruptForm({}, "review")).toBeNull();
-  });
-});
-
-describe("projectResume", () => {
-  it("wraps reject as the Command resume that returns the run to writeSpec", () => {
-    expect(projectResume({ action: "reject" })).toEqual({
-      command: { resume: { action: "reject" } },
-    });
-  });
-
-  it("wraps review retry with the chosen ticket ids", () => {
-    expect(projectResume({ action: "retry", ids: ["T1", "T3"] })).toEqual({
-      command: { resume: { action: "retry", ids: ["T1", "T3"] } },
-    });
-  });
-});
-
-describe("projectNodeCards interrupt status", () => {
-  it("marks the owning card interrupted and attaches the form", () => {
-    const cards = projectNodeCards(
-      { nodes: [{ id: "approveSpec" }, { id: "writeSpec" }], edges: [] },
-      play(initRun({ spec: "# Spec" }), [
-        { event: "updates", data: { writeSpec: {} } },
-        { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
-      ]),
-      {
-        graph: [{ value: { kind: "approve-spec", spec: "# Spec", tickets: [T1] } }],
-      },
-    );
-    const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
-    expect(byId.approveSpec?.status).toBe("interrupted");
-    expect(byId.approveSpec?.interrupt?.kind).toBe("approve-spec");
-    expect(byId.writeSpec?.status).toBe("ran");
-    expect(byId.writeSpec?.interrupt).toBeNull();
-  });
-
-  it("after reject, a writeSpec updates part makes writeSpec active again", () => {
-    const run = play(initRun(), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
-      { event: "updates", data: { writeSpec: { spec: "rewritten" } } },
-    ]);
-    expect(projectNodes(run)).toEqual([
-      { node: "writeSpec", status: "active" },
-      { node: "approveSpec", status: "ran" },
-    ]);
-  });
-});
-
-describe("finishRun", () => {
-  it("clears the active highlight so a finished run is not left running", () => {
-    const run = finishRun(
-      play(initRun(), [{ event: "updates", data: { review: {} } }]),
-    );
-    expect(run.streaming).toBe(false);
-    expect(run.activeNodes).toEqual([]);
-    expect(run.visitedNodes).toEqual(["review"]);
-    const byId = Object.fromEntries(
-      projectNodeCards(
-        { nodes: [{ id: "review" }, { id: "__end__" }], edges: [{ source: "review", target: "__end__" }] },
-        run,
-      ).map((c) => [c.id, c]),
-    );
-    expect(byId.review?.status).toBe("ran");
-    expect(byId.__end__?.status).toBe("idle");
-  });
-});
-
-describe("layoutStorageKey", () => {
-  it("scopes ticket cards to the thread and leaves graph nodes global", () => {
-    expect(layoutStorageKey("writeSpec", "thread-a")).toBe("writeSpec");
-    expect(layoutStorageKey("ticket:T1", "thread-a")).toBe("thread-a:ticket:T1");
-    expect(layoutStorageKey("ticket:T1", "thread-b")).toBe("thread-b:ticket:T1");
-    expect(layoutStorageKey("ticket:T1", null)).toBe("ticket:T1");
+  it("passes values inside the range through unchanged", () => {
+    expect(clampDrawersHeight(32)).toBe(32);
   });
 });
 
 describe("nextNodeSelection", () => {
-  it("selects a node when nothing is selected", () => {
-    expect(nextNodeSelection(null, "writeSpec")).toBe("writeSpec");
-  });
-
-  it("swaps to a different node", () => {
-    expect(nextNodeSelection("writeSpec", "approveSpec")).toBe("approveSpec");
-  });
-
-  it("clears when the selected node is clicked again", () => {
-    expect(nextNodeSelection("writeSpec", "writeSpec")).toBeNull();
-  });
-});
-
-describe("clampDrawersHeight", () => {
-  it("clamps below the minimum to the floor", () => {
-    expect(clampDrawersHeight(0)).toBe(DRAWER_MIN_VH);
-    expect(clampDrawersHeight(-12)).toBe(DRAWER_MIN_VH);
-    expect(clampDrawersHeight(14.99)).toBe(DRAWER_MIN_VH);
-  });
-
-  it("clamps above the maximum to the ceiling", () => {
-    expect(clampDrawersHeight(100)).toBe(DRAWER_MAX_VH);
-    expect(clampDrawersHeight(80.01)).toBe(DRAWER_MAX_VH);
-    expect(clampDrawersHeight(Number.POSITIVE_INFINITY)).toBe(DRAWER_MAX_VH);
-  });
-
-  it("passes values inside the range through unchanged", () => {
-    expect(clampDrawersHeight(15)).toBe(15);
-    expect(clampDrawersHeight(32)).toBe(32);
-    expect(clampDrawersHeight(80)).toBe(80);
-  });
-});
-
-describe("projectTicketCards", () => {
-  const t1 = { id: "T1", title: "first", blockedBy: [] as string[], status: "running" as const };
-  const t2 = { id: "T2", title: "second", blockedBy: ["T1"], status: "pending" as const };
-  const t3 = { id: "T3", title: "third", blockedBy: [] as string[], status: "running" as const };
-
-  it("spawns one card per ticket beside implementTicket with a schedule edge", () => {
-    const cards = projectTicketCards(initRun({ tickets: [t1, t2, t3] }));
-    expect(cards.map((c) => c.ticketId)).toEqual(["T1", "T2", "T3"]);
-    expect(cards.map((c) => c.id)).toEqual(["ticket:T1", "ticket:T2", "ticket:T3"]);
-    expect(cards.map((c) => c.x)).toEqual([640, 640, 640]);
-    expect(cards.map((c) => c.y)).toEqual([736, 896, 1056]);
-    expect(projectTicketEdges(cards)).toEqual([
-      { source: "schedule", target: "ticket:T1" },
-      { source: "schedule", target: "ticket:T2" },
-      { source: "schedule", target: "ticket:T3" },
-    ]);
-  });
-
-  it("tracks ticket status pending → running → done through values parts", () => {
-    const ticket = (status: "pending" | "running" | "done") => ({
-      id: "T1",
-      title: "first",
-      blockedBy: [] as string[],
-      status,
-    });
-    let run = initRun({ tickets: [ticket("pending")] });
-    expect(projectTicketCards(run)[0]?.status).toBe("pending");
-    run = applyStreamPart(run, { event: "values", data: { tickets: [ticket("running")] } });
-    expect(projectTicketCards(run)[0]?.status).toBe("running");
-    run = applyStreamPart(run, { event: "values", data: { tickets: [ticket("done")] } });
-    expect(projectTicketCards(run)[0]?.status).toBe("done");
-  });
-
-  it("keeps blockedBy on a pending card", () => {
-    const cards = projectTicketCards(initRun({ tickets: [t2] }));
-    expect(cards[0]?.blockedBy).toEqual(["T1"]);
-    expect(cards[0]?.status).toBe("pending");
-  });
-
-  it("keeps done cards in the projection so they stay on the canvas", () => {
-    const cards = projectTicketCards(
-      initRun({
-        tickets: [
-          { id: "T1", title: "first", blockedBy: [], status: "done" },
-          { id: "T3", title: "third", blockedBy: [], status: "done" },
-        ],
-      }),
-    );
-    expect(cards.map((c) => c.ticketId)).toEqual(["T1", "T3"]);
-    expect(cards.every((c) => c.status === "done")).toBe(true);
-  });
-
-  it("returns no cards when there is no run or no tickets", () => {
-    expect(projectTicketCards(null)).toEqual([]);
-    expect(projectTicketCards(initRun())).toEqual([]);
-    expect(projectTicketEdges([])).toEqual([]);
-  });
-});
-
-describe("projectNodeStateSlice", () => {
-  const values = {
-    topic: "demo",
-    packetSource: "stub",
-    packet: "packet text",
-    spec: "# Spec",
-    specApproved: false,
-    tickets: [T1, T2],
-    log: ["writeSpec: drafted"],
-  };
-
-  it("keeps only the channels the node owns, as raw values", () => {
-    expect(projectNodeStateSlice("writeSpec", values)).toEqual({ spec: "# Spec" });
-    expect(projectNodeStateSlice("schedule", values)).toEqual({ tickets: [T1, T2] });
-  });
-
-  it("returns an empty slice for a node with no channels and for missing values", () => {
-    expect(projectNodeStateSlice("review", null)).toEqual({});
-    expect(projectNodeStateSlice("__end__", values)).toEqual({});
-  });
-});
-
-describe("projectDetail", () => {
-  const topology = projectTopology({
-    nodes: [
-      { id: "__start__" },
-      { id: "writeSpec" },
-      { id: "approveSpec" },
-      { id: "schedule" },
-    ],
-    edges: [
-      { source: "__start__", target: "writeSpec" },
-      { source: "writeSpec", target: "approveSpec" },
-      { source: "approveSpec", target: "schedule", conditional: true },
-    ],
-  });
-
-  const values = {
-    topic: "demo",
-    packetSource: "stub",
-    packet: "packet text",
-    spec: "# Spec\nline two",
-    specApproved: false,
-    tickets: [T1, T2],
-    log: ["writeSpec: drafted"],
-  };
-
-  it("returns null for a node not in the topology", () => {
-    expect(projectDetail("missing", topology, initRun(values))).toBeNull();
-  });
-
-  it("projects name, status, full channels and the raw state slice for an active node", () => {
-    const run = play(initRun(values), [{ event: "updates", data: { writeSpec: {} } }]);
-    const detail = projectDetail("writeSpec", topology, run);
-    expect(detail).not.toBeNull();
-    expect(detail?.name).toBe("writeSpec");
-    expect(detail?.status).toBe("active");
-    expect(detail?.channels).toEqual([{ name: "spec", kind: "pre", text: "# Spec\nline two" }]);
-    expect(detail?.stateSlice).toEqual({ spec: "# Spec\nline two" });
-    expect(detail?.interrupt).toBeNull();
-  });
-
-  it("marks the unvisited target of the active node next", () => {
-    const run = play(initRun(values), [{ event: "updates", data: { writeSpec: {} } }]);
-    expect(projectDetail("approveSpec", topology, run)?.status).toBe("next");
-  });
-
-  it("marks an earlier node ran once a later node is active", () => {
-    const run = play(initRun(values), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { approveSpec: {} } },
-    ]);
-    expect(projectDetail("writeSpec", topology, run)?.status).toBe("ran");
-    expect(projectDetail("approveSpec", topology, run)?.status).toBe("active");
-  });
-
-  it("carries the full channels and the interrupt form for an interrupted node", () => {
-    const run = play(initRun(values), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { __interrupt__: [{ value: { kind: "approve-spec" } }] } },
-    ]);
-    const detail = projectDetail(
-      "approveSpec",
-      topology,
-      run,
-      {
-        graph: [{ value: { kind: "approve-spec", spec: "# Spec\nline two", tickets: [T1, T2] } }],
-      },
-    );
-    expect(detail?.status).toBe("interrupted");
-    expect(detail?.interrupt?.kind).toBe("approve-spec");
-    expect(detail?.channels).toEqual([{ name: "spec", kind: "pre", text: "# Spec\nline two" }]);
-    expect(detail?.stateSlice).toEqual({ spec: "# Spec\nline two" });
-  });
-
-  it("projects the tickets channel and its raw slice on schedule", () => {
-    const run = play(initRun(values), [
-      { event: "updates", data: { writeSpec: {} } },
-      { event: "updates", data: { approveSpec: {} } },
-      { event: "updates", data: { schedule: {} } },
-    ]);
-    const detail = projectDetail("schedule", topology, run);
-    expect(detail?.status).toBe("active");
-    const tickets = detail?.channels.find((channel) => channel.kind === "tickets");
-    expect(tickets?.kind === "tickets" ? tickets.tickets.map((t) => t.id) : []).toEqual([
-      "T1",
-      "T2",
-    ]);
-    expect(detail?.stateSlice).toEqual({ tickets: [T1, T2] });
+  it("selects, swaps, and clears", () => {
+    expect(nextNodeSelection(null, "ticket:A")).toBe("ticket:A");
+    expect(nextNodeSelection("ticket:A", "ticket:B")).toBe("ticket:B");
+    expect(nextNodeSelection("ticket:A", "ticket:A")).toBeNull();
   });
 });

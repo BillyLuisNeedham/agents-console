@@ -3,15 +3,12 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Console: a custom UI for driving the agent graph on the local LangGraph dev server.",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
   "scripts": {
     "dev": "vite",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "vite build"
-  },
-  "dependencies": {
-    "@langchain/langgraph-sdk": "^2.0.0"
   },
   "devDependencies": {
     "bun-types": "^1.3.14",

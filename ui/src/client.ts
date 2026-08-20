@@ -1,130 +1,85 @@
 /**
- * Thin wrapper over the LangGraph SDK client. The Console is a client of the
- * dev server's HTTP API only; this module is the single place that talks to it.
+ * Pool client: the Console's single path to the pool server. The server serves
+ * the built SPA, a small JSON API (get state, start, resume-with-answer), and
+ * an SSE stream that pushes a full state snapshot on every change. The UI
+ * renders from those snapshots only; this module is the only code that talks
+ * to the server.
  */
 
-import { Client, type Thread } from "@langchain/langgraph-sdk";
-import { projectResume, type InterruptDecision, type Raw, type StreamPart } from "./project";
+import type { PoolSnapshot } from "./project";
 
-export const DEV_SERVER_URL = "http://localhost:2024";
-
-export function makeClient(): Client<Raw> {
-  return new Client<Raw>({ apiUrl: DEV_SERVER_URL, apiKey: null });
-}
-
-export async function listThreads(client: Client<Raw>): Promise<Thread<Raw>[]> {
-  return client.threads.search<Raw>({
-    limit: 50,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-  });
-}
-
-export async function getThread(client: Client<Raw>, threadId: string): Promise<Thread<Raw>> {
-  return client.threads.get<Raw>(threadId);
-}
-
-/** Create a Console-tagged thread. The label is the run's topic. */
-export async function createThread(client: Client<Raw>, label: string): Promise<Thread<Raw>> {
-  return client.threads.create({ metadata: { label, origin: "ui" } });
-}
-
-// ---------------------------------------------------------------------------
-// Run streaming: values + updates only, ever
-// ---------------------------------------------------------------------------
-
-const STREAM_MODE = ["values", "updates"] as const;
+const DEFAULT_BASE = "";
+const STREAM_PATH = "/api/stream";
 
 export interface StreamHandlers {
-  onPart: (part: StreamPart) => void;
+  onSnapshot: (snapshot: PoolSnapshot) => void;
   onError: (message: string) => void;
-  onDone: () => void;
 }
 
-async function consume(
-  stream: AsyncGenerator<{ event: string; data: unknown }>,
-  handlers: StreamHandlers,
-  signal: AbortSignal,
-): Promise<void> {
-  try {
-    for await (const part of stream) {
-      if (signal.aborted) return;
-      handlers.onPart({ event: String(part.event), data: part.data });
-    }
-    if (!signal.aborted) handlers.onDone();
-  } catch (err) {
-    if (signal.aborted) return;
-    handlers.onError(err instanceof Error ? err.message : String(err));
+export type ResumeAction = "resume" | "approve" | "reject";
+
+export class PoolClient {
+  private base: string;
+
+  constructor(base: string = DEFAULT_BASE) {
+    this.base = base;
   }
-}
 
-/** The id of the run currently executing on a thread, if there is one. */
-export async function findActiveRun(client: Client<Raw>, threadId: string): Promise<string | null> {
-  const runs = await client.runs.list(threadId);
-  const active = runs.find((run) => run.status === "running" || run.status === "pending");
-  return active?.run_id ?? null;
-}
+  /** The latest snapshot, or null before the server has started a run. */
+  async getState(): Promise<PoolSnapshot | null> {
+    const res = await fetch(`${this.base}/api/state`);
+    if (!res.ok) throw new Error(`pool state failed: ${res.status}`);
+    const body = await res.json();
+    return body?.snapshot ?? null;
+  }
 
-/** Join an in-flight run's stream, from wherever it has got to. */
-export async function joinRun(
-  client: Client<Raw>,
-  threadId: string,
-  runId: string,
-  handlers: StreamHandlers,
-  signal: AbortSignal,
-): Promise<void> {
-  const stream = client.runs.joinStream(threadId, runId, {
-    signal,
-    streamMode: [...STREAM_MODE],
-  });
-  await consume(stream, handlers, signal);
-}
+  /** Start (or restart) the pool run and return the first snapshot. */
+  async start(): Promise<PoolSnapshot> {
+    const res = await fetch(`${this.base}/api/start`, { method: "POST" });
+    if (!res.ok) throw new Error(`pool start failed: ${res.status}`);
+    const body = await res.json();
+    return body.snapshot;
+  }
 
-/** Resume an interrupted run with the SDK Command payload and stream it live. */
-export async function resumeRun(
-  client: Client<Raw>,
-  threadId: string,
-  assistantId: string,
-  decision: InterruptDecision,
-  handlers: StreamHandlers,
-  signal: AbortSignal,
-): Promise<void> {
-  const stream = client.runs.stream(threadId, assistantId, {
-    ...projectResume(decision),
-    signal,
-    streamMode: [...STREAM_MODE],
-  });
-  await consume(stream, handlers, signal);
-}
+  /**
+   * Answer an interrupt. `approve`/`reject` are used for the merge-approval
+   * interrupt; plain `resume` answers every other kind. The optional note is
+   * appended to the Issue file through the engine's resume path.
+   */
+  async answer(
+    ticketId: string,
+    action: ResumeAction,
+    note?: string,
+  ): Promise<PoolSnapshot> {
+    const res = await fetch(`${this.base}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId, action, note }),
+    });
+    if (!res.ok) throw new Error(`pool resume failed: ${res.status}`);
+    const body = await res.json();
+    return body.snapshot;
+  }
 
-/** Start a run on a thread and stream it to completion. */
-export async function streamRun(
-  client: Client<Raw>,
-  threadId: string,
-  assistantId: string,
-  input: Raw,
-  handlers: StreamHandlers,
-  signal: AbortSignal,
-  config?: Raw,
-): Promise<void> {
-  const stream = client.runs.stream(threadId, assistantId, {
-    input,
-    config,
-    signal,
-    streamMode: [...STREAM_MODE],
-  });
-  await consume(stream, handlers, signal);
-}
-
-/** The dev server registers one assistant per graph in langgraph.json. */
-export async function getAssistantId(client: Client<Raw>): Promise<string> {
-  const assistants = await client.assistants.search({ limit: 1 });
-  const first = assistants[0];
-  if (!first) throw new Error("no assistant registered on the dev server");
-  return first.assistant_id;
-}
-
-/** Compiled graph topology: nodes and edges as the dev server reports them. */
-export async function getGraph(client: Client<Raw>, assistantId: string): Promise<unknown> {
-  return client.assistants.getGraph(assistantId);
+  /**
+   * Open the SSE snapshot stream. Each change pushes a full snapshot; on
+   * connect the server immediately replays the latest snapshot so a client
+   * joining mid-run does not miss state. Returns a function that closes the
+   * stream.
+   */
+  stream(handlers: StreamHandlers): () => void {
+    const source = new EventSource(`${this.base}${STREAM_PATH}`);
+    source.addEventListener("snapshot", (event) => {
+      try {
+        const snapshot = JSON.parse((event as MessageEvent).data) as PoolSnapshot;
+        handlers.onSnapshot(snapshot);
+      } catch {
+        // ignore malformed frames; the next snapshot will supersede
+      }
+    });
+    source.onerror = () => {
+      handlers.onError("pool stream disconnected");
+    };
+    return () => source.close();
+  }
 }

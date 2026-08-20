@@ -660,6 +660,48 @@ body {
   display: none;
 }
 
+/* --------------------------------------------------------- pool statuses */
+
+.ticket-card-in-progress {
+  border-color: var(--status-running);
+}
+
+.ticket-card-checkpoint {
+  border-color: var(--interrupt);
+}
+
+.ticket-state-ready {
+  color: var(--status-pending);
+}
+
+.ticket-state-in-progress {
+  color: var(--status-running);
+  font-weight: 700;
+}
+
+.ticket-state-done {
+  color: var(--status-done);
+}
+
+.ticket-state-checkpoint {
+  color: var(--interrupt);
+  font-weight: 700;
+}
+
+/* -------------------------------------------------------- utility cards */
+
+.node-card-utility {
+  background: var(--bg-panel-2);
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+.node-card-utility .node-card-id {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
 /* -------------------------------------------------------------- run strip */
 
 .run-strip {

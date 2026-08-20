@@ -1,10 +1,12 @@
 /**
  * DOM rendering: a thin layer over the view model from project.ts. All data
  * flows in through `renderApp`; all user intent flows out through `Handlers`.
+ * The canvas mechanics (pan, zoom, drag, edge routing, persisted positions)
+ * are unchanged from the thread-driven Console; only what a card is changed:
+ * the pool renders ticket cards and the start/review utility cards.
  */
 
 import {
-  TICKET_POOLS,
   clampDrawersHeight,
   DRAWER_DEFAULT_VH,
   edgePath,
@@ -16,56 +18,36 @@ import {
   nextNodeSelection,
   zoomAtCursor,
   type CardBox,
-  type ChannelView,
   type DetailView,
   type EdgeMode,
-  type InterruptDecision,
-  type InterruptFormView,
-  type NodeCardView,
   type Point,
-  type Raw,
-  type ThreadSummary,
+  type PoolCardView,
+  type PoolPhase,
+  type PoolStatus,
   type TicketCardView,
-  type TicketView,
   type TopologyEdge,
+  type UtilityCardView,
   type ViewTransform,
 } from "./project";
 
-export interface StartFormModel {
-  topic: string;
-  ticketDir: string;
-  packet: string;
-  starting: boolean;
-  error: string | null;
-}
-
 export interface AppModel {
-  threads: ThreadSummary[];
-  showAll: boolean;
-  selectedId: string | null;
-  cards: NodeCardView[];
-  ticketCards: TicketCardView[];
+  phase: PoolPhase | null;
+  phaseLabel: string;
+  cards: PoolCardView[];
   edges: TopologyEdge[];
   log: string[];
   logOpen: boolean;
-  inspector: ChannelView[];
+  inspectorJson: string;
   inspectorOpen: boolean;
-  streaming: boolean;
-  streamError: string | null;
+  connected: boolean;
+  seq: number;
   error: string | null;
-  start: StartFormModel;
   detail: DetailView | null;
 }
 
 export interface Handlers {
-  onSelectThread: (threadId: string) => void;
-  onToggleShowAll: (showAll: boolean) => void;
   onToggleLog: () => void;
   onToggleInspector: () => void;
-  onRefresh: () => void;
-  onStartField: (field: "topic" | "ticketDir" | "packet", value: string) => void;
-  onStartRun: () => void;
-  onResume: (decision: InterruptDecision) => void;
   onSelectNode: (nodeId: string | null) => void;
 }
 
@@ -91,125 +73,8 @@ function h<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function fmtTime(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
-}
-
 // ---------------------------------------------------------------------------
-// Left rail: start-run form + thread list + show-all toggle
-// ---------------------------------------------------------------------------
-
-function renderStartForm(model: AppModel, handlers: Handlers): HTMLElement {
-  const start = model.start;
-
-  const topic = h("input", {
-    class: "field",
-    type: "text",
-    placeholder: "topic",
-    value: start.topic,
-    "data-field": "start-topic",
-    disabled: start.starting || null,
-  }) as HTMLInputElement;
-  topic.addEventListener("input", () => handlers.onStartField("topic", topic.value));
-
-  const pool = h("select", {
-    class: "field",
-    "data-field": "start-pool",
-    disabled: start.starting || null,
-  }) as HTMLSelectElement;
-  for (const dir of TICKET_POOLS) {
-    pool.append(h("option", { value: dir }, dir));
-  }
-  pool.value = start.ticketDir;
-  pool.addEventListener("change", () => handlers.onStartField("ticketDir", pool.value));
-
-  const packet = h(
-    "textarea",
-    {
-      class: "field",
-      rows: 4,
-      placeholder: "packet (optional; blank uses the demo packet)",
-      "data-field": "start-packet",
-      disabled: start.starting || null,
-    },
-    start.packet,
-  ) as HTMLTextAreaElement;
-  packet.addEventListener("input", () => handlers.onStartField("packet", packet.value));
-
-  const form = h(
-    "form",
-    { class: "start-form" },
-    h("h2", {}, "start a run"),
-    topic,
-    pool,
-    packet,
-    h(
-      "button",
-      {
-        class: "btn",
-        disabled: start.starting || start.topic.trim() === "" || null,
-      },
-      start.starting ? "starting…" : "start run",
-    ),
-    start.error ? h("span", { class: "error-inline" }, start.error) : null,
-  );
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    handlers.onStartRun();
-  });
-  return form;
-}
-
-
-function renderRail(model: AppModel, handlers: Handlers): HTMLElement {
-  const toggle = h("input", { type: "checkbox", checked: model.showAll }) as HTMLInputElement;
-  toggle.addEventListener("change", () => handlers.onToggleShowAll(toggle.checked));
-
-  const list = h("div", { class: "thread-list" });
-  if (model.threads.length === 0) {
-    list.append(h("div", { class: "dim" }, model.showAll ? "no threads" : "no Console threads yet"));
-  }
-  for (const t of model.threads) {
-    const meta = h("span", {}, t.status);
-    if (t.interruptCount > 0) {
-      meta.append(
-        h("span", {
-          class: "dot dot-interrupt",
-          title: `${t.interruptCount} pending interrupt${t.interruptCount === 1 ? "" : "s"}`,
-        }),
-      );
-    }
-    list.append(
-      h(
-        "div",
-        {
-          class: "thread-item" + (t.threadId === model.selectedId ? " thread-active" : ""),
-          onclick: () => handlers.onSelectThread(t.threadId),
-        },
-        h("div", { class: "thread-label" }, t.label),
-        h("div", { class: "thread-meta" }, h("span", {}, t.origin), meta),
-      ),
-    );
-  }
-
-  return h(
-    "div",
-    { class: "rail" },
-    h(
-      "div",
-      { class: "rail-head" },
-      h("h2", {}, "Threads"),
-      h("label", { class: "dim checkrow" }, toggle, "show all"),
-      h("button", { class: "btn", onclick: () => handlers.onRefresh() }, "refresh"),
-    ),
-    renderStartForm(model, handlers),
-    list,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Main panel: graph canvas, node cards + edges
+// Main panel: graph canvas, cards + edges
 // ---------------------------------------------------------------------------
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -223,7 +88,6 @@ const nodePos = new Map<string, Point>();
 const expandedTickets = new Set<string>();
 const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
 let edgeMode: EdgeMode = "ortho";
-let layoutThreadId: string | null = null;
 
 type Positioned = { id: string; x: number; y: number };
 
@@ -264,12 +128,12 @@ let canvas: CanvasBind | null = null;
 let drag: Drag | null = null;
 
 // Detail panel selection: module scope so it survives the full-DOM rebuild on
-// every render (streaming updates never close the panel or lose the selection).
+// every render (snapshots never close the panel or lose the selection).
 let selectedNodeId: string | null = null;
 let onSelectNode: ((nodeId: string | null) => void) | null = null;
 
-// Drawers strip height: module scope so it survives re-renders while the run
-// streams. One shared vh height drives both drawer bodies.
+// Drawers strip height: module scope so it survives re-renders while snapshots
+// stream. One shared vh height drives both drawer bodies.
 let drawersHeight = DRAWER_DEFAULT_VH;
 let drawerDrag: { startY: number; startHeight: number } | null = null;
 
@@ -283,10 +147,7 @@ function readStored(): Record<string, Point> {
 
 function writeStored(): void {
   const stored = readStored();
-  for (const [id, pos] of nodePos) stored[layoutStorageKey(id, layoutThreadId)] = pos;
-  for (const key of Object.keys(stored)) {
-    if (key.startsWith("ticket:")) delete stored[key];
-  }
+  for (const [id, pos] of nodePos) stored[layoutStorageKey(id)] = pos;
   try {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
   } catch {
@@ -300,7 +161,7 @@ function seedPositions(cards: Positioned[]): void {
   const overrides: Record<string, Point> = {};
   for (const card of cards) {
     defaults[card.id] = { x: card.x, y: card.y };
-    const saved = stored[layoutStorageKey(card.id, layoutThreadId)];
+    const saved = stored[layoutStorageKey(card.id)];
     if (saved) overrides[card.id] = saved;
   }
   const merged = mergeLayout(defaults, overrides);
@@ -312,11 +173,8 @@ function seedPositions(cards: Positioned[]): void {
 function resetLayout(cards: Positioned[]): void {
   const stored = readStored();
   for (const card of cards) {
-    delete stored[layoutStorageKey(card.id, layoutThreadId)];
+    delete stored[layoutStorageKey(card.id)];
     nodePos.set(card.id, { x: card.x, y: card.y });
-  }
-  for (const key of Object.keys(stored)) {
-    if (key.startsWith("ticket:")) delete stored[key];
   }
   try {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
@@ -334,7 +192,7 @@ function posOf(card: Positioned): Point {
 }
 
 function canvasCards(model: AppModel): Positioned[] {
-  return [...model.cards, ...model.ticketCards];
+  return model.cards;
 }
 
 function toggleTicketExpand(id: string): void {
@@ -546,138 +404,46 @@ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEd
   );
 }
 
-function ticketRow(t: TicketView): HTMLElement {
-  return h(
-    "div",
-    { class: "ticket-row" },
-    h("span", { class: `chip chip-${t.status}` }, t.id),
-    h("span", { class: "dim" }, t.title),
-    t.blockedBy.length > 0 ? h("span", { class: "dim" }, `after ${t.blockedBy.join(", ")}`) : null,
-  );
-}
+// ---------------------------------------------------------------------------
+// Cards
+// ---------------------------------------------------------------------------
 
-function snippet(text: string, lines: number): string {
-  return text.split("\n").slice(0, lines).join("\n");
-}
-
-function renderCardChannel(channel: ChannelView): HTMLElement {
-  if (channel.kind === "tickets") {
-    if (channel.tickets.length === 0) return h("div", { class: "dim" }, "no tickets");
-    return h("div", { class: "card-channels" }, ...channel.tickets.map(ticketRow));
-  }
-  if (channel.kind === "pre") {
-    return h("pre", { class: "card-pre" }, snippet(channel.text, 8) || "-");
-  }
-  if (channel.kind === "json") {
-    return h("pre", { class: "card-pre" }, snippet(channel.json, 8));
-  }
-  return h("div", { class: "card-text" }, channel.text);
-}
-
-function statusLabel(status: NodeCardView["status"]): string {
-  if (status === "interrupted") return "interrupted";
-  if (status === "active") return "running";
-  if (status === "next") return "next";
-  if (status === "ran") return "ran";
-  return "idle";
-}
-
-function renderInterruptForm(form: InterruptFormView, handlers: Handlers): HTMLElement {
-  const box = h("div", { class: "interrupt-box" }, h("div", { class: "interrupt-kind" }, `interrupt · ${form.kind}`));
-  if (form.kind === "approve-spec") {
-    box.append(
-      h("div", { class: "dim" }, "spec waiting for your call"),
-      h("pre", { class: "card-pre interrupt-spec" }, form.spec || "-"),
-      ...form.tickets.map(ticketRow),
-      h(
-        "div",
-        { class: "interrupt-actions" },
-        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "approve" }) }, "approve"),
-        h("button", { class: "btn btn-danger", onclick: () => handlers.onResume({ action: "reject" }) }, "reject"),
-      ),
-    );
-  } else if (form.kind === "deadlock") {
-    box.append(
-      h("div", { class: "dim" }, "blocked tickets can't start"),
-      h(
-        "div",
-        { class: "ticket-row" },
-        ...form.pending.map((id) => h("span", { class: "chip chip-pending" }, id)),
-      ),
-      h("div", { class: "card-text" }, form.hint),
-      h(
-        "div",
-        { class: "interrupt-actions" },
-        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "reload" }) }, "reload"),
-        h("button", { class: "btn btn-danger", onclick: () => handlers.onResume({ action: "abort" }) }, "abort"),
-      ),
-    );
-  } else {
-    const checks = new Map<string, HTMLInputElement>();
-    const rows = form.tickets.map((ticket) => {
-      const cb = h("input", { type: "checkbox", value: ticket.id }) as HTMLInputElement;
-      checks.set(ticket.id, cb);
-      return h(
-        "label",
-        { class: "checkrow interrupt-check" },
-        cb,
-        h("span", { class: `chip chip-${ticket.status}` }, ticket.id),
-        h("span", { class: "dim" }, ticket.title),
-      );
-    });
-    const retry = h("button", { class: "btn" }, "retry") as HTMLButtonElement;
-    retry.disabled = true;
-    retry.addEventListener("click", () => {
-      const ids = [...checks.entries()].filter(([, cb]) => cb.checked).map(([id]) => id);
-      handlers.onResume({ action: "retry", ids });
-    });
-    for (const [, cb] of checks) {
-      cb.addEventListener("change", () => {
-        retry.disabled = ![...checks.values()].some((c) => c.checked);
-      });
-    }
-    box.append(
-      h("div", { class: "dim" }, "all tickets implemented; your call"),
-      ...rows,
-      h(
-        "div",
-        { class: "interrupt-actions" },
-        h("button", { class: "btn btn-primary", onclick: () => handlers.onResume({ action: "approve" }) }, "approve"),
-        retry,
-        h("button", { class: "btn", onclick: () => handlers.onResume({ action: "replan" }) }, "replan"),
-      ),
-    );
-  }
-  box.append(
-    h(
-      "details",
-      { class: "interrupt-raw" },
-      h("summary", {}, "raw payload"),
-      h("pre", {}, JSON.stringify(form.raw, null, 2)),
-    ),
-  );
-  return box;
+function statusLabel(status: PoolStatus): string {
+  return status === "in-progress" ? "running" : status;
 }
 
 function renderTicketCard(card: TicketCardView): HTMLElement {
   const pos = posOf(card);
   const expanded = expandedTickets.has(card.id);
-  const blocked =
-    card.status === "pending" && card.blockedBy.length > 0
-      ? h("div", { class: "dim ticket-card-blocked" }, `blockedBy ${card.blockedBy.join(", ")}`)
-      : null;
   const details = h(
     "div",
     { class: "ticket-card-details" },
     h("div", { class: "card-text" }, `id ${card.ticketId}`),
     h("div", { class: "card-text" }, card.title),
-    h("div", { class: "dim" }, `status ${card.status}`),
+    h("div", { class: "dim" }, `status ${statusLabel(card.status)}`),
     h(
       "div",
       { class: "dim" },
       card.blockedBy.length > 0 ? `blockedBy ${card.blockedBy.join(", ")}` : "blockedBy none",
     ),
+    ...(card.outcome
+      ? [
+          h("div", { class: "card-text" }, `outcome: ${card.outcome.summary}`),
+          card.outcome.commitSha
+            ? h("div", { class: "dim" }, `commit ${card.outcome.commitSha}`)
+            : null,
+        ]
+      : []),
   );
+  const head = h(
+    "div",
+    { class: "node-card-head" },
+    h("span", { class: "node-card-id" }, card.ticketId),
+    h("span", { class: `node-card-state ticket-state-${card.status}` }, statusLabel(card.status)),
+  );
+  if (card.interrupt) {
+    head.append(h("span", { class: "dot dot-interrupt", title: `interrupt · ${card.interrupt.kind}` }));
+  }
   return h(
     "div",
     {
@@ -687,46 +453,39 @@ function renderTicketCard(card: TicketCardView): HTMLElement {
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
-    h(
-      "div",
-      { class: "node-card-head" },
-      h("span", { class: "node-card-id" }, card.ticketId),
-      h("span", { class: `node-card-state ticket-state-${card.status}` }, card.status),
-    ),
+    head,
     h(
       "div",
       { class: "node-card-body" },
       h("div", { class: "card-text ticket-card-summary" }, card.title),
-      blocked,
+      h("div", { class: "dim ticket-card-blocked" },
+        card.blockedBy.length > 0 ? `after ${card.blockedBy.join(", ")}` : "no blockers"),
       details,
     ),
   );
 }
 
-function renderCard(card: NodeCardView, handlers: Handlers): HTMLElement {
-  const body =
-    card.channels.length > 0
-      ? card.channels.map(renderCardChannel)
-      : card.interrupt
-        ? []
-        : [h("div", { class: "dim" }, "-")];
-  if (card.interrupt) body.push(renderInterruptForm(card.interrupt, handlers));
+function renderUtilityCard(card: UtilityCardView): HTMLElement {
   const pos = posOf(card);
   return h(
     "div",
     {
-      class: `node-card node-card-${card.status}`,
+      class: "node-card node-card-utility",
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
     h(
       "div",
       { class: "node-card-head" },
-      h("span", { class: "node-card-id" }, card.name),
-      h("span", { class: `node-card-state node-state-${card.status}` }, statusLabel(card.status)),
+      h("span", { class: "node-card-id" }, card.label),
     ),
-    h("div", { class: "node-card-body" }, ...body),
+    h("div", { class: "node-card-body" }, h("div", { class: "dim" }, "utility")),
   );
+}
+
+function renderCard(card: PoolCardView): HTMLElement {
+  if (card.kind === "ticket") return renderTicketCard(card);
+  return renderUtilityCard(card);
 }
 
 function worldSize(cards: Positioned[]): { width: number; height: number } {
@@ -752,13 +511,14 @@ function renderCanvasHeader(model: AppModel): HTMLElement {
   return h(
     "div",
     { class: "canvas-header" },
-    model.streaming ? h("span", { class: "dot dot-live", title: "streaming" }) : null,
     h(
       "span",
       { class: "dim" },
-      model.selectedId ? `thread · ${model.selectedId}` : "no thread selected",
+      model.connected
+        ? `pool · ${model.phaseLabel} · snapshot ${model.seq}`
+        : "pool · connecting",
     ),
-    model.streamError ? h("span", { class: "error-inline" }, model.streamError) : null,
+    model.error ? h("span", { class: "error-inline" }, model.error) : null,
     h(
       "div",
       { class: "canvas-tools" },
@@ -862,14 +622,14 @@ function drawEdges(world: HTMLElement, edges: TopologyEdge[]): void {
   paintStrokeScale();
 }
 
-function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
+function renderMain(model: AppModel): HTMLElement {
   const main = h("div", { class: "main" });
-  if (model.error) {
+  if (model.error && model.cards.length === 0) {
     main.append(h("div", { class: "error" }, model.error));
     return main;
   }
   if (model.cards.length === 0) {
-    main.append(h("div", { class: "dim placeholder" }, "graph topology not loaded"));
+    main.append(h("div", { class: "dim placeholder" }, "pool not loaded"));
     return main;
   }
   const size = worldSize(canvasCards(model));
@@ -877,73 +637,75 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
     class: "canvas-world",
     style: `width:${size.width}px;height:${size.height}px`,
   });
-  world.append(
-    makeSvg(),
-    ...model.cards.map((card) => renderCard(card, handlers)),
-    ...model.ticketCards.map(renderTicketCard),
-  );
+  world.append(makeSvg(), ...model.cards.map(renderCard));
   const viewport = h("div", { class: "canvas-viewport" }, world);
   main.append(renderCanvasHeader(model), viewport);
   return main;
 }
 
 // ---------------------------------------------------------------------------
-// Detail panel: right-hand flex sibling for the selected node card
+// Detail panel: right-hand flex sibling for the selected card
 // ---------------------------------------------------------------------------
 
-function renderDetailChannel(channel: ChannelView): HTMLElement {
-  if (channel.kind === "tickets") {
-    if (channel.tickets.length === 0) return h("div", { class: "dim" }, "no tickets");
-    return h("div", { class: "detail-channels" }, ...channel.tickets.map(ticketRow));
+function renderTicketDetail(detail: Extract<DetailView, { kind: "ticket" }>): HTMLElement {
+  const body = h("div", { class: "detail-body" });
+  body.append(
+    h("div", { class: "dim" }, "status"),
+    h("div", { class: `detail-status ticket-state-${detail.status}` }, statusLabel(detail.status)),
+    h("div", { class: "dim" }, "blocked by"),
+    h(
+      "div",
+      { class: "card-text" },
+      detail.blockedBy.length > 0 ? detail.blockedBy.join(", ") : "none",
+    ),
+  );
+  if (detail.interrupt) {
+    body.append(
+      h("div", { class: "dim" }, `interrupt · ${detail.interrupt.kind}`),
+      h("pre", { class: "detail-pre" }, detail.interrupt.body || "-"),
+    );
   }
-  if (channel.kind === "pre") {
-    return h("pre", { class: "detail-pre" }, channel.text || "-");
+  if (detail.outcome) {
+    body.append(
+      h("div", { class: "dim" }, "outcome"),
+      h("pre", { class: "detail-pre" }, detail.outcome.summary || "-"),
+    );
+    if (detail.outcome.commitSha) {
+      body.append(h("div", { class: "dim" }, `commit ${detail.outcome.commitSha}`));
+    }
   }
-  if (channel.kind === "json") {
-    return h("pre", { class: "detail-pre" }, channel.json);
-  }
-  return h("div", { class: "card-text" }, channel.text);
+  return body;
 }
 
-function renderStateSlice(slice: Raw): HTMLElement {
-  const json = JSON.stringify(slice, null, 2);
-  return h("pre", { class: "detail-pre" }, json === "{}" ? "- empty -" : json);
+function renderUtilityDetail(detail: Extract<DetailView, { kind: "utility" }>): HTMLElement {
+  return h(
+    "div",
+    { class: "detail-body" },
+    h("div", { class: "dim" }, "kind"),
+    h("div", { class: "card-text" }, "utility card"),
+    h("div", { class: "dim" }, "label"),
+    h("div", { class: "card-text" }, detail.label),
+  );
 }
 
-function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+function renderDetail(model: AppModel): HTMLElement {
   const detail = h("div", { class: "detail" });
   const view = model.detail;
   if (!view) return detail;
   detail.classList.add("detail-open");
+  const title = view.kind === "ticket" ? view.ticketId : view.label;
   detail.append(
     h(
       "div",
       { class: "detail-head" },
-      h("span", { class: "detail-title" }, view.name),
+      h("span", { class: "detail-title" }, title),
       h(
         "button",
         { class: "btn", title: "close detail", onclick: () => closeDetail() },
         "✕",
       ),
     ),
-    h(
-      "div",
-      { class: "detail-body" },
-      h("div", { class: "dim" }, "status"),
-      h("div", { class: `detail-status node-state-${view.status}` }, statusLabel(view.status)),
-      h("div", { class: "dim" }, "channels"),
-      ...(view.channels.length > 0
-        ? view.channels.map(renderDetailChannel)
-        : [h("div", { class: "dim" }, "no channels for this node")]),
-      h("div", { class: "dim" }, "raw state"),
-      renderStateSlice(view.stateSlice),
-      ...(view.interrupt
-        ? [
-            h("div", { class: "dim" }, "interrupt"),
-            renderInterruptForm(view.interrupt, handlers),
-          ]
-        : []),
-    ),
+    view.kind === "ticket" ? renderTicketDetail(view) : renderUtilityDetail(view),
   );
   return detail;
 }
@@ -968,52 +730,22 @@ function renderLogDrawer(model: AppModel, handlers: Handlers): HTMLElement {
   );
 }
 
-function renderInspectorChannel(channel: ChannelView): HTMLElement {
-  let body: HTMLElement;
-  if (channel.kind === "tickets") {
-    body =
-      channel.tickets.length === 0
-        ? h("div", { class: "channel-body dim" }, "no tickets")
-        : h("div", { class: "channel-body" }, ...channel.tickets.map(ticketRow));
-  } else if (channel.kind === "pre") {
-    body = h("pre", { class: "channel-pre" }, channel.text || "-");
-  } else if (channel.kind === "json") {
-    body = h("pre", { class: "channel-pre" }, channel.json);
-  } else {
-    body = h("div", { class: "channel-body" }, channel.text);
-  }
-  return h("div", { class: "channel" }, h("div", { class: "channel-name" }, channel.name), body);
-}
-
 function renderInspectorDrawer(model: AppModel, handlers: Handlers): HTMLElement {
-  const body =
-    model.inspector.length > 0
-      ? h(
-          "div",
-          { class: "inspector-channels", style: `height:${drawersHeight}vh` },
-          ...model.inspector.map(renderInspectorChannel),
-        )
-      : h(
-          "div",
-          { class: "inspector-empty dim", style: `height:${drawersHeight}vh` },
-          "- no state yet -",
-        );
+  const body = h("pre", { class: "inspector-channels", style: `height:${drawersHeight}vh` }, model.inspectorJson);
   return h(
     "div",
     { class: "inspector-drawer" + (model.inspectorOpen ? " inspector-open" : "") },
     h(
       "button",
       { class: "drawer-bar", onclick: () => handlers.onToggleInspector() },
-      `state (${model.inspector.length}) ${model.inspectorOpen ? "▾" : "▴"}`,
+      `state ${model.inspectorOpen ? "▾" : "▴"}`,
     ),
     model.inspectorOpen ? body : null,
   );
 }
 
 function drawerBodies(): HTMLElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLElement>(".log-lines, .inspector-channels, .inspector-empty"),
-  );
+  return Array.from(document.querySelectorAll<HTMLElement>(".log-lines, .inspector-channels"));
 }
 
 function applyDrawersHeight(): void {
@@ -1064,26 +796,19 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
   endDrag();
   drawerDrag = null;
   onSelectNode = handlers.onSelectNode;
-  if (model.selectedId !== layoutThreadId) {
-    for (const id of [...nodePos.keys()]) {
-      if (isTicketCardId(id)) nodePos.delete(id);
-    }
-    layoutThreadId = model.selectedId;
-  }
-  const liveTicketIds = new Set(model.ticketCards.map((card) => card.id));
+  const liveIds = new Set(model.cards.map((card) => card.id));
   for (const id of [...expandedTickets]) {
-    if (!liveTicketIds.has(id)) expandedTickets.delete(id);
+    if (!liveIds.has(id)) expandedTickets.delete(id);
   }
   for (const id of [...nodePos.keys()]) {
-    if (isTicketCardId(id) && !liveTicketIds.has(id)) nodePos.delete(id);
+    if (!liveIds.has(id)) nodePos.delete(id);
   }
   seedPositions(canvasCards(model));
   const content = h(
     "div",
     { class: "content" },
-    renderRail(model, handlers),
-    renderMain(model, handlers),
-    renderDetail(model, handlers),
+    renderMain(model),
+    renderDetail(model),
   );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
   const world = root.querySelector(".canvas-world");
