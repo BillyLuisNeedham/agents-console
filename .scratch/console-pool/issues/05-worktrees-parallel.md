@@ -1,4 +1,4 @@
-<!-- state: id=05 blocked-by=01 status=ready -->
+<!-- state: id=05 blocked-by=01 status=done -->
 
 # 05 — Worktrees and parallel super-steps
 
@@ -10,13 +10,13 @@ True parallel fan-out with git isolation. When a super-step's ready set has more
 
 ## Acceptance criteria
 
-- [ ] A multi-ticket ready set runs concurrently, each in its own worktree branched from HEAD
-- [ ] All tickets in a super-step observe the same starting snapshot
-- [ ] Finished branches merge in completion order onto the pool's working branch
-- [ ] A running ticket is never rebased
-- [ ] A conflicting merge is detected, its conflicted state recorded, and a merge-conflict interrupt raised without stalling unrelated tickets
-- [ ] A downstream ticket's prompt carries its blockers' outcomes regardless of merge timing
-- [ ] Covered by engine-seam tests using real git in temp directories, including a constructed clash between two stub tickets
+- [x] A multi-ticket ready set runs concurrently, each in its own worktree branched from HEAD
+- [x] All tickets in a super-step observe the same starting snapshot
+- [x] Finished branches merge in completion order onto the pool's working branch
+- [x] A running ticket is never rebased
+- [x] A conflicting merge is detected, its conflicted state recorded, and a merge-conflict interrupt raised without stalling unrelated tickets
+- [x] A downstream ticket's prompt carries its blockers' outcomes regardless of merge timing
+- [x] Covered by engine-seam tests using real git in temp directories, including a constructed clash between two stub tickets
 
 ## Blocked by
 
@@ -33,6 +33,8 @@ True parallel fan-out with git isolation. When a super-step's ready set has more
 - A conflicting merge is aborted (`git merge --abort`), the working branch is left clean, and a `merge-conflict` interrupt carries the conflicted files, the branch and the worktree path. The ticket stays done: its outcome still flows downstream (outcomes come from the runs directory, not the merge). Resuming that interrupt re-attempts the merge; "Already up to date" or a deleted branch counts as resolved by hand.
 - A running ticket is never rebased by construction: the engine has no rebase path at all. A resumed ticket keeps its parked worktree at its original base and merges from there.
 - Successful merges remove the worktree (`git worktree remove --force`, which is why the Issue mirrors back first) and delete the branch. Conflict and checkpoint keep both parked.
+- Finish pass after the interrupted run: the code committed as `653efbb` was verified, not trusted from the log. Full suite green (125 pass), `tsc --noEmit` clean.
+- Two-axis review run against `653efbb`. Standards: no hard violations; fixed two collapsed one-liner hunks the diff had introduced, extracted `refExists` in `worktrees.ts` for the three rev-parse probes, and extracted `mergeWithIssueAside` in `engine.ts` for the duplicated merge-with-issue-aside shape. A review claim that `resumeMerge` dropped the worktree cleanup on the ok path was wrong (it is there, after the conflict check). Spec: no missing requirements and no scope creep; the real-git clash and the completion-order merge parents are genuinely tested. The two raised edge concerns (a resumed ticket keeping its original base in a mixed super-step, and the aside rename-back winning over a branch-committed Issue edit) are both settled by the design notes above, not gaps.
 
 ---
 
