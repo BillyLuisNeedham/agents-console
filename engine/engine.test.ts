@@ -1007,8 +1007,7 @@ describe("interrupts", () => {
   });
 });
 
-function markerLine(poolDir: string, file: string): string {
-  return readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0];
+function markerLine(poolDir: string, file: string): string {  return readFileSync(join(poolDir, "issues", file), "utf8").split("\n")[0];
 }
 
 function markerStatuses(poolDir: string, files: string[]): Record<string, string> {
@@ -1464,4 +1463,451 @@ describe("durability", () => {
       "03": "done",
     });
   });
+});
+
+// Worktree tests run the same public seam against pools that are real git
+// repos (the pool dir is the repo root). The git stub harness is a bash
+// script driven by a per-spawn plan file, so each ticket can do real work in
+// its checkout: write and commit files, wait on siblings, and record what it
+// observed (HEAD, branch, cwd) for the assertions.
+describe("worktrees", () => {
+  interface GitStubBehaviour {
+    status?: "done" | "checkpoint" | "keep";
+    outcome?: { summary: string; commitSha: string | null } | null;
+    exitCode?: number;
+    workFile?: string;
+    workLine?: string;
+    overwrite?: boolean;
+    commitMsg?: string;
+    commitIssue?: boolean;
+    leaveFile?: string;
+    touch?: string;
+    waitFor?: string;
+    waitMerged?: string;
+    recordDir?: string;
+    expectFile?: string;
+  }
+
+  interface GitPool {
+    poolDir: string;
+    head: string;
+    git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
+  }
+
+  function makeGitPool(
+    spec: PoolSpec,
+    seed: Record<string, string> = {},
+  ): GitPool {
+    const poolDir = makePool(spec);
+    for (const [path, content] of Object.entries(seed)) {
+      writeFileSync(join(poolDir, path), content);
+    }
+    const git = (args: string[]) =>
+      Bun.spawnSync(["git", ...args], {
+        cwd: poolDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    const head = git(["rev-parse", "HEAD"]).stdout.toString().trim();
+    return { poolDir, head, git };
+  }
+
+  function gitStubHarness(
+    poolDir: string,
+    behaviour: Record<string, GitStubBehaviour | GitStubBehaviour[]>,
+  ): StubRig {
+    const stubPath = join(poolDir, "git-stub.sh");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+        'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+        'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+        'source "$plan"',
+        'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+        'if [ -n "$WAIT_FOR" ]; then',
+        "  for _ in $(seq 1 100); do",
+        '    [ -e "$WAIT_FOR" ] && break',
+        "    sleep 0.05",
+        "  done",
+        '  [ -e "$WAIT_FOR" ] || exit 42',
+        "fi",
+        'if [ -n "$WAIT_MERGED" ]; then',
+        "  for _ in $(seq 1 100); do",
+        '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
+        "    sleep 0.05",
+        "  done",
+        '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
+        "fi",
+        'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+        'if [ -n "$RECORD_DIR" ]; then',
+        '  mkdir -p "$RECORD_DIR"',
+        '  git rev-parse HEAD > "$RECORD_DIR/head"',
+        '  git branch --show-current > "$RECORD_DIR/branch"',
+        '  pwd > "$RECORD_DIR/cwd"',
+        "fi",
+        "staged=0",
+        'if [ -n "$WORK_FILE" ]; then',
+        '  mkdir -p "$(dirname "$WORK_FILE")"',
+        '  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
+        '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
+        '  git add "$WORK_FILE"; staged=1',
+        "fi",
+        'if [ "$status" != "keep" ]; then',
+        '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+        '  if [ -n "$COMMIT_ISSUE" ]; then git add "$issue"; staged=1; fi',
+        "fi",
+        'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
+        'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
+        'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
+        'exit "$exit_code"',
+        "",
+      ].join("\n"),
+    );
+    const spawned: Record<string, SpawnContext> = {};
+    const spawnOrder: string[] = [];
+    const spawnCounts: Record<string, number> = {};
+    const stub: HarnessCommand = (ctx) => {
+      spawned[ctx.id] = ctx;
+      spawnOrder.push(ctx.id);
+      const n = spawnCounts[ctx.id] ?? 0;
+      spawnCounts[ctx.id] = n + 1;
+      const entry = behaviour[ctx.id] ?? {};
+      const b = Array.isArray(entry)
+        ? entry[Math.min(n, entry.length - 1)]
+        : entry;
+      const status = b.status ?? "done";
+      const outcome =
+        b.outcome === null
+          ? ""
+          : JSON.stringify(
+              b.outcome ?? {
+                summary: `summary-${ctx.id}`,
+                commitSha: `sha-${ctx.id}`,
+              },
+            );
+      const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
+      const quote = (value: string) => JSON.stringify(value);
+      const lines = [`MAIN_REPO=${quote(poolDir)}`];
+      if (b.workFile) lines.push(`WORK_FILE=${quote(b.workFile)}`);
+      if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);
+      if (b.overwrite) lines.push('OVERWRITE="1"');
+      if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);
+      if (b.commitIssue === false) lines.push('COMMIT_ISSUE=""');
+      if (b.leaveFile) lines.push(`LEAVE_FILE=${quote(b.leaveFile)}`);
+      if (b.touch) lines.push(`TOUCH=${quote(b.touch)}`);
+      if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
+      if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
+      if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
+      if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
+      writeFileSync(planPath, lines.join("\n") + "\n");
+      return [
+        "bash",
+        stubPath,
+        ctx.issuePath,
+        status,
+        ctx.outcomePath,
+        outcome,
+        String(b.exitCode ?? 0),
+        planPath,
+      ];
+    };
+    return { harnesses: { stub }, spawned, spawnOrder };
+  }
+
+  const readyTicket = (id: string, blockedBy = "none") => ({
+    file: `${id}-t.md`,
+    marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
+  });
+
+  it("runs a multi-ticket super-step concurrently, each in its own worktree branched from the same HEAD", async () => {
+    const { poolDir, head, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        touch: join(poolDir, "started-01"),
+        waitFor: join(poolDir, "started-02"),
+        recordDir: join(poolDir, "rec-01"),
+      },
+      "02": {
+        workFile: "two.txt",
+        commitMsg: "work-02",
+        touch: join(poolDir, "started-02"),
+        waitFor: join(poolDir, "started-01"),
+        recordDir: join(poolDir, "rec-02"),
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The rendezvous only passes if both tickets are alive at once; a serial
+    // engine would time the wait out and crash both tickets.
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    for (const id of ["01", "02"]) {
+      const rec = join(poolDir, `rec-${id}`);
+      expect(readFileSync(join(rec, "head"), "utf8").trim()).toBe(head);
+      expect(readFileSync(join(rec, "branch"), "utf8").trim()).toBe(
+        `pool/${id}`,
+      );
+      expect(readFileSync(join(rec, "cwd"), "utf8").trim()).toBe(
+        join(poolDir, ".git", "pool-worktrees", id),
+      );
+    }
+    expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "two.txt"))).toBe(true);
+    const subjects = git(["log", "--format=%s"]).stdout.toString();
+    expect(subjects).toContain("work-01");
+    expect(subjects).toContain("work-02");
+    // Clean merges clean up after themselves: one worktree (the main
+    // checkout), no pool branches left.
+    const worktrees = git(["worktree", "list", "--porcelain"])
+      .stdout.toString()
+      .match(/^worktree /gm);
+    expect(worktrees).toHaveLength(1);
+    expect(
+      git(["branch", "--list", "pool/*"]).stdout.toString().trim(),
+    ).toBe("");
+  }, 15000);
+
+  it("merges finished branches in completion order and never rebases a running ticket", async () => {
+    const { poolDir, head, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      // 01 stays alive until 02's merge has landed on the working branch.
+      "01": {
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        waitMerged: "work-02",
+        recordDir: join(poolDir, "rec-01"),
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("done");
+    // 01's branch was never rebased: it still sits on the super-step's
+    // starting HEAD, observed after 02's merge had already landed.
+    expect(readFileSync(join(poolDir, "rec-01", "head"), "utf8").trim()).toBe(
+      head,
+    );
+    const commits = git(["log", "--format=%H %s"])
+      .stdout.toString()
+      .trim()
+      .split("\n")
+      .map((line) => ({ sha: line.slice(0, 40), subject: line.slice(41) }));
+    const bySubject = (subject: string) =>
+      commits.find((c) => c.subject === subject)!.sha;
+    // Completion order: 02 finished first and fast-forwarded; 01's merge
+    // commit has 02's commit as its first parent and 01's as its second.
+    const merge = commits.find((c) => c.subject.startsWith("Merge branch"))!;
+    const parents = git(["rev-list", "--parents", "-n", "1", merge.sha])
+      .stdout.toString()
+      .trim()
+      .split(" ")
+      .slice(1);
+    expect(parents).toEqual([bySubject("work-02"), bySubject("work-01")]);
+    // And 01's own commit still hangs off the shared starting snapshot.
+    const baseOf01 = git(["rev-list", "--parents", "-n", "1", bySubject("work-01")])
+      .stdout.toString()
+      .trim()
+      .split(" ")[1];
+    expect(baseOf01).toBe(head);
+  }, 15000);
+
+  it("raises a merge-conflict interrupt on a clashing merge without stalling unrelated tickets", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
+        config: stubConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "02": "done",
+      "03": "done",
+    });
+    expect(run.interrupts).toHaveLength(1);
+    const interrupt = run.interrupts[0];
+    expect(interrupt.ticketId).toBe("02");
+    expect(interrupt.kind).toBe("merge-conflict");
+    expect(interrupt.body).toContain("shared.txt");
+    expect(interrupt.body).toContain("pool/02");
+    // The working branch was left clean: no half-merged state, 01's content
+    // in place, 03 merged past the conflict, 02's branch parked for a human.
+    expect(
+      git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).exitCode,
+    ).not.toBe(0);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
+    expect(existsSync(join(poolDir, "three.txt"))).toBe(true);
+    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).toBe(0);
+    expect(
+      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+    ).toBe(true);
+
+    // The human resolves by hand in the main checkout, then resumes.
+    git(["checkout", "--", "issues/02-t.md"]);
+    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
+    git(["add", "shared.txt"]);
+    git(["commit", "-qm", "resolve pool/02"]);
+
+    const resumed = await run.resume("02");
+
+    expect(resumed.phase).toBe("done");
+    expect(resumed.interrupts).toEqual([]);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
+      "resolved\n",
+    );
+    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(
+      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+    ).toBe(false);
+  }, 15000);
+
+  it("passes a blocker's outcome downstream even when its merge conflicted", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [
+          readyTicket("01"),
+          readyTicket("02"),
+          readyTicket("03", "02"),
+        ],
+        config: stubConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+        outcome: { summary: "schema v2", commitSha: "sha-02" },
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("merge-conflict");
+    // 02 is done (its merge is machinery), so 03 ran in the next super-step
+    // with 02's outcome in its prompt, against a HEAD the merge never
+    // reached. The outcomes channel, not the merge, carries state downstream.
+    expect(rig.spawnOrder).toContain("03");
+    expect(rig.spawned["03"].prompt).toContain("02: schema v2");
+    expect(run.final.tickets["03"]).toBe("done");
+    expect(rig.spawned["03"].cwd).toBe(poolDir);
+  }, 15000);
+
+  it("keeps a checkpointed ticket's worktree parked and reuses it on resume", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { status: "checkpoint", workFile: "one.txt", commitMsg: "work-01", leaveFile: "partial.txt" },
+        { status: "done", workFile: "one-more.txt", commitMsg: "work-01b", expectFile: "partial.txt" },
+      ],
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "checkpoint",
+        body: "(no Brief section in the Issue file)",
+      },
+    ]);
+    // The checkpoint parked 01's worktree with its partial work; 02 merged
+    // and cleaned up.
+    expect(existsSync(join(poolDir, ".git", "pool-worktrees", "01"))).toBe(
+      true,
+    );
+    expect(git(["rev-parse", "--verify", "pool/01"]).exitCode).toBe(0);
+    expect(existsSync(join(poolDir, ".git", "pool-worktrees", "02"))).toBe(
+      false,
+    );
+
+    const resumed = await run.resume("01", "carry on");
+
+    // The second spawn asserts partial.txt is present (exit 43 otherwise),
+    // which only holds in the parked worktree.
+    expect(resumed.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "02", "01"]);
+    expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "one-more.txt"))).toBe(true);
+    expect(git(["rev-parse", "--verify", "pool/01"]).exitCode).not.toBe(0);
+    const issueText = readFileSync(join(poolDir, "issues", "01-t.md"), "utf8");
+    expect(issueText).toContain("status=done");
+    expect(issueText).toContain("carry on");
+  }, 15000);
+
+  it("runs a single-ticket super-step in the main checkout without a worktree", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "one.txt", commitMsg: "work-01", recordDir: join(poolDir, "rec-01") },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("done");
+    expect(readFileSync(join(poolDir, "rec-01", "cwd"), "utf8").trim()).toBe(
+      poolDir,
+    );
+    expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
+    expect(
+      git(["branch", "--list", "pool/*"]).stdout.toString().trim(),
+    ).toBe("");
+  }, 15000);
 });

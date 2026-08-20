@@ -1,12 +1,14 @@
 import {
   appendFileSync,
+  copyFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
 } from "node:fs";
 import { once } from "node:events";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
   loadPoolMarkers,
@@ -21,6 +23,17 @@ import {
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
+import {
+  branchExists,
+  branchFor,
+  gitAvailable,
+  mergeBranch,
+  prepareWorktree,
+  removeWorktree,
+  worktreePathFor,
+  type MergeResult,
+  type WorktreeInfo,
+} from "./worktrees.ts";
 
 export type { TicketStatus } from "./pool.ts";
 export type { HarnessCommand, SpawnContext } from "./spawn.ts";
@@ -43,7 +56,7 @@ export interface PoolConfig {
   agents?: string;
 }
 
-export type InterruptKind = "checkpoint" | "crash" | "deadlock";
+export type InterruptKind = "checkpoint" | "crash" | "deadlock" | "merge-conflict";
 
 export interface Interrupt {
   ticketId: string;
@@ -148,6 +161,7 @@ interface Session {
   runsDir: string;
   agentMd: string;
   cwd: string;
+  git: boolean;
   harnesses: Record<string, HarnessCommand>;
   assignments: Map<string, Assignment>;
   markers: TicketMarker[];
@@ -185,6 +199,7 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
     runsDir,
     agentMd,
     cwd,
+    git: gitAvailable(cwd),
     harnesses,
     assignments,
     markers,
@@ -237,24 +252,67 @@ async function drive(session: Session): Promise<PoolRun> {
       emit("running");
       const snapshot = session.state;
 
+      const plans = new Map(
+        ready.map((marker) => [marker.id, planTicket(session, marker, ready.length)]),
+      );
+
+      // Merges land in completion order: each ticket's merge chains onto a
+      // serialized queue the moment the ticket finishes, while its siblings
+      // are still running.
+      const merges: { marker: TicketMarker; result: MergeResult }[] = [];
+      let mergeQueue: Promise<void> = Promise.resolve();
       const results = await Promise.all(
         ready.map((marker) =>
-          runTicket(marker, snapshot, session.assignments.get(marker.id)!, {
-            poolDir: session.poolDir,
-            runsDir: session.runsDir,
-            issuesDir: session.issuesDir,
-            agentMd: session.agentMd,
-            harnesses: session.harnesses,
-            cwd: session.cwd,
+          runTicket(
+            marker,
+            snapshot,
+            session.assignments.get(marker.id)!,
+            {
+              poolDir: session.poolDir,
+              runsDir: session.runsDir,
+              issuesDir: session.issuesDir,
+              agentMd: session.agentMd,
+              harnesses: session.harnesses,
+            },
+            plans.get(marker.id)!,
+          ).then((result) => {
+            if (result.plan.worktree && result.status === "done") {
+              mergeQueue = mergeQueue.then(() => {
+                merges.push({
+                  marker,
+                  result: mergeTicket(session, marker, result.plan.worktree!),
+                });
+              });
+            }
+            return result;
           }),
         ),
       );
+      await mergeQueue;
 
       let joined = snapshot;
       for (const { update } of results) {
         joined = applyUpdate(joined, update);
       }
       session.state = joined;
+      for (const merge of merges) {
+        if (merge.result.ok) {
+          session.state = applyUpdate(session.state, {
+            log: [
+              `ticket ${merge.marker.id}: merged ${branchFor(merge.marker.id)} ` +
+                "onto the working branch" +
+                (merge.result.detail.endsWith("is gone")
+                  ? ` (${merge.result.detail})`
+                  : ""),
+            ],
+          });
+        } else {
+          raiseInterrupt(
+            session,
+            mergeConflictInterrupt(session, merge.marker, merge.result),
+          );
+        }
+      }
       for (const { marker, status, logPath } of results) {
         if (status === "checkpoint") {
           raiseInterrupt(session, checkpointInterrupt(marker));
@@ -278,10 +336,12 @@ async function drive(session: Session): Promise<PoolRun> {
     .map((m) => m.id)
     .filter((id) => session.state.tickets[id] !== "done");
   let phase: Exclude<RunPhase, "running">;
-  if (pending.length === 0) {
-    phase = "done";
-  } else if (session.state.interrupts.length > 0) {
+  if (session.state.interrupts.length > 0) {
+    // An interrupt can outlive its ticket's done: a conflicted merge leaves
+    // the ticket done and the interrupt pending.
     phase = "quiescent";
+  } else if (pending.length === 0) {
+    phase = "done";
   } else {
     phase = "stalled";
   }
@@ -461,6 +521,9 @@ async function resumeTicket(
       );
     }
   }
+  if (interrupt.kind === "merge-conflict") {
+    return resumeMerge(session, marker, interrupt, note);
+  }
   if (marker.status !== "done") {
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
@@ -483,8 +546,51 @@ async function resumeTicket(
   return drive(session);
 }
 
-function raiseInterrupt(session: Session, interrupt: Interrupt): void {
-  if (
+// Resuming a merge-conflict interrupt re-attempts the merge. A human who
+// resolved it by hand in the main checkout sees "Already up to date" and a
+// deleted branch counts as resolved; a fresh conflict refreshes the
+// interrupt and the pool stays quiescent. The ticket itself stays done: the
+// work was finished, only the merge was pending.
+async function resumeMerge(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  note?: string,
+): Promise<PoolRun> {
+  const branch = branchFor(marker.id);
+  const worktree: WorktreeInfo = {
+    path: worktreePathFor(session.cwd, marker.id),
+    branch,
+  };
+  const aside = `${marker.file}.pool-aside`;
+  renameSync(marker.file, aside);
+  const result = mergeBranch(session.cwd, branch);
+  renameSync(aside, marker.file);
+  if (note && note.trim()) {
+    appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
+  }
+  if (!result.ok) {
+    session.state = applyUpdate(session.state, {
+      interrupts: [
+        ...session.state.interrupts.filter((i) => i !== interrupt),
+        mergeConflictInterrupt(session, marker, result),
+      ],
+      log: [`merge re-attempt for ${marker.id} still conflicts`],
+    });
+    return drive(session);
+  }
+  removeWorktree(session.cwd, worktree);
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `interrupt answered for ${marker.id} (merge-conflict): merge landed` +
+        (result.detail.endsWith("is gone") ? ` (${result.detail})` : ""),
+    ],
+  });
+  return drive(session);
+}
+
+function raiseInterrupt(session: Session, interrupt: Interrupt): void {  if (
     session.state.interrupts.some(
       (i) => i.ticketId === interrupt.ticketId && i.kind === interrupt.kind,
     )
@@ -582,14 +688,102 @@ interface TicketEnv {
   issuesDir: string;
   agentMd: string;
   harnesses: Record<string, HarnessCommand>;
+}
+
+interface TicketPlan {
   cwd: string;
+  issuePath: string;
+  worktree?: WorktreeInfo;
 }
 
 interface TicketResult {
   marker: TicketMarker;
   status: TicketStatus;
   logPath: string;
+  plan: TicketPlan;
   update: PoolUpdate;
+}
+
+// Where a ticket runs. A multi-ticket super-step gives every ticket its own
+// worktree branched from the same HEAD, so parallel harnesses never share a
+// checkout. A ticket with a parked branch (checkpoint, crash or conflicted
+// merge left it behind) always reuses its worktree, even alone, so it keeps
+// the work it already did. Anything else runs in the main checkout. The main
+// checkout's Issue file is the truth and is copied into the worktree at
+// spawn, which is how a resume note reaches the agent.
+function planTicket(
+  session: Session,
+  marker: TicketMarker,
+  readyCount: number,
+): TicketPlan {
+  if (!session.git) return { cwd: session.cwd, issuePath: marker.file };
+  const parked = branchExists(session.cwd, marker.id);
+  if (readyCount < 2 && !parked) {
+    return { cwd: session.cwd, issuePath: marker.file };
+  }
+  const worktree = prepareWorktree(session.cwd, marker.id);
+  const issuePath = join(worktree.path, relative(session.cwd, marker.file));
+  mkdirSync(dirname(issuePath), { recursive: true });
+  copyFileSync(marker.file, issuePath);
+  return { cwd: worktree.path, issuePath, worktree };
+}
+
+// Marker read-back. In a worktree the agent edited its own copy; a finished
+// ticket's Issue content mirrors back to the main checkout so the dual-write
+// and any Brief stay inspectable there. A marker left at ready or
+// in-progress means the agent died; the main marker keeps the super-step's
+// in-progress, matching the no-worktree crash path.
+function readBack(marker: TicketMarker, plan: TicketPlan): TicketStatus {
+  if (!plan.worktree) return readMarker(marker.file).status;
+  const status = readMarker(plan.issuePath).status;
+  if (status === "done" || status === "checkpoint") {
+    copyFileSync(plan.issuePath, marker.file);
+    return status;
+  }
+  return "in-progress";
+}
+
+// Merging one finished ticket's branch onto the pool's working branch. The
+// dual-write leaves the Issue file dirty on the working branch and git
+// refuses a merge that would touch a dirty file, so the Issue steps aside
+// for the merge and comes straight back: its content already matches the
+// worktree copy, whether or not the agent committed it.
+function mergeTicket(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+): MergeResult {
+  const aside = `${marker.file}.pool-aside`;
+  renameSync(marker.file, aside);
+  const result = mergeBranch(session.cwd, worktree.branch);
+  renameSync(aside, marker.file);
+  if (result.ok) removeWorktree(session.cwd, worktree);
+  return result;
+}
+
+function mergeConflictInterrupt(
+  session: Session,
+  marker: TicketMarker,
+  result: MergeResult,
+): Interrupt {
+  const branch = branchFor(marker.id);
+  const files =
+    result.conflicted.length > 0
+      ? result.conflicted.join(", ")
+      : "(no unmerged paths listed)";
+  return {
+    ticketId: marker.id,
+    kind: "merge-conflict",
+    body:
+      `merging ${branch} onto the working branch failed; the merge was ` +
+      "aborted and the working branch was left clean.\n" +
+      `conflicted files: ${files}\n` +
+      `the ticket's work is parked on branch ${branch}, checked out at ` +
+      `${worktreePathFor(session.cwd, marker.id)}.\n` +
+      (result.detail ? `git said: ${result.detail}\n` : "") +
+      "resolve the conflict and resume this ticket; the merge is " +
+      "re-attempted on resume.",
+  };
 }
 
 async function runTicket(
@@ -597,11 +791,12 @@ async function runTicket(
   snapshot: PoolState,
   assignment: Assignment,
   env: TicketEnv,
+  plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
   const logPath = join(env.runsDir, `${marker.id}.log`);
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
-  const issueRel = relative(env.cwd, marker.file);
+  const issueRel = relative(plan.cwd, plan.issuePath);
 
   const upstream = marker.blockedBy.flatMap((id) => {
     const outcome = snapshot.outcomes[id];
@@ -620,7 +815,7 @@ async function runTicket(
 
   const ctx: SpawnContext = {
     id: marker.id,
-    issuePath: marker.file,
+    issuePath: plan.issuePath,
     issueRel,
     prompt,
     driver,
@@ -629,18 +824,19 @@ async function runTicket(
     agents: snapshot.config.agents,
     logPath,
     outcomePath,
-    cwd: env.cwd,
+    cwd: plan.cwd,
   };
   const argv = env.harnesses[assignment.harness](ctx);
   const exitCode = await spawnToLog(argv, ctx);
 
-  const status = readMarker(marker.file).status;
+  const status = readBack(marker, plan);
   const outcome = readOutcome(outcomePath);
 
   return {
     marker,
     status,
     logPath,
+    plan,
     update: {
       tickets: { [marker.id]: status },
       log: [
