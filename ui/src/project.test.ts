@@ -543,4 +543,89 @@ describe("nextNodeSelection", () => {
     expect(nextNodeSelection("ticket:A", "ticket:B")).toBe("ticket:B");
     expect(nextNodeSelection("ticket:A", "ticket:A")).toBeNull();
   });
+
+  it("treats ticket and utility cards alike", () => {
+    expect(nextNodeSelection(null, START_CARD_ID)).toBe(START_CARD_ID);
+    expect(nextNodeSelection("ticket:A", REVIEW_CARD_ID)).toBe(REVIEW_CARD_ID);
+    expect(nextNodeSelection(START_CARD_ID, START_CARD_ID)).toBeNull();
+  });
+});
+
+describe("a card click opens the Detail", () => {
+  function flightSnapshot(): PoolSnapshot {
+    return snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [
+          ticket("R", { status: "ready" }),
+          ticket("P", { status: "in-progress", blockedBy: ["R"] }),
+          ticket("C", { status: "checkpoint", blockedBy: ["P"] }),
+          ticket("D", { status: "done", blockedBy: ["P"] }),
+        ],
+        log: [],
+        outcomes: {},
+        interrupts: [{ ticketId: "C", kind: "checkpoint", body: "the brief" }],
+        config: {},
+      },
+    });
+  }
+
+  it("opens a ticket Detail for a card of any status", () => {
+    const snap = flightSnapshot();
+    const cases: [string, PoolStatus][] = [
+      ["R", "ready"],
+      ["P", "in-progress"],
+      ["C", "checkpoint"],
+      ["D", "done"],
+    ];
+    for (const [id, status] of cases) {
+      const selected = nextNodeSelection(null, ticketCardId(id));
+      const detail = selected ? projectDetail(snap, selected) : null;
+      expect(detail?.kind).toBe("ticket");
+      if (detail?.kind === "ticket") expect(detail.status).toBe(status);
+    }
+  });
+
+  it("keeps a pending interrupt answerable from the Detail's form", () => {
+    const detail = projectDetail(flightSnapshot(), ticketCardId("C"));
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.interrupt?.body).toBe("the brief");
+      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+    }
+  });
+
+  it("keeps the Detail across a snapshot that changes the card's status", () => {
+    const selected = nextNodeSelection(null, ticketCardId("P"));
+    const next = snapshot({
+      state: {
+        tickets: [ticket("P", { status: "done" })],
+        log: [],
+        outcomes: { P: { summary: "did P", commitSha: "sha-p" } },
+        interrupts: [],
+        config: {},
+      },
+    });
+    const detail = selected ? projectDetail(next, selected) : null;
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.status).toBe("done");
+      expect(detail.outcome?.summary).toBe("did P");
+    }
+  });
+
+  it("closes the Detail gracefully when the selected card has left the pool", () => {
+    const selected = nextNodeSelection(null, ticketCardId("R"));
+    expect(selected && projectDetail(flightSnapshot(), selected)).not.toBeNull();
+    const gone = snapshot({
+      state: {
+        tickets: [ticket("P")],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        config: {},
+      },
+    });
+    expect(selected && projectDetail(gone, selected)).toBeNull();
+  });
 });

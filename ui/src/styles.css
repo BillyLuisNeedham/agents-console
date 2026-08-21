@@ -383,16 +383,6 @@ body {
   z-index: 2;
 }
 
-.node-card-active {
-  border-color: var(--status-running);
-  box-shadow: 0 0 0 1px var(--status-running) inset;
-}
-
-.node-card-next {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
-}
-
 .node-card-ran {
   border-color: var(--status-done);
 }
@@ -643,23 +633,6 @@ body {
   color: var(--status-done);
 }
 
-.ticket-card-details {
-  display: none;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  flex-direction: column;
-  gap: 4px;
-}
-
-.ticket-card-expanded .ticket-card-details {
-  display: flex;
-}
-
-.ticket-card-expanded .ticket-card-blocked,
-.ticket-card-expanded .ticket-card-summary {
-  display: none;
-}
-
 /* --------------------------------------------------------- pool statuses */
 
 .ticket-card-in-progress {
@@ -709,10 +682,6 @@ body {
   font-size: 11px;
   overflow: auto;
   user-select: text;
-}
-
-.interrupt-box-card .interrupt-body {
-  max-height: 120px;
 }
 
 .interrupt-note {

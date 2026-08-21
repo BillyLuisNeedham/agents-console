@@ -13,7 +13,6 @@ import {
   mergeLayout,
   parseStoredLayout,
   strokeWidthForZoom,
-  isTicketCardId,
   layoutStorageKey,
   nextNodeSelection,
   zoomAtCursor,
@@ -88,7 +87,6 @@ const DRAG_THRESHOLD = 4;
 const WORLD_MIN_WIDTH = 960;
 
 const nodePos = new Map<string, Point>();
-const expandedTickets = new Set<string>();
 const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
 let edgeMode: EdgeMode = "ortho";
 
@@ -205,17 +203,6 @@ function canvasCards(model: AppModel): Positioned[] {
   return model.cards;
 }
 
-function toggleTicketExpand(id: string): void {
-  if (expandedTickets.has(id)) expandedTickets.delete(id);
-  else expandedTickets.add(id);
-  const el = canvas?.nodesById.get(id);
-  el?.classList.toggle("ticket-card-expanded", expandedTickets.has(id));
-  if (canvas) {
-    fitWorld(canvas.world);
-    updateEdges();
-  }
-}
-
 function applyTransform(): void {
   if (!canvas) return;
   canvas.world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
@@ -297,8 +284,7 @@ function endDrag(event?: PointerEvent): void {
   if (drag.kind === "node" && drag.moved) writeStored();
   drag = null;
   if (!wasClick || !nodeId) return;
-  if (isTicketCardId(nodeId)) toggleTicketExpand(nodeId);
-  else selectNode(nodeId);
+  selectNode(nodeId);
 }
 
 function selectNode(nodeId: string): void {
@@ -422,17 +408,14 @@ function statusLabel(status: PoolStatus): string {
   return status === "in-progress" ? "running" : status;
 }
 
-// One interrupt form shape for the card (compact) and the Detail (full
-// size). The kind-specific body comes from the engine: a checkpoint's Brief,
-// a crash's log path, a conflict's resolution or attempt.
-function renderInterrupt(
-  interrupt: InterruptView,
-  place: "card" | "detail",
-  handlers: Handlers,
-): HTMLElement {
+// One interrupt form shape, rendered in the Detail: the only place an
+// interrupt is read and answered. The kind-specific body comes from the
+// engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
+// or attempt.
+function renderInterrupt(interrupt: InterruptView, handlers: Handlers): HTMLElement {
   const box = h(
     "div",
-    { class: `interrupt-box interrupt-box-${place}` },
+    { class: "interrupt-box" },
     h("span", { class: "interrupt-kind" }, interrupt.form.title),
     h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
   );
@@ -440,8 +423,8 @@ function renderInterrupt(
     class: "interrupt-note",
     placeholder:
       interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
-    "data-note-key": `${interrupt.ticketId}:${place}`,
-    rows: place === "card" ? 2 : 3,
+    "data-note-key": `${interrupt.ticketId}:detail`,
+    rows: 3,
   }) as HTMLTextAreaElement;
   note.value = interruptDrafts.get(interrupt.ticketId) ?? "";
   note.addEventListener("input", () => {
@@ -472,29 +455,11 @@ function renderInterrupt(
   return box;
 }
 
-function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement {
+// A card is a summary: status, title, blockers, and an interrupt dot. A
+// click selects it and opens the Detail, where the ticket is read and its
+// interrupt answered.
+function renderTicketCard(card: TicketCardView): HTMLElement {
   const pos = posOf(card);
-  const expanded = expandedTickets.has(card.id);
-  const details = h(
-    "div",
-    { class: "ticket-card-details" },
-    h("div", { class: "card-text" }, `id ${card.ticketId}`),
-    h("div", { class: "card-text" }, card.title),
-    h("div", { class: "dim" }, `status ${statusLabel(card.status)}`),
-    h(
-      "div",
-      { class: "dim" },
-      card.blockedBy.length > 0 ? `blockedBy ${card.blockedBy.join(", ")}` : "blockedBy none",
-    ),
-    ...(card.outcome
-      ? [
-          h("div", { class: "card-text" }, `outcome: ${card.outcome.summary}`),
-          card.outcome.commitSha
-            ? h("div", { class: "dim" }, `commit ${card.outcome.commitSha}`)
-            : null,
-        ]
-      : []),
-  );
   const head = h(
     "div",
     { class: "node-card-head" },
@@ -509,8 +474,7 @@ function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement
     {
       class:
         `node-card ticket-card ticket-card-${card.status}` +
-        (card.interrupt ? " ticket-card-interrupt" : "") +
-        (expanded ? " ticket-card-expanded" : ""),
+        (card.interrupt ? " ticket-card-interrupt" : ""),
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
@@ -521,15 +485,11 @@ function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement
       h("div", { class: "card-text ticket-card-summary" }, card.title),
       h("div", { class: "dim ticket-card-blocked" },
         card.blockedBy.length > 0 ? `after ${card.blockedBy.join(", ")}` : "no blockers"),
-      card.interrupt
-        ? renderInterrupt(card.interrupt, "card", handlers)
-        : null,
-      details,
     ),
   );
 }
 
-function renderUtilityCard(card: UtilityCardView, handlers: Handlers): HTMLElement {
+function renderUtilityCard(card: UtilityCardView): HTMLElement {
   const pos = posOf(card);
   const head = h(
     "div",
@@ -552,16 +512,14 @@ function renderUtilityCard(card: UtilityCardView, handlers: Handlers): HTMLEleme
     h(
       "div",
       { class: "node-card-body" },
-      card.interrupt
-        ? renderInterrupt(card.interrupt, "card", handlers)
-        : h("div", { class: "dim" }, "utility"),
+      h("div", { class: "dim" }, "utility"),
     ),
   );
 }
 
-function renderCard(card: PoolCardView, handlers: Handlers): HTMLElement {
-  if (card.kind === "ticket") return renderTicketCard(card, handlers);
-  return renderUtilityCard(card, handlers);
+function renderCard(card: PoolCardView): HTMLElement {
+  if (card.kind === "ticket") return renderTicketCard(card);
+  return renderUtilityCard(card);
 }
 
 function worldSize(cards: Positioned[]): { width: number; height: number } {
@@ -713,7 +671,7 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
     class: "canvas-world",
     style: `width:${size.width}px;height:${size.height}px`,
   });
-  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card, handlers)));
+  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card)));
   const viewport = h("div", { class: "canvas-viewport" }, world);
   main.append(renderCanvasHeader(model), viewport);
   return main;
@@ -739,7 +697,7 @@ function renderTicketDetail(
     ),
   );
   if (detail.interrupt) {
-    body.append(renderInterrupt(detail.interrupt, "detail", handlers));
+    body.append(renderInterrupt(detail.interrupt, handlers));
   }
   if (detail.outcome) {
     body.append(
@@ -766,7 +724,7 @@ function renderUtilityDetail(
     h("div", { class: "card-text" }, detail.label),
   );
   if (detail.interrupt) {
-    body.append(renderInterrupt(detail.interrupt, "detail", handlers));
+    body.append(renderInterrupt(detail.interrupt, handlers));
   }
   return body;
 }
@@ -880,9 +838,6 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
   drawerDrag = null;
   onSelectNode = handlers.onSelectNode;
   const liveIds = new Set(model.cards.map((card) => card.id));
-  for (const id of [...expandedTickets]) {
-    if (!liveIds.has(id)) expandedTickets.delete(id);
-  }
   for (const id of [...nodePos.keys()]) {
     if (!liveIds.has(id)) nodePos.delete(id);
   }
