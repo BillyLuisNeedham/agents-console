@@ -1,4 +1,4 @@
-<!-- state: id=11 blocked-by=01,02,03,04,05,06,07,08,09,10,12,13,14,15 status=checkpoint -->
+<!-- state: id=11 blocked-by=01,02,03,04,05,06,07,08,09,10,12,13,14,15 status=done -->
 
 # 11 — Review pass against the spec
 
@@ -11,9 +11,9 @@ Final review pass over the whole ticket-pool Console before calling the spec don
 ## Acceptance criteria
 
 - [x] Both review axes run over the full diff from the fixed point
-- [ ] Every user story in the spec is verified as demonstrably working, with the verification noted
+- [x] Every user story in the spec is verified as demonstrably working, with the verification noted
 - [x] CONTEXT.md vocabulary is used correctly in code and UI copy; avoid-words absent
-- [ ] All findings addressed or explicitly deferred with reasons recorded
+- [x] All findings addressed or explicitly deferred with reasons recorded
 - [x] Full test suite, typecheck, and build all clean
 
 ## Blocked by
@@ -101,3 +101,33 @@ Spec summary: 6 findings. Worst: (c)1, the opencode resolver path never works, s
    - **Baseline smells** (answer-path duplication, tri-state declared three times, Session god-object, REVIEW id contract string): judgement calls; defer, ticket, or leave.
 
 3. After Billy rules: fixes become new tickets or a small fix pass on this branch, then either re-run this review over the new diff or accept the remaining findings and call the spec done. The run's final Review interrupt (ticket 09's machinery) is still pending in the pool, so the pool itself is waiting on the same decision.
+
+## Resume note
+
+i'm happy with all your points, act on it
+
+## Re-review, tickets 12 to 15
+
+Fixed point unchanged (`41ac900`); the re-review slice was `git diff f698364...HEAD -- engine/ ui/` (2d467d1, 3a36537, d39a6af, 8b820ca, c63885c), run as two parallel sub-agents against `.scratch/console-pool/spec-console-flight-fixes.md`.
+
+Standards axis: one hard violation, em dashes in the `flowNeighbourhood` JSDoc (fixed in the pass below). One letter-of-the-law bend, a `message` variable in the opencode PWD fake (renamed). Baseline smells in the new code, all judgement calls, all deferred: the inflow/outflow edge test is derived in both `project.ts` and `view.ts` (deferred: both are one-liners over the same edge list, and a shared helper would complicate the render hot path for no story's benefit); `flowInflow`/`flowOutflow` as parallel module state in `view.ts` (mild, cohesive); env-swap choreography in the new engine test (test-only).
+
+Spec axis: stories 1 to 19 all present with tests (engine 60/60, ui 50/50 at review time). Stories 20 to 22 carry no evidence in this repo by design; the skill lives in the skills repo (commit 6b95018) and the Mac half is unprovable from Linux per the spec's own honesty clause. One real defect: the grace timer re-armed on every stream error, and native EventSource retries land inside the four-second window, so a sustained outage starved the banner forever (story 8). One scope-creep note: the spawn-PWD fix (d39a6af) is not in the flight-fixes spec; ratified here as a load-bearing bugfix that tickets 12/13/15 already depended on (their work landed during the escape it caused), and flagged for the pool's final Review interrupt.
+
+## Fix pass, per Billy's ruling
+
+- `engine.ts` readBack: only done and checkpoint survive read-back, in either mode. A main-checkout agent that exits with its marker rewritten to ready now maps to in-progress, the marker is written back, and the crash interrupt fires instead of an unbounded respawn (stories 19 and 27). Pinned by a new test, "treats a marker rewritten to ready as a crash, not a respawn"; verified against the old code, where it times out in the respawn loop.
+- `RESOLVER_DRIVER` renamed `resolve` to `resolving-merge-conflicts`, the command stub present under both `~/.config/opencode/command/` and `~/.claude/commands/` (story 24). The stub takes `$ARGUMENTS`, exactly the `--command` message shape. The resolver prompt carries the instructions, so claude is unaffected.
+- `main.ts`: the grace timer arms on the first error of an outage only; repeated retries update the stored message but no longer push the banner past the grace window forever (story 8). Composition-root wiring, not harness-tested, matching the flight-fixes Testing Decisions.
+- Em dashes removed from `engine/engine.test.ts` prose and the `flowNeighbourhood` JSDoc. The `.scratch` runner-note em dashes are left as the historical record: that area is never committed, the convention binds new prose, and quoted spec text must stay verbatim.
+- Ratifications written into `spec-ticket-pools.md`: story 13 and the Worktrees decision reworded to the deliberate lone-ticket main-checkout behaviour (ticket 05's documented deviation); the channels line now names `reviewApproved`; the console.json contents now name the `agents` key; story 27 and the crash definition reworded to the fixed read-back semantics.
+- Deferred with reasons: the four baseline smells from the first pass (answer-path duplication, tri-state declared three times, Session god-object, REVIEW id contract string) and the new ones above. None blocks a spec story.
+- The fix diff itself got an abbreviated self-review against the smell baseline and conventions: four source files, no em dashes, no attribution, no new dependencies, vocabulary clean.
+
+## Story verification, final
+
+Parent spec, 34 stories: 31 verified in the first pass; 13 (worktree wording), 24 (opencode resolver name), 27 (crash gap) were partial and are now closed by the spec amendment and the two engine fixes. Flight-fixes spec, 22 stories: 1 to 19 verified by the ticket test suites (12: selection and projection tests; 13: server stream test past the ten-second idle timeout; 14: `flowNeighbourhood` fixture tests, 110 pass at c63885c); 20 to 22 verified in the skills repo (6b95018, Linux smoke-proven) with the Mac branch accepted as unprovable from here.
+
+Checks after the fix pass: `bun test` 111 pass / 0 fail; `tsc --noEmit` clean; `bun run build` in `ui/` clean.
+
+AGENT.md note (this ticket owns it): every path the pool AGENT.md references still resolves. The stale content is its "expected to stop" section (10 is done, not at checkpoint) and its "Issue 11 changes no code" line, superseded by Billy's resume note above. Left as-is: the pool ends with this ticket, so no future agent reads it.

@@ -36,7 +36,7 @@ Parallel execution:
 
 11. As Billy, I want every ticket whose blockers are done to run in the same super-step, so that independent work finishes in parallel instead of queueing behind a serial runner.
 12. As Billy, I want parallel tickets in a super-step to see the same starting snapshot, so that no ticket observes half-merged sibling state.
-13. As Billy, I want each running ticket to work in its own git worktree branched from current HEAD, so that parallel harnesses never edit the same checkout.
+13. As Billy, I want parallel tickets in a super-step to work in their own git worktrees branched from the same HEAD, so that parallel harnesses never edit the same checkout.
 14. As Billy, I want ticket work merged back in completion order, so that the pool's working branch accumulates finished work deterministically.
 15. As Billy, I want a running ticket to never be rebased, so that an agent mid-task never has its ground shifted.
 
@@ -56,7 +56,7 @@ Interrupts:
 24. As Billy, I want a merge conflict to be handed to a resolver agent automatically, so that mechanical conflict resolution doesn't burn my attention.
 25. As Billy, I want the resolver agent's resolution shown to me as an approval interrupt before the merge commits, so that merge authority stays with me.
 26. As Billy, I want rejecting a resolution to hand me the conflicted state with the agent's attempt noted, so that I fix it myself without losing what the agent tried.
-27. As Billy, I want a harness crash — a ticket that ends with no status set — surfaced as an interrupt carrying the log path, so that silent failures can't strand a pool.
+27. As Billy, I want a harness crash — a ticket that ends without done or checkpoint on its marker — surfaced as an interrupt carrying the log path, so that silent failures can't strand a pool.
 28. As Billy, I want deadlock — a ticket whose blockers can never complete — surfaced as an interrupt, so that a broken pool asks for help instead of hanging.
 29. As Billy, I want one final Review interrupt when every ticket is done, so that finished work gets my judgment before the run is called complete.
 30. As Billy, I want rejecting at Review to send named tickets back to ready with my note appended and the run to continue, so that review feedback loops through the graph instead of becoming terminal chores.
@@ -70,14 +70,14 @@ Durability and interop:
 
 ## Implementation Decisions
 
-- **New skill** `my-console-runner` lives beside my-issue-runner. Detection phase reuses my-issue-runner's eight facts; interview is the same six questions; output is `console.json` (drivers, per-ticket harness/model assignments, roster, reviewer authority, checkpoint definition, optional `resolver=` harness for conflict resolution falling back to the `~/.issue-runner` default) plus `AGENT.md`. It then launches the server bound to the pool and opens the browser. It never writes tickets.
+- **New skill** `my-console-runner` lives beside my-issue-runner. Detection phase reuses my-issue-runner's eight facts; interview is the same six questions; output is `console.json` (drivers, per-ticket harness/model assignments, roster, reviewer authority, checkpoint definition, optional `resolver=` harness for conflict resolution falling back to the `~/.issue-runner` default, optional `agents` roster JSON for harnesses that take one) plus `AGENT.md`. It then launches the server bound to the pool and opens the browser. It never writes tickets.
 - **Bespoke pool engine**, one versioned copy in the prototype, replacing any per-pool engine. Graph vocabulary, pool semantics only.
 - **Graph shape is fixed**: schedule → fan-out implement → deadlock/terminal handling → Review. Grill and Spec stay outside; the pool is specified before the skill runs.
-- **Channels**: `tickets` (id → status map, last-write merge), `log` (append), `outcomes` (id → summary + commit sha, keyed merge), `config` (static, the console.json contents). Upstream outcomes are injected into downstream tickets' prompts at spawn time.
+- **Channels**: `tickets` (id → status map, last-write merge), `log` (append), `outcomes` (id → summary + commit sha, keyed merge), `config` (static, the console.json contents), `reviewApproved` (the final Review approval, kept durable so a restart never re-raises an approved Review). Upstream outcomes are injected into downstream tickets' prompts at spawn time.
 - **Scheduling**: ready = every blocker done. The ready set runs as one super-step against a shared starting snapshot; reducers apply at the join.
-- **Worktrees**: one git worktree per running ticket, branched from HEAD at super-step start; merges land in completion order; running tickets are never rebased.
+- **Worktrees**: a multi-ticket super-step gives every ticket its own git worktree, branched from the same HEAD at super-step start, so parallel harnesses never share a checkout. A lone ticket runs in the main checkout, unless a parked branch (checkpoint, crash or conflicted merge) exists, which always reuses its worktree. Merges land in completion order; running tickets are never rebased.
 - **Merge conflicts**: engine spawns the resolver agent automatically; its resolution is presented as an approval interrupt; approve commits the merge, reject converts to a manual-resolution interrupt carrying the agent's attempt.
-- **Harness execution**: port run.sh's proven spawn kernel — non-interactive invocation with stdin closed, glued prompt (driver skill + AGENT.md + chain + roster), per-ticket harness/model from console.json, line-1 marker read-back after exit, per-ticket logs in the pool's runs directory. Crash = exit with no status set.
+- **Harness execution**: port run.sh's proven spawn kernel — non-interactive invocation with stdin closed, glued prompt (driver skill + AGENT.md + chain + roster), per-ticket harness/model from console.json, line-1 marker read-back after exit, per-ticket logs in the pool's runs directory. Crash = exit without done or checkpoint on the marker, including a marker the agent rewrote to ready, which read-back maps to in-progress rather than re-spawning forever.
 - **Interrupt kinds** (six, one form shape with a kind-specific body): ticket checkpoint, merge-conflict approval, resolver-failure/manual merge, harness crash, deadlock, final Review.
 - **Interrupt semantics**: an interrupt blocks only its own subtree; ready siblings keep running; answering an interrupt resumes the pool automatically. The pool is quiescent only when nothing is running and interrupts are pending. Review approve ends the run; reject returns named tickets to ready with the note appended.
 - **Durability**: checkpoint to sqlite in the pool directory after each super-step; line-1 markers dual-written and authoritative on conflict; server restart rehydrates from markers + checkpoint.
