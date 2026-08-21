@@ -21,6 +21,53 @@ export interface PoolInterrupt {
   body: string;
 }
 
+// ---------------------------------------------------------------------------
+// Interrupt forms: one form shape across the interrupt kinds, with a
+// kind-specific title and action set. Pure config over the interrupt; the
+// DOM layer renders it. The engine appends the note to the Issue file on
+// every answer path, so every form carries the note field.
+// ---------------------------------------------------------------------------
+
+export type InterruptAction = "resume" | "approve" | "reject";
+
+export interface InterruptFormAction {
+  action: InterruptAction;
+  label: string;
+  tone: "primary" | "danger";
+}
+
+export interface InterruptFormView {
+  title: string;
+  actions: InterruptFormAction[];
+}
+
+/** An interrupt with its form attached, as projected onto a card or Detail. */
+export interface InterruptView extends PoolInterrupt {
+  form: InterruptFormView;
+}
+
+const RESUME: InterruptFormAction = { action: "resume", label: "resume", tone: "primary" };
+const APPROVE: InterruptFormAction = { action: "approve", label: "approve", tone: "primary" };
+const REJECT: InterruptFormAction = { action: "reject", label: "reject", tone: "danger" };
+
+const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
+  checkpoint: { title: "checkpoint", actions: [RESUME] },
+  crash: { title: "harness crash", actions: [RESUME] },
+  deadlock: { title: "deadlock", actions: [RESUME] },
+  "merge-conflict": { title: "merge conflict", actions: [RESUME] },
+  "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
+  review: { title: "review", actions: [APPROVE, REJECT] },
+};
+
+/**
+ * The form for an interrupt. The engine's five kinds are joined by `review`
+ * (Issue 09); an unknown kind falls back to a plain resume form so a newer
+ * engine never renders an unanswerable interrupt.
+ */
+export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
+  return INTERRUPT_FORMS[interrupt.kind] ?? { title: interrupt.kind, actions: [RESUME] };
+}
+
 export interface PoolTicketState {
   id: string;
   title: string;
@@ -58,7 +105,7 @@ export interface TicketCardView {
   blockedBy: string[];
   status: PoolStatus;
   outcome: PoolOutcome | null;
-  interrupt: PoolInterrupt | null;
+  interrupt: InterruptView | null;
   x: number;
   y: number;
 }
@@ -187,6 +234,7 @@ function projectTicket(
   state: PoolState,
   pos: Point,
 ): TicketCardView {
+  const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
   return {
     kind: "ticket",
     id: ticketCardId(ticket.id),
@@ -195,8 +243,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
-    interrupt:
-      state.interrupts.find((i) => i.ticketId === ticket.id) ?? null,
+    interrupt: raw ? { ...raw, form: interruptForm(raw) } : null,
     x: pos.x,
     y: pos.y,
   };
@@ -250,7 +297,7 @@ export interface TicketDetailView {
   status: PoolStatus;
   blockedBy: string[];
   outcome: PoolOutcome | null;
-  interrupt: PoolInterrupt | null;
+  interrupt: InterruptView | null;
 }
 
 export interface UtilityDetailView {

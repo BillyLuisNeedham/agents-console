@@ -688,6 +688,50 @@ body {
   font-weight: 700;
 }
 
+/* --------------------------------------------------------- interrupt forms */
+
+/* A pending interrupt wins over the status styling: a conflicted merge can
+   leave a done card waiting on a human, and it must not fade. */
+.ticket-card-interrupt {
+  border-color: var(--interrupt);
+  opacity: 1;
+  animation: interrupt-pulse 1.6s ease-in-out infinite;
+}
+
+.interrupt-body {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: auto;
+  user-select: text;
+}
+
+.interrupt-box-card .interrupt-body {
+  max-height: 120px;
+}
+
+.interrupt-note {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  resize: vertical;
+  user-select: text;
+}
+
+.interrupt-note:focus {
+  outline: none;
+  border-color: var(--interrupt);
+}
+
 /* -------------------------------------------------------- utility cards */
 
 .node-card-utility {

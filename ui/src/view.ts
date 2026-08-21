@@ -20,6 +20,8 @@ import {
   type CardBox,
   type DetailView,
   type EdgeMode,
+  type InterruptAction,
+  type InterruptView,
   type Point,
   type PoolCardView,
   type PoolPhase,
@@ -49,6 +51,7 @@ export interface Handlers {
   onToggleLog: () => void;
   onToggleInspector: () => void;
   onSelectNode: (nodeId: string | null) => void;
+  onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(
@@ -136,6 +139,13 @@ let onSelectNode: ((nodeId: string | null) => void) | null = null;
 // stream. One shared vh height drives both drawer bodies.
 let drawersHeight = DRAWER_DEFAULT_VH;
 let drawerDrag: { startY: number; startHeight: number } | null = null;
+
+// Interrupt note drafts, keyed by ticket id: module scope so a snapshot
+// re-render (siblings keep running while an interrupt waits) never wipes a
+// note being typed. Drafts are pruned when their interrupt resolves. Focus
+// and cursor are restored across the rebuild via the textarea's
+// data-note-key.
+const interruptDrafts = new Map<string, string>();
 
 function readStored(): Record<string, Point> {
   try {
@@ -412,7 +422,56 @@ function statusLabel(status: PoolStatus): string {
   return status === "in-progress" ? "running" : status;
 }
 
-function renderTicketCard(card: TicketCardView): HTMLElement {
+// One interrupt form shape for the card (compact) and the Detail (full
+// size). The kind-specific body comes from the engine: a checkpoint's Brief,
+// a crash's log path, a conflict's resolution or attempt.
+function renderInterrupt(
+  interrupt: InterruptView,
+  place: "card" | "detail",
+  handlers: Handlers,
+): HTMLElement {
+  const box = h(
+    "div",
+    { class: `interrupt-box interrupt-box-${place}` },
+    h("span", { class: "interrupt-kind" }, interrupt.form.title),
+    h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
+  );
+  const note = h("textarea", {
+    class: "interrupt-note",
+    placeholder: "note (optional, appended to the Issue)",
+    "data-note-key": `${interrupt.ticketId}:${place}`,
+    rows: place === "card" ? 2 : 3,
+  }) as HTMLTextAreaElement;
+  note.value = interruptDrafts.get(interrupt.ticketId) ?? "";
+  note.addEventListener("input", () => {
+    interruptDrafts.set(interrupt.ticketId, note.value);
+  });
+  box.append(note);
+  box.append(
+    h(
+      "div",
+      { class: "interrupt-actions" },
+      ...interrupt.form.actions.map(({ action, label, tone }) =>
+        h(
+          "button",
+          {
+            class: "btn" + (tone === "primary" ? " btn-primary" : " btn-danger"),
+            onclick: () =>
+              handlers.onAnswer(
+                interrupt.ticketId,
+                action,
+                interruptDrafts.get(interrupt.ticketId),
+              ),
+          },
+          label,
+        ),
+      ),
+    ),
+  );
+  return box;
+}
+
+function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement {
   const pos = posOf(card);
   const expanded = expandedTickets.has(card.id);
   const details = h(
@@ -449,6 +508,7 @@ function renderTicketCard(card: TicketCardView): HTMLElement {
     {
       class:
         `node-card ticket-card ticket-card-${card.status}` +
+        (card.interrupt ? " ticket-card-interrupt" : "") +
         (expanded ? " ticket-card-expanded" : ""),
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
@@ -460,6 +520,9 @@ function renderTicketCard(card: TicketCardView): HTMLElement {
       h("div", { class: "card-text ticket-card-summary" }, card.title),
       h("div", { class: "dim ticket-card-blocked" },
         card.blockedBy.length > 0 ? `after ${card.blockedBy.join(", ")}` : "no blockers"),
+      card.interrupt
+        ? renderInterrupt(card.interrupt, "card", handlers)
+        : null,
       details,
     ),
   );
@@ -483,8 +546,8 @@ function renderUtilityCard(card: UtilityCardView): HTMLElement {
   );
 }
 
-function renderCard(card: PoolCardView): HTMLElement {
-  if (card.kind === "ticket") return renderTicketCard(card);
+function renderCard(card: PoolCardView, handlers: Handlers): HTMLElement {
+  if (card.kind === "ticket") return renderTicketCard(card, handlers);
   return renderUtilityCard(card);
 }
 
@@ -622,7 +685,7 @@ function drawEdges(world: HTMLElement, edges: TopologyEdge[]): void {
   paintStrokeScale();
 }
 
-function renderMain(model: AppModel): HTMLElement {
+function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
   const main = h("div", { class: "main" });
   if (model.error && model.cards.length === 0) {
     main.append(h("div", { class: "error" }, model.error));
@@ -637,7 +700,7 @@ function renderMain(model: AppModel): HTMLElement {
     class: "canvas-world",
     style: `width:${size.width}px;height:${size.height}px`,
   });
-  world.append(makeSvg(), ...model.cards.map(renderCard));
+  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card, handlers)));
   const viewport = h("div", { class: "canvas-viewport" }, world);
   main.append(renderCanvasHeader(model), viewport);
   return main;
@@ -647,7 +710,10 @@ function renderMain(model: AppModel): HTMLElement {
 // Detail panel: right-hand flex sibling for the selected card
 // ---------------------------------------------------------------------------
 
-function renderTicketDetail(detail: Extract<DetailView, { kind: "ticket" }>): HTMLElement {
+function renderTicketDetail(
+  detail: Extract<DetailView, { kind: "ticket" }>,
+  handlers: Handlers,
+): HTMLElement {
   const body = h("div", { class: "detail-body" });
   body.append(
     h("div", { class: "dim" }, "status"),
@@ -660,10 +726,7 @@ function renderTicketDetail(detail: Extract<DetailView, { kind: "ticket" }>): HT
     ),
   );
   if (detail.interrupt) {
-    body.append(
-      h("div", { class: "dim" }, `interrupt · ${detail.interrupt.kind}`),
-      h("pre", { class: "detail-pre" }, detail.interrupt.body || "-"),
-    );
+    body.append(renderInterrupt(detail.interrupt, "detail", handlers));
   }
   if (detail.outcome) {
     body.append(
@@ -688,7 +751,7 @@ function renderUtilityDetail(detail: Extract<DetailView, { kind: "utility" }>): 
   );
 }
 
-function renderDetail(model: AppModel): HTMLElement {
+function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
   const detail = h("div", { class: "detail" });
   const view = model.detail;
   if (!view) return detail;
@@ -705,7 +768,7 @@ function renderDetail(model: AppModel): HTMLElement {
         "✕",
       ),
     ),
-    view.kind === "ticket" ? renderTicketDetail(view) : renderUtilityDetail(view),
+    view.kind === "ticket" ? renderTicketDetail(view, handlers) : renderUtilityDetail(view),
   );
   return detail;
 }
@@ -803,14 +866,45 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
   for (const id of [...nodePos.keys()]) {
     if (!liveIds.has(id)) nodePos.delete(id);
   }
+  const pendingInterrupts = new Set(
+    model.cards.flatMap((card) =>
+      card.kind === "ticket" && card.interrupt ? [card.ticketId] : [],
+    ),
+  );
+  for (const id of [...interruptDrafts.keys()]) {
+    if (!pendingInterrupts.has(id)) interruptDrafts.delete(id);
+  }
+  // Preserve a note being typed across the rebuild: text lives in
+  // interruptDrafts, focus and cursor are restored after the swap.
+  let noteFocus: { key: string; start: number; end: number } | null = null;
+  const active = document.activeElement;
+  if (active instanceof HTMLTextAreaElement && active.dataset.noteKey) {
+    noteFocus = {
+      key: active.dataset.noteKey,
+      start: active.selectionStart,
+      end: active.selectionEnd,
+    };
+  }
   seedPositions(canvasCards(model));
   const content = h(
     "div",
     { class: "content" },
-    renderMain(model),
-    renderDetail(model),
+    renderMain(model, handlers),
+    renderDetail(model, handlers),
   );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
+  if (noteFocus) {
+    const next = root.querySelector<HTMLTextAreaElement>(
+      `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
+    );
+    if (next) {
+      next.focus();
+      next.setSelectionRange(
+        Math.min(noteFocus.start, next.value.length),
+        Math.min(noteFocus.end, next.value.length),
+      );
+    }
+  }
   const world = root.querySelector(".canvas-world");
   const viewport = root.querySelector(".canvas-viewport");
   if (world instanceof HTMLElement && viewport instanceof HTMLElement) {

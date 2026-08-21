@@ -6,6 +6,7 @@ import {
   DRAWER_MAX_VH,
   DRAWER_MIN_VH,
   edgePath,
+  interruptForm,
   isTicketCardId,
   layoutStorageKey,
   mergeLayout,
@@ -184,6 +185,127 @@ describe("projectPool", () => {
     const view = projectPool(snapshot());
     expect(view.cards.map((c) => c.id)).toEqual([START_CARD_ID, REVIEW_CARD_ID]);
     expect(view.edges).toEqual([]);
+  });
+});
+
+const INTERRUPT_KINDS = [
+  "checkpoint",
+  "crash",
+  "deadlock",
+  "merge-conflict",
+  "merge-approval",
+  "review",
+];
+
+describe("interruptForm", () => {
+  it("gives all six interrupt kinds a renderable, answerable form", () => {
+    for (const kind of INTERRUPT_KINDS) {
+      const form = interruptForm({ ticketId: "A", kind, body: "body" });
+      expect(form.title.length).toBeGreaterThan(0);
+      expect(form.actions.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("resumes the human-decision kinds and gates the approval kinds", () => {
+    const actions = (kind: string) =>
+      interruptForm({ ticketId: "A", kind, body: "" }).actions.map((a) => a.action);
+    expect(actions("checkpoint")).toEqual(["resume"]);
+    expect(actions("crash")).toEqual(["resume"]);
+    expect(actions("deadlock")).toEqual(["resume"]);
+    expect(actions("merge-conflict")).toEqual(["resume"]);
+    expect(actions("merge-approval")).toEqual(["approve", "reject"]);
+    expect(actions("review")).toEqual(["approve", "reject"]);
+  });
+
+  it("titles each kind for the card and Detail", () => {
+    const titles = Object.fromEntries(
+      INTERRUPT_KINDS.map((kind) => [
+        kind,
+        interruptForm({ ticketId: "A", kind, body: "" }).title,
+      ]),
+    );
+    expect(titles).toEqual({
+      checkpoint: "checkpoint",
+      crash: "harness crash",
+      deadlock: "deadlock",
+      "merge-conflict": "merge conflict",
+      "merge-approval": "merge approval",
+      review: "review",
+    });
+  });
+
+  it("falls back to a resume form for an unknown kind", () => {
+    const form = interruptForm({ ticketId: "A", kind: "future-kind", body: "" });
+    expect(form.title).toBe("future-kind");
+    expect(form.actions.map((a) => a.action)).toEqual(["resume"]);
+  });
+});
+
+describe("interrupt projection", () => {
+  function interruptSnapshot(): PoolSnapshot {
+    return snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
+        log: [],
+        outcomes: {},
+        interrupts: INTERRUPT_KINDS.map((kind) => ({
+          ticketId: `T-${kind}`,
+          kind,
+          body: `${kind} body`,
+        })),
+        config: {},
+      },
+    });
+  }
+
+  it("carries each interrupt kind onto its card with a form", () => {
+    const view = projectPool(interruptSnapshot());
+    for (const kind of INTERRUPT_KINDS) {
+      const card = view.cards.find((c) => c.id === ticketCardId(`T-${kind}`));
+      expect(card?.kind).toBe("ticket");
+      if (card?.kind === "ticket") {
+        expect(card.interrupt?.kind).toBe(kind);
+        expect(card.interrupt?.body).toBe(`${kind} body`);
+        expect(card.interrupt?.form.title.length).toBeGreaterThan(0);
+        expect(card.interrupt?.form.actions.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("carries the same interrupt and form into the Detail", () => {
+    const snap = interruptSnapshot();
+    for (const kind of INTERRUPT_KINDS) {
+      const detail = projectDetail(snap, ticketCardId(`T-${kind}`));
+      expect(detail?.kind).toBe("ticket");
+      if (detail?.kind === "ticket") {
+        expect(detail.interrupt?.kind).toBe(kind);
+        expect(detail.interrupt?.form).toEqual(
+          interruptForm({ ticketId: `T-${kind}`, kind, body: `${kind} body` }),
+        );
+      }
+    }
+  });
+
+  it("keeps an interrupt visible on a done ticket (a pending merge)", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "done" })],
+        log: [],
+        outcomes: {},
+        interrupts: [{ ticketId: "A", kind: "merge-approval", body: "resolution" }],
+        config: {},
+      },
+    });
+    const card = projectPool(snap).cards.find((c) => c.id === "ticket:A");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.status).toBe("done");
+      expect(card.interrupt?.form.actions.map((a) => a.action)).toEqual([
+        "approve",
+        "reject",
+      ]);
+    }
   });
 });
 

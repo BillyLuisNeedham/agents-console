@@ -66,6 +66,17 @@ function render(): void {
       state.selectedId = nodeId;
       render();
     },
+    onAnswer: (ticketId, action, note) => {
+      // One answer, one action: the response snapshot and the SSE stream both
+      // carry the resumed pool.
+      client
+        .answer(ticketId, action, note)
+        .then(setSnapshot)
+        .catch((err) => {
+          state.error = `answer failed: ${err instanceof Error ? err.message : String(err)}`;
+          render();
+        });
+    },
   });
 }
 
