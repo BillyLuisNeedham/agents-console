@@ -39,6 +39,7 @@ export interface InterruptFormAction {
 export interface InterruptFormView {
   title: string;
   actions: InterruptFormAction[];
+  notePlaceholder?: string;
 }
 
 /** An interrupt with its form attached, as projected onto a card or Detail. */
@@ -56,13 +57,18 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
   deadlock: { title: "deadlock", actions: [RESUME] },
   "merge-conflict": { title: "merge conflict", actions: [RESUME] },
   "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
-  review: { title: "review", actions: [APPROVE, REJECT] },
+  review: {
+    title: "review",
+    actions: [APPROVE, REJECT],
+    notePlaceholder:
+      "approve: optional note · reject: name the tickets to send back",
+  },
 };
 
 /**
- * The form for an interrupt. The engine's five kinds are joined by `review`
- * (Issue 09); an unknown kind falls back to a plain resume form so a newer
- * engine never renders an unanswerable interrupt.
+ * The form for an interrupt. The engine's six kinds all render; an unknown
+ * kind falls back to a plain resume form so a newer engine never renders an
+ * unanswerable interrupt.
  */
 export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
   return INTERRUPT_FORMS[interrupt.kind] ?? { title: interrupt.kind, actions: [RESUME] };
@@ -114,6 +120,7 @@ export interface UtilityCardView {
   kind: "utility";
   id: string;
   label: string;
+  interrupt: InterruptView | null;
   x: number;
   y: number;
 }
@@ -229,6 +236,10 @@ export function projectPoolEdges(
   return edges;
 }
 
+function toInterruptView(raw: PoolInterrupt | null): InterruptView | null {
+  return raw ? { ...raw, form: interruptForm(raw) } : null;
+}
+
 function projectTicket(
   ticket: PoolTicketState,
   state: PoolState,
@@ -243,7 +254,26 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
-    interrupt: raw ? { ...raw, form: interruptForm(raw) } : null,
+    interrupt: toInterruptView(raw),
+    x: pos.x,
+    y: pos.y,
+  };
+}
+
+// A utility card can carry an interrupt too: the engine's final Review is
+// raised with the review card's id, so it is answered where the run ends.
+function projectUtility(
+  id: string,
+  label: string,
+  state: PoolState,
+  pos: Point,
+): UtilityCardView {
+  const raw = state.interrupts.find((i) => i.ticketId === id) ?? null;
+  return {
+    kind: "utility",
+    id,
+    label,
+    interrupt: toInterruptView(raw),
     x: pos.x,
     y: pos.y,
   };
@@ -253,9 +283,9 @@ export function projectPool(snapshot: PoolSnapshot): PoolView {
   const tickets = snapshot.state.tickets;
   const positions = layoutPool(tickets);
   const cards: PoolCardView[] = [
-    { kind: "utility", id: START_CARD_ID, label: "start", ...positions[START_CARD_ID] },
+    projectUtility(START_CARD_ID, "start", snapshot.state, positions[START_CARD_ID]),
     ...tickets.map((ticket) => projectTicket(ticket, snapshot.state, positions[ticketCardId(ticket.id)])),
-    { kind: "utility", id: REVIEW_CARD_ID, label: "review", ...positions[REVIEW_CARD_ID] },
+    projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),
   ];
   return {
     seq: snapshot.seq,
@@ -304,6 +334,7 @@ export interface UtilityDetailView {
   kind: "utility";
   id: string;
   label: string;
+  interrupt: InterruptView | null;
 }
 
 export type DetailView = TicketDetailView | UtilityDetailView;
@@ -323,7 +354,7 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
       interrupt: card.interrupt,
     };
   }
-  return { kind: "utility", id: card.id, label: card.label };
+  return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
 }
 
 /**

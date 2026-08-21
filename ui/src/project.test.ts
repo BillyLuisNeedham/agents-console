@@ -309,6 +309,67 @@ describe("interrupt projection", () => {
   });
 });
 
+describe("review projection", () => {
+  function reviewSnapshot(): PoolSnapshot {
+    return snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "done" }), ticket("B", { status: "done" })],
+        log: [],
+        outcomes: {
+          A: { summary: "did A", commitSha: "sha-a" },
+          B: { summary: "did B", commitSha: "sha-b" },
+        },
+        interrupts: [
+          {
+            ticketId: REVIEW_CARD_ID,
+            kind: "review",
+            body: "every ticket is done.\n- A: did A\n- B: did B",
+          },
+        ],
+        config: {},
+      },
+    });
+  }
+
+  it("hangs the review interrupt on the review utility card with its form", () => {
+    const view = projectPool(reviewSnapshot());
+    const card = view.cards.find((c) => c.id === REVIEW_CARD_ID);
+    expect(card?.kind).toBe("utility");
+    if (card?.kind === "utility") {
+      expect(card.interrupt?.kind).toBe("review");
+      expect(card.interrupt?.body).toContain("every ticket is done");
+      expect(card.interrupt?.form.title).toBe("review");
+      expect(card.interrupt?.form.actions.map((a) => a.action)).toEqual([
+        "approve",
+        "reject",
+      ]);
+    }
+    const start = view.cards.find((c) => c.id === START_CARD_ID);
+    expect(start?.kind === "utility" ? start.interrupt : "x").toBeNull();
+    const a = view.cards.find((c) => c.id === "ticket:A");
+    expect(a?.kind === "ticket" ? a.interrupt : "x").toBeNull();
+  });
+
+  it("carries the review interrupt into the review card's Detail", () => {
+    const detail = projectDetail(reviewSnapshot(), REVIEW_CARD_ID);
+    expect(detail?.kind).toBe("utility");
+    if (detail?.kind === "utility") {
+      expect(detail.label).toBe("review");
+      expect(detail.interrupt?.kind).toBe("review");
+      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual([
+        "approve",
+        "reject",
+      ]);
+    }
+  });
+
+  it("tells the reviewer a reject note names the tickets to send back", () => {
+    const form = interruptForm({ ticketId: REVIEW_CARD_ID, kind: "review", body: "" });
+    expect(form.notePlaceholder).toContain("name the tickets");
+  });
+});
+
 describe("projectDetail", () => {
   it("projects a ticket's status, blockers, outcome and interrupt", () => {
     const snap = snapshot({
@@ -331,7 +392,12 @@ describe("projectDetail", () => {
 
   it("projects a utility card", () => {
     const detail = projectDetail(snapshot(), START_CARD_ID);
-    expect(detail).toEqual({ kind: "utility", id: START_CARD_ID, label: "start" });
+    expect(detail).toEqual({
+      kind: "utility",
+      id: START_CARD_ID,
+      label: "start",
+      interrupt: null,
+    });
   });
 
   it("returns null for a card not in the pool", () => {

@@ -438,7 +438,8 @@ function renderInterrupt(
   );
   const note = h("textarea", {
     class: "interrupt-note",
-    placeholder: "note (optional, appended to the Issue)",
+    placeholder:
+      interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
     "data-note-key": `${interrupt.ticketId}:${place}`,
     rows: place === "card" ? 2 : 3,
   }) as HTMLTextAreaElement;
@@ -528,27 +529,39 @@ function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement
   );
 }
 
-function renderUtilityCard(card: UtilityCardView): HTMLElement {
+function renderUtilityCard(card: UtilityCardView, handlers: Handlers): HTMLElement {
   const pos = posOf(card);
+  const head = h(
+    "div",
+    { class: "node-card-head" },
+    h("span", { class: "node-card-id" }, card.label),
+  );
+  if (card.interrupt) {
+    head.append(h("span", { class: "dot dot-interrupt", title: `interrupt · ${card.interrupt.kind}` }));
+  }
   return h(
     "div",
     {
-      class: "node-card node-card-utility",
+      class:
+        "node-card node-card-utility" +
+        (card.interrupt ? " node-card-utility-interrupt" : ""),
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
+    head,
     h(
       "div",
-      { class: "node-card-head" },
-      h("span", { class: "node-card-id" }, card.label),
+      { class: "node-card-body" },
+      card.interrupt
+        ? renderInterrupt(card.interrupt, "card", handlers)
+        : h("div", { class: "dim" }, "utility"),
     ),
-    h("div", { class: "node-card-body" }, h("div", { class: "dim" }, "utility")),
   );
 }
 
 function renderCard(card: PoolCardView, handlers: Handlers): HTMLElement {
   if (card.kind === "ticket") return renderTicketCard(card, handlers);
-  return renderUtilityCard(card);
+  return renderUtilityCard(card, handlers);
 }
 
 function worldSize(cards: Positioned[]): { width: number; height: number } {
@@ -740,8 +753,11 @@ function renderTicketDetail(
   return body;
 }
 
-function renderUtilityDetail(detail: Extract<DetailView, { kind: "utility" }>): HTMLElement {
-  return h(
+function renderUtilityDetail(
+  detail: Extract<DetailView, { kind: "utility" }>,
+  handlers: Handlers,
+): HTMLElement {
+  const body = h(
     "div",
     { class: "detail-body" },
     h("div", { class: "dim" }, "kind"),
@@ -749,6 +765,10 @@ function renderUtilityDetail(detail: Extract<DetailView, { kind: "utility" }>): 
     h("div", { class: "dim" }, "label"),
     h("div", { class: "card-text" }, detail.label),
   );
+  if (detail.interrupt) {
+    body.append(renderInterrupt(detail.interrupt, "detail", handlers));
+  }
+  return body;
 }
 
 function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
@@ -768,7 +788,7 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
         "✕",
       ),
     ),
-    view.kind === "ticket" ? renderTicketDetail(view, handlers) : renderUtilityDetail(view),
+    view.kind === "ticket" ? renderTicketDetail(view, handlers) : renderUtilityDetail(view, handlers),
   );
   return detail;
 }
@@ -867,9 +887,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     if (!liveIds.has(id)) nodePos.delete(id);
   }
   const pendingInterrupts = new Set(
-    model.cards.flatMap((card) =>
-      card.kind === "ticket" && card.interrupt ? [card.ticketId] : [],
-    ),
+    model.cards.flatMap((card) => (card.interrupt ? [card.interrupt.ticketId] : [])),
   );
   for (const id of [...interruptDrafts.keys()]) {
     if (!pendingInterrupts.has(id)) interruptDrafts.delete(id);

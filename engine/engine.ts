@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
 } from "node:fs";
 import { once } from "node:events";
 import { homedir } from "node:os";
@@ -66,7 +67,13 @@ export type InterruptKind =
   | "crash"
   | "deadlock"
   | "merge-conflict"
-  | "merge-approval";
+  | "merge-approval"
+  | "review";
+
+// The final Review interrupt is not a ticket's: it belongs to the run, and it
+// carries this id so the Console can hang it on the review utility card (the
+// projection's REVIEW_CARD_ID is the same string by contract).
+export const REVIEW_TICKET_ID = "REVIEW";
 
 export interface Interrupt {
   ticketId: string;
@@ -80,6 +87,10 @@ export interface PoolState {
   outcomes: Record<string, Outcome>;
   config: PoolConfig;
   interrupts: Interrupt[];
+  // True once the final Review interrupt is approved. Persisted with the
+  // checkpoint so a server restart after approval comes up done instead of
+  // re-raising the gate.
+  reviewApproved: boolean;
 }
 
 export interface PoolUpdate {
@@ -87,6 +98,7 @@ export interface PoolUpdate {
   log?: string[];
   outcomes?: Record<string, Outcome>;
   interrupts?: Interrupt[];
+  reviewApproved?: boolean;
 }
 
 export type RunPhase = "running" | "done" | "quiescent" | "stalled";
@@ -148,6 +160,7 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
       ? reduceInterrupts(state.interrupts, update.interrupts)
       : state.interrupts,
     config: state.config,
+    reviewApproved: update.reviewApproved ?? state.reviewApproved,
   };
 }
 
@@ -224,6 +237,7 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
       outcomes: {},
       config,
       interrupts: [],
+      reviewApproved: false,
     },
     snapshots: [],
     store: new CheckpointStore(poolDir),
@@ -349,6 +363,17 @@ async function drive(session: Session): Promise<PoolRun> {
   const pending = session.markers
     .map((m) => m.id)
     .filter((id) => session.state.tickets[id] !== "done");
+  // The closing gate: every ticket done and nothing else waiting on the human
+  // raises the final Review interrupt. The dedupe in raiseInterrupt keeps it
+  // to exactly one; an approval recorded in state holds it down for good.
+  if (
+    pending.length === 0 &&
+    session.state.interrupts.length === 0 &&
+    !session.state.reviewApproved
+  ) {
+    raiseInterrupt(session, reviewInterrupt(session));
+    persist(session);
+  }
   let phase: Exclude<RunPhase, "running">;
   if (session.state.interrupts.length > 0) {
     // An interrupt can outlive its ticket's done: a conflicted merge leaves
@@ -413,6 +438,7 @@ function rehydrate(session: Session): void {
       outcomes: stored.outcomes ?? {},
       config: session.state.config,
       interrupts: Array.isArray(stored.interrupts) ? stored.interrupts : [],
+      reviewApproved: stored.reviewApproved === true,
     };
     log.push(
       `rehydrated from checkpoint: ${session.state.interrupts.length} ` +
@@ -437,6 +463,22 @@ function rehydrate(session: Session): void {
       session.markers.map((marker) => [marker.id, marker.status]),
     ),
   });
+  // An approval only stands while every marker on disk is done: a human who
+  // reset tickets between runs gets a fresh Review when they finish again.
+  if (
+    session.markers.some((marker) => marker.status !== "done") &&
+    (session.state.reviewApproved ||
+      session.state.interrupts.some((i) => i.kind === "review"))
+  ) {
+    session.state = applyUpdate(session.state, {
+      interrupts: session.state.interrupts.filter((i) => i.kind !== "review"),
+      reviewApproved: false,
+    });
+    log.push(
+      "review gate cleared: markers on disk are not all done, so a fresh " +
+        "Review will be raised when they finish",
+    );
+  }
   const stale = session.state.interrupts.filter((i) => {
     if (i.kind === "merge-conflict" || i.kind === "merge-approval") return false;
     const status = session.state.tickets[i.ticketId];
@@ -526,12 +568,6 @@ async function answerTicket(
     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
   }
   session.markers = loadPoolMarkers(session.issuesDir);
-  const marker = session.markers.find((m) => m.id === ticketId);
-  if (!marker) {
-    throw new Error(
-      `resume: ticket ${ticketId} has no Issue file in ${session.issuesDir}`,
-    );
-  }
   for (const m of session.markers) {
     if (!session.assignments.has(m.id)) {
       session.assignments.set(
@@ -539,6 +575,21 @@ async function answerTicket(
         resolveAssignment(m, session.state.config, session.harnesses),
       );
     }
+  }
+  if (interrupt.kind === "review") {
+    if (approve === undefined) {
+      throw new Error(
+        "answer: use approve() or reject() for the final review interrupt",
+      );
+    }
+    if (approve) return approveReview(session, interrupt, note);
+    return rejectReview(session, interrupt, note);
+  }
+  const marker = session.markers.find((m) => m.id === ticketId);
+  if (!marker) {
+    throw new Error(
+      `resume: ticket ${ticketId} has no Issue file in ${session.issuesDir}`,
+    );
   }
   if (interrupt.kind === "merge-conflict") {
     return resumeMerge(session, marker, interrupt, note);
@@ -903,6 +954,126 @@ async function rejectMerge(
       `merge-approval rejected for ${marker.id}: converted to manual resolution`,
     ],
   });
+  return drive(session);
+}
+
+// The final Review: the run's closing gate, raised once every ticket is done
+// and no other interrupt is pending. The body is the run's outcome list, so
+// the judgment happens over what actually happened, not a ticket count.
+function reviewInterrupt(session: Session): Interrupt {
+  const lines = session.markers.map(
+    (marker) =>
+      `- ${marker.id}: ${session.state.outcomes[marker.id]?.summary ?? "(no outcome recorded)"}`,
+  );
+  return {
+    ticketId: REVIEW_TICKET_ID,
+    kind: "review",
+    body:
+      "every ticket is done.\n" +
+      lines.join("\n") +
+      "\napprove to end the run, or reject with a note naming the tickets to " +
+      "send back; their downstream tickets return to ready with them.",
+  };
+}
+
+// Approving ends the run: the gate lifts for good (reviewApproved persists
+// through checkpoints, so a restart comes up done) and the pool's final state
+// stays inspectable through the server. The approval only stands if the
+// markers reloaded from disk are all done; a marker a human reset behind the
+// engine's back sends the pool around to a fresh Review instead.
+async function approveReview(
+  session: Session,
+  interrupt: Interrupt,
+  note?: string,
+): Promise<PoolRun> {
+  const allDone = session.markers.every((m) => m.status === "done");
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(
+      session.markers.map((m) => [m.id, m.status]),
+    ),
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      allDone
+        ? "review approved: the run is complete" +
+          (note?.trim() ? ` (${note.trim()})` : "")
+        : "review approved, but markers on disk are not all done: the run " +
+          "continues to a fresh review",
+    ],
+    reviewApproved: allDone,
+  });
+  return drive(session);
+}
+
+// A ticket id counts as named when it appears in the note delimited by
+// non-id characters, so "redo 03 and 05" names 03 and 05 without matching
+// the 03 inside 033.
+function namesTicket(note: string, id: string): boolean {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9_-])${escaped}($|[^A-Za-z0-9_-])`).test(
+    note,
+  );
+}
+
+// Rejecting sends the named tickets back to ready with the note appended to
+// their Issue files, and invalidates their downstream tickets to ready too:
+// anything built on rejected work runs again. Outcomes for the reset tickets
+// are dropped from the channel and from disk, so downstream prompts are never
+// fed a superseded summary. The run then continues until every ticket is done
+// again and a fresh Review is raised.
+async function rejectReview(
+  session: Session,
+  interrupt: Interrupt,
+  note?: string,
+): Promise<PoolRun> {
+  const text = note?.trim() ?? "";
+  const named = session.markers
+    .filter((marker) => namesTicket(text, marker.id))
+    .map((marker) => marker.id);
+  if (named.length === 0) {
+    throw new Error(
+      "review reject: name at least one ticket in the note " +
+        `(known: ${session.markers.map((m) => m.id).join(", ")})`,
+    );
+  }
+  const reset = new Set(named);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const marker of session.markers) {
+      if (!reset.has(marker.id) && marker.blockedBy.some((b) => reset.has(b))) {
+        reset.add(marker.id);
+        grew = true;
+      }
+    }
+  }
+  for (const marker of session.markers) {
+    if (!reset.has(marker.id)) continue;
+    writeMarkerStatus(marker.file, "ready");
+    marker.status = "ready";
+    if (named.includes(marker.id)) {
+      appendFileSync(marker.file, `\n## Review note\n\n${text}\n`);
+    }
+    rmSync(join(session.runsDir, `${marker.id}.outcome.json`), {
+      force: true,
+    });
+  }
+  const outcomes = { ...session.state.outcomes };
+  for (const id of reset) delete outcomes[id];
+  const downstream = [...reset].filter((id) => !named.includes(id));
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(
+      session.markers.map((m) => [m.id, m.status]),
+    ),
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `review rejected: ${named.join(", ")} back to ready` +
+        (downstream.length > 0
+          ? `; downstream ${downstream.join(", ")} also reset`
+          : ""),
+    ],
+  });
+  // The outcomes channel is a keyed merge, so removals go around the reducer.
+  session.state = { ...session.state, outcomes };
   return drive(session);
 }
 

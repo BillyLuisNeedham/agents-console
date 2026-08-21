@@ -43,8 +43,9 @@ export class PoolClient {
 
   /**
    * Answer an interrupt. `approve`/`reject` are used for the merge-approval
-   * interrupt; plain `resume` answers every other kind. The optional note is
-   * appended to the Issue file through the engine's resume path.
+   * and review interrupts; plain `resume` answers every other kind. The
+   * optional note is appended to the Issue file through the engine's resume
+   * path (for a review reject, to the named tickets' Issues).
    */
   async answer(
     ticketId: string,

@@ -14,7 +14,7 @@ import {
   createPoolServer,
   type PoolServer,
 } from "./server.ts";
-import type { HarnessCommand, PoolConfig } from "./engine.ts";
+import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
@@ -75,7 +75,7 @@ async function startServer(poolDir: string, harnesses: Record<string, HarnessCom
 }
 
 describe("pool server", () => {
-  it("drives a pool to done and serves the enriched state", async () => {
+  it("drives a pool to the review gate and serves the enriched state", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
@@ -83,11 +83,19 @@ describe("pool server", () => {
     const server = await startServer(poolDir, stubHarness({}));
 
     const snapshot = await server.start();
-    expect(snapshot.phase).toBe("done");
+    expect(snapshot.phase).toBe("quiescent");
+    expect(snapshot.state.interrupts.map((i) => i.kind)).toEqual(["review"]);
     const statuses = Object.fromEntries(snapshot.state.tickets.map((t) => [t.id, t.status]));
     expect(statuses).toEqual({ "01": "done", "02": "done" });
     expect(snapshot.state.tickets.map((t) => t.blockedBy)).toEqual([[], ["01"]]);
     expect(snapshot.state.tickets.map((t) => t.title)).toEqual(["body", "body"]);
+
+    // Approving the review ends the run; the server stays up with the final
+    // state inspectable.
+    const approved = await server.answer(REVIEW_TICKET_ID, "approve");
+    expect(approved.phase).toBe("done");
+    expect(approved.state.interrupts).toEqual([]);
+    expect(server.latest?.phase).toBe("done");
   });
 
   it("serves get state, start, and resume over HTTP", async () => {
@@ -111,8 +119,17 @@ describe("pool server", () => {
       body: JSON.stringify({ ticketId: "01", action: "resume", note: "go on" }),
     });
     const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
-    expect(resumeBody.snapshot.phase).toBe("done");
+    expect(resumeBody.snapshot.phase).toBe("quiescent");
     expect(resumeBody.snapshot.state.tickets[0]?.status).toBe("done");
+    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("review");
+
+    const approveRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+    });
+    const approveBody = (await approveRes.json()) as { snapshot: typeof first };
+    expect(approveBody.snapshot.phase).toBe("done");
   });
 
   it("streams the latest snapshot to an SSE client on connect", async () => {
@@ -121,6 +138,7 @@ describe("pool server", () => {
     ]);
     const server = await startServer(poolDir, stubHarness({}));
     await server.start();
+    await server.answer(REVIEW_TICKET_ID, "approve");
 
     const res = await fetch(`${server.url}/api/stream`);
     expect(res.status).toBe(200);

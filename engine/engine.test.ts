@@ -12,9 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  REVIEW_TICKET_ID,
   runPool,
   type HarnessCommand,
   type PoolConfig,
+  type PoolRun,
   type SpawnContext,
 } from "./engine.ts";
 
@@ -131,6 +133,14 @@ const noResolverConfig: PoolConfig = {
   resolver: "none",
 };
 
+// Every fully-done pool stops at the final Review interrupt; a test that
+// wants a finished run approves it through the same answer path the UI uses.
+async function approveReview(run: PoolRun): Promise<PoolRun> {
+  const review = run.interrupts.find((i) => i.kind === "review");
+  expect(review).toBeTruthy();
+  return run.approve(review!.ticketId);
+}
+
 describe("pool loading", () => {
   it("rejects a pool with a missing line-1 marker", async () => {
     const poolDir = makePool({
@@ -181,7 +191,9 @@ describe("super-steps", () => {
     });
     const rig = stubHarness({});
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
@@ -218,7 +230,9 @@ describe("super-steps", () => {
     });
     const rig = stubHarness({});
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     expect(run.final.log).toContain("super-step 1: 01");
@@ -520,7 +534,7 @@ describe("harness CLIs", () => {
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
-      run = await runPool({ poolDir });
+      run = await approveReview(await runPool({ poolDir }));
     });
 
     expect(run!.phase).toBe("done");
@@ -550,7 +564,7 @@ describe("harness CLIs", () => {
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
-      run = await runPool({ poolDir });
+      run = await approveReview(await runPool({ poolDir }));
     });
 
     expect(run!.phase).toBe("done");
@@ -571,7 +585,7 @@ describe("harness CLIs", () => {
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
-      run = await runPool({ poolDir });
+      run = await approveReview(await runPool({ poolDir }));
     });
 
     expect(run!.phase).toBe("done");
@@ -594,7 +608,7 @@ describe("harness CLIs", () => {
     const doneFake = fakeCli(doneDir, "claude", extractFromPrintFlag);
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(doneFake, async () => {
-      run = await runPool({ poolDir: doneDir });
+      run = await approveReview(await runPool({ poolDir: doneDir }));
     });
     expect(run!.phase).toBe("done");
     expect(run!.final.tickets["01"]).toBe("done");
@@ -636,7 +650,9 @@ describe("checkpoints", () => {
     });
     const rig = stubHarness({});
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     const db = new Database(join(poolDir, "console.db"), { readonly: true });
     const rows = db
@@ -644,15 +660,17 @@ describe("checkpoints", () => {
       .all() as { state: string }[];
     db.close();
 
-    expect(rows.length).toBe(3);
+    // Two super-step joins, the review gate, the quiescent final, and the
+    // approval's done final.
+    expect(rows.length).toBe(5);
     const first = JSON.parse(rows[0].state);
     const second = JSON.parse(rows[1].state);
-    const terminal = JSON.parse(rows[2].state);
+    const terminal = JSON.parse(rows[4].state);
     expect(first.tickets).toEqual({ "01": "done", "02": "ready" });
     expect(second.tickets).toEqual({ "01": "done", "02": "done" });
     expect(second.outcomes["01"].summary).toBe("summary-01");
     expect(terminal.log.at(-1)).toBe("pool done: every ticket reached done");
-    expect(run.snapshots.length).toBe(6);
+    expect(terminal.reviewApproved).toBe(true);
     expect(run.snapshots.at(-1)?.phase).toBe("done");
   });
 });
@@ -809,13 +827,14 @@ describe("interrupts", () => {
     const snapshotsBefore = run.snapshots.length;
 
     const resumed = await run.resume("01", "carry on with option two");
+    const done = await approveReview(resumed);
 
-    expect(resumed.phase).toBe("done");
-    expect(resumed.interrupts).toEqual([]);
-    expect(resumed.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
+    expect(done.final.tickets).toEqual({ "01": "done", "02": "done" });
     expect(rig.spawnOrder).toEqual(["01", "01", "02"]);
-    expect(resumed.snapshots.length).toBeGreaterThan(snapshotsBefore);
-    expect(resumed.final.log).toContain(
+    expect(done.snapshots.length).toBeGreaterThan(snapshotsBefore);
+    expect(done.final.log).toContain(
       "interrupt answered for 01 (checkpoint): resumed",
     );
     const markerLines = ["01-a.md", "02-b.md"].map(
@@ -893,9 +912,10 @@ describe("interrupts", () => {
       "<!-- state: id=02 blocked-by=none status=ready -->\n\n# 02\n",
     );
     const resumed = await run.resume("02", "broke the cycle");
+    const done = await approveReview(resumed);
 
-    expect(resumed.phase).toBe("done");
-    expect(resumed.interrupts).toEqual([]);
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
     expect(rig.spawnOrder).toEqual(["02", "01"]);
   });
 
@@ -931,9 +951,13 @@ describe("interrupts", () => {
     expect(stuck.phase).toBe("quiescent");
     expect(stuck.interrupts).toHaveLength(1);
     expect(stuck.snapshots.at(-1)?.phase).toBe("quiescent");
-    expect(clean.phase).toBe("done");
-    expect(clean.interrupts).toEqual([]);
-    expect(clean.snapshots.at(-1)?.phase).toBe("done");
+    // A clean run stops at the final Review interrupt; approving ends it.
+    expect(clean.phase).toBe("quiescent");
+    expect(clean.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const done = await approveReview(clean);
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
+    expect(done.snapshots.at(-1)?.phase).toBe("done");
   });
 
   it("raises a deadlock interrupt for a blocker id that does not exist", async () => {
@@ -985,7 +1009,7 @@ describe("interrupts", () => {
     expect(second.interrupts[0]?.kind).toBe("crash");
     expect(rig.spawnOrder).toEqual(["01"]);
     const resumed = await second.resume("01");
-    expect(resumed.phase).toBe("done");
+    expect((await approveReview(resumed)).phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["01", "01"]);
   });
 
@@ -1005,12 +1029,239 @@ describe("interrupts", () => {
     expect(run.interrupts[0]?.kind).toBe("crash");
 
     const resumed = await run.resume("01");
+    const done = await approveReview(resumed);
 
-    expect(resumed.phase).toBe("done");
+    expect(done.phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["01", "01"]);
-    expect(resumed.final.log).toContain(
+    expect(done.final.log).toContain(
       "interrupt answered for 01 (crash): resumed",
     );
+  });
+});
+
+describe("final review", () => {
+  it("raises exactly one Review interrupt when every ticket is done", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts).toHaveLength(1);
+    const review = run.interrupts[0];
+    expect(review.ticketId).toBe(REVIEW_TICKET_ID);
+    expect(review.kind).toBe("review");
+    expect(review.body).toContain("every ticket is done");
+    expect(review.body).toContain("- 01: summary-01");
+    expect(review.body).toContain("- 02: summary-02");
+    expect(run.final.log.at(-1)).toBe(
+      "pool quiescent: interrupts pending for REVIEW",
+    );
+  });
+
+  it("approve ends the run, and a restart comes up done without re-asking", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: stubHarness({}).harnesses,
+    });
+    const done = await run.approve(REVIEW_TICKET_ID, "looks right");
+
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
+    expect(done.final.log).toContain(
+      "review approved: the run is complete (looks right)",
+    );
+    expect(done.final.log.at(-1)).toBe("pool done: every ticket reached done");
+
+    const rig = stubHarness({});
+    const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(restarted.phase).toBe("done");
+    expect(restarted.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual([]);
+  });
+
+  it("reject sends the named tickets and their downstream back to ready, and the run re-reviews", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=02 status=ready -->",
+        },
+        {
+          file: "04-d.md",
+          marker: "<!-- state: id=04 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    const rejected = await run.reject(
+      REVIEW_TICKET_ID,
+      "redo 02: the parser is wrong",
+    );
+
+    // 02 went back to ready with the note on its Issue; its downstream 03
+    // was invalidated with it (no note); 01 and 04 were left alone. The pool
+    // re-ran both and stopped at a fresh Review.
+    expect(rig.spawnOrder).toEqual(["01", "04", "02", "03", "02", "03"]);
+    expect(rejected.phase).toBe("quiescent");
+    expect(rejected.interrupts).toHaveLength(1);
+    expect(rejected.interrupts[0].kind).toBe("review");
+    expect(rejected.final.tickets).toEqual({
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done",
+    });
+    expect(rejected.final.log).toContain(
+      "review rejected: 02 back to ready; downstream 03 also reset",
+    );
+    const issue02 = readFileSync(join(poolDir, "issues", "02-b.md"), "utf8");
+    expect(issue02).toContain("## Review note");
+    expect(issue02).toContain("redo 02: the parser is wrong");
+    const issue03 = readFileSync(join(poolDir, "issues", "03-c.md"), "utf8");
+    expect(issue03).not.toContain("## Review note");
+
+    const done = await approveReview(rejected);
+    expect(done.phase).toBe("done");
+  });
+
+  it("reject without a named ticket throws and keeps the gate up", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: stubHarness({}).harnesses,
+    });
+
+    await expect(
+      run.reject(REVIEW_TICKET_ID, "this is not good enough"),
+    ).rejects.toThrow(/name at least one ticket/);
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    const done = await approveReview(run);
+    expect(done.phase).toBe("done");
+  });
+
+  it("refuses a plain resume on the review gate", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: stubHarness({}).harnesses,
+    });
+
+    await expect(run.resume(REVIEW_TICKET_ID)).rejects.toThrow(
+      /use approve\(\) or reject\(\)/,
+    );
+  });
+
+  it("an approve over a marker a human reset on disk continues to a fresh review", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    // run.sh reset the ticket behind the engine's back; the marker is the
+    // truth, so the approval cannot close the run over work now unfinished.
+    setMarker(poolDir, "01-a.md", "ready");
+    const continued = await run.approve(REVIEW_TICKET_ID);
+
+    expect(continued.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01", "01"]);
+    expect(continued.final.log).toContain(
+      "review approved, but markers on disk are not all done: the run " +
+        "continues to a fresh review",
+    );
+    expect(continued.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    const done = await approveReview(continued);
+    expect(done.phase).toBe("done");
+  });
+
+  it("holds the gate while another interrupt is pending", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+
+    const resumed = await run.resume("01");
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
   });
 });
 
@@ -1106,17 +1357,21 @@ describe("durability", () => {
       ],
       config: stubConfig,
     });
-    const first = await runPool({
-      poolDir,
-      harnesses: stubHarness({}).harnesses,
-    });
+    const first = await approveReview(
+      await runPool({
+        poolDir,
+        harnesses: stubHarness({}).harnesses,
+      }),
+    );
     expect(first.phase).toBe("done");
 
     // run.sh reset 02: the marker on disk is the truth, the checkpoint's
-    // done is stale.
+    // done is stale — and the earlier review approval lapses with it.
     setMarker(poolDir, "02-b.md", "ready");
     const rig = stubHarness({});
-    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    const second = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(second.phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["02"]);
@@ -1148,7 +1403,9 @@ describe("durability", () => {
     // checkpoint interrupt.
     setMarker(poolDir, "01-a.md", "done");
     const rig = stubHarness({});
-    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    const second = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(second.phase).toBe("done");
     expect(second.interrupts).toEqual([]);
@@ -1170,7 +1427,9 @@ describe("durability", () => {
     });
     const rig = stubHarness({});
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["01"]);
@@ -1206,7 +1465,9 @@ describe("durability", () => {
     // must not linger into the next engine run.
     setMarker(poolDir, "01-a.md", "ready");
     const rig = stubHarness({});
-    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    const second = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(second.phase).toBe("done");
     expect(second.interrupts).toEqual([]);
@@ -1253,7 +1514,7 @@ describe("durability", () => {
     expect(rig.spawnOrder).toEqual([]);
 
     const resumed = await second.resume("01", "the name is Foo");
-    expect(resumed.phase).toBe("done");
+    expect((await approveReview(resumed)).phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["01", "02"]);
     const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
     expect(issueText).toContain("## Resume note");
@@ -1323,7 +1584,9 @@ describe("durability", () => {
     }
 
     const rig = stubHarness({});
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["02"]);
@@ -1370,7 +1633,7 @@ describe("durability", () => {
     ]);
 
     const resumed = await first.resume("02");
-    expect(resumed.phase).toBe("done");
+    expect((await approveReview(resumed)).phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["02", "03"]);
   });
 
@@ -1657,7 +1920,9 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     // The rendezvous only passes if both tickets are alive at once; a serial
     // engine would time the wait out and crash both tickets.
@@ -1705,7 +1970,9 @@ describe("worktrees", () => {
       "02": { workFile: "two.txt", commitMsg: "work-02" },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     // 01's branch was never rebased: it still sits on the super-step's
@@ -1796,9 +2063,10 @@ describe("worktrees", () => {
     git(["commit", "-qm", "resolve pool/02"]);
 
     const resumed = await run.resume("02");
+    const done = await approveReview(resumed);
 
-    expect(resumed.phase).toBe("done");
-    expect(resumed.interrupts).toEqual([]);
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
       "resolved\n",
     );
@@ -1885,10 +2153,11 @@ describe("worktrees", () => {
     );
 
     const resumed = await run.resume("01", "carry on");
+    const done = await approveReview(resumed);
 
     // The second spawn asserts partial.txt is present (exit 43 otherwise),
     // which only holds in the parked worktree.
-    expect(resumed.phase).toBe("done");
+    expect(done.phase).toBe("done");
     expect(rig.spawnOrder).toEqual(["01", "02", "01"]);
     expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
     expect(existsSync(join(poolDir, "one-more.txt"))).toBe(true);
@@ -1907,7 +2176,9 @@ describe("worktrees", () => {
       "01": { workFile: "one.txt", commitMsg: "work-01", recordDir: join(poolDir, "rec-01") },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
     expect(run.phase).toBe("done");
     expect(readFileSync(join(poolDir, "rec-01", "cwd"), "utf8").trim()).toBe(
@@ -2063,12 +2334,13 @@ describe("worktrees", () => {
     ).toBeTruthy();
 
     const approved = await run.approve("02");
-    expect(approved.phase).toBe("done");
-    expect(approved.interrupts).toEqual([]);
+    const done = await approveReview(approved);
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
       "resolved-by-agent\n",
     );
-    expect(approved.final.tickets["03"]).toBe("done");
+    expect(done.final.tickets["03"]).toBe("done");
     expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
     expect(
       existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
@@ -2140,7 +2412,7 @@ describe("worktrees", () => {
     git(["commit", "-qm", "resolve pool/02 manually"]);
 
     const resumed = await rejected.resume("02");
-    expect(resumed.phase).toBe("done");
+    expect((await approveReview(resumed)).phase).toBe("done");
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
       "manual-resolution\n",
     );
@@ -2192,7 +2464,7 @@ describe("worktrees", () => {
     git(["add", "shared.txt"]);
     git(["commit", "-qm", "resolve pool/02"]);
     const resumed = await run.resume("02");
-    expect(resumed.phase).toBe("done");
+    expect((await approveReview(resumed)).phase).toBe("done");
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("manual\n");
   }, 15000);
 

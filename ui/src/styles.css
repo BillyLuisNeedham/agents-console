@@ -746,6 +746,15 @@ body {
   color: var(--text-dim);
 }
 
+/* A utility card holding an interrupt (the final Review on the review card)
+   comes out of the faded utility look: it is waiting on a human. */
+.node-card-utility-interrupt {
+  border-color: var(--interrupt);
+  border-style: solid;
+  opacity: 1;
+  animation: interrupt-pulse 1.6s ease-in-out infinite;
+}
+
 /* -------------------------------------------------------------- run strip */
 
 .run-strip {
