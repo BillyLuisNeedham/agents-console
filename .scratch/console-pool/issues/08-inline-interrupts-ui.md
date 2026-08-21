@@ -1,4 +1,4 @@
-<!-- state: id=08 blocked-by=02,07 status=ready -->
+<!-- state: id=08 blocked-by=02,07 status=done -->
 
 # 08 — Inline interrupts in card and Detail
 
@@ -10,13 +10,13 @@ Every interrupt kind answerable from the UI. A card whose ticket has a pending i
 
 ## Acceptance criteria
 
-- [ ] A pending interrupt renders inline on its card with a kind-specific body
-- [ ] The same interrupt renders at full size in the Detail; both views stay live across snapshots
-- [ ] Answering an interrupt resumes the pool automatically — one answer, one action
-- [ ] Kinds that support a note append it to the Issue file via the engine's resume path
-- [ ] All six interrupt kinds are renderable and answerable
-- [ ] Cards with pending interrupts are visually distinguishable from running and done cards
-- [ ] Covered by projection tests over snapshots carrying each interrupt kind
+- [x] A pending interrupt renders inline on its card with a kind-specific body
+- [x] The same interrupt renders at full size in the Detail; both views stay live across snapshots
+- [x] Answering an interrupt resumes the pool automatically — one answer, one action
+- [x] Kinds that support a note append it to the Issue file via the engine's resume path
+- [x] All six interrupt kinds are renderable and answerable
+- [x] Cards with pending interrupts are visually distinguishable from running and done cards
+- [x] Covered by projection tests over snapshots carrying each interrupt kind
 
 ## Blocked by
 
@@ -69,3 +69,52 @@ Let me look at the styles.cs
 ```
 
 Nothing above is confirmed. Read the log before you trust any part of this Issue.
+
+---
+
+## Notes
+
+Findings from the restarted run (the crashed run left no code; the working tree
+was clean apart from this Issue):
+
+- The previous run's log tail is sound and was adopted: `interruptForm` lives in
+  `project.ts` as a pure function (tested over snapshot fixtures), the DOM form
+  lives in `view.ts`, note drafts are module-scope keyed by ticket id.
+- Engine interrupt kinds on the wire (engine/engine.ts:64): `checkpoint`,
+  `crash`, `deadlock`, `merge-conflict`, `merge-approval`. The spec's
+  resolver-failure/manual-merge kind is a `merge-conflict` whose body carries
+  the resolver's attempt; the UI does not need to distinguish it.
+- The sixth kind, `review`, is Issue 09's to add to the engine. `interruptForm`
+  handles it now (approve/reject + note); 09 still has to attach the review
+  interrupt to a card in the projection (likely the REVIEW utility card) once
+  it fixes the engine shape.
+- The engine appends the note to the Issue file on every answer path
+  (`answerTicket`, `resumeMerge`, `approveMerge`, `rejectMerge`), so every kind
+  supports a note.
+- Client and server already support `resume|approve|reject` with an optional
+  note (client.ts `answer`, server.ts `/api/resume`); no wire changes needed.
+- One answer resumes the pool: `answerTicket` calls back into `drive`, and the
+  POST response plus the SSE stream both carry the new snapshot.
+- Focus: snapshots stream on every state change, and siblings keep running
+  while an interrupt waits (spec story 20), so a rebuild can land mid-typing.
+  The note text survives via the draft map; focus and cursor are restored
+  after rebuild by matching the textarea's data-note-key.
+
+Two-axis review ran clean after a tidy-up pass:
+
+- Standards: the switch became the `INTERRUPT_FORMS` table, dead generality
+  dropped (the always-true note flag, the unused default tone, the unused
+  form kind), and interrupt+form collapsed into one `InterruptView` on the
+  card and Detail view models.
+- Spec: one flag worth repeating for 09. `review` maps to approve/reject in
+  the form, matching spec stories 29/30. Today those actions only reach
+  merge logic when the kind is `merge-approval`; 09 defines what review
+  approve/reject do in the engine and attaches the review interrupt to a
+  card (likely the REVIEW utility card) in the projection.
+- Judgement call: the note placeholder says "appended to the Issue". The
+  CONTEXT glossary avoids "issue" for tickets, but the runner's own
+  vocabulary names the pool files Issue files, and the text refers to the
+  file on disk.
+
+Verified: `bun test` (87 pass, engine + server + ui), `tsc --noEmit` in both
+the repo root and ui/, `vite build` in ui/.
