@@ -102,19 +102,19 @@ message is yours to write.
 
 <!-- ============================================================ CONFIG -->
 
-Author everything below. One `/my-issue-runner` interview fills it in.
+Author everything below. One `/my-console-runner` interview fills it in.
 
 ## Read before you touch anything
 
 In this order: your Issue, then the files this job's context lives in.
 
 - `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words.
-- `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 build it; Issue 11 reviews against it.
-- `prototype/NOTES.md` — prototype status and lessons learned.
-- `prototype/src/graph.ts`, `state.ts`, `nodes.ts`, `tickets.ts` — the LangGraph reference implementation the lessons were built on. Read it for the graph vocabulary made concrete. The pool engine replaces this path; do not extend it.
-- `prototype/ui/src/` — the existing Console. The canvas, node cards, Detail panel, drawers and styles are kept. `client.ts` and `project.ts` are the LangGraph adapter that Issue 07 deletes and replaces.
-- `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Issue 04 ports its spawn mechanics; treat its comments about harness quirks as load-bearing.
-- `prototype/mock-tickets/` and `prototype/mock-tickets-deadlock/` — example pools in the old front-matter format. Useful as fixtures; the new pool format is the line-1 state marker on your own Issue files.
+- `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 built it; Issue 11 reviews against it.
+- `NOTES.md` (repo root) — prototype status and lessons learned.
+- `engine/` and `ui/` (repo root) — the pool engine and Console this queue built, now the code under review in Issue 11.
+- `~/.claude/commands/skills/personal/my-console-runner/` — Issue 10's output: `SKILL.md` and `AGENT.template.md`.
+- `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Treat its comments about harness quirks as load-bearing.
+- `mock-tickets/` and `mock-tickets-deadlock/` (repo root) — example pools in the old front-matter format. Useful as fixtures; the pool format is the line-1 state marker on your own Issue files.
 
 ## Commit message format
 
@@ -126,19 +126,19 @@ One commit per Issue. Commit only the paths your Issue touches — never `.scrat
 
 ## This job's constraints
 
-- Stack is fixed: vanilla TypeScript + Vite + bun, the engine in the prototype, the UI in `prototype/ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides.
-- Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `vite build` in `prototype/ui/`.
+- Stack is fixed: vanilla TypeScript + Vite + bun, the engine in `engine/`, the UI in `ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides.
+- Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `bun run build` in `ui/`.
 - Test the pool engine only through its public interface, with stub harness scripts and temp pool directories. Never test engine internals. The UI projection is tested as pure functions over snapshot fixtures, following the existing `project.test.ts` precedent.
 - Never start a long-lived server and leave it running: a server an agent starts dies with that process tree. Verify a server as a smoke check (start, probe, kill) or make it a checkpoint.
-- Issues 05 and 06 do git worktree and merge work. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve.
-- Issue 04 spawns real harness CLIs. The first real spawn is a proving flight: a harness behaving in a way the Issue does not cover is a checkpoint, not an improvisation.
-- `agent` (the cursor CLI) is not installed on this machine. No Issue runs on cursor; Issue 04 only writes that launch line from Cursor's documentation.
+- The merge resolver runs on opencode. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve.
+- No Issue runs on cursor. The cursor launch line in the spawn kernel comes from Cursor's documentation and is unproven.
 - Issue 10 writes a skill under `~/.claude/commands/skills/personal/`. That write outside the repo is the point of the Issue. Any other write outside the repo is a checkpoint.
-- `prototype/.env` and `prototype/scripts/.env` are gitignored secrets. Never print or commit them.
-- Issue 11 is a review Issue. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
+- `scripts/.env` and any other `.env` file are gitignored secrets. Never print or commit them.
+- A reviewer checks acceptance criteria only, never code quality. A review failure buys the orchestrator one fix attempt; if it still fails, the Issue becomes a checkpoint and the brief carries the disagreement.
+- A checkpoint on this job means: a write outside the repository other than Issue 10's skill file, a decision the Issue and its context do not settle, or a material guess.
+- Issue 11 is a review Issue driven by `code-review`. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
 
 ## Which Issues are expected to stop
 
-- 04 — the first real harness spawn is a proving flight, and a surprise there is a checkpoint by design.
-- 10 — the first end-to-end launch of the new skill is Billy's to watch.
+- 10 — already sits at checkpoint; its first end-to-end Console launch is Billy's to watch. Answering that interrupt resumes the pool.
 - 11 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.
