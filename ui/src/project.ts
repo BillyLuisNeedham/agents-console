@@ -385,6 +385,24 @@ export interface TopologyEdge {
   data?: string;
 }
 
+/**
+ * The flow neighbourhood of a selected card: its one-hop inflow (the cards
+ * whose edges point at it — its blockers, plus start when it is blockerless)
+ * and one-hop outflow (the cards it points at — its dependents, plus review).
+ * One hop only, never the transitive cone, so a chain does not light up the
+ * whole canvas. A cleared selection has an empty neighbourhood.
+ */
+export function flowNeighbourhood(
+  edges: TopologyEdge[],
+  selectedId: string | null,
+): { inflow: string[]; outflow: string[] } {
+  if (!selectedId) return { inflow: [], outflow: [] };
+  return {
+    inflow: edges.filter((edge) => edge.target === selectedId).map((edge) => edge.source),
+    outflow: edges.filter((edge) => edge.source === selectedId).map((edge) => edge.target),
+  };
+}
+
 export function edgePath(
   source: CardBox,
   target: CardBox,

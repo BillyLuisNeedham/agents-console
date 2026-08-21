@@ -15,6 +15,7 @@
   --status-running: #d29922;
   --status-done: #3fb950;
   --interrupt: #f85149;
+  --accent-purple: #a371f7;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
     "Liberation Mono", monospace;
 }
@@ -910,4 +911,42 @@ body {
   color: var(--text-dim);
   font-size: 11px;
   overflow: auto;
+}
+
+/* ------------------------------------------------------- flow highlight */
+
+/* The selection and its one-hop flow neighbourhood. Placed last so a
+   highlight wins over status and interrupt styles in source order, the way
+   the interrupt style already wins over status; animation: none keeps the
+   interrupt pulse from fighting the ring. A highlighted done or utility card
+   comes back to full opacity so the highlight stays visible. */
+.node-card-inflow {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  opacity: 1;
+  animation: none;
+}
+
+.node-card-outflow {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 1px var(--accent-purple);
+  opacity: 1;
+  animation: none;
+}
+
+/* The selected ring is the accent at a heavier weight than the neighbour
+   highlights, so the card the neighbourhood belongs to is never in doubt. */
+.node-card-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent);
+  opacity: 1;
+  animation: none;
+}
+
+.canvas-edge-inflow {
+  stroke: var(--accent);
+}
+
+.canvas-edge-outflow {
+  stroke: var(--accent-purple);
 }

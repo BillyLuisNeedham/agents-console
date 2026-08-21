@@ -10,6 +10,7 @@ import {
   clampDrawersHeight,
   DRAWER_DEFAULT_VH,
   edgePath,
+  flowNeighbourhood,
   mergeLayout,
   parseStoredLayout,
   strokeWidthForZoom,
@@ -132,6 +133,19 @@ let drag: Drag | null = null;
 // every render (snapshots never close the panel or lose the selection).
 let selectedNodeId: string | null = null;
 let onSelectNode: ((nodeId: string | null) => void) | null = null;
+
+// The selection's one-hop flow neighbourhood: module scope alongside the
+// selection, recomputed from the model's edges on every render, so a live
+// snapshot re-derives the highlight instead of stripping it.
+let flowInflow = new Set<string>();
+let flowOutflow = new Set<string>();
+
+function flowClass(id: string): string {
+  if (id === selectedNodeId) return " node-card-selected";
+  if (flowInflow.has(id)) return " node-card-inflow";
+  if (flowOutflow.has(id)) return " node-card-outflow";
+  return "";
+}
 
 // Drawers strip height: module scope so it survives re-renders while snapshots
 // stream. One shared vh height drives both drawer bodies.
@@ -474,7 +488,8 @@ function renderTicketCard(card: TicketCardView): HTMLElement {
     {
       class:
         `node-card ticket-card ticket-card-${card.status}` +
-        (card.interrupt ? " ticket-card-interrupt" : ""),
+        (card.interrupt ? " ticket-card-interrupt" : "") +
+        flowClass(card.id),
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
@@ -504,7 +519,8 @@ function renderUtilityCard(card: UtilityCardView): HTMLElement {
     {
       class:
         "node-card node-card-utility" +
-        (card.interrupt ? " node-card-utility-interrupt" : ""),
+        (card.interrupt ? " node-card-utility-interrupt" : "") +
+        flowClass(card.id),
       "data-node-id": card.id,
       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
     },
@@ -632,7 +648,10 @@ function drawEdges(world: HTMLElement, edges: TopologyEdge[]): void {
     path.setAttribute("d", geom.d);
     path.setAttribute(
       "class",
-      "canvas-edge" + (edge.conditional ? " canvas-edge-conditional" : ""),
+      "canvas-edge" +
+        (edge.conditional ? " canvas-edge-conditional" : "") +
+        (edge.target === selectedNodeId ? " canvas-edge-inflow" : "") +
+        (edge.source === selectedNodeId ? " canvas-edge-outflow" : ""),
     );
     path.setAttribute("marker-end", `url(#${ARROW_ID})`);
     svg.appendChild(path);
@@ -859,6 +878,9 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     };
   }
   seedPositions(canvasCards(model));
+  const hood = flowNeighbourhood(model.edges, selectedNodeId);
+  flowInflow = new Set(hood.inflow);
+  flowOutflow = new Set(hood.outflow);
   const content = h(
     "div",
     { class: "content" },

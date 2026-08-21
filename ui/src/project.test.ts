@@ -6,6 +6,7 @@ import {
   DRAWER_MAX_VH,
   DRAWER_MIN_VH,
   edgePath,
+  flowNeighbourhood,
   interruptForm,
   isTicketCardId,
   layoutStorageKey,
@@ -548,6 +549,60 @@ describe("nextNodeSelection", () => {
     expect(nextNodeSelection(null, START_CARD_ID)).toBe(START_CARD_ID);
     expect(nextNodeSelection("ticket:A", REVIEW_CARD_ID)).toBe(REVIEW_CARD_ID);
     expect(nextNodeSelection(START_CARD_ID, START_CARD_ID)).toBeNull();
+  });
+});
+
+describe("flowNeighbourhood", () => {
+  const edges = projectPoolEdges([
+    ticket("A"),
+    ticket("B", { blockedBy: ["A"] }),
+    ticket("C", { blockedBy: ["B"] }),
+  ]);
+
+  it("returns the one-hop inflow and outflow of the selection", () => {
+    expect(flowNeighbourhood(edges, "ticket:B")).toEqual({
+      inflow: ["ticket:A"],
+      outflow: [REVIEW_CARD_ID, "ticket:C"],
+    });
+  });
+
+  it("is one hop only: no transitive dependency cone", () => {
+    const hood = flowNeighbourhood(edges, "ticket:C");
+    expect(hood.inflow).toEqual(["ticket:B"]);
+    expect(hood.inflow).not.toContain("ticket:A");
+    expect(hood.inflow).not.toContain(START_CARD_ID);
+  });
+
+  it("lets start flow into a blockerless ticket and review out of every ticket", () => {
+    const hood = flowNeighbourhood(edges, "ticket:A");
+    expect(hood.inflow).toEqual([START_CARD_ID]);
+    expect(hood.outflow).toEqual([REVIEW_CARD_ID, "ticket:B"]);
+  });
+
+  it("lights the utility cards' own neighbourhoods", () => {
+    expect(flowNeighbourhood(edges, START_CARD_ID)).toEqual({
+      inflow: [],
+      outflow: ["ticket:A"],
+    });
+    expect(flowNeighbourhood(edges, REVIEW_CARD_ID)).toEqual({
+      inflow: ["ticket:A", "ticket:B", "ticket:C"],
+      outflow: [],
+    });
+  });
+
+  it("is empty for a cleared selection or an unknown card", () => {
+    expect(flowNeighbourhood(edges, null)).toEqual({ inflow: [], outflow: [] });
+    expect(flowNeighbourhood(edges, "ticket:zzz")).toEqual({ inflow: [], outflow: [] });
+  });
+
+  it("re-derives from the edges of each live snapshot", () => {
+    const first = projectPoolEdges([ticket("A")]);
+    expect(flowNeighbourhood(first, "ticket:A").outflow).toEqual([REVIEW_CARD_ID]);
+    const next = projectPoolEdges([ticket("A"), ticket("B", { blockedBy: ["A"] })]);
+    expect(flowNeighbourhood(next, "ticket:A").outflow).toEqual([
+      REVIEW_CARD_ID,
+      "ticket:B",
+    ]);
   });
 });
 
