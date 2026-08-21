@@ -107,10 +107,32 @@ async function boot(): Promise<void> {
       return;
     }
   }
+  // A stream error marks the connection down at once, but the banner waits
+  // out a grace delay: a snapshot inside the window (the server replays the
+  // latest on reconnect) cancels it, and reconnect clears one already showing.
+  const STREAM_GRACE_MS = 4000;
+  let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancelGrace = () => {
+    if (graceTimer !== null) {
+      clearTimeout(graceTimer);
+      graceTimer = null;
+    }
+  };
   client.stream({
-    onSnapshot: setSnapshot,
+    onSnapshot: (snapshot) => {
+      cancelGrace();
+      setSnapshot(snapshot);
+    },
     onError: (message) => {
-      state.error = message;
+      state.connected = false;
+      cancelGrace();
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        if (!state.connected) {
+          state.error = message;
+          render();
+        }
+      }, STREAM_GRACE_MS);
       render();
     },
   });

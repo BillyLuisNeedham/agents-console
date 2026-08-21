@@ -181,7 +181,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
   const server = Bun.serve({
     port: options.port,
-    async fetch(req) {
+    async fetch(req, bunServer) {
       const url = new URL(req.url);
       const pathname = url.pathname;
 
@@ -218,6 +218,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       }
 
       if (pathname === "/api/stream") {
+        // The stream is silent whenever the pool waits at an interrupt, so it
+        // opts out of the default idle timeout; every other route keeps it.
+        bunServer.timeout(req, 0);
         let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
         const stream = new ReadableStream<Uint8Array>({
           start(ctrl) {

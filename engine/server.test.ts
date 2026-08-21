@@ -158,4 +158,50 @@ describe("pool server", () => {
     expect(data).toContain('"phase":"done"');
     reader!.cancel();
   });
+
+  it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    await server.start();
+    // The pool now waits at the checkpoint interrupt: the stream goes silent.
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    let data = "";
+    while (!data.includes('"phase"')) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("stream closed before the replayed snapshot");
+      data += decoder.decode(value, { stream: true });
+    }
+
+    // A dropped stream rejects the pending read rather than ending cleanly.
+    let closed = false;
+    const nextFrame = reader.read().then(
+      ({ done }) => {
+        if (done) closed = true;
+      },
+      () => {
+        closed = true;
+      },
+    );
+    // The default ten-second timeout's close reaches the client a couple of
+    // seconds late, so wait well past both.
+    await Bun.sleep(14_000);
+    expect(closed).toBe(false);
+
+    // The same connection still delivers the next broadcast after the silence.
+    await server.answer("01", "resume");
+    const arrived = await Promise.race([
+      nextFrame.then(() => true),
+      Bun.sleep(3000).then(() => false),
+    ]);
+    expect(arrived).toBe(true);
+    expect(closed).toBe(false);
+    reader.cancel();
+  }, 25_000);
 });
