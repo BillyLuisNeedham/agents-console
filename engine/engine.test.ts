@@ -57,8 +57,8 @@ function makePool(spec: PoolSpec): string {
 }
 
 interface StubBehaviour {
-  status?: "done" | "checkpoint" | "keep";
-  statuses?: ("done" | "checkpoint" | "keep")[];
+  status?: "done" | "checkpoint" | "ready" | "keep";
+  statuses?: ("done" | "checkpoint" | "ready" | "keep")[];
   outcome?: { summary: string; commitSha: string | null } | null;
   exitCode?: number;
 }
@@ -736,6 +736,35 @@ describe("interrupts", () => {
     expect(run.final.log.some((line) => line.includes("exited 1"))).toBe(true);
   });
 
+  it("treats a marker rewritten to ready as a crash, not a respawn", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    // The harness exits having set its own marker back to ready: a crash
+    // with extra steps. Without the read-back mapping this re-spawns
+    // forever and never reaches a human.
+    const rig = stubHarness({ "01": { status: "ready", exitCode: 0 } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "crash",
+        body: join(poolDir, "runs", "01.log"),
+      },
+    ]);
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
   it("raises deadlock interrupts for a blocked-by cycle without spawning", async () => {
     const poolDir = makePool({
       tickets: [
@@ -1366,7 +1395,7 @@ describe("durability", () => {
     expect(first.phase).toBe("done");
 
     // run.sh reset 02: the marker on disk is the truth, the checkpoint's
-    // done is stale — and the earlier review approval lapses with it.
+    // done is stale, and the earlier review approval lapses with it.
     setMarker(poolDir, "02-b.md", "ready");
     const rig = stubHarness({});
     const second = await approveReview(
@@ -1968,8 +1997,8 @@ describe("worktrees", () => {
         "#!/usr/bin/env bun",
         'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
         'import { join } from "node:path";',
-        'const message = process.argv[process.argv.indexOf("--command") + 2];',
-        'const issueRel = message.split("\\n")[0];',
+        'const commandArgs = process.argv[process.argv.indexOf("--command") + 2];',
+        'const issueRel = commandArgs.split("\\n")[0];',
         'const id = issueRel.split("/").at(-1)!.split("-")[0];',
         'const issue = join(process.cwd(), issueRel);',
         'const recordDir = process.env.PWD_RECORD_DIR;',

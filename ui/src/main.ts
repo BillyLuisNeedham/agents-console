@@ -109,9 +109,13 @@ async function boot(): Promise<void> {
   }
   // A stream error marks the connection down at once, but the banner waits
   // out a grace delay: a snapshot inside the window (the server replays the
-  // latest on reconnect) cancels it, and reconnect clears one already showing.
+  // latest on reconnect) cancels it, and reconnect clears one already
+  // showing. The timer arms only on the first error of an outage: a dead
+  // connection re-fires onError on every EventSource retry, and re-arming
+  // each time would push the banner past the grace window forever.
   const STREAM_GRACE_MS = 4000;
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastStreamError = "";
   const cancelGrace = () => {
     if (graceTimer !== null) {
       clearTimeout(graceTimer);
@@ -125,14 +129,16 @@ async function boot(): Promise<void> {
     },
     onError: (message) => {
       state.connected = false;
-      cancelGrace();
-      graceTimer = setTimeout(() => {
-        graceTimer = null;
-        if (!state.connected) {
-          state.error = message;
-          render();
-        }
-      }, STREAM_GRACE_MS);
+      lastStreamError = message;
+      if (graceTimer === null) {
+        graceTimer = setTimeout(() => {
+          graceTimer = null;
+          if (!state.connected) {
+            state.error = lastStreamError;
+            render();
+          }
+        }, STREAM_GRACE_MS);
+      }
       render();
     },
   });

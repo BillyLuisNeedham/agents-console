@@ -683,7 +683,11 @@ async function resumeMerge(
   return drive(session);
 }
 
-const RESOLVER_DRIVER = "resolve";
+// The driver name must match a command stub under each harness's commands
+// directory (~/.config/opencode/command, ~/.claude/commands); the stub that
+// exists on both is resolving-merge-conflicts. A bare "resolve" matched
+// nothing on opencode, so every conflict there took the manual path.
+const RESOLVER_DRIVER = "resolving-merge-conflicts";
 
 interface ResolverSpec {
   harness: string;
@@ -1216,13 +1220,21 @@ function planTicket(
   return { cwd: worktree.path, issuePath, worktree };
 }
 
-// Marker read-back. In a worktree the agent edited its own copy; a finished
-// ticket's Issue content mirrors back to the main checkout so the dual-write
-// and any Brief stay inspectable there. A marker left at ready or
-// in-progress means the agent died; the main marker keeps the super-step's
-// in-progress, matching the no-worktree crash path.
+// Marker read-back. Only done and checkpoint are real endings: the
+// super-step wrote in-progress before the spawn, so an agent that exits
+// leaving anything else (an untouched marker, or one it rewrote to ready)
+// died mid-ticket. The marker goes to in-progress either way, so the crash
+// interrupt holds the ticket out of the next super-step instead of
+// re-spawning it forever. In a worktree the agent edited its own copy; a
+// finished ticket's Issue content mirrors back to the main checkout so the
+// dual-write and any Brief stay inspectable there.
 function readBack(marker: TicketMarker, plan: TicketPlan): TicketStatus {
-  if (!plan.worktree) return readMarker(marker.file).status;
+  if (!plan.worktree) {
+    const status = readMarker(marker.file).status;
+    if (status === "done" || status === "checkpoint") return status;
+    if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
+    return "in-progress";
+  }
   const status = readMarker(plan.issuePath).status;
   if (status === "done" || status === "checkpoint") {
     copyFileSync(plan.issuePath, marker.file);

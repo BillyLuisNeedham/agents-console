@@ -387,8 +387,8 @@ export interface TopologyEdge {
 
 /**
  * The flow neighbourhood of a selected card: its one-hop inflow (the cards
- * whose edges point at it — its blockers, plus start when it is blockerless)
- * and one-hop outflow (the cards it points at — its dependents, plus review).
+ * whose edges point at it: its blockers, plus start when it is blockerless)
+ * and one-hop outflow (the cards it points at: its dependents, plus review).
  * One hop only, never the transitive cone, so a chain does not light up the
  * whole canvas. A cleared selection has an empty neighbourhood.
  */
