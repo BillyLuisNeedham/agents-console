@@ -1351,9 +1351,13 @@ async function spawnToLog(
   // env is passed explicitly: Bun resolves argv[0] against a cached PATH
   // unless an env is given, and the parent environment at spawn time is
   // what the child should inherit.
+  //
+  // PWD is forced to the spawn cwd: Bun passes env verbatim, so the
+  // server's stale PWD (the checkout it was launched from) would otherwise
+  // win, and opencode roots its project in PWD before cwd.
   const proc = Bun.spawn(argv, {
     cwd: ctx.cwd,
-    env: { ...process.env },
+    env: { ...process.env, PWD: ctx.cwd },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

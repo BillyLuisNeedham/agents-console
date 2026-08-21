@@ -1954,6 +1954,69 @@ describe("worktrees", () => {
     ).toBe("");
   }, 15000);
 
+  // A fake opencode binary on PATH records the PWD the engine passed it.
+  // The real opencode CLI is a Bun binary and bun hands the inherited
+  // environment through verbatim; a shell fake would sanitize $PWD back to
+  // the true cwd and hide the bug this guards against.
+  function opencodePwdFake(poolDir: string): { binDir: string; recordDir: string } {
+    const binDir = join(poolDir, "bin");
+    const recordDir = join(poolDir, "rec");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, "opencode"),
+      [
+        "#!/usr/bin/env bun",
+        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+        'import { join } from "node:path";',
+        'const message = process.argv[process.argv.indexOf("--command") + 2];',
+        'const issueRel = message.split("\\n")[0];',
+        'const id = issueRel.split("/").at(-1)!.split("-")[0];',
+        'const issue = join(process.cwd(), issueRel);',
+        'const recordDir = process.env.PWD_RECORD_DIR;',
+        'mkdirSync(recordDir, { recursive: true });',
+        'writeFileSync(join(recordDir, `pwd.${id}`), process.env.PWD ?? "");',
+        'writeFileSync(issue, readFileSync(issue, "utf8").replace(/status=[a-z-]*/, "status=done"));',
+        "console.log(`fake opencode ran in ${process.env.PWD}`);",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(binDir, "opencode"), 0o755);
+    return { binDir, recordDir };
+  }
+
+  it("spawns with PWD set to the worktree cwd so opencode roots in the worktree, not the server's checkout", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: { defaults: { harness: "opencode", model: "opencode-test" } },
+    });
+    const fake = opencodePwdFake(poolDir);
+    const originalPath = process.env.PATH;
+    const originalRecord = process.env.PWD_RECORD_DIR;
+    process.env.PATH = `${fake.binDir}:${originalPath}`;
+    process.env.PWD_RECORD_DIR = fake.recordDir;
+
+    let run: Awaited<ReturnType<typeof runPool>>;
+    try {
+      run = await approveReview(await runPool({ poolDir }));
+    } finally {
+      process.env.PATH = originalPath;
+      if (originalRecord === undefined) delete process.env.PWD_RECORD_DIR;
+      else process.env.PWD_RECORD_DIR = originalRecord;
+    }
+
+    expect(run!.phase).toBe("done");
+    for (const id of ["01", "02"]) {
+      // The tickets ran in worktrees; the child must see the worktree as
+      // PWD, not the server's checkout (where the test process lives).
+      expect(readFileSync(join(fake.recordDir, `pwd.${id}`), "utf8")).toBe(
+        join(poolDir, ".git", "pool-worktrees", id),
+      );
+      expect(readFileSync(join(fake.recordDir, `pwd.${id}`), "utf8")).not.toBe(
+        process.env.PWD,
+      );
+    }
+  }, 15000);
+
   it("merges finished branches in completion order and never rebases a running ticket", async () => {
     const { poolDir, head, git } = makeGitPool({
       tickets: [readyTicket("01"), readyTicket("02")],
