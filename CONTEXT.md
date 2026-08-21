@@ -63,5 +63,13 @@ Billy's UI for driving a thread — the agent graph rendered as node cards on a 
 _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
 
 **Detail**:
-The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live.
+The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
+
+**Attempt**:
+One run of a ticket by a harness, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects.
+_Avoid_: run (that's the whole thread), execution, job
+
+**Ticket log**:
+The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.
+_Avoid_: log drawer (that's the pool-level channel), transcript, chat history
