@@ -233,12 +233,16 @@ export interface LogPaneView {
   selectedAttempt: number | null;
   /** The raw log text (ANSI stripped server-side) fetched for that attempt. */
   content: string;
-  /** The raw byte offset the next fetch should request. */
+  /** The raw byte offset of the first byte the pane holds. */
+  firstOffset: number;
+  /** The raw byte offset the next tail fetch should request. */
   offset: number;
   /** The raw byte size of the attempt's log file. */
   totalSize: number;
   /** More chunks remain to fetch (offset < totalSize). */
   hasMore: boolean;
+  /** Older bytes exist before the held window: offer "load earlier". */
+  hasEarlier: boolean;
   /** The ticket has never run: show the spec text with a marker instead of timeline and log. */
   neverRun: boolean;
   /** The ticket's spec text, shown in the never-run fallback. */
@@ -266,16 +270,17 @@ export function selectLogAttempt(
 
 /**
  * The log pane view: which attempt is selected, the log text fetched for it,
- * and whether the ticket's never-run fallback applies. The pane is static in
- * this ticket: it shows what has been fetched for the selected attempt. A null
- * timeline (not yet loaded) projects null, so the pane is simply absent until
- * the timeline lands.
+ * and whether the ticket's never-run fallback applies. The pane tails live:
+ * `offset`/`totalSize` track the append cursor and `firstOffset` tracks the
+ * oldest held byte, so the DOM layer follows the tail and offers "load
+ * earlier". A null timeline (not yet loaded) projects null, so the pane is
+ * simply absent until the timeline lands.
  */
 export function projectLogPane(
   timeline: TimelineView | null,
   clickedAttempt: number | null,
   spec: string,
-  log: { content: string; offset: number; totalSize: number } | null,
+  log: { content: string; firstOffset: number; offset: number; totalSize: number } | null,
   error: string | null,
 ): LogPaneView | null {
   if (!timeline) return null;
@@ -284,26 +289,78 @@ export function projectLogPane(
     return {
       selectedAttempt: null,
       content: "",
+      firstOffset: 0,
       offset: 0,
       totalSize: 0,
       hasMore: false,
+      hasEarlier: false,
       neverRun: true,
       spec,
       error: null,
     };
   }
   const selectedAttempt = selectLogAttempt(timeline, clickedAttempt);
-  const loaded = log ?? { content: "", offset: 0, totalSize: 0 };
+  const loaded = log ?? { content: "", firstOffset: 0, offset: 0, totalSize: 0 };
   return {
     selectedAttempt,
     content: loaded.content,
+    firstOffset: loaded.firstOffset,
     offset: loaded.offset,
     totalSize: loaded.totalSize,
     hasMore: loaded.offset < loaded.totalSize,
+    hasEarlier: loaded.firstOffset > 0,
     neverRun: false,
     spec,
     error,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Log tailing decisions (pure; the DOM layer applies them to the scroll pane)
+// ---------------------------------------------------------------------------
+
+/**
+ * The byte window the log pane opens and pages by. Mirrors the pool server's
+ * LOG_CHUNK_BYTES: the wire contract pages in these steps, so the tail-first
+ * window and the "load earlier" step are one chunk each.
+ */
+export const LOG_TAIL_BYTES = 64 * 1024;
+
+/** The byte offset a tail-first open starts at: the last window of the log. */
+export function initialLogWindow(totalSize: number): number {
+  return Math.max(0, totalSize - LOG_TAIL_BYTES);
+}
+
+/**
+ * The byte offset the next tail fetch requests, or null when the pane holds
+ * the whole file. The pane appends from its last read offset until caught up.
+ */
+export function logTailOffset(offset: number, totalSize: number): number | null {
+  return offset < totalSize ? offset : null;
+}
+
+/**
+ * The byte offset a "load earlier" fetch requests: one window before the
+ * oldest byte held, or null when the pane already holds the file head.
+ */
+export function earlierLogOffset(firstOffset: number): number | null {
+  return firstOffset > 0 ? Math.max(0, firstOffset - LOG_TAIL_BYTES) : null;
+}
+
+/** Slack in px for "scrolled to the bottom": within it counts as at the tail. */
+export const LOG_BOTTOM_SLACK_PX = 24;
+
+/**
+ * Whether the log pane sits at the tail. Auto-scroll follows the log only
+ * while this holds; scrolling up unpins, scrolling back into the slack
+ * resumes following.
+ */
+export function logAtBottom(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+): boolean {
+  return scrollTop + clientHeight >= scrollHeight - LOG_BOTTOM_SLACK_PX;
 }
 
 // ---------------------------------------------------------------------------

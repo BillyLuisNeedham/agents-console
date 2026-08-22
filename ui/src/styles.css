@@ -1077,6 +1077,11 @@ body {
   font-size: 11px;
 }
 
+.log-pane-earlier {
+  align-self: flex-start;
+  font-size: 11px;
+}
+
 /* --------------------------------------------------------- never-run */
 
 .never-run {

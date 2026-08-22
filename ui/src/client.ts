@@ -79,18 +79,21 @@ export class PoolClient {
    * A byte range of an attempt's raw log, ANSI-stripped server-side. `offset`
    * is a raw byte offset; the response reports `nextOffset` (where the next
    * range starts) and `totalSize`, so the pane pages until offset reaches the
-   * total. Ticket 19's tailing reuses this offset contract for growth.
+   * total. The optional `end` bounds the range, which is how "load earlier"
+   * reads exactly the prefix before the bytes the pane already holds.
    */
   async getLog(
     ticketId: string,
     attempt: number,
     offset: number,
+    end?: number,
   ): Promise<TicketLogResponse> {
     const params = new URLSearchParams({
       ticket: ticketId,
       attempt: String(attempt),
       offset: String(offset),
     });
+    if (end !== undefined) params.set("end", String(end));
     const res = await fetch(`${this.base}/api/log?${params}`);
     if (!res.ok) throw new Error(`ticket log failed: ${res.status}`);
     return res.json();

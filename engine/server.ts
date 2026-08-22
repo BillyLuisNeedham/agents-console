@@ -294,11 +294,14 @@ function utf8End(bytes: Uint8Array, start: number, end: number): number {
 /**
  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
- * returned `nextOffset` until it equals `totalSize`.
+ * returned `nextOffset` until it equals `totalSize`. An optional `end` bounds
+ * the range below the chunk size, which is how "load earlier" reads exactly
+ * the missing prefix before the bytes the pane already holds.
  */
 async function readLogRange(
   logPath: string,
   offset: number,
+  end?: number,
 ): Promise<{ content: string; offset: number; nextOffset: number; totalSize: number }> {
   if (!existsSync(logPath)) {
     return { content: "", offset: 0, nextOffset: 0, totalSize: 0 };
@@ -306,8 +309,12 @@ async function readLogRange(
   const file = Bun.file(logPath);
   const totalSize = file.size;
   const start = Math.min(Math.max(0, offset), totalSize);
-  const end = Math.min(start + LOG_CHUNK_BYTES, totalSize);
-  const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+  const bound =
+    end !== undefined && Number.isFinite(end)
+      ? Math.max(start, end)
+      : start + LOG_CHUNK_BYTES;
+  const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
+  const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
   const decodeEnd = utf8End(bytes, 0, bytes.length);
   return {
     content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
@@ -605,14 +612,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           const attempts = listAttemptLogs(runsDir, ticketId);
           const rawAttempt = url.searchParams.get("attempt");
           const rawOffset = url.searchParams.get("offset");
+          const rawEnd = url.searchParams.get("end");
           // The offset is a byte offset into the raw log; the client pages by
           // continuing from the returned nextOffset. Default to the current
-          // (latest) attempt and offset 0.
+          // (latest) attempt and offset 0. The optional end bounds the range
+          // for the log pane's "load earlier" prefix reads.
           const attempt =
             rawAttempt !== null && rawAttempt !== ""
               ? Number(rawAttempt)
               : (attempts[attempts.length - 1]?.attempt ?? 0);
           const offset = rawOffset !== null && rawOffset !== "" ? Number(rawOffset) : 0;
+          const end = rawEnd !== null && rawEnd !== "" ? Number(rawEnd) : undefined;
           const logFile = attemptLogFile(runsDir, ticketId, attempt);
           if (!logFile) {
             return Response.json(
@@ -620,7 +630,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               { status: 404 },
             );
           }
-          const range = await readLogRange(join(runsDir, logFile), offset);
+          const range = await readLogRange(join(runsDir, logFile), offset, end);
           return Response.json({ ...range, attempts });
         }
 

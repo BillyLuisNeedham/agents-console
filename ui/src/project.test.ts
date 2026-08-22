@@ -8,11 +8,17 @@ import {
   DETAIL_MIN_PX,
   DRAWER_MAX_VH,
   DRAWER_MIN_VH,
+  earlierLogOffset,
   edgePath,
   flowNeighbourhood,
+  initialLogWindow,
   interruptForm,
   isTicketCardId,
   layoutStorageKey,
+  LOG_BOTTOM_SLACK_PX,
+  LOG_TAIL_BYTES,
+  logAtBottom,
+  logTailOffset,
   mergeLayout,
   nextNodeSelection,
   parseStoredLayout,
@@ -604,7 +610,7 @@ describe("projectLogPane", () => {
       ]),
       null,
       "spec",
-      { content: "the log", offset: 50, totalSize: 100 },
+      { content: "the log", firstOffset: 0, offset: 50, totalSize: 100 },
       null,
     );
     expect(pane).not.toBeNull();
@@ -621,7 +627,7 @@ describe("projectLogPane", () => {
       timelineView([{ number: 1, running: false }]),
       null,
       "spec",
-      { content: "all", offset: 100, totalSize: 100 },
+      { content: "all", firstOffset: 0, offset: 100, totalSize: 100 },
       null,
     );
     expect(pane?.hasMore).toBe(false);
@@ -656,6 +662,89 @@ describe("projectLogPane", () => {
   it("projects null while the timeline has not loaded", () => {
     const pane = projectLogPane(null, null, "spec", null, null);
     expect(pane).toBeNull();
+  });
+
+  it("offers load-earlier only when older bytes exist before the held window", () => {
+    const timeline = timelineView([{ number: 1, running: false }]);
+    const atHead = projectLogPane(
+      timeline,
+      null,
+      "spec",
+      { content: "all", firstOffset: 0, offset: 3, totalSize: 3 },
+      null,
+    );
+    expect(atHead?.hasEarlier).toBe(false);
+    const midFile = projectLogPane(
+      timeline,
+      null,
+      "spec",
+      { content: "tail", firstOffset: LOG_TAIL_BYTES, offset: LOG_TAIL_BYTES + 4, totalSize: LOG_TAIL_BYTES + 4 },
+      null,
+    );
+    expect(midFile?.firstOffset).toBe(LOG_TAIL_BYTES);
+    expect(midFile?.hasEarlier).toBe(true);
+  });
+});
+
+describe("log tailing decisions", () => {
+  it("opens a long log tail-first at its last window", () => {
+    expect(initialLogWindow(LOG_TAIL_BYTES * 3 + 10)).toBe(LOG_TAIL_BYTES * 2 + 10);
+  });
+
+  it("opens a log of one window or less from the head", () => {
+    expect(initialLogWindow(100)).toBe(0);
+    expect(initialLogWindow(LOG_TAIL_BYTES)).toBe(0);
+    expect(initialLogWindow(0)).toBe(0);
+  });
+
+  it("tails from the last read offset until caught up, then stops requesting", () => {
+    expect(logTailOffset(50, 100)).toBe(50);
+    expect(logTailOffset(100, 100)).toBeNull();
+    expect(logTailOffset(0, 0)).toBeNull();
+  });
+
+  it("steps load-earlier one window back from the oldest held byte, stopping at the head", () => {
+    expect(earlierLogOffset(LOG_TAIL_BYTES * 2)).toBe(LOG_TAIL_BYTES);
+    expect(earlierLogOffset(10)).toBe(0);
+    expect(earlierLogOffset(0)).toBeNull();
+  });
+
+  it("counts the pane as at the tail only within the bottom slack", () => {
+    const scrollHeight = 1000;
+    const clientHeight = 200;
+    const atBottom = scrollHeight - clientHeight;
+    expect(logAtBottom(atBottom, clientHeight, scrollHeight)).toBe(true);
+    expect(logAtBottom(atBottom - LOG_BOTTOM_SLACK_PX, clientHeight, scrollHeight)).toBe(true);
+    expect(logAtBottom(atBottom - LOG_BOTTOM_SLACK_PX - 1, clientHeight, scrollHeight)).toBe(false);
+    expect(logAtBottom(0, clientHeight, scrollHeight)).toBe(false);
+  });
+});
+
+describe("attempt-stay on a running ticket", () => {
+  it("keeps a clicked older attempt when a new attempt starts running", () => {
+    const after = timelineView([
+      { number: 1, running: false },
+      { number: 2, running: true },
+    ]);
+    expect(selectLogAttempt(after, 1)).toBe(1);
+  });
+
+  it("follows the newly running attempt when no attempt was clicked", () => {
+    const before = timelineView([{ number: 1, running: true }]);
+    expect(selectLogAttempt(before, null)).toBe(1);
+    const after = timelineView([
+      { number: 1, running: false },
+      { number: 2, running: true },
+    ]);
+    expect(selectLogAttempt(after, null)).toBe(2);
+  });
+
+  it("stays on the latest attempt while no attempt is running", () => {
+    const waiting = timelineView([
+      { number: 1, running: false },
+      { number: 2, running: false },
+    ]);
+    expect(selectLogAttempt(waiting, null)).toBe(2);
   });
 });
 

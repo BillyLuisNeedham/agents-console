@@ -8,18 +8,20 @@
 import "./styles.css";
 import { PoolClient } from "./client";
 import {
+  earlierLogOffset,
+  initialLogWindow,
+  logTailOffset,
   phaseLabel,
   projectDetail,
   projectLogPane,
   projectPool,
   projectTimeline,
   selectLogAttempt,
-  type LogPaneView,
   type PoolSnapshot,
   type TimelineView,
   type TicketEventsResponse,
 } from "./project";
-import { renderApp, type AppModel } from "./view";
+import { captureLogAnchor, renderApp, type AppModel } from "./view";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
@@ -46,21 +48,30 @@ const timelineState = {
 };
 
 // The selected ticket's raw log pane: module scope so a full-DOM rebuild never
-// drops the fetched content or the selected attempt, and a slow fetch
-// answering after a newer selection never clobbers the newer ticket's pane.
+// drops the fetched content, the selected attempt, or the pin, and a slow
+// fetch answering after a newer selection never clobbers the newer ticket's
+// pane. `clicked` records whether the attempt was picked by hand: a clicked
+// attempt stays when a new attempt starts, an unclicked pane follows the
+// running one. `firstOffset`..`offset` bookend the held byte window.
 const logState = {
   ticketId: null as string | null,
   attempt: null as number | null,
+  clicked: false,
   content: "",
+  firstOffset: 0,
   offset: 0,
   totalSize: 0,
   error: null as string | null,
+  tailInFlight: false,
+  earlierInFlight: false,
 };
 
 function resetLogPane(): void {
   logState.ticketId = null;
   logState.attempt = null;
+  logState.clicked = false;
   logState.content = "";
+  logState.firstOffset = 0;
   logState.offset = 0;
   logState.totalSize = 0;
   logState.error = null;
@@ -87,48 +98,114 @@ function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
 }
 
 /**
- * Fetch the raw log for an attempt, paging through byte ranges until the whole
- * file is in hand. The pane is static in this ticket: it fetches once on
- * selection, and the offset contract it uses is what ticket 19 makes live.
+ * Open an attempt's raw log tail-first: probe the size (an offset past EOF
+ * serves empty content plus the total), fetch the last window, then tail
+ * whatever grew in the meantime. A slow answer only lands when it is still
+ * the selected attempt.
  */
-async function fetchLog(ticketId: string, attempt: number): Promise<void> {
-  const key = `${ticketId}:${attempt}`;
+async function openLog(
+  ticketId: string,
+  attempt: number,
+  clicked: boolean,
+): Promise<void> {
   logState.ticketId = ticketId;
   logState.attempt = attempt;
+  logState.clicked = clicked;
   logState.content = "";
+  logState.firstOffset = 0;
   logState.offset = 0;
   logState.totalSize = 0;
   logState.error = null;
   render();
   try {
-    let offset = 0;
-    for (;;) {
-      const chunk = await client.getLog(ticketId, attempt, offset);
-      // A newer selection may have landed while the fetch was out.
-      if (logState.ticketId !== ticketId || logState.attempt !== attempt) {
-        return;
-      }
-      logState.content += chunk.content;
-      logState.offset = chunk.nextOffset;
-      logState.totalSize = chunk.totalSize;
-      if (logState.ticketId === ticketId && logState.attempt === attempt) {
-        render();
-      }
-      if (chunk.nextOffset >= chunk.totalSize) break;
-      offset = chunk.nextOffset;
-    }
+    const probe = await client.getLog(ticketId, attempt, Number.MAX_SAFE_INTEGER);
+    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
+    const chunk = await client.getLog(
+      ticketId,
+      attempt,
+      initialLogWindow(probe.totalSize),
+    );
+    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
+    logState.content = chunk.content;
+    logState.firstOffset = chunk.offset;
+    logState.offset = chunk.nextOffset;
+    logState.totalSize = chunk.totalSize;
+    render();
+    // The attempt may have grown while the open fetched.
+    void tailLog(ticketId, attempt);
   } catch {
     if (logState.ticketId === ticketId && logState.attempt === attempt) {
-      logState.error = `log fetch failed: ${key}`;
+      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
       render();
     }
   }
 }
 
 /**
+ * Append whatever bytes the selected attempt's log has grown since the last
+ * read: the live tail, driven by the snapshot cadence. Fetches only bytes
+ * past the last offset read; a no-op once caught up.
+ */
+async function tailLog(ticketId: string, attempt: number): Promise<void> {
+  if (logState.tailInFlight) return;
+  if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
+  logState.tailInFlight = true;
+  try {
+    while (logTailOffset(logState.offset, logState.totalSize) !== null) {
+      const from = logState.offset;
+      const chunk = await client.getLog(ticketId, attempt, from);
+      if (logState.ticketId !== ticketId || logState.attempt !== attempt) {
+        return;
+      }
+      logState.content += chunk.content;
+      logState.offset = chunk.nextOffset;
+      logState.totalSize = chunk.totalSize;
+      render();
+      if (chunk.nextOffset <= from) break;
+    }
+  } catch {
+    if (logState.ticketId === ticketId && logState.attempt === attempt) {
+      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
+      render();
+    }
+  } finally {
+    logState.tailInFlight = false;
+  }
+}
+
+/**
+ * Prepend the window before the oldest byte held ("load earlier"). The fetch
+ * is bounded by `firstOffset`, so the range cannot overlap the held content.
+ * The anchor captured before the mutation keeps the opened view put across
+ * the rebuild.
+ */
+async function prependLog(ticketId: string, attempt: number): Promise<void> {
+  if (logState.earlierInFlight) return;
+  if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
+  const from = earlierLogOffset(logState.firstOffset);
+  if (from === null) return;
+  logState.earlierInFlight = true;
+  try {
+    const chunk = await client.getLog(ticketId, attempt, from, logState.firstOffset);
+    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
+    captureLogAnchor();
+    logState.content = chunk.content + logState.content;
+    logState.firstOffset = chunk.offset;
+    render();
+  } catch {
+    if (logState.ticketId === ticketId && logState.attempt === attempt) {
+      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
+      render();
+    }
+  } finally {
+    logState.earlierInFlight = false;
+  }
+}
+
+/**
  * Load the log pane for the selected ticket's default attempt: the running
- * attempt, else the latest. The pane is static (fetches on selection), so a
- * slow answer only lands when it is still the selected ticket.
+ * attempt, else the latest. Unclicked, so the pane follows the live attempt
+ * as new attempts start.
  */
 function loadLogPane(): void {
   const ticketId = state.snapshot
@@ -138,16 +215,42 @@ function loadLogPane(): void {
   const view = timelineState.ticketId === ticketId ? timelineState.view : null;
   const attempt = view ? selectLogAttempt(view, null) : null;
   if (attempt !== null) {
-    void fetchLog(ticketId, attempt);
+    void openLog(ticketId, attempt, false);
   } else {
     logState.ticketId = ticketId;
     logState.attempt = null;
+    logState.clicked = false;
     logState.content = "";
+    logState.firstOffset = 0;
     logState.offset = 0;
     logState.totalSize = 0;
     logState.error = null;
     render();
   }
+}
+
+/**
+ * The snapshot-cadence liveness step for the open pane. Attempt-stay: a
+ * clicked attempt is never switched away from; an unclicked pane follows the
+ * running attempt as new attempts start. The selected attempt tails.
+ */
+function followLog(ticketId: string): void {
+  const view = timelineState.view;
+  if (!view) return;
+  if (logState.attempt === null) {
+    if (view.attempts.length > 0) loadLogPane();
+    return;
+  }
+  const desired = selectLogAttempt(
+    view,
+    logState.clicked ? logState.attempt : null,
+  );
+  if (desired === null) return;
+  if (desired !== logState.attempt) {
+    void openLog(ticketId, desired, false);
+    return;
+  }
+  void tailLog(ticketId, desired);
 }
 
 async function loadTimeline(): Promise<void> {
@@ -168,12 +271,12 @@ async function loadTimeline(): Promise<void> {
     // A newer selection may have landed while the fetch was out.
     if (timelineState.ticketId === ticketId) {
       applyTimeline(ticketId, response);
-      // The log pane is static: it fetches on selection, so a new snapshot
-      // for the same ticket keeps the fetched content. Only a newly selected
-      // ticket starts a log fetch.
+      // The snapshot cadence doubles as the liveness signal: a newly selected
+      // ticket opens its pane, and an already-open pane follows the tail.
       if (logState.ticketId !== ticketId) {
         loadLogPane();
       } else {
+        followLog(ticketId);
         render();
       }
     }
@@ -220,6 +323,7 @@ function model(): AppModel {
           logIsCurrent
             ? {
                 content: logState.content,
+                firstOffset: logState.firstOffset,
                 offset: logState.offset,
                 totalSize: logState.totalSize,
               }
@@ -247,7 +351,10 @@ function render(): void {
     },
     onSelectAttempt: (ticketId, attempt) => {
       if (logState.ticketId === ticketId && logState.attempt === attempt) return;
-      void fetchLog(ticketId, attempt);
+      void openLog(ticketId, attempt, true);
+    },
+    onLoadEarlier: (ticketId, attempt) => {
+      void prependLog(ticketId, attempt);
     },
     onAnswer: (ticketId, action, note) => {
       // One answer, one action: the response snapshot and the SSE stream both

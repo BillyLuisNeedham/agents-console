@@ -434,6 +434,59 @@ describe("ticket log endpoint", () => {
     expect(body.totalSize).toBe(6);
   });
 
+  it("serves a bounded range when end is given, for load-earlier prefix reads", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "0123456789abcdef\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=4&end=10`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      offset: number;
+      nextOffset: number;
+      totalSize: number;
+    };
+    expect(body.offset).toBe(4);
+    expect(body.content).toBe("456789");
+    expect(body.nextOffset).toBe(10);
+    expect(body.totalSize).toBe(17);
+  });
+
+  it("clamps a requested end to one chunk past the offset", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    const big = "x".repeat(LOG_CHUNK_BYTES + 16) + "\n";
+    writeFileSync(join(runsDir, "01.log"), big);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=1&offset=0&end=${big.length}`,
+    );
+    const body = (await res.json()) as { content: string; nextOffset: number };
+    expect(body.content).toHaveLength(LOG_CHUNK_BYTES);
+    expect(body.nextOffset).toBe(LOG_CHUNK_BYTES);
+  });
+
+  it("trims a partial UTF-8 character at a bounded range's end", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // é = U+00E9 is two bytes, at byte offsets 10 and 11: a range ending at 11
+    // holds only the lead byte and must trim it.
+    writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0&end=11`);
+    const body = (await res.json()) as { content: string; nextOffset: number };
+    expect(body.content).toBe("a".repeat(10));
+    expect(body.content).not.toContain("\uFFFD");
+    expect(body.nextOffset).toBe(10);
+  });
+
   it("lists event-based attempts with their rotated log files", async () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
