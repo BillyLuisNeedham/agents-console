@@ -1,6 +1,0 @@
-Merge remote-tracking branch 'origin/main' into arch/cleanup
-
-# Conflicts:
-#	engine/server.ts
-#	ui/src/main.ts
-#	ui/src/view.ts
