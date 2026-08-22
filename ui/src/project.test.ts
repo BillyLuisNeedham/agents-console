@@ -25,6 +25,7 @@ import {
   parseStoredLayout,
   phaseLabel,
   projectDetail,
+  projectDetailTab,
   projectLog,
   projectLogPane,
   projectPool,
@@ -40,6 +41,8 @@ import {
   type PoolSnapshot,
   type PoolStatus,
   type PoolTicketState,
+  type TabOverride,
+  type TicketDetailView,
   type TicketEvent,
   type TicketEventsResponse,
   type TimelineView,
@@ -419,6 +422,61 @@ describe("projectDetail", () => {
 
   it("returns null for a card not in the pool", () => {
     expect(projectDetail(snapshot(), "ticket:zzz")).toBeNull();
+  });
+});
+
+describe("projectDetailTab", () => {
+  function detail(
+    status: PoolStatus,
+    interrupt: TicketDetailView["interrupt"] = null,
+    ticketId = "A",
+  ): TicketDetailView {
+    return {
+      kind: "ticket",
+      ticketId,
+      title: `ticket ${ticketId}`,
+      status,
+      blockedBy: [],
+      outcome: null,
+      interrupt,
+    };
+  }
+
+  const pending = (ticketId = "A"): TicketDetailView["interrupt"] => ({
+    ticketId,
+    kind: "checkpoint",
+    body: "the brief",
+    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+  });
+
+  it("maps each pool status to its default tab", () => {
+    expect(projectDetailTab(detail("ready"), null)).toBe("spec");
+    expect(projectDetailTab(detail("in-progress"), null)).toBe("progress");
+    expect(projectDetailTab(detail("checkpoint"), null)).toBe("progress");
+    expect(projectDetailTab(detail("done"), null)).toBe("outcome");
+  });
+
+  it("maps a pending interrupt to Progress on every status, including done", () => {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+      expect(projectDetailTab(detail(status, pending()), null)).toBe("progress");
+    }
+  });
+
+  it("lets a manual tab choice override the default for the current ticket", () => {
+    const override: TabOverride = { ticketId: "A", tab: "spec" };
+    expect(projectDetailTab(detail("done"), override)).toBe("spec");
+    expect(projectDetailTab(detail("ready"), { ticketId: "A", tab: "outcome" })).toBe("outcome");
+  });
+
+  it("lets a manual choice override the interrupt-driven Progress tab", () => {
+    const override: TabOverride = { ticketId: "A", tab: "outcome" };
+    expect(projectDetailTab(detail("checkpoint", pending()), override)).toBe("outcome");
+  });
+
+  it("resets the override when the selected ticket changes", () => {
+    const override: TabOverride = { ticketId: "A", tab: "spec" };
+    expect(projectDetailTab(detail("done", null, "B"), override)).toBe("outcome");
+    expect(projectDetailTab(detail("in-progress", null, "B"), override)).toBe("progress");
   });
 });
 

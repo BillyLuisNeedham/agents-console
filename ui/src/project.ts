@@ -623,6 +623,58 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
 }
 
+// ---------------------------------------------------------------------------
+// Detail tab default
+// ---------------------------------------------------------------------------
+
+export type DetailTab = "spec" | "progress" | "outcome";
+
+/**
+ * A manually chosen tab, held per ticket: the ticket id the choice belongs
+ * to plus the chosen tab. Null means "auto": the default for the ticket's
+ * phase. Because the choice carries its ticket id, the view layer keeps one
+ * value and a stale choice from a previous selection simply does not apply.
+ */
+export interface TabOverride {
+  ticketId: string;
+  tab: DetailTab;
+}
+
+/**
+ * The tab a ticket's Detail opens on: Progress for anything live or waiting
+ * on a human, Spec before the ticket has run, Outcome once it is done. A
+ * pending interrupt always wins over the status, even on a done ticket: the
+ * interrupt is the action surface, and the action surface is Progress.
+ */
+export function defaultDetailTab(
+  status: PoolStatus,
+  interruptPending: boolean,
+): DetailTab {
+  if (interruptPending) return "progress";
+  switch (status) {
+    case "ready":
+      return "spec";
+    case "in-progress":
+    case "checkpoint":
+      return "progress";
+    case "done":
+      return "outcome";
+  }
+}
+
+/**
+ * The tab a ticket's Detail shows. A manual choice for this ticket wins;
+ * a choice made on another ticket does not apply, so the default reasserts
+ * itself when the selection changes ticket.
+ */
+export function projectDetailTab(
+  detail: TicketDetailView,
+  override: TabOverride | null,
+): DetailTab {
+  if (override && override.ticketId === detail.ticketId) return override.tab;
+  return defaultDetailTab(detail.status, detail.interrupt !== null);
+}
+
 /**
  * The next Detail selection after a card press-release. Clicking the selected
  * card again clears the selection; clicking any other card swaps to it.
