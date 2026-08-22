@@ -123,6 +123,16 @@ export interface TicketEventsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket body wire type (served by /api/ticket)
+// ---------------------------------------------------------------------------
+
+export interface TicketBodyResponse {
+  id: string;
+  /** The Issue file's markdown with the line-1 state marker stripped. */
+  body: string;
+}
+
+// ---------------------------------------------------------------------------
 // Log pane wire types (served by /api/log)
 // ---------------------------------------------------------------------------
 
