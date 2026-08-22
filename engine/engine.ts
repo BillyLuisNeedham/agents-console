@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import {
   appendEvent,
+  attemptLogName,
   lastAttempt,
   lastAttemptOfKind,
   nextAttempt,
@@ -47,15 +48,14 @@ import {
   type WorktreeInfo,
 } from "./worktrees.ts";
 
-export type { TicketStatus } from "./pool.ts";
-export type { HarnessCommand, SpawnContext } from "./spawn.ts";
+export type { HarnessCommand } from "./spawn.ts";
 
 export interface Outcome {
   summary: string;
   commitSha: string | null;
 }
 
-export interface TicketAssignment {
+interface TicketAssignment {
   harness?: string;
   model?: string;
   drivers?: string;
@@ -83,13 +83,13 @@ export type InterruptKind =
 // projection's REVIEW_CARD_ID is the same string by contract).
 export const REVIEW_TICKET_ID = "REVIEW";
 
-export interface Interrupt {
+interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
 }
 
-export interface PoolState {
+interface PoolState {
   tickets: Record<string, TicketStatus>;
   log: string[];
   outcomes: Record<string, Outcome>;
@@ -101,7 +101,7 @@ export interface PoolState {
   reviewApproved: boolean;
 }
 
-export interface PoolUpdate {
+interface PoolUpdate {
   tickets?: Record<string, TicketStatus>;
   log?: string[];
   outcomes?: Record<string, Outcome>;
@@ -117,7 +117,7 @@ export interface PoolSnapshot {
   state: PoolState;
 }
 
-export interface RunOptions {
+interface RunOptions {
   poolDir: string;
   harnesses?: Record<string, HarnessCommand>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
@@ -172,7 +172,7 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   };
 }
 
-export function readyTickets(
+function readyTickets(
   markers: TicketMarker[],
   tickets: PoolState["tickets"],
 ): TicketMarker[] {
@@ -910,7 +910,7 @@ async function runResolver(
   result: MergeResult,
 ): Promise<ResolverAttempt> {
   const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
-  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
+  const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
   rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
@@ -930,7 +930,7 @@ async function runResolver(
     id: marker.id,
     issuePath: marker.file,
     issueRel: relative(session.cwd, marker.file),
-    prompt,
+    body: prompt,
     driver: RESOLVER_DRIVER,
     harness: resolver.harness,
     model: resolver.model,
@@ -1436,8 +1436,9 @@ function manualMergeInterrupt(
 // existing well-known raw log moves to its attempt-numbered name so a re-run
 // never destroys the ticket's history. The number is the attempt the events
 // file recorded for the run that wrote the file: the last implement spawn for
-// `<id>.log`, the last resolver run for `<id>.resolver.log`. A pre-feature
-// log (written before events existed) rotates to attempt-0.
+// the base log, the last resolver run for the resolver log. A pre-feature
+// log (written before events existed) rotates to attempt-0. The names come
+// from the events module's naming contract.
 function rotateAttemptLog(
   runsDir: string,
   ticketId: string,
@@ -1446,10 +1447,9 @@ function rotateAttemptLog(
 ): void {
   if (!existsSync(wellKnownPath)) return;
   const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
-  const suffix = kind === "resolver" ? ".resolver" : "";
   renameSync(
     wellKnownPath,
-    join(runsDir, `${ticketId}.attempt-${attempt}${suffix}.log`),
+    join(runsDir, attemptLogName(ticketId, attempt, kind === "resolver")),
   );
 }
 
@@ -1461,7 +1461,7 @@ async function runTicket(
   plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
-  const logPath = join(env.runsDir, `${marker.id}.log`);
+  const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
   rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
   const issueRel = relative(plan.cwd, plan.issuePath);
@@ -1472,9 +1472,7 @@ async function runTicket(
   });
 
   const prompt = buildPrompt({
-    driver,
     chain,
-    issueRel,
     agentMd: env.agentMd,
     roster: snapshot.config.roster ?? "",
     upstream,
@@ -1485,7 +1483,7 @@ async function runTicket(
     id: marker.id,
     issuePath: plan.issuePath,
     issueRel,
-    prompt,
+    body: prompt,
     driver,
     harness: assignment.harness,
     model: assignment.model,
@@ -1617,7 +1615,12 @@ function resolveAssignment(
   return { harness, model, drivers };
 }
 
-function readConfig(poolDir: string): PoolConfig {
+/**
+ * The pool's config loader, the single parser of console.json. The server
+ * consumes the same parsed config it hands the engine, so the file is read
+ * and validated exactly once.
+ */
+export function readConfig(poolDir: string): PoolConfig {
   const raw = readOptional(join(poolDir, "console.json"));
   if (!raw) return {};
   const parsed = JSON.parse(raw);

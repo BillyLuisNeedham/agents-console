@@ -17,8 +17,8 @@ import {
   type HarnessCommand,
   type PoolConfig,
   type PoolRun,
-  type SpawnContext,
 } from "./engine.ts";
+import type { SpawnContext } from "./spawn.ts";
 
 const tempDirs: string[] = [];
 
@@ -269,10 +269,10 @@ describe("super-steps", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(run.final.log).toContain("super-step 2: 02, 03");
-    expect(rig.spawned["02"].prompt).toContain("summary-01");
-    expect(rig.spawned["03"].prompt).toContain("summary-01");
-    expect(rig.spawned["02"].prompt).not.toContain("summary-03");
-    expect(rig.spawned["03"].prompt).not.toContain("summary-02");
+    expect(rig.spawned["02"].body).toContain("summary-01");
+    expect(rig.spawned["03"].body).toContain("summary-01");
+    expect(rig.spawned["02"].body).not.toContain("summary-03");
+    expect(rig.spawned["03"].body).not.toContain("summary-02");
     expect(Object.keys(run.final.outcomes).sort()).toEqual([
       "01",
       "02",
@@ -569,8 +569,8 @@ describe("channels", () => {
       summary: "built the schema",
       commitSha: "abc123",
     });
-    expect(rig.spawned["02"].prompt).toContain("01: built the schema");
-    expect(rig.spawned["02"].prompt).toContain("abc123");
+    expect(rig.spawned["02"].body).toContain("01: built the schema");
+    expect(rig.spawned["02"].body).toContain("abc123");
   });
 
   it("appends to the log channel across super-steps", async () => {
@@ -620,7 +620,7 @@ describe("channels", () => {
 });
 
 describe("glued prompt", () => {
-  it("glues driver skill, AGENT.md, chain, and roster in run.sh's shape", async () => {
+  it("glues AGENT.md, chain, and roster in run.sh's shape, without a driver line", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -639,16 +639,18 @@ describe("glued prompt", () => {
 
     await runPool({ poolDir, harnesses: rig.harnesses });
 
-    const prompt = rig.spawned["01"].prompt;
-    const lines = prompt.split("\n");
-    expect(lines[0]).toMatch(/^\/implement .*issues\/01-a\.md$/);
-    expect(prompt).toContain("Standing instructions for this job:");
-    expect(prompt).toContain("Do the thing.");
-    expect(prompt).toContain("dispatch these subagents in this order");
-    expect(prompt).toContain("code-review");
-    expect(prompt).toContain("The subagent roster for this job");
-    expect(prompt).toContain("deepseek: general-purpose subagent");
-    expect(prompt).toContain("outcome.json");
+    const body = rig.spawned["01"].body;
+    expect(body).toContain("Standing instructions for this job:");
+    expect(body).toContain("Do the thing.");
+    expect(body).toContain("dispatch these subagents in this order");
+    expect(body).toContain("code-review");
+    expect(body).toContain("The subagent roster for this job");
+    expect(body).toContain("deepseek: general-purpose subagent");
+    expect(body).toContain("outcome.json");
+    // The driver invocation line belongs to the adapters now; the body the
+    // engine passes carries it nowhere, so a prompt change cannot break a
+    // harness that assembles its own invocation.
+    expect(body).not.toContain("/implement");
   });
 
   it("spawns with stdin closed and writes a per-ticket log to runs/", async () => {
@@ -675,7 +677,9 @@ describe("harness CLIs", () => {
   // engine resolves the console.json harness name to a binary and launches
   // it in the shape run.sh proved. Each fake records its argv one argument
   // per file (argv.0, argv.1, ...) so assertions see exact strings, newline-
-  // carrying prompts included.
+  // carrying prompts included. The fake learns which Issue to mark done from
+  // an env var, never by parsing the prompt, so no test depends on the
+  // prompt's first line as a format.
 
   interface FakeCli {
     binDir: string;
@@ -685,7 +689,6 @@ describe("harness CLIs", () => {
   function fakeCli(
     poolDir: string,
     binary: string,
-    argExtract: string[],
     opts: { setDone?: boolean; exitCode?: number } = {},
   ): FakeCli {
     const binDir = join(poolDir, "bin");
@@ -707,9 +710,8 @@ describe("harness CLIs", () => {
         "elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open",
         "else stdin=eof; fi",
         'printf \'%s\' "$stdin" > "$out/stdin"',
-        ...argExtract,
         ...(opts.setDone ?? true
-          ? ['sed -i "1s/status=[a-z-]*/status=done/" "$rel"']
+          ? ['sed -i "1s/status=[a-z-]*/status=done/" "$FAKE_ISSUE_REL"']
           : []),
         `echo "fake ${binary} ran"`,
         `exit ${opts.exitCode ?? 0}`,
@@ -719,31 +721,6 @@ describe("harness CLIs", () => {
     chmodSync(join(binDir, binary), 0o755);
     return { binDir, recordDir };
   }
-
-  // claude and cursor take the whole prompt after -p; its first line is
-  // "/<driver> <issueRel>".
-  const extractFromPrintFlag = [
-    'prompt=""',
-    "while [ $# -gt 0 ]; do",
-    '  case "$1" in',
-    '    -p) prompt="$2"; shift 2 ;;',
-    "    *) shift ;;",
-    "  esac",
-    "done",
-    'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
-  ];
-
-  // opencode takes the message after --command <driver>; its first line is
-  // the bare issueRel.
-  const extractFromCommandMessage = [
-    'seen=0; msg=""',
-    'for a in "$@"; do',
-    '  if [ "$seen" = "2" ]; then msg="$a"; break; fi',
-    '  if [ "$seen" = "1" ]; then seen=2; fi',
-    '  if [ "$a" = "--command" ]; then seen=1; fi',
-    "done",
-    'rel="$(printf \'%s\' "$msg" | head -1)"',
-  ];
 
   function recordedArgs(recordDir: string): string[] {
     const args: string[] = [];
@@ -761,14 +738,18 @@ describe("harness CLIs", () => {
   ): Promise<void> {
     const originalPath = process.env.PATH;
     const originalRecord = process.env.FAKE_RECORD_DIR;
+    const originalIssue = process.env.FAKE_ISSUE_REL;
     process.env.PATH = `${fake.binDir}:${originalPath}`;
     process.env.FAKE_RECORD_DIR = fake.recordDir;
+    process.env.FAKE_ISSUE_REL = "issues/01-a.md";
     try {
       await fn();
     } finally {
       process.env.PATH = originalPath;
       if (originalRecord === undefined) delete process.env.FAKE_RECORD_DIR;
       else process.env.FAKE_RECORD_DIR = originalRecord;
+      if (originalIssue === undefined) delete process.env.FAKE_ISSUE_REL;
+      else process.env.FAKE_ISSUE_REL = originalIssue;
     }
   }
 
@@ -793,7 +774,7 @@ describe("harness CLIs", () => {
     const agents =
       '{"deepseek":{"description":"General-purpose subagent","prompt":"Do the reading.","model":"deepseek"}}';
     const poolDir = oneTicketPool("claude", "claude-test", { agents });
-    const fake = fakeCli(poolDir, "claude", extractFromPrintFlag);
+    const fake = fakeCli(poolDir, "claude");
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
@@ -823,7 +804,7 @@ describe("harness CLIs", () => {
 
   it("drives opencode through --command with the bare driver name and the issue path leading the message", async () => {
     const poolDir = oneTicketPool("opencode", "opencode-test");
-    const fake = fakeCli(poolDir, "opencode", extractFromCommandMessage);
+    const fake = fakeCli(poolDir, "opencode");
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
@@ -844,7 +825,7 @@ describe("harness CLIs", () => {
 
   it("launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh)", async () => {
     const poolDir = oneTicketPool("cursor", "cursor-test");
-    const fake = fakeCli(poolDir, "agent", extractFromPrintFlag);
+    const fake = fakeCli(poolDir, "agent");
 
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(fake, async () => {
@@ -868,7 +849,7 @@ describe("harness CLIs", () => {
 
   it("drives status from the marker a spawned CLI leaves behind, done or untouched alike", async () => {
     const doneDir = oneTicketPool("claude", "claude-test");
-    const doneFake = fakeCli(doneDir, "claude", extractFromPrintFlag);
+    const doneFake = fakeCli(doneDir, "claude");
     let run: Awaited<ReturnType<typeof runPool>>;
     await withFakePath(doneFake, async () => {
       run = await approveReview(await runPool({ poolDir: doneDir }));
@@ -877,7 +858,7 @@ describe("harness CLIs", () => {
     expect(run!.final.tickets["01"]).toBe("done");
 
     const crashDir = oneTicketPool("claude", "claude-test");
-    const crashFake = fakeCli(crashDir, "claude", extractFromPrintFlag, {
+    const crashFake = fakeCli(crashDir, "claude", {
       setDone: false,
       exitCode: 1,
     });
@@ -2471,7 +2452,7 @@ describe("worktrees", () => {
     // with 02's outcome in its prompt, against a HEAD the merge never
     // reached. The outcomes channel, not the merge, carries state downstream.
     expect(rig.spawnOrder).toContain("03");
-    expect(rig.spawned["03"].prompt).toContain("02: schema v2");
+    expect(rig.spawned["03"].body).toContain("02: schema v2");
     expect(run.final.tickets["03"]).toBe("done");
     expect(rig.spawned["03"].cwd).toBe(poolDir);
   }, 15000);

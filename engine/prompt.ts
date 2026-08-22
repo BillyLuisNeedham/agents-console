@@ -1,6 +1,6 @@
 import type { Outcome } from "./engine.ts";
 
-export interface ResolverPromptParts {
+interface ResolverPromptParts {
   id: string;
   worktree: string;
   branch: string;
@@ -31,20 +31,20 @@ export function buildResolverPrompt(parts: ResolverPromptParts): string {
   ].join("\n");
 }
 
-export interface PromptParts {
-  driver: string;
+interface PromptParts {
   chain: string[];
-  issueRel: string;
   agentMd: string;
   roster: string;
   upstream: { id: string; outcome: Outcome }[];
   outcomePath: string;
 }
 
+// The prompt body: the standing instructions, chain, roster, upstream
+// outcomes, and the outcome-writing instruction. The driver invocation line is
+// no longer part of this string; each harness adapter assembles its own from
+// the structured driver and issue-reference fields it receives.
 export function buildPrompt(parts: PromptParts): string {
   const sections: string[] = [
-    `/${parts.driver} ${parts.issueRel}`,
-    "",
     "Standing instructions for this job:",
     "",
     parts.agentMd.trim() || "_(no AGENT.md in the pool directory)_",

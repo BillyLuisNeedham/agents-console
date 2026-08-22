@@ -15,7 +15,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const EVENT_KINDS = [
+const EVENT_KINDS = [
   "scheduled",
   "spawned",
   "exited",
@@ -39,7 +39,62 @@ export interface TicketEvent {
   payload: Record<string, unknown>;
 }
 
-export function eventsFile(runsDir: string, ticketId: string): string {
+/**
+ * One ticket log file name, covering every raw-log variant ADR 0002 names:
+ * the well-known paths for the current attempt (`<id>.log`,
+ * `<id>.resolver.log`) and the rotated attempt-numbered names
+ * (`<id>.attempt-N.log`, `<id>.attempt-N.resolver.log`). `attempt` is null
+ * for the well-known paths. The events module owns the naming contract, and
+ * the engine rotator plus both server readers call this so the on-disk names
+ * cannot drift apart.
+ */
+export function attemptLogName(
+  ticketId: string,
+  attempt: number | null,
+  resolver: boolean,
+): string {
+  const numbered = attempt === null ? "" : `.attempt-${attempt}`;
+  const suffix = resolver ? ".resolver" : "";
+  return `${ticketId}${numbered}${suffix}.log`;
+}
+
+/** The free variables one `attemptLogName` call needed to produce a name. */
+export interface AttemptLogName {
+  attempt: number | null;
+  resolver: boolean;
+}
+
+/**
+ * Match a file name against a ticket's log naming contract: the four shapes
+ * `attemptLogName` produces. Returns the free variables, or null when the
+ * name is not one of this ticket's logs. A round-trip through the naming
+ * function keeps it the single authority, so a name it could not write is not
+ * matched. Used by the server's attempt reconstruction over old pools.
+ */
+export function parseAttemptLogName(
+  ticketId: string,
+  fileName: string,
+): AttemptLogName | null {
+  if (!fileName.startsWith(ticketId)) return null;
+  let rest = fileName.slice(ticketId.length);
+  let attempt: number | null = null;
+  if (rest.startsWith(".attempt-")) {
+    const digits = /^\d+/.exec(rest.slice(".attempt-".length));
+    if (!digits) return null;
+    attempt = Number(digits[0]);
+    rest = rest.slice(".attempt-".length + digits[0].length);
+  }
+  let resolver = false;
+  if (rest.startsWith(".resolver")) {
+    resolver = true;
+    rest = rest.slice(".resolver".length);
+  }
+  if (rest !== ".log") return null;
+  if (attemptLogName(ticketId, attempt, resolver) !== fileName) return null;
+  return { attempt, resolver };
+}
+
+function eventsFile(runsDir: string, ticketId: string): string {
   return join(runsDir, `${ticketId}.events.jsonl`);
 }
 
@@ -55,7 +110,9 @@ export function appendEvent(
 /**
  * Parse the append-only events file. The file is only ever appended to, but a
  * crash could tear a line, so a malformed or partial line is skipped and the
- * rest of the timeline stays readable.
+ * rest of the timeline stays readable. A line whose kind is not in the
+ * module's known kind list is skipped the same way, so the reader validates
+ * against the one list that also drives the kind type.
  */
 export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   const path = eventsFile(runsDir, ticketId);
@@ -65,7 +122,11 @@ export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as TicketEvent;
-      if (typeof parsed?.kind !== "string" || typeof parsed.attempt !== "number") {
+      if (
+        typeof parsed?.kind !== "string" ||
+        typeof parsed.attempt !== "number" ||
+        !(EVENT_KINDS as readonly string[]).includes(parsed.kind)
+      ) {
         continue;
       }
       events.push(parsed);

@@ -6,8 +6,8 @@
  *
  * The engine's snapshot carries `state.tickets` as an id -> status map; the
  * server enriches it into an array of {id, title, blockedBy, status} so the
- * projection can draw blocked-by edges and show titles, reading the pool's
- * marker files once at start for the metadata.
+ * projection can draw blocked-by edges and show titles. The metadata (title,
+ * spec, blockedBy) is the engine's own marker parsing, loaded once at start.
  */
 
 import {
@@ -20,15 +20,33 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
-import { readEvents, type TicketEvent } from "./events.ts";
+import {
+  readConfig,
+  REVIEW_TICKET_ID,
+  runPool,
+  type HarnessCommand,
+  type InterruptKind,
+  type PoolSnapshot,
+  type RunPhase,
+} from "./engine.ts";
+import {
+  attemptLogName,
+  parseAttemptLogName,
+  readEvents,
+  type TicketEvent,
+} from "./events.ts";
 import {
   defaultRegistryPath,
   readFleetEntry,
   readFleetEntryByPort,
   upsertFleetEntry,
 } from "./fleet.ts";
-import { loadPoolMarkers, MARKER_RE } from "./pool.ts";
+import {
+  loadPoolMarkers,
+  MARKER_RE,
+  type TicketMarker,
+  type TicketStatus,
+} from "./pool.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
@@ -43,24 +61,21 @@ export interface PoolServerOptions {
   registryPath?: string;
 }
 
-export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
-export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
-
-export interface EnrichedTicketState {
+interface EnrichedTicketState {
   id: string;
   title: string;
   blockedBy: string[];
-  status: PoolStatus;
+  status: TicketStatus;
 }
 
-export interface EnrichedSnapshot {
+interface EnrichedSnapshot {
   seq: number;
-  phase: PoolPhase;
+  phase: RunPhase;
   state: {
     tickets: EnrichedTicketState[];
     log: string[];
     outcomes: Record<string, { summary: string; commitSha: string | null }>;
-    interrupts: { ticketId: string; kind: string; body: string }[];
+    interrupts: { ticketId: string; kind: InterruptKind; body: string }[];
     config: Record<string, unknown>;
   };
 }
@@ -73,43 +88,13 @@ export interface PoolServer {
   close: () => Promise<void>;
 }
 
-interface TicketMeta {
-  id: string;
-  title: string;
-  blockedBy: string[];
-  /** The ticket's spec text: everything after the title heading. */
-  spec: string;
-}
-
-function readTitle(file: string): string {
-  const firstHeading = readFileSync(file, "utf8")
-    .split("\n")
-    .find((line) => line.startsWith("# "));
-  if (!firstHeading) return "(untitled)";
-  return firstHeading.replace(/^#\s+/, "").trim();
-}
-
-/** The issue body after the title heading and its leading blank line. */
-function readSpec(file: string): string {
-  const lines = readFileSync(file, "utf8").split("\n");
-  const headingIndex = lines.findIndex((line) => line.startsWith("# "));
-  const body = lines.slice(headingIndex + 1).join("\n").trim();
-  return body;
-}
-
-function loadMeta(poolDir: string): TicketMeta[] {
-  const issuesDir = join(poolDir, "issues");
-  const markers = loadPoolMarkers(issuesDir);
-  return markers.map((marker) => ({
-    id: marker.id,
-    title: readTitle(marker.file),
-    blockedBy: marker.blockedBy,
-    spec: readSpec(marker.file),
-  }));
+/** The pool's ticket metadata, as the engine parses it from the Issue files. */
+function loadMeta(poolDir: string): TicketMarker[] {
+  return loadPoolMarkers(join(poolDir, "issues"));
 }
 
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
-function enrich(snapshot: PoolSnapshot, meta: TicketMeta[]): EnrichedSnapshot {
+function enrich(snapshot: PoolSnapshot, meta: TicketMarker[]): EnrichedSnapshot {
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -156,7 +141,7 @@ function serveStatic(distDir: string, pathname: string): Response | null {
 // Ticket events endpoint
 // ---------------------------------------------------------------------------
 
-export interface TicketEventsResponse {
+interface TicketEventsResponse {
   events: TicketEvent[];
   attempts: ReconstructedAttempt[];
   reconstructed: boolean;
@@ -171,14 +156,14 @@ export interface TicketEventsResponse {
 /** The largest byte range a single log response serves. Larger logs page. */
 export const LOG_CHUNK_BYTES = 64 * 1024;
 
-export interface LogAttemptInfo {
+interface LogAttemptInfo {
   attempt: number;
   kind: "implement" | "resolver" | "reconstructed";
   logFile: string;
   current: boolean;
 }
 
-export interface TicketLogResponse {
+interface TicketLogResponse {
   content: string;
   offset: number;
   nextOffset: number;
@@ -191,7 +176,7 @@ export interface TicketLogResponse {
 const ANSI_ESCAPE_RE =
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
 
-export function stripAnsi(text: string): string {
+function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
 }
 
@@ -199,10 +184,11 @@ export function stripAnsi(text: string): string {
  * The ticket's attempts as log sources, in attempt order. Event-based tickets
  * (an events file exists) derive implement/resolver attempts from the events:
  * the latest of each kind holds its well-known path, older attempts their
- * rotated `<id>.attempt-N` name. A pre-feature ticket (no events file) uses
- * the reconstructed attempt rows, each with the log file it was built from.
+ * rotated attempt-numbered name (both named by the events module's contract).
+ * A pre-feature ticket (no events file) uses the reconstructed attempt rows,
+ * each with the log file it was built from.
  */
-export function listAttemptLogs(
+function listAttemptLogs(
   runsDir: string,
   ticketId: string,
 ): LogAttemptInfo[] {
@@ -219,9 +205,7 @@ export function listAttemptLogs(
         attempt: event.attempt,
         kind: "implement",
         current,
-        logFile: current
-          ? `${ticketId}.log`
-          : `${ticketId}.attempt-${event.attempt}.log`,
+        logFile: attemptLogName(ticketId, current ? null : event.attempt, false),
       });
     }
     for (const event of resolvers) {
@@ -230,9 +214,7 @@ export function listAttemptLogs(
         attempt: event.attempt,
         kind: "resolver",
         current,
-        logFile: current
-          ? `${ticketId}.resolver.log`
-          : `${ticketId}.attempt-${event.attempt}.resolver.log`,
+        logFile: attemptLogName(ticketId, current ? null : event.attempt, true),
       });
     }
     return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
@@ -342,7 +324,7 @@ async function readLogRange(
   };
 }
 
-export interface ReconstructedAttempt {
+interface ReconstructedAttempt {
   attempt: number;
   logFile: string;
   modifiedAt: string;
@@ -351,14 +333,14 @@ export interface ReconstructedAttempt {
 // The events endpoint answers for tickets the pool actually owns. Scoping to
 // the known ticket ids also keeps the lookup inside the pool's runs
 // directory: an arbitrary id can never walk out of it.
-function knownTicketIds(meta: TicketMeta[]): Set<string> {
+function knownTicketIds(meta: TicketMarker[]): Set<string> {
   return new Set(meta.map((m) => m.id));
 }
 
-// Attempt logs are `<id>.log`, `<id>.attempt-N.log`, `<id>.resolver.log`, and
-// `<id>.attempt-N.resolver.log`, in the pool's runs directory. A ticket with
-// no events file (a pre-feature pool) is backfilled one attempt row per
-// existing log file, in modification-time order, marked as reconstructed.
+// Attempt logs are the four names the events module's naming contract
+// produces, in the pool's runs directory. A ticket with no events file (a
+// pre-feature pool) is backfilled one attempt row per existing log file, in
+// modification-time order, marked as reconstructed.
 function reconstructAttempts(
   runsDir: string,
   ticketId: string,
@@ -369,12 +351,8 @@ function reconstructAttempts(
   } catch {
     return [];
   }
-  const escaped = ticketId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const logName = new RegExp(
-    `^${escaped}(?:\\.attempt-\\d+)?(?:\\.resolver)?\\.log$`,
-  );
   return files
-    .filter((file) => logName.test(file))
+    .filter((file) => parseAttemptLogName(ticketId, file) !== null)
     .map((file) => {
       const stat = statSync(join(runsDir, file));
       return { file, mtime: stat.mtimeMs };
@@ -390,7 +368,7 @@ function reconstructAttempts(
 function readTicketEvents(
   poolDir: string,
   ticketId: string,
-  meta: TicketMeta[],
+  meta: TicketMarker[],
 ): TicketEventsResponse {
   const runsDir = join(poolDir, "runs");
   const events = readEvents(runsDir, ticketId);
@@ -475,27 +453,6 @@ function pidIsLive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
-}
-
-/** The pool's pinned port from console.json, or undefined when it pins none. */
-function readConfigPort(poolDir: string): number | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(join(poolDir, "console.json"), "utf8");
-  } catch {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return undefined;
-  }
-  const port = (parsed as Record<string, unknown>).port;
-  return port === undefined ? undefined : (port as number);
 }
 
 function isAddressInUse(err: unknown): boolean {
@@ -646,6 +603,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   ): Promise<EnrichedSnapshot> {
     const run = currentRun;
     if (!run) throw new Error("pool not started");
+    if (action !== "resume") {
+      // Only the run's review gate (REVIEW_TICKET_ID) and a ticket's
+      // merge-approval take approve/reject; anything else is a malformed
+      // request, so fail at the seam instead of the engine silently treating
+      // it as a resume.
+      const kind = latest?.state.interrupts.find(
+        (i) => i.ticketId === ticketId,
+      )?.kind;
+      if (kind !== "review" && kind !== "merge-approval") {
+        throw new Error(
+          `answer: approve/reject needs the review gate (${REVIEW_TICKET_ID}) ` +
+            `or a merge-approval interrupt, got ${kind ?? "no interrupt"} ` +
+            `for ${ticketId}`,
+        );
+      }
+    }
     const next =
       action === "approve"
         ? await run.approve(ticketId, note)
@@ -658,7 +631,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
   const resolution = resolvePort(
     options.port,
-    readConfigPort(poolDir),
+    readConfig(poolDir).port,
     options.defaultPort ?? DEFAULT_PORT,
   );
   let server: Bun.Server<undefined>;
@@ -828,7 +801,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   };
 }
 
-export function runServerCli(): void {
+function runServerCli(): void {
   const args = process.argv.slice(2);
   const poolIndex = args.indexOf("--pool");
   const portIndex = args.indexOf("--port");

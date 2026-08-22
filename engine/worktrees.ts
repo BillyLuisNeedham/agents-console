@@ -6,7 +6,7 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-export interface GitProbe {
+interface GitProbe {
   ok: boolean;
   out: string;
   err: string;
@@ -52,10 +52,28 @@ export function branchFor(ticketId: string): string {
   return `pool/${ticketId}`;
 }
 
-// Worktrees live inside .git so they never appear in the main checkout's
-// status, where an in-place ticket could sweep one into a commit.
+// Worktrees live inside the common git dir so they never appear in a
+// checkout's status, where an in-place ticket could sweep one into a commit.
+// The common dir is the main checkout's .git for every worktree of the repo —
+// a linked worktree's own .git is a file, not a directory, so anchoring there
+// would break ticket worktree creation.
+const commonDirCache = new Map<string, string>();
+
+function gitCommonDir(repoRoot: string): string {
+  const cached = commonDirCache.get(repoRoot);
+  if (cached) return cached;
+  const probe = git(repoRoot, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  const dir = probe.ok && probe.out ? probe.out : join(repoRoot, ".git");
+  commonDirCache.set(repoRoot, dir);
+  return dir;
+}
+
 export function worktreePathFor(repoRoot: string, ticketId: string): string {
-  return join(repoRoot, ".git", "pool-worktrees", ticketId);
+  return join(gitCommonDir(repoRoot), "pool-worktrees", ticketId);
 }
 
 export function branchExists(repoRoot: string, ticketId: string): boolean {

@@ -35,6 +35,7 @@ import {
   REVIEW_CARD_ID,
   selectLogAttempt,
   START_CARD_ID,
+  statusLabel,
   strokeWidthForZoom,
   ticketCardId,
   ticketBodyHtml,
@@ -557,6 +558,15 @@ describe("phaseLabel", () => {
     expect(phaseLabel("quiescent")).toBe("waiting on you");
     expect(phaseLabel("done")).toBe("done");
     expect(phaseLabel("stalled")).toBe("stalled");
+  });
+});
+
+describe("statusLabel", () => {
+  it("labels the ticket statuses", () => {
+    expect(statusLabel("ready")).toBe("ready");
+    expect(statusLabel("in-progress")).toBe("running");
+    expect(statusLabel("done")).toBe("done");
+    expect(statusLabel("checkpoint")).toBe("checkpoint");
   });
 });
 

@@ -11,12 +11,12 @@ import type { PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogR
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
 
-export interface StreamHandlers {
+interface StreamHandlers {
   onSnapshot: (snapshot: PoolSnapshot) => void;
   onError: (message: string) => void;
 }
 
-export type ResumeAction = "resume" | "approve" | "reject";
+type ResumeAction = "resume" | "approve" | "reject";
 
 export class PoolClient {
   private base: string;

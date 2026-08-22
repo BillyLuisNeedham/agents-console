@@ -2,15 +2,13 @@
  * Console: the pool rendered as node cards on a canvas. One Bun server per
  * pool serves the built SPA, a JSON API, and an SSE stream pushing a full
  * snapshot on every change. The UI renders from those snapshots only; ticket
- * cards and their blocked-by edges replace the old LangGraph thread UI.
+ * cards and their blocked-by edges render the thread.
  */
 
 import "./styles.css";
 import { PoolClient } from "./client";
+import { LogPane } from "./log-pane";
 import {
-  earlierLogOffset,
-  initialLogWindow,
-  logTailOffset,
   phaseLabel,
   projectDetail,
   projectDetailTabs,
@@ -20,10 +18,10 @@ import {
   selectLogAttempt,
   type PoolSnapshot,
   type TabOverride,
-  type TimelineView,
   type TicketEventsResponse,
+  type TimelineView,
 } from "./project";
-import { captureLogAnchor, renderApp, type AppModel } from "./view";
+import { ConsoleView, type AppModel } from "./view";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
@@ -48,35 +46,20 @@ const timelineState = {
   view: null as TimelineView | null,
 };
 
-// The selected ticket's raw log pane: module scope so a full-DOM rebuild never
-// drops the fetched content, the selected attempt, or the pin, and a slow
-// fetch answering after a newer selection never clobbers the newer ticket's
-// pane. `clicked` records whether the attempt was picked by hand: a clicked
-// attempt stays when a new attempt starts, an unclicked pane follows the
-// running one. `firstOffset`..`offset` bookend the held byte window.
-const logState = {
-  ticketId: null as string | null,
-  attempt: null as number | null,
-  clicked: false,
-  content: "",
-  firstOffset: 0,
-  offset: 0,
-  totalSize: 0,
-  error: null as string | null,
-  tailInFlight: false,
-  earlierInFlight: false,
-};
+// The selected ticket's raw log pane: one module owns the byte-window state
+// machine (open, live tail, load earlier), the attempt-stay and
+// stale-selection guards, and the scroll pin. The bootstrap drives it and
+// renders when it changes; it never does offset arithmetic itself.
+const logPane = new LogPane({
+  fetch: (ticketId, attempt, offset, end) =>
+    client.getLog(ticketId, attempt, offset, end),
+  onChange: () => render(),
+});
 
-function resetLogPane(): void {
-  logState.ticketId = null;
-  logState.attempt = null;
-  logState.clicked = false;
-  logState.content = "";
-  logState.firstOffset = 0;
-  logState.offset = 0;
-  logState.totalSize = 0;
-  logState.error = null;
-}
+// The per-session view state: selection, dragged card positions, panel
+// width, drawer height, and note drafts, owned by the canvas, detail, and
+// drawers modules and composed here once for the session.
+const consoleView = new ConsoleView();
 
 // Ticket bodies for the Spec tab: fetched once per ticket on first selection
 // and held for the session; a 404 caches null so a known-missing body is
@@ -141,159 +124,16 @@ function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
 }
 
 /**
- * Open an attempt's raw log tail-first: probe the size (an offset past EOF
- * serves empty content plus the total), fetch the last window, then tail
- * whatever grew in the meantime. A slow answer only lands when it is still
- * the selected attempt.
+ * Open the log pane for a newly selected ticket: the default attempt (the
+ * running one, else the latest), unclicked so the pane follows the live
+ * attempt as new attempts start. A ticket with no attempts holds an empty
+ * pane.
  */
-async function openLog(
-  ticketId: string,
-  attempt: number,
-  clicked: boolean,
-): Promise<void> {
-  logState.ticketId = ticketId;
-  logState.attempt = attempt;
-  logState.clicked = clicked;
-  logState.content = "";
-  logState.firstOffset = 0;
-  logState.offset = 0;
-  logState.totalSize = 0;
-  logState.error = null;
-  render();
-  try {
-    const probe = await client.getLog(ticketId, attempt, Number.MAX_SAFE_INTEGER);
-    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
-    const chunk = await client.getLog(
-      ticketId,
-      attempt,
-      initialLogWindow(probe.totalSize),
-    );
-    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
-    logState.content = chunk.content;
-    logState.firstOffset = chunk.offset;
-    logState.offset = chunk.nextOffset;
-    logState.totalSize = chunk.totalSize;
-    render();
-    // The attempt may have grown while the open fetched.
-    void tailLog(ticketId, attempt);
-  } catch {
-    if (logState.ticketId === ticketId && logState.attempt === attempt) {
-      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
-      render();
-    }
-  }
-}
-
-/**
- * Append whatever bytes the selected attempt's log has grown since the last
- * read: the live tail, driven by the snapshot cadence. Fetches only bytes
- * past the last offset read; a no-op once caught up.
- */
-async function tailLog(ticketId: string, attempt: number): Promise<void> {
-  if (logState.tailInFlight) return;
-  if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
-  logState.tailInFlight = true;
-  try {
-    while (logTailOffset(logState.offset, logState.totalSize) !== null) {
-      const from = logState.offset;
-      const chunk = await client.getLog(ticketId, attempt, from);
-      if (logState.ticketId !== ticketId || logState.attempt !== attempt) {
-        return;
-      }
-      logState.content += chunk.content;
-      logState.offset = chunk.nextOffset;
-      logState.totalSize = chunk.totalSize;
-      render();
-      if (chunk.nextOffset <= from) break;
-    }
-  } catch {
-    if (logState.ticketId === ticketId && logState.attempt === attempt) {
-      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
-      render();
-    }
-  } finally {
-    logState.tailInFlight = false;
-  }
-}
-
-/**
- * Prepend the window before the oldest byte held ("load earlier"). The fetch
- * is bounded by `firstOffset`, so the range cannot overlap the held content.
- * The anchor captured before the mutation keeps the opened view put across
- * the rebuild.
- */
-async function prependLog(ticketId: string, attempt: number): Promise<void> {
-  if (logState.earlierInFlight) return;
-  if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
-  const from = earlierLogOffset(logState.firstOffset);
-  if (from === null) return;
-  logState.earlierInFlight = true;
-  try {
-    const chunk = await client.getLog(ticketId, attempt, from, logState.firstOffset);
-    if (logState.ticketId !== ticketId || logState.attempt !== attempt) return;
-    captureLogAnchor();
-    logState.content = chunk.content + logState.content;
-    logState.firstOffset = chunk.offset;
-    render();
-  } catch {
-    if (logState.ticketId === ticketId && logState.attempt === attempt) {
-      logState.error = `log fetch failed: ${ticketId}:${attempt}`;
-      render();
-    }
-  } finally {
-    logState.earlierInFlight = false;
-  }
-}
-
-/**
- * Load the log pane for the selected ticket's default attempt: the running
- * attempt, else the latest. Unclicked, so the pane follows the live attempt
- * as new attempts start.
- */
-function loadLogPane(): void {
-  const ticketId = state.snapshot
-    ? selectedTicket(state.snapshot, state.selectedId)
-    : null;
-  if (!ticketId) return;
-  const view = timelineState.ticketId === ticketId ? timelineState.view : null;
-  const attempt = view ? selectLogAttempt(view, null) : null;
-  if (attempt !== null) {
-    void openLog(ticketId, attempt, false);
-  } else {
-    logState.ticketId = ticketId;
-    logState.attempt = null;
-    logState.clicked = false;
-    logState.content = "";
-    logState.firstOffset = 0;
-    logState.offset = 0;
-    logState.totalSize = 0;
-    logState.error = null;
-    render();
-  }
-}
-
-/**
- * The snapshot-cadence liveness step for the open pane. Attempt-stay: a
- * clicked attempt is never switched away from; an unclicked pane follows the
- * running attempt as new attempts start. The selected attempt tails.
- */
-function followLog(ticketId: string): void {
-  const view = timelineState.view;
-  if (!view) return;
-  if (logState.attempt === null) {
-    if (view.attempts.length > 0) loadLogPane();
-    return;
-  }
-  const desired = selectLogAttempt(
-    view,
-    logState.clicked ? logState.attempt : null,
-  );
-  if (desired === null) return;
-  if (desired !== logState.attempt) {
-    void openLog(ticketId, desired, false);
-    return;
-  }
-  void tailLog(ticketId, desired);
+function openLogPane(ticketId: string): void {
+  const timeline =
+    timelineState.ticketId === ticketId ? timelineState.view : null;
+  const attempt = timeline ? selectLogAttempt(timeline, null) : null;
+  void logPane.open(ticketId, attempt, false);
 }
 
 async function loadTimeline(): Promise<void> {
@@ -303,7 +143,7 @@ async function loadTimeline(): Promise<void> {
   if (!ticketId) {
     timelineState.ticketId = null;
     timelineState.view = null;
-    resetLogPane();
+    logPane.reset();
     render();
     return;
   }
@@ -315,10 +155,10 @@ async function loadTimeline(): Promise<void> {
       applyTimeline(ticketId, response);
       // The snapshot cadence doubles as the liveness signal: a newly selected
       // ticket opens its pane, and an already-open pane follows the tail.
-      if (logState.ticketId !== ticketId) {
-        loadLogPane();
+      if (logPane.state.ticketId !== ticketId) {
+        openLogPane(ticketId);
       } else {
-        followLog(ticketId);
+        void logPane.follow(ticketId, timelineState.view);
         render();
       }
     }
@@ -340,7 +180,7 @@ function model(): AppModel {
   const isCurrent =
     detailTicketId !== null && timelineState.ticketId === detailTicketId;
   const logIsCurrent =
-    detailTicketId !== null && logState.ticketId === detailTicketId;
+    detailTicketId !== null && logPane.state.ticketId === detailTicketId;
   return {
     phase: view?.phase ?? null,
     phaseLabel: view ? phaseLabel(view.phase) : "connecting",
@@ -370,23 +210,23 @@ function model(): AppModel {
     logPane: detailTicketId
       ? projectLogPane(
           isCurrent ? timelineState.view : null,
-          logIsCurrent ? logState.attempt : null,
+          logIsCurrent ? logPane.state.attempt : null,
           logIsCurrent
             ? {
-                content: logState.content,
-                firstOffset: logState.firstOffset,
-                offset: logState.offset,
-                totalSize: logState.totalSize,
+                content: logPane.state.content,
+                firstOffset: logPane.state.firstOffset,
+                offset: logPane.state.offset,
+                totalSize: logPane.state.totalSize,
               }
             : null,
-          logIsCurrent ? logState.error : null,
+          logIsCurrent ? logPane.state.error : null,
         )
       : null,
   };
 }
 
 function render(): void {
-  renderApp(root, model(), {
+  consoleView.render(root, model(), {
     onToggleLog: () => {
       state.logOpen = !state.logOpen;
       render();
@@ -409,11 +249,10 @@ function render(): void {
       render();
     },
     onSelectAttempt: (ticketId, attempt) => {
-      if (logState.ticketId === ticketId && logState.attempt === attempt) return;
-      void openLog(ticketId, attempt, true);
+      logPane.selectAttempt(ticketId, attempt);
     },
     onLoadEarlier: (ticketId, attempt) => {
-      void prependLog(ticketId, attempt);
+      void logPane.loadEarlier(ticketId, attempt);
     },
     onAnswer: (ticketId, action, note) => {
       // One answer, one action: the response snapshot and the SSE stream both

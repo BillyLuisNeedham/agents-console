@@ -1,7 +1,5 @@
 node_modules/
 dist/
-.run/
-.langgraph_api/
 .env
 .scratch/console/runs/
 .scratch/console/verify-*.ts

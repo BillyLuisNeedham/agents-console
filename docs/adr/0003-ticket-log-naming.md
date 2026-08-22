@@ -1,0 +1,7 @@
+# Ticket-log file naming is owned by the events module
+
+ADR-0002 made the attempt-log naming contract "stable from the first write" and described its shapes: `<id>.log` and `<id>.resolver.log` always hold the current attempt, and older attempts move to `<id>.attempt-N.log` and `<id>.attempt-N.resolver.log`. That contract was spelled out in three places, each a separate implementation: the engine's attempt rotator wrote the rotated names while building the well-known paths itself, the server's log lister rebuilt the names from events, and the server's attempt reconstructor re-derived a regex to recognise them. Three owners meant the "stable" contract could drift without any single file being wrong.
+
+We decided the events module owns the whole naming contract. It already owns the per-ticket events file, so the ticket's on-disk record lives in one module. It exports one naming function that produces every raw-log variant, plus a parser that recognises the names that function produces, for the reconstructor's use. The engine's rotator writes through the naming function, and the server's log lister and attempt reconstructor read through it; no other code spells a file name.
+
+The naming function keeps ADR-0002's shapes exactly. The contract is unchanged, only its owner moves, so attempt logs from existing pools keep resolving.
