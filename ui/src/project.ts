@@ -118,6 +118,27 @@ export interface TicketEventsResponse {
   events: TicketEvent[];
   attempts: ReconstructedAttempt[];
   reconstructed: boolean;
+  /** The ticket's spec text: the issue file body after the title heading. */
+  spec: string;
+}
+
+// ---------------------------------------------------------------------------
+// Log pane wire types (served by /api/log)
+// ---------------------------------------------------------------------------
+
+export interface LogAttemptInfo {
+  attempt: number;
+  kind: "implement" | "resolver" | "reconstructed";
+  logFile: string;
+  current: boolean;
+}
+
+export interface TicketLogResponse {
+  content: string;
+  offset: number;
+  nextOffset: number;
+  totalSize: number;
+  attempts: LogAttemptInfo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +222,88 @@ function runningAttempt(
     if (last && LIVE_LAST_KINDS.has(last.kind)) return numbers[i];
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Log pane view model
+// ---------------------------------------------------------------------------
+
+export interface LogPaneView {
+  /** The attempt whose log the pane shows; null when the ticket has never run. */
+  selectedAttempt: number | null;
+  /** The raw log text (ANSI stripped server-side) fetched for that attempt. */
+  content: string;
+  /** The raw byte offset the next fetch should request. */
+  offset: number;
+  /** The raw byte size of the attempt's log file. */
+  totalSize: number;
+  /** More chunks remain to fetch (offset < totalSize). */
+  hasMore: boolean;
+  /** The ticket has never run: show the spec text with a marker instead of timeline and log. */
+  neverRun: boolean;
+  /** The ticket's spec text, shown in the never-run fallback. */
+  spec: string;
+  error: string | null;
+}
+
+/**
+ * The attempt the log pane shows. A clicked attempt wins; otherwise the
+ * running attempt, else the latest recorded attempt. Null for a ticket that
+ * has never run.
+ */
+export function selectLogAttempt(
+  timeline: TimelineView,
+  clicked: number | null,
+): number | null {
+  if (clicked !== null) return clicked;
+  const running = timeline.attempts.find((a) => a.running);
+  return (
+    running?.number ??
+    timeline.attempts[timeline.attempts.length - 1]?.number ??
+    null
+  );
+}
+
+/**
+ * The log pane view: which attempt is selected, the log text fetched for it,
+ * and whether the ticket's never-run fallback applies. The pane is static in
+ * this ticket: it shows what has been fetched for the selected attempt. A null
+ * timeline (not yet loaded) projects null, so the pane is simply absent until
+ * the timeline lands.
+ */
+export function projectLogPane(
+  timeline: TimelineView | null,
+  clickedAttempt: number | null,
+  spec: string,
+  log: { content: string; offset: number; totalSize: number } | null,
+  error: string | null,
+): LogPaneView | null {
+  if (!timeline) return null;
+  const hasAttempts = timeline.attempts.length > 0;
+  if (!hasAttempts) {
+    return {
+      selectedAttempt: null,
+      content: "",
+      offset: 0,
+      totalSize: 0,
+      hasMore: false,
+      neverRun: true,
+      spec,
+      error: null,
+    };
+  }
+  const selectedAttempt = selectLogAttempt(timeline, clickedAttempt);
+  const loaded = log ?? { content: "", offset: 0, totalSize: 0 };
+  return {
+    selectedAttempt,
+    content: loaded.content,
+    offset: loaded.offset,
+    totalSize: loaded.totalSize,
+    hasMore: loaded.offset < loaded.totalSize,
+    neverRun: false,
+    spec,
+    error,
+  };
 }
 
 // ---------------------------------------------------------------------------

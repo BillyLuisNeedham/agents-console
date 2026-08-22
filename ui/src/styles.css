@@ -1016,6 +1016,85 @@ body {
   font-size: 10px;
 }
 
+/* The attempt row is a button: click to show that attempt's raw log in the
+   pane below. The selected row gets the accent ring so the pane's source is
+   obvious even when the log has scrolled. */
+.timeline-attempt {
+  cursor: pointer;
+}
+
+.timeline-attempt-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.timeline-selected {
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* --------------------------------------------------------- raw log pane */
+
+.log-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.log-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-pane-attempt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.log-pane-error {
+  margin-left: auto;
+}
+
+.log-pane-content {
+  margin: 0;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.log-pane-more {
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------- never-run */
+
+.never-run {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.never-run-marker {
+  font-size: 11px;
+  font-style: italic;
+}
+
+.never-run-spec {
+  max-height: 60vh;
+}
+
 /* ------------------------------------------------------- flow highlight */
 
 /* The selection and its one-hop flow neighbourhood. Placed last so a
