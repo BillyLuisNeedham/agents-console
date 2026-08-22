@@ -28,6 +28,7 @@ import {
   type PoolStatus,
   type TicketCardView,
   type TopologyEdge,
+  type TimelineView,
   type UtilityCardView,
   type ViewTransform,
 } from "./project";
@@ -45,6 +46,7 @@ export interface AppModel {
   seq: number;
   error: string | null;
   detail: DetailView | null;
+  timeline: TimelineView | null;
 }
 
 export interface Handlers {
@@ -700,8 +702,82 @@ function renderMain(model: AppModel, handlers: Handlers): HTMLElement {
 // Detail panel: right-hand flex sibling for the selected card
 // ---------------------------------------------------------------------------
 
+function formatEventTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour12: false });
+}
+
+// The ticket's timeline: one row per attempt with its events, read from the
+// events endpoint and rendered under the interrupt form. The currently
+// running attempt is marked; a reconstructed timeline (a pre-feature pool
+// with no events file) notes that its rows came from log files.
+function renderTimelineSection(timeline: TimelineView): HTMLElement {
+  const body = h("div", { class: "timeline" });
+  body.append(h("div", { class: "dim" }, "timeline"));
+  if (timeline.attempts.length === 0) {
+    body.append(h("div", { class: "dim timeline-empty" }, "no attempts yet"));
+    return body;
+  }
+  if (timeline.reconstructed) {
+    body.append(
+      h(
+        "div",
+        { class: "dim timeline-note" },
+        "attempts reconstructed from log files",
+      ),
+    );
+  }
+  for (const attempt of timeline.attempts) {
+    const row = h(
+      "div",
+      {
+        class:
+          "timeline-attempt" +
+          (attempt.running ? " timeline-attempt-running" : ""),
+      },
+    );
+    row.append(
+      h(
+        "div",
+        { class: "timeline-attempt-head" },
+        h(
+          "span",
+          { class: "timeline-attempt-number" },
+          `attempt ${attempt.number}`,
+        ),
+        attempt.running
+          ? h("span", { class: "timeline-running" }, "running")
+          : null,
+        attempt.reconstructed
+          ? h("span", { class: "dim" }, "reconstructed")
+          : null,
+      ),
+    );
+    if (attempt.events.length === 0) {
+      row.append(
+        h("div", { class: "dim timeline-event" }, "no events recorded"),
+      );
+    } else {
+      for (const event of attempt.events) {
+        row.append(
+          h(
+            "div",
+            { class: "timeline-event" },
+            h("span", { class: "timeline-event-kind" }, event.kind),
+            h("span", { class: "dim timeline-event-at" }, formatEventTime(event.at)),
+          ),
+        );
+      }
+    }
+    body.append(row);
+  }
+  return body;
+}
+
 function renderTicketDetail(
   detail: Extract<DetailView, { kind: "ticket" }>,
+  timeline: TimelineView | null,
   handlers: Handlers,
 ): HTMLElement {
   const body = h("div", { class: "detail-body" });
@@ -717,6 +793,9 @@ function renderTicketDetail(
   );
   if (detail.interrupt) {
     body.append(renderInterrupt(detail.interrupt, handlers));
+  }
+  if (timeline) {
+    body.append(renderTimelineSection(timeline));
   }
   if (detail.outcome) {
     body.append(
@@ -765,7 +844,9 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
         "✕",
       ),
     ),
-    view.kind === "ticket" ? renderTicketDetail(view, handlers) : renderUtilityDetail(view, handlers),
+    view.kind === "ticket"
+      ? renderTicketDetail(view, model.timeline, handlers)
+      : renderUtilityDetail(view, handlers),
   );
   return detail;
 }

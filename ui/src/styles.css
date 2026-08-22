@@ -913,6 +913,71 @@ body {
   overflow: auto;
 }
 
+/* ------------------------------------------------------- ticket timeline */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.timeline-note {
+  font-size: 11px;
+}
+
+.timeline-empty {
+  font-size: 12px;
+}
+
+.timeline-attempt {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg);
+}
+
+.timeline-attempt-running {
+  border-color: var(--accent);
+}
+
+.timeline-attempt-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-attempt-number {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.timeline-running {
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.timeline-event {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.timeline-event-kind {
+  color: var(--text);
+}
+
+.timeline-event-at {
+  font-size: 10px;
+}
+
 /* ------------------------------------------------------- flow highlight */
 
 /* The selection and its one-hop flow neighbourhood. Placed last so a

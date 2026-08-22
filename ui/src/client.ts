@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { PoolSnapshot } from "./project";
+import type { PoolSnapshot, TicketEventsResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -60,6 +60,19 @@ export class PoolClient {
     if (!res.ok) throw new Error(`pool resume failed: ${res.status}`);
     const body = await res.json();
     return body.snapshot;
+  }
+
+  /**
+   * The selected ticket's parsed events, plus reconstructed attempt rows for
+   * a ticket with no events file (a pre-feature pool). Fetched lazily for the
+   * selected ticket and refetched when a new snapshot arrives.
+   */
+  async getEvents(ticketId: string): Promise<TicketEventsResponse> {
+    const res = await fetch(
+      `${this.base}/api/events?ticket=${encodeURIComponent(ticketId)}`,
+    );
+    if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
+    return res.json();
   }
 
   /**

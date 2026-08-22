@@ -11,6 +11,7 @@ import {
 import { once } from "node:events";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { appendEvent, lastAttempt, nextAttempt } from "./events.ts";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
   loadPoolMarkers,
@@ -271,6 +272,12 @@ async function drive(session: Session): Promise<PoolRun> {
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
       session.superStep += 1;
+      const scheduledAttempts = new Map(
+        ready.map((marker) => [
+          marker.id,
+          nextAttempt(session.runsDir, marker.id),
+        ]),
+      );
       session.state = applyUpdate(session.state, {
         tickets: Object.fromEntries(
           ready.map((marker) => [marker.id, "in-progress" as const]),
@@ -280,17 +287,37 @@ async function drive(session: Session): Promise<PoolRun> {
         ],
       });
       writeMarkers(session);
+      for (const marker of ready) {
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt: scheduledAttempts.get(marker.id)!,
+          kind: "scheduled",
+          payload: {},
+        });
+      }
       emit("running");
       const snapshot = session.state;
 
       const plans = new Map(
-        ready.map((marker) => [marker.id, planTicket(session, marker, ready.length)]),
+        ready.map((marker) => [
+          marker.id,
+          planTicket(
+            session,
+            marker,
+            ready.length,
+            scheduledAttempts.get(marker.id)!,
+          ),
+        ]),
       );
 
       // Merges land in completion order: each ticket's merge chains onto a
       // serialized queue the moment the ticket finishes, while its siblings
       // are still running.
-      const merges: { marker: TicketMarker; result: MergeResult }[] = [];
+      const merges: {
+        marker: TicketMarker;
+        result: MergeResult;
+        attempt: number;
+      }[] = [];
       let mergeQueue: Promise<void> = Promise.resolve();
       const results = await Promise.all(
         ready.map((marker) =>
@@ -312,6 +339,7 @@ async function drive(session: Session): Promise<PoolRun> {
                 merges.push({
                   marker,
                   result: mergeTicket(session, marker, result.plan.worktree!),
+                  attempt: result.plan.attempt,
                 });
               });
             }
@@ -328,6 +356,12 @@ async function drive(session: Session): Promise<PoolRun> {
       session.state = joined;
       for (const merge of merges) {
         if (merge.result.ok) {
+          appendEvent(session.runsDir, merge.marker.id, {
+            at: new Date().toISOString(),
+            attempt: merge.attempt,
+            kind: "merged",
+            payload: {},
+          });
           session.state = applyUpdate(session.state, {
             log: [
               `ticket ${merge.marker.id}: merged ${branchFor(merge.marker.id)} ` +
@@ -338,20 +372,37 @@ async function drive(session: Session): Promise<PoolRun> {
             ],
           });
         } else {
-          await handleMergeConflict(session, merge.marker, merge.result);
+          await handleMergeConflict(
+            session,
+            merge.marker,
+            merge.result,
+            merge.attempt,
+          );
         }
       }
-      for (const { marker, status, logPath } of results) {
+      for (const { marker, status, logPath, exitCode } of results) {
         if (status === "checkpoint") {
           raiseInterrupt(session, checkpointInterrupt(marker));
+          appendEvent(session.runsDir, marker.id, {
+            at: new Date().toISOString(),
+            attempt: lastAttempt(session.runsDir, marker.id),
+            kind: "checkpoint",
+            payload: {},
+          });
         } else if (status === "in-progress") {
           raiseInterrupt(session, {
             ticketId: marker.id,
             kind: "crash",
-            body: logPath,
-          });
-        }
+          body: logPath,
+        });
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt: lastAttempt(session.runsDir, marker.id),
+          kind: "crash",
+          payload: { code: exitCode },
+        });
       }
+    }
       persist(session);
       emit("running");
     }
@@ -500,6 +551,12 @@ function rehydrate(session: Session): void {
       !session.state.interrupts.some((i) => i.ticketId === marker.id)
     ) {
       raiseInterrupt(session, checkpointInterrupt(marker));
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: lastAttempt(session.runsDir, marker.id),
+        kind: "checkpoint",
+        payload: {},
+      });
     }
   }
   const recovered: Record<string, Outcome> = {};
@@ -591,6 +648,12 @@ async function answerTicket(
       `resume: ticket ${ticketId} has no Issue file in ${session.issuesDir}`,
     );
   }
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, ticketId),
+    kind: "answered",
+    payload: { kind: interrupt.kind },
+  });
   if (interrupt.kind === "merge-conflict") {
     return resumeMerge(session, marker, interrupt, note);
   }
@@ -663,6 +726,12 @@ async function resumeMerge(
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
   if (!result.ok) {
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "merge-conflict",
+      payload: { files: result.conflicted },
+    });
     session.state = applyUpdate(session.state, {
       interrupts: [
         ...session.state.interrupts.filter((i) => i !== interrupt),
@@ -673,6 +742,12 @@ async function resumeMerge(
     return drive(session);
   }
   removeWorktree(session.cwd, worktree);
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, marker.id),
+    kind: "merged",
+    payload: {},
+  });
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -767,7 +842,14 @@ async function handleMergeConflict(
   session: Session,
   marker: TicketMarker,
   result: MergeResult,
+  attempt: number,
 ): Promise<void> {
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "merge-conflict",
+    payload: { files: result.conflicted },
+  });
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
     branch: branchFor(marker.id),
@@ -786,15 +868,21 @@ async function handleMergeConflict(
     );
     return;
   }
-  const attempt = await runResolver(session, marker, worktree, resolver, result);
+  const resolverAttempt = await runResolver(
+    session,
+    marker,
+    worktree,
+    resolver,
+    result,
+  );
   session.resolverAttempts.set(marker.id, {
     files: result.conflicted,
-    note: attempt.note,
+    note: resolverAttempt.note,
   });
-  if (attempt.resolved) {
+  if (resolverAttempt.resolved) {
     raiseInterrupt(
       session,
-      approvalInterrupt(session, marker, result, attempt.note),
+      approvalInterrupt(session, marker, result, resolverAttempt.note),
     );
   } else {
     // Discard whatever the resolver left in the worktree, restoring the
@@ -802,7 +890,7 @@ async function handleMergeConflict(
     git(worktree.path, ["merge", "--abort"]);
     raiseInterrupt(
       session,
-      manualMergeInterrupt(session, marker, result, attempt.note),
+      manualMergeInterrupt(session, marker, result, resolverAttempt.note),
     );
   }
 }
@@ -814,6 +902,12 @@ async function runResolver(
   resolver: ResolverSpec,
   result: MergeResult,
 ): Promise<ResolverAttempt> {
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: nextAttempt(session.runsDir, marker.id),
+    kind: "resolver",
+    payload: { files: result.conflicted },
+  });
   const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
   const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
   const prompt = buildResolverPrompt({
@@ -889,6 +983,12 @@ async function approveMerge(
   }
   const result = mergeWithIssueAside(session, marker, worktree.branch);
   if (!result.ok) {
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "merge-conflict",
+      payload: { files: result.conflicted },
+    });
     session.state = applyUpdate(session.state, {
       interrupts: [
         ...session.state.interrupts.filter((i) => i !== interrupt),
@@ -904,6 +1004,12 @@ async function approveMerge(
     return drive(session);
   }
   removeWorktree(session.cwd, worktree);
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, marker.id),
+    kind: "merged",
+    payload: {},
+  });
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -1052,6 +1158,12 @@ async function rejectReview(
   }
   for (const marker of session.markers) {
     if (!reset.has(marker.id)) continue;
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "review-reject",
+      payload: {},
+    });
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
     if (named.includes(marker.id)) {
@@ -1139,9 +1251,18 @@ function reconcileDeadlocks(session: Session): void {
   let interrupts = state.interrupts.filter(
     (i) => !cleared.some((c) => c.ticketId === i.ticketId && c.kind === i.kind),
   );
-  const log: string[] = cleared.map(
-    (i) => `interrupt cleared for ${i.ticketId} (deadlock): blockers can complete again`,
-  );
+  const log: string[] = [];
+  for (const interrupt of cleared) {
+    appendEvent(session.runsDir, interrupt.ticketId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, interrupt.ticketId),
+      kind: "deadlock-cleared",
+      payload: {},
+    });
+    log.push(
+      `interrupt cleared for ${interrupt.ticketId} (deadlock): blockers can complete again`,
+    );
+  }
   for (const marker of raised) {
     const blocking = marker.blockedBy.filter(
       (id) => !canComplete(id, new Set()),
@@ -1152,6 +1273,12 @@ function reconcileDeadlocks(session: Session): void {
       body: `blockers can never complete: ${blocking.join(", ")}`,
     };
     interrupts = [...interrupts, interrupt];
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "deadlock",
+      payload: { blockers: blocking },
+    });
     log.push(`interrupt raised for ${marker.id} (deadlock): ${interrupt.body}`);
   }
   session.state = applyUpdate(session.state, { interrupts, log });
@@ -1186,12 +1313,14 @@ interface TicketPlan {
   cwd: string;
   issuePath: string;
   worktree?: WorktreeInfo;
+  attempt: number;
 }
 
 interface TicketResult {
   marker: TicketMarker;
   status: TicketStatus;
   logPath: string;
+  exitCode: number;
   plan: TicketPlan;
   update: PoolUpdate;
 }
@@ -1207,17 +1336,18 @@ function planTicket(
   session: Session,
   marker: TicketMarker,
   readyCount: number,
+  attempt: number,
 ): TicketPlan {
-  if (!session.git) return { cwd: session.cwd, issuePath: marker.file };
+  if (!session.git) return { cwd: session.cwd, issuePath: marker.file, attempt };
   const parked = branchExists(session.cwd, marker.id);
   if (readyCount < 2 && !parked) {
-    return { cwd: session.cwd, issuePath: marker.file };
+    return { cwd: session.cwd, issuePath: marker.file, attempt };
   }
   const worktree = prepareWorktree(session.cwd, marker.id);
   const issuePath = join(worktree.path, relative(session.cwd, marker.file));
   mkdirSync(dirname(issuePath), { recursive: true });
   copyFileSync(marker.file, issuePath);
-  return { cwd: worktree.path, issuePath, worktree };
+  return { cwd: worktree.path, issuePath, worktree, attempt };
 }
 
 // Marker read-back. Only done and checkpoint are real endings: the
@@ -1335,15 +1465,28 @@ async function runTicket(
     cwd: plan.cwd,
   };
   const argv = env.harnesses[assignment.harness](ctx);
+  appendEvent(env.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: plan.attempt,
+    kind: "spawned",
+    payload: {},
+  });
   const exitCode = await spawnToLog(argv, ctx);
 
   const status = readBack(marker, plan);
   const outcome = readOutcome(outcomePath);
+  appendEvent(env.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: plan.attempt,
+    kind: "exited",
+    payload: { code: exitCode, status },
+  });
 
   return {
     marker,
     status,
     logPath,
+    exitCode,
     plan,
     update: {
       tickets: { [marker.id]: status },

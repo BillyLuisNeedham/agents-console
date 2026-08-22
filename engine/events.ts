@@ -1,0 +1,95 @@
+/**
+ * Ticket events: the engine's per-ticket lifecycle record, one JSON line per
+ * event appended to `runs/<id>.events.jsonl` at each lifecycle point the
+ * engine already passes through (ADR 0002). Append-only and small; it is never
+ * folded into the SSE snapshot. The timeline in the ticket's Detail is built
+ * from these events, and tickets with no events file (pre-feature pools) are
+ * backfilled from their log files at read time.
+ *
+ * Attempt numbers are per ticket and shared by implement and resolver runs:
+ * every spawn of a harness for a ticket increments that ticket's attempt
+ * counter, so a resolver run after a conflicted implement attempt is the next
+ * attempt.
+ */
+
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const EVENT_KINDS = [
+  "scheduled",
+  "spawned",
+  "exited",
+  "merged",
+  "merge-conflict",
+  "resolver",
+  "checkpoint",
+  "crash",
+  "deadlock",
+  "deadlock-cleared",
+  "answered",
+  "review-reject",
+] as const;
+
+export type TicketEventKind = (typeof EVENT_KINDS)[number];
+
+export interface TicketEvent {
+  at: string;
+  attempt: number;
+  kind: TicketEventKind;
+  payload: Record<string, unknown>;
+}
+
+export function eventsFile(runsDir: string, ticketId: string): string {
+  return join(runsDir, `${ticketId}.events.jsonl`);
+}
+
+export function appendEvent(
+  runsDir: string,
+  ticketId: string,
+  event: TicketEvent,
+): void {
+  mkdirSync(runsDir, { recursive: true });
+  appendFileSync(eventsFile(runsDir, ticketId), `${JSON.stringify(event)}\n`);
+}
+
+/**
+ * Parse the append-only events file. The file is only ever appended to, but a
+ * crash could tear a line, so a malformed or partial line is skipped and the
+ * rest of the timeline stays readable.
+ */
+export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
+  const path = eventsFile(runsDir, ticketId);
+  if (!existsSync(path)) return [];
+  const events: TicketEvent[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as TicketEvent;
+      if (typeof parsed?.kind !== "string" || typeof parsed.attempt !== "number") {
+        continue;
+      }
+      events.push(parsed);
+    } catch {
+      // torn line: skip it
+    }
+  }
+  return events;
+}
+
+/** The attempt number for a ticket's next spawn: one past the highest attempt recorded. */
+export function nextAttempt(runsDir: string, ticketId: string): number {
+  return (
+    readEvents(runsDir, ticketId).reduce(
+      (max, event) => Math.max(max, event.attempt),
+      0,
+    ) + 1
+  );
+}
+
+/** The ticket's latest recorded attempt, or 0 before anything has spawned. */
+export function lastAttempt(runsDir: string, ticketId: string): number {
+  return readEvents(runsDir, ticketId).reduce(
+    (max, event) => Math.max(max, event.attempt),
+    0,
+  );
+}

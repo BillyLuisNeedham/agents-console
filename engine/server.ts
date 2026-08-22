@@ -10,9 +10,10 @@
  * marker files once at start for the metadata.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
+import { readEvents, type TicketEvent } from "./events.ts";
 import { loadPoolMarkers } from "./pool.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
@@ -121,11 +122,80 @@ function serveStatic(distDir: string, pathname: string): Response | null {
   return new Response(body, { headers: { "content-type": type } });
 }
 
+// ---------------------------------------------------------------------------
+// Ticket events endpoint
+// ---------------------------------------------------------------------------
+
+export interface TicketEventsResponse {
+  events: TicketEvent[];
+  attempts: ReconstructedAttempt[];
+  reconstructed: boolean;
+}
+
+export interface ReconstructedAttempt {
+  attempt: number;
+  logFile: string;
+  modifiedAt: string;
+}
+
+// The events endpoint answers for tickets the pool actually owns. Scoping to
+// the known ticket ids also keeps the lookup inside the pool's runs
+// directory: an arbitrary id can never walk out of it.
+function knownTicketIds(meta: TicketMeta[]): Set<string> {
+  return new Set(meta.map((m) => m.id));
+}
+
+// Attempt logs are `<id>.log`, `<id>.attempt-N.log`, `<id>.resolver.log`, and
+// `<id>.attempt-N.resolver.log`, in the pool's runs directory. A ticket with
+// no events file (a pre-feature pool) is backfilled one attempt row per
+// existing log file, in modification-time order, marked as reconstructed.
+function reconstructAttempts(
+  runsDir: string,
+  ticketId: string,
+): ReconstructedAttempt[] {
+  let files: string[] = [];
+  try {
+    files = readdirSync(runsDir);
+  } catch {
+    return [];
+  }
+  const escaped = ticketId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const logName = new RegExp(
+    `^${escaped}(?:\\.attempt-\\d+)?(?:\\.resolver)?\\.log$`,
+  );
+  return files
+    .filter((file) => logName.test(file))
+    .map((file) => {
+      const stat = statSync(join(runsDir, file));
+      return { file, mtime: stat.mtimeMs };
+    })
+    .sort((a, b) => a.mtime - b.mtime)
+    .map(({ file, mtime }, index) => ({
+      attempt: index + 1,
+      logFile: file,
+      modifiedAt: new Date(mtime).toISOString(),
+    }));
+}
+
+function readTicketEvents(poolDir: string, ticketId: string): TicketEventsResponse {
+  const runsDir = join(poolDir, "runs");
+  const events = readEvents(runsDir, ticketId);
+  if (events.length > 0) {
+    return { events, attempts: [], reconstructed: false };
+  }
+  return {
+    events: [],
+    attempts: reconstructAttempts(runsDir, ticketId),
+    reconstructed: true,
+  };
+}
+
 export function createPoolServer(options: PoolServerOptions): PoolServer {
   const poolDir = options.poolDir;
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const meta = loadMeta(poolDir);
+  const ticketIds = knownTicketIds(meta);
 
   let latest: EnrichedSnapshot | null = null;
   let currentRun: Awaited<ReturnType<typeof runPool>> | null = null;
@@ -215,6 +285,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             { status: 400 },
           );
         }
+      }
+
+      if (pathname === "/api/events") {
+        const ticketId = url.searchParams.get("ticket") ?? "";
+        if (!ticketIds.has(ticketId)) {
+          return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+        }
+        return Response.json(readTicketEvents(poolDir, ticketId));
       }
 
       if (pathname === "/api/stream") {

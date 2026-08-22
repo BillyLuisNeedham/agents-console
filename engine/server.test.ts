@@ -5,7 +5,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -204,4 +206,78 @@ describe("pool server", () => {
     expect(closed).toBe(false);
     reader.cancel();
   }, 25_000);
+});
+
+describe("ticket events endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("serves a ticket's parsed events after a run", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+    await server.answer(REVIEW_TICKET_ID, "approve");
+
+    const res = await fetch(`${server.url}/api/events?ticket=01`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      events: { at: string; attempt: number; kind: string; payload: Record<string, unknown> }[];
+      attempts: unknown[];
+      reconstructed: boolean;
+    };
+    expect(body.reconstructed).toBe(false);
+    expect(body.attempts).toEqual([]);
+    expect(body.events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(body.events[0].attempt).toBe(1);
+    expect(typeof body.events[0].at).toBe("string");
+    const exited = body.events.find((e) => e.kind === "exited");
+    expect(exited?.payload).toEqual({ code: 0, status: "done" });
+  });
+
+  it("backfills reconstructed attempt rows for a ticket with no events file", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "first attempt output\n");
+    writeFileSync(join(runsDir, "01.attempt-2.log"), "second attempt output\n");
+    // Distinct modification times, so the reconstruction orders the attempts
+    // the way they happened.
+    const now = Date.now();
+    utimesSync(join(runsDir, "01.log"), new Date(now - 60_000), new Date(now - 60_000));
+    utimesSync(join(runsDir, "01.attempt-2.log"), new Date(now), new Date(now));
+
+    const server = await startServer(poolDir, stubHarness({}));
+    const res = await fetch(`${server.url}/api/events?ticket=01`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      events: unknown[];
+      attempts: { attempt: number; logFile: string; modifiedAt: string }[];
+      reconstructed: boolean;
+    };
+    expect(body.reconstructed).toBe(true);
+    expect(body.events).toEqual([]);
+    expect(body.attempts).toEqual([
+      {
+        attempt: 1,
+        logFile: "01.log",
+        modifiedAt: new Date(now - 60_000).toISOString(),
+      },
+      {
+        attempt: 2,
+        logFile: "01.attempt-2.log",
+        modifiedAt: new Date(now).toISOString(),
+      },
+    ]);
+  });
+
+  it("rejects a ticket id the pool does not own", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/events?ticket=zzz`);
+    expect(res.status).toBe(404);
+  });
 });

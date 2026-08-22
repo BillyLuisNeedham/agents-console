@@ -98,6 +98,112 @@ export interface PoolSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket events (wire format served by /api/events)
+// ---------------------------------------------------------------------------
+
+export interface TicketEvent {
+  at: string;
+  attempt: number;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ReconstructedAttempt {
+  attempt: number;
+  logFile: string;
+  modifiedAt: string;
+}
+
+export interface TicketEventsResponse {
+  events: TicketEvent[];
+  attempts: ReconstructedAttempt[];
+  reconstructed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Timeline view model
+// ---------------------------------------------------------------------------
+
+export interface TimelineEventView {
+  kind: string;
+  at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface TimelineAttemptView {
+  number: number;
+  events: TimelineEventView[];
+  reconstructed: boolean;
+  running: boolean;
+  logFile: string | null;
+}
+
+export interface TimelineView {
+  attempts: TimelineAttemptView[];
+  reconstructed: boolean;
+}
+
+/**
+ * The ticket timeline: one row per attempt with its events, derived from the
+ * events endpoint's parsed events, or reconstructed one row per log file for
+ * a pre-feature pool with no events file. The currently running attempt is
+ * marked: the latest attempt whose last event has not yet exited, when the
+ * ticket's status is in-progress.
+ */
+export function projectTimeline(
+  response: TicketEventsResponse,
+  status: PoolStatus,
+): TimelineView {
+  if (response.events.length > 0) {
+    const byAttempt = new Map<number, TimelineEventView[]>();
+    for (const event of response.events) {
+      const list = byAttempt.get(event.attempt) ?? [];
+      list.push({ kind: event.kind, at: event.at, payload: event.payload });
+      byAttempt.set(event.attempt, list);
+    }
+    const numbers = [...byAttempt.keys()].sort((a, b) => a - b);
+    const running = runningAttempt(numbers, byAttempt, status);
+    return {
+      attempts: numbers.map((number) => ({
+        number,
+        events: byAttempt.get(number)!,
+        reconstructed: false,
+        running: number === running,
+        logFile: null,
+      })),
+      reconstructed: false,
+    };
+  }
+  const attempts = response.attempts.map((row, index) => ({
+    number: row.attempt,
+    events: [] as TimelineEventView[],
+    reconstructed: true,
+    running: status === "in-progress" && index === response.attempts.length - 1,
+    logFile: row.logFile,
+  }));
+  return { attempts, reconstructed: response.reconstructed };
+}
+
+// An attempt is live only while its last recorded event has not yet ended
+// it: the harness was spawned (or is about to be) and has not exited or
+// crashed. A crashed attempt stays in-progress on the marker, but it is not
+// running.
+const LIVE_LAST_KINDS = new Set(["scheduled", "spawned", "resolver"]);
+
+function runningAttempt(
+  numbers: number[],
+  byAttempt: Map<number, TimelineEventView[]>,
+  status: PoolStatus,
+): number | null {
+  if (status !== "in-progress") return null;
+  for (let i = numbers.length - 1; i >= 0; i--) {
+    const last = byAttempt.get(numbers[i])!.at(-1);
+    if (last && LIVE_LAST_KINDS.has(last.kind)) return numbers[i];
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // View model
 // ---------------------------------------------------------------------------
 

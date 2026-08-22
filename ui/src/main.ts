@@ -11,7 +11,10 @@ import {
   phaseLabel,
   projectDetail,
   projectPool,
+  projectTimeline,
   type PoolSnapshot,
+  type TimelineView,
+  type TicketEventsResponse,
 } from "./project";
 import { renderApp, type AppModel } from "./view";
 
@@ -29,6 +32,59 @@ const state = {
   error: null as string | null,
   connected: false,
 };
+
+// The selected ticket's timeline: module scope so a full-DOM rebuild from a
+// live snapshot never drops it, and a slow fetch answering after a newer
+// selection never clobbers the newer ticket's rows.
+const timelineState = {
+  ticketId: null as string | null,
+  view: null as TimelineView | null,
+};
+
+function selectedTicket(snapshot: PoolSnapshot, selectedId: string | null): string | null {
+  if (!selectedId) return null;
+  const card = projectPool(snapshot).cards.find((c) => c.id === selectedId);
+  return card?.kind === "ticket" ? card.ticketId : null;
+}
+
+function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
+  const card = state.snapshot
+    ? projectPool(state.snapshot).cards.find(
+        (c) => c.kind === "ticket" && c.ticketId === ticketId,
+      )
+    : undefined;
+  timelineState.ticketId = ticketId;
+  timelineState.view = projectTimeline(
+    response,
+    card?.kind === "ticket" ? card.status : "ready",
+  );
+}
+
+async function loadTimeline(): Promise<void> {
+  const ticketId = state.snapshot
+    ? selectedTicket(state.snapshot, state.selectedId)
+    : null;
+  if (!ticketId) {
+    timelineState.ticketId = null;
+    timelineState.view = null;
+    render();
+    return;
+  }
+  timelineState.ticketId = ticketId;
+  try {
+    const response = await client.getEvents(ticketId);
+    // A newer selection may have landed while the fetch was out.
+    if (timelineState.ticketId === ticketId) {
+      applyTimeline(ticketId, response);
+      render();
+    }
+  } catch {
+    if (timelineState.ticketId === ticketId) {
+      timelineState.view = null;
+      render();
+    }
+  }
+}
 
 function model(): AppModel {
   const view = state.snapshot ? projectPool(state.snapshot) : null;
@@ -49,7 +105,22 @@ function model(): AppModel {
     detail: state.snapshot && state.selectedId
       ? projectDetail(state.snapshot, state.selectedId)
       : null,
+    timeline:
+      timelineState.ticketId &&
+      modelDetailTicketId(state.snapshot, state.selectedId) ===
+        timelineState.ticketId
+        ? timelineState.view
+        : null,
   };
+}
+
+function modelDetailTicketId(
+  snapshot: PoolSnapshot | null,
+  selectedId: string | null,
+): string | null {
+  if (!snapshot || !selectedId) return null;
+  const detail = projectDetail(snapshot, selectedId);
+  return detail?.kind === "ticket" ? detail.ticketId : null;
 }
 
 function render(): void {
@@ -64,6 +135,7 @@ function render(): void {
     },
     onSelectNode: (nodeId) => {
       state.selectedId = nodeId;
+      void loadTimeline();
       render();
     },
     onAnswer: (ticketId, action, note) => {
@@ -84,6 +156,12 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.snapshot = snapshot;
   state.connected = true;
   state.error = null;
+  // A new snapshot can move the selected ticket (spawned, exited, merged),
+  // so the timeline refetches on that cadence; the events file is append-only
+  // and small, so a refetch is cheap.
+  if (state.snapshot && state.selectedId) {
+    void loadTimeline();
+  }
   render();
 }
 

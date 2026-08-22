@@ -18,6 +18,7 @@ import {
   projectLog,
   projectPool,
   projectPoolEdges,
+  projectTimeline,
   REVIEW_CARD_ID,
   START_CARD_ID,
   strokeWidthForZoom,
@@ -27,6 +28,8 @@ import {
   type PoolSnapshot,
   type PoolStatus,
   type PoolTicketState,
+  type TicketEvent,
+  type TicketEventsResponse,
 } from "./project";
 
 function ticket(
@@ -423,6 +426,123 @@ describe("projectLog", () => {
   it("is empty without a log", () => {
     expect(projectLog({})).toEqual([]);
     expect(projectLog(null)).toEqual([]);
+  });
+});
+
+describe("projectTimeline", () => {
+  function event(
+    attempt: number,
+    kind: string,
+    payload: Record<string, unknown> = {},
+  ): TicketEvent {
+    return { at: "2026-01-01T00:00:00.000Z", attempt, kind, payload };
+  }
+
+  function response(events: TicketEvent[]): TicketEventsResponse {
+    return { events, attempts: [], reconstructed: false };
+  }
+
+  it("groups events into one row per attempt and marks the running attempt", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "scheduled"),
+        event(1, "spawned"),
+        event(2, "scheduled"),
+        event(2, "spawned"),
+      ]),
+      "in-progress",
+    );
+    expect(view.reconstructed).toBe(false);
+    expect(view.attempts.map((a) => a.number)).toEqual([1, 2]);
+    expect(view.attempts[0].running).toBe(false);
+    expect(view.attempts[1].running).toBe(true);
+    expect(view.attempts[1].events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+    ]);
+  });
+
+  it("keeps each attempt's events in recorded order", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "scheduled"),
+        event(1, "spawned"),
+        event(1, "exited", { code: 0, status: "checkpoint" }),
+        event(1, "checkpoint"),
+      ]),
+      "checkpoint",
+    );
+    expect(view.attempts).toHaveLength(1);
+    expect(view.attempts[0].events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "checkpoint",
+    ]);
+    expect(view.attempts[0].events[2].payload).toEqual({
+      code: 0,
+      status: "checkpoint",
+    });
+  });
+
+  it("marks no attempt running when the ticket is not in-progress", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "scheduled"),
+        event(1, "spawned"),
+        event(1, "exited"),
+      ]),
+      "done",
+    );
+    expect(view.attempts[0].running).toBe(false);
+  });
+
+  it("does not mark a crashed attempt running", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "scheduled"),
+        event(1, "spawned"),
+        event(1, "exited"),
+        event(1, "crash"),
+      ]),
+      "in-progress",
+    );
+    expect(view.attempts[0].running).toBe(false);
+  });
+
+  it("reconstructs one row per log file with the reconstructed flag", () => {
+    const view = projectTimeline(
+      {
+        events: [],
+        attempts: [
+          { attempt: 1, logFile: "01.log", modifiedAt: "2026-01-01T00:00:00.000Z" },
+          { attempt: 2, logFile: "01.attempt-2.log", modifiedAt: "2026-01-01T00:00:01.000Z" },
+        ],
+        reconstructed: true,
+      },
+      "in-progress",
+    );
+    expect(view.reconstructed).toBe(true);
+    expect(view.attempts).toHaveLength(2);
+    expect(view.attempts[0]).toEqual({
+      number: 1,
+      events: [],
+      reconstructed: true,
+      running: false,
+      logFile: "01.log",
+    });
+    // The current attempt of an in-progress reconstructed ticket is the
+    // newest log row.
+    expect(view.attempts[1].running).toBe(true);
+  });
+
+  it("is empty for a ticket with no events and no log files", () => {
+    const view = projectTimeline(
+      { events: [], attempts: [], reconstructed: true },
+      "ready",
+    );
+    expect(view.attempts).toEqual([]);
+    expect(view.reconstructed).toBe(true);
   });
 });
 

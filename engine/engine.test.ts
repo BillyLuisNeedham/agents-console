@@ -281,6 +281,200 @@ describe("super-steps", () => {
   });
 });
 
+describe("ticket events", () => {
+  interface EventLine {
+    at: string;
+    attempt: number;
+    kind: string;
+    payload: Record<string, unknown>;
+  }
+
+  function readEventsFile(poolDir: string, id: string): EventLine[] {
+    const raw = readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8");
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as EventLine);
+  }
+
+  it("records a checkpoint and resume in order, numbering attempts per ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const resumed = await run.resume("01", "the name is Foo");
+    const done = await approveReview(resumed);
+    expect(done.phase).toBe("done");
+
+    const events = readEventsFile(poolDir, "01");
+    expect(events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "checkpoint",
+      "answered",
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(events.filter((e) => e.attempt === 1).map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "checkpoint",
+      "answered",
+    ]);
+    expect(events.filter((e) => e.attempt === 2).map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    // The exited event carries the exit code and the marker status the
+    // harness left behind.
+    const exited = events.filter((e) => e.kind === "exited");
+    expect(exited[0].payload).toEqual({ code: 0, status: "checkpoint" });
+    expect(exited[1].payload).toEqual({ code: 0, status: "done" });
+
+    // The blocked ticket ran once, cleanly.
+    const events02 = readEventsFile(poolDir, "02");
+    expect(events02.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(events02.map((e) => e.attempt)).toEqual([1, 1, 1]);
+  });
+
+  it("records a crash and its answer, carrying the exit code", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { statuses: ["keep", "done"], exitCode: 3 },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+
+    const crash = readEventsFile(poolDir, "01");
+    expect(crash.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+    ]);
+    expect(crash.at(-1)?.payload).toEqual({ code: 3 });
+
+    const resumed = await run.resume("01");
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const answered = readEventsFile(poolDir, "01");
+    expect(answered.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "answered",
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+  });
+
+  it("records a deadlock raise and clear for a blocked cycle", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=02 status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual([
+      "deadlock",
+      "deadlock",
+    ]);
+
+    const deadlock01 = readEventsFile(poolDir, "01");
+    expect(deadlock01.map((e) => e.kind)).toEqual(["deadlock"]);
+    expect(deadlock01[0].attempt).toBe(0);
+    expect(deadlock01[0].payload).toEqual({ blockers: ["02"] });
+
+    writeFileSync(
+      join(poolDir, "issues", "02-b.md"),
+      "<!-- state: id=02 blocked-by=none status=ready -->\n\n# 02\n",
+    );
+    await run.resume("02", "broke the cycle");
+
+    // 01 stays deadlocked until it can complete; once 02 is done and 01 runs,
+    // the cleared deadlock lands in the record.
+    const cleared01 = readEventsFile(poolDir, "01");
+    expect(cleared01.map((e) => e.kind)).toEqual([
+      "deadlock",
+      "scheduled",
+      "spawned",
+      "exited",
+      "deadlock-cleared",
+    ]);
+  });
+
+  it("records a review-reject reset against the rejected ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const rejected = await run.reject(REVIEW_TICKET_ID, "redo 01");
+    expect(rejected.phase).toBe("quiescent");
+
+    const events = readEventsFile(poolDir, "01");
+    expect(events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "review-reject",
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+  });
+});
+
 describe("channels", () => {
   it("lands outcomes in the channel and injects them into downstream prompts", async () => {
     const poolDir = makePool({
@@ -2359,6 +2553,90 @@ describe("worktrees", () => {
     ...stubConfig,
     resolver: "resolver-stub",
   };
+
+  it("shares attempt numbers between implement and resolver runs", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03", "02")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "resolved-by-agent",
+        note: "kept both lines",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+
+    interface EventLine {
+      at: string;
+      attempt: number;
+      kind: string;
+      payload: Record<string, unknown>;
+    }
+    const readEventsFile = (id: string): EventLine[] =>
+      readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as EventLine);
+
+    // The implement attempt conflicted, then the resolver took the next
+    // attempt number for the same ticket.
+    const before = readEventsFile("02");
+    expect(before.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "merge-conflict",
+      "resolver",
+    ]);
+    expect(before[0].attempt).toBe(1);
+    expect(before.find((e) => e.kind === "resolver")?.attempt).toBe(2);
+
+    const approved = await run.approve("02");
+    const done = await approveReview(approved);
+    expect(done.phase).toBe("done");
+
+    // The approval answered the interrupt and the merge landed on the
+    // resolver's attempt.
+    const after = readEventsFile("02");
+    expect(after.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "merge-conflict",
+      "resolver",
+      "answered",
+      "merged",
+    ]);
+    expect(after.at(-1)?.attempt).toBe(2);
+    expect(after.at(-1)?.kind).toBe("merged");
+  }, 15000);
 
   it("spawns the resolver on a conflict, raises an approval interrupt, and approve commits the merge and continues", async () => {
     const { poolDir, git } = makeGitPool(
