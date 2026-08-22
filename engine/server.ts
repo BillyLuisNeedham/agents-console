@@ -10,10 +10,17 @@
  * marker files once at start for the metadata.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
 import { readEvents, type TicketEvent } from "./events.ts";
+import { defaultRegistryPath, readFleetEntry } from "./fleet.ts";
 import { loadPoolMarkers } from "./pool.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
@@ -22,6 +29,7 @@ export interface PoolServerOptions {
   port: number;
   harnesses?: Record<string, HarnessCommand>;
   distDir?: string;
+  registryPath?: string;
 }
 
 export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
@@ -190,8 +198,50 @@ function readTicketEvents(poolDir: string, ticketId: string): TicketEventsRespon
   };
 }
 
+function readLockedPid(poolDir: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim();
+  } catch {
+    return null;
+  }
+  const pid = Number(raw);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function pidIsLive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * One server per pool. If runs/server.pid names a live process, refuse with a
+ * message naming that pid, its fleet-registry port when known, and the pool
+ * directory. Otherwise claim the pool by writing our own pid. There is no
+ * force override: a live lock always means use the running console or kill it.
+ */
+function acquirePoolLock(poolDir: string, registryPath: string): void {
+  const livePid = readLockedPid(poolDir);
+  if (livePid !== null && pidIsLive(livePid)) {
+    const entry = readFleetEntry(registryPath, poolDir, livePid);
+    const portText = entry ? ` on port ${entry.port}` : "";
+    throw new Error(
+      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
+        "open the running console or kill it",
+    );
+  }
+  const runsDir = join(poolDir, "runs");
+  mkdirSync(runsDir, { recursive: true });
+  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
+}
+
 export function createPoolServer(options: PoolServerOptions): PoolServer {
   const poolDir = options.poolDir;
+  acquirePoolLock(poolDir, options.registryPath ?? defaultRegistryPath());
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const meta = loadMeta(poolDir);
@@ -349,7 +399,13 @@ export function runServerCli(): void {
     console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
     process.exit(1);
   }
-  const server = createPoolServer({ poolDir, port });
+  let server: PoolServer;
+  try {
+    server = createPoolServer({ poolDir, port });
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
   void server.start().then(() => {
     console.log(`pool server on ${server.url} (${poolDir})`);
   });
