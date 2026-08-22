@@ -1,0 +1,1025 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/CONTEXT.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/NOTES.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/docs/adr/0001-one-console-per-pool.md
+Reading the required context in
+[0m
+[0m$ [0mgit status && echo "---BRANCH---" && git branch --show-current && echo "---LOG---" && git log --oneline -10
+On branch pool/23
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/23-engine-pool-lock.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+---BRANCH---
+pool/23
+---LOG---
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+c63885c console: light up the selection's flow neighbourhood
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+3a36537 console: ticket card clicks open the Detail panel
+2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+[0m
+[0m$ [0mls -la engine/ ui/ && echo "---" && cat package.json 2>/dev/null; echo "---UI PKG---"; cat ui/package.json 2>/dev/null
+engine/:
+total 180
+drwxr-xr-x 1 billy billy   192 Aug 22 01:19 .
+drwxr-xr-x 1 billy billy   316 Aug 22 01:19 ..
+-rw-r--r-- 1 billy billy   869 Aug 22 01:19 checkpoints.ts
+-rw-r--r-- 1 billy billy 87333 Aug 22 01:19 engine.test.ts
+-rw-r--r-- 1 billy billy 47354 Aug 22 01:19 engine.ts
+-rw-r--r-- 1 billy billy  2665 Aug 22 01:19 pool.ts
+-rw-r--r-- 1 billy billy  2843 Aug 22 01:19 prompt.ts
+-rw-r--r-- 1 billy billy  7765 Aug 22 01:19 server.test.ts
+-rw-r--r-- 1 billy billy  8680 Aug 22 01:19 server.ts
+-rw-r--r-- 1 billy billy  1737 Aug 22 01:19 spawn.ts
+-rw-r--r-- 1 billy billy  4306 Aug 22 01:19 worktrees.ts
+
+ui/:
+total 36
+drwxr-xr-x 1 billy billy   140 Aug 22 01:19 .
+drwxr-xr-x 1 billy billy   316 Aug 22 01:19 ..
+-rw-r--r-- 1 billy billy 16322 Aug 22 01:19 bun.lock
+-rw-r--r-- 1 billy billy    20 Aug 22 01:19 .gitignore
+-rw-r--r-- 1 billy billy   292 Aug 22 01:19 index.html
+-rw-r--r-- 1 billy billy   433 Aug 22 01:19 package.json
+drwxr-xr-x 1 billy billy   142 Aug 22 01:19 src
+-rw-r--r-- 1 billy billy   486 Aug 22 01:19 tsconfig.json
+-rw-r--r-- 1 billy billy   105 Aug 22 01:19 vite.config.ts
+---
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+---UI PKG---
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+[0m
+Now let me look at the engine code and current git
+[0m→ [0mRead engine/server.ts
+[0m→ [0mRead engine/server.test.ts
+[0m→ [0mRead engine/pool.ts
+Working tree is clean except the untracked issue file — no partial work left. Let me read the server code and its
+[0m
+[0m$ [0mls -la ~/.claude/commands/skills/personal/my-console-runner/ 2>/dev/null; echo "---"; ls ~/.agent-graphs/ 2>/dev/null || echo "no ~/.agent-graphs yet"; echo "---"; ls .scratch/console/ 2>/dev/null
+total 20
+drwxr-xr-x 1 billy billy    50 Aug 21 14:46 .
+drwxr-xr-x 1 billy billy   254 Aug 21 14:44 ..
+-rw-r--r-- 1 billy billy  5057 Aug 21 14:46 AGENT.template.md
+-rw-r--r-- 1 billy billy 12101 Aug 21 22:50 SKILL.md
+---
+no ~/.agent-graphs yet
+---
+AGENT.md
+issues
+run.sh
+spec-detail-and-resizable-drawers.md
+[0m
+[0m✱ [0mGrep "runs|server\.pid|pid"[90m in engine · 30 matches[0m
+Let me examine the engine internals, the launcher skill, and where `runs/` lives in a pool
+[0m→ [0mRead /home/billy/.claude/commands/skills/personal/my-console-runner/SKILL.md
+[0m→ [0mRead /home/billy/.claude/commands/skills/personal/my-console-runner/AGENT.template.md
+[0m✱ [0mGrep "createPoolServer|PoolServerOptions|server\.pid"[90m in . · 8 matches[0m
+[0m
+[0m$ [0mls tsconfig.json engine/tsconfig.json ui/tsconfig.json 2>/dev/null; echo "---"; cat tsconfig.json 2>/dev/null
+tsconfig.json
+ui/tsconfig.json
+---
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  },
+  "include": ["src", "engine"]
+}
+[0m
+Now let me check how `createPoolServer` is used across the codebase, the tsconfig, and how tests
+Baseline checks — run the test suite and type
+[0m$ [0mbun --version && bun test 2>&1 | tail -30
+1.3.14
+bun test v1.3.14 (0d9b296a)
+
+ 111 pass
+ 0 fail
+ 556 expect() calls
+Ran 111 tests across 3 files. [16.41s]
+[0m
+[0m$ [0mbun test 2>&1 | grep -i file; echo "---TYPECHECK---"; bun run typecheck 2>&1 | tail -5
+Ran 111 tests across 3 files. [16.24s]
+---TYPECHECK---
+$ tsc --noEmit
+[0m
+[0m✱ [0mGlob "**/*.test.ts"[90m 3 matches[0m
+[0m
+[0m$ [0mls ui/src/
+client.ts
+main.ts
+project.test.ts
+project.ts
+styles.css
+view.ts
+vite-env.d.ts
+[0m
+[0m$ [0mbun -e '
+const self = process.pid;
+try { process.kill(self, 0); console.log("self alive: yes (no throw)"); } catch (e) { console.log("self alive: throw", e.code); }
+try { process.kill(999999, 0); console.log("huge pid alive: yes"); } catch (e) { console.log("huge pid: throw", e.code); }
+try { process.kill(0, 0); console.log("pid 0 alive: yes"); } catch (e) { console.log("pid 0: throw", e.code); }
+'
+echo "---spawnSync reaping---"
+bun -e '
+const { spawnSync } = require("node:child_process");
+const c = spawnSync("true");
+console.log("child pid", c.pid);
+try { process.kill(c.pid, 0); console.log("child still probeable: yes"); } catch (e) { console.log("child dead: throw", e.code); }
+'
+self alive: yes (no throw)
+huge pid: throw ESRCH
+pid 0 alive: yes
+---spawnSync reaping---
+child pid 4138054
+child dead: throw ESRCH
+[0m
+Let me sanity-check Bun's signal-0 probe behavior before writing the
+[0m# [0mTodos
+[•] Create engine/fleet.ts with defaultRegistryPath and readFleetEntry (best-effort registry read)
+[ ] Add pool lock to createPoolServer: read runs/server.pid, signal-0 probe, throw on live lock naming pid/port/pool, else write own pid
+[ ] Make runServerCli exit non-zero with the refusal message
+[ ] Write server.test.ts lock tests: self-written pid, live refusal (+port when known, no force), stale takeover, CLI subprocess non-zero
+[ ] Run full suite, typecheck, UI build
+[ ] Tick acceptance criteria, review diff, commit
+[0m
+Signal-0 works as expected. Now let me implement. Todo list:
+[0m← [0mWrite engine/fleet.ts
+Wrote file successfully.
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+@@ -9,19 +9,21 @@
+  * projection can draw blocked-by edges and show titles, reading the pool's
+  * marker files once at start for the metadata.
+  */
+ 
+-import { readFileSync } from "node:fs";
++import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
++import { defaultRegistryPath, readFleetEntry } from "./fleet.ts";
+ import { loadPoolMarkers } from "./pool.ts";
+ import { defaultHarnesses } from "./spawn.ts";
+ 
+ export interface PoolServerOptions {
+   poolDir: string;
+   port: number;
+   harnesses?: Record<string, HarnessCommand>;
+   distDir?: string;
++  registryPath?: string;
+ }
+ 
+ export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
+ export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
+
+[0m
+Now the server.ts changes — imports, options, lock helpers, factory, CLI
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+@@ -122,10 +122,52 @@
+             : "application/octet-stream";
+   return new Response(body, { headers: { "content-type": type } });
+ }
+ 
++function readLockedPid(poolDir: string): number | null {
++  let raw: string;
++  try {
++    raw = readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim();
++  } catch {
++    return null;
++  }
++  const pid = Number(raw);
++  return Number.isInteger(pid) && pid > 0 ? pid : null;
++}
++
++function pidIsLive(pid: number): boolean {
++  try {
++    process.kill(pid, 0);
++    return true;
++  } catch (err) {
++    return (err as NodeJS.ErrnoException).code === "EPERM";
++  }
++}
++
++/**
++ * One server per pool. If runs/server.pid names a live process, refuse with a
++ * message naming that pid, its fleet-registry port when known, and the pool
++ * directory. Otherwise claim the pool by writing our own pid. There is no
++ * force override: a live lock always means use the running console or kill it.
++ */
++function acquirePoolLock(poolDir: string, registryPath: string): void {
++  const livePid = readLockedPid(poolDir);
++  if (livePid !== null && pidIsLive(livePid)) {
++    const entry = readFleetEntry(registryPath, poolDir, livePid);
++    const portText = entry ? ` on port ${entry.port}` : "";
++    throw new Error(
++      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
++        "open the running console or kill it",
++    );
++  }
++  const runsDir = join(poolDir, "runs");
++  mkdirSync(runsDir, { recursive: true });
++  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
++}
++
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+   const poolDir = options.poolDir;
++  acquirePoolLock(poolDir, options.registryPath ?? defaultRegistryPath());
+   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
+   const harnesses = { ...defaultHarnesses, ...options.harnesses };
+   const meta = loadMeta(poolDir);
+ 
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.ts
+@@ -314,9 +314,15 @@
+   if (!poolDir) {
+     console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
+     process.exit(1);
+   }
+-  const server = createPoolServer({ poolDir, port });
++  let server: PoolServer;
++  try {
++    server = createPoolServer({ poolDir, port });
++  } catch (err) {
++    console.error(err instanceof Error ? err.message : String(err));
++    process.exit(1);
++  }
+   void server.start().then(() => {
+     console.log(`pool server on ${server.url} (${poolDir})`);
+   });
+ }
+
+[0m
+Now the CLI — catch the refusal and exit non-zero clean
+[0m$ [0mbun run typecheck 2>&1 | tail -20
+$ tsc --noEmit
+[0m
+[0m← [0mWrite engine/fleet.test.ts
+Wrote file successfully.
+[0m
+Typecheck clean. Now the tests — first the fleet read unit tests,
+[0m← [0mEdit engine/fleet.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/fleet.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/fleet.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/fleet.test.ts
+@@ -1,7 +1,7 @@
+ /// <reference types="bun" />
+ 
+-import { describe, expect, it } from "bun:test";
++import { afterEach, describe, expect, it } from "bun:test";
+ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { readFleetEntry } from "./fleet.ts";
+
+[0m
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+@@ -1,19 +1,22 @@
+ /// <reference types="bun" />
+ 
+ import { afterEach, describe, expect, it } from "bun:test";
++import { spawnSync } from "node:child_process";
+ import {
+   existsSync,
+   mkdirSync,
+   mkdtempSync,
++  readFileSync,
+   rmSync,
+   writeFileSync,
+ } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import {
+   createPoolServer,
+   type PoolServer,
++  type PoolServerOptions,
+ } from "./server.ts";
+ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+ 
+ const servers: PoolServer[] = [];
+
+[0m
+Now the server lock tests. Update imports
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+@@ -207,4 +207,104 @@
+     expect(closed).toBe(false);
+     reader.cancel();
+   }, 25_000);
+ });
++
++function writePidFile(poolDir: string, pid: number): void {
++  mkdirSync(join(poolDir, "runs"), { recursive: true });
++  writeFileSync(join(poolDir, "runs", "server.pid"), `${pid}\n`);
++}
++
++/** A real pid that has exited and been reaped, so it probes as dead. */
++function deadPid(): number {
++  const child = spawnSync("true");
++  if (!child.pid) throw new Error("failed to spawn a child for a dead pid");
++  return child.pid;
++}
++
++function makeLockedPool(): string {
++  return makePool([
++    { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
++  ]);
++}
++
++describe("pool lock", () => {
++  it("writes its own pid on a successful boot", () => {
++    const poolDir = makeLockedPool();
++    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    servers.push(server);
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      `${process.pid}`,
++    );
++  });
++
++  it("refuses a live lock, naming the live pid and the pool directory", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    expect(() =>
++      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" }),
++    ).toThrow(/live server pid 1234567|live server pid \d+/);
++    const message = (() => {
++      try {
++        createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++      } catch (err) {
++        return err instanceof Error ? err.message : String(err);
++      }
++      throw new Error("expected a refusal");
++    })();
++    expect(message).toContain(String(process.pid));
++    expect(message).toContain(poolDir);
++    expect(message).not.toContain("on port");
++  });
++
++  it("names the live server's port when the registry knows it", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const registryPath = join(poolDir, "pools.json");
++    writeFileSync(
++      registryPath,
++      JSON.stringify([
++        { poolDir, port: 8799, pid: process.pid, startedAt: "t" },
++      ]),
++    );
++    expect(() =>
++      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath }),
++    ).toThrow("on port 8799");
++  });
++
++  it("takes over a stale pid file on boot", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, deadPid());
++    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    servers.push(server);
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      `${process.pid}`,
++    );
++  });
++
++  it("has no force override: a live lock refuses even when forced", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const forced = {
++      poolDir,
++      port: 0,
++      distDir: "/nonexistent",
++      force: true,
++    } as unknown as PoolServerOptions;
++    expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
++  });
++
++  it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const repoDir = join(import.meta.dir, "..");
++    const child = Bun.spawn(
++      ["bun", "run", "engine/server.ts", "--pool", poolDir, "--port", "8799"],
++      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
++    );
++    const exitCode = await child.exited;
++    const stderr = await new Response(child.stderr).text();
++    expect(exitCode).not.toBe(0);
++    expect(stderr).toContain(String(process.pid));
++    expect(stderr).toContain(poolDir);
++  });
++});
+
+[0m
+Now add the lock tests after the existing
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+@@ -239,19 +239,14 @@
+ 
+ it("refuses a live lock, naming the live pid and the pool directory", () => {
+   const poolDir = makeLockedPool();
+   writePidFile(poolDir, process.pid);
+-  expect(() =>
+-    createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" }),
+-  ).toThrow(/live server pid 1234567|live server pid \d+/);
+-  const message = (() => {
+-    try {
+-      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+-    } catch (err) {
+-      return err instanceof Error ? err.message : String(err);
+-    }
+-    throw new Error("expected a refusal");
+-  })();
++  let message = "";
++  try {
++    createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++  } catch (err) {
++    message = err instanceof Error ? err.message : String(err);
++  }
+   expect(message).toContain(String(process.pid));
+   expect(message).toContain(poolDir);
+   expect(message).not.toContain("on port");
+ });
+
+[0m
+Let me clean up the redundant assertion in the first refusal test
+[0m$ [0mbun test engine/server.test.ts engine/fleet.test.ts 2>&1 | tail -40
+bun test v1.3.14 (0d9b296a)
+
+ 14 pass
+ 0 fail
+ 39 expect() calls
+Ran 14 tests across 2 files. [14.12s]
+[0m
+All pass. Now the full suite, typecheck, and
+[0m$ [0mbun run typecheck 2>&1 | tail -5 && echo "===BUILD===" && bun run build 2>&1 | tail -8
+$ tsc --noEmit
+error TS2688: Cannot find type definition file for 'vite/client'.
+  The file is in the program because:
+    Entry point of type library 'vite/client' specified in compilerOptions
+error: script "typecheck" exited with code 1
+===BUILD===
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+[0m$ [0mbun test 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 121 pass
+ 0 fail
+ 570 expect() calls
+Ran 121 tests across 4 files. [16.16s]
+[0m
+[0m$ [0mls ui/node_modules 2>/dev/null | head -3 || echo "no node_modules"; echo "---root---"; ls node_modules 2>/dev/null | head -3 || echo "no root node_modules"
+---root---
+[0m
+[0m$ [0mls -d ui/node_modules node_modules 2>&1; echo "---"; ls -la ui/node_modules 2>&1 | head; echo "---"; ls -la node_modules 2>&1 | head
+ls: cannot access 'ui/node_modules': No such file or directory
+ls: cannot access 'node_modules': No such file or directory
+---
+ls: cannot access 'ui/node_modules': No such file or directory
+---
+ls: cannot access 'node_modules': No such file or directory
+[0m
+[0m$ [0mls -d /home/billy/repos/learning/ai-agent-graphs/node_modules /home/billy/repos/learning/ai-agent-graphs/ui/node_modules 2>&1; echo "---"; git -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23 check-ignore ui/node_modules node_modules 2>&1; echo "---gitignore---"; cat ui/.gitignore; echo "---root gitignore---"; cat .gitignore 2>/dev/null | head -20
+/home/billy/repos/learning/ai-agent-graphs/node_modules
+/home/billy/repos/learning/ai-agent-graphs/ui/node_modules
+---
+---gitignore---
+node_modules/
+dist/
+---root gitignore---
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
+.scratch/console/runs/
+.scratch/console/verify-*.ts
+[0m
+The worktree has no `node_modules` — the main checkout does. UI build needs deps installed in the worktree's `ui/`. Installing the declared deps (gitignored, no new dependencies
+[0m$ [0mbun install 2>&1 | tail -5
++ bun-types@1.3.14
++ typescript@7.0.2
++ vite@8.2.1
+
+22 packages installed [29.00ms]
+[0m
+[0m$ [0mgit status --short; echo "---typecheck---"; bun run typecheck 2>&1 | tail -5
+M ../engine/server.test.ts
+ M ../engine/server.ts
+?? ../.scratch/console-pool/issues/23-engine-pool-lock.md
+?? ../engine/fleet.test.ts
+?? ../engine/fleet.ts
+---typecheck---
+$ tsc --noEmit
+[0m
+[0m$ [0mbun run build 2>&1 | tail -8
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-BXIWond2.css  11.86 kB │ gzip: 2.54 kB
+dist/assets/index-l4DqObnR.js   19.40 kB │ gzip: 6.95 kB
+
+✓ built in 42ms
+[0m
+[0m$ [0mgit show --stat 88de6dd 2>&1 | head -20; echo "===b084321==="; git show --stat b084321 2>&1 | head -15
+commit 88de6dd7f22d5c19774e60f8b8c592095f635cc8
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 00:37:03 2026 +0100
+
+    console-pool: close out 11/14; track console.json, amend pool spec
+
+ .scratch/console-pool/console.json                 | 15 +++++++++
+ .scratch/console-pool/issues/11-review-pass.md     | 36 ++++++++++++++++++++--
+ .../issues/14-flow-neighbourhood-highlight.md      | 25 +++++++++------
+ .scratch/console-pool/spec-ticket-pools.md         | 12 ++++----
+ 4 files changed, 70 insertions(+), 18 deletions(-)
+===b084321===
+commit b084321385d63f4e01e71774aa6e3e1643839751
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 00:37:03 2026 +0100
+
+    console: glossary — Attempt, Ticket log; Detail resizable
+
+ CONTEXT.md | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+[0m
+UI build and typecheck clean. Let me check what prior pool commits touched, to confirm the `.scratch
+UI install, typecheck, build all clean, and `git status` shows only intended changes. Let me review the full diff and re-run root typecheck + full
+[0m$ [0mgit diff engine/ && echo "===ROOT TYPECHECK===" && bun run typecheck 2>&1 | tail -3
+diff --git a/engine/server.test.ts b/engine/server.test.ts
+index b63ead5..0d45326 100644
+--- a/engine/server.test.ts
++++ b/engine/server.test.ts
+@@ -1,10 +1,12 @@
+ /// <reference types="bun" />
+ 
+ import { afterEach, describe, expect, it } from "bun:test";
++import { spawnSync } from "node:child_process";
+ import {
+   existsSync,
+   mkdirSync,
+   mkdtempSync,
++  readFileSync,
+   rmSync,
+   writeFileSync,
+ } from "node:fs";
+@@ -13,6 +15,7 @@ import { join } from "node:path";
+ import {
+   createPoolServer,
+   type PoolServer,
++  type PoolServerOptions,
+ } from "./server.ts";
+ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+ 
+@@ -205,3 +208,98 @@ describe("pool server", () => {
+     reader.cancel();
+   }, 25_000);
+ });
++
++function writePidFile(poolDir: string, pid: number): void {
++  mkdirSync(join(poolDir, "runs"), { recursive: true });
++  writeFileSync(join(poolDir, "runs", "server.pid"), `${pid}\n`);
++}
++
++/** A real pid that has exited and been reaped, so it probes as dead. */
++function deadPid(): number {
++  const child = spawnSync("true");
++  if (!child.pid) throw new Error("failed to spawn a child for a dead pid");
++  return child.pid;
++}
++
++function makeLockedPool(): string {
++  return makePool([
++    { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
++  ]);
++}
++
++describe("pool lock", () => {
++  it("writes its own pid on a successful boot", () => {
++    const poolDir = makeLockedPool();
++    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    servers.push(server);
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      `${process.pid}`,
++    );
++  });
++
++  it("refuses a live lock, naming the live pid and the pool directory", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    let message = "";
++    try {
++      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    } catch (err) {
++      message = err instanceof Error ? err.message : String(err);
++    }
++    expect(message).toContain(String(process.pid));
++    expect(message).toContain(poolDir);
++    expect(message).not.toContain("on port");
++  });
++
++  it("names the live server's port when the registry knows it", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const registryPath = join(poolDir, "pools.json");
++    writeFileSync(
++      registryPath,
++      JSON.stringify([
++        { poolDir, port: 8799, pid: process.pid, startedAt: "t" },
++      ]),
++    );
++    expect(() =>
++      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath }),
++    ).toThrow("on port 8799");
++  });
++
++  it("takes over a stale pid file on boot", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, deadPid());
++    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    servers.push(server);
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      `${process.pid}`,
++    );
++  });
++
++  it("has no force override: a live lock refuses even when forced", () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const forced = {
++      poolDir,
++      port: 0,
++      distDir: "/nonexistent",
++      force: true,
++    } as unknown as PoolServerOptions;
++    expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
++  });
++
++  it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    const repoDir = join(import.meta.dir, "..");
++    const child = Bun.spawn(
++      ["bun", "run", "engine/server.ts", "--pool", poolDir, "--port", "8799"],
++      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
++    );
++    const exitCode = await child.exited;
++    const stderr = await new Response(child.stderr).text();
++    expect(exitCode).not.toBe(0);
++    expect(stderr).toContain(String(process.pid));
++    expect(stderr).toContain(poolDir);
++  });
++});
+diff --git a/engine/server.ts b/engine/server.ts
+index 01eaeaf..c82b4e6 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -10,9 +10,10 @@
+  * marker files once at start for the metadata.
+  */
+ 
+-import { readFileSync } from "node:fs";
++import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
++import { defaultRegistryPath, readFleetEntry } from "./fleet.ts";
+ import { loadPoolMarkers } from "./pool.ts";
+ import { defaultHarnesses } from "./spawn.ts";
+ 
+@@ -21,6 +22,7 @@ export interface PoolServerOptions {
+   port: number;
+   harnesses?: Record<string, HarnessCommand>;
+   distDir?: string;
++  registryPath?: string;
+ }
+ 
+ export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
+@@ -121,8 +123,50 @@ function serveStatic(distDir: string, pathname: string): Response | null {
+   return new Response(body, { headers: { "content-type": type } });
+ }
+ 
++function readLockedPid(poolDir: string): number | null {
++  let raw: string;
++  try {
++    raw = readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim();
++  } catch {
++    return null;
++  }
++  const pid = Number(raw);
++  return Number.isInteger(pid) && pid > 0 ? pid : null;
++}
++
++function pidIsLive(pid: number): boolean {
++  try {
++    process.kill(pid, 0);
++    return true;
++  } catch (err) {
++    return (err as NodeJS.ErrnoException).code === "EPERM";
++  }
++}
++
++/**
++ * One server per pool. If runs/server.pid names a live process, refuse with a
++ * message naming that pid, its fleet-registry port when known, and the pool
++ * directory. Otherwise claim the pool by writing our own pid. There is no
++ * force override: a live lock always means use the running console or kill it.
++ */
++function acquirePoolLock(poolDir: string, registryPath: string): void {
++  const livePid = readLockedPid(poolDir);
++  if (livePid !== null && pidIsLive(livePid)) {
++    const entry = readFleetEntry(registryPath, poolDir, livePid);
++    const portText = entry ? ` on port ${entry.port}` : "";
++    throw new Error(
++      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
++        "open the running console or kill it",
++    );
++  }
++  const runsDir = join(poolDir, "runs");
++  mkdirSync(runsDir, { recursive: true });
++  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
++}
++
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+   const poolDir = options.poolDir;
++  acquirePoolLock(poolDir, options.registryPath ?? defaultRegistryPath());
+   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
+   const harnesses = { ...defaultHarnesses, ...options.harnesses };
+   const meta = loadMeta(poolDir);
+@@ -271,7 +315,13 @@ export function runServerCli(): void {
+     console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
+     process.exit(1);
+   }
+-  const server = createPoolServer({ poolDir, port });
++  let server: PoolServer;
++  try {
++    server = createPoolServer({ poolDir, port });
++  } catch (err) {
++    console.error(err instanceof Error ? err.message : String(err));
++    process.exit(1);
++  }
+   void server.start().then(() => {
+     console.log(`pool server on ${server.url} (${poolDir})`);
+   });
+===ROOT TYPECHECK===
+$ tsc --noEmit
+[0m
+[0m• [0mReview engine pool lock diff[90m Deepseek Agent[0m
+All checks pass. Let me dispatch a review subagent over the diff (per the implement skill) while I final
+[0m✓ [0mReview engine pool lock diff[90m Deepseek Agent[0m
+[0m
+[0m$ [0mls .scratch/console-pool/issues/ 2>/dev/null
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+23-engine-pool-lock.md
+[0m
+The review flagged a real concern: the launcher skill still writes the pid file, which would make the engine refuse its own launches. Let me check how the pool's tickets divide the skill work
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23/engine/server.test.ts
+@@ -275,8 +275,21 @@
+     `${process.pid}`,
+   );
+ });
+ 
++it("takes over a pid file that is not a positive integer", () => {
++  for (const bogus of ["0", "-1", "not-a-pid", ""]) {
++    const poolDir = makeLockedPool();
++    mkdirSync(join(poolDir, "runs"), { recursive: true });
++    writeFileSync(join(poolDir, "runs", "server.pid"), bogus);
++    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
++    servers.push(server);
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      `${process.pid}`,
++    );
++  }
++});
++
+ it("has no force override: a live lock refuses even when forced", () => {
+   const poolDir = makeLockedPool();
+   writePidFile(poolDir, process.pid);
+   const forced = {
+
+[0m
+The review confirms the engine work is correct; its FAIL is about the launcher skill (out of repo, explicitly a checkpoint trigger on this job, and a separate workstream in the spec). Issue 23 is engine-scoped. But the review surfaced two cheap unpinned guards worth a test each: pid 0 and garbage pid files must be treated as stale (pid 0 would otherwise probe the process group and always look live). Let me pin
+[0m$ [0mbun test engine/server.test.ts engine/fleet.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 15 pass
+ 0 fail
+ 43 expect() calls
+Ran 15 tests across 2 files. [14.12s]
+[0m
+Full suite once more, then finalize
+[0m$ [0mbun test 2>&1 | tail -5 && echo "===ROOT TSC===" && bun run typecheck 2>&1 | tail -2
+122 pass
+ 0 fail
+ 574 expect() calls
+Ran 122 tests across 4 files. [16.18s]
+===ROOT TSC===
+$ tsc --noEmit
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=23 blocked-by=none status=in-progress -->
++<!-- state: id=23 blocked-by=none status=done -->
+ 
+ # 23 — Engine-enforced pool lock
+ 
+ Spec: `.scratch/console-pool/spec-fleet-of-consoles.md`. Decision record: `docs/adr/0001-one-console-per-pool.md`.
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+@@ -9,14 +9,14 @@
+ The engine itself enforces one server per pool, replacing the advisory pid-file convention the launcher skill used to keep. On boot the server reads `runs/server.pid` from the pool directory: if that pid belongs to a live process, it exits non-zero with a message naming the live pid, its port (from the fleet registry when known), and the pool directory; if the pid is stale or the file is absent, it writes its own pid and continues. Liveness is a signal-0 probe. There is no `--force` escape hatch — a live lock always means "use the running console or kill it".
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Booting a second server against a pool with a live server exits non-zero, naming the live pid, its port when known, and the pool directory
+-- [ ] Booting against a stale pid file succeeds and overwrites it with the new server's pid
+-- [ ] The pid file is written by the server process itself, on every successful boot — no launcher involvement
+-- [ ] No `--force` flag or equivalent override exists
+-- [ ] Server-factory test seam: live-pid refusal, stale-pid takeover, and self-written pid each covered against temp pool directories, using real pids
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Booting a second server against a pool with a live server exits non-zero, naming the live pid, its port when known, and the pool directory
++- [x] Booting against a stale pid file succeeds and overwrites it with the new server's pid
++- [x] The pid file is written by the server process itself, on every successful boot — no launcher involvement
++- [x] No `--force` flag or equivalent override exists
++- [x] Server-factory test seam: live-pid refusal, stale-pid takeover, and self-written pid each covered against temp pool directories, using real pids
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - None — can start immediately
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/23-engine-pool-lock.md
+@@ -23,10 +23,8 @@
+ 
+ ## Notes
+ 
+ - The registry lookup for the refusal message's port is best-effort: if the registry is absent or has no entry, the message still names pid and pool dir. Ticket 25 builds the registry; the refusal must not depend on it existing.
+-
+----
+-
+-## Brief, written by the engine
+-
+-The engine process stopped while this ticket was in-progress (killed, crashed, or the machine restarted), so the work is part done at best and the agent left no brief. The ticket is back to ready; read the working tree before it runs again.
++- Implemented: the lock lives in `createPoolServer` in `engine/server.ts` (`acquirePoolLock`), claimed at server construction before any port binding or pool meta load. `engine/fleet.ts` holds the registry path default and a best-effort `readFleetEntry` that ticket 25 extends. Tests are in `engine/server.test.ts` (factory seam) and `engine/fleet.test.ts`.
++- Liveness is `process.kill(pid, 0)`: success or EPERM counts as live, ESRCH as dead. A pid file that is absent, empty, non-numeric, or not a positive integer is treated as stale and taken over; pid 0 is never probed because signal 0 to pid 0 probes the process group and always looks alive.
++- The refusal message is `pool <dir> is locked by live server pid <pid>[ on port <n>]; open the running console or kill it`. The port comes from the fleet registry only when its entry matches both pool and pid. The CLI catches the refusal, prints it to stderr, and exits 1. There is no `--force` anywhere.
++- Interlock to sequence (inference, from code reading, proven by the review): the my-console-runner skill still writes `runs/server.pid` itself after launching (`echo $! > runs/server.pid`). Because the engine now also writes it at boot, the skill's write races the engine's first read and usually wins, so the engine reads its own pid and refuses on a fresh pool's first launch. The skill update (stop writing the pid file, rely on the engine's refusal) is a separate workstream in the spec and a write outside this repo, so it was not touched here. It must land before the skill is used to launch a fresh pool.
+
+[0m
+[0m→ [0mRead engine/server.ts[90m [offset=120, limit=75][0m
+Let me verify the final state of the changed server file, then commit
+[0m
+[0m$ [0mgit add engine/server.ts engine/server.test.ts engine/fleet.ts engine/fleet.test.ts && git status --short && git commit -m "console: enforce one server per pool with a pid-file lock" 2>&1 | tail -5
+A  engine/fleet.test.ts
+A  engine/fleet.ts
+M  engine/server.test.ts
+M  engine/server.ts
+?? .scratch/console-pool/issues/23-engine-pool-lock.md
+[pool/23 7d37820] console: enforce one server per pool with a pid-file lock
+ 4 files changed, 268 insertions(+), 2 deletions(-)
+ create mode 100644 engine/fleet.test.ts
+ create mode 100644 engine/fleet.ts
+[0m
+Looks coherent. Now commit only the engine files
+[0m$ [0mls -d .scratch/console-pool/runs 2>/dev/null || echo "no runs dir"
+no runs dir
+[0m
+Commit `7d37820`. Now the outcome record
+[0m$ [0mmkdir -p .scratch/console-pool/runs
+(no output)
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/23.outcome.json
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Create engine/fleet.ts with defaultRegistryPath and readFleetEntry (best-effort registry read)
+[✓] Add pool lock to createPoolServer: read runs/server.pid, signal-0 probe, throw on live lock naming pid/port/pool, else write own pid
+[✓] Make runServerCli exit non-zero with the refusal message
+[✓] Write server.test.ts lock tests: self-written pid, live refusal (+port when known, no force), stale takeover, CLI subprocess non-zero
+[✓] Run full suite, typecheck, UI build
+[✓] Tick acceptance criteria, review diff, commit
+[0m
+Issue 23 done, committed as `7d37820` on `pool/23`.
+
+What landed:
+- `engine/server.ts`: `acquirePoolLock` in `createPoolServer` reads `runs/server.pid`, probes liveness with signal 0 (EPERM counts live, ESRCH dead; pid 0/negative/garbage treated as stale), refuses a live lock with a message naming pid, port from the registry when known, and pool dir, otherwise writes its own pid. CLI catches the refusal and exits 1. No `--force`.
+- `engine/fleet.ts`: registry path default (`~/.agent-graphs/pools.json`) and best-effort `readFleetEntry` that ticket 25 extends.
+- Tests in `engine/server.test.ts` and `engine/fleet.test.ts` against temp pools with real pids: self-written pid, live refusal (pid + pool dir, port only when registry matches), stale takeover, bogus pid files, no-force refusal, and a CLI subprocess that exits non-zero.
+
+Verified: 122 tests pass, root and UI typecheck clean, UI build clean. One finding recorded in the issue Notes: the my-console-runner skill still writes `runs/server.pid` itself, so a fresh pool's first skill launch will self-refuse until the skill update lands (it is a separate spec workstream and a write outside the repo, so untouched here).

@@ -1,0 +1,77 @@
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+[Bun.serve]: request timed out after 10 seconds. Pass `idleTimeout` to configure.
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+[Bun.serve]: request timed out after 10 seconds. Pass `idleTimeout` to configure.
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+pool /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool is already served by live process 4128328; use the running console or kill it
+pool /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool is already served by live process 4129001; use the running console or kill it
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /api/events?ticketId=16 failed
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /api/events?ticket=16 failed
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /api/events?ticket=16 failed
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+Failed to start server. Is port 8787 in use?
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)

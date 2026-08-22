@@ -1,0 +1,695 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-console-flight-fixes.md
+[0m
+[0m$ [0mls ui ui/src 2>/dev/null; git -C /home/billy/repos/learning/ai-agent-graphs status --short | head -30
+ui:
+bun.lock
+dist
+index.html
+node_modules
+package.json
+src
+tsconfig.json
+vite.config.ts
+
+ui/src:
+client.ts
+main.ts
+project.test.ts
+project.ts
+styles.css
+view.ts
+vite-env.d.ts
+ M .scratch/console-pool/issues/12-ticket-cards-open-detail.md
+ M .scratch/console-pool/issues/13-stream-stays-connected.md
+ M .scratch/console-pool/issues/15-skill-mac-linux.md
+?? .scratch/console-pool/console.db
+?? .scratch/console-pool/console.json
+?? .scratch/console-pool/runs/
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/project.ts
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/client.ts
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+[0m✱ [0mGrep "node-card-active|node-card-next|ticket-card-expanded|ticket-card-details|expandedTickets|toggleTicketExpand"[90m in /home/billy/repos/learning/ai-agent-graphs/ui/src · 17 matches[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/ui/tsconfig.json
+I have the full picture. Checking tsconfig strictness and a couple of remaining references before editing.
+[0m✱ [0mGrep "isUtilityCardId|interrupt-box-card|interrupt-box-detail"[90m in /home/billy/repos/learning/ai-agent-graphs · 5 matches[0m
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -87,9 +87,8 @@
+ const DRAG_THRESHOLD = 4;
+ const WORLD_MIN_WIDTH = 960;
+ 
+ const nodePos = new Map<string, Point>();
+-const expandedTickets = new Set<string>();
+ const view: ViewTransform & { seeded: boolean } = { x: 0, y: 0, zoom: 1, seeded: false };
+ let edgeMode: EdgeMode = "ortho";
+ 
+ type Positioned = { id: string; x: number; y: number };
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -203,19 +203,8 @@
+ function canvasCards(model: AppModel): Positioned[] {
+   return model.cards;
+ }
+ 
+-function toggleTicketExpand(id: string): void {
+-  if (expandedTickets.has(id)) expandedTickets.delete(id);
+-  else expandedTickets.add(id);
+-  const el = canvas?.nodesById.get(id);
+-  el?.classList.toggle("ticket-card-expanded", expandedTickets.has(id));
+-  if (canvas) {
+-    fitWorld(canvas.world);
+-    updateEdges();
+-  }
+-}
+-
+ function applyTransform(): void {
+   if (!canvas) return;
+   canvas.world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
+   paintStrokeScale();
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -284,10 +284,9 @@
+   }
+   if (drag.kind === "node" && drag.moved) writeStored();
+   drag = null;
+   if (!wasClick || !nodeId) return;
+-  if (isTicketCardId(nodeId)) toggleTicketExpand(nodeId);
+-  else selectNode(nodeId);
++  selectNode(nodeId);
+ }
+ 
+ function selectNode(nodeId: string): void {
+   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+
+[0m
+Now the edits. First `view.ts`: retire the expansion and route every card click to selection.
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -408,28 +408,25 @@
+ function statusLabel(status: PoolStatus): string {
+   return status === "in-progress" ? "running" : status;
+ }
+ 
+-// One interrupt form shape for the card (compact) and the Detail (full
+-// size). The kind-specific body comes from the engine: a checkpoint's Brief,
+-// a crash's log path, a conflict's resolution or attempt.
+-function renderInterrupt(
+-  interrupt: InterruptView,
+-  place: "card" | "detail",
+-  handlers: Handlers,
+-): HTMLElement {
++// One interrupt form shape, rendered in the Detail: the only place an
++// interrupt is read and answered. The kind-specific body comes from the
++// engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
++// or attempt.
++function renderInterrupt(interrupt: InterruptView, handlers: Handlers): HTMLElement {
+   const box = h(
+     "div",
+-    { class: `interrupt-box interrupt-box-${place}` },
++    { class: "interrupt-box" },
+     h("span", { class: "interrupt-kind" }, interrupt.form.title),
+     h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
+   );
+   const note = h("textarea", {
+     class: "interrupt-note",
+     placeholder:
+       interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
+-    "data-note-key": `${interrupt.ticketId}:${place}`,
+-    rows: place === "card" ? 2 : 3,
++    "data-note-key": `${interrupt.ticketId}:detail`,
++    rows: 3,
+   }) as HTMLTextAreaElement;
+   note.value = interruptDrafts.get(interrupt.ticketId) ?? "";
+   note.addEventListener("input", () => {
+     interruptDrafts.set(interrupt.ticketId, note.value);
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -455,31 +455,13 @@
+   );
+   return box;
+ }
+ 
+-function renderTicketCard(card: TicketCardView, handlers: Handlers): HTMLElement {
++// A card is a summary: status, title, blockers, and an interrupt dot. A
++// click selects it and opens the Detail, where the ticket is read and its
++// interrupt answered.
++function renderTicketCard(card: TicketCardView): HTMLElement {
+   const pos = posOf(card);
+-  const expanded = expandedTickets.has(card.id);
+-  const details = h(
+-    "div",
+-    { class: "ticket-card-details" },
+-    h("div", { class: "card-text" }, `id ${card.ticketId}`),
+-    h("div", { class: "card-text" }, card.title),
+-    h("div", { class: "dim" }, `status ${statusLabel(card.status)}`),
+-    h(
+-      "div",
+-      { class: "dim" },
+-      card.blockedBy.length > 0 ? `blockedBy ${card.blockedBy.join(", ")}` : "blockedBy none",
+-    ),
+-    ...(card.outcome
+-      ? [
+-          h("div", { class: "card-text" }, `outcome: ${card.outcome.summary}`),
+-          card.outcome.commitSha
+-            ? h("div", { class: "dim" }, `commit ${card.outcome.commitSha}`)
+-            : null,
+-        ]
+-      : []),
+-  );
+   const head = h(
+     "div",
+     { class: "node-card-head" },
+     h("span", { class: "node-card-id" }, card.ticketId),
+@@ -492,10 +474,9 @@
+     "div",
+     {
+       class:
+         `node-card ticket-card ticket-card-${card.status}` +
+-        (card.interrupt ? " ticket-card-interrupt" : "") +
+-        (expanded ? " ticket-card-expanded" : ""),
++        (card.interrupt ? " ticket-card-interrupt" : ""),
+       "data-node-id": card.id,
+       style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
+     },
+     head,
+@@ -504,17 +485,13 @@
+       { class: "node-card-body" },
+       h("div", { class: "card-text ticket-card-summary" }, card.title),
+       h("div", { class: "dim ticket-card-blocked" },
+         card.blockedBy.length > 0 ? `after ${card.blockedBy.join(", ")}` : "no blockers"),
+-      card.interrupt
+-        ? renderInterrupt(card.interrupt, "card", handlers)
+-        : null,
+-      details,
+     ),
+   );
+ }
+ 
+-function renderUtilityCard(card: UtilityCardView, handlers: Handlers): HTMLElement {
++function renderUtilityCard(card: UtilityCardView): HTMLElement {
+   const pos = posOf(card);
+   const head = h(
+     "div",
+     { class: "node-card-head" },
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -512,18 +512,16 @@
+     head,
+     h(
+       "div",
+       { class: "node-card-body" },
+-      card.interrupt
+-        ? renderInterrupt(card.interrupt, "card", handlers)
+-        : h("div", { class: "dim" }, "utility"),
++      h("div", { class: "dim" }, "utility"),
+     ),
+   );
+ }
+ 
+-function renderCard(card: PoolCardView, handlers: Handlers): HTMLElement {
+-  if (card.kind === "ticket") return renderTicketCard(card, handlers);
+-  return renderUtilityCard(card, handlers);
++function renderCard(card: PoolCardView): HTMLElement {
++  if (card.kind === "ticket") return renderTicketCard(card);
++  return renderUtilityCard(card);
+ }
+ 
+ function worldSize(cards: Positioned[]): { width: number; height: number } {
+   let width = WORLD_MIN_WIDTH;
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -671,9 +671,9 @@
+   const world = h("div", {
+     class: "canvas-world",
+     style: `width:${size.width}px;height:${size.height}px`,
+   });
+-  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card, handlers)));
++  world.append(makeSvg(), ...model.cards.map((card) => renderCard(card)));
+   const viewport = h("div", { class: "canvas-viewport" }, world);
+   main.append(renderCanvasHeader(model), viewport);
+   return main;
+ }
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -697,9 +697,9 @@
+     detail.blockedBy.length > 0 ? detail.blockedBy.join(", ") : "none",
+   ),
+ );
+ if (detail.interrupt) {
+-  body.append(renderInterrupt(detail.interrupt, "detail", handlers));
++  body.append(renderInterrupt(detail.interrupt, handlers));
+ }
+ if (detail.outcome) {
+   body.append(
+     h("div", { class: "dim" }, "outcome"),
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -724,9 +724,9 @@
+     h("div", { class: "dim" }, "label"),
+     h("div", { class: "card-text" }, detail.label),
+   );
+   if (detail.interrupt) {
+-    body.append(renderInterrupt(detail.interrupt, "detail", handlers));
++    body.append(renderInterrupt(detail.interrupt, handlers));
+   }
+   return body;
+ }
+ 
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -838,11 +838,8 @@
+ endDrag();
+ drawerDrag = null;
+ onSelectNode = handlers.onSelectNode;
+ const liveIds = new Set(model.cards.map((card) => card.id));
+-for (const id of [...expandedTickets]) {
+-  if (!liveIds.has(id)) expandedTickets.delete(id);
+-}
+ for (const id of [...nodePos.keys()]) {
+   if (!liveIds.has(id)) nodePos.delete(id);
+ }
+ const pendingInterrupts = new Set(
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/view.ts
+@@ -12,9 +12,8 @@
+ edgePath,
+ mergeLayout,
+ parseStoredLayout,
+ strokeWidthForZoom,
+-isTicketCardId,
+ layoutStorageKey,
+ nextNodeSelection,
+ zoomAtCursor,
+ type CardBox,
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+@@ -382,18 +382,8 @@
+   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+   z-index: 2;
+ }
+ 
+-.node-card-active {
+-  border-color: var(--status-running);
+-  box-shadow: 0 0 0 1px var(--status-running) inset;
+-}
+-
+-.node-card-next {
+-  border-color: var(--accent);
+-  box-shadow: 0 0 0 1px var(--accent) inset;
+-}
+-
+ .node-card-ran {
+   border-color: var(--status-done);
+ }
+ 
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+@@ -632,25 +632,8 @@
+ .ticket-state-done {
+   color: var(--status-done);
+ }
+ 
+-.ticket-card-details {
+-  display: none;
+-  padding-top: 6px;
+-  border-top: 1px solid var(--border);
+-  flex-direction: column;
+-  gap: 4px;
+-}
+-
+-.ticket-card-expanded .ticket-card-details {
+-  display: flex;
+-}
+-
+-.ticket-card-expanded .ticket-card-blocked,
+-.ticket-card-expanded .ticket-card-summary {
+-  display: none;
+-}
+-
+ /* --------------------------------------------------------- pool statuses */
+ 
+ .ticket-card-in-progress {
+   border-color: var(--status-running);
+
+[0m
+Now the dead CSS in `styles.css`:
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/styles.css
+@@ -683,12 +683,8 @@
+   overflow: auto;
+   user-select: text;
+ }
+ 
+-.interrupt-box-card .interrupt-body {
+-  max-height: 120px;
+-}
+-
+ .interrupt-note {
+   background: var(--bg);
+   color: var(--text);
+   border: 1px solid var(--border);
+
+[0m
+Now extend the tests at the existing seams in `project.test.ts`:
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+@@ -542,5 +542,90 @@
+     expect(nextNodeSelection(null, "ticket:A")).toBe("ticket:A");
+     expect(nextNodeSelection("ticket:A", "ticket:B")).toBe("ticket:B");
+     expect(nextNodeSelection("ticket:A", "ticket:A")).toBeNull();
+   });
++
++  it("treats ticket and utility cards alike", () => {
++    expect(nextNodeSelection(null, START_CARD_ID)).toBe(START_CARD_ID);
++    expect(nextNodeSelection("ticket:A", REVIEW_CARD_ID)).toBe(REVIEW_CARD_ID);
++    expect(nextNodeSelection(START_CARD_ID, START_CARD_ID)).toBeNull();
++  });
+ });
++
++describe("a card click opens the Detail", () => {
++  function flightSnapshot(): PoolSnapshot {
++    return snapshot({
++      phase: "quiescent",
++      state: {
++        tickets: [
++          ticket("R", { status: "ready" }),
++          ticket("P", { status: "in-progress", blockedBy: ["R"] }),
++          ticket("C", { status: "checkpoint", blockedBy: ["P"] }),
++          ticket("D", { status: "done", blockedBy: ["P"] }),
++        ],
++        log: [],
++        outcomes: {},
++        interrupts: [{ ticketId: "C", kind: "checkpoint", body: "the brief" }],
++        config: {},
++      },
++    });
++  }
++
++  it("opens a ticket Detail for a card of any status", () => {
++    const snap = flightSnapshot();
++    const cases: [string, PoolStatus][] = [
++      ["R", "ready"],
++      ["P", "in-progress"],
++      ["C", "checkpoint"],
++      ["D", "done"],
++    ];
++    for (const [id, status] of cases) {
++      const selected = nextNodeSelection(null, ticketCardId(id));
++      const detail = selected ? projectDetail(snap, selected) : null;
++      expect(detail?.kind).toBe("ticket");
++      if (detail?.kind === "ticket") expect(detail.status).toBe(status);
++    }
++  });
++
++  it("keeps a pending interrupt answerable from the Detail's form", () => {
++    const detail = projectDetail(flightSnapshot(), ticketCardId("C"));
++    expect(detail?.kind).toBe("ticket");
++    if (detail?.kind === "ticket") {
++      expect(detail.interrupt?.body).toBe("the brief");
++      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
++    }
++  });
++
++  it("keeps the Detail across a snapshot that changes the card's status", () => {
++    const selected = nextNodeSelection(null, ticketCardId("P"));
++    const next = snapshot({
++      state: {
++        tickets: [ticket("P", { status: "done" })],
++        log: [],
++        outcomes: { P: { summary: "did P", commitSha: "sha-p" } },
++        interrupts: [],
++        config: {},
++      },
++    });
++    const detail = selected ? projectDetail(next, selected) : null;
++    expect(detail?.kind).toBe("ticket");
++    if (detail?.kind === "ticket") {
++      expect(detail.status).toBe("done");
++      expect(detail.outcome?.summary).toBe("did P");
++    }
++  });
++
++  it("closes the Detail gracefully when the selected card has left the pool", () => {
++    const selected = nextNodeSelection(null, ticketCardId("R"));
++    expect(selected && projectDetail(flightSnapshot(), selected)).not.toBeNull();
++    const gone = snapshot({
++      state: {
++        tickets: [ticket("P")],
++        log: [],
++        outcomes: {},
++        interrupts: [],
++        config: {},
++      },
++    });
++    expect(selected && projectDetail(gone, selected)).toBeNull();
++  });
++});
+
+[0m
+[0m$ [0mbun test src/project.test.ts 2>&1 | tail -8 && bunx tsc --noEmit && bun run build 2>&1 | tail -5
+bun test v1.3.14 (0d9b296a)
+
+ 44 pass
+ 0 fail
+ 165 expect() calls
+Ran 44 tests across 1 file. [22.00ms]
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-J5SV58JF.css  11.41 kB │ gzip: 2.47 kB
+dist/assets/index-Cx8hHD4k.js   18.93 kB │ gzip: 6.79 kB
+
+✓ built in 38ms
+[0m
+UI tests, typecheck, and build are clean. Running the full repo suite:
+[0m$ [0mbun test 2>&1 | tail -6
+(fail) pool server > keeps the stream open through more than ten seconds of a quiet pool [14009.39ms]
+
+ 102 pass
+ 1 fail
+ 532 expect() calls
+Ran 103 tests across 3 files. [16.24s]
+[0m
+One failure, in the pool server stream test — that's Issue 13's territory, not mine. Checking whether it pre-exists my change:
+[0m$ [0mls .scratch/console-pool/runs/ && head -1 .scratch/console-pool/issues/13-stream-stays-connected.md .scratch/console-pool/issues/15-skill-mac-linux.md
+01.log
+02.log
+03.log
+04.log
+05.log
+06.log
+07.log
+08.log
+09.log
+10.log
+10.outcome.json
+11.log
+11.outcome.json
+12.log
+13.log
+15.log
+server.log
+server.pid
+==> .scratch/console-pool/issues/13-stream-stays-connected.md <==
+<!-- state: id=13 blocked-by=none status=ready -->
+
+==> .scratch/console-pool/issues/15-skill-mac-linux.md <==
+<!-- state: id=15 blocked-by=none status=ready -->
+[0m
+[0m$ [0mgit stash -q && bun test 2>&1 | tail -4; git stash pop -q && git status --short
+97 pass
+ 0 fail
+ 511 expect() calls
+Ran 97 tests across 3 files. [2.21s]
+ M .scratch/console-pool/issues/12-ticket-cards-open-detail.md
+ M .scratch/console-pool/issues/13-stream-stays-connected.md
+ M .scratch/console-pool/issues/15-skill-mac-linux.md
+ M engine/server.test.ts
+ M engine/server.ts
+ M ui/src/main.ts
+ M ui/src/project.test.ts
+ M ui/src/styles.css
+ M ui/src/view.ts
+?? .scratch/console-pool/console.db
+?? .scratch/console-pool/console.json
+?? .scratch/console-pool/runs/
+[0m
+[0m$ [0mgit diff -- ui/src/view.ts ui/src/styles.css ui/src/project.test.ts > /tmp/opencode/issue12.diff && wc -l /tmp/opencode/issue12.diff && git worktree add /tmp/opencode/issue12-verify HEAD 2>&1 | tail -1
+352 /tmp/opencode/issue12.diff
+HEAD is now at f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+[0m
+[0m$ [0mgit apply /tmp/opencode/issue12.diff && ln -s /home/billy/repos/learning/ai-agent-graphs/node_modules node_modules 2>/dev/null; ln -s /home/billy/repos/learning/ai-agent-graphs/ui/node_modules ui/node_modules 2>/dev/null; bun test 2>&1 | tail -4 && cd ui && bunx tsc --noEmit && bun run build 2>&1 | tail -2
+102 pass
+ 0 fail
+ 530 expect() calls
+Ran 102 tests across 3 files. [1.97s]
+
+✓ built in 37ms
+[0m
+[0m$ [0mrm -f /tmp/opencode/issue12-verify/node_modules /tmp/opencode/issue12-verify/ui/node_modules && git worktree remove --force /tmp/opencode/issue12-verify && git add ui/src/view.ts ui/src/styles.css ui/src/project.test.ts && git commit -m "console: ticket card clicks open the Detail panel" && git log --oneline -1
+[main 3a36537] console: ticket card clicks open the Detail panel
+ 3 files changed, 107 insertions(+), 98 deletions(-)
+3a36537 console: ticket card clicks open the Detail panel
+[0m
+My diff on clean HEAD: 102 pass, 0 fail, typecheck and build clean. Removing the worktree and committing my three files:
+[0m$ [0mbun test 2>&1 | tail -4
+103 pass
+ 0 fail
+ 534 expect() calls
+Ran 103 tests across 3 files. [15.94s]
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=12 blocked-by=none status=in-progress -->
++<!-- state: id=12 blocked-by=none status=done -->
+ 
+ # 12 — Ticket cards open the Detail panel
+ 
+ Spec: `.scratch/console-pool/spec-console-flight-fixes.md`
+
+[0m
+Full suite is green now too — Issue 13's agent landed its fix in the meantime. Updating the Issue file:
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+@@ -9,14 +9,14 @@
+ Clicking any card on the canvas selects it and opens the right-hand Detail panel at full size: its status, channels, and pending interrupt, answerable there. Today a click on a ticket card only toggles the card's inline expansion and never selects, so the Detail is unreachable for tickets (start and review cards work). The inline card expansion is retired: the card stays a summary, the Detail is the single place a ticket is read and its interrupt answered. Clicking the already-selected card clears the selection and closes the panel, matching the utility cards' toggle.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Clicking a ticket card of any status (ready, in-progress, checkpoint, done, interrupt pending) opens its Detail panel
+-- [ ] Clicking the selected card again clears the selection and closes the Detail
+-- [ ] The inline card expansion is retired; a card click drives the Detail only
+-- [ ] A pending interrupt remains answerable from the Detail's form
+-- [ ] Selection survives live snapshots, and selecting a card that has left the pool closes the Detail gracefully
+-- [ ] Selection-reducer and projection tests extended at the existing seams; full test suite, typecheck, and build clean
++- [x] Clicking a ticket card of any status (ready, in-progress, checkpoint, done, interrupt pending) opens its Detail panel
++- [x] Clicking the selected card again clears the selection and closes the Detail
++- [x] The inline card expansion is retired; a card click drives the Detail only
++- [x] A pending interrupt remains answerable from the Detail's form
++- [x] Selection survives live snapshots, and selecting a card that has left the pool closes the Detail gracefully
++- [x] Selection-reducer and projection tests extended at the existing seams; full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ None — can start immediately.
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+@@ -25,4 +25,12 @@
+ 
+ - Root cause (found in proving-flight diagnosis): the click branch in the canvas view routes ticket-card clicks to the inline expand toggle and only utility-card clicks to selection, a leftover from the thread-driven Console. The pool-era projection and Detail renderer already handle ticket cards fully and have tests behind them, so this is a wiring change at the click handler plus removal of the expand path, not new rendering.
+ - The dead `.node-card-active` / `.node-card-next` styles and the expansion's CSS are candidates for removal with the feature; keep the sweep tight.
+ - Parent-spec interaction: spec-ticket-pools story 22 asked for the Brief as an interrupt on the card and in its Detail. This spec supersedes the card half: the Detail is the answering surface (agreed in the grill: Billy answers in the right-hand panel, never on the card). Note the amendment in the ticket's closing notes so ticket 11's review sees it.
++
++## Closing notes
++
++- Click routing in `endDrag` (ui/src/view.ts) now sends every card to `selectNode`; the ticket/utility split is gone. `nextNodeSelection` already toggled, so re-click clearing came free.
++- Expansion retired: `expandedTickets`, `toggleTicketExpand`, the card's `ticket-card-details` block, and the `.ticket-card-expanded` / `.ticket-card-details` CSS are removed, along with the dead `.node-card-active` / `.node-card-next` rules named in the Issue.
++- Amendment for ticket 11's review: spec-ticket-pools story 22's card half is superseded. The card interrupt form is removed with the expansion; the card keeps only the interrupt dot, and `renderInterrupt` now renders in the Detail only. Billy answers in the right-hand panel, never on the card.
++- Selection survival was already structural (selection id held outside the rebuilt DOM; `projectDetail` returns null for a departed card, closing the panel). Tests at the projection seam now pin it: per-status Detail, interrupt form in the Detail, status change across snapshots, departed card.
++- Verified: `bun test` 103 pass / 0 fail, `tsc --noEmit` clean, `bun run build` clean. Mid-run the suite showed one failure from ticket 13's in-flight stream test (its agent was editing engine/server.ts concurrently); my diff was verified in isolation on a clean worktree at HEAD (102/0), and the shared tree went green once 13's fix landed. Commit `3a36537` touches only ui/src/view.ts, ui/src/styles.css, ui/src/project.test.ts.
+
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/12.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mgit rev-parse HEAD
+3a365371d0b40920bd14ad7cf517211bfbd0e671
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/12.outcome.json
+Wrote file successfully.
+[0m
+Issue 12 done. Commit `3a36537` on main.
+
+- `endDrag` in ui/src/view.ts now routes every card click to `selectNode`; the ticket/utility split and the whole expansion path (`expandedTickets`, `toggleTicketExpand`, details block) are gone.
+- The card interrupt form moved out with the expansion — the Detail is the only answering surface, per the story-22 amendment noted in the Issue's closing notes for ticket 11.
+- Dead `.node-card-active` / `.node-card-next` and expansion CSS removed.
+- Tests extended at the projection seam (per-status Detail, interrupt form, snapshot survival, departed card); 103/0, `tsc --noEmit` and build clean.
+
+One note: ticket 13's agent was editing `engine/server.ts` concurrently mid-run, briefly reddening the suite; I verified my diff in isolation on a clean worktree and the shared tree went green once 13 landed.

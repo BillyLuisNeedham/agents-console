@@ -1,0 +1,2664 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/CONTEXT.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-ticket-pools.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/NOTES.md
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git status && git log --oneline -5 && git branch --show-current
+On branch pool/31
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+f9fda2b Merge branch 'pool/29'
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+2e51fe1 console: record ADRs 0001 (one console per pool) and 0002 (ticket log storage)
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+pool/31
+[0m
+[0m✱ [0mGlob "engine/*.ts"[90m 16 matches[0m
+Now let me look at the code under review. Let me get oriented on the repo structure and the specific failing test.
+[0m✱ [0mGlob "ui/src/*.ts"[90m 6 matches[0m
+[0m→ [0mRead engine/engine.test.ts[90m [offset=2980, limit=160][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=150, offset=2840][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=260][0m
+Let me look at the test helpers at the top of engine.test.ts and the engine's `reject`/`run` flow.
+Now let me read engine.ts, focusing on `runPool`, `PoolRun`, approve/reject/resume flows, and the resolver rotation.
+[0m✱ [0mGrep "reject|approve|resume|resolver|merge-approval|rotation|rotate"[90m in engine · 100 matches[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=240, offset=200][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=180, offset=440][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=180, offset=619][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=160, offset=1085][0m
+[0m✱ [0mGrep "function gitStubHarness|function resolverStub|function makeGitPool|function readyTicket|const resolverConfig|const REVIEW_TICKET_ID"[90m in engine · 4 matches[0m
+Let me look at the `gitStubHarness`, `resolverStub`, `makeGitPool` helpers in the test file.
+[0m→ [0mRead engine/engine.test.ts[90m [limit=130, offset=2055][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=110, offset=2555][0m
+Let me read `planTicket`, `runTicket`, `handleMergeConflict`, `runResolver`, and `rotateAttemptLog` to understand the worktree/merge flow.
+[0m→ [0mRead engine/engine.ts[90m [limit=150, offset=799][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=140, offset=1245][0m
+[0m✱ [0mGrep "function readyTickets|function nextAttempt|function lastAttempt|function rotateAttemptLog|function mergeTicket|function runTicket|function spawnToLog"[90m in engine · 5 matches[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=70, offset=160][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=160, offset=1385][0m
+Let me run the two resolver tests in isolation to understand the actual flow.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test engine/engine.test.ts -t "resolver" 2>&1 | tail -40
+bun test v1.3.14 (0d9b296a)
+
+ 7 pass
+ 57 filtered out
+ 0 fail
+ 63 expect() calls
+Ran 7 tests across 1 file. [1204.00ms]
+[0m
+The tests pass in isolation. Let me trace the actual flow with a debug script to understand the conflict choreography.
+[0m✗ [0mInvalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool write: JSON parsing failed: Text: {"filePath": "/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/debug-flake.ts", "content": "import { runPool, type PoolConfig } from \"./engine.ts\";\nimport {\n  existsSync,\n  mkdtempSync,\n  mkdirSync,\n  readFileSync,\n  rmSync,\n  writeFileSync,\n} from \"node:fs\";\nimport { tmpdir } from \"node:os\";\nimport { join } from \"node:path\";\n\nconst tempDirs: string[] = [];\nfunction makePool(): string {\n  const poolDir = mkdtempSync(join(tmpdir(), \"debug-pool-\"));\n  tempDirs.push(poolDir);\n  mkdirSync(join(poolDir, \"issues\"), { recursive: true });\n  return poolDir;\n}\n\nfunction readyTicket(id: string, blockedBy = \"none\"): { file: string; marker: string } {\n  return {\n    file: `${id}-t.md`,\n    marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,\n  };\n}\n\nconst stubConfig: PoolConfig = {\n  defaults: { harness: \"stub\", model: \"stub-model\" },\n};\n\nfunction gitCmd(poolDir: string, args: string[]) {\n  const r = Bun.spawnSync([\"git\", ...args], {\n    cwd: poolDir,\n    stdout: \"pipe\",\n    stderr: \"pipe\",\n  });\n  return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() };\n}\n\nconst stubPath = join(\"/tmp\", \"debug-git-stub.sh\");\nwriteFileSync(\n  stubPath,\n  [\n    \"#!/usr/bin/env bash\",\n    \"set -uo pipefail\",\n    'issue=\"$1\"; status=\"$2\"; outcome_path=\"$3\"; outcome_json=\"$4\"; exit_code=\"$5\"; plan=\"$6\"',\n    'WORK_FILE=\"\"; WORK_LINE=\"\"; OVERWRITE=\"\"; COMMIT_MSG=\"\"; COMMIT_ISSUE=\"1\"',\n    'LEAVE_FILE=\"\"; TOUCH=\"\"; WAIT_FOR=\"\"; WAIT_MERGED=\"\"; MAIN_REPO=\"\"; RECORD_DIR=\"\"; EXPECT_FILE=\"\"',\n    'source \"$plan\"',\n    'if [ -n \"$TOUCH\" ]; then touch \"$TOUCH\"; fi',\n    'if [ -n \"$WAIT_FOR\" ]; then',\n    \"  for _ in $(seq 1 100); do\",\n    '    [ -e \"$WAIT_FOR\" ] && break',\n    \"    sleep 0.05\",\n    \"  done\",\n    \"fi\",\n    'if [ -n \"$WAIT_MERGED\" ]; then',\n    \"  for _ in $(seq 1 100); do\",\n    '    git -C \"$MAIN_REPO\" log --format=%s 2>/dev/null | grep -q \"$WAIT_MERGED\" && break',\n    \"    sleep 0.05\",\n    \"  done\",\n    \"fi\",\n    \"staged=0\",\n    'if [ -n \"$WORK_FILE\" ]; then',\n    '  mkdir -p \"$(dirname \"$WORK_FILE\")\"',\n    '  if [ -n \"$OVERWRITE\" ]; then printf \\'%s\\\\n\\' \"${WORK_LINE:-work}\" > \"$WORK_FILE\"',\n    '  else printf \\'%s\\\\n\\' \"${WORK_LINE:-work}\" >> \"$WORK_FILE\"; fi',\n    '  git add \"$WORK_FILE\"; staged=1',\n    \"fi\",\n    'if [ \"$status\" != \"keep\" ]; then',\n    '  sed -i \"1s/status=[a-z-]*/status=$status/\" \"$issue\"',\n    '  if [ -n \"$COMMIT_ISSUE\" ]; then git add \"$issue\"; staged=1; fi',\n    \"fi\",\n    'if [ \"$staged\" = \"1\" ]; then git commit -qm \"${COMMIT_MSG:-ticket}\"; fi',\n    'if [ -n \"$outcome_json\" ]; then printf \\'%s\\' \"$outcome_json\" > \"$outcome_path\"; fi',\n    'exit \"$exit_code\"',\n    \"\",\n  ].join(\"\\n\"),\n);\n\ninterface Behaviour {\n  workFile?: string;\n  workLine?: string;\n  overwrite?: boolean;\n  commitMsg?: string;\n  waitMerged?: string;\n}\n\nfunction makeRig(poolDir: string, behaviour: Record<string, Behaviour[]>) {\n  const spawnCounts: Record<string, number> = {};\n  const stub = (ctx: { id: string; issuePath: string; outcomePath: string }) => {\n    const n = spawnCounts[ctx.id] ?? 0;\n    spawnCounts[ctx.id] = n + 1;\n    const b = behaviour[ctx.id]?.[n] ?? { workFile: \"extra.txt\" };\n    const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);\n    const quote = (value: string) => JSON.stringify(value);\n    const lines = [`MAIN_REPO=${quote(poolDir)}`];\n    if (b.workFile) lines.push(`WORK_FILE=${quote(b.workFile)}`);\n    if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);\n    if (b.overwrite) lines.push('OVERWRITE=\"1\"');\n    if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);\n    if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);\n    writeFileSync(planPath, lines.join(\"\\n\") + \"\\n\");\n    return [\"bash\", stubPath, ctx.issuePath, \"done\", ctx.outcomePath, \"\", \"0\", planPath];\n  };\n  return { harnesses: { stub } };\n}\n\nconst resolverStubPath = join(\"/tmp\", \"debug-resolver-stub.sh\");\nwriteFileSync(\n  resolverStubPath,\n  [\n    \"#!/usr/bin/env bash\",\n    \"set -uo pipefail\",\n    'outcome=\"$1\"; plan=\"$2\"; worktree=\"$3\"',\n    'source \"$plan\"',\n    'git -C \"$worktree\" merge \"$WORKING_BRANCH\" >/dev/null 2>&1 || true',\n    'if [ \"$RESOLVED\" = \"1\" ]; then',\n    '  if [ -n \"$CONFLICT_FILE\" ]; then',\n    '    printf \\'%s\\\\n\\' \"$RESOLUTION\" > \"$worktree/$CONFLICT_FILE\"',\n    '    git -C \"$worktree\" add \"$CONFLICT_FILE\"',\n    \"  fi\",\n    '  printf \\'{\"resolved\": true, \"note\": \"%s\"}\\' \"$NOTE\" > \"$outcome\"',\n    \"else\",\n    '  printf \\'{\"resolved\": false, \"note\": \"%s\"}\\' \"$NOTE\" > \"$outcome\"',\n    \"fi\",\n    'exit \"$EXIT\"',\n    \"\",\n  ].join(\"\\n\"),\n);\n\nfunction makeResolver(poolDir: string) {\n  const stub = (ctx: { id: string; outcomePath: string; cwd: string }) => {\n    const planPath = join(poolDir, `resolver-plan-${ctx.id}.sh`);\n    writeFileSync(\n      planPath,\n      [\n        \"WORKING_BRANCH=main\",\n        \"RESOLVED=1\",\n        'NOTE=\"kept both lines\"',\n        \"EXIT=0\",\n        'CONFLICT_FILE=\"shared.txt\"',\n        'RESOLUTION=\"resolved-by-agent\"',\n        \"\",\n      ].join(\"\\n\"),\n    );\n    return [\"bash\", resolverStubPath, ctx.outcomePath, planPath, ctx.cwd];\n  };\n  return { harnesses: { \"resolver-stub\": stub } };\n}\n\nconst resolverConfig: PoolConfig = { ...stubConfig, resolver: \"resolver-stub\" };\n\nasync function main() {\n  const poolDir = makePool();\n  const tickets = [\n    readyTicket(\"01\"),\n    readyTicket(\"02\", \"01\"),\n    readyTicket(\"03\", \"02\"),\n    readyTicket(\"04\"),\n  ];\n  for (const t of tickets) {\n    writeFileSync(join(poolDir, \"issues\", t.file), `${t.marker}\\n\\n# body\\n`);\n  }\n  writeFileSync(join(poolDir, \"console.json\"), JSON.stringify(resolverConfig, null, 2));\n  writeFileSync(join(poolDir, \"shared.txt\"), \"base\\n\");\n  const git = (args: string[]) => gitCmd(poolDir, args);\n  git([\"init\", \"-q\", \"-b\", \"main\"]);\n  git([\"config\", \"user.email\", \"pool@test\"]);\n  git([\"config\", \"user.name\", \"pool\"]);\n  git([\"add\", \"-A\"]);\n  git([\"commit\", \"-qm\", \"init\"]);\n\n  const rig = makeRig(poolDir, {\n    \"01\": [{ workFile: \"shared.txt\", workLine: \"from-01\", overwrite: true, commitMsg: \"work-01\" }],\n    \"02\": [\n      { waitMerged: \"work-01\", workFile: \"shared.txt\", workLine: \"from-02\", overwrite: true, commitMsg: \"work-02\" },\n      { waitMerged: \"work-04-again\", workFile: \"shared.txt\", workLine: \"from-02-again\", overwrite: true, commitMsg: \"work-02-again\" },\n    ],\n    \"03\": [{ workFile: \"three.txt\", commitMsg: \"work-03\" }],\n    \"04\": [\n      { workFile: \"four.txt\", commitMsg: \"work-04\" },\n      { workFile: \"shared.txt\", workLine: \"from-04-again\", overwrite: true, commitMsg: \"work-04-again\" },\n    ],\n  });\n  const resolver = makeResolver(poolDir);\n\n  const run = await runPool({\n    poolDir,\n    harnesses: { ...rig.harnesses, ...resolver.harnesses },\n  });\n  console.log(\"FIRST RUN phase:\", run.phase);\n  console.log(\"FIRST RUN interrupts:\", JSON.stringify(run.interrupts, null, 2));\n  console.log(\"FIRST RUN log:\", JSON.stringify(run.final.log, null, 2));\n  console.log(\"FIRST RUN tickets:\", JSON.stringify(run.final.tickets));\n\n  if (run.interrupts[0]?.kind === \"merge-approval\") {\n    const approved = await run.approve(\"02\");\n    console.log(\"APPROVED phase:\", approved.phase);\n    console.log(\"APPROVED interrupts:\", JSON.stringify(approved.interrupts.map((i) => i.kind)));\n\n    const rejected = await run.reject(\"review\", \"redo 02 04\");\n    console.log(\"REJECTED phase:\", rejected.phase);\n    console.log(\"REJECTED interrupts:\", JSON.stringify(rejected.interrupts.map((i) => ({ kind: i.kind, ticketId: i.ticketId }))));\n    console.log(\"REJECTED log:\", JSON.stringify(rejected.final.log, null, 2));\n    console.log(\"REJECTED tickets:\", JSON.stringify(rejected.final..
+Error message: JSON Parse error: Unterminated string
+[0m
+[0m← [0mWrite /tmp/opencode/debug-flake.ts
+Wrote file successfully.
+[0m
+The debug script got truncated. Let me instead understand the flow by reading the rest of engine.test.ts and the key parts. Let me read the full flaky test once more and think carefully about what "misses the second merge-approval interrupt" means.
+
+Let me trace through the test logic carefully:
+
+Round 1: runPool with 01, 02 (blocked by 01), 03 (blocked by 02), 04 (independent).
+- Super-step 1: ready = 01, 04. Both in worktrees. 01 writes shared.txt="from-01" (overwrite), commits "work-01". 04 writes four.txt, commits "work-04".
+- Merges in completion order. 01 merges "work-01" (shared.txt from base "base\n" to "from-01\n"). 04 merges "work-04" (adds four.txt). Both clean.
+- Super-step 2: ready = 02 (01 done). 02 runs in main checkout (lone ticket, no parked branch). It waits for "work-01" merged, then overwrites shared.txt = "from-02", commits "work-02". Wait, but if it runs in the main checkout, the merge is trivial - it commits directly to main. Hmm.
+
+Wait — actually let me re-check. In round 1, does 02 conflict? 02 waits for "work-01" to be merged, then writes shared.txt = "from-02" (overwrite). If 02 runs in the main checkout, there's no conflict possible since it commits directly.
+
+But the test expects `run.interrupts[0]?.kind` to be `"merge-approval"`. So there must be a conflict in round 1. Let me reconsider.
+
+Actually wait. Let me re-read. Tickets:
+- 01: ready, no blocker
+- 02: ready, blocked by 01
+- 03: ready, blocked by 02
+- 04: ready, no blocker
+
+Round 1 super-step 1: ready = 01, 04 (02 blocked by 01, 03 blocked by 02). Both run in worktrees.
+- 01: writes shared.txt = "from-01" (overwrite). commits work-01.
+- 04: writes four.txt. commits work-04.
+
+Merges: 01 merges work-01 -> shared.txt becomes from-01. 04 merges work-04 -> adds four.txt. Both clean.
+
+Round 1 super-step 2: ready = 02 (01 done). 02 runs in main checkout (lone ticket, readyCount < 2, no parked branch). 02 waits for "work-01" merged (yes), then overwrites shared.txt = "from-02", commits work-02 directly to main. No conflict. Hmm.
+
+Wait, but then how does the first merge-approval happen at line 3048? The test expects `run.interrupts[0]?.kind` to be "merge-approval". So there must be a conflict somewhere.
+
+Hmm, let me re-read the gitStubHarness for 01:
+```
+"01": {
+  workFile: "shared.txt",
+  workLine: "from-01",
+  overwrite: true,
+  commitMsg: "work-01",
+},
+```
+
+And 04 first behaviour: `{ workFile: "four.txt", commitMsg: "work-04" }`.
+
+Hmm, so in round 1: super-step 1 = 01 and 04. Both in worktrees branched from same HEAD (base). 01 commits "work-01" changing shared.txt. 04 commits "work-04" adding four.txt. Merges: both clean.
+
+Super-step 2 = 02 (in main checkout, since lone). 02 waits for "work-01", overwrites shared.txt="from-02". Commits directly to main. No conflict.
+
+Super-step 3 = 03. Writes three.txt. commits work-03.
+
+So round 1 produces no conflict at all! But the test at line 3048 expects the first interrupt to be "merge-approval". Something's off in my understanding.
+
+Wait, maybe I'm wrong about the "lone ticket runs in main checkout". Let me re-read planTicket. `if (readyCount < 2 && !parked) return { cwd: session.cwd, ... }`. So a lone ticket runs in main checkout.
+
+Hmm, but that means 02 commits directly to main, and there's no conflict. Then run.interrupts[0] would be "review", not "merge-approval". Unless...
+
+Wait, let me re-read the test. The stub for 02 is an array of two behaviours:
+```
+"02": [
+  {
+    waitMerged: "work-01",
+    workFile: "shared.txt",
+    workLine: "from-02",
+    overwrite: true,
+    commitMsg: "work-02",
+  },
+  {
+    waitMerged: "work-04-again",
+    workFile: "shared.txt",
+    workLine: "from-02-again",
+    overwrite: true,
+    commitMsg: "work-02-again",
+  },
+],
+```
+
+In round 1, 02 runs in main checkout. Wait — but actually, does the merge of 01's worktree conflict with 02? No, 02 waits for work-01 merged first. Then overwrites.
+
+Hmm, let me actually reconsider. Maybe in round 1, 01 and 04 both run in worktrees, and 04's merge happens AFTER 01's... they both touch shared.txt? No. 04 writes four.txt only in round 1.
+
+Wait, but maybe the conflict in round 1 is between 01 and 04 merges? Both are branched from same HEAD. 01 modifies shared.txt. 04 adds four.txt. Different files. Clean.
+
+Hmm, so how does run.interrupts[0] become "merge-approval"? Let me re-check. Maybe the issue is that 02 runs in a worktree even when alone because of a parked branch? No parked branch in round 1.
+
+Actually wait — maybe I misread which tickets are in the first super-step. Let me check readyTickets again: markers filtered where status ready and all blockers done. At start, all 4 are "ready" (marker status). But state.tickets[01] = "ready", state.tickets[02]="ready" but blocked by 01 which isn't done. So ready = 01, 04. Yes.
+
+Hmm, so my trace says no conflict in round 1, but the test expects merge-approval as first interrupt. Let me actually run the test with some instrumentation to see. Actually, maybe I should just run the specific test and print interrupts. Let me write a tiny debug test file.
+
+Actually, wait. Let me reconsider the overwrite semantics in gitStubHarness. When OVERWRITE is set:
+```
+'  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
+```
+This writes "from-01\n" to shared.txt. But it doesn't necessarily conflict... 
+
+Hmm, hold on. Let me reconsider: maybe 02 runs in a worktree because readyCount during its super-step is 2? Let me re-check round 1 super-step 2. After super-step 1, state.tickets = {01: done, 02: ready, 03: ready, 04: done}. ready = 02. Only one. So lone.
+
+But wait — 03 is blocked by 02 which isn't done, so 03 not ready. Yes only 02.
+
+Hmm, but then no conflict in round 1 and the first interrupt would be review. Unless... let me re-read the test comment: "so the second merge conflicts and the resolver runs a second time." This says the SECOND merge conflicts. What about the first? The test asserts the first interrupt is merge-approval. So the first conflict must come from somewhere.
+
+Wait — maybe in round 1, super-step 1 = 01, 02, 04? No, 02 is blocked by 01. 
+
+Actually, wait. Let me re-read readyTickets and blockedBy. In the flaky test:
+```
+tickets: [
+  readyTicket("01"),
+  readyTicket("02", "01"),
+  readyTicket("03", "02"),
+  readyTicket("04"),
+],
+```
+
+So 02 blocked by 01, 03 blocked by 02, 04 independent. First super-step: 01 and 04. 
+
+Then super-step 2: 02. Super-step 3: 03.
+
+Round 1 has NO conflicts. So run.interrupts[0] should be "review", and line 3048 `expect(run.interrupts[0]?.kind).toBe("merge-approval")` would fail... but the test passes in isolation! So my trace must be wrong somewhere.
+
+Let me re-examine. Maybe 02's round-1 behaviour DOES conflict. Actually wait — 02 waits for "work-01" merged. Then 02 OVERWRITES shared.txt with from-02 and commits "work-02". If 02 runs in the main checkout, its commit goes directly to main. No conflict. If 02 runs in a worktree... but it shouldn't.
+
+Hmm, unless readyCount >= 2 in super-step 2. Let me reconsider: after super-step 1 completes with 01 and 04 done, is 03 also ready? No.
+
+OK here's another thought — maybe the merge of work-01 in super-step 1 conflicts? 01's branch changed shared.txt. When merging onto main (which has "base\n"), clean.
+
+Let me just actually run the test and add debug prints. Let me create a debug version quickly with a shell script instead.
+
+Actually, the simplest approach: add a temporary console.log in the test itself? No, don't modify the test. Let me write a standalone debug script in /tmp.
+
+Let me write a smaller debug script using bun.
+
+Actually, let me reconsider — maybe I'm wrong about the flaky test setup and there IS a conflict in round 1. Let me re-read lines 3044-3058:
+
+```js
+const run = await runPool({...});
+expect(run.interrupts[0]?.kind).toBe("merge-approval");
+const approved = await run.approve("02");
+expect(approved.phase).toBe("quiescent");
+const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
+expect(rejected.interrupts.some((i) => i.kind === "merge-approval")).toBe(true);
+```
+
+So round 1: runPool returns with a merge-approval interrupt. approve("02") → quiescent (must mean review interrupt raised). Then reject review → second run → expect merge-approval again.
+
+So the first conflict: 02's work conflicts with 01's when merged. That means 02 runs in a worktree in round 1. But readyCount for 02's super-step is 1 (only 02). Unless... 
+
+OH WAIT. I bet the first super-step includes 02. Let me reconsider readyTickets: `tickets[marker.id] === "ready" && marker.blockedBy.every((id) => tickets[id] === "done")`. 02's blocker is 01. Is 01 "done" at the start? No, 01 is "ready". So 02 is NOT ready in super-step 1.
+
+Hmm. Let me just actually run the debug. Let me write a proper debug script.
+
+Actually — maybe the trick is the gitStubHarness for "01" with overwrite:true on shared.txt and "04" also... no, 04 writes four.txt in round 1.
+
+Wait, let me re-read 04's behaviours:
+```
+"04": [
+  { workFile: "four.txt", commitMsg: "work-04" },
+  {
+    workFile: "shared.txt",
+    workLine: "from-04-again",
+    overwrite: true,
+    commitMsg: "work-04-again",
+  },
+],
+```
+
+Round 1: 04 writes four.txt only. So in round 1, no conflict between 01 and 04.
+
+Hmm, so how does the FIRST merge-approval arise? Let me reconsider: maybe 02 is NOT blocked by 01 in the actual test... but the comment says 02 waits on 04's merged change. And round 2 has both 02 and 04 ready simultaneously.
+
+Let me look again at the test ticket list: `readyTicket("02", "01")` — 02 blocked by 01.
+
+OK, I really need to just run it. Let me write the debug script carefully.
+
+Actually — hmm, wait. Let me reconsider the merge order in round 1. The `merges` array: `results` for 01 and 04. mergeQueue processes in completion order. 01's result: plan.worktree exists, status done → merge. 04's: plan.worktree exists, status done → merge. Both clean.
+
+Then round 1 super-step 2: ready = [02]. Lone. planTicket: readyCount=1, parked = branchExists(cwd, "02"). No. So runs in main checkout. 02 writes shared.txt="from-02", commits directly on main. No merge, no conflict. Then super-step 3: [03] lone, writes three.txt.
+
+So round 1 gives phase "quiescent" with interrupt kind "review". Line 3048 would FAIL: `expect(run.interrupts[0]?.kind).toBe("merge-approval")`. But the test passes solo! So clearly I'm misunderstanding something.
+
+Let me look at what `run.approve("02")` does and whether the FIRST interrupt could be review... no, approve("02") with interrupt kind "review" would throw "use approve() or reject() for the final review interrupt"? No wait — approve on a review interrupt calls approveReview. approve("02") where 02 is not the review ticket... Let me check: interrupt for ticketId "02" kind review? No, the review interrupt has ticketId REVIEW_TICKET_ID. So run.approve("02") finds interrupt with ticketId "02". If that's a review... no.
+
+So run.interrupts[0] must be a merge-approval for ticket 02. So there IS a conflict in round 1 involving 02.
+
+I must be wrong that 02 runs in main checkout. Let me re-read planTicket once more:
+
+```js
+function planTicket(session, marker, readyCount, attempt): TicketPlan {
+  if (!session.git) return { cwd: session.cwd, issuePath: marker.file, attempt };
+  const parked = branchExists(session.cwd, marker.id);
+  if (readyCount < 2 && !parked) {
+    return { cwd: session.cwd, issuePath: marker.file, attempt };
+  }
+  ...
+```
+
+Hmm. OK so for a lone 02 with no parked branch, it runs in main checkout. So no conflict. 
+
+Unless... the ready set for super-step 2 is NOT just [02]. What if 03 is also ready? 03 blocked by 02, and 02 not done → no.
+
+Let me actually just run the test with debug output. Let me create a modified copy of the test file that logs. Actually simplest: temporarily add console.log statements to the flaky test itself, run it, then revert. Let me do that via a separate debug file that imports from the test file? No.
+
+Let me just write the debug script more carefully this time.</think>Let me write a proper debug script to trace the actual choreography.
+Let me run the debug script.
+[0m$ [0mcd /tmp/opencode && bun debug-flake.ts 2>&1 | head -100
+FIRST phase: quiescent
+FIRST interrupts: [
+  {
+    "ticketId": "REVIEW",
+    "kind": "review",
+    "body": "every ticket is done.\n- 01: (no outcome recorded)\n- 02: (no outcome recorded)\n- 03: (no outcome recorded)\n- 04: (no outcome recorded)\napprove to end the run, or reject with a note naming the tickets to send back; their downstream tickets return to ready with them."
+  }
+]
+FIRST log: [
+  "super-step 1: 01, 04",
+  "ticket 01: exited 0, marker done, no outcome recorded",
+  "ticket 04: exited 0, marker done, no outcome recorded",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+  "super-step 2: 02",
+  "ticket 02: exited 0, marker done, no outcome recorded",
+  "super-step 3: 03",
+  "ticket 03: exited 0, marker done, no outcome recorded",
+  "interrupt raised for REVIEW (review)",
+  "pool quiescent: interrupts pending for REVIEW"
+]
+FIRST tickets: {"01":"done","02":"done","03":"done","04":"done"}
+627 | ): Promise<PoolRun> {
+628 |   const interrupt = session.state.interrupts.find(
+629 |     (i) => i.ticketId === ticketId,
+630 |   );
+631 |   if (!interrupt) {
+632 |     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+                    ^
+error: resume: no pending interrupt for ticket 02
+      at answerTicket (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.ts:632:15)
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -n "loadPoolMarkers" engine/*.ts
+engine/engine.ts:23:  loadPoolMarkers,
+engine/engine.ts:217:  const markers = loadPoolMarkers(issuesDir);
+engine/engine.ts:634:  session.markers = loadPoolMarkers(session.issuesDir);
+engine/pool.ts:65:export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
+engine/server.ts:31:import { loadPoolMarkers } from "./pool.ts";
+engine/server.ts:102:  const markers = loadPoolMarkers(issuesDir);
+[0m
+My debug harness doesn't reproduce the conflict choreography (first interrupt is review, not merge-approval). My stub differs from the real one. Let me instrument the real test temporarily to see the actual interrupt sequence.
+[0m✱ [0mGrep "function readyTicket|function mergeBranch|describe\("[90m in engine · 13 matches[0m
+My debug didn't reproduce the first-round conflict. Let me check `readyTicket` and `writeMarkerStatus`, and confirm how the real test produces a first-round conflict.
+[0m✱ [0mGrep "readyTicket = |const readyTicket|function readyTicket"[90m in engine · 1 match[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=40, offset=2186][0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && sed -n '3044,3083p' engine/engine.test.ts
+const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+
+    const approved = await run.approve("02");
+    expect(approved.phase).toBe("quiescent");
+
+    // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+    // in a worktree alongside 04 and conflicts again.
+    const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
+    expect(
+      rejected.interrupts.some((i) => i.kind === "merge-approval"),
+    ).toBe(true);
+
+    // Implement attempt 1 rotated away; attempt 3 sits at the long-standing
+    // path. Resolver attempt 2 rotated away; attempt 4 sits at its path.
+    expect(existsSync(join(poolDir, "runs", "02.attempt-1.log"))).toBe(true);
+    expect(existsSync(join(poolDir, "runs", "02.log"))).toBe(true);
+    expect(existsSync(join(poolDir, "runs", "02.attempt-2.resolver.log"))).toBe(
+      true,
+    );
+    expect(existsSync(join(poolDir, "runs", "02.resolver.log"))).toBe(true);
+
+    // Rotated names agree with the attempt numbers in the events file.
+    const events = readFileSync(
+      join(poolDir, "runs", "02.events.jsonl"),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { attempt: number; kind: string });
+    expect(
+      events.filter((e) => e.kind === "spawned").map((e) => e.attempt),
+    ).toEqual([1, 3]);
+    expect(
+      events.filter((e) => e.kind === "resolver").map((e) => e.attempt),
+    ).toEqual([2, 4]);
+  }, 20000);
+[0m
+My debug harness didn't reproduce the choreography. Let me instrument the real test temporarily to see the actual flow.
+[0m→ [0mRead engine/engine.test.ts[90m [limit=140, offset=2626][0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && sed -n '2036,2060p' engine/engine.test.ts
+describe("worktrees", () => {
+  interface GitStubBehaviour {
+    status?: "done" | "checkpoint" | "keep";
+    outcome?: { summary: string; commitSha: string | null } | null;
+    exitCode?: number;
+    workFile?: string;
+    workLine?: string;
+    overwrite?: boolean;
+    commitMsg?: string;
+    commitIssue?: boolean;
+    leaveFile?: string;
+    touch?: string;
+    waitFor?: string;
+    waitMerged?: string;
+    recordDir?: string;
+    expectFile?: string;
+  }
+
+  interface GitPool {
+    poolDir: string;
+    head: string;
+    git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
+  }
+
+  function makeGitPool(
+[0m
+My debug harness didn't reproduce the conflict choreography. Let me copy the exact flaky test setup into a temporary standalone test that prints the interrupts.
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3044,11 +3044,17 @@
+ const run = await runPool({
+   poolDir,
+   harnesses: { ...rig.harnesses, ...resolver.harnesses },
+ });
++console.log("DEBUG first phase:", run.phase);
++console.log("DEBUG first interrupts:", JSON.stringify(run.interrupts, null, 2));
++console.log("DEBUG first log:", JSON.stringify(run.final.log, null, 2));
+ expect(run.interrupts[0]?.kind).toBe("merge-approval");
+ 
+ const approved = await run.approve("02");
++console.log("DEBUG approved phase:", approved.phase);
++console.log("DEBUG approved interrupts:", JSON.stringify(approved.interrupts.map((i) => i.kind)));
++console.log("DEBUG approved log:", JSON.stringify(approved.final.log, null, 2));
+ expect(approved.phase).toBe("quiescent");
+ 
+ // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+ // in a worktree alongside 04 and conflicts again.
+
+[0m
+Let me temporarily instrument the real test to see the interrupt sequence.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test engine/engine.test.ts -t "rotates the resolver log" 2>&1 | head -80
+bun test v1.3.14 (0d9b296a)
+
+engine/engine.test.ts:
+DEBUG first phase: quiescent
+DEBUG first interrupts: [
+  {
+    "ticketId": "02",
+    "kind": "merge-approval",
+    "body": "The resolver agent resolved the merge conflict for ticket 02.\nIt attempted: kept both lines\nconflicted files: shared.txt\nthe resolution is staged on branch pool/02; approve to commit it and continue, or reject to resolve by hand."
+  }
+]
+DEBUG first log: [
+  "super-step 1: 01, 02, 04",
+  "ticket 01: exited 0, marker done",
+  "ticket 02: exited 0, marker done",
+  "ticket 04: exited 0, marker done",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (merge-approval)",
+  "super-step 2: 03",
+  "ticket 03: exited 0, marker done",
+  "pool quiescent: interrupts pending for 02"
+]
+DEBUG approved phase: quiescent
+DEBUG approved interrupts: ["review"]
+DEBUG approved log: [
+  "super-step 1: 01, 02, 04",
+  "ticket 01: exited 0, marker done",
+  "ticket 02: exited 0, marker done",
+  "ticket 04: exited 0, marker done",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (merge-approval)",
+  "super-step 2: 03",
+  "ticket 03: exited 0, marker done",
+  "pool quiescent: interrupts pending for 02",
+  "interrupt answered for 02 (merge-approval): resolver resolution committed",
+  "interrupt raised for REVIEW (review)",
+  "pool quiescent: interrupts pending for REVIEW"
+]
+
+ 1 pass
+ 63 filtered out
+ 0 fail
+ 9 expect() calls
+Ran 1 test across 1 file. [339.00ms]
+[0m
+[0m→ [0mRead engine/pool.ts
+Let me check the marker parsing and blockedBy handling.
+[0m→ [0mRead engine/engine.test.ts[90m [limit=75, offset=2984][0m
+The debug shows super-step 1 runs "01, 02, 04" together. But the test says 02 is blocked by 01. Let me re-read the current test file carefully.
+The debug confirms super-step 1 runs 01, 02, 04 together (02 has no blockers), and the first merge-approval is for 02. Let me remove my debug edits and reproduce the actual flake under load.
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3044,17 +3044,11 @@
+ const run = await runPool({
+   poolDir,
+   harnesses: { ...rig.harnesses, ...resolver.harnesses },
+ });
+-console.log("DEBUG first phase:", run.phase);
+-console.log("DEBUG first interrupts:", JSON.stringify(run.interrupts, null, 2));
+-console.log("DEBUG first log:", JSON.stringify(run.final.log, null, 2));
+ expect(run.interrupts[0]?.kind).toBe("merge-approval");
+ 
+ const approved = await run.approve("02");
+-console.log("DEBUG approved phase:", approved.phase);
+-console.log("DEBUG approved interrupts:", JSON.stringify(approved.interrupts.map((i) => i.kind)));
+-console.log("DEBUG approved log:", JSON.stringify(approved.final.log, null, 2));
+ expect(approved.phase).toBe("quiescent");
+ 
+ // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+ // in a worktree alongside 04 and conflicts again.
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && cat package.json 2>/dev/null; cat ui/package.json 2>/dev/null | head -30; ls
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+bun.lock
+CONTEXT.md
+docs
+engine
+langgraph.json
+mock-tickets
+mock-tickets-deadlock
+NOTES.md
+package.json
+README.md
+scripts
+src
+tickets
+tsconfig.json
+ui
+[0m
+Now I understand the choreography. Let me remove my debug and reproduce the flake under load. Let me check how the suite runs.
+Let me reproduce the flake by running the full suite several times under parallel load.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && timeout 300 bun test 2>&1 | tail -25
+bun test v1.3.14 (0d9b296a)
+
+ 220 pass
+ 0 fail
+ 822 expect() calls
+Ran 220 tests across 6 files. [17.50s]
+[0m
+The full suite passes once. The flake is intermittent. Let me stress it by running the engine test file under concurrent load, which is what the "full-suite parallel load" means.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4; do (timeout 180 bun test 2>&1 | tail -4 | tr '\n' ' '; echo "  RUN $i") & done; wait
+219 pass  1 fail  816 expect() calls Ran 220 tests across 6 files. [17.70s]   RUN 1
+ 219 pass  1 fail  816 expect() calls Ran 220 tests across 6 files. [17.80s]   RUN 4
+ 219 pass  1 fail  816 expect() calls Ran 220 tests across 6 files. [17.91s]   RUN 2
+ 220 pass  0 fail  822 expect() calls Ran 220 tests across 6 files. [18.05s]   RUN 3
+[0m
+Reproduced. 3 of 4 concurrent runs fail. Let me see which test fails and why.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2; do (timeout 180 bun test 2>&1 | grep -A 30 "fail\|FAIL\|Error" | head -60; echo "=== END RUN $i ===") & done; wait
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [266.05ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [17.59s]
+=== END RUN 1 ===
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [481.35ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [17.75s]
+=== END RUN 2 ===
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && timeout 180 bun test 2>&1 | grep -B2 -A 40 "rotates the resolver log" | head -80
+(no output)
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in $(seq 1 6); do out=$(timeout 180 bun test 2>&1); if echo "$out" | grep -q " 1 fail"; then echo "=== FAILED ON RUN $i ==="; echo "$out" | grep -B3 -A 40 "rotates the resolver log"; break; fi; echo "pass $i"; done
+pass 1
+pass 2
+pass 3
+pass 4
+pass 5
+pass 6
+[0m
+The flake reproduces only under concurrent load. Let me run several concurrently and capture the failure detail.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+FAIL 2
+pass 6
+pass 1
+FAIL 3
+FAIL 4
+pass 5
+[0m
+[0m$ [0mcd /tmp/opencode && grep -B3 -A 45 "rotates the resolver log" run-2.log | head -80
+Received: false
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3058:7)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [299.34ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [18.00s]
+[0m
+[0m$ [0mcd /tmp/opencode && grep -B 40 "Received: false" run-2.log | head -60
+bun test v1.3.14 (0d9b296a)
+
+engine/engine.test.ts:
+3053 |     // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+3054 |     // in a worktree alongside 04 and conflicts again.
+3055 |     const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
+3056 |     expect(
+3057 |       rejected.interrupts.some((i) => i.kind === "merge-approval"),
+3058 |     ).toBe(true);
+             ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3052,8 +3052,35 @@
+ 
+ // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+ // in a worktree alongside 04 and conflicts again.
+ const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
++if (!rejected.interrupts.some((i) => i.kind === "merge-approval")) {
++  console.log(
++    "DEBUG rejected interrupts:",
++    JSON.stringify(rejected.interrupts, null, 2),
++  );
++  console.log(
++    "DEBUG rejected log:",
++    JSON.stringify(rejected.final.log, null, 2),
++  );
++  console.log(
++    "DEBUG rejected tickets:",
++    JSON.stringify(rejected.final.tickets, null, 2),
++  );
++  console.log(
++    "DEBUG snapshots:",
++    JSON.stringify(
++      rejected.snapshots.map((s) => ({
++        seq: s.seq,
++        phase: s.phase,
++        tickets: s.state.tickets,
++        interrupts: s.state.interrupts.map((i) => i.kind),
++      })),
++      null,
++      2,
++    ),
++  );
++}
+ expect(
+   rejected.interrupts.some((i) => i.kind === "merge-approval"),
+ ).toBe(true);
+ 
+
+[0m
+Let me instrument the test to see what interrupts are actually present when it fails, then run under load.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-debug-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-debug-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+FAIL 3
+pass 5
+pass 1
+FAIL 4
+pass 6
+pass 2
+[0m
+[0m$ [0mcd /tmp/opencode && grep -A 120 "DEBUG rejected interrupts" run-debug-3.log | head -130
+(no output)
+[0m
+[0m$ [0mcd /tmp/opencode && grep -c "DEBUG" run-debug-3.log; grep -B3 -A50 "rotates the resolver log" run-debug-3.log | head -70
+0
+Received: "crash"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3048:37)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [120.92ms]
+
+ 219 pass
+ 1 fail
+ 814 expect() calls
+Ran 220 tests across 6 files. [17.74s]
+[0m
+[0m$ [0mcd /tmp/opencode && grep -B3 -A50 "rotates the resolver log" run-debug-4.log | head -70
+Received: false
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3085:7)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [287.72ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [18.01s]
+[0m
+[0m$ [0mcd /tmp/opencode && grep -A 200 "DEBUG rejected interrupts" run-debug-4.log | head -220
+DEBUG rejected interrupts: [
+  {
+    "ticketId": "02",
+    "kind": "crash",
+    "body": "/tmp/pool-dGhhXI/runs/02.log"
+  }
+]
+DEBUG rejected log: [
+  "super-step 1: 01, 02, 04",
+  "ticket 01: exited 0, marker done",
+  "ticket 02: exited 0, marker done",
+  "ticket 04: exited 0, marker done",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (merge-approval)",
+  "super-step 2: 03",
+  "ticket 03: exited 0, marker done",
+  "pool quiescent: interrupts pending for 02",
+  "interrupt answered for 02 (merge-approval): resolver resolution committed",
+  "interrupt raised for REVIEW (review)",
+  "pool quiescent: interrupts pending for REVIEW",
+  "review rejected: 02, 04 back to ready; downstream 03 also reset",
+  "super-step 3: 02, 04",
+  "ticket 02: exited 42, marker in-progress, no outcome recorded",
+  "ticket 04: exited 0, marker done",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (crash)",
+  "pool quiescent: interrupts pending for 02"
+]
+DEBUG rejected tickets: {
+  "01": "done",
+  "02": "in-progress",
+  "03": "ready",
+  "04": "done"
+}
+DEBUG snapshots: [
+  {
+    "seq": 0,
+    "phase": "running",
+    "tickets": {
+      "01": "ready",
+      "02": "ready",
+      "03": "ready",
+      "04": "ready"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 1,
+    "phase": "running",
+    "tickets": {
+      "01": "in-progress",
+      "02": "in-progress",
+      "03": "ready",
+      "04": "in-progress"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 2,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "ready",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 3,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "in-progress",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 4,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 5,
+    "phase": "quiescent",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 6,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 7,
+    "phase": "quiescent",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": [
+      "review"
+    ]
+  },
+  {
+    "seq": 8,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "ready",
+      "03": "ready",
+      "04": "ready"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 9,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "in-progress",
+      "03": "ready",
+      "04": "in-progress"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 10,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "in-progress",
+      "03": "ready",
+      "04": "done"
+    },
+    "interrupts": [
+      "crash"
+    ]
+  },
+  {
+    "seq": 11,
+    "phase": "quiescent",
+    "tickets": {
+      "01": "done",
+      "02": "in-progress",
+      "03": "ready",
+      "04": "done"
+    },
+    "interrupts": [
+      "crash"
+    ]
+  }
+]
+3080 |         ),
+3081 |       );
+3082 |     }
+3083 |     expect(
+3084 |       rejected.interrupts.some((i) => i.kind === "merge-approval"),
+3085 |     ).toBe(true);
+             ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3085:7)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [287.72ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -n "waitMerged\|waitFor\|exit 42\|exit 43" engine/engine.test.ts
+1581:async function waitFor(cond: () => boolean, ms = 10000): Promise<void> {
+1587:  throw new Error("waitFor: timed out");
+1868:      await waitFor(
+2048:    waitFor?: string;
+2049:    waitMerged?: string;
+2103:        '  [ -e "$WAIT_FOR" ] || exit 42',
+2110:        '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
+2112:        'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+2169:      if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
+2170:      if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
+2203:        waitFor: join(poolDir, "started-02"),
+2210:        waitFor: join(poolDir, "started-01"),
+2322:        waitMerged: "work-02",
+2378:        waitMerged: "work-01",
+2454:        waitMerged: "work-01",
+2513:    // The second spawn asserts partial.txt is present (exit 43 otherwise),
+2642:        waitMerged: "work-01",
+2726:        waitMerged: "work-01",
+2805:        waitMerged: "work-01",
+2876:        waitMerged: "work-01",
+2928:        waitMerged: "work-01",
+2971:        waitMerged: "work-01",
+3010:          waitMerged: "work-01",
+3017:          waitMerged: "work-04-again",
+[0m
+The failure is clear now: in round 2, ticket 02's `waitMerged: "work-04-again"` poll loop times out (exit 42) under load because 04's merge lands late, so 02 never commits and the second conflict never happens. Let me check how `waitMerged` is used across the tests to design a deterministic fix.
+[0m$ [0mcd /tmp/opencode && grep -B3 -A45 "3048" run-debug-3.log | head -60
+3045 |       poolDir,
+3046 |       harnesses: { ...rig.harnesses, ...resolver.harnesses },
+3047 |     });
+3048 |     expect(run.interrupts[0]?.kind).toBe("merge-approval");
+                                           ^
+error: expect(received).toBe(expected)
+
+Expected: "merge-approval"
+Received: "crash"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3048:37)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [120.92ms]
+
+ 219 pass
+ 1 fail
+ 814 expect() calls
+Ran 220 tests across 6 files. [17.74s]
+[0m
+[0m✗ [0mEdit engine/engine.test.ts failed
+[91m[1mError: [0mFound multiple matches for oldString. Provide more surrounding context to make the match unique.
+The first-run failure (run-debug-3) crashes at line 3048. Let me move my debug earlier to cover both failure points.
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3044,8 +3044,13 @@
+ const run = await runPool({
+   poolDir,
+   harnesses: { ...rig.harnesses, ...resolver.harnesses },
+ });
++if (run.interrupts[0]?.kind !== "merge-approval") {
++  console.log("DEBUG first run interrupts:", JSON.stringify(run.interrupts, null, 2));
++  console.log("DEBUG first run log:", JSON.stringify(run.final.log, null, 2));
++  console.log("DEBUG first run tickets:", JSON.stringify(run.final.tickets, null, 2));
++}
+ expect(run.interrupts[0]?.kind).toBe("merge-approval");
+ 
+ const approved = await run.approve("02");
+ expect(approved.phase).toBe("quiescent");
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4; do (timeout 180 bun test > /tmp/opencode/run-dbg2-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg2-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 1
+pass 2
+pass 4
+FAIL 3
+[0m
+[0m$ [0mcd /tmp/opencode && grep -A 60 "DEBUG first run interrupts" run-dbg2-3.log | head -70
+(no output)
+[0m
+[0m$ [0mcd /tmp/opencode && grep -B3 -A40 "rotates the resolver log" run-dbg2-3.log | head -60
+Received: false
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts:3090:7)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [495.99ms]
+
+ 219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [17.98s]
+[0m
+[0m$ [0mcd /tmp/opencode && grep -A 120 "DEBUG rejected interrupts" run-dbg2-3.log | head -130
+DEBUG rejected interrupts: [
+  {
+    "ticketId": "02",
+    "kind": "crash",
+    "body": "/tmp/pool-qQK2sl/runs/02.log"
+  }
+]
+DEBUG rejected log: [
+  "super-step 1: 01, 02, 04",
+  "ticket 01: exited 0, marker done",
+  "ticket 02: exited 0, marker done",
+  "ticket 04: exited 0, marker done",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (merge-approval)",
+  "super-step 2: 03",
+  "ticket 03: exited 0, marker done",
+  "pool quiescent: interrupts pending for 02",
+  "interrupt answered for 02 (merge-approval): resolver resolution committed",
+  "interrupt raised for REVIEW (review)",
+  "pool quiescent: interrupts pending for REVIEW",
+  "review rejected: 02, 04 back to ready; downstream 03 also reset",
+  "super-step 3: 02, 04",
+  "ticket 02: exited 42, marker in-progress, no outcome recorded",
+  "ticket 04: exited 0, marker done",
+  "ticket 04: merged pool/04 onto the working branch",
+  "interrupt raised for 02 (crash)",
+  "pool quiescent: interrupts pending for 02"
+]
+DEBUG rejected tickets: {
+  "01": "done",
+  "02": "in-progress",
+  "03": "ready",
+  "04": "done"
+}
+DEBUG snapshots: [
+  {
+    "seq": 0,
+    "phase": "running",
+    "tickets": {
+      "01": "ready",
+      "02": "ready",
+      "03": "ready",
+      "04": "ready"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 1,
+    "phase": "running",
+    "tickets": {
+      "01": "in-progress",
+      "02": "in-progress",
+      "03": "ready",
+      "04": "in-progress"
+    },
+    "interrupts": []
+  },
+  {
+    "seq": 2,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "ready",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 3,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "in-progress",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 4,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 5,
+    "phase": "quiescent",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": [
+      "merge-approval"
+    ]
+  },
+  {
+    "seq": 6,
+    "phase": "running",
+    "tickets": {
+      "01": "done",
+      "02": "done",
+      "03": "done",
+      "04": "done"
+    },
+    "interrupts": []
+  },
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3063,8 +3063,16 @@
+   "DEBUG rejected interrupts:",
+   JSON.stringify(rejected.interrupts, null, 2),
+ );
+ console.log(
++  "DEBUG 02.log:",
++  JSON.stringify(readFileSync(join(poolDir, "runs", "02.log"), "utf8")),
++);
++console.log(
++  "DEBUG 02.events:",
++  JSON.stringify(readFileSync(join(poolDir, "runs", "02.events.jsonl"), "utf8")),
++);
++console.log(
+   "DEBUG rejected log:",
+   JSON.stringify(rejected.final.log, null, 2),
+ );
+ console.log(
+
+[0m
+The failure is in super-step 3: ticket 02 exits 42 (the WAIT_MERGED poll gives up). Let me capture 02's actual log content to see the timing.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-dbg3-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg3-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 4
+FAIL 6
+pass 1
+pass 5
+FAIL 3
+pass 2
+[0m
+[0m$ [0mcd /tmp/opencode && grep -A 8 "DEBUG 02.log" run-dbg3-6.log | head -12
+DEBUG 02.log: ""
+DEBUG 02.events: "{\"at\":\"2026-08-22T13:08:27.989Z\",\"attempt\":1,\"kind\":\"scheduled\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.031Z\",\"attempt\":1,\"kind\":\"spawned\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.106Z\",\"attempt\":1,\"kind\":\"exited\",\"payload\":{\"code\":0,\"status\":\"done\"}}\n{\"at\":\"2026-08-22T13:08:28.121Z\",\"attempt\":1,\"kind\":\"merge-conflict\",\"payload\":{\"files\":[\"shared.txt\"]}}\n{\"at\":\"2026-08-22T13:08:28.121Z\",\"attempt\":2,\"kind\":\"resolver\",\"payload\":{\"files\":[\"shared.txt\"]}}\n{\"at\":\"2026-08-22T13:08:28.153Z\",\"attempt\":2,\"kind\":\"answered\",\"payload\":{\"kind\":\"merge-approval\"}}\n{\"at\":\"2026-08-22T13:08:28.175Z\",\"attempt\":2,\"kind\":\"merged\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.176Z\",\"attempt\":2,\"kind\":\"review-reject\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.176Z\",\"attempt\":3,\"kind\":\"scheduled\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.201Z\",\"attempt\":3,\"kind\":\"spawned\",\"payload\":{}}\n{\"at\":\"2026-08-22T13:08:28.262Z\",\"attempt\":3,\"kind\":\"exited\",\"payload\":{\"code\":42,\"status\":\"in-progress\"}}\n{\"at\":\"2026-08-22T13:08:28.262Z\",\"attempt\":3,\"kind\":\"crash\",\"payload\":{\"code\":42}}\n"
+DEBUG rejected log: [
+  "super-step 1: 01, 02, 04",
+  "ticket 01: exited 0, marker done",
+  "ticket 02: exited 0, marker done",
+  "ticket 04: exited 0, marker done",
+  "ticket 01: merged pool/01 onto the working branch",
+  "ticket 04: merged pool/04 onto the working branch",
+[0m
+The 02.log is empty and 02 exited 42 just 61ms after spawn — too fast for the 5s WAIT_MERGED loop. Something else produces exit 42. Let me add tracing to the stub.
+[0m→ [0mRead engine/engine.test.ts[90m [limit=55, offset=2088][0m
+[0m✗ [0mEdit engine/engine.test.ts failed
+[91m[1mError: [0mFound multiple matches for oldString. Provide more surrounding context to make the match unique.
+The 02 exited 42 in 61ms — too fast for the 5s WAIT_MERGED loop. Let me instrument the stub to trace which exit path fires.
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2093,8 +2093,9 @@
+ 'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+ 'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+ 'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+ 'source "$plan"',
++'echo "PLAN=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO" >> "$issue.log-trace" 2>/dev/null || true',
+ 'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+ 'if [ -n "$WAIT_FOR" ]; then',
+ "  for _ in $(seq 1 100); do",
+ '    [ -e "$WAIT_FOR" ] && break',
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2093,9 +2093,9 @@
+ 'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+ 'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+ 'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+ 'source "$plan"',
+-'echo "PLAN=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO" >> "$issue.log-trace" 2>/dev/null || true',
++'echo "STUB-DEBUG plan=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO"',
+ 'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+ 'if [ -n "$WAIT_FOR" ]; then',
+ "  for _ in $(seq 1 100); do",
+ '    [ -e "$WAIT_FOR" ] && break',
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2107,9 +2107,9 @@
+ "  for _ in $(seq 1 100); do",
+ '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
+ "    sleep 0.05",
+ "  done",
+-'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
++'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG WAIT_MERGED gave up on $WAIT_MERGED"; exit 42; }',
+ "fi",
+ 'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+ 'if [ -n "$RECORD_DIR" ]; then',
+ '  mkdir -p "$RECORD_DIR"',
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-dbg4-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg4-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+FAIL 5
+FAIL 3
+FAIL 6
+pass 1
+FAIL 4
+pass 2
+[0m
+[0m$ [0mcd /tmp/opencode && for f in run-dbg4-3.log run-dbg4-5.log; do echo "=== $f ==="; grep -E "STUB-DEBUG|exited 42|Received" $f | head -20; done
+=== run-dbg4-3.log ===
+DEBUG 02.log: "STUB-DEBUG plan=/tmp/pool-nzARFF/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-nzARFF\nSTUB-DEBUG WAIT_MERGED gave up on work-04-again\n"
+  "ticket 02: exited 42, marker in-progress, no outcome recorded",
+Received: false
+=== run-dbg4-5.log ===
+DEBUG 02.log: "STUB-DEBUG plan=/tmp/pool-Ik5mMW/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-Ik5mMW\nSTUB-DEBUG WAIT_MERGED gave up on work-04-again\n"
+  "ticket 02: exited 42, marker in-progress, no outcome recorded",
+Received: false
+[0m
+The WAIT_MERGED loop gives up, but the events show 02 exited just 61ms after spawn — far too fast for a 100-iteration loop with 0.05s sleeps (that's ~5s). Let me test the loop timing directly.
+[0m$ [0mcd /tmp && rm -rf loop-test && mkdir loop-test && cd loop-test && git init -q -b main . && git config user.email t@t && git config user.name t && echo hi > f && git add f && git commit -qm init && time (bash -c 'for _ in $(seq 1 100); do git log --format=%s 2>/dev/null | grep -q "nonexistent" && break; sleep 0.05; done; git log --format=%s | grep -q "nonexistent" || echo gave-up')
+gave-up
+
+real	0m5.296s
+user	0m0.118s
+sys	0m0.273s
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2093,9 +2093,9 @@
+ 'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+ 'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+ 'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+ 'source "$plan"',
+-'echo "STUB-DEBUG plan=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO"',
++'echo "STUB-DEBUG start=$(date +%s.%N) plan=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO"',
+ 'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+ 'if [ -n "$WAIT_FOR" ]; then',
+ "  for _ in $(seq 1 100); do",
+ '    [ -e "$WAIT_FOR" ] && break',
+
+[0m
+The events timestamps (61ms spawn→exit) contradict the 5s loop. Let me add timing to the stub to resolve this.
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2107,9 +2107,9 @@
+ "  for _ in $(seq 1 100); do",
+ '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
+ "    sleep 0.05",
+ "  done",
+-'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG WAIT_MERGED gave up on $WAIT_MERGED"; exit 42; }',
++'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG gave-up=$(date +%s.%N) on $WAIT_MERGED"; exit 42; }',
+ "fi",
+ 'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+ 'if [ -n "$RECORD_DIR" ]; then',
+ '  mkdir -p "$RECORD_DIR"',
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-dbg5-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg5-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+FAIL 3
+FAIL 5
+FAIL 6
+pass 4
+pass 2
+FAIL 1
+[0m
+[0m$ [0mcd /tmp/opencode && for f in run-dbg5-1.log run-dbg5-3.log; do echo "=== $f ==="; grep "DEBUG 02.log" $f | head -1; done
+=== run-dbg5-1.log ===
+DEBUG 02.log: "STUB-DEBUG start=1787404307.597700306 plan=/tmp/pool-myDJwx/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-myDJwx\nSTUB-DEBUG gave-up=1787404307.765320048 on work-04-again\n"
+=== run-dbg5-3.log ===
+DEBUG 02.log: "STUB-DEBUG start=1787404307.620471289 plan=/tmp/pool-OdEVZa/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-OdEVZa\nSTUB-DEBUG gave-up=1787404307.679967949 on work-04-again\n"
+[0m
+The WAIT_MERGED loop "gave up" in only ~160ms, but 100 iterations with `sleep 0.05` should take ~5s. Let me test whether `sleep 0.05` actually sleeps on this system.
+[0m$ [0mcd /tmp && time bash -c 'sleep 0.05'; which sleep; sleep --version 2>&1 | head -1
+real	0m0.052s
+user	0m0.000s
+sys	0m0.001s
+/usr/bin/sleep
+sleep (GNU coreutils) 9.11
+[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=30, offset=2091][0m
+The loop timing is contradictory. Let me re-read the exact stub with my edit.
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2103,12 +2103,15 @@
+ "  done",
+ '  [ -e "$WAIT_FOR" ] || exit 42',
+ "fi",
+ 'if [ -n "$WAIT_MERGED" ]; then',
++"  i=0",
+ "  for _ in $(seq 1 100); do",
++"    i=$((i+1))",
+ '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
+ "    sleep 0.05",
+ "  done",
++'  echo "STUB-DEBUG looped=$i"',
+ '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG gave-up=$(date +%s.%N) on $WAIT_MERGED"; exit 42; }',
+ "fi",
+ 'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+ 'if [ -n "$RECORD_DIR" ]; then',
+
+[0m
+The loop timings contradict: 100 iterations × 0.05s sleep should take ~5s, but the stub "gave up" in ~170ms. Let me instrument the loop to count iterations.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6; do (timeout 180 bun test > /tmp/opencode/run-dbg6-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg6-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+FAIL 2
+FAIL 3
+pass 5
+pass 4
+FAIL 1
+FAIL 6
+[0m
+[0m$ [0mcd /tmp/opencode && for f in run-dbg6-1.log run-dbg6-2.log; do echo "=== $f ==="; grep "DEBUG 02.log" $f | head -1; done
+=== run-dbg6-1.log ===
+=== run-dbg6-2.log ===
+DEBUG 02.log: "STUB-DEBUG start=1787404490.248134702 plan=/tmp/pool-F3DaUC/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-F3DaUC\nSTUB-DEBUG looped=3\nSTUB-DEBUG gave-up=1787404490.360968500 on work-04-again\n"
+[0m
+[0m$ [0mcd /tmp/loop-test && git log --format=%s | head -3; echo "---"; set -o pipefail; for i in 1 2 3 4 5 6 7 8 9 10; do git log --format=%s | grep -q "init" && echo "match $i" || echo "nomatch $i"; done
+init
+---
+match 1
+match 2
+match 3
+match 4
+match 5
+match 6
+match 7
+match 8
+match 9
+match 10
+[0m
+The `looped=3` reveals it: the loop broke after 3 iterations (grep matched), yet the final check gave up. Let me test the `pipefail` + `grep -q` + SIGPIPE interaction.
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2110,9 +2110,9 @@
+ '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
+ "    sleep 0.05",
+ "  done",
+ '  echo "STUB-DEBUG looped=$i"',
+-'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG gave-up=$(date +%s.%N) on $WAIT_MERGED"; exit 42; }',
++'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG final-log=$(git -C "$MAIN_REPO" log --format=%s 2>&1 | tr "\\n" "|")"; echo "STUB-DEBUG gave-up=$(date +%s.%N) on $WAIT_MERGED"; exit 42; }',
+ "fi",
+ 'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+ 'if [ -n "$RECORD_DIR" ]; then',
+ '  mkdir -p "$RECORD_DIR"',
+
+[0m
+The `looped=3` shows grep matched on iteration 3 but the final check then failed. Let me capture the git log at failure time.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6 7 8; do (timeout 180 bun test > /tmp/opencode/run-dbg7-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-dbg7-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 5
+FAIL 3
+pass 4
+pass 8
+pass 2
+pass 7
+pass 6
+FAIL 1
+[0m
+[0m$ [0mcd /tmp/opencode && for f in run-dbg7-1.log run-dbg7-3.log; do echo "=== $f ==="; grep -o "DEBUG 02.log: [^ ]*" $f | head -1; done
+=== run-dbg7-1.log ===
+DEBUG 02.log: "STUB-DEBUG
+=== run-dbg7-3.log ===
+[0m
+[0m$ [0mcd /tmp/opencode && grep "DEBUG 02.log" run-dbg7-1.log | head -1
+DEBUG 02.log: "STUB-DEBUG start=1787404575.080957466 plan=/tmp/pool-2LvwaN/plan-02-1.sh WAIT_FOR= WAIT_MERGED=work-04-again MAIN_REPO=/tmp/pool-2LvwaN\nSTUB-DEBUG looped=6\nSTUB-DEBUG final-log=work-04-again|Merge branch 'pool/02'|work-03|merge pool/02 by resolver|Merge branch 'pool/04'|work-02|work-01|work-04|init|\nSTUB-DEBUG gave-up=1787404575.358462857 on work-04-again\n"
+[0m
+[0m$ [0mcd /tmp/loop-test && bash -c 'set -uo pipefail; for i in $(seq 1 20); do git log --format=%s | grep -q "init" && echo "match $i" || echo "NOMATCH $i"; done'
+match 1
+match 2
+match 3
+match 4
+match 5
+match 6
+match 7
+match 8
+match 9
+match 10
+match 11
+match 12
+match 13
+match 14
+match 15
+match 16
+match 17
+match 18
+match 19
+match 20
+[0m
+The final-log clearly shows `work-04-again` is present, yet grep failed. This points to `set -o pipefail` + `grep -q` + SIGPIPE: grep closes the pipe early on match, git log gets SIGPIPE (141), and pipefail reports failure. Let me verify.
+[0m$ [0mcd /tmp/loop-test && bash -c 'set -uo pipefail; for i in $(seq 1 30); do git log --format=%s | grep -q "init" && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH; echo "---with temp file---"; bash -c 'set -uo pipefail; for i in $(seq 1 30); do git log --format=%s > /tmp/lg.txt; grep -q "init" /tmp/lg.txt && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH
+0
+---with temp file---
+0
+[0m
+The bug is found. The stub's `git log | grep -q` under `set -o pipefail` fails on SIGPIPE: when `grep -q` finds the match and closes the pipe, `git log` gets SIGPIPE (exit 141), and pipefail makes the pipeline report failure even though the match was found. The loop eventually breaks (looped=6) but the final check hits the SIGPIPE race. Let me verify.
+[0m$ [0mcd /tmp/loop-test && bash -c 'set -uo pipefail; for i in $(seq 1 50); do git log --format=%s | grep -q "init" && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH
+0
+[0m
+The bug is confirmed in principle: `grep -q` closes the pipe on match, and under `pipefail` the pipeline reports git's SIGPIPE (141) as failure. Let me reproduce it deterministically to be sure.
+Root cause identified. The `git log | grep -q` pipeline under `set -o pipefail` races on SIGPIPE: `grep -q` closes the pipe on match, `git log` gets SIGPIPE (141), and pipefail makes the pipeline report failure even though the match was found. In the failing run, `looped=6` shows the loop's grep matched (it broke), but the final check `|| exit 42` fired because the same pipeline hit SIGPIPE. This is a race in the test stub, not the engine.
+
+Let me verify the SIGPIPE mechanism directly:
+[0m$ [0mcd /tmp/loop-test && bash -c 'set -uo pipefail; (sleep 0.3; git log --format=%s) | grep -q "init"; echo "exit=$?"'; echo "--- compare with no pipefail ---"; bash -c '(sleep 0.3; git log --format=%s) | grep -q "init"; echo "exit=$?"'
+exit=0
+--- compare with no pipefail ---
+exit=0
+[0m
+The SIGPIPE theory needs verification with a larger output where git blocks on write. Let me test deterministically.
+[0m$ [0mcd /tmp && rm -rf sigpipe-test && mkdir sigpipe-test && cd sigpipe-test && git init -q -b main . && git config user.email t@t && git config user.name t && for i in $(seq 1 20000); do echo $i >> f; git add f; git commit -qm "commit-$i"; done 2>/dev/null; git log --format=%s | wc -l
+(no output)
+
+<shell_metadata>
+shell tool terminated command after exceeding timeout 60000 ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.
+</shell_metadata>
+[0m
+[0m$ [0mcd /tmp/sigpipe-test 2>/dev/null && git log --format=%s | wc -l; echo "exists: $?"
+9175
+exists: 0
+[0m
+[0m$ [0mcd /tmp/sigpipe-test && bash -c 'set -uo pipefail; for i in $(seq 1 20); do git log --format=%s | grep -q "commit-1$" && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH
+0
+[0m
+[0m$ [0mcd /tmp/sigpipe-test && bash -c 'set -uo pipefail; for i in $(seq 1 30); do git log --format=%s | grep -q "commit-1$" && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH; echo "with sleep-after-start:"; bash -c 'set -uo pipefail; for i in $(seq 1 30); do git log --format=%s | grep -q "commit-1$" && echo "match $i" || echo "NOMATCH $i"; done' 2>&1 | grep -c NOMATCH
+0
+with sleep-after-start:
+0
+[0m
+The theory: `git log | grep -q` under `pipefail` races on SIGPIPE when grep closes the pipe on a match while git is still writing. My small-repo test didn't reproduce because output fit in the pipe buffer. Let me force the race deterministically.
+[0m$ [0mcd /tmp/sigpipe-test && bash -c 'set -uo pipefail; (git log --format=%s &) ; sleep 0.001; git log --format=%s | grep -q "commit-1$" && echo "match" || echo "NOMATCH rc=$?"' 2>&1 | tail -2; echo "--- direct rc capture:"; bash -c 'set -uo pipefail; git log --format=%s | grep -q "commit-1$"; echo "pipe rc=$?"'
+commit-2
+commit-1
+--- direct rc capture:
+pipe rc=0
+[0m
+The small repo fits in the pipe buffer so no SIGPIPE. I need output > 64KB with the match on the first line. Let me test the race deterministically.
+[0m$ [0mcd /tmp/sigpipe-test && bash -c 'set -uo pipefail; hits=0; miss=0; for i in $(seq 1 50); do if git log --format=%s | grep -q "commit-1$" ; then hits=$((hits+1)); else miss=$((miss+1)); fi; done; echo "hits=$hits miss=$miss"' 2>&1 | tail -2
+hits=50 miss=0
+[0m
+The match is on the last line, so grep reads everything. I need grep to close the pipe early — match the FIRST line while git is still writing.
+[0m$ [0mcd /tmp/sigpipe-test && git log --format=%s | head -1; bash -c 'set -uo pipefail; hits=0; miss=0; for i in $(seq 1 50); do if git log --format=%s | grep -q "commit-9175$" ; then hits=$((hits+1)); else miss=$((miss+1)); fi; done; echo "hits=$hits miss=$miss"' 2>&1 | tail -2
+commit-9175
+hits=0 miss=50
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2093,9 +2093,8 @@
+ 'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+ 'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+ 'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+ 'source "$plan"',
+-'echo "STUB-DEBUG start=$(date +%s.%N) plan=$plan WAIT_FOR=$WAIT_FOR WAIT_MERGED=$WAIT_MERGED MAIN_REPO=$MAIN_REPO"',
+ 'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+ 'if [ -n "$WAIT_FOR" ]; then',
+ "  for _ in $(seq 1 100); do",
+ '    [ -e "$WAIT_FOR" ] && break',
+
+[0m
+Reproduced deterministically: when `git log | grep -q` matches the first line of a large output, grep closes the pipe while git is still writing, git gets SIGPIPE (141), and `set -o pipefail` reports pipeline failure even though the match exists. In the flaky test, the loop eventually breaks (looped=6) but the final check races and fails → exit 42 → ticket 02 crashes → no second merge-approval.
+
+This is purely a test-stub race, confirming ticket 22's inference. The fix: make the WAIT_MERGED check SIGPIPE-free by capturing git output first. Let me revert all my debug edits and apply the real fix.
+[0m✗ [0mEdit engine/engine.test.ts failed
+[91m[1mError: [0mCould not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.
+Now I'll apply the real fix: remove the pipe (`git log | grep -q`) which races on SIGPIPE under `pipefail`. Capture the log into a variable and match with `case` — no pipe, no early-close.
+[0m→ [0mRead engine/engine.test.ts[90m [limit=18, offset=2104][0m
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -2102,16 +2102,15 @@
+ "  done",
+ '  [ -e "$WAIT_FOR" ] || exit 42',
+ "fi",
+ 'if [ -n "$WAIT_MERGED" ]; then',
+-"  i=0",
+ "  for _ in $(seq 1 100); do",
+-"    i=$((i+1))",
+-'    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
++'    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++'    case "$log" in *"$WAIT_MERGED"*) break;; esac',
+ "    sleep 0.05",
+ "  done",
+-'  echo "STUB-DEBUG looped=$i"',
+-'  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || { echo "STUB-DEBUG final-log=$(git -C "$MAIN_REPO" log --format=%s 2>&1 | tr "\\n" "|")"; echo "STUB-DEBUG gave-up=$(date +%s.%N) on $WAIT_MERGED"; exit 42; }',
++'  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++'  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
+ "fi",
+ 'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+ 'if [ -n "$RECORD_DIR" ]; then',
+ '  mkdir -p "$RECORD_DIR"',
+
+[0m
+Now remove the debug instrumentation from the test body.
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3046,13 +3046,8 @@
+ const run = await runPool({
+   poolDir,
+   harnesses: { ...rig.harnesses, ...resolver.harnesses },
+ });
+-if (run.interrupts[0]?.kind !== "merge-approval") {
+-  console.log("DEBUG first run interrupts:", JSON.stringify(run.interrupts, null, 2));
+-  console.log("DEBUG first run log:", JSON.stringify(run.final.log, null, 2));
+-  console.log("DEBUG first run tickets:", JSON.stringify(run.final.tickets, null, 2));
+-}
+ expect(run.interrupts[0]?.kind).toBe("merge-approval");
+ 
+ const approved = await run.approve("02");
+ expect(approved.phase).toBe("quiescent");
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/engine.test.ts
+@@ -3054,43 +3054,8 @@
+ 
+ // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+ // in a worktree alongside 04 and conflicts again.
+ const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
+-if (!rejected.interrupts.some((i) => i.kind === "merge-approval")) {
+-  console.log(
+-    "DEBUG rejected interrupts:",
+-    JSON.stringify(rejected.interrupts, null, 2),
+-  );
+-  console.log(
+-    "DEBUG 02.log:",
+-    JSON.stringify(readFileSync(join(poolDir, "runs", "02.log"), "utf8")),
+-  );
+-  console.log(
+-    "DEBUG 02.events:",
+-    JSON.stringify(readFileSync(join(poolDir, "runs", "02.events.jsonl"), "utf8")),
+-  );
+-  console.log(
+-    "DEBUG rejected log:",
+-    JSON.stringify(rejected.final.log, null, 2),
+-  );
+-  console.log(
+-    "DEBUG rejected tickets:",
+-    JSON.stringify(rejected.final.tickets, null, 2),
+-  );
+-  console.log(
+-    "DEBUG snapshots:",
+-    JSON.stringify(
+-      rejected.snapshots.map((s) => ({
+-        seq: s.seq,
+-        phase: s.phase,
+-        tickets: s.state.tickets,
+-        interrupts: s.state.interrupts.map((i) => i.kind),
+-      })),
+-      null,
+-      2,
+-    ),
+-  );
+-}
+ expect(
+   rejected.interrupts.some((i) => i.kind === "merge-approval"),
+ ).toBe(true);
+ 
+
+[0m
+Let me verify the fix works and stress test it under parallel load.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test engine/engine.test.ts -t "resolver" 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 7 pass
+ 57 filtered out
+ 0 fail
+ 63 expect() calls
+Ran 7 tests across 1 file. [1233.00ms]
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6 7 8; do (timeout 180 bun test > /tmp/opencode/run-fix-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-fix-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 2
+pass 3
+pass 4
+pass 6
+pass 8
+pass 1
+pass 7
+pass 5
+[0m
+8/8 concurrent full-suite runs pass. Let me run a larger batch to be confident.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6 7 8 9 10; do (timeout 180 bun test > /tmp/opencode/run-fix2-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-fix2-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 9
+pass 6
+pass 7
+pass 5
+pass 8
+pass 1
+pass 2
+pass 10
+pass 3
+pass 4
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff engine/engine.test.ts
+diff --git a/engine/engine.test.ts b/engine/engine.test.ts
+index 9aa0407..04db2df 100644
+--- a/engine/engine.test.ts
++++ b/engine/engine.test.ts
+@@ -2104,10 +2104,12 @@ describe("worktrees", () => {
+         "fi",
+         'if [ -n "$WAIT_MERGED" ]; then',
+         "  for _ in $(seq 1 100); do",
+-        '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
++        '    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '    case "$log" in *"$WAIT_MERGED"*) break;; esac',
+         "    sleep 0.05",
+         "  done",
+-        '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
++        '  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
+         "fi",
+         'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+         'if [ -n "$RECORD_DIR" ]; then',
+[0m
+10/10 concurrent runs pass. The SIGPIPE race fix works. Let me verify no debug residue remains and review my diff.
+[0m$ [0mrm -f /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/debug-flake.ts; rm -rf /tmp/opencode/loop-test /tmp/opencode/sigpipe-test /tmp/opencode/debug-*.ts /tmp/opencode/debug-*.sh
+(no output)
+[0m
+[0m→ [0mRead engine/server.ts[90m [limit=120, offset=150][0m
+The fix is clean and benefits all tests using `waitMerged`. Now let me remove the debug files and move to task 2: the UTF-8 head-boundary defect. Let me look at the log range read code.
+[0m→ [0mRead engine/server.ts[90m [limit=160, offset=270][0m
+[0m✱ [0mGrep "UTF-8|utf8|boundary|U\+FFFD|replacement|range"[90m in engine · 12 matches[0m
+Now let me look at the existing UTF-8 tests in server.test.ts, and the client-side log range handling.
+[0m→ [0mRead engine/server.test.ts[90m [limit=130, offset=390][0m
+[0m✱ [0mGrep "firstOffset|nextOffset|loadEarlier|LOG_CHUNK|totalSize|offset"[90m in ui/src · 31 matches[0m
+Now let me look at the client-side log handling (main.ts) to understand how `firstOffset` and prepend work.
+[0m→ [0mRead ui/src/main.ts[90m [limit=160, offset=45][0m
+[0m✱ [0mGrep "initialLogWindow|earlierLogOffset|logTailOffset"[90m in ui/src · 3 matches[0m
+Now let me look at the client-side helpers `initialLogWindow`, `earlierLogOffset`, and the server's `/api/log` handler.
+[0m→ [0mRead ui/src/project.ts[90m [limit=40, offset=320][0m
+[0m→ [0mRead engine/server.ts[90m [limit=70, offset=261][0m
+Let me continue. I understand the UTF-8 head-boundary defect fully. `readLogRange` trims only the tail via `utf8End`, never the head: if the requested `offset` lands on a continuation byte (mid-char), the range begins with a partial char that `TextDecoder` renders as U+FFFD at the pane head permanently, and `offset` is reported as the untrimmed start, so the client's prepend bookkeeping misaligns. Ticket 22's prescribed fix: trim the head like the tail and report the adjusted offset.
+
+Let me look at the existing UTF-8 helpers and implement.
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.ts
+@@ -292,8 +292,22 @@
+   return cut;
+ }
+ 
+ /**
++ * Trim a raw byte slice so no multi-byte UTF-8 char straddles its head: a
++ * range that begins on a continuation byte drops the partial char and starts
++ * at the next lead byte, so the pane head never decodes as U+FFFD. The byte
++ * count removed is reported back so the caller can adjust the served offset.
++ */
++function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
++  let cut = start;
++  while (cut < end && (bytes[cut] & 0xc0) === 0x80) {
++    cut += 1;
++  }
++  return cut - start;
++}
++
++/**
+  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
+  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
+  * returned `nextOffset` until it equals `totalSize`. An optional `end` bounds
+  * the range below the chunk size, which is how "load earlier" reads exactly
+@@ -315,12 +329,15 @@
+       ? Math.max(start, end)
+       : start + LOG_CHUNK_BYTES;
+   const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
+   const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
+-  const decodeEnd = utf8End(bytes, 0, bytes.length);
++  const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
++  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
+   return {
+-    content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
+-    offset: start,
++    content: stripAnsi(
++      new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
++    ),
++    offset: start + headTrim,
+     nextOffset: start + decodeEnd,
+     totalSize,
+   };
+ }
+
+[0m
+[0m→ [0mRead engine/server.test.ts[90m [limit=70, offset=340][0m
+Now let me check the server.test.ts setup for the log tests to write a proper regression test.
+[0m→ [0mRead engine/server.ts[90m [limit=40, offset=295][0m
+Now let me look at the exact existing test region and add the regression test. Let me also verify my head-trim fix interacts correctly with the `end` bound semantics (prepend reads).
+[0m
+[0m$ [0mcd /tmp && node -e 'const s="a".repeat(10)+"é tail\n"; const b=Buffer.from(s); console.log("total", b.length); for (let i=0;i<b.length;i++) console.log(i, b[i].toString(16));'
+total 18
+0 61
+1 61
+2 61
+3 61
+4 61
+5 61
+6 61
+7 61
+8 61
+9 61
+10 c3
+11 a9
+12 20
+13 74
+14 61
+15 69
+16 6c
+17 a
+[0m
+Now let me add the regression tests. First let me confirm the byte layout with a quick check.
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/engine/server.test.ts
+@@ -420,8 +420,33 @@
+   expect(secondBody.content).toBe("é tail\n");
+   expect(secondBody.content).not.toContain("\uFFFD");
+ });
+ 
++it("does not split a multi-byte UTF-8 character at a range's head", async () => {
++  const poolDir = makePool([{ file: "01-a.md", marker }]);
++  const runsDir = join(poolDir, "runs");
++  mkdirSync(runsDir, { recursive: true });
++  // é = U+00E9 is two bytes, at byte offsets 10 and 11. A tail-first open or
++  // load-earlier read can request an offset mid-character: a range starting
++  // at byte 11 (a continuation byte) must drop the partial char and report
++  // the adjusted offset, so the pane head never decodes as U+FFFD.
++  writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
++  const server = await startServer(poolDir, stubHarness({}));
++
++  const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=11`);
++  const body = (await res.json()) as {
++    content: string;
++    offset: number;
++    nextOffset: number;
++    totalSize: number;
++  };
++  expect(body.content).toBe(" tail\n");
++  expect(body.content).not.toContain("\uFFFD");
++  expect(body.offset).toBe(12);
++  expect(body.nextOffset).toBe(18);
++  expect(body.totalSize).toBe(18);
++});
++
+ it("returns empty content for an offset at or past the end", async () => {
+   const poolDir = makePool([{ file: "01-a.md", marker }]);
+   const runsDir = join(poolDir, "runs");
+   mkdirSync(runsDir, { recursive: true });
+
+[0m
+Now let me add the regression test for the head-boundary defect, placed alongside the existing UTF-8 tests.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test engine/server.test.ts -t "UTF-8" 2>&1 | tail -15
+bun test v1.3.14 (0d9b296a)
+
+ 3 pass
+ 44 filtered out
+ 0 fail
+ 12 expect() calls
+Ran 3 tests across 1 file. [43.00ms]
+[0m
+Now let me run the server tests to verify my head-trim fix and the new regression test.
+Let me run the full server test suite to make sure the head-trim fix doesn't break the existing offset-based tests.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test engine/server.test.ts 2>&1 | tail -12
+bun test v1.3.14 (0d9b296a)
+
+ 47 pass
+ 0 fail
+ 138 expect() calls
+Ran 47 tests across 1 file. [14.50s]
+[0m
+All 47 server tests pass. Let me verify the fix handles the prepend/load-earlier path too by checking my new head-trim test covers it, then run typecheck and the full suite.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bunx tsc --noEmit 2>&1 | tail -5
+(no output)
+[0m
+[0m✱ [0mGrep "console-detail-width|detailWidth|width|clamp"[90m in ui/src · 35 matches[0m
+Typecheck clean. Now task 3: pin Detail width persistence. Let me look at the relevant view.ts code and the existing projection tests.
+[0m→ [0mRead ui/src/view.ts[90m [limit=100, offset=160][0m
+[0m→ [0mRead ui/src/view.ts[90m [limit=40, offset=1030][0m
+[0m✱ [0mGrep "clampDetailWidth|DETAIL_MIN_PX|DETAIL_MAX_FRACTION"[90m in ui/src · 4 matches[0m
+Now let me look at the clamp helpers in project.ts and the existing projection tests to follow the precedent.
+[0m→ [0mRead ui/src/project.ts[90m [limit=40, offset=760][0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -n "clampDetailWidth\|describe(\|import " ui/src/project.test.ts | head -40
+3:import { describe, expect, it } from "bun:test";
+4:import {
+5:  clampDetailWidth,
+75:describe("ticketCardId / isTicketCardId / layoutStorageKey", () => {
+89:describe("ticketDepth", () => {
+109:describe("projectPoolEdges", () => {
+141:describe("projectPool", () => {
+216:describe("interruptForm", () => {
+260:describe("interrupt projection", () => {
+328:describe("review projection", () => {
+389:describe("projectDetail", () => {
+424:describe("phaseLabel", () => {
+433:describe("projectLog", () => {
+444:describe("projectTimeline", () => {
+575:describe("selectLogAttempt", () => {
+589:describe("projectLogPane", () => {
+689:describe("log tailing decisions", () => {
+723:describe("attempt-stay on a running ticket", () => {
+751:describe("layout", () => {
+762:describe("mergeLayout", () => {
+782:describe("parseStoredLayout", () => {
+800:describe("edgePath", () => {
+827:describe("zoomAtCursor", () => {
+845:describe("strokeWidthForZoom", () => {
+852:describe("clampDrawersHeight", () => {
+863:describe("clampDetailWidth", () => {
+865:    expect(clampDetailWidth(100, 1600)).toBe(DETAIL_MIN_PX);
+869:    expect(clampDetailWidth(2000, 1600)).toBe(1600);
+873:    expect(clampDetailWidth(600, 1600)).toBe(600);
+877:    expect(clampDetailWidth(600, 200)).toBe(200);
+882:    expect(clampDetailWidth(100000, Math.round(1440 * DETAIL_MAX_FRACTION))).toBe(1152);
+886:describe("nextNodeSelection", () => {
+900:describe("flowNeighbourhood", () => {
+954:describe("a card click opens the Detail", () => {
+[0m
+Now let me look at the existing project.test.ts structure to follow the precedent for the new test.
+[0m→ [0mRead ui/src/project.test.ts[90m [limit=60, offset=850][0m
+[0m✱ [0mGlob "ui/src/*.test.ts"[90m 1 match[0m
+Let me check how view.ts is tested and whether there's a view test file.
+[0m→ [0mRead ui/src/view.ts[90m [limit=50][0m
+Let me examine view.ts's top-level structure and exports to find the cleanest seam for a persistence test.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -n "StoredDrawer\|readStored\|writeStored\|localStorage\|DRAWER" ui/src/view.ts | head -30
+14:  DRAWER_DEFAULT_VH,
+162:let drawersHeight = DRAWER_DEFAULT_VH;
+166:// width across the full-DOM rebuild on every render. One global localStorage
+241:function readStoredDetailWidth(): number {
+243:    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
+253:function writeStoredDetailWidth(): void {
+255:    localStorage.setItem(DETAIL_WIDTH_KEY, String(detailWidth));
+268:function readStored(): Record<string, Point> {
+270:    return parseStoredLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
+276:function writeStored(): void {
+277:  const stored = readStored();
+280:    localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
+287:  const stored = readStored();
+302:  const stored = readStored();
+308:    localStorage.setItem(LAYOUT_KEY, JSON.stringify(stored));
+404:  if (drag.kind === "node" && drag.moved) writeStored();
+423:  detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
+1068:    writeStoredDetailWidth();
+[0m
+Let me look at how drawer height persistence is handled (the pattern Detail copies) and check for existing read/write helpers.
+[0m→ [0mRead ui/src/view.ts[90m [limit=30, offset=410][0m
+Let me look at the load path (line 423) and how the layout storage parse is extracted to project.ts as a precedent.
+[0m✱ [0mGrep "layoutStorageKey|LAYOUT_KEY|parseStoredLayout"[90m in ui/src · 2 matches[0m
+Let me look at the `layoutStorageKey` and `parseStoredLayout` precedent in project.ts for how storage keys/parse helpers are structured.
+[0m→ [0mRead ui/src/project.ts[90m [limit=30, offset=420][0m
+[0m
+[0m← [0mEdit ui/src/project.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.ts
+@@ -775,4 +775,21 @@
+  */
+ export function clampDetailWidth(px: number, maxPx: number): number {
+   return Math.min(maxPx, Math.max(DETAIL_MIN_PX, px));
+ }
++
++/**
++ * The Detail width persistence round trip: the width is stored as a plain
++ * number string under one global key, and a reload parses it back and clamps
++ * it to the current window. A missing, unparseable, or non-finite stored
++ * value falls back to the readable minimum.
++ */
++export function parseStoredDetailWidth(
++  raw: string | null,
++  maxPx: number,
++): number {
++  const parsed = raw == null ? Number.NaN : Number(raw);
++  return clampDetailWidth(
++    Number.isFinite(parsed) ? parsed : DETAIL_MIN_PX,
++    maxPx,
++  );
++}
+
+[0m
+Now I'll add a pure persistence-parse helper in project.ts and use it in view.ts, so the round trip is testable at the projection seam. Let me first add the helper.
+Now update view.ts to use the new helper, removing the duplicated parse logic.
+[0m✗ [0mInvalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool edit: JSON parsing failed: Text: {"filePath": "/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src.
+Error message: JSON Parse error: Unterminated string
+[0m
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
+@@ -14,8 +14,9 @@
+ DRAWER_DEFAULT_VH,
+ edgePath,
+ flowNeighbourhood,
+ mergeLayout,
++parseStoredDetailWidth,
+ parseStoredLayout,
+ strokeWidthForZoom,
+ layoutStorageKey,
+ logAtBottom,
+
+[0m
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/view.ts
+@@ -240,12 +240,12 @@
+ }
+ 
+ function readStoredDetailWidth(): number {
+   try {
+-    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
+-    if (raw == null) return DETAIL_MIN_PX;
+-    const n = Number(raw);
+-    return Number.isFinite(n) ? n : DETAIL_MIN_PX;
++    return parseStoredDetailWidth(
++      localStorage.getItem(DETAIL_WIDTH_KEY),
++      currentDetailMaxPx(),
++    );
+   } catch {
+     // quota or private mode: the default width applies
+     return DETAIL_MIN_PX;
+   }
+
+[0m
+[0m→ [0mRead ui/src/project.test.ts[90m [limit=75][0m
+Now add the round-trip test in project.test.ts, following the clampDetailWidth describe block precedent. Let me check the imports there.
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
+@@ -20,8 +20,9 @@
+ logAtBottom,
+ logTailOffset,
+ mergeLayout,
+ nextNodeSelection,
++parseStoredDetailWidth,
+ parseStoredLayout,
+ phaseLabel,
+ projectDetail,
+ projectLog,
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui/src/project.test.ts
+@@ -883,8 +883,36 @@
+     expect(clampDetailWidth(100000, Math.round(1440 * DETAIL_MAX_FRACTION))).toBe(1152);
+   });
+ });
+ 
++describe("parseStoredDetailWidth", () => {
++  it("round-trips a stored width string through a reload", () => {
++    // The write path stores String(detailWidth) under one global key; the
++    // read path parses it back and clamps to the current window. A stored
++    // 600 on a reload with the same window comes back as 600.
++    const maxPx = Math.round(1440 * DETAIL_MAX_FRACTION);
++    expect(parseStoredDetailWidth("600", maxPx)).toBe(600);
++  });
++
++  it("falls back to the minimum when nothing is stored", () => {
++    expect(parseStoredDetailWidth(null, 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("falls back to the minimum for a non-numeric or non-finite stored value", () => {
++    expect(parseStoredDetailWidth("abc", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("Infinity", 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("clamps a stored width that is out of range on reload", () => {
++    expect(parseStoredDetailWidth("10", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("5000", 1600)).toBe(1600);
++  });
++
++  it("tracks the window bound on a narrow window", () => {
++    expect(parseStoredDetailWidth("600", 200)).toBe(200);
++  });
++});
++
+ describe("nextNodeSelection", () => {
+   it("selects, swaps, and clears", () => {
+     expect(nextNodeSelection(null, "ticket:A")).toBe("ticket:A");
+     expect(nextNodeSelection("ticket:A", "ticket:B")).toBe("ticket:B");
+
+[0m
+Now add the persistence round-trip test after the clampDetailWidth describe block.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui && bun test 2>&1 | tail -10
+bun test v1.3.14 (0d9b296a)
+
+ 82 pass
+ 0 fail
+ 248 expect() calls
+Ran 82 tests across 1 file. [28.00ms]
+[0m
+Now let me run the UI tests and typecheck.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui && bunx tsc --noEmit 2>&1 | tail -5 && echo "UI typecheck OK" && bun run build 2>&1 | tail -8
+error TS2688: Cannot find type definition file for 'vite/client'.
+  The file is in the program because:
+    Entry point of type library 'vite/client' specified in compilerOptions
+UI typecheck OK
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && ls ui/node_modules 2>/dev/null | head -3; ls node_modules 2>/dev/null | head -3; ls ui/tsconfig.json; cat ui/tsconfig.json
+ui/tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "bun"]
+  },
+  "include": ["src"]
+}
+[0m
+The UI tooling isn't installed. Let me check where node_modules lives and how the CI/pool runs these.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && ls ui/node_modules/.bin 2>/dev/null | head; find . -maxdepth 3 -name "node_modules" -type d 2>/dev/null | head; ls ui/bun.lock 2>/dev/null; ls bun.lock 2>/dev/null
+ui/bun.lock
+bun.lock
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && cat .scratch/console/AGENT.md 2>/dev/null | head -60; echo "---gitignore---"; cat .gitignore 2>/dev/null | head -30
+# Runner agent instructions
+
+Every agent the runner starts gets this file appended to its system prompt. One agent works one
+Issue, then exits. The next agent starts fresh and reads this again.
+
+Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+
+## Your role
+
+You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
+subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
+through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
+and cursor they are whatever your user's own config defines under those names, so if a named agent
+does not exist, do the reading yourself rather than inventing one.
+
+**Write the substance of the Issue yourself.** The code that answers it, the test that pins the
+behaviour, the prose that lands in the repository and the commit message are all yours. This is
+deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller
+one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
+
+Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+
+## The state protocol
+
+Line 1 of your Issue file is a state marker:
+
+```
+<!-- state: id=NN blocked-by=.. status=.. -->
+```
+
+The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
+exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+
+If you exit without setting it, the runner treats that as a failure and halts.
+
+### Set `status=done` when
+
+Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
+cannot be met, the Issue is a `checkpoint`, not `done`.
+
+### Set `status=checkpoint` when
+
+- it needs a device, an emulator, or a live backend
+- it needs a write to an external system, or contact with anyone outside the codebase
+- it needs a decision the Issue and its context do not already settle
+- you would have to guess at something material to proceed
+- the build or the test suite fails for a reason the Issue does not cover
+
+Then **append a `## Brief` section to the bottom of the Issue** saying:
+
+1. what you completed, precisely
+2. what the human has to do
+3. what should happen after they have done it
+
+Keep the brief decision-ready. It is the report, not the raw work.
+
+## Write into the Issue, not only at the end
+
+**The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent
+reads the Issue.
+---gitignore---
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
+.scratch/console/runs/
+.scratch/console/verify-*.ts
+[0m
+Dependencies aren't installed in this worktree. Let me check the previous pool's run notes about how to install them.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && ls node_modules 2>/dev/null | wc -l; ls ui/node_modules 2>/dev/null | wc -l; echo "---"; cat .scratch/console/run.sh 2>/dev/null | grep -n "bun install\|install" | head
+0
+0
+---
+210:  # must be installed, and the harness must be able to reach the first driver.
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/node_modules 2>/dev/null | wc -l; ls /home/billy/repos/learning/ai-agent-graphs/ui/node_modules 2>/dev/null | wc -l; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/ 2>/dev/null | head
+187
+27
+18
+20
+22
+23
+25
+29
+31
+[0m
+The UI tests pass (82). The UI typecheck needs `vite/client` types. Let me check if dependencies are installed in the parent repo.
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/node_modules 2>/dev/null | wc -l; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/ui/node_modules 2>/dev/null | wc -l
+0
+20
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui && bun install 2>&1 | tail -5
++ bun-types@1.3.14
++ typescript@7.0.2
++ vite@8.2.1
+
+22 packages installed [22.00ms]
+[0m
+Worktree 29 has ui/node_modules. I need to install deps in my worktree to run the UI typecheck/build.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31/ui && bunx tsc --noEmit 2>&1 | tail -5 && echo "UI TYPECHECK OK" && bun run build 2>&1 | tail -8
+UI TYPECHECK OK
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-aLCzL345.js   29.24 kB │ gzip: 9.69 kB
+
+✓ built in 60ms
+[0m
+UI typecheck and build clean. Now the root-level typecheck and full test suite. Let me also check if root deps are needed.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bunx tsc --noEmit 2>&1 | tail -5 && echo "ROOT TYPECHECK OK"
+ROOT TYPECHECK OK
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -rn "—" engine/*.ts
+(no output)
+[0m
+Now task 4: re-check engine/server.ts for em dashes in prose. Let me search for em dashes.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && grep -n "best-effort\|registry write" engine/server.ts | head; echo "---also check UI and other engine files for em dash---"; grep -rn "—" engine/ ui/src/ 2>/dev/null | grep -v node_modules | head
+739:  // actually get bound. Registration is best-effort: a registry write that
+---also check UI and other engine files for em dash---
+[0m
+No em dashes anywhere in `engine/*.ts`. Let me double-check the specific area ticket 22 flagged (server.ts:676) is clean.
+The em dash is gone (ticket 29's fix used a colon). No em dashes remain in engine or UI source. Now let me run the full test suite to verify everything, then run the stress test again with all my fixes in place.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && bun test 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 226 pass
+ 0 fail
+ 834 expect() calls
+Ran 226 tests across 6 files. [17.46s]
+[0m
+Full suite passes with 226 tests (was 220). Now let me stress-test under concurrent load to confirm the resolver-rotation test is now deterministic.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6 7 8 9 10; do (timeout 180 bun test > /tmp/opencode/run-final-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-final-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 1
+pass 8
+pass 5
+pass 6
+pass 3
+pass 2
+pass 7
+pass 10
+pass 4
+pass 9
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff --stat && echo "=== untracked ===" && git status --short
+engine/engine.test.ts  |  6 ++++--
+ engine/server.test.ts  | 25 +++++++++++++++++++++++++
+ engine/server.ts       | 23 ++++++++++++++++++++---
+ ui/src/project.test.ts | 29 +++++++++++++++++++++++++++++
+ ui/src/project.ts      | 17 +++++++++++++++++
+ ui/src/view.ts         |  9 +++++----
+ 6 files changed, 100 insertions(+), 9 deletions(-)
+=== untracked ===
+ M engine/engine.test.ts
+ M engine/server.test.ts
+ M engine/server.ts
+ M ui/src/project.test.ts
+ M ui/src/project.ts
+ M ui/src/view.ts
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+[0m
+10/10 concurrent runs pass. Let me review the complete diff of my changes.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff engine/server.ts ui/src/project.ts ui/src/view.ts
+diff --git a/engine/server.ts b/engine/server.ts
+index 2b15c69..48c837d 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -292,6 +292,20 @@ function utf8End(bytes: Uint8Array, start: number, end: number): number {
+   return cut;
+ }
+ 
++/**
++ * Trim a raw byte slice so no multi-byte UTF-8 char straddles its head: a
++ * range that begins on a continuation byte drops the partial char and starts
++ * at the next lead byte, so the pane head never decodes as U+FFFD. The byte
++ * count removed is reported back so the caller can adjust the served offset.
++ */
++function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
++  let cut = start;
++  while (cut < end && (bytes[cut] & 0xc0) === 0x80) {
++    cut += 1;
++  }
++  return cut - start;
++}
++
+ /**
+  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
+  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
+@@ -316,10 +330,13 @@ async function readLogRange(
+       : start + LOG_CHUNK_BYTES;
+   const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
+   const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
+-  const decodeEnd = utf8End(bytes, 0, bytes.length);
++  const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
++  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
+   return {
+-    content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
+-    offset: start,
++    content: stripAnsi(
++      new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
++    ),
++    offset: start + headTrim,
+     nextOffset: start + decodeEnd,
+     totalSize,
+   };
+diff --git a/ui/src/project.ts b/ui/src/project.ts
+index 3de559c..04dc135 100644
+--- a/ui/src/project.ts
++++ b/ui/src/project.ts
+@@ -776,3 +776,20 @@ export const DETAIL_MAX_FRACTION = 0.8;
+ export function clampDetailWidth(px: number, maxPx: number): number {
+   return Math.min(maxPx, Math.max(DETAIL_MIN_PX, px));
+ }
++
++/**
++ * The Detail width persistence round trip: the width is stored as a plain
++ * number string under one global key, and a reload parses it back and clamps
++ * it to the current window. A missing, unparseable, or non-finite stored
++ * value falls back to the readable minimum.
++ */
++export function parseStoredDetailWidth(
++  raw: string | null,
++  maxPx: number,
++): number {
++  const parsed = raw == null ? Number.NaN : Number(raw);
++  return clampDetailWidth(
++    Number.isFinite(parsed) ? parsed : DETAIL_MIN_PX,
++    maxPx,
++  );
++}
+diff --git a/ui/src/view.ts b/ui/src/view.ts
+index 6de4be4..490a0e1 100644
+--- a/ui/src/view.ts
++++ b/ui/src/view.ts
+@@ -15,6 +15,7 @@ import {
+   edgePath,
+   flowNeighbourhood,
+   mergeLayout,
++  parseStoredDetailWidth,
+   parseStoredLayout,
+   strokeWidthForZoom,
+   layoutStorageKey,
+@@ -240,10 +241,10 @@ function currentDetailMaxPx(): number {
+ 
+ function readStoredDetailWidth(): number {
+   try {
+-    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
+-    if (raw == null) return DETAIL_MIN_PX;
+-    const n = Number(raw);
+-    return Number.isFinite(n) ? n : DETAIL_MIN_PX;
++    return parseStoredDetailWidth(
++      localStorage.getItem(DETAIL_WIDTH_KEY),
++      currentDetailMaxPx(),
++    );
+   } catch {
+     // quota or private mode: the default width applies
+     return DETAIL_MIN_PX;
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff engine/server.test.ts ui/src/project.test.ts
+diff --git a/engine/server.test.ts b/engine/server.test.ts
+index e9e215d..4ac374e 100644
+--- a/engine/server.test.ts
++++ b/engine/server.test.ts
+@@ -421,6 +421,31 @@ describe("ticket log endpoint", () => {
+     expect(secondBody.content).not.toContain("\uFFFD");
+   });
+ 
++  it("does not split a multi-byte UTF-8 character at a range's head", async () => {
++    const poolDir = makePool([{ file: "01-a.md", marker }]);
++    const runsDir = join(poolDir, "runs");
++    mkdirSync(runsDir, { recursive: true });
++    // é = U+00E9 is two bytes, at byte offsets 10 and 11. A tail-first open or
++    // load-earlier read can request an offset mid-character: a range starting
++    // at byte 11 (a continuation byte) must drop the partial char and report
++    // the adjusted offset, so the pane head never decodes as U+FFFD.
++    writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=11`);
++    const body = (await res.json()) as {
++      content: string;
++      offset: number;
++      nextOffset: number;
++      totalSize: number;
++    };
++    expect(body.content).toBe(" tail\n");
++    expect(body.content).not.toContain("\uFFFD");
++    expect(body.offset).toBe(12);
++    expect(body.nextOffset).toBe(18);
++    expect(body.totalSize).toBe(18);
++  });
++
+   it("returns empty content for an offset at or past the end", async () => {
+     const poolDir = makePool([{ file: "01-a.md", marker }]);
+     const runsDir = join(poolDir, "runs");
+diff --git a/ui/src/project.test.ts b/ui/src/project.test.ts
+index 37ce1ea..db08935 100644
+--- a/ui/src/project.test.ts
++++ b/ui/src/project.test.ts
+@@ -21,6 +21,7 @@ import {
+   logTailOffset,
+   mergeLayout,
+   nextNodeSelection,
++  parseStoredDetailWidth,
+   parseStoredLayout,
+   phaseLabel,
+   projectDetail,
+@@ -883,6 +884,34 @@ describe("clampDetailWidth", () => {
+   });
+ });
+ 
++describe("parseStoredDetailWidth", () => {
++  it("round-trips a stored width string through a reload", () => {
++    // The write path stores String(detailWidth) under one global key; the
++    // read path parses it back and clamps to the current window. A stored
++    // 600 on a reload with the same window comes back as 600.
++    const maxPx = Math.round(1440 * DETAIL_MAX_FRACTION);
++    expect(parseStoredDetailWidth("600", maxPx)).toBe(600);
++  });
++
++  it("falls back to the minimum when nothing is stored", () => {
++    expect(parseStoredDetailWidth(null, 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("falls back to the minimum for a non-numeric or non-finite stored value", () => {
++    expect(parseStoredDetailWidth("abc", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("Infinity", 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("clamps a stored width that is out of range on reload", () => {
++    expect(parseStoredDetailWidth("10", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("5000", 1600)).toBe(1600);
++  });
++
++  it("tracks the window bound on a narrow window", () => {
++    expect(parseStoredDetailWidth("600", 200)).toBe(200);
++  });
++});
++
+ describe("nextNodeSelection", () => {
+   it("selects, swaps, and clears", () => {
+     expect(nextNodeSelection(null, "ticket:A")).toBe("ticket:A");
+[0m
+Let me review the test diffs.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff engine/engine.test.ts
+diff --git a/engine/engine.test.ts b/engine/engine.test.ts
+index 9aa0407..04db2df 100644
+--- a/engine/engine.test.ts
++++ b/engine/engine.test.ts
+@@ -2104,10 +2104,12 @@ describe("worktrees", () => {
+         "fi",
+         'if [ -n "$WAIT_MERGED" ]; then',
+         "  for _ in $(seq 1 100); do",
+-        '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
++        '    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '    case "$log" in *"$WAIT_MERGED"*) break;; esac',
+         "    sleep 0.05",
+         "  done",
+-        '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
++        '  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
+         "fi",
+         'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+         'if [ -n "$RECORD_DIR" ]; then',
+[0m
+Let me view the final engine.test.ts diff.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff | grep -n "—" | head
+(no output)
+[0m
+Let me verify my added prose contains no em dashes (a runner convention), then run one final full verification.
+No em dashes. All four fixes are in. Let me do a final consolidated verification: full suite + both typechecks + UI build together.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && echo "=== ROOT TYPECHECK ===" && bunx tsc --noEmit && echo OK && echo "=== UI TYPECHECK ===" && (cd ui && bunx tsc --noEmit) && echo OK && echo "=== UI BUILD ===" && (cd ui && bun run build 2>&1 | tail -3) && echo "=== FULL TEST SUITE ===" && bun test 2>&1 | tail -6
+=== ROOT TYPECHECK ===
+OK
+=== UI TYPECHECK ===
+OK
+=== UI BUILD ===
+dist/assets/index-aLCzL345.js   29.24 kB │ gzip: 9.69 kB
+
+✓ built in 44ms
+=== FULL TEST SUITE ===
+bun test v1.3.14 (0d9b296a)
+
+ 226 pass
+ 0 fail
+ 834 expect() calls
+Ran 226 tests across 6 files. [17.39s]
+[0m
+All green. Let me run one more larger stress batch on the flaky test to be fully confident, and confirm nothing in the worktree is accidentally tracked.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && for i in 1 2 3 4 5 6 7 8; do (timeout 180 bun test > /tmp/opencode/run-stress-$i.log 2>&1; if grep -q " 1 fail" /tmp/opencode/run-stress-$i.log; then echo "FAIL $i"; else echo "pass $i"; fi) & done; wait
+pass 4
+pass 2
+pass 8
+pass 7
+pass 3
+pass 5
+pass 6
+pass 1
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+36 consecutive concurrent full-suite runs pass. The flake is fixed. Now let me update the Issue file: tick the acceptance criteria, add notes, and set the state marker.
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=31 blocked-by=29 status=in-progress -->
++<!-- state: id=31 blocked-by=29 status=done -->
+ 
+ # 31 — Ticket-log batch review fixes
+ 
+ Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`. Source: ticket 22's review (`.scratch/console-pool/issues/22-review-pass-ticket-log-detail.md`), which Billy's standing pattern sends to a follow-up ticket, mirroring ticket 29 for the fleet batch.
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/31-ticket-log-review-fixes.md
+@@ -15,13 +15,13 @@
+ Also: after ticket 29 lands, re-check engine/server.ts for em dashes in prose (ticket 22 flagged one at line 676, in the same comment ticket 29 already rewords) and confirm none remain.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] The resolver-rotation test passes under repeated full-suite parallel runs
+-- [ ] Log range reads never split a multi-byte UTF-8 character at the head of a range; regression test added
+-- [ ] A test pins Detail width persistence across reloads
+-- [ ] No em dashes in engine/server.ts prose
+-- [ ] Full test suite, typecheck, and build clean
++- [x] The resolver-rotation test passes under repeated full-suite parallel runs
++- [x] Log range reads never split a multi-byte UTF-8 character at the head of a range; regression test added
++- [x] A test pins Detail width persistence across reloads
++- [x] No em dashes in engine/server.ts prose
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 29 — Fleet batch review fixes (both touch engine/server.ts; run after it to keep the merges simple)
+@@ -29,4 +29,11 @@
+ ## Notes
+ 
+ - Deliberately out of scope, deferred to Billy: story 6's claim that the live tail is not truly live mid-attempt (snapshots appear to broadcast only at super-step boundaries — a streaming-cadence design question, not a small fix), and story 3's wording nit. Both are recorded in ticket 22's Notes.
+ - The baseline smells in ticket 22's Standards section (duplicated pidIsLive, the 64 KiB constant pair, and friends) stay deferred; this ticket is the three defects, not a refactor.
++
++## Notes (implementation)
++
++- Deflake root cause, proven: the gitStubHarness WAIT_MERGED poll ran `git log | grep -q` under `set -o pipefail`. `grep -q` closes the pipe the instant it matches, git log then dies on SIGPIPE (141), and pipefail reports the whole pipeline as failed even though the match was found. So the "wait for the sibling's merge" check could spuriously give up (exit 42) and crash ticket 02, which is exactly the missing second merge-approval. Reproduced under concurrent bun test processes (failed ~3-4 of 6), then after the fix passed 36 consecutive concurrent full-suite runs. The fix captures git log to a shell variable and matches with `case`, which is pipe-free and deterministic. This was a test-stub bug, not an engine defect, confirming ticket 22's inference.
++- UTF-8 head fix: `readLogRange` now head-trims via `utf8HeadTrim` (skips a leading continuation byte) and reports `offset = start + headTrim`, so a tail-first open or load-earlier read that starts mid-character drops the partial char and reports the adjusted offset instead of decoding U+FFFD. The tail trim is unchanged.
++- Detail width persistence: moved the parse-and-clamp of the stored `console-detail-width` string into a pure `parseStoredDetailWidth` in project.ts, used by view.ts's readStoredDetailWidth, and pinned the round trip (stored string -> parsed -> clamped) at the projection seam in project.test.ts.
++- Em dash: none remain in engine/*.ts; ticket 29's colon reword holds at server.ts:739.
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git status --short && echo "---check ignored---" && git check-ignore ui/node_modules ui/dist node_modules 2>&1
+M engine/engine.test.ts
+ M engine/server.test.ts
+ M engine/server.ts
+ M ui/src/project.test.ts
+ M ui/src/project.ts
+ M ui/src/view.ts
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+---check ignored---
+ui/node_modules
+ui/dist
+[0m
+Let me verify the gitignore covers my installed deps and build output, then run the full verification one final time before committing.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git check-ignore .scratch/console-pool/issues/31-ticket-log-review-fixes.md && echo "scratch ignored"; echo "---"; git status --short
+---
+ M engine/engine.test.ts
+ M engine/server.test.ts
+ M engine/server.ts
+ M ui/src/project.test.ts
+ M ui/src/project.ts
+ M ui/src/view.ts
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+[0m
+The `.scratch/` issue file is untracked and must not be committed (per job constraints). Let me check that `.scratch/` is ignored, then verify the final state of everything before committing.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git ls-files .scratch/ | head; echo "--- tracked count ---"; git ls-files .scratch/ | wc -l
+.scratch/console-pool/AGENT.md
+.scratch/console-pool/console.json
+.scratch/console-pool/issues/01-pool-engine-skeleton.md
+.scratch/console-pool/issues/02-interrupt-engine.md
+.scratch/console-pool/issues/03-durability.md
+.scratch/console-pool/issues/04-harness-spawn-kernel.md
+.scratch/console-pool/issues/05-worktrees-parallel.md
+.scratch/console-pool/issues/06-resolver-agent.md
+.scratch/console-pool/issues/07-server-and-pool-ui.md
+.scratch/console-pool/issues/08-inline-interrupts-ui.md
+--- tracked count ---
+37
+[0m
+`.scratch/` isn't gitignored and the issue file is untracked. The job constraint says never commit `.scratch/`. Let me check whether prior issue files were committed or left untracked.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git show --stat 7a4b1fc | head -30; echo "---"; git log --oneline -3 -- .scratch/console-pool/issues/29-fleet-batch-review-fixes.md
+commit 7a4b1fcaa4fc26aacd1f31a5f76873001746ce78
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 13:41:21 2026 +0100
+
+    console: harden pool lock, port conflict, and fleet registry writes
+
+ engine/fleet.test.ts  |  41 ++++++++++-
+ engine/fleet.ts       |  97 ++++++++++++++++++++++--
+ engine/server.test.ts | 200 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts      |  97 +++++++++++++++++++-----
+ 4 files changed, 407 insertions(+), 28 deletions(-)
+---
+[0m
+Issue files are tracked. Let me check what ticket 29's commit included for its issue file, to follow the convention.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git ls-files .scratch/console-pool/issues/ | tail -8
+.scratch/console-pool/issues/08-inline-interrupts-ui.md
+.scratch/console-pool/issues/09-final-review-interrupt.md
+.scratch/console-pool/issues/10-console-runner-skill.md
+.scratch/console-pool/issues/11-review-pass.md
+.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+.scratch/console-pool/issues/13-stream-stays-connected.md
+.scratch/console-pool/issues/14-flow-neighbourhood-highlight.md
+.scratch/console-pool/issues/15-skill-mac-linux.md
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git diff --stat
+engine/engine.test.ts  |  6 ++++--
+ engine/server.test.ts  | 25 +++++++++++++++++++++++++
+ engine/server.ts       | 23 ++++++++++++++++++++---
+ ui/src/project.test.ts | 29 +++++++++++++++++++++++++++++
+ ui/src/project.ts      | 17 +++++++++++++++++
+ ui/src/view.ts         |  9 +++++----
+ 6 files changed, 100 insertions(+), 9 deletions(-)
+[0m
+Issues 16+ (the pool-run batch) are untracked and stay out of commits per the job constraint. Only the engine and UI source changes get committed. Let me do the final full verification pass and review the complete diff once more.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git add engine/engine.test.ts engine/server.test.ts engine/server.ts ui/src/project.test.ts ui/src/project.ts ui/src/view.ts && git status --short
+M  engine/engine.test.ts
+M  engine/server.test.ts
+M  engine/server.ts
+M  ui/src/project.test.ts
+M  ui/src/project.ts
+M  ui/src/view.ts
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+[0m
+Now let me commit. The `.scratch/` issue file must stay untracked (never commit `.scratch/` per job constraints), so I stage only the six source/test files.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git commit -m "console: deflake resolver rotation, fix UTF-8 log head, pin detail width" && git log --oneline -1
+[pool/31 aec2f65] console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+ 6 files changed, 100 insertions(+), 9 deletions(-)
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+[0m
+Committed. Let me run a final full verification post-commit to be certain.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/31 && git status --short && echo "--- branch ---" && git branch --show-current && echo "--- suite ---" && bun test 2>&1 | tail -5
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+--- branch ---
+pool/31
+--- suite ---
+
+ 226 pass
+ 0 fail
+ 834 expect() calls
+Ran 226 tests across 6 files. [17.39s]
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool && mkdir -p runs && cat > runs/31.outcome.json <<'EOF'
+{"summary": "All three ticket-log review fixes landed: deflaked the resolver-rotation test (gitStubHarness WAIT_MERGED raced on SIGPIPE under pipefail, so a merge-approval could be missed; now matches git log via a captured variable), fixed the UTF-8 head-boundary defect in readLogRange (head-trim + adjusted offset, regression test added), and pinned Detail width persistence via a pure parseStoredDetailWidth at the projection seam. Em-dash sweep clean. 226 tests, both typechecks, and the UI build pass; 36 consecutive concurrent full-suite runs green.", "commitSha": "aec2f65"}
+EOF
+cat runs/31.outcome.json
+{"summary": "All three ticket-log review fixes landed: deflaked the resolver-rotation test (gitStubHarness WAIT_MERGED raced on SIGPIPE under pipefail, so a merge-approval could be missed; now matches git log via a captured variable), fixed the UTF-8 head-boundary defect in readLogRange (head-trim + adjusted offset, regression test added), and pinned Detail width persistence via a pure parseStoredDetailWidth at the projection seam. Em-dash sweep clean. 226 tests, both typechecks, and the UI build pass; 36 consecutive concurrent full-suite runs green.", "commitSha": "aec2f65"}
+[0m
+Now write the outcome JSON.
+Issue 31 is done. Summary:
+
+**1. Deflaked the resolver-rotation test.** Root cause (proven by reproduction under concurrent `bun test` processes): the `gitStubHarness` WAIT_MERGED poll ran `git log | grep -q` under `set -o pipefail`. When `grep -q` matched it closed the pipe, git log died on SIGPIPE (141), and pipefail reported the pipeline as failed despite the match — so ticket 02's "wait for the sibling's merge" could spuriously exit 42, killing the second merge-approval. Fixed by capturing git log into a shell variable and matching with `case`, which is pipe-free. Before: ~3-4 failures per 6 concurrent runs. After: 36 consecutive concurrent full-suite runs green. This was a test-stub bug, not an engine defect, confirming ticket 22's inference.
+
+**2. UTF-8 head-boundary fix.** `readLogRange` now head-trims via a new `utf8HeadTrim` (drops a leading continuation byte) and reports `offset = start + headTrim`, so a tail-first open or load-earlier read that starts mid-character never decodes U+FFFD at the pane head. Regression test added beside the existing boundary tests.
+
+**3. Detail width persistence pinned.** Moved parse-and-clamp of the stored `console-detail-width` string into a pure `parseStoredDetailWidth` in project.ts (used by view.ts), and pinned the round trip at the projection seam in project.test.ts.
+
+**4. Em dashes.** None remain in `engine/*.ts`; ticket 29's colon reword holds.
+
+All five acceptance criteria ticked in the Issue; state set to `done`; committed as `aec2f65` on `pool/31` (outcome JSON written).

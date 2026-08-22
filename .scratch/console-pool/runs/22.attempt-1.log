@@ -1,0 +1,223 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+[0m
+[0m$ [0mgit status && git log --oneline -12 && git branch --show-current
+On branch main
+Your branch is ahead of 'origin/main' by 4 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/console-pool/console.json
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/console.db
+	.scratch/console-pool/issues/16-per-ticket-event-timeline.md
+	.scratch/console-pool/issues/17-attempt-log-retention.md
+	.scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+	.scratch/console-pool/issues/19-live-log-tailing.md
+	.scratch/console-pool/issues/20-resizable-detail.md
+	.scratch/console-pool/issues/21-fullscreen-detail.md
+	.scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+	.scratch/console-pool/issues/23-engine-pool-lock.md
+	.scratch/console-pool/issues/24-pinned-pool-ports.md
+	.scratch/console-pool/issues/25-fleet-registry.md
+	.scratch/console-pool/issues/26-fleet-list-command.md
+	.scratch/console-pool/issues/27-skill-fleet-conventions.md
+	.scratch/console-pool/issues/28-review-pass-fleet-batch.md
+	.scratch/console-pool/issues/29-fleet-review-fixes.md
+	.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+	.scratch/console-pool/runs/
+	.scratch/console-pool/spec-fleet-of-consoles.md
+	.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+	docs/adr/
+	ui/src/prototype/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+a10b68e console: glossary — Pool, Fleet; one Console per pool
+b7f5148 console: add fleet list command that prints live pools
+d85baf3 console: raw log pane in the ticket Detail
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+main
+[0m
+[0m→ [0mRead /home/billy/.agents/skills/code-review/SKILL.md
+[0m
+[0m$ [0mgit log --oneline ae6f99f~1..HEAD && echo --- && git show ae6f99f --stat --oneline | head -20
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+a10b68e console: glossary — Pool, Fleet; one Console per pool
+b7f5148 console: add fleet list command that prints live pools
+d85baf3 console: raw log pane in the ticket Detail
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+---
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+ engine/engine.test.ts  | 278 +++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/engine.ts       | 179 +++++++++++++++++++++++++++----
+ engine/events.ts       |  95 +++++++++++++++++
+ engine/server.test.ts  |  76 ++++++++++++++
+ engine/server.ts       |  80 +++++++++++++-
+ ui/src/client.ts       |  15 ++-
+ ui/src/main.ts         |  78 ++++++++++++++
+ ui/src/project.test.ts | 120 +++++++++++++++++++++
+ ui/src/project.ts      | 106 +++++++++++++++++++
+ ui/src/styles.css      |  65 ++++++++++++
+ ui/src/view.ts         |  83 ++++++++++++++-
+ 11 files changed, 1154 insertions(+), 21 deletions(-)
+[0m
+[0m→ [0mRead .scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m
+[0m$ [0mgit log --oneline ae6f99f^ -1 && echo --- && git show ae6f99f^ --stat --oneline | head -5 && echo --- && ls docs/adr/ .scratch/console-pool/runs/ 2>/dev/null && echo --- && git log --oneline --all --graph | head -40
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+---
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+ CONTEXT.md | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+---
+docs/adr/:
+0001-one-console-per-pool.md
+0002-ticket-log-storage.md
+
+.scratch/console-pool/runs/:
+01.log
+02.log
+03.log
+04.log
+05.log
+06.log
+07.log
+08.log
+09.log
+10.log
+10.outcome.json
+11.log
+11.outcome.json
+12.log
+12.outcome.json
+13.log
+13.outcome.json
+14.log
+14.outcome.json
+15.log
+15.outcome.json
+16.log
+16.outcome.json
+16.resolver.json
+16.resolver.log
+17.events.jsonl
+17.log
+17.outcome.json
+18.events.jsonl
+18.log
+18.outcome.json
+19.attempt-1.log
+19.events.jsonl
+19.log
+19.outcome.json
+20.log
+20.outcome.json
+21.events.jsonl
+21.log
+21.outcome.json
+22.events.jsonl
+22.log
+23.log
+23.outcome.json
+24.events.jsonl
+24.log
+24.outcome.json
+25.events.jsonl
+25.log
+25.outcome.json
+26.events.jsonl
+26.log
+26.outcome.json
+27.events.jsonl
+27.log
+27.outcome.json
+28.attempt-1.log
+28.events.jsonl
+28.log
+28.outcome.json
+server.log
+server.pid
+---
+* f510b09 console: live-tail the ticket log pane on the snapshot cadence
+*   b832f08 Merge branch 'pool/18'
+|\  
+| * d85baf3 console: raw log pane in the ticket Detail
+| | * e13f9be On main: throwaway prototype: ticket body endpoint + ui bits
+| |/| 
+|/| | 
+| | * c146d7e index on main: a10b68e console: glossary — Pool, Fleet; one Console per pool
+| |/  
+|/|   
+* | a10b68e console: glossary — Pool, Fleet; one Console per pool
+* | b7f5148 console: add fleet list command that prints live pools
+* | ff3d0a8 console: register each bound server in the machine-wide fleet registry
+|/  
+*   5b01388 Merge branch 'pool/24'
+|\  
+| * 1da30a6 console: resolve pool port from flag, console.json pin, or next free
+* |   4f99aad Merge branch 'pool/17'
+|\ \  
+| * | 9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+| |/  
+* |   31267a1 Merge branch 'pool/21'
+|\ \  
+| * | 7c9637c console: fullscreen Detail mode via a header toggle
+| |/  
+* / 4263f89 console: resolve pool port from flag, console.json pin, or next free
+|/  
+*   8d00da7 console-pool: merge ticket 23 (engine pool lock)
+|\  
+| * 7d37820 console: enforce one server per pool with a pid-file lock
+* |   a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+|\ \  
+| * | 0382112 console: resizable Detail panel via a left-edge drag handle
+| |/  
+* / ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+|/  
+* b084321 console: glossary — Attempt, Ticket log; Detail resizable
+* 88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+* c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+* c63885c console: light up the selection's flow neighbourhood
+[0m
+[0m$ [0mfor sha in ae6f99f 9d760f9 d85baf3 0382112 7c9637c f510b09; do git show $sha; done > /tmp/opencode/review-22.diff && wc -l /tmp/opencode/review-22.diff && ls CODING_STANDARDS.md CONTRIBUTING.md AGENTS.md NOTES.md 2>&1; echo ---; git diff b084321..HEAD --stat | tail -5
+4526 /tmp/opencode/review-22.diff
+ls: cannot access 'CODING_STANDARDS.md': No such file or directory
+ls: cannot access 'CONTRIBUTING.md': No such file or directory
+ls: cannot access 'AGENTS.md': No such file or directory
+NOTES.md
+---
+ ui/src/project.test.ts   | 345 +++++++++++++++++++++++
+ ui/src/project.ts        | 284 +++++++++++++++++++
+ ui/src/styles.css        | 189 ++++++++++++-
+ ui/src/view.ts           | 402 ++++++++++++++++++++++++++-
+ 18 files changed, 4143 insertions(+), 98 deletions(-)
+[0m
+[0m→ [0mRead docs/adr/0002-ticket-log-storage.md

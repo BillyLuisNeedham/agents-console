@@ -1,0 +1,658 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/code-review/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+[0m
+[0m# [0mTodos
+[•] Read context: spec, ticket 28 brief, ticket 29 commit diff
+[ ] Run Standards + Spec review sub-agents in parallel over 7a4b1fc
+[ ] Live-verify ticket 29's four fixes against temp pools
+[ ] Re-verify spec stories 1, 2, 7, 10 end to end
+[ ] CONTEXT.md vocabulary check
+[ ] Run bun test, tsc --noEmit, ui build
+[ ] Write Notes/Brief into Issue 30, set state, commit, outcome JSON
+[0m
+[0m$ [0mgit branch --show-current && git log --oneline -5 && git status --short | head -20
+pool/30
+f9fda2b Merge branch 'pool/29'
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+2e51fe1 console: record ADRs 0001 (one console per pool) and 0002 (ticket log storage)
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+?? .scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+[0m
+[0m✗ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-fleet-batch-review.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-fleet-batch-review.md
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+16-per-ticket-event-timeline.md
+17-attempt-log-retention.md
+18-raw-log-pane-in-detail.md
+19-live-log-tailing.md
+20-resizable-detail.md
+21-fullscreen-detail.md
+22-review-pass-ticket-log-detail.md
+23-engine-pool-lock.md
+24-pinned-pool-ports.md
+25-fleet-registry.md
+26-fleet-list-command.md
+27-skill-fleet-conventions.md
+28-review-pass-fleet-batch.md
+29-fleet-review-fixes.md
+30-review-pass-fleet-fixes.md
+31-ticket-log-review-fixes.md
+32-review-pass-ticket-log-fixes.md
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-review-pass-fleet-batch.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m
+[0m$ [0mgit show 7a4b1fc --stat && ls /home/billy/repos/learning/ai-agent-graphs/CODING_STANDARDS.md /home/billy/repos/learning/ai-agent-graphs/CONTRIBUTING.md 2>&1
+commit 7a4b1fcaa4fc26aacd1f31a5f76873001746ce78
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 13:41:21 2026 +0100
+
+    console: harden pool lock, port conflict, and fleet registry writes
+
+ engine/fleet.test.ts  |  41 ++++++++++-
+ engine/fleet.ts       |  97 ++++++++++++++++++++++--
+ engine/server.test.ts | 200 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts      |  97 +++++++++++++++++++-----
+ 4 files changed, 407 insertions(+), 28 deletions(-)
+ls: cannot access '/home/billy/repos/learning/ai-agent-graphs/CODING_STANDARDS.md': No such file or directory
+ls: cannot access '/home/billy/repos/learning/ai-agent-graphs/CONTRIBUTING.md': No such file or directory
+[0m
+[0m• [0mStandards review of 7a4b1fc[90m Deepseek Agent[0m
+[0m• [0mSpec review of 7a4b1fc[90m Deepseek Agent[0m
+Dispatching both review sub-agents in parallel over commit 7a4b1fc.
+[0m✓ [0mStandards review of 7a4b1fc[90m Deepseek Agent[0m
+[0m✓ [0mSpec review of 7a4b1fc[90m Deepseek Agent[0m
+[0m
+[0m$ [0mgit diff 7a4b1fc~1...7a4b1fc -- engine/server.ts | head -250
+diff --git a/engine/server.ts b/engine/server.ts
+index d0bcb9f..2b15c69 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -25,6 +25,7 @@ import { readEvents, type TicketEvent } from "./events.ts";
+ import {
+   defaultRegistryPath,
+   readFleetEntry,
++  readFleetEntryByPort,
+   upsertFleetEntry,
+ } from "./fleet.ts";
+ import { loadPoolMarkers } from "./pool.ts";
+@@ -435,20 +436,28 @@ function isAddressInUse(err: unknown): boolean {
+ 
+ /**
+  * Bind the pool server per the resolution. A pinned port that is busy is a
+- * hard failure naming the port; only the unpinned path hunts upward from the
+- * default for a free one. Port 0 means "any free port" (Bun ephemeral).
++ * hard failure naming the port and, when the fleet registry knows the holder,
++ * the conflicting pool directory and pid; only the unpinned path hunts upward
++ * from the default for a free one. Port 0 means "any free port" (Bun
++ * ephemeral).
+  */
+ function bindPoolServer(
+   resolution: PortResolution,
+   serve: (port: number) => Bun.Server<undefined>,
++  registryPath: string,
+ ): Bun.Server<undefined> {
+   if (resolution.pinned) {
+     try {
+       return serve(resolution.port);
+     } catch (err) {
+       if (isAddressInUse(err)) {
++        const holder = readFleetEntryByPort(registryPath, resolution.port);
++        const holderText = holder
++          ? ` by pool ${holder.poolDir} (pid ${holder.pid})`
++          : "";
+         throw new Error(
+-          `port ${resolution.port} is already in use; free it or pass a different --port`,
++          `port ${resolution.port} is already in use${holderText}; ` +
++            "free it or pass a different --port",
+         );
+       }
+       throw err;
+@@ -472,20 +481,50 @@ function bindPoolServer(
+  * message naming that pid, its fleet-registry port when known, and the pool
+  * directory. Otherwise claim the pool by writing our own pid. There is no
+  * force override: a live lock always means use the running console or kill it.
++ *
++ * The claim is atomic (O_EXCL create), so two near-simultaneous launches of
++ * the same pool cannot both pass. A stale lock is cleared only when it still
++ * names a dead pid or is still unreadable after a beat, so a lock another
++ * server is mid-way through claiming is never trampled.
+  */
+ function acquirePoolLock(poolDir: string, registryPath: string): void {
+-  const livePid = readLockedPid(poolDir);
+-  if (livePid !== null && pidIsLive(livePid)) {
+-    const entry = readFleetEntry(registryPath, poolDir, livePid);
+-    const portText = entry ? ` on port ${entry.port}` : "";
+-    throw new Error(
+-      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
+-        "open the running console or kill it",
+-    );
++  const pidPath = join(poolDir, "runs", "server.pid");
++  mkdirSync(join(poolDir, "runs"), { recursive: true });
++  for (let attempt = 0; attempt < 5; attempt += 1) {
++    try {
++      writeFileSync(pidPath, `${process.pid}\n`, { flag: "wx" });
++      return;
++    } catch (err) {
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
++    }
++    const holder = readLockedPid(poolDir);
++    if (holder !== null) {
++      if (pidIsLive(holder)) {
++        const entry = readFleetEntry(registryPath, poolDir, holder);
++        const portText = entry ? ` on port ${entry.port}` : "";
++        throw new Error(
++          `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
++            "open the running console or kill it",
++        );
++      }
++      // A dead holder is a stale lock. Remove it only if it still names the
++      // same dead pid on re-read: a live server may have claimed it since.
++      if (readLockedPid(poolDir) === holder) {
++        rmSync(pidPath, { force: true });
++      }
++      continue;
++    }
++    // Empty or unreadable: a writer may be mid-claim, its pid landing within
++    // microseconds. Wait a beat and re-read; a lock still empty afterwards is
++    // garbage from a crashed or bogus earlier state, and is cleared.
++    Bun.sleepSync(25);
++    if (readLockedPid(poolDir) === null) {
++      rmSync(pidPath, { force: true });
++    }
+   }
+-  const runsDir = join(poolDir, "runs");
+-  mkdirSync(runsDir, { recursive: true });
+-  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
++  throw new Error(
++    `pool ${poolDir}: could not claim the pool lock after five attempts`,
++  );
+ }
+ 
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+@@ -556,7 +595,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+   );
+   let server: Bun.Server<undefined>;
+   try {
+-    server = bindPoolServer(resolution, (port) =>
++    server = bindPoolServer(
++      resolution,
++      (port) =>
+       Bun.serve({
+         port,
+       async fetch(req, bunServer) {
+@@ -663,17 +704,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+         return new Response("not found", { status: 404 });
+       },
+       }),
++      registryPath,
+     );
+   } catch (err) {
+     // The lock was claimed before the bind; a bind that never happened must
+-    // not leave a live-looking pid behind, or the next launch refuses itself.
+-    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++    // not leave our own live-looking pid behind, or the next launch refuses
++    // itself. Only our pid is removed: a lock another live server holds must
++    // survive this launch's failure.
++    if (readLockedPid(poolDir) === process.pid) {
++      rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++    }
+     throw err;
+   }
+ 
+   // The bind succeeded, so the pool is live and advertises itself. Boot order
+   // is lock -> bind -> register: the registry never names a port that did not
+-  // actually get bound. Registration is best-effort — a registry write that
++  // actually get bound. Registration is best-effort: a registry write that
+   // fails must not take down a console that already bound successfully.
+   const boundPort = server.port;
+   if (boundPort !== undefined) {
+@@ -709,15 +755,26 @@ export function runServerCli(): void {
+   const args = process.argv.slice(2);
+   const poolIndex = args.indexOf("--pool");
+   const portIndex = args.indexOf("--port");
++  const registryIndex = args.indexOf("--registry");
+   const poolDir = poolIndex >= 0 ? args[poolIndex + 1] : undefined;
+   const port = portIndex >= 0 ? Number(args[portIndex + 1]) : undefined;
++  const registryPath =
++    registryIndex >= 0 && args[registryIndex + 1]
++      ? args[registryIndex + 1]
++      : undefined;
+   if (!poolDir) {
+-    console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
++    console.error(
++      "usage: bun run engine/server.ts --pool <dir> [--port <n>] [--registry <file>]",
++    );
+     process.exit(1);
+   }
+   let server: PoolServer;
+   try {
+-    server = createPoolServer({ poolDir, ...(port !== undefined ? { port } : {}) });
++    server = createPoolServer({
++      poolDir,
++      ...(port !== undefined ? { port } : {}),
++      ...(registryPath !== undefined ? { registryPath } : {}),
++    });
+   } catch (err) {
+     console.error(err instanceof Error ? err.message : String(err));
+     process.exit(1);
+[0m
+Both axes reported. Now I'll read the server CLI surface and set up live verification.
+[0m✱ [0mGrep "--pool|--port|--registry|usage|process\.argv"[90m in /home/billy/repos/learning/ai-agent-graphs/engine/server.ts · 29 matches[0m
+[0m
+[0m$ [0msed -n 1,80p engine/server.test.ts
+/// <reference types="bun" />
+
+import { afterEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createPoolServer,
+  LOG_CHUNK_BYTES,
+  type PoolServer,
+  type PoolServerOptions,
+} from "./server.ts";
+import { readFleetEntries } from "./fleet.ts";
+import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+
+const servers: PoolServer[] = [];
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const server of servers.splice(0)) {
+    void server.close();
+  }
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+function makePool(
+  tickets: { file: string; marker: string }[],
+  config: Partial<PoolConfig> = {},
+): string {
+  const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+  tempDirs.push(poolDir);
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  for (const ticket of tickets) {
+    writeFileSync(join(poolDir, "issues", ticket.file), `${ticket.marker}\n\n# body\n`);
+  }
+  writeFileSync(
+    join(poolDir, "console.json"),
+    JSON.stringify(
+      { defaults: { harness: "stub", model: "m" }, ...config } satisfies PoolConfig,
+      null,
+      2,
+    ),
+  );
+  return poolDir;
+}
+
+function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Record<string, HarnessCommand> {
+  const poolLocal = tempDirs[tempDirs.length - 1];
+  const stubPath = join(poolLocal, "stub-harness.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"',
+      'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+      'printf \'{"summary":"smoke","commitSha":null}\' > "$3"',
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  const counts: Record<string, number> = {};
+  const harness: HarnessCommand = (ctx) => {
+    const statuses = behaviour[ctx.id] ?? ["done"];
+    const n = counts[ctx.id] ?? 0;
+    counts[ctx.id] = n + 1;
+    const status = statuses[Math.min(n, statuses.length - 1)];
+    return ["bash", stubPath, ctx.issuePath, status, ctx.outcomePath];
+  };
+[0m
+[0m← [0mWrite /tmp/opencode/verify-30.sh
+Wrote file successfully.
+[0m
+Now setting up the live verification script against temp pools.
+[0m$ [0mbash /tmp/opencode/verify-30.sh 2>&1
+=== setup: registry /tmp/fleet-review-30.Z5ZFiZ/pools.json
+--- boot pool A (pinned 19411)
+FAIL: A did not boot
+1607 |       `pool config: ticket ${marker.id} has no model ` +
+1608 |         `(set one in console.json assign or defaults)`,
+1609 |     );
+1610 |   }
+1611 |   if (!harnesses[harness]) {
+1612 |     throw new Error(
+                     ^
+error: pool config: ticket 1 names unknown harness 'stub'. Known: claude, cursor, opencode
+      at resolveAssignment (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/engine.ts:1612:15)
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/engine.ts:228:7)
+      at map (1:11)
+      at runPool (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/engine.ts:226:13)
+      at driveRun (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/server.ts:559:23)
+      at runServerCli (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/server.ts:782:15)
+      at /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/30/engine/server.ts:788:3
+
+Bun v1.3.14 (Linux x64)
+[0m
+[0m← [0mEdit /tmp/opencode/verify-30.sh
+Index: /tmp/opencode/verify-30.sh
+===================================================================
+--- /tmp/opencode/verify-30.sh
++++ /tmp/opencode/verify-30.sh
+@@ -14,11 +14,11 @@
+ 
+ mkpool() { # name port
+   local d="$T/$1"
+   mkdir -p "$d/issues"
+-  printf '<!-- state: id=1 blocked-by= status=ready -->\n\n# t\n' > "$d/issues/01-t.md"
++  printf '<!-- state: id=1 blocked-by= status=done -->\n\n# t\n' > "$d/issues/01-t.md"
+   cat > "$d/console.json" <<EOF
+-{"defaults":{"harness":"stub","model":"m"}$( [ -n "${2:-}" ] && printf ',"port":%s' "$2" )}
++{"defaults":{"harness":"opencode","model":"m"}$( [ -n "${2:-}" ] && printf ',"port":%s' "$2" )}
+ EOF
+   printf '%s' "$d"
+ }
+ 
+
+[0m
+[0m$ [0mbash /tmp/opencode/verify-30.sh 2>&1
+=== setup: registry /tmp/fleet-review-30.M2vhNX/pools.json
+--- boot pool A (pinned 19411)
+A live at http://localhost:19411 pid 487835
+=== FIX 1 / STORY 7: busy pinned port names the holder
+exit=1 msg: port 19411 is already in use by pool /tmp/fleet-review-30.M2vhNX/poolA (pid 487835); free it or pass a different --port
+=== FIX 1 fallback: busy pinned port, holder NOT in registry
+exit=1 msg: port 19415 is already in use; free it or pass a different --port
+=== STORIES 1+2: second boot on live pool refuses, naming pid and port
+exit=1 msg: pool /tmp/fleet-review-30.M2vhNX/poolA is locked by live server pid 487835 on port 19411; open the running console or kill it
+A pid file after refusal: 487835
+A still serving: 500
+=== FIX 2: two simultaneous same-pool launches -> exactly one winner
+launch1: pool server on http://localhost:19412 (/tmp/fleet-review-30.M2vhNX/poolC)
+launch2: pool /tmp/fleet-review-30.M2vhNX/poolC is locked by live server pid 487923; open the running console or kill it
+winners still alive: 1 (expect 1)
+pool C pid file: 487923
+=== FIX 3 / STORY 10: two concurrent different-pool boots both register
+/tmp/opencode/verify-30.sh: line 88: 487923 Killed                     ( cd "$REPO" && bun run engine/server.ts --pool "$1" --registry "$REG" "${@:2}" ) > "$BOOT_LOG" 2>&1
+D: http://localhost:19413  E: http://localhost:19414
+--- registry contents:
+[
+  {
+    "poolDir": "/tmp/fleet-review-30.M2vhNX/poolA",
+    "port": 19411,
+    "pid": 487835,
+    "startedAt": "2026-08-22T12:51:11.365Z"
+  },
+  {
+    "poolDir": "/tmp/fleet-review-30.M2vhNX/poolC",
+    "port": 19412,
+    "pid": 487923,
+    "startedAt": "2026-08-22T12:51:12.213Z"
+  },
+  {
+    "poolDir": "/tmp/fleet-review-30.M2vhNX/poolE",
+    "port": 19414,
+    "pid": 487991,
+    "startedAt": "2026-08-22T12:51:16.211Z"
+  },
+  {
+    "poolDir": "/tmp/fleet-review-30.M2vhNX/poolD",
+    "port": 19413,
+    "pid": 487990,
+    "startedAt": "2026-08-22T12:51:16.220Z"
+  }
+]--- fleet list:
+/tmp/fleet-review-30.M2vhNX/poolA → http://localhost:19411
+/tmp/fleet-review-30.M2vhNX/poolE → http://localhost:19414
+/tmp/fleet-review-30.M2vhNX/poolD → http://localhost:19413
+=== FIX 4: em dashes in engine/server.ts
+none
+=== DONE
+[0m
+[0m$ [0mbunx tsc --noEmit 2>&1 | tail -3; echo "tsc exit=$?"
+tsc exit=0
+[0m
+All live checks pass. Running the suite, typecheck, and UI build.
+[0m$ [0mbun run build 2>&1 | tail -5
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+[0m$ [0mbun test 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 220 pass
+ 0 fail
+ 822 expect() calls
+Ran 220 tests across 6 files. [17.66s]
+[0m
+[0m$ [0mbun install 2>&1 | tail -2 && bun run build 2>&1 | tail -5
+22 packages installed [25.00ms]
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-BwHkCFg6.js   29.22 kB │ gzip: 9.69 kB
+
+✓ built in 50ms
+[0m
+Suite is green. Checking how issue state files are tracked before writing up.
+[0m$ [0mgit check-ignore -v .scratch/console-pool/issues/30-review-pass-fleet-fixes.md; git log --oneline --all -- .scratch/console-pool/issues/ | head -5; ls .scratch/console-pool/runs/ | tail -5
+514eaa7 console-pool: review the ticket log and Detail batch; findings with Billy
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+ls: cannot access '.scratch/console-pool/runs/': No such file or directory
+[0m
+[0m$ [0mgit ls-files .scratch | head -20; echo ---; git status --short .scratch | head; echo ---; diff .scratch/console-pool/issues/30-review-pass-fleet-fixes.md /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md && echo SAME
+.scratch/console-pool/AGENT.md
+.scratch/console-pool/console.json
+.scratch/console-pool/issues/01-pool-engine-skeleton.md
+.scratch/console-pool/issues/02-interrupt-engine.md
+.scratch/console-pool/issues/03-durability.md
+.scratch/console-pool/issues/04-harness-spawn-kernel.md
+.scratch/console-pool/issues/05-worktrees-parallel.md
+.scratch/console-pool/issues/06-resolver-agent.md
+.scratch/console-pool/issues/07-server-and-pool-ui.md
+.scratch/console-pool/issues/08-inline-interrupts-ui.md
+.scratch/console-pool/issues/09-final-review-interrupt.md
+.scratch/console-pool/issues/10-console-runner-skill.md
+.scratch/console-pool/issues/11-review-pass.md
+.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+.scratch/console-pool/issues/13-stream-stays-connected.md
+.scratch/console-pool/issues/14-flow-neighbourhood-highlight.md
+.scratch/console-pool/issues/15-skill-mac-linux.md
+.scratch/console-pool/run.sh
+.scratch/console-pool/spec-console-flight-fixes.md
+.scratch/console-pool/spec-ticket-pools.md
+---
+?? .scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+---
+SAME
+[0m
+[0m$ [0mgit ls-files .scratch/console-pool/issues/ | tail -8; echo ---; git log --oneline main -3 2>/dev/null; git branch -a | head
+.scratch/console-pool/issues/08-inline-interrupts-ui.md
+.scratch/console-pool/issues/09-final-review-interrupt.md
+.scratch/console-pool/issues/10-console-runner-skill.md
+.scratch/console-pool/issues/11-review-pass.md
+.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+.scratch/console-pool/issues/13-stream-stays-connected.md
+.scratch/console-pool/issues/14-flow-neighbourhood-highlight.md
+.scratch/console-pool/issues/15-skill-mac-linux.md
+---
+f9fda2b Merge branch 'pool/29'
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+2e51fe1 console: record ADRs 0001 (one console per pool) and 0002 (ticket log storage)
++ main
++ pool/18
++ pool/20
++ pool/22
++ pool/23
++ pool/25
++ pool/29
+* pool/30
++ pool/31
+  remotes/origin/HEAD -> origin/main
+[0m
+[0m# [0mTodos
+[✓] Read context: spec, ticket 28 brief, ticket 29 commit diff
+[✓] Run Standards + Spec review sub-agents in parallel over 7a4b1fc
+[✓] Live-verify ticket 29's four fixes against temp pools
+[✓] Re-verify spec stories 1, 2, 7, 10 end to end
+[✓] CONTEXT.md vocabulary check
+[✓] Run bun test, tsc --noEmit, ui build
+[•] Write Notes/Brief into Issue 30, set state, commit, outcome JSON
+[0m
+All verification is complete. Adjudicating findings and writing up the Issue.
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=30 blocked-by=29 status=in-progress -->
++<!-- state: id=30 blocked-by=29 status=done -->
+ 
+ # 30 — Review pass over the fleet fixes
+ 
+ Spec: `.scratch/console-pool/spec-fleet-of-consoles.md`. Mirrors tickets 22 and 28's shape. Reviews ticket 29, the follow-up fixes from ticket 28's review.
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+@@ -9,13 +9,13 @@
+ Review pass over ticket 29's diff before calling the fleet spec done. Run both review axes (standards plus spec, per the `code-review` skill) across ticket 29's commit, and verify live that each fix behaves as specified: a busy pinned port names the holder when the registry knows it, two simultaneous same-pool launches produce exactly one winner, failed-bind cleanup leaves another server's pid file intact, two concurrent different-pool boots both register, and engine/server.ts prose carries no em dashes. Re-verify spec stories 1, 2, 7, and 10 end to end against temp pools, since the fixes touch their code paths. This ticket changes no code: if the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Both review axes run over ticket 29's diff and findings addressed
+-- [ ] Each of ticket 29's four fixes verified live against temp pools
+-- [ ] Spec stories 1, 2, 7, and 10 re-verified end to end
+-- [ ] CONTEXT.md vocabulary used correctly; avoid-words absent
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Both review axes run over ticket 29's diff and findings addressed (adjudications in Notes)
++- [x] Each of ticket 29's four fixes verified live against temp pools
++- [x] Spec stories 1, 2, 7, and 10 re-verified end to end
++- [x] CONTEXT.md vocabulary used correctly; avoid-words absent
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 29 — Fleet batch review fixes (the diff under review)
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+@@ -23,4 +23,47 @@
+ ## Notes
+ 
+ - This is a batch review, not the pool's final Review interrupt — the engine raises that itself once every ticket in the pool is done.
+ - Ticket 28's Brief carries the original findings and the live-verification table format to reuse.
++
++### Review setup (ticket 30)
++
++- Review diff: ticket 29's single commit 7a4b1fc (`git diff 7a4b1fc~1...7a4b1fc`), four files: engine/fleet.ts, engine/fleet.test.ts, engine/server.ts, engine/server.test.ts.
++- Spec sources: this pool's `.scratch/console-pool/spec-fleet-of-consoles.md` plus ticket 29's own Issue text.
++- Standards sources: no CODING_STANDARDS.md / CONTRIBUTING.md exists; documented standards are CONTEXT.md vocabulary plus this job's runner constraints, over the fixed smell baseline from the code-review skill.
++- Both axes ran as parallel sub-agents, adjudicated by me.
++
++### Standards axis
++
++No documented-standard breaches: no em dashes added (the diff removes the one finding 4 targeted), vocabulary correct in user-facing strings, no `--force` hatch, no new dependencies, tests stay at the public interface, no AI attribution. Judgement-call smells only, none blocking:
++
++- Duplicated Code: the lock-claim protocol shape (claim, live-holder/dead-holder/empty branches) now exists in both `acquirePoolLock` (server.ts) and `upsertFleetEntry` (fleet.ts), and `readLockPid` (fleet.ts) mirrors `readLockedPid` (server.ts). The loops genuinely diverge (deadline versus attempt count, re-read-before-remove in one), so extraction is a judgement call; noted so the two cannot drift unnoticed.
++- Speculative Generality: `FLEET_LOCK_TIMEOUT_MS` is exported but nothing imports it. One-line tidy when next touching fleet.ts.
++- Mysterious Name (minor): `readLockPid` versus `readLockedPid` differ by one letter for near-identical jobs.
++
++### Spec axis
++
++All four fixes landed and every ticket 29 acceptance criterion holds. Three concerns raised, adjudicated as follows:
++
++1. Residual theoretical race in the lock claim: an empty or unreadable lock gets a 25ms beat before clearing, so a writer stalled more than 25ms between create and write could still be trampled. Judgement: accepted. Every practical file lock has such a window; the acceptance criterion (two near-simultaneous launches cannot both pass) is proven by a real two-process test and re-verified live below. Recorded as a known limitation, not a spec gap.
++2. The conditional failed-bind cleanup branch (`readLockedPid === process.pid`) is effectively unreachable, because a live foreign lock refuses before the bind is attempted. Judgement: the criterion is behavioural — cleanup never deletes a pid file naming another live server — and it holds, verified live below (pool A's pid file survived a refused contender boot). The branch is cheap defence in depth, not dead weight to remove.
++3. The `--registry` CLI flag on server.ts is beyond the four fixes' letter. Judgement: justified, not scope creep. Ticket 29's worklog disclosed it; without it the CLI-level concurrency tests would write to the real `~/.agent-graphs/pools.json`, breaching this job's no-writes-outside-the-repo constraint. It mirrors fleet-cli.ts's existing `--registry`.
++
++Also raised: fix 1's holder lookup trusts any live-pid registry entry for the port (pid reuse could misname). That matches the Issue's own "best-effort" wording; accepted. The lock-race test would hang rather than fail against a non-atomic regression and does not assert the winner bound; test-robustness judgement call, noted.
++
++### Live verification (temp pools under /tmp, real spawned servers, temp registry via --registry, all processes killed after)
++
++- Fix 1 / story 7: pool B pinned to live pool A's port exits 1 with `port 19411 is already in use by pool <poolA> (pid <pidA>); free it or pass a different --port`. PASS.
++- Fix 1 fallback: a port held by a process the registry does not know exits 1 with the original holder-less message. PASS.
++- Stories 1, 2: second boot on live pool A exits 1 with `pool <poolA> is locked by live server pid <pidA> on port 19411; open the running console or kill it` (port from the registry). PASS.
++- Failed-bind cleanup invariant: after the refused boot, pool A's pid file still names the live server and pool A still serves. PASS.
++- Fix 2: two simultaneous same-pool launches produce exactly one winner; the loser exits 1 naming the winner's pid; the pid file names the winner. PASS.
++- Fix 3 / story 10: two concurrent different-pool boots both land in the fleet registry (four entries present including A's; no lost write), and fleet list prints both. PASS.
++- Fix 4: no em dashes in engine/server.ts. PASS.
++
++### Suite
++
++`bun test` 220 pass / 0 fail; `bunx tsc --noEmit` clean; `bun run build` in ui/ clean. Ticket 29's noted pre-existing resolver-log flake did not appear in this run.
++
++### Disposition
++
++Clean review: no hard findings, no spec gaps, nothing needing Billy's decision. The smells and limitations above are recorded for the pool's final Review interrupt. This ticket changes no code, and the Issue files are untracked runner state (`.scratch/` is never committed), so there is no commit for this ticket.
+
+[0m
+[0m$ [0mcp /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/30-review-pass-fleet-fixes.md .scratch/console-pool/issues/30-review-pass-fleet-fixes.md && mkdir -p /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs
+(no output)
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/30.outcome.json
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Read context: spec, ticket 28 brief, ticket 29 commit diff
+[✓] Run Standards + Spec review sub-agents in parallel over 7a4b1fc
+[✓] Live-verify ticket 29's four fixes against temp pools
+[✓] Re-verify spec stories 1, 2, 7, 10 end to end
+[✓] CONTEXT.md vocabulary check
+[✓] Run bun test, tsc --noEmit, ui build
+[✓] Write Notes/Brief into Issue 30, set state, commit, outcome JSON
+[0m
+Issue 30 is **done**. Clean review of ticket 29 (7a4b1fc):
+
+- **Standards axis**: no hard violations. Judgement-call smells only (duplicated lock-protocol shape across fleet.ts/server.ts, unused `FLEET_LOCK_TIMEOUT_MS` export, near-identical `readLockPid`/`readLockedPid` names).
+- **Spec axis**: all four fixes landed; three concerns adjudicated without needing Billy (residual 25ms-beat race accepted as inherent to file locks, unreachable-but-defensive cleanup branch, `--registry` flag justified by the no-writes-outside-repo constraint).
+- **Live verification** against temp pools: busy pinned port named the holder pool and pid (fallback intact), same-pool race produced exactly one winner, a refused boot left the live server's pid file untouched, two concurrent different-pool boots both registered, no em dashes in server.ts. Stories 1, 2, 7, 10 re-verified.
+- **Suite**: 220 pass / 0 fail, tsc clean, ui build clean.
+
+No commit: the ticket changes no code and the Issue files are untracked `.scratch/` runner state. State set to `status=done`, full adjudications in the Issue Notes, outcome at `runs/30.outcome.json`.

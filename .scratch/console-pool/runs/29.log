@@ -1,0 +1,2148 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-review-pass-fleet-batch.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/CONTEXT.md
+[0m→ [0mRead engine
+[0m→ [0mRead .
+[0m→ [0mRead engine/server.ts
+[0m→ [0mRead engine/fleet.ts
+[0m→ [0mRead engine/ports.ts
+[0m→ [0mRead engine/server.test.ts
+[0m→ [0mRead engine/fleet.test.ts
+[0m→ [0mRead engine/ports.test.ts
+[0m
+[0m$ [0mgit status && git log --oneline -10 && git branch --show-current
+On branch pool/29
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/29-fleet-review-fixes.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+a10b68e console: glossary — Pool, Fleet; one Console per pool
+b7f5148 console: add fleet list command that prints live pools
+d85baf3 console: raw log pane in the ticket Detail
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+pool/29
+[0m
+[0m✱ [0mGrep "—"[90m in engine/server.ts · 1 match[0m
+[0m
+[0m$ [0mbun --version && ls ui/ && cat package.json
+1.3.14
+bun.lock
+index.html
+package.json
+src
+tsconfig.json
+vite.config.ts
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+[0m
+[0m✗ [0mInvalid Tool
+The arguments provided to the tool are invalid: Invalid input for tool grep: JSON parsing failed: Text: {.
+Error message: JSON Parse error: Expected '}'
+[0m
+[0m$ [0mbun test 2>&1 | tail -5
+212 pass
+ 0 fail
+ 802 expect() calls
+Ran 212 tests across 6 files. [17.10s]
+[0m
+[0m$ [0mrg -n '—' engine/ || echo "no em dashes in engine/"
+engine/server.ts:676:  // actually get bound. Registration is best-effort — a registry write that
+[0m
+[0m$ [0mbun -e 'import { openSync, closeSync, renameSync } from "node:fs"; const p="/tmp/opencode/bunapi-test"; import("node:fs").then(()=>{}); console.log("openSync:", typeof openSync); console.log("sleepSync:", typeof Bun.sleepSync); const fd = openSync(p, "wx"); closeSync(fd); console.log("openSync wx ok");'
+openSync: function
+sleepSync: function
+openSync wx ok
+[0m
+[0m→ [0mRead engine/fleet-cli.ts
+[0m→ [0mRead engine/fleet-cli.test.ts
+[0m
+[0m$ [0mrg -n 'export function runPool|defaultHarnesses|function runPool|status === "ready"|status !== "ready"|harness' engine/engine.ts engine/spawn.ts | head -50
+engine/spawn.ts:7:  harness: string;
+engine/spawn.ts:17:// One case per harness, matching run.sh's launch shapes: the prompt leads
+engine/spawn.ts:19:// harness runs with its fullest auto-approve mode. There is no spend cap.
+engine/spawn.ts:20:export const defaultHarnesses: Record<string, HarnessCommand> = {
+engine/engine.ts:31:  defaultHarnesses,
+engine/engine.ts:59:  harness?: string;
+engine/engine.ts:65:  defaults?: { harness?: string; model?: string; drivers?: string };
+engine/engine.ts:122:  harnesses?: Record<string, HarnessCommand>;
+engine/engine.ts:187:  harness: string;
+engine/engine.ts:199:  harnesses: Record<string, HarnessCommand>;
+engine/engine.ts:213:export async function runPool(options: RunOptions): Promise<PoolRun> {
+engine/engine.ts:221:  const harnesses = { ...defaultHarnesses, ...options.harnesses };
+engine/engine.ts:228:      resolveAssignment(marker, config, harnesses),
+engine/engine.ts:239:    harnesses,
+engine/engine.ts:340:              harnesses: session.harnesses,
+engine/engine.ts:543:    return status === "done" || status === "ready";
+engine/engine.ts:639:        resolveAssignment(m, session.state.config, session.harnesses),
+engine/engine.ts:768:// The driver name must match a command stub under each harness's commands
+engine/engine.ts:775:  harness: string;
+engine/engine.ts:784:// The resolver agent for a conflicting merge: the harness comes from
+engine/engine.ts:788:// resolver that names an unknown harness fails fast, matching how a ticket's
+engine/engine.ts:789:// unknown harness is rejected. No configured resolver at all also means the
+engine/engine.ts:795:  let harness = explicit;
+engine/engine.ts:797:  if (!harness || !model) {
+engine/engine.ts:799:    if (!harness) harness = runner?.harness;
+engine/engine.ts:802:  if (!harness || !model) return null;
+engine/engine.ts:803:  if (!session.harnesses[harness]) {
+engine/engine.ts:806:        `pool config: resolver names unknown harness '${explicit}'. ` +
+engine/engine.ts:807:          `Known: ${Object.keys(session.harnesses).sort().join(", ")}`,
+engine/engine.ts:812:  return { harness, model };
+engine/engine.ts:817:): { harness?: string; model?: string } | null {
+engine/engine.ts:824:  return { harness: fields.get("harness"), model: fields.get("model") };
+engine/engine.ts:872:        "no resolver harness available (set console.json resolver= or a " +
+engine/engine.ts:935:    harness: resolver.harness,
+engine/engine.ts:942:  const argv = session.harnesses[resolver.harness](ctx);
+engine/engine.ts:1317:  harnesses: Record<string, HarnessCommand>;
+engine/engine.ts:1337:// worktree branched from the same HEAD, so parallel harnesses never share a
+engine/engine.ts:1490:    harness: assignment.harness,
+engine/engine.ts:1497:  const argv = env.harnesses[assignment.harness](ctx);
+engine/engine.ts:1551:  // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
+engine/engine.ts:1592:  harnesses: Record<string, HarnessCommand>,
+engine/engine.ts:1595:  const harness = assign.harness ?? config.defaults?.harness ?? "";
+engine/engine.ts:1599:  if (!harness) {
+engine/engine.ts:1601:      `pool config: ticket ${marker.id} has no harness ` +
+engine/engine.ts:1611:  if (!harnesses[harness]) {
+engine/engine.ts:1613:      `pool config: ticket ${marker.id} names unknown harness '${harness}'. ` +
+engine/engine.ts:1614:        `Known: ${Object.keys(harnesses).sort().join(", ")}`,
+engine/engine.ts:1617:  return { harness, model, drivers };
+[0m
+[0m→ [0mRead engine/engine.ts[90m [offset=213, limit=160][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=40, offset=530][0m
+[0m✱ [0mGrep "function readyTickets"[90m in engine/engine.ts · 1 match[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=30, offset=175][0m
+[0m
+[0m# [0mTodos
+[•] Fix 3: atomic fleet registry writes (lockfile + temp/rename) in fleet.ts
+[ ] Fix 1: readFleetEntryByPort helper in fleet.ts
+[ ] Fix 2: atomic O_EXCL pool lock claim + conditional cleanup in server.ts
+[ ] Fix 1: name the holder on a busy pinned port in server.ts bindPoolServer
+[ ] Fix 4: remove em dash in server.ts prose
+[ ] Add --registry CLI seam to runServerCli
+[ ] Write tests: busy-port naming, lock concurrency, failed-bind cleanup, registry concurrency
+[ ] Run full suite, typecheck, UI build
+[ ] Code review pass, tick acceptance criteria, commit, write outcome
+[0m
+Now I understand the codebase. Let me set up my task list and start implementing.
+[0m← [0mEdit engine/fleet.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
+@@ -6,9 +6,16 @@
+  * unreliable, so a dead pid or a deleted pool directory only drops from view
+  * on the next read.
+  */
+ 
+-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import {
++  existsSync,
++  mkdirSync,
++  readFileSync,
++  renameSync,
++  rmSync,
++  writeFileSync,
++} from "node:fs";
+ import { homedir } from "node:os";
+ import { dirname, join } from "node:path";
+ 
+ export interface FleetEntry {
+
+[0m
+[0m← [0mEdit engine/fleet.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.ts
+@@ -91,19 +91,95 @@
+   );
+ }
+ 
+ /**
++ * Best-effort lookup of a fleet entry by port, used to name the holder on a
++ * busy pinned port. Only live, pruned entries are candidates; an absent,
++ * corrupt, or unmatched registry yields null, and callers never depend on the
++ * registry existing.
++ */
++export function readFleetEntryByPort(
++  registryPath: string,
++  port: number,
++): FleetEntry | null {
++  return (
++    readFleetEntries(registryPath).find((entry) => entry.port === port) ?? null
++  );
++}
++
++/** The pid named in a lock file, or null when it is empty or unreadable. */
++function readLockPid(lockPath: string): number | null {
++  let raw: string;
++  try {
++    raw = readFileSync(lockPath, "utf8").trim();
++  } catch {
++    return null;
++  }
++  const pid = Number(raw);
++  return Number.isInteger(pid) && pid > 0 ? pid : null;
++}
++
++/** How long a registry write waits on a foreign lock before giving up. */
++export const FLEET_LOCK_TIMEOUT_MS = 10_000;
++
++/**
+  * Upsert one console's entry, keyed by pool directory: relaunching the same
+  * pool replaces its old entry rather than duplicating it. A missing or corrupt
+  * registry file is recreated, never an error.
++ *
++ * Writes are serialized with a lock file, so two servers booting different
++ * pools at the same moment cannot lose one entry, and the registry itself is
++ * replaced by rename so a reader never sees a half-written file. The lock is
++ * claimed with O_EXCL; a lock whose holder pid is dead is a crashed writer's
++ * and is cleared, while a live holder is waited on up to FLEET_LOCK_TIMEOUT_MS.
+  */
+ export function upsertFleetEntry(
+   registryPath: string,
+   entry: FleetEntry,
+ ): void {
+-  const entries = readRegistry(registryPath).filter(
+-    (existing) => existing.poolDir !== entry.poolDir,
+-  );
+-  entries.push(entry);
++  const lockPath = `${registryPath}.lock`;
+   mkdirSync(dirname(registryPath), { recursive: true });
+-  writeFileSync(registryPath, JSON.stringify(entries, null, 2));
++  const deadline = Date.now() + FLEET_LOCK_TIMEOUT_MS;
++  for (;;) {
++    try {
++      writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
++    } catch (err) {
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
++      const holder = readLockPid(lockPath);
++      if (holder !== null) {
++        if (pidIsLive(holder)) {
++          if (Date.now() > deadline) {
++            throw new Error(
++              `fleet registry: lock ${lockPath} is held by live pid ${holder}`,
++            );
++          }
++          Bun.sleepSync(10);
++          continue;
++        }
++        // The holder's process is gone: a crashed writer. Clear its lock.
++        rmSync(lockPath, { force: true });
++        continue;
++      }
++      // Empty or unreadable: a writer is mid-claim, its pid appears within
++      // microseconds. A lock still empty past the deadline is a crashed
++      // writer's, so clear it and retry.
++      if (Date.now() > deadline) {
++        rmSync(lockPath, { force: true });
++        continue;
++      }
++      Bun.sleepSync(10);
++      continue;
++    }
++    try {
++      const entries = readRegistry(registryPath).filter(
++        (existing) => existing.poolDir !== entry.poolDir,
++      );
++      entries.push(entry);
++      const tempPath = `${registryPath}.tmp`;
++      writeFileSync(tempPath, JSON.stringify(entries, null, 2));
++      renameSync(tempPath, registryPath);
++      return;
++    } finally {
++      rmSync(lockPath, { force: true });
++    }
++  }
+ }
+\ No newline at end of file
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -24,8 +24,9 @@
+ import { readEvents, type TicketEvent } from "./events.ts";
+ import {
+   defaultRegistryPath,
+   readFleetEntry,
++  readFleetEntryByPort,
+   upsertFleetEntry,
+ } from "./fleet.ts";
+ import { loadPoolMarkers } from "./pool.ts";
+ import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -472,22 +472,42 @@
+  * One server per pool. If runs/server.pid names a live process, refuse with a
+  * message naming that pid, its fleet-registry port when known, and the pool
+  * directory. Otherwise claim the pool by writing our own pid. There is no
+  * force override: a live lock always means use the running console or kill it.
++ *
++ * The claim is atomic (O_EXCL create), so two near-simultaneous launches of
++ * the same pool cannot both pass. A stale lock is cleared only when it still
++ * names the same dead value on re-read, so a lock another server just claimed
++ * is never trampled.
+  */
+ function acquirePoolLock(poolDir: string, registryPath: string): void {
+-  const livePid = readLockedPid(poolDir);
+-  if (livePid !== null && pidIsLive(livePid)) {
+-    const entry = readFleetEntry(registryPath, poolDir, livePid);
+-    const portText = entry ? ` on port ${entry.port}` : "";
+-    throw new Error(
+-      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
+-        "open the running console or kill it",
+-    );
++  const pidPath = join(poolDir, "runs", "server.pid");
++  mkdirSync(join(poolDir, "runs"), { recursive: true });
++  for (let attempt = 0; attempt < 3; attempt += 1) {
++    try {
++      writeFileSync(pidPath, `${process.pid}\n`, { flag: "wx" });
++      return;
++    } catch (err) {
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
++    }
++    const holder = readLockedPid(poolDir);
++    if (holder !== null && pidIsLive(holder)) {
++      const entry = readFleetEntry(registryPath, poolDir, holder);
++      const portText = entry ? ` on port ${entry.port}` : "";
++      throw new Error(
++        `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
++          "open the running console or kill it",
++      );
++    }
++    // The lock is stale. Remove it only if it still names the same dead value
++    // (or is still unreadable): a live server may have claimed it since.
++    if (readLockedPid(poolDir) === holder) {
++      rmSync(pidPath, { force: true });
++    }
+   }
+-  const runsDir = join(poolDir, "runs");
+-  mkdirSync(runsDir, { recursive: true });
+-  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
++  throw new Error(
++    `pool ${poolDir}: could not claim the pool lock after three attempts`,
++  );
+ }
+ 
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+   const poolDir = resolve(options.poolDir);
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -435,22 +435,30 @@
+ }
+ 
+ /**
+  * Bind the pool server per the resolution. A pinned port that is busy is a
+- * hard failure naming the port; only the unpinned path hunts upward from the
+- * default for a free one. Port 0 means "any free port" (Bun ephemeral).
++ * hard failure naming the port and, when the fleet registry knows the holder,
++ * the conflicting pool directory and pid; only the unpinned path hunts upward
++ * from the default for a free one. Port 0 means "any free port" (Bun
++ * ephemeral).
+  */
+ function bindPoolServer(
+   resolution: PortResolution,
+   serve: (port: number) => Bun.Server<undefined>,
++  registryPath: string,
+ ): Bun.Server<undefined> {
+   if (resolution.pinned) {
+     try {
+       return serve(resolution.port);
+     } catch (err) {
+       if (isAddressInUse(err)) {
++        const holder = readFleetEntryByPort(registryPath, resolution.port);
++        const holderText = holder
++          ? ` by pool ${holder.poolDir} (pid ${holder.pid})`
++          : "";
+         throw new Error(
+-          `port ${resolution.port} is already in use; free it or pass a different --port`,
++          `port ${resolution.port} is already in use${holderText}; ` +
++            "free it or pass a different --port",
+         );
+       }
+       throw err;
+     }
+
+[0m
+[0m✗ [0mEdit engine/server.ts failed
+[91m[1mError: [0mNo changes to apply: oldString and newString are identical.
+Now update the `bindPoolServer` call site and the failed-bind cleanup:
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -584,9 +584,11 @@
+   options.defaultPort ?? DEFAULT_PORT,
+ );
+ let server: Bun.Server<undefined>;
+ try {
+-  server = bindPoolServer(resolution, (port) =>
++  server = bindPoolServer(
++    resolution,
++    (port) =>
+     Bun.serve({
+       port,
+     async fetch(req, bunServer) {
+       const url = new URL(req.url);
+
+[0m
+[0m→ [0mRead engine/server.ts[90m [limit=40, offset=570][0m
+[0m✗ [0mEdit engine/server.ts failed
+[91m[1mError: [0mNo changes to apply: oldString and newString are identical.
+[0m→ [0mRead engine/server.ts[90m [limit=50, offset=690][0m
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -696,16 +696,20 @@
+     }),
+   );
+ } catch (err) {
+   // The lock was claimed before the bind; a bind that never happened must
+-  // not leave a live-looking pid behind, or the next launch refuses itself.
+-  rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++  // not leave our own live-looking pid behind, or the next launch refuses
++  // itself. Only our pid is removed: a lock another live server holds must
++  // survive this launch's failure.
++  if (readLockedPid(poolDir) === process.pid) {
++    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++  }
+   throw err;
+ }
+ 
+ // The bind succeeded, so the pool is live and advertises itself. Boot order
+ // is lock -> bind -> register: the registry never names a port that did not
+-// actually get bound. Registration is best-effort — a registry write that
++// actually get bound. Registration is best-effort: a registry write that
+ // fails must not take down a console that already bound successfully.
+ const boundPort = server.port;
+ if (boundPort !== undefined) {
+   try {
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -693,8 +693,9 @@
+       if (staticRes) return staticRes;
+       return new Response("not found", { status: 404 });
+     },
+     }),
++    registryPath,
+   );
+ } catch (err) {
+   // The lock was claimed before the bind; a bind that never happened must
+   // not leave our own live-looking pid behind, or the next launch refuses
+
+[0m
+[0m$ [0mrg -n '—' engine/ || echo "no em dashes in engine/"; bunx tsc --noEmit 2>&1 | head -20
+no em dashes in engine/
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -744,17 +744,28 @@
+ export function runServerCli(): void {
+   const args = process.argv.slice(2);
+   const poolIndex = args.indexOf("--pool");
+   const portIndex = args.indexOf("--port");
++  const registryIndex = args.indexOf("--registry");
+   const poolDir = poolIndex >= 0 ? args[poolIndex + 1] : undefined;
+   const port = portIndex >= 0 ? Number(args[portIndex + 1]) : undefined;
++  const registryPath =
++    registryIndex >= 0 && args[registryIndex + 1]
++      ? args[registryIndex + 1]
++      : undefined;
+   if (!poolDir) {
+-    console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
++    console.error(
++      "usage: bun run engine/server.ts --pool <dir> [--port <n>] [--registry <file>]",
++    );
+     process.exit(1);
+   }
+   let server: PoolServer;
+   try {
+-    server = createPoolServer({ poolDir, ...(port !== undefined ? { port } : {}) });
++    server = createPoolServer({
++      poolDir,
++      ...(port !== undefined ? { port } : {}),
++      ...(registryPath !== undefined ? { registryPath } : {}),
++    });
+   } catch (err) {
+     console.error(err instanceof Error ? err.message : String(err));
+     process.exit(1);
+   }
+
+[0m
+Now the CLI `--registry` seam:
+[0m$ [0mbunx tsc --noEmit 2>&1 | head -20 && echo "TSC DONE" && bun test engine/fleet.test.ts 2>&1 | tail -8
+TSC DONE
+bun test v1.3.14 (0d9b296a)
+
+ 16 pass
+ 0 fail
+ 16 expect() calls
+Ran 16 tests across 1 file. [26.00ms]
+[0m
+[0m$ [0mbun test engine/server.test.ts engine/ports.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 49 pass
+ 0 fail
+ 132 expect() calls
+Ran 49 tests across 2 files. [14.26s]
+[0m
+[0m# [0mTodos
+[✓] Fix 3: atomic fleet registry writes (lockfile + temp/rename) in fleet.ts
+[✓] Fix 1: readFleetEntryByPort helper in fleet.ts
+[✓] Fix 2: atomic O_EXCL pool lock claim + conditional cleanup in server.ts
+[✓] Fix 1: name the holder on a busy pinned port in server.ts bindPoolServer
+[✓] Fix 4: remove em dash in server.ts prose
+[✓] Add --registry CLI seam to runServerCli
+[•] Write tests: busy-port naming, lock concurrency, failed-bind cleanup, registry concurrency
+[ ] Run full suite, typecheck, UI build
+[ ] Code review pass, tick acceptance criteria, commit, write outcome
+[0m
+[0m$ [0mrg -n 'export function loadPoolMarkers|export function readConfig' engine/pool.ts
+65:export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
+[0m
+Let me check `loadPoolMarkers` handles an empty issues dir before writing CLI-concurrency tests:
+[0m→ [0mRead engine/pool.ts[90m [limit=30, offset=60][0m
+[0m→ [0mRead engine/spawn.ts
+[0m→ [0mRead engine/engine.ts[90m [limit=45, offset=1585][0m
+[0m
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+@@ -577,8 +577,27 @@
+     { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+   ]);
+ }
+ 
++/**
++ * A pool for CLI-level tests: one ticket that is already done, so the boot
++ * never spawns a real harness, with a harness name that resolves.
++ */
++function makeCliPool(): string {
++  const poolDir = mkdtempSync(join(tmpdir(), "pool-cli-"));
++  tempDirs.push(poolDir);
++  mkdirSync(join(poolDir, "issues"), { recursive: true });
++  writeFileSync(
++    join(poolDir, "issues", "01-a.md"),
++    "<!-- state: id=01 blocked-by=none status=done -->\n\n# body\n",
++  );
++  writeFileSync(
++    join(poolDir, "console.json"),
++    JSON.stringify({ defaults: { harness: "claude", model: "m" } }, null, 2),
++  );
++  return poolDir;
++}
++
+ describe("pool lock", () => {
+   it("writes its own pid on a successful boot", () => {
+     const poolDir = makeLockedPool();
+     const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+
+[0m
+Now I'll add the tests. First to `server.test.ts`:
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+@@ -671,8 +671,41 @@
+   } as unknown as PoolServerOptions;
+   expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
+ });
+ 
++it("two near-simultaneous launches cannot both pass the lock; the loser names the winner", async () => {
++  const poolDir = makeCliPool();
++  const registryPath = fleetRegistry(poolDir);
++  const repoDir = join(import.meta.dir, "..");
++  const args = [
++    "bun",
++    "run",
++    "engine/server.ts",
++    "--pool",
++    poolDir,
++    "--port",
++    "0",
++    "--registry",
++    registryPath,
++  ];
++  const childA = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++  const childB = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++  // Exactly one launch holds the lock and serves; the other exits non-zero
++  // naming the winner's pid. The first to exit is the loser.
++  const loser = await Promise.race([
++    childA.exited.then(() => childA),
++    childB.exited.then(() => childB),
++  ]);
++  const winner = loser === childA ? childB : childA;
++  const exitCode = await loser.exited;
++  expect(exitCode).not.toBe(0);
++  const stderr = await new Response(loser.stderr).text();
++  expect(stderr).toContain("locked by live server");
++  expect(stderr).toContain(String(winner.pid));
++  winner.kill();
++  await winner.exited;
++});
++
+ it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
+   const poolDir = makeLockedPool();
+   writePidFile(poolDir, process.pid);
+   const repoDir = join(import.meta.dir, "..");
+
+[0m
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+@@ -798,8 +798,84 @@
+   expect(message).toContain(String(held.port));
+   await held.release();
+ });
+ 
++it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
++  const held = await holdPort();
++  const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
++  tempDirs.push(holderPool);
++  const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
++  const registryPath = join(poolDir, "pools.json");
++  writeFileSync(
++    registryPath,
++    JSON.stringify([
++      { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
++    ]),
++  );
++  let message = "";
++  try {
++    createPoolServer({ poolDir, distDir: "/nonexistent", registryPath });
++  } catch (err) {
++    message = err instanceof Error ? err.message : String(err);
++  }
++  expect(message).toContain(String(held.port));
++  expect(message).toContain(holderPool);
++  expect(message).toContain(String(process.pid));
++  await held.release();
++});
++
++it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
++  const held = await holdPort();
++  const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
++  tempDirs.push(holderPool);
++  const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
++  const registryPath = join(poolDir, "pools.json");
++  writeFileSync(
++    registryPath,
++    JSON.stringify([
++      { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
++    ]),
++  );
++  const repoDir = join(import.meta.dir, "..");
++  const child = Bun.spawn(
++    [
++      "bun",
++      "run",
++      "engine/server.ts",
++      "--pool",
++      poolDir,
++      "--port",
++      String(held.port),
++      "--registry",
++      registryPath,
++    ],
++    { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
++  );
++  const exitCode = await child.exited;
++  const stderr = await new Response(child.stderr).text();
++  expect(exitCode).not.toBe(0);
++  expect(stderr).toContain(holderPool);
++  expect(stderr).toContain(String(process.pid));
++  await held.release();
++});
++
++it("a failed launch never deletes a pid file naming another live server", async () => {
++  const held = await holdPort();
++  const poolDir = makeLockedPool();
++  writePidFile(poolDir, process.pid);
++  let message = "";
++  try {
++    createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
++  } catch (err) {
++    message = err instanceof Error ? err.message : String(err);
++  }
++  expect(message).toContain("locked by live server");
++  expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++    String(process.pid),
++  );
++  await held.release();
++});
++
+ it("--port overrides the console.json pin for that launch", async () => {
+   const configPort = await freePort();
+   const flagPort = await freePort();
+   expect(flagPort).not.toBe(configPort);
+
+[0m
+Now the pinned-port holder-naming tests and the failed-launch cleanup test:
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+@@ -1016,5 +1016,48 @@
+     // never advertise a port in the registry.
+     expect(readFleetEntries(registryPath)).toEqual([]);
+     await held.release();
+   });
++
++  it("two servers booting different pools concurrently both end up in the registry", async () => {
++    const poolA = makeCliPool();
++    const poolB = makeCliPool();
++    const registryPath = fleetRegistry(poolA);
++    const repoDir = join(import.meta.dir, "..");
++    const argsFor = (pool: string) => [
++      "bun",
++      "run",
++      "engine/server.ts",
++      "--pool",
++      pool,
++      "--port",
++      "0",
++      "--registry",
++      registryPath,
++    ];
++    const childA = Bun.spawn(argsFor(poolA), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    const childB = Bun.spawn(argsFor(poolB), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    // Poll the raw registry until both pools have landed. The lock around the
++    // write means the later writer reads the earlier entry, so neither boot
++    // can overwrite the other.
++    const deadline = Date.now() + 20_000;
++    let entries: { poolDir: string; port: number; pid: number; startedAt: string }[] = [];
++    while (Date.now() < deadline) {
++      try {
++        entries = JSON.parse(readFileSync(registryPath, "utf8")) as typeof entries;
++      } catch {
++        entries = [];
++      }
++      if (entries.length === 2) break;
++      await Bun.sleep(50);
++    }
++    childA.kill();
++    childB.kill();
++    await Promise.all([childA.exited, childB.exited]);
++    expect(entries.map((e) => e.poolDir).sort()).toEqual(
++      [poolA, poolB].sort(),
++    );
++    expect(entries.map((e) => e.pid).sort()).toEqual(
++      [childA.pid, childB.pid].sort(),
++    );
++  });
+ });
+
+[0m
+[0m← [0mEdit engine/fleet.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+@@ -1,9 +1,16 @@
+ /// <reference types="bun" />
+ 
+ import { afterEach, describe, expect, it } from "bun:test";
+ import { spawnSync } from "node:child_process";
+-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import {
++  existsSync,
++  mkdirSync,
++  mkdtempSync,
++  readdirSync,
++  rmSync,
++  writeFileSync,
++} from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import {
+   readFleetEntries,
+
+[0m
+Now the fleet.ts test additions (atomic write, stale lock recovery, no temp leftovers):
+[0m← [0mEdit engine/fleet.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+@@ -147,8 +147,40 @@
+     expect(readFleetEntries(registry)).toEqual([
+       { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
+     ]);
+   });
++
++  it("clears a lock left by a crashed writer and upserts anyway", () => {
++    const dir = tempDir();
++    const poolDir = join(dir, "pool");
++    mkdirSync(poolDir, { recursive: true });
++    const registry = join(dir, "pools.json");
++    writeFileSync(`${registry}.lock`, `${deadPid()}\n`);
++    upsertFleetEntry(registry, {
++      poolDir,
++      port: 8787,
++      pid: process.pid,
++      startedAt: "t",
++    });
++    expect(readFleetEntries(registry)).toEqual([
++      { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
++    ]);
++    expect(existsSync(`${registry}.lock`)).toBe(false);
++  });
++
++  it("replaces the registry by rename, leaving no temp or lock file behind", () => {
++    const dir = tempDir();
++    const poolDir = join(dir, "pool");
++    mkdirSync(poolDir, { recursive: true });
++    const registry = join(dir, "pools.json");
++    upsertFleetEntry(registry, {
++      poolDir,
++      port: 8787,
++      pid: process.pid,
++      startedAt: "t",
++    });
++    expect(readdirSync(dir).sort()).toEqual(["pools.json", "pool"]);
++  });
+ });
+ 
+ describe("fleet registry prune-on-read", () => {
+   it("reads a missing registry as empty", () => {
+
+[0m
+[0m$ [0mbun test engine/fleet.test.ts 2>&1 | tail -8
+at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts:181:37)
+(fail) fleet registry upsert > replaces the registry by rename, leaving no temp or lock file behind [0.17ms]
+
+ 17 pass
+ 1 fail
+ 19 expect() calls
+Ran 18 tests across 1 file. [27.00ms]
+[0m
+[0m$ [0mbun test engine/fleet.test.ts 2>&1 | rg -A 20 'replaces the registry by rename'
+(fail) fleet registry upsert > replaces the registry by rename, leaving no temp or lock file behind [0.20ms]
+
+ 17 pass
+ 1 fail
+ 19 expect() calls
+Ran 18 tests across 1 file. [28.00ms]
+[0m
+[0m$ [0mbun test engine/fleet.test.ts 2>&1 | rg -B2 -A25 'leaving no temp or lock'
+at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts:181:37)
+(fail) fleet registry upsert > replaces the registry by rename, leaving no temp or lock file behind [0.38ms]
+
+ 17 pass
+ 1 fail
+ 19 expect() calls
+Ran 18 tests across 1 file. [39.00ms]
+[0m
+[0m$ [0mbun test engine/fleet.test.ts 2>&1 | rg -B5 -A5 'expected|received' | head -40
+178 |       pid: process.pid,
+179 |       startedAt: "t",
+180 |     });
+181 |     expect(readdirSync(dir).sort()).toEqual(["pools.json", "pool"]);
+                                          ^
+error: expect(received).toEqual(expected)
+
+  [
+-   "pools.json",
+    "pool",
++   "pools.json",
+[0m
+[0m← [0mEdit engine/fleet.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/fleet.test.ts
+@@ -177,9 +177,9 @@
+       port: 8787,
+       pid: process.pid,
+       startedAt: "t",
+     });
+-    expect(readdirSync(dir).sort()).toEqual(["pools.json", "pool"]);
++    expect(readdirSync(dir).sort()).toEqual(["pool", "pools.json"]);
+   });
+ });
+ 
+ describe("fleet registry prune-on-read", () => {
+
+[0m
+The `.sort()` order was wrong in my expectation ("pool" < "pools.json"). Fixing:
+[0m$ [0mbun test engine/fleet.test.ts 2>&1 | tail -5
+18 pass
+ 0 fail
+ 19 expect() calls
+Ran 18 tests across 1 file. [31.00ms]
+[0m
+Now the server tests including the new concurrency tests:
+[0m$ [0mbun test engine/server.test.ts 2>&1 | tail -15
+bun test v1.3.14 (0d9b296a)
+
+ 45 pass
+ 0 fail
+ 129 expect() calls
+Ran 45 tests across 1 file. [14.39s]
+[0m
+All tests pass. Now the full suite, typecheck, and UI build:
+[0m$ [0mbun test 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 219 pass
+ 0 fail
+ 818 expect() calls
+Ran 219 tests across 6 files. [17.23s]
+[0m
+[0m$ [0mbunx tsc --noEmit 2>&1 | head -10 && echo "TSC CLEAN"
+TSC CLEAN
+[0m
+[0m$ [0mbun run build 2>&1 | tail -6
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+[0m$ [0mls ui/node_modules >/dev/null 2>&1 && echo "node_modules present" || echo "missing"; ls -d node_modules >/dev/null 2>&1 && echo "root node_modules present" || echo "root missing"
+missing
+root missing
+[0m
+[0m$ [0mbun install 2>&1 | tail -5
++ bun-types@1.3.14
++ typescript@7.0.2
++ vite@8.2.1
+
+22 packages installed [26.00ms]
+[0m
+[0m$ [0mbun run build 2>&1 | tail -8
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-BwHkCFg6.js   29.22 kB │ gzip: 9.69 kB
+
+✓ built in 64ms
+[0m
+[0m$ [0mgit status --short && echo "---" && git check-ignore ui/node_modules ui/dist 2>/dev/null || echo "not ignored?"
+M engine/fleet.test.ts
+ M engine/fleet.ts
+ M engine/server.test.ts
+ M engine/server.ts
+?? .scratch/console-pool/issues/29-fleet-review-fixes.md
+---
+ui/node_modules
+ui/dist
+[0m
+Let me stress the new concurrency tests for flakiness, then run the review skill:
+[0m$ [0mfor i in 1 2 3 4 5; do bun test engine/server.test.ts -t "cannot both pass the lock|concurrently both end up in the registry|names the conflicting pool|naming the holder from the registry|never deletes a pid file naming another live" 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(run $i)"; done
+5 pass  0 fail (run 1)
+ 5 pass  0 fail (run 2)
+ 5 pass  0 fail (run 3)
+ 5 pass  0 fail (run 4)
+ 5 pass  0 fail (run 5)
+[0m
+Stable across 5 runs. Now the code review pass per the implement skill:
+[0m→ [0mSkill "code-review"
+[0m• [0mStandards review of fleet fixes[90m Deepseek Agent[0m
+[0m• [0mSpec review of fleet fixes[90m Deepseek Agent[0m
+The diff under review is the uncommitted working-tree change since HEAD. Spawning both review axes in parallel:
+[0m✓ [0mStandards review of fleet fixes[90m Deepseek Agent[0m
+[0m✓ [0mSpec review of fleet fixes[90m Deepseek Agent[0m
+[0m
+[0m$ [0mtail -c 1 engine/fleet.ts | xxd | tail -1
+/bin/bash: line 1: xxd: command not found
+[0m
+Both reviews came back. Let me adjudicate the findings:
+
+- **Duplicated Code** (lock protocol shape in server.ts + fleet.ts): judgement call, pre-existing pattern; the two locks have genuinely different policies (refuse-on-live vs wait-on-live). Not acting — the issue says keep changes small.
+- **Divergent Change / `--registry` scope creep**: the `--registry` CLI flag is a test seam mirroring the existing `fleet-cli.ts --registry`, required so CLI-level tests never touch the real `~/.agent-graphs` registry. Justified.
+- **Busy-port lookup prunes dead entries**: matches the lock-refusal path exactly as the issue instructed ("mirror that in the port-conflict path"); naming a dead pid as the holder would be wrong. Non-issue.
+- **Lockfile machinery**: stale-lock recovery is necessary, not gold-plating — a lockfile without it would wedge the registry on a crash, contradicting the prune-on-read crash-safety philosophy.
+- **Real finding 1**: the acquire-side `null === null` re-read race is legitimate — a concurrent writer's O_EXCL claim mid-write reads as empty, and my guard would clear it. I'll close it with a grace re-read like the fleet lock does.
+- **Real finding 2**: the busy-port holder test simulates the holder via a hand-written registry entry; the acceptance wants it "verified live with two temp pools". I'll add a genuinely live two-pool test.
+
+Let me check the trailing-newline nit and fix the acquire race:
+[0m$ [0mtail -c 20 engine/fleet.ts | od -c | tail -2
+0000020       }  \n   }
+0000024
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -489,32 +489,42 @@
+  */
+ function acquirePoolLock(poolDir: string, registryPath: string): void {
+   const pidPath = join(poolDir, "runs", "server.pid");
+   mkdirSync(join(poolDir, "runs"), { recursive: true });
+-  for (let attempt = 0; attempt < 3; attempt += 1) {
++  for (let attempt = 0; attempt < 5; attempt += 1) {
+     try {
+       writeFileSync(pidPath, `${process.pid}\n`, { flag: "wx" });
+       return;
+     } catch (err) {
+       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+     }
+     const holder = readLockedPid(poolDir);
+-    if (holder !== null && pidIsLive(holder)) {
+-      const entry = readFleetEntry(registryPath, poolDir, holder);
+-      const portText = entry ? ` on port ${entry.port}` : "";
+-      throw new Error(
+-        `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
+-          "open the running console or kill it",
+-      );
++    if (holder !== null) {
++      if (pidIsLive(holder)) {
++        const entry = readFleetEntry(registryPath, poolDir, holder);
++        const portText = entry ? ` on port ${entry.port}` : "";
++        throw new Error(
++          `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
++            "open the running console or kill it",
++        );
++      }
++      // A dead holder is a stale lock. Remove it only if it still names the
++      // same dead pid on re-read: a live server may have claimed it since.
++      if (readLockedPid(poolDir) === holder) {
++        rmSync(pidPath, { force: true });
++      }
++      continue;
+     }
+-    // The lock is stale. Remove it only if it still names the same dead value
+-    // (or is still unreadable): a live server may have claimed it since.
+-    if (readLockedPid(poolDir) === holder) {
++    // Empty or unreadable: a writer may be mid-claim, its pid landing within
++    // microseconds. Wait a beat and re-read; a lock still empty afterwards is
++    // garbage from a crashed or bogus earlier state, and is cleared.
++    Bun.sleepSync(25);
++    if (readLockedPid(poolDir) === null) {
+       rmSync(pidPath, { force: true });
+     }
+   }
+   throw new Error(
+-    `pool ${poolDir}: could not claim the pool lock after three attempts`,
++    `pool ${poolDir}: could not claim the pool lock after five attempts`,
+   );
+ }
+ 
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+
+[0m
+fleet.ts ends with a newline; the nit was a diff-presentation artifact. Now fixing the real finding — the acquire-side `null === null` re-read race:
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.ts
+@@ -483,10 +483,10 @@
+  * force override: a live lock always means use the running console or kill it.
+  *
+  * The claim is atomic (O_EXCL create), so two near-simultaneous launches of
+  * the same pool cannot both pass. A stale lock is cleared only when it still
+- * names the same dead value on re-read, so a lock another server just claimed
+- * is never trampled.
++ * names a dead pid or is still unreadable after a beat, so a lock another
++ * server is mid-way through claiming is never trampled.
+  */
+ function acquirePoolLock(poolDir: string, registryPath: string): void {
+   const pidPath = join(poolDir, "runs", "server.pid");
+   mkdirSync(join(poolDir, "runs"), { recursive: true });
+
+[0m
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/server.test.ts
+@@ -822,8 +822,37 @@
+   expect(message).toContain(String(process.pid));
+   await held.release();
+ });
+ 
++it("names a live holder's pool and pid when a second server boots into its pin", async () => {
++  const port = await freePort();
++  const holderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
++  const registryPath = fleetRegistry(holderPool);
++  const holder = createPoolServer({
++    poolDir: holderPool,
++    distDir: "/nonexistent",
++    registryPath,
++  });
++  servers.push(holder);
++  expect(holder.url).toBe(`http://localhost:${port}`);
++  // The holder is a real, registered, live server. A second pool pinned to
++  // the same port must fail naming the holder's pool directory and pid.
++  const contenderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
++  let message = "";
++  try {
++    createPoolServer({
++      poolDir: contenderPool,
++      distDir: "/nonexistent",
++      registryPath,
++    });
++  } catch (err) {
++    message = err instanceof Error ? err.message : String(err);
++  }
++  expect(message).toContain(String(port));
++  expect(message).toContain(holderPool);
++  expect(message).toContain(String(process.pid));
++});
++
+ it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
+   const held = await holdPort();
+   const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+   tempDirs.push(holderPool);
+
+[0m
+Now add the genuinely live two-pool holder-naming test:
+[0m$ [0mbun test engine/server.test.ts engine/fleet.test.ts 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 64 pass
+ 0 fail
+ 152 expect() calls
+Ran 64 tests across 2 files. [14.51s]
+[0m
+[0m$ [0mfor i in 1 2 3; do bun test engine/server.test.ts -t "cannot both pass the lock|concurrently both end up in the registry|names a live holder|takes over a pid file that is not a positive integer" 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(run $i)"; done
+4 pass  0 fail (run 1)
+ 4 pass  0 fail (run 2)
+ 4 pass  0 fail (run 3)
+[0m
+[0m$ [0mbun test 2>&1 | tail -5 && bunx tsc --noEmit && echo "TSC CLEAN" && cd ui && bun run build 2>&1 | tail -3
+220 pass
+ 0 fail
+ 822 expect() calls
+Ran 220 tests across 6 files. [17.37s]
+TSC CLEAN
+dist/assets/index-BwHkCFg6.js   29.22 kB │ gzip: 9.69 kB
+
+✓ built in 52ms
+[0m
+[0m$ [0mgit diff
+diff --git a/engine/fleet.test.ts b/engine/fleet.test.ts
+index bc91bbd..081f810 100644
+--- a/engine/fleet.test.ts
++++ b/engine/fleet.test.ts
+@@ -2,7 +2,14 @@
+ 
+ import { afterEach, describe, expect, it } from "bun:test";
+ import { spawnSync } from "node:child_process";
+-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import {
++  existsSync,
++  mkdirSync,
++  mkdtempSync,
++  readdirSync,
++  rmSync,
++  writeFileSync,
++} from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import {
+@@ -141,6 +148,38 @@ describe("fleet registry upsert", () => {
+       { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
+     ]);
+   });
++
++  it("clears a lock left by a crashed writer and upserts anyway", () => {
++    const dir = tempDir();
++    const poolDir = join(dir, "pool");
++    mkdirSync(poolDir, { recursive: true });
++    const registry = join(dir, "pools.json");
++    writeFileSync(`${registry}.lock`, `${deadPid()}\n`);
++    upsertFleetEntry(registry, {
++      poolDir,
++      port: 8787,
++      pid: process.pid,
++      startedAt: "t",
++    });
++    expect(readFleetEntries(registry)).toEqual([
++      { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
++    ]);
++    expect(existsSync(`${registry}.lock`)).toBe(false);
++  });
++
++  it("replaces the registry by rename, leaving no temp or lock file behind", () => {
++    const dir = tempDir();
++    const poolDir = join(dir, "pool");
++    mkdirSync(poolDir, { recursive: true });
++    const registry = join(dir, "pools.json");
++    upsertFleetEntry(registry, {
++      poolDir,
++      port: 8787,
++      pid: process.pid,
++      startedAt: "t",
++    });
++    expect(readdirSync(dir).sort()).toEqual(["pool", "pools.json"]);
++  });
+ });
+ 
+ describe("fleet registry prune-on-read", () => {
+diff --git a/engine/fleet.ts b/engine/fleet.ts
+index 16bb9f8..1bfb5b4 100644
+--- a/engine/fleet.ts
++++ b/engine/fleet.ts
+@@ -7,7 +7,14 @@
+  * on the next read.
+  */
+ 
+-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import {
++  existsSync,
++  mkdirSync,
++  readFileSync,
++  renameSync,
++  rmSync,
++  writeFileSync,
++} from "node:fs";
+ import { homedir } from "node:os";
+ import { dirname, join } from "node:path";
+ 
+@@ -84,19 +91,95 @@ export function readFleetEntry(
+   );
+ }
+ 
++/**
++ * Best-effort lookup of a fleet entry by port, used to name the holder on a
++ * busy pinned port. Only live, pruned entries are candidates; an absent,
++ * corrupt, or unmatched registry yields null, and callers never depend on the
++ * registry existing.
++ */
++export function readFleetEntryByPort(
++  registryPath: string,
++  port: number,
++): FleetEntry | null {
++  return (
++    readFleetEntries(registryPath).find((entry) => entry.port === port) ?? null
++  );
++}
++
++/** The pid named in a lock file, or null when it is empty or unreadable. */
++function readLockPid(lockPath: string): number | null {
++  let raw: string;
++  try {
++    raw = readFileSync(lockPath, "utf8").trim();
++  } catch {
++    return null;
++  }
++  const pid = Number(raw);
++  return Number.isInteger(pid) && pid > 0 ? pid : null;
++}
++
++/** How long a registry write waits on a foreign lock before giving up. */
++export const FLEET_LOCK_TIMEOUT_MS = 10_000;
++
+ /**
+  * Upsert one console's entry, keyed by pool directory: relaunching the same
+  * pool replaces its old entry rather than duplicating it. A missing or corrupt
+  * registry file is recreated, never an error.
++ *
++ * Writes are serialized with a lock file, so two servers booting different
++ * pools at the same moment cannot lose one entry, and the registry itself is
++ * replaced by rename so a reader never sees a half-written file. The lock is
++ * claimed with O_EXCL; a lock whose holder pid is dead is a crashed writer's
++ * and is cleared, while a live holder is waited on up to FLEET_LOCK_TIMEOUT_MS.
+  */
+ export function upsertFleetEntry(
+   registryPath: string,
+   entry: FleetEntry,
+ ): void {
+-  const entries = readRegistry(registryPath).filter(
+-    (existing) => existing.poolDir !== entry.poolDir,
+-  );
+-  entries.push(entry);
++  const lockPath = `${registryPath}.lock`;
+   mkdirSync(dirname(registryPath), { recursive: true });
+-  writeFileSync(registryPath, JSON.stringify(entries, null, 2));
++  const deadline = Date.now() + FLEET_LOCK_TIMEOUT_MS;
++  for (;;) {
++    try {
++      writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
++    } catch (err) {
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
++      const holder = readLockPid(lockPath);
++      if (holder !== null) {
++        if (pidIsLive(holder)) {
++          if (Date.now() > deadline) {
++            throw new Error(
++              `fleet registry: lock ${lockPath} is held by live pid ${holder}`,
++            );
++          }
++          Bun.sleepSync(10);
++          continue;
++        }
++        // The holder's process is gone: a crashed writer. Clear its lock.
++        rmSync(lockPath, { force: true });
++        continue;
++      }
++      // Empty or unreadable: a writer is mid-claim, its pid appears within
++      // microseconds. A lock still empty past the deadline is a crashed
++      // writer's, so clear it and retry.
++      if (Date.now() > deadline) {
++        rmSync(lockPath, { force: true });
++        continue;
++      }
++      Bun.sleepSync(10);
++      continue;
++    }
++    try {
++      const entries = readRegistry(registryPath).filter(
++        (existing) => existing.poolDir !== entry.poolDir,
++      );
++      entries.push(entry);
++      const tempPath = `${registryPath}.tmp`;
++      writeFileSync(tempPath, JSON.stringify(entries, null, 2));
++      renameSync(tempPath, registryPath);
++      return;
++    } finally {
++      rmSync(lockPath, { force: true });
++    }
++  }
+ }
+\ No newline at end of file
+diff --git a/engine/server.test.ts b/engine/server.test.ts
+index 61f96c8..e9e215d 100644
+--- a/engine/server.test.ts
++++ b/engine/server.test.ts
+@@ -578,6 +578,25 @@ function makeLockedPool(): string {
+   ]);
+ }
+ 
++/**
++ * A pool for CLI-level tests: one ticket that is already done, so the boot
++ * never spawns a real harness, with a harness name that resolves.
++ */
++function makeCliPool(): string {
++  const poolDir = mkdtempSync(join(tmpdir(), "pool-cli-"));
++  tempDirs.push(poolDir);
++  mkdirSync(join(poolDir, "issues"), { recursive: true });
++  writeFileSync(
++    join(poolDir, "issues", "01-a.md"),
++    "<!-- state: id=01 blocked-by=none status=done -->\n\n# body\n",
++  );
++  writeFileSync(
++    join(poolDir, "console.json"),
++    JSON.stringify({ defaults: { harness: "claude", model: "m" } }, null, 2),
++  );
++  return poolDir;
++}
++
+ describe("pool lock", () => {
+   it("writes its own pid on a successful boot", () => {
+     const poolDir = makeLockedPool();
+@@ -653,6 +672,39 @@ describe("pool lock", () => {
+     expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
+   });
+ 
++  it("two near-simultaneous launches cannot both pass the lock; the loser names the winner", async () => {
++    const poolDir = makeCliPool();
++    const registryPath = fleetRegistry(poolDir);
++    const repoDir = join(import.meta.dir, "..");
++    const args = [
++      "bun",
++      "run",
++      "engine/server.ts",
++      "--pool",
++      poolDir,
++      "--port",
++      "0",
++      "--registry",
++      registryPath,
++    ];
++    const childA = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    const childB = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    // Exactly one launch holds the lock and serves; the other exits non-zero
++    // naming the winner's pid. The first to exit is the loser.
++    const loser = await Promise.race([
++      childA.exited.then(() => childA),
++      childB.exited.then(() => childB),
++    ]);
++    const winner = loser === childA ? childB : childA;
++    const exitCode = await loser.exited;
++    expect(exitCode).not.toBe(0);
++    const stderr = await new Response(loser.stderr).text();
++    expect(stderr).toContain("locked by live server");
++    expect(stderr).toContain(String(winner.pid));
++    winner.kill();
++    await winner.exited;
++  });
++
+   it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
+     const poolDir = makeLockedPool();
+     writePidFile(poolDir, process.pid);
+@@ -747,6 +799,111 @@ describe("pinned pool ports", () => {
+     await held.release();
+   });
+ 
++  it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
++    const held = await holdPort();
++    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
++    tempDirs.push(holderPool);
++    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
++    const registryPath = join(poolDir, "pools.json");
++    writeFileSync(
++      registryPath,
++      JSON.stringify([
++        { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
++      ]),
++    );
++    let message = "";
++    try {
++      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath });
++    } catch (err) {
++      message = err instanceof Error ? err.message : String(err);
++    }
++    expect(message).toContain(String(held.port));
++    expect(message).toContain(holderPool);
++    expect(message).toContain(String(process.pid));
++    await held.release();
++  });
++
++  it("names a live holder's pool and pid when a second server boots into its pin", async () => {
++    const port = await freePort();
++    const holderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
++    const registryPath = fleetRegistry(holderPool);
++    const holder = createPoolServer({
++      poolDir: holderPool,
++      distDir: "/nonexistent",
++      registryPath,
++    });
++    servers.push(holder);
++    expect(holder.url).toBe(`http://localhost:${port}`);
++    // The holder is a real, registered, live server. A second pool pinned to
++    // the same port must fail naming the holder's pool directory and pid.
++    const contenderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
++    let message = "";
++    try {
++      createPoolServer({
++        poolDir: contenderPool,
++        distDir: "/nonexistent",
++        registryPath,
++      });
++    } catch (err) {
++      message = err instanceof Error ? err.message : String(err);
++    }
++    expect(message).toContain(String(port));
++    expect(message).toContain(holderPool);
++    expect(message).toContain(String(process.pid));
++  });
++
++  it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
++    const held = await holdPort();
++    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
++    tempDirs.push(holderPool);
++    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
++    const registryPath = join(poolDir, "pools.json");
++    writeFileSync(
++      registryPath,
++      JSON.stringify([
++        { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
++      ]),
++    );
++    const repoDir = join(import.meta.dir, "..");
++    const child = Bun.spawn(
++      [
++        "bun",
++        "run",
++        "engine/server.ts",
++        "--pool",
++        poolDir,
++        "--port",
++        String(held.port),
++        "--registry",
++        registryPath,
++      ],
++      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
++    );
++    const exitCode = await child.exited;
++    const stderr = await new Response(child.stderr).text();
++    expect(exitCode).not.toBe(0);
++    expect(stderr).toContain(holderPool);
++    expect(stderr).toContain(String(process.pid));
++    await held.release();
++  });
++
++  it("a failed launch never deletes a pid file naming another live server", async () => {
++    const held = await holdPort();
++    const poolDir = makeLockedPool();
++    writePidFile(poolDir, process.pid);
++    let message = "";
++    try {
++      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
++    } catch (err) {
++      message = err instanceof Error ? err.message : String(err);
++    }
++    expect(message).toContain("locked by live server");
++    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
++      String(process.pid),
++    );
++    await held.release();
++  });
++
+   it("--port overrides the console.json pin for that launch", async () => {
+     const configPort = await freePort();
+     const flagPort = await freePort();
+@@ -889,4 +1046,47 @@ describe("fleet registration", () => {
+     expect(readFleetEntries(registryPath)).toEqual([]);
+     await held.release();
+   });
++
++  it("two servers booting different pools concurrently both end up in the registry", async () => {
++    const poolA = makeCliPool();
++    const poolB = makeCliPool();
++    const registryPath = fleetRegistry(poolA);
++    const repoDir = join(import.meta.dir, "..");
++    const argsFor = (pool: string) => [
++      "bun",
++      "run",
++      "engine/server.ts",
++      "--pool",
++      pool,
++      "--port",
++      "0",
++      "--registry",
++      registryPath,
++    ];
++    const childA = Bun.spawn(argsFor(poolA), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    const childB = Bun.spawn(argsFor(poolB), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
++    // Poll the raw registry until both pools have landed. The lock around the
++    // write means the later writer reads the earlier entry, so neither boot
++    // can overwrite the other.
++    const deadline = Date.now() + 20_000;
++    let entries: { poolDir: string; port: number; pid: number; startedAt: string }[] = [];
++    while (Date.now() < deadline) {
++      try {
++        entries = JSON.parse(readFileSync(registryPath, "utf8")) as typeof entries;
++      } catch {
++        entries = [];
++      }
++      if (entries.length === 2) break;
++      await Bun.sleep(50);
++    }
++    childA.kill();
++    childB.kill();
++    await Promise.all([childA.exited, childB.exited]);
++    expect(entries.map((e) => e.poolDir).sort()).toEqual(
++      [poolA, poolB].sort(),
++    );
++    expect(entries.map((e) => e.pid).sort()).toEqual(
++      [childA.pid, childB.pid].sort(),
++    );
++  });
+ });
+diff --git a/engine/server.ts b/engine/server.ts
+index d0bcb9f..2b15c69 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -25,6 +25,7 @@ import { readEvents, type TicketEvent } from "./events.ts";
+ import {
+   defaultRegistryPath,
+   readFleetEntry,
++  readFleetEntryByPort,
+   upsertFleetEntry,
+ } from "./fleet.ts";
+ import { loadPoolMarkers } from "./pool.ts";
+@@ -435,20 +436,28 @@ function isAddressInUse(err: unknown): boolean {
+ 
+ /**
+  * Bind the pool server per the resolution. A pinned port that is busy is a
+- * hard failure naming the port; only the unpinned path hunts upward from the
+- * default for a free one. Port 0 means "any free port" (Bun ephemeral).
++ * hard failure naming the port and, when the fleet registry knows the holder,
++ * the conflicting pool directory and pid; only the unpinned path hunts upward
++ * from the default for a free one. Port 0 means "any free port" (Bun
++ * ephemeral).
+  */
+ function bindPoolServer(
+   resolution: PortResolution,
+   serve: (port: number) => Bun.Server<undefined>,
++  registryPath: string,
+ ): Bun.Server<undefined> {
+   if (resolution.pinned) {
+     try {
+       return serve(resolution.port);
+     } catch (err) {
+       if (isAddressInUse(err)) {
++        const holder = readFleetEntryByPort(registryPath, resolution.port);
++        const holderText = holder
++          ? ` by pool ${holder.poolDir} (pid ${holder.pid})`
++          : "";
+         throw new Error(
+-          `port ${resolution.port} is already in use; free it or pass a different --port`,
++          `port ${resolution.port} is already in use${holderText}; ` +
++            "free it or pass a different --port",
+         );
+       }
+       throw err;
+@@ -472,20 +481,50 @@ function bindPoolServer(
+  * message naming that pid, its fleet-registry port when known, and the pool
+  * directory. Otherwise claim the pool by writing our own pid. There is no
+  * force override: a live lock always means use the running console or kill it.
++ *
++ * The claim is atomic (O_EXCL create), so two near-simultaneous launches of
++ * the same pool cannot both pass. A stale lock is cleared only when it still
++ * names a dead pid or is still unreadable after a beat, so a lock another
++ * server is mid-way through claiming is never trampled.
+  */
+ function acquirePoolLock(poolDir: string, registryPath: string): void {
+-  const livePid = readLockedPid(poolDir);
+-  if (livePid !== null && pidIsLive(livePid)) {
+-    const entry = readFleetEntry(registryPath, poolDir, livePid);
+-    const portText = entry ? ` on port ${entry.port}` : "";
+-    throw new Error(
+-      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
+-        "open the running console or kill it",
+-    );
++  const pidPath = join(poolDir, "runs", "server.pid");
++  mkdirSync(join(poolDir, "runs"), { recursive: true });
++  for (let attempt = 0; attempt < 5; attempt += 1) {
++    try {
++      writeFileSync(pidPath, `${process.pid}\n`, { flag: "wx" });
++      return;
++    } catch (err) {
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
++    }
++    const holder = readLockedPid(poolDir);
++    if (holder !== null) {
++      if (pidIsLive(holder)) {
++        const entry = readFleetEntry(registryPath, poolDir, holder);
++        const portText = entry ? ` on port ${entry.port}` : "";
++        throw new Error(
++          `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
++            "open the running console or kill it",
++        );
++      }
++      // A dead holder is a stale lock. Remove it only if it still names the
++      // same dead pid on re-read: a live server may have claimed it since.
++      if (readLockedPid(poolDir) === holder) {
++        rmSync(pidPath, { force: true });
++      }
++      continue;
++    }
++    // Empty or unreadable: a writer may be mid-claim, its pid landing within
++    // microseconds. Wait a beat and re-read; a lock still empty afterwards is
++    // garbage from a crashed or bogus earlier state, and is cleared.
++    Bun.sleepSync(25);
++    if (readLockedPid(poolDir) === null) {
++      rmSync(pidPath, { force: true });
++    }
+   }
+-  const runsDir = join(poolDir, "runs");
+-  mkdirSync(runsDir, { recursive: true });
+-  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
++  throw new Error(
++    `pool ${poolDir}: could not claim the pool lock after five attempts`,
++  );
+ }
+ 
+ export function createPoolServer(options: PoolServerOptions): PoolServer {
+@@ -556,7 +595,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+   );
+   let server: Bun.Server<undefined>;
+   try {
+-    server = bindPoolServer(resolution, (port) =>
++    server = bindPoolServer(
++      resolution,
++      (port) =>
+       Bun.serve({
+         port,
+       async fetch(req, bunServer) {
+@@ -663,17 +704,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+         return new Response("not found", { status: 404 });
+       },
+       }),
++      registryPath,
+     );
+   } catch (err) {
+     // The lock was claimed before the bind; a bind that never happened must
+-    // not leave a live-looking pid behind, or the next launch refuses itself.
+-    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++    // not leave our own live-looking pid behind, or the next launch refuses
++    // itself. Only our pid is removed: a lock another live server holds must
++    // survive this launch's failure.
++    if (readLockedPid(poolDir) === process.pid) {
++      rmSync(join(poolDir, "runs", "server.pid"), { force: true });
++    }
+     throw err;
+   }
+ 
+   // The bind succeeded, so the pool is live and advertises itself. Boot order
+   // is lock -> bind -> register: the registry never names a port that did not
+-  // actually get bound. Registration is best-effort — a registry write that
++  // actually get bound. Registration is best-effort: a registry write that
+   // fails must not take down a console that already bound successfully.
+   const boundPort = server.port;
+   if (boundPort !== undefined) {
+@@ -709,15 +755,26 @@ export function runServerCli(): void {
+   const args = process.argv.slice(2);
+   const poolIndex = args.indexOf("--pool");
+   const portIndex = args.indexOf("--port");
++  const registryIndex = args.indexOf("--registry");
+   const poolDir = poolIndex >= 0 ? args[poolIndex + 1] : undefined;
+   const port = portIndex >= 0 ? Number(args[portIndex + 1]) : undefined;
++  const registryPath =
++    registryIndex >= 0 && args[registryIndex + 1]
++      ? args[registryIndex + 1]
++      : undefined;
+   if (!poolDir) {
+-    console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
++    console.error(
++      "usage: bun run engine/server.ts --pool <dir> [--port <n>] [--registry <file>]",
++    );
+     process.exit(1);
+   }
+   let server: PoolServer;
+   try {
+-    server = createPoolServer({ poolDir, ...(port !== undefined ? { port } : {}) });
++    server = createPoolServer({
++      poolDir,
++      ...(port !== undefined ? { port } : {}),
++      ...(registryPath !== undefined ? { registryPath } : {}),
++    });
+   } catch (err) {
+     console.error(err instanceof Error ? err.message : String(err));
+     process.exit(1);
+[0m
+Full suite green (220 pass), typecheck clean, build clean. Let me review the final diff:
+[0m→ [0mRead engine/fleet.ts[90m [limit=20, offset=165][0m
+The diff shows fleet.ts lost its trailing newline. Let me restore it:
+[0m✗ [0mEdit engine/fleet.ts failed
+[91m[1mError: [0mNo changes to apply: oldString and newString are identical.
+[0m
+[0m$ [0msed -n '184,185p' engine/fleet.ts | od -c | tail -3
+0000000           }  \n   }
+0000005
+[0m
+[0m$ [0mgit diff -- engine/fleet.ts | rg 'No newline' && echo "STILL MISSING" || echo "has trailing newline"
+\ No newline at end of file
+STILL MISSING
+[0m
+[0m$ [0mprintf '\n' >> engine/fleet.ts && git diff -- engine/fleet.ts | rg 'No newline' && echo "STILL MISSING" || echo "has trailing newline"
+\ No newline at end of file
+STILL MISSING
+[0m
+[0m$ [0mtail -c 5 engine/fleet.ts | od -c
+0000000       }  \n   }  \n
+0000005
+[0m
+[0m$ [0mgit diff -- engine/fleet.ts | rg 'No newline' && echo "STILL MISSING" || echo "has trailing newline"; tail -c 3 engine/fleet.ts | od -c
+\ No newline at end of file
+STILL MISSING
+0000000  \n   }  \n
+0000003
+[0m
+[0m$ [0mgit diff -- engine/fleet.ts | tail -12 | cat -A | tail -14
++        (existing) => existing.poolDir !== entry.poolDir,$
++      );$
++      entries.push(entry);$
++      const tempPath = `${registryPath}.tmp`;$
++      writeFileSync(tempPath, JSON.stringify(entries, null, 2));$
++      renameSync(tempPath, registryPath);$
++      return;$
++    } finally {$
++      rmSync(lockPath, { force: true });$
++    }$
++  }$
++}$
+[0m
+[0m$ [0mgit diff -- engine/fleet.ts | rg -n 'No newline' && echo FOUND || echo "no missing-newline marker"; git diff --stat
+78:\ No newline at end of file
+FOUND
+ engine/fleet.test.ts  |  41 ++++++++++-
+ engine/fleet.ts       |  97 ++++++++++++++++++++++--
+ engine/server.test.ts | 200 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts      |  97 +++++++++++++++++++-----
+ 4 files changed, 407 insertions(+), 28 deletions(-)
+[0m
+[0m$ [0mgit diff -- engine/fleet.ts | sed -n '70,85p' | cat -A
+-  const entries = readRegistry(registryPath).filter($
+-    (existing) => existing.poolDir !== entry.poolDir,$
+-  );$
+-  entries.push(entry);$
++  const lockPath = `${registryPath}.lock`;$
+   mkdirSync(dirname(registryPath), { recursive: true });$
+-  writeFileSync(registryPath, JSON.stringify(entries, null, 2));$
+-}$
+\ No newline at end of file$
++  const deadline = Date.now() + FLEET_LOCK_TIMEOUT_MS;$
++  for (;;) {$
++    try {$
++      writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });$
++    } catch (err) {$
++      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;$
++      const holder = readLockPid(lockPath);$
+[0m
+[0m$ [0mgit show HEAD:engine/fleet.ts | tail -c 3 | od -c; echo "---"; tail -c 3 engine/fleet.ts | od -c
+0000000   ;  \n   }
+0000003
+---
+0000000  \n   }  \n
+0000003
+[0m
+The marker is on the **removed** `-}` line — the old file at HEAD already lacked a trailing newline; my working-tree file now ends cleanly. Let me confirm and then run the final verification:
+Confirmed pre-existing; my file now ends correctly. Final verification:
+[0m$ [0mbun test 2>&1 | tail -5 && bunx tsc --noEmit && echo "TSC CLEAN" && cd ui && bun run build 2>&1 | tail -2
+219 pass
+ 1 fail
+ 816 expect() calls
+Ran 220 tests across 6 files. [17.24s]
+TSC CLEAN
+
+✓ built in 46ms
+[0m
+[0m$ [0mbun test 2>&1 | rg -B2 -A20 'fail' | head -60
+220 pass
+ 0 fail
+ 822 expect() calls
+Ran 220 tests across 6 files. [17.44s]
+[0m
+One run flaked (220/0 on re-run). Let me hunt the flake:
+[0m$ [0mfor i in 1 2 3; do bun test engine/server.test.ts 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(server run $i)"; done
+46 pass  0 fail (server run 1)
+ 46 pass  0 fail (server run 2)
+ 46 pass  0 fail (server run 3)
+[0m
+[0m$ [0mfor i in 1 2 3 4; do bun test 2>&1 | rg 'fail' | rg -v '0 fail' | head -3; echo "--- run $i done"; done
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [247.89ms]
+ 1 fail
+--- run 1 done
+--- run 2 done
+--- run 3 done
+--- run 4 done
+[0m
+The flake is a pre-existing `worktrees` resolver test, not one of mine. Let me confirm it's unrelated to my change by checking if it flakes independently:
+[0m$ [0mgit stash && for i in 1 2 3 4 5; do bun test engine/worktrees.test.ts -t "rotates the resolver log" 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(base run $i)"; done; git stash pop
+Saved working directory and index state WIP on pool/29: f510b09 console: live-tail the ticket log pane on the snapshot cadence
+(base run 1)
+(base run 2)
+(base run 3)
+(base run 4)
+(base run 5)
+On branch pool/29
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   engine/fleet.test.ts
+	modified:   engine/fleet.ts
+	modified:   engine/server.test.ts
+	modified:   engine/server.ts
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/29-fleet-review-fixes.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+Dropped refs/stash@{0} (5b14850e6623060b4602e0dda4c5cbcdba8edc84)
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6 7 8; do bun test engine/worktrees.test.ts -t "rotates the resolver log to its attempt-numbered name on a second resolver run" 2>&1 | tail -3 | tr '\n' ' '; echo "(with changes run $i)"; done
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 1)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 2)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 3)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 4)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 5)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 6)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 7)
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts") note: To treat the "engine/worktrees.test.ts" filter as a path, run "bun test ./engine/worktrees.test.ts"  (with changes run 8)
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6 7 8 9 10; do bun test ./engine/worktrees.test.ts -t "rotates the resolver log to its attempt-numbered name on a second resolver run" 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(run $i)"; done
+(run 1)
+(run 2)
+(run 3)
+(run 4)
+(run 5)
+(run 6)
+(run 7)
+(run 8)
+(run 9)
+(run 10)
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6 7 8; do bun test ./engine/worktrees.test.ts 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(run $i)"; done
+(run 1)
+(run 2)
+(run 3)
+(run 4)
+(run 5)
+(run 6)
+(run 7)
+(run 8)
+[0m
+[0m$ [0mbun test ./engine/worktrees.test.ts 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+Test filter "./engine/worktrees.test.ts" had no matches in --cwd="/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29"
+[0m
+[0m$ [0mbun test worktrees.test.ts 2>&1 | tail -6
+worktrees.test.ts
+16 files were searched [9.00ms]
+
+note: Tests need ".test", "_test_", ".spec" or "_spec_" in the filename (ex: "MyApp.test.ts")
+note: To treat the "worktrees.test.ts" filter as a path, run "bun test ./worktrees.test.ts"
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6 7 8 9 10; do bun test ./worktrees.test.ts 2>&1 | rg 'pass|fail' | tr '\n' ' '; echo "(run $i)"; done
+(run 1)
+(run 2)
+(run 3)
+(run 4)
+(run 5)
+(run 6)
+(run 7)
+(run 8)
+(run 9)
+(run 10)
+[0m
+[0m$ [0mbun test ./worktrees.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+Test filter "./worktrees.test.ts" had no matches in --cwd="/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine"
+[0m
+[0m$ [0mfor i in 1 2 3 4 5; do bun test 2>&1 | rg '\(fail\)' | head -3; echo "=== full run $i done ==="; done
+=== full run 1 done ===
+=== full run 2 done ===
+=== full run 3 done ===
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [1007.84ms]
+=== full run 4 done ===
+=== full run 5 done ===
+[0m
+The flake is the worktrees resolver test, which my change doesn't touch. Let me confirm it flakes on base (without my changes):
+[0m$ [0mgit stash && for i in 1 2 3 4 5 6; do bun test 2>&1 | rg '\(fail\)' | head -3; echo "=== base run $i done ==="; done; git stash pop
+Saved working directory and index state WIP on pool/29: f510b09 console: live-tail the ticket log pane on the snapshot cadence
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [255.72ms]
+=== base run 1 done ===
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [251.00ms]
+=== base run 2 done ===
+=== base run 3 done ===
+=== base run 4 done ===
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [244.97ms]
+=== base run 5 done ===
+=== base run 6 done ===
+On branch pool/29
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   engine/fleet.test.ts
+	modified:   engine/fleet.ts
+	modified:   engine/server.test.ts
+	modified:   engine/server.ts
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/29-fleet-review-fixes.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+Dropped refs/stash@{0} (d49190fcae741db7d19adc2154f4e57638668934)
+[0m
+[0m$ [0mrg -n 'rotates the resolver log' engine/worktrees.test.ts
+rg: engine/worktrees.test.ts: IO error for operation on engine/worktrees.test.ts: No such file or directory (os error 2)
+[0m
+The worktrees resolver-log flake reproduces on base too (failed 3 of 6 base runs), so it's pre-existing and unrelated to my change. Let me look at it to judge whether a small fix is warranted:
+[0m$ [0mrg -rln 'rotates the resolver log' . --glob '*.test.ts' 2>/dev/null
+./engine/engine.test.ts:  it("ln to its attempt-numbered name on a second resolver run", async () => {
+[0m
+[0m$ [0mrg -n 'rotates the resolver log' engine/engine.test.ts
+2984:  it("rotates the resolver log to its attempt-numbered name on a second resolver run", async () => {
+[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=70, offset=2984][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=35, offset=3053][0m
+This is a pre-existing flaky merge-resolver test (base flakes too, my change doesn't touch that subsystem). Let me capture the actual failure detail to record it:
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6 7 8; do out=$(bun test engine/engine.test.ts 2>&1); if echo "$out" | rg -q '\(fail\)'; then echo "$out" | rg -B3 -A25 'rotates the resolver log' | head -50; break; fi; echo "engine run $i clean"; done
+engine run 1 clean
+Received: false
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/29/engine/engine.test.ts:3058:7)
+(fail) worktrees > resolver agent > rotates the resolver log to its attempt-numbered name on a second resolver run [252.67ms]
+
+ 63 pass
+ 1 fail
+ 395 expect() calls
+Ran 64 tests across 1 file. [2.64s]
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+@@ -14,14 +14,14 @@
+ 4. **Em dash in committed prose.** engine/server.ts has the comment "Registration is best-effort — a registry write that..." (around line 507 on main), breaching the standing no-em-dashes rule. Reword without the em dash.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Busy pinned port names the conflicting pool directory and pid when the fleet registry knows the holder; falls back to the current message when it does not (verified live with two temp pools)
+-- [ ] Two near-simultaneous launches of the same pool cannot both pass the lock; the loser exits 1 naming the winner
+-- [ ] Failed-bind cleanup never deletes a pid file that names another live server
+-- [ ] Two servers booting different pools concurrently both end up in the fleet registry (no lost entry)
+-- [ ] No em dashes in engine/server.ts prose
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Busy pinned port names the conflicting pool directory and pid when the fleet registry knows the holder; falls back to the current message when it does not (verified live with two temp pools)
++- [x] Two near-simultaneous launches of the same pool cannot both pass the lock; the loser exits 1 naming the winner
++- [x] Failed-bind cleanup never deletes a pid file that names another live server
++- [x] Two servers booting different pools concurrently both end up in the fleet registry (no lost entry)
++- [x] No em dashes in engine/server.ts prose
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 23 — Engine-enforced pool lock (fix 2 reworks its claim and cleanup)
+
+[0m
+The flake fails at `engine.test.ts:3057` — the second merge-approval interrupt hasn't landed yet when `reject()` resolves; a timing race deep in the merge-resolver machinery, entirely outside this Issue's scope and reproduced on base. I'll document it in the Issue and proceed (a fix would be a redesign of a subsystem the Issue explicitly says to leave alone).
+
+Let me update the Issue file — tick acceptance criteria and add notes:
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+@@ -34,8 +34,22 @@
+ 
+ - Each fix mirrors code that already exists: the lock refusal's registry lookup for fix 1, standard O_EXCL/temp-rename patterns for fixes 2 and 3. Keep the changes small; this is hardening, not a redesign.
+ - Tests stay at the public interface: temp pool directories, temp registry paths, stub harnesses. Concurrency tests can spawn real server processes against temp pools, following the existing server.test.ts precedent.
+ 
++### Worklog (ticket 29)
++
++All four fixes landed in `engine/fleet.ts` and `engine/server.ts`, with tests in `fleet.test.ts` and `server.test.ts`.
++
++- Fix 1: `readFleetEntryByPort` in fleet.ts (live pruned lookup by port, mirroring `readFleetEntry`); `bindPoolServer` takes the registry path and appends ` by pool <dir> (pid <pid>)` to the busy-pin error when the registry knows the holder. Fallback message unchanged.
++- Fix 2: `acquirePoolLock` now claims with O_EXCL (`writeFileSync` flag "wx") and loops: a live holder refuses; a dead holder is removed only if a re-read still shows the same dead pid; an empty/unreadable lock is given a 25ms beat before being cleared, so a concurrent writer mid-claim is not trampled (closes the null-null re-read race a review sub-agent found in my first cut). Failed-bind cleanup removes `runs/server.pid` only when it still names our own pid.
++- Fix 3: `upsertFleetEntry` serializes writes with a `.lock` file claimed via O_EXCL, waits up to 10s on a live holder, clears a dead holder's stale lock, and replaces the registry via temp-file + rename so a reader never sees a torn file.
++- Fix 4: the em dash in the "Registration is best-effort" comment is now a colon.
++- Added a `--registry <file>` seam to the server CLI (mirrors fleet-cli.ts's existing `--registry`), so CLI-level tests never touch the real `~/.agent-graphs/pools.json`. Without it the lock and registry concurrency tests would write outside the repo.
++- Tests: live two-pool holder naming (a real bound server plus a contender booting into its pin), two-spawned-process same-pool lock race (loser exits 1 naming the winner's pid), foreign-live-pid lock survival, two-spawned-process different-pool registry race (both entries land), stale registry lock recovery, no temp/lock leftovers.
++- Full suite: 220 pass, 0 fail (repeated full runs; the new concurrency tests are stable across repeated runs). `tsc --noEmit` clean; `bun run build` in ui clean.
++
++Pre-existing flake, not caused by this ticket and out of its scope: `engine.test.ts` "rotates the resolver log to its attempt-numbered name on a second resolver run" fails intermittently (about 1 in 4 full-suite runs; reproduced on base HEAD without my changes). The failure is at the `merge-approval` assertion after `run.reject` (engine.test.ts:3057): the second resolver's conflict interrupt has not always landed when the rejection resolves. It is a timing race in the merge-resolver subsystem, which this ticket does not touch. Left as found.
++
+ ---
+ 
+ ## Brief, written by the engine
+ 
+
+[0m
+[0m← [0mEdit /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/29-fleet-review-fixes.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=29 blocked-by=23,24,25,26,27 status=in-progress -->
++<!-- state: id=29 blocked-by=23,24,25,26,27 status=done -->
+ 
+ # 29 — Fleet batch review fixes
+ 
+ Spec: `.scratch/console-pool/spec-fleet-of-consoles.md`. Source: ticket 28's review Brief (`.scratch/console-pool/issues/28-review-pass-fleet-batch.md`), findings 1-3 plus the second pass's finding 4. Billy's call on the three findings was: fix all three.
+
+[0m
+Now the final verification run and commit:
+[0m$ [0mbun test 2>&1 | tail -4 && bunx tsc --noEmit && echo "TSC CLEAN"
+220 pass
+ 0 fail
+ 822 expect() calls
+Ran 220 tests across 6 files. [17.33s]
+TSC CLEAN
+[0m
+[0m$ [0mgit status --short && echo "---" && git diff --stat
+M engine/fleet.test.ts
+ M engine/fleet.ts
+ M engine/server.test.ts
+ M engine/server.ts
+?? .scratch/console-pool/issues/29-fleet-review-fixes.md
+---
+ engine/fleet.test.ts  |  41 ++++++++++-
+ engine/fleet.ts       |  97 ++++++++++++++++++++++--
+ engine/server.test.ts | 200 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts      |  97 +++++++++++++++++++-----
+ 4 files changed, 407 insertions(+), 28 deletions(-)
+[0m
+[0m$ [0mgit add engine/fleet.ts engine/server.ts engine/fleet.test.ts engine/server.test.ts && git commit -m "console: harden pool lock, port conflict, and fleet registry writes" 2>&1 | tail -5
+[pool/29 7a4b1fc] console: harden pool lock, port conflict, and fleet registry writes
+ 4 files changed, 407 insertions(+), 28 deletions(-)
+[0m
+[0m$ [0mgit status --short && git log --oneline -3
+?? .scratch/console-pool/issues/29-fleet-review-fixes.md
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/29.outcome.json
+Wrote file successfully.
+[0m
+[0m# [0mTodos
+[✓] Fix 3: atomic fleet registry writes (lockfile + temp/rename) in fleet.ts
+[✓] Fix 1: readFleetEntryByPort helper in fleet.ts
+[✓] Fix 2: atomic O_EXCL pool lock claim + conditional cleanup in server.ts
+[✓] Fix 1: name the holder on a busy pinned port in server.ts bindPoolServer
+[✓] Fix 4: remove em dash in server.ts prose
+[✓] Add --registry CLI seam to runServerCli
+[✓] Write tests: busy-port naming, lock concurrency, failed-bind cleanup, registry concurrency
+[✓] Run full suite, typecheck, UI build
+[✓] Code review pass, tick acceptance criteria, commit, write outcome
+[0m
+Issue 29 done, committed as `7a4b1fc`, outcome written.
+
+**All four fixes landed** (in `engine/fleet.ts` and `engine/server.ts`):
+1. Busy pinned ports now name the holder (` by pool <dir> (pid <pid>)`) from a live fleet-registry lookup by port; bare message preserved as fallback.
+2. Pool lock claims atomically via O_EXCL; a live holder refuses, stale locks clear only after a re-read confirms, and failed-bind cleanup removes the pid file only when it still names our pid. This closes the review's TOCTOU window.
+3. Fleet registry writes serialize through a `.lock` file (live-holder wait, stale-lock recovery) plus temp-file-and-rename, so concurrent different-pool boots lose no entry.
+4. The em dash in the registration comment is a colon.
+
+**Verification**: live two-pool and real-concurrent-process tests (new concurrency tests stable across repeated runs), 220 tests pass, `tsc --noEmit` clean, UI build clean. A two-axis code review ran; its one real finding (a null-null re-read race in the lock takeover) was fixed.
+
+One pre-existing condition, documented in the Issue's Notes: `engine.test.ts`'s resolver-log rotation test flakes intermittently on base HEAD too (merge-resolver timing race, out of this Issue's scope). Left as found.

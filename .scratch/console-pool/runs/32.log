@@ -1,0 +1,584 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/code-review/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+[0m
+[0m$ [0mgit log --oneline -8 && git show --stat aec2f65 | head -40
+7161efa Merge branch 'pool/31'
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+f9fda2b Merge branch 'pool/29'
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+2e51fe1 console: record ADRs 0001 (one console per pool) and 0002 (ticket log storage)
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+a10b68e console: glossary — Pool, Fleet; one Console per pool
+commit aec2f6595bff69d4f303b4a8cf36c5d8833b8cfc
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 14:39:27 2026 +0100
+
+    console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+
+ engine/engine.test.ts  |  6 ++++--
+ engine/server.test.ts  | 25 +++++++++++++++++++++++++
+ engine/server.ts       | 23 ++++++++++++++++++++---
+ ui/src/project.test.ts | 29 +++++++++++++++++++++++++++++
+ ui/src/project.ts      | 17 +++++++++++++++++
+ ui/src/view.ts         |  9 +++++----
+ 6 files changed, 100 insertions(+), 9 deletions(-)
+[0m
+[0m→ [0mRead .scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/ | head -40
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+16-per-ticket-event-timeline.md
+17-attempt-log-retention.md
+18-raw-log-pane-in-detail.md
+19-live-log-tailing.md
+20-resizable-detail.md
+21-fullscreen-detail.md
+22-review-pass-ticket-log-detail.md
+23-engine-pool-lock.md
+24-pinned-pool-ports.md
+25-fleet-registry.md
+26-fleet-list-command.md
+27-skill-fleet-conventions.md
+28-review-pass-fleet-batch.md
+29-fleet-review-fixes.md
+30-review-pass-fleet-fixes.md
+31-ticket-log-review-fixes.md
+32-review-pass-ticket-log-fixes.md
+[0m
+[0m→ [0mRead .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+[0m→ [0mRead .scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+[0m
+[0m$ [0mgit show aec2f65 --format=short | head -300
+commit aec2f6595bff69d4f303b4a8cf36c5d8833b8cfc
+Author: billy needham <billyluisneedham@duck.com>
+
+    console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+
+diff --git a/engine/engine.test.ts b/engine/engine.test.ts
+index 9aa0407..04db2df 100644
+--- a/engine/engine.test.ts
++++ b/engine/engine.test.ts
+@@ -2104,10 +2104,12 @@ describe("worktrees", () => {
+         "fi",
+         'if [ -n "$WAIT_MERGED" ]; then',
+         "  for _ in $(seq 1 100); do",
+-        '    git -C "$MAIN_REPO" log --format=%s 2>/dev/null | grep -q "$WAIT_MERGED" && break',
++        '    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '    case "$log" in *"$WAIT_MERGED"*) break;; esac',
+         "    sleep 0.05",
+         "  done",
+-        '  git -C "$MAIN_REPO" log --format=%s | grep -q "$WAIT_MERGED" || exit 42',
++        '  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
++        '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
+         "fi",
+         'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+         'if [ -n "$RECORD_DIR" ]; then',
+diff --git a/engine/server.test.ts b/engine/server.test.ts
+index e9e215d..4ac374e 100644
+--- a/engine/server.test.ts
++++ b/engine/server.test.ts
+@@ -421,6 +421,31 @@ describe("ticket log endpoint", () => {
+     expect(secondBody.content).not.toContain("\uFFFD");
+   });
+ 
++  it("does not split a multi-byte UTF-8 character at a range's head", async () => {
++    const poolDir = makePool([{ file: "01-a.md", marker }]);
++    const runsDir = join(poolDir, "runs");
++    mkdirSync(runsDir, { recursive: true });
++    // é = U+00E9 is two bytes, at byte offsets 10 and 11. A tail-first open or
++    // load-earlier read can request an offset mid-character: a range starting
++    // at byte 11 (a continuation byte) must drop the partial char and report
++    // the adjusted offset, so the pane head never decodes as U+FFFD.
++    writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=11`);
++    const body = (await res.json()) as {
++      content: string;
++      offset: number;
++      nextOffset: number;
++      totalSize: number;
++    };
++    expect(body.content).toBe(" tail\n");
++    expect(body.content).not.toContain("\uFFFD");
++    expect(body.offset).toBe(12);
++    expect(body.nextOffset).toBe(18);
++    expect(body.totalSize).toBe(18);
++  });
++
+   it("returns empty content for an offset at or past the end", async () => {
+     const poolDir = makePool([{ file: "01-a.md", marker }]);
+     const runsDir = join(poolDir, "runs");
+diff --git a/engine/server.ts b/engine/server.ts
+index 2b15c69..48c837d 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -292,6 +292,20 @@ function utf8End(bytes: Uint8Array, start: number, end: number): number {
+   return cut;
+ }
+ 
++/**
++ * Trim a raw byte slice so no multi-byte UTF-8 char straddles its head: a
++ * range that begins on a continuation byte drops the partial char and starts
++ * at the next lead byte, so the pane head never decodes as U+FFFD. The byte
++ * count removed is reported back so the caller can adjust the served offset.
++ */
++function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
++  let cut = start;
++  while (cut < end && (bytes[cut] & 0xc0) === 0x80) {
++    cut += 1;
++  }
++  return cut - start;
++}
++
+ /**
+  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
+  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
+@@ -316,10 +330,13 @@ async function readLogRange(
+       : start + LOG_CHUNK_BYTES;
+   const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
+   const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
+-  const decodeEnd = utf8End(bytes, 0, bytes.length);
++  const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
++  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
+   return {
+-    content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
+-    offset: start,
++    content: stripAnsi(
++      new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
++    ),
++    offset: start + headTrim,
+     nextOffset: start + decodeEnd,
+     totalSize,
+   };
+diff --git a/ui/src/project.test.ts b/ui/src/project.test.ts
+index 37ce1ea..db08935 100644
+--- a/ui/src/project.test.ts
++++ b/ui/src/project.test.ts
+@@ -21,6 +21,7 @@ import {
+   logTailOffset,
+   mergeLayout,
+   nextNodeSelection,
++  parseStoredDetailWidth,
+   parseStoredLayout,
+   phaseLabel,
+   projectDetail,
+@@ -883,6 +884,34 @@ describe("clampDetailWidth", () => {
+   });
+ });
+ 
++describe("parseStoredDetailWidth", () => {
++  it("round-trips a stored width string through a reload", () => {
++    // The write path stores String(detailWidth) under one global key; the
++    // read path parses it back and clamps to the current window. A stored
++    // 600 on a reload with the same window comes back as 600.
++    const maxPx = Math.round(1440 * DETAIL_MAX_FRACTION);
++    expect(parseStoredDetailWidth("600", maxPx)).toBe(600);
++  });
++
++  it("falls back to the minimum when nothing is stored", () => {
++    expect(parseStoredDetailWidth(null, 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("falls back to the minimum for a non-numeric or non-finite stored value", () => {
++    expect(parseStoredDetailWidth("abc", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("Infinity", 1600)).toBe(DETAIL_MIN_PX);
++  });
++
++  it("clamps a stored width that is out of range on reload", () => {
++    expect(parseStoredDetailWidth("10", 1600)).toBe(DETAIL_MIN_PX);
++    expect(parseStoredDetailWidth("5000", 1600)).toBe(1600);
++  });
++
++  it("tracks the window bound on a narrow window", () => {
++    expect(parseStoredDetailWidth("600", 200)).toBe(200);
++  });
++});
++
+ describe("nextNodeSelection", () => {
+   it("selects, swaps, and clears", () => {
+     expect(nextNodeSelection(null, "ticket:A")).toBe("ticket:A");
+diff --git a/ui/src/project.ts b/ui/src/project.ts
+index 3de559c..04dc135 100644
+--- a/ui/src/project.ts
++++ b/ui/src/project.ts
+@@ -776,3 +776,20 @@ export const DETAIL_MAX_FRACTION = 0.8;
+ export function clampDetailWidth(px: number, maxPx: number): number {
+   return Math.min(maxPx, Math.max(DETAIL_MIN_PX, px));
+ }
++
++/**
++ * The Detail width persistence round trip: the width is stored as a plain
++ * number string under one global key, and a reload parses it back and clamps
++ * it to the current window. A missing, unparseable, or non-finite stored
++ * value falls back to the readable minimum.
++ */
++export function parseStoredDetailWidth(
++  raw: string | null,
++  maxPx: number,
++): number {
++  const parsed = raw == null ? Number.NaN : Number(raw);
++  return clampDetailWidth(
++    Number.isFinite(parsed) ? parsed : DETAIL_MIN_PX,
++    maxPx,
++  );
++}
+diff --git a/ui/src/view.ts b/ui/src/view.ts
+index 6de4be4..490a0e1 100644
+--- a/ui/src/view.ts
++++ b/ui/src/view.ts
+@@ -15,6 +15,7 @@ import {
+   edgePath,
+   flowNeighbourhood,
+   mergeLayout,
++  parseStoredDetailWidth,
+   parseStoredLayout,
+   strokeWidthForZoom,
+   layoutStorageKey,
+@@ -240,10 +241,10 @@ function currentDetailMaxPx(): number {
+ 
+ function readStoredDetailWidth(): number {
+   try {
+-    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
+-    if (raw == null) return DETAIL_MIN_PX;
+-    const n = Number(raw);
+-    return Number.isFinite(n) ? n : DETAIL_MIN_PX;
++    return parseStoredDetailWidth(
++      localStorage.getItem(DETAIL_WIDTH_KEY),
++      currentDetailMaxPx(),
++    );
+   } catch {
+     // quota or private mode: the default width applies
+     return DETAIL_MIN_PX;
+[0m
+[0m$ [0mgit rev-parse aec2f65^ && git log f9fda2b..HEAD --oneline && git diff --stat f9fda2b...HEAD
+f9fda2b262ae1a747e61cb222d37689ebd0829a4
+7161efa Merge branch 'pool/31'
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+ engine/engine.test.ts  |  6 ++++--
+ engine/server.test.ts  | 25 +++++++++++++++++++++++++
+ engine/server.ts       | 23 ++++++++++++++++++++---
+ ui/src/project.test.ts | 29 +++++++++++++++++++++++++++++
+ ui/src/project.ts      | 17 +++++++++++++++++
+ ui/src/view.ts         |  9 +++++----
+ 6 files changed, 100 insertions(+), 9 deletions(-)
+[0m
+I have the full picture. Now pinning the fixed point and checking for standards docs before spawning the two review sub-agents.
+[0m✱ [0mGlob "{CODING_STANDARDS.md,CONTRIBUTING.md,AGENTS.md,NOTES.md}"[90m 1 match[0m
+[0m• [0mStandards review of ticket 31 diff[90m Deepseek Agent[0m
+[0m• [0mSpec review of ticket 31 diff[90m Deepseek Agent[0m
+[0m✓ [0mStandards review of ticket 31 diff[90m Deepseek Agent[0m
+[0m✓ [0mSpec review of ticket 31 diff[90m Deepseek Agent[0m
+[0m
+[0m$ [0mbun run build 2>&1 | tail -3 && cd ui && tsc --noEmit && echo UI-TSC-OK
+dist/assets/index-aLCzL345.js   29.24 kB │ gzip: 9.69 kB
+
+✓ built in 64ms
+/bin/bash: line 1: cd: ui: No such file or directory
+[0m
+[0m$ [0mtsc --noEmit && echo TSC-OK
+TSC-OK
+[0m
+[0m$ [0mbun test 2>&1 | tail -5
+226 pass
+ 0 fail
+ 834 expect() calls
+Ran 226 tests across 6 files. [17.66s]
+[0m
+[0m$ [0mtsc --noEmit && echo UI-TSC-OK
+src/prototype/VariantA.ts(3,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantA.ts(3,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantA.ts(3,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantA.ts(3,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantB.ts(16,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantB.ts(16,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantB.ts(16,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantB.ts(16,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantC.ts(18,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantC.ts(18,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantC.ts(18,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantC.ts(18,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/switcher.ts(11,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+[0m
+[0m$ [0mfor i in 1 2 3 4 5 6; do (bun test > /tmp/opencode/suite-$i.log 2>&1; echo "run-$i: $?" >> /tmp/opencode/suite-results.txt) & done; wait; cat /tmp/opencode/suite-results.txt
+run-4: 0
+run-1: 0
+run-3: 0
+run-6: 0
+run-2: 0
+run-5: 0
+[0m
+[0m$ [0mcat package.json && cat tsconfig.json
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "bun"]
+  },
+  "include": ["src"]
+}
+[0m
+[0m$ [0mgit log --oneline -3 -- ui/src/prototype/ && git status --short ui/src/prototype/ | head
+?? ui/src/prototype/
+[0m
+`ui/src/prototype/` is untracked scratch, not part of ticket 31's diff. Checking the working tree state and file provenance:
+[0m$ [0mgit status --short && ls -la --time-style=long-iso ui/src/prototype/ && ls ui/src/
+M .scratch/console-pool/console.json
+?? .scratch/console-pool/console.db
+?? .scratch/console-pool/issues/16-per-ticket-event-timeline.md
+?? .scratch/console-pool/issues/17-attempt-log-retention.md
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+?? .scratch/console-pool/issues/19-live-log-tailing.md
+?? .scratch/console-pool/issues/20-resizable-detail.md
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+?? .scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+?? .scratch/console-pool/issues/23-engine-pool-lock.md
+?? .scratch/console-pool/issues/24-pinned-pool-ports.md
+?? .scratch/console-pool/issues/25-fleet-registry.md
+?? .scratch/console-pool/issues/26-fleet-list-command.md
+?? .scratch/console-pool/issues/27-skill-fleet-conventions.md
+?? .scratch/console-pool/issues/28-review-pass-fleet-batch.md
+?? .scratch/console-pool/issues/29-fleet-review-fixes.md
+?? .scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+?? .scratch/console-pool/issues/31-ticket-log-review-fixes.md
+?? .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+?? .scratch/console-pool/runs/
+?? .scratch/console-pool/spec-fleet-of-consoles.md
+?? .scratch/console-pool/spec-ticket-log-and-detail-resize.md
+?? ui/src/prototype/
+total 40
+drwxr-xr-x 1 billy billy    88 2026-08-22 12:11 .
+drwxr-xr-x 1 billy billy   160 2026-08-22 14:41 ..
+-rw-r--r-- 1 billy billy  3055 2026-08-22 12:08 switcher.ts
+-rw-r--r-- 1 billy billy  8395 2026-08-22 12:09 VariantA.ts
+-rw-r--r-- 1 billy billy  9476 2026-08-22 12:12 VariantB.ts
+-rw-r--r-- 1 billy billy 11185 2026-08-22 12:10 VariantC.ts
+client.ts
+main.ts
+project.test.ts
+project.ts
+prototype
+styles.css
+view.ts
+vite-env.d.ts
+[0m
+[0m$ [0mcat tsconfig.json 2>/dev/null | head -30; echo ---; tsc --noEmit && echo ROOT-TSC-OK
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  },
+  "include": ["src", "engine"]
+}
+---
+ROOT-TSC-OK
+[0m
+[0m$ [0mgrep -n '—' engine/server.ts; echo "em-dash-exit:$?"; grep -n '—' engine/engine.test.ts engine/server.test.ts ui/src/project.ts ui/src/project.test.ts ui/src/view.ts; echo "all-exit:$?"
+em-dash-exit:1
+all-exit:1
+[0m
+[0m$ [0mcat .scratch/console-pool/runs/30.outcome.json 2>/dev/null; echo ---; ls .scratch/console-pool/runs/*.outcome.json | tail -5; echo ---; tail -30 .scratch/console-pool/issues/30-review-pass-fleet-fixes.md
+{"summary": "Review pass over ticket 29's fleet fixes (7a4b1fc): both axes clean after adjudication, all four fixes and spec stories 1, 2, 7, 10 verified live against temp pools, suite 220/220 with typecheck and UI build clean. Ends done; adjudicated limitations recorded in the Issue Notes.", "commitSha": null}
+---
+.scratch/console-pool/runs/27.outcome.json
+.scratch/console-pool/runs/28.outcome.json
+.scratch/console-pool/runs/29.outcome.json
+.scratch/console-pool/runs/30.outcome.json
+.scratch/console-pool/runs/31.outcome.json
+---
+- Speculative Generality: `FLEET_LOCK_TIMEOUT_MS` is exported but nothing imports it. One-line tidy when next touching fleet.ts.
+- Mysterious Name (minor): `readLockPid` versus `readLockedPid` differ by one letter for near-identical jobs.
+
+### Spec axis
+
+All four fixes landed and every ticket 29 acceptance criterion holds. Three concerns raised, adjudicated as follows:
+
+1. Residual theoretical race in the lock claim: an empty or unreadable lock gets a 25ms beat before clearing, so a writer stalled more than 25ms between create and write could still be trampled. Judgement: accepted. Every practical file lock has such a window; the acceptance criterion (two near-simultaneous launches cannot both pass) is proven by a real two-process test and re-verified live below. Recorded as a known limitation, not a spec gap.
+2. The conditional failed-bind cleanup branch (`readLockedPid === process.pid`) is effectively unreachable, because a live foreign lock refuses before the bind is attempted. Judgement: the criterion is behavioural — cleanup never deletes a pid file naming another live server — and it holds, verified live below (pool A's pid file survived a refused contender boot). The branch is cheap defence in depth, not dead weight to remove.
+3. The `--registry` CLI flag on server.ts is beyond the four fixes' letter. Judgement: justified, not scope creep. Ticket 29's worklog disclosed it; without it the CLI-level concurrency tests would write to the real `~/.agent-graphs/pools.json`, breaching this job's no-writes-outside-the-repo constraint. It mirrors fleet-cli.ts's existing `--registry`.
+
+Also raised: fix 1's holder lookup trusts any live-pid registry entry for the port (pid reuse could misname). That matches the Issue's own "best-effort" wording; accepted. The lock-race test would hang rather than fail against a non-atomic regression and does not assert the winner bound; test-robustness judgement call, noted.
+
+### Live verification (temp pools under /tmp, real spawned servers, temp registry via --registry, all processes killed after)
+
+- Fix 1 / story 7: pool B pinned to live pool A's port exits 1 with `port 19411 is already in use by pool <poolA> (pid <pidA>); free it or pass a different --port`. PASS.
+- Fix 1 fallback: a port held by a process the registry does not know exits 1 with the original holder-less message. PASS.
+- Stories 1, 2: second boot on live pool A exits 1 with `pool <poolA> is locked by live server pid <pidA> on port 19411; open the running console or kill it` (port from the registry). PASS.
+- Failed-bind cleanup invariant: after the refused boot, pool A's pid file still names the live server and pool A still serves. PASS.
+- Fix 2: two simultaneous same-pool launches produce exactly one winner; the loser exits 1 naming the winner's pid; the pid file names the winner. PASS.
+- Fix 3 / story 10: two concurrent different-pool boots both land in the fleet registry (four entries present including A's; no lost write), and fleet list prints both. PASS.
+- Fix 4: no em dashes in engine/server.ts. PASS.
+
+### Suite
+
+`bun test` 220 pass / 0 fail; `bunx tsc --noEmit` clean; `bun run build` in ui/ clean. Ticket 29's noted pre-existing resolver-log flake did not appear in this run.
+
+### Disposition
+
+Clean review: no hard findings, no spec gaps, nothing needing Billy's decision. The smells and limitations above are recorded for the pool's final Review interrupt. This ticket changes no code, and the Issue files are untracked runner state (`.scratch/` is never committed), so there is no commit for this ticket.
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=32 blocked-by=31 status=in-progress -->
++<!-- state: id=32 blocked-by=31 status=done -->
+ 
+ # 32 — Review pass over the ticket-log fixes
+ 
+ Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`. Mirrors tickets 22, 28, and 30's shape. Reviews ticket 31, the follow-up fixes from ticket 22's review.
+
+[0m
+Precedent confirmed (ticket 30: clean review, done, no commit since `.scratch/` is never committed). Writing the review record into the issue:
+[0m← [0mEdit .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+@@ -9,12 +9,12 @@
+ Review pass over ticket 31's diff. Run both review axes (standards plus spec, per the `code-review` skill) across ticket 31's commit, and verify each fix behaves as specified: the resolver-rotation test is stable across repeated full-suite parallel runs, log range reads handle multi-byte UTF-8 at the head of a range, the Detail width persistence test pins spec story 21, and engine/server.ts prose carries no em dashes. Re-run the full suite repeatedly enough to trust the deflake. This ticket changes no code: if the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Both review axes run over ticket 31's diff and findings addressed
+-- [ ] Each of ticket 31's fixes verified, including repeated full-suite runs for the deflake
+-- [ ] CONTEXT.md vocabulary used correctly; avoid-words absent
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Both review axes run over ticket 31's diff and findings addressed
++- [x] Each of ticket 31's fixes verified, including repeated full-suite runs for the deflake
++- [x] CONTEXT.md vocabulary used correctly; avoid-words absent
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 31 — Ticket-log batch review fixes (the diff under review)
+
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+@@ -22,4 +22,43 @@
+ ## Notes
+ 
+ - This is a batch review, not the pool's final Review interrupt — the engine raises that itself once every ticket in the pool is done.
+ - Ticket 22's file carries the original findings; the deferred items (story 6 streaming cadence, story 3 wording) stay deferred and are not this ticket's scope.
++
++---
++
++## Notes (review record)
++
++Fixed point: `f9fda2b` (ticket 29's merge). Diff: `git diff f9fda2b...HEAD`, exactly ticket 31's commit aec2f65, +100/-9 across engine/engine.test.ts, engine/server.test.ts, engine/server.ts, ui/src/project.test.ts, ui/src/project.ts, ui/src/view.ts. Both axes ran as parallel sub-agents per the code-review skill.
++
++### Standards axis
++
++No documented-standard violations. Em dashes absent from the diff and from all touched files (grep-verified). Commit message matches the `console: <imperative>` format. Tests stay at the public seams (the /api/log endpoint, the exported parseStoredDetailWidth). CONTEXT.md terms respected: Detail and attempt used correctly; no avoid-words in the diff's prose or identifiers.
++
++Two new baseline smells, both judgement calls:
++
++1. Duplicated Code (borderline): the continuation-byte predicate `(bytes[i] & 0xc0) === 0x80` now appears in both `utf8End` and the new `utf8HeadTrim` (engine/server.ts). Mirror-image trimmers scanning opposite directions; extraction optional.
++2. Speculative Generality (mild): `utf8HeadTrim(bytes, start, end)` takes start/end but the sole call site passes `(0, bytes.length)`. Defensible as signature symmetry with `utf8End`.
++
++### Spec axis
++
++All four ticket 31 requirements implemented; no scope creep. One partial note, adjudicated below:
++
++1. The head-split regression test pins only a 2-byte character (U+00E9); no test pins a head mid-sequence of a 3- or 4-byte character. Judgement: accepted. Ticket 31's letter asked for "a regression test", and `utf8HeadTrim`'s loop skips any run of continuation bytes, so the 3-/4-byte cases are handled by the same code path the test exercises. Coverage breadth, not a defect.
++
++Verified by the spec sub-agent's reading of the code: (i) the `case`-based match removes the SIGPIPE race (no pipe remains), the exit-42 pin and loop bound are unchanged in effect, and quoted `case` patterns are literal so the match is at least as strict as the old grep; (ii) `offset = start + headTrim` with `decodeEnd >= headTrim` keeps paging monotonic, and both `openLog` and `prependLog` in ui/src/main.ts key `firstOffset` off the adjusted `chunk.offset`, so load-earlier ranges stay contiguous; (iii) `parseStoredDetailWidth` pins the exact round trip the write path performs (`String(detailWidth)` under one global key), and its read-time clamp is behaviour-identical to before because the caller already clamped and `clampDetailWidth` is idempotent.
++
++### Fix verification
++
++- Deflake: 1 solo full-suite run plus 6 concurrent full-suite runs (parallel `bun test` processes, the load condition that exposed the flake), 226/226 pass in every run.
++- UTF-8 head: the new server test passes (offset 11 into a 2-byte char serves " tail\n", offset 12, nextOffset 18, no U+FFFD); the pre-existing tail-boundary tests still pass.
++- Width persistence: the five new `parseStoredDetailWidth` tests pass at the projection seam, pinning the round trip per spec story 21.
++- Em dashes: none in engine/server.ts or any touched file.
++- Suite: `bun test` 226 pass / 0 fail. Root `tsc --noEmit` clean (covers engine/). `bun run build` in ui/ clean.
++
++### Pre-existing untracked scratch, not this review's finding
++
++`ui/src/prototype/` (untracked, created 12:08 today, before ticket 31's commit at 14:39) makes a standalone `tsc --noEmit` inside ui/ fail with 13 import errors, all in that directory. It is leftover exploration scratch, outside ticket 31's diff and outside the tracked tree; every error is confined to it. Recorded so the final Review interrupt can decide whether to delete it; this ticket changes nothing.
++
++### Disposition
++
++Clean review: no hard findings, no spec gaps, nothing needing Billy's decision. The smells and the test-breadth note are recorded for the pool's final Review interrupt. This ticket changes no code, and the Issue files are untracked runner state (`.scratch/` is never committed), so there is no commit for this ticket.
+
+[0m
+[0m$ [0mgrep -c '—' .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+3
+[0m
+[0m← [0mWrite .scratch/console-pool/runs/32.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mgrep -n '—' .scratch/console-pool/issues/32-review-pass-ticket-log-fixes.md
+3:# 32 — Review pass over the ticket-log fixes
+20:- 31 — Ticket-log batch review fixes (the diff under review)
+24:- This is a batch review, not the pool's final Review interrupt — the engine raises that itself once every ticket in the pool is done.
+[0m
+All three em dashes are pre-existing (title, blocked-by, original note); my added prose is clean. Ticket 32 is done.
+
+**Outcome:** Clean review of ticket 31 (aec2f65), `status=done`, no commit (review changes no code; `.scratch/` is never committed, per ticket 30 precedent).
+
+- **Standards axis:** no violations. Em dashes absent, commit format correct, tests at public seams, CONTEXT.md vocabulary clean. Two mild judgement-call smells recorded (duplicated continuation-byte predicate; unused start/end params on `utf8HeadTrim`).
+- **Spec axis:** all four requirements met, no scope creep. One adjudicated note: the head-split regression test pins only a 2-byte char, but the same loop handles 3-/4-byte sequences — coverage breadth, not a defect.
+- **Verification:** 6 concurrent full-suite runs + 1 solo run, 226/226 green each time; root `tsc --noEmit` clean; `bun run build` in ui/ clean.
+- One pre-existing oddity recorded for the final Review interrupt: untracked `ui/src/prototype/` scratch (predating ticket 31) breaks a standalone `tsc` inside `ui/` — outside the diff and the tracked tree.
+
+Outcome written to `.scratch/console-pool/runs/32.outcome.json`.

@@ -1,0 +1,757 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/26-fleet-list-command.md
+[0m→ [0mRead CONTEXT.md
+[0m✗ [0mRead .scratch/console-pool/spec-fleet-of-consoles.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m→ [0mRead NOTES.md
+[0m
+[0m$ [0mls -la .scratch/console-pool/ && echo "---" && ls -la .scratch/console/ 2>/dev/null; echo "---"; ls -la
+total 60
+drwxr-xr-x 1 billy billy   160 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    38 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy  8091 Aug 22 11:52 AGENT.md
+-rw-r--r-- 1 billy billy  1467 Aug 22 11:52 console.json
+drwxr-xr-x 1 billy billy   784 Aug 22 11:52 issues
+-rwxr-xr-x 1 billy billy 16432 Aug 22 11:52 run.sh
+-rw-r--r-- 1 billy billy 11814 Aug 22 11:52 spec-console-flight-fixes.md
+-rw-r--r-- 1 billy billy 13711 Aug 22 11:52 spec-ticket-pools.md
+---
+total 32
+drwxr-xr-x 1 billy billy   112 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    38 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy  7251 Aug 22 11:52 AGENT.md
+drwxr-xr-x 1 billy billy   608 Aug 22 11:52 issues
+-rwxr-xr-x 1 billy billy 16239 Aug 22 11:52 run.sh
+-rw-r--r-- 1 billy billy  7690 Aug 22 11:52 spec-detail-and-resizable-drawers.md
+---
+total 96
+drwxr-xr-x 1 billy billy   316 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    24 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy 65341 Aug 22 11:52 bun.lock
+-rw-r--r-- 1 billy billy  3487 Aug 22 11:52 CONTEXT.md
+drwxr-xr-x 1 billy billy    48 Aug 22 11:52 docs
+drwxr-xr-x 1 billy billy   294 Aug 22 11:52 engine
+-rw-r--r-- 1 billy billy    69 Aug 22 11:52 .git
+-rw-r--r-- 1 billy billy    99 Aug 22 11:52 .gitignore
+-rw-r--r-- 1 billy billy    93 Aug 22 11:52 langgraph.json
+drwxr-xr-x 1 billy billy   126 Aug 22 11:52 mock-tickets
+drwxr-xr-x 1 billy billy    20 Aug 22 11:52 mock-tickets-deadlock
+-rw-r--r-- 1 billy billy  3883 Aug 22 11:52 NOTES.md
+-rw-r--r-- 1 billy billy   566 Aug 22 11:52 package.json
+-rw-r--r-- 1 billy billy   987 Aug 22 11:52 README.md
+drwxr-xr-x 1 billy billy    38 Aug 22 11:52 .scratch
+drwxr-xr-x 1 billy billy    36 Aug 22 11:52 scripts
+drwxr-xr-x 1 billy billy   100 Aug 22 11:52 src
+drwxr-xr-x 1 billy billy    30 Aug 22 11:52 tickets
+-rw-r--r-- 1 billy billy   310 Aug 22 11:52 tsconfig.json
+drwxr-xr-x 1 billy billy   140 Aug 22 11:52 ui
+[0m
+[0m$ [0mls .scratch/console-pool/issues/ && echo "---fleet specs---" && find . -iname "*fleet*" -not -path "*/node_modules/*" 2>/dev/null
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+26-fleet-list-command.md
+---fleet specs---
+./.scratch/console-pool/issues/26-fleet-list-command.md
+./engine/fleet.test.ts
+./engine/fleet.ts
+[0m
+[0m$ [0mcat .scratch/console-pool/console.json; echo "---AGENT.md---"; cat .scratch/console-pool/AGENT.md
+{
+  "defaults": {
+    "harness": "opencode",
+    "model": "kimi-for-coding-oauth/k3",
+    "drivers": "implement"
+  },
+  "assign": {
+    "11": { "drivers": "code-review" }
+  },
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own model.",
+  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. On opencode this maps to the deepseek agent, DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"deepseek\"}}",
+  "resolver": "opencode",
+  "reviewer": "a reviewer checks acceptance criteria only, never code quality; a failure buys the orchestrator one fix attempt, then the Issue becomes a checkpoint carrying the disagreement in its brief",
+  "checkpoint": "a write outside the repository other than Issue 10's skill file, an undecided decision the Issue and its context do not settle, or a material guess"
+}
+---AGENT.md---
+# Runner agent instructions
+
+Every agent the runner starts gets this file appended to its system prompt. One agent works one
+Issue, then exits. The next agent starts fresh and reads this again.
+
+Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+
+## Your role
+
+You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
+subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
+through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
+and cursor they are whatever your user's own config defines under those names, so if a named agent
+does not exist, do the reading yourself rather than inventing one.
+
+**Write the substance of the Issue yourself.** The code that answers it, the test that pins the
+behaviour, the prose that lands in the repository and the commit message are all yours. This is
+deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller
+one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
+
+Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+
+## The state protocol
+
+Line 1 of your Issue file is a state marker:
+
+```
+<!-- state: id=NN blocked-by=.. status=.. -->
+```
+
+The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
+exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+
+If you exit without setting it, the runner treats that as a failure and halts.
+
+### Set `status=done` when
+
+Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
+cannot be met, the Issue is a `checkpoint`, not `done`.
+
+### Set `status=checkpoint` when
+
+- it needs a device, an emulator, or a live backend
+- it needs a write to an external system, or contact with anyone outside the codebase
+- it needs a decision the Issue and its context do not already settle
+- you would have to guess at something material to proceed
+- the build or the test suite fails for a reason the Issue does not cover
+
+Then **append a `## Brief` section to the bottom of the Issue** saying:
+
+1. what you completed, precisely
+2. what the human has to do
+3. what should happen after they have done it
+
+Keep the brief decision-ready. It is the report, not the raw work.
+
+## Write into the Issue, not only at the end
+
+**The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent
+reads the Issue.
+
+You can run out of context, and the run can be interrupted. Either way anything you were holding in
+your head is lost. So append to the Issue as you go, whenever you learn something the next agent
+would not get from the code alone:
+
+- a finding, and whether it is proven or inferred
+- something you tried that did not work, and why, so nobody repeats it
+- a decision you made that the Issue did not settle for you
+- anything you were about to do next
+
+Write it before you start anything long or risky. A build, a device attempt or a large refactor might
+not return.
+
+Keep it short. A few lines under a `## Notes` heading is enough, and it stands alongside the
+`## Brief` section rather than replacing it.
+
+If the runner has to stop you, it appends its own note saying so. That note can only report the
+working tree and the tail of the log. It cannot report what you knew. That part is yours.
+
+## Halting is the mechanism, not a failure
+
+The runner halts on `checkpoint` and prints your brief. **Expect a good share of a real queue to stop
+this way.** Do the autonomous part first, then stop cleanly.
+
+Stopping honestly beats guessing every time. Nothing is gained by a `done` that is not true.
+
+## Finishing
+
+Tick each acceptance criterion in the Issue as you satisfy it.
+
+Commit to the current branch when the Issue is done and when you stop. One commit per Issue, and the
+message is yours to write.
+
+## Standing constraints, all non-negotiable
+
+- Leave the branch as you found it. Commit to the branch you are on, and create none.
+- Leave pushing and pull requests to the human. Commits are where your work stops.
+- Write commit messages and documentation with no AI tool attribution of any kind: no
+  co-author trailer, no generated-with footer, in commits, code, docs or anywhere else.
+- Write prose without em dashes.
+- Label a claim as inference when it is inference.
+
+<!-- ============================================================ CONFIG -->
+
+Author everything below. One `/my-console-runner` interview fills it in.
+
+## Read before you touch anything
+
+In this order: your Issue, then the files this job's context lives in.
+
+- `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words.
+- `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 built it; Issue 11 reviews against it.
+- `NOTES.md` (repo root) — prototype status and lessons learned.
+- `engine/` and `ui/` (repo root) — the pool engine and Console this queue built, now the code under review in Issue 11.
+- `~/.claude/commands/skills/personal/my-console-runner/` — Issue 10's output: `SKILL.md` and `AGENT.template.md`.
+- `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Treat its comments about harness quirks as load-bearing.
+- `mock-tickets/` and `mock-tickets-deadlock/` (repo root) — example pools in the old front-matter format. Useful as fixtures; the pool format is the line-1 state marker on your own Issue files.
+
+## Commit message format
+
+```
+console: <what changed, in the imperative>
+```
+
+One commit per Issue. Commit only the paths your Issue touches — never `.scratch/`, never `node_modules/` or `dist/`.
+
+## This job's constraints
+
+- Stack is fixed: vanilla TypeScript + Vite + bun, the engine in `engine/`, the UI in `ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides.
+- Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `bun run build` in `ui/`.
+- Test the pool engine only through its public interface, with stub harness scripts and temp pool directories. Never test engine internals. The UI projection is tested as pure functions over snapshot fixtures, following the existing `project.test.ts` precedent.
+- Never start a long-lived server and leave it running: a server an agent starts dies with that process tree. Verify a server as a smoke check (start, probe, kill) or make it a checkpoint.
+- The merge resolver runs on opencode. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve.
+- No Issue runs on cursor. The cursor launch line in the spawn kernel comes from Cursor's documentation and is unproven.
+- Issue 10 writes a skill under `~/.claude/commands/skills/personal/`. That write outside the repo is the point of the Issue. Any other write outside the repo is a checkpoint.
+- `scripts/.env` and any other `.env` file are gitignored secrets. Never print or commit them.
+- A reviewer checks acceptance criteria only, never code quality. A review failure buys the orchestrator one fix attempt; if it still fails, the Issue becomes a checkpoint and the brief carries the disagreement.
+- A checkpoint on this job means: a write outside the repository other than Issue 10's skill file, a decision the Issue and its context do not settle, or a material guess.
+- Issue 11 is a review Issue driven by `code-review`. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
+
+## Which Issues are expected to stop
+
+- 10 — already sits at checkpoint; its first end-to-end Console launch is Billy's to watch. Answering that interrupt resumes the pool.
+- 11 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.
+[0m
+[0m$ [0mfind /home/billy/repos/learning/ai-agent-graphs -iname "*fleet*" 2>/dev/null | grep -v node_modules | grep -v ".git/"; echo "---search spec-fleet---"; find /home/billy/repos/learning/ai-agent-graphs -name "spec-fleet-of-consoles.md" 2>/dev/null
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/25-fleet-registry.md
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/26-fleet-list-command.md
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-review-pass-fleet-batch.md
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/27-skill-fleet-conventions.md
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+/home/billy/repos/learning/ai-agent-graphs/engine/fleet.test.ts
+/home/billy/repos/learning/ai-agent-graphs/engine/fleet.ts
+---search spec-fleet---
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m
+[0m$ [0mgit log --oneline -15 && echo "---status---" && git status && echo "---branch---" && git branch --show-current
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+---status---
+On branch pool/26
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/26-fleet-list-command.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+---branch---
+pool/26
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-fleet-of-consoles.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/25-fleet-registry.md
+[0m→ [0mRead engine/fleet.ts
+[0m→ [0mRead engine/fleet.test.ts
+[0m
+[0m$ [0mls -la engine/ && echo "---" && cat package.json && echo "---tsconfig---" && cat tsconfig.json
+total 240
+drwxr-xr-x 1 billy billy    294 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    316 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy    869 Aug 22 11:52 checkpoints.ts
+-rw-r--r-- 1 billy billy 101146 Aug 22 11:52 engine.test.ts
+-rw-r--r-- 1 billy billy  52567 Aug 22 11:52 engine.ts
+-rw-r--r-- 1 billy billy   3413 Aug 22 11:52 events.ts
+-rw-r--r-- 1 billy billy   7698 Aug 22 11:52 fleet.test.ts
+-rw-r--r-- 1 billy billy   3153 Aug 22 11:52 fleet.ts
+-rw-r--r-- 1 billy billy   2665 Aug 22 11:52 pool.ts
+-rw-r--r-- 1 billy billy   1782 Aug 22 11:52 ports.test.ts
+-rw-r--r-- 1 billy billy   1286 Aug 22 11:52 ports.ts
+-rw-r--r-- 1 billy billy   2843 Aug 22 11:52 prompt.ts
+-rw-r--r-- 1 billy billy  24026 Aug 22 11:52 server.test.ts
+-rw-r--r-- 1 billy billy  16377 Aug 22 11:52 server.ts
+-rw-r--r-- 1 billy billy   1737 Aug 22 11:52 spawn.ts
+-rw-r--r-- 1 billy billy   4306 Aug 22 11:52 worktrees.ts
+---
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+---tsconfig---
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  },
+  "include": ["src", "engine"]
+}
+[0m
+[0m→ [0mRead engine/server.ts
+[0m→ [0mRead engine/server.test.ts
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/27-skill-fleet-conventions.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/28-review-pass-fleet-batch.md
+[0m
+[0m$ [0mls docs/ docs/adr 2>/dev/null; echo "---"; cat docs/adr/0001-one-console-per-pool.md 2>/dev/null
+docs/:
+langgraph-js-api-2026.md
+---
+[0m
+[0m$ [0mcat engine/ports.ts; echo "===pool.ts==="; cat engine/pool.ts
+/**
+ * Pool port resolution. The order at boot is: the --port CLI flag wins, then
+ * the console.json pin, then the default 8787-or-next-free. A port that is
+ * pinned (by flag or config) must bind exactly, or boot fails loudly naming
+ * the port; only the unpinned path hunts for a free port. Port 0 means "any
+ * free port", Bun's ephemeral semantics, and is never a pin.
+ */
+
+export const DEFAULT_PORT = 8787;
+
+export interface PortResolution {
+  port: number;
+  pinned: boolean;
+}
+
+/** A port must be an integer in 0-65535. Port 0 means "any free port". */
+export function validPort(value: number, source: string): number {
+  if (!Number.isInteger(value) || value < 0 || value > 65535) {
+    throw new Error(
+      `${source}: port must be an integer 0-65535, got ${value}`,
+    );
+  }
+  return value;
+}
+
+export function resolvePort(
+  cliPort: number | undefined,
+  configPort: number | undefined,
+  defaultPort = DEFAULT_PORT,
+): PortResolution {
+  if (cliPort !== undefined) {
+    const port = validPort(cliPort, "--port");
+    return { port, pinned: port !== 0 };
+  }
+  if (configPort !== undefined) {
+    const port = validPort(configPort, "console.json");
+    return { port, pinned: port !== 0 };
+  }
+  return { port: validPort(defaultPort, "default port"), pinned: false };
+}===pool.ts===
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const TICKET_STATUSES = [
+  "ready",
+  "in-progress",
+  "done",
+  "checkpoint",
+] as const;
+
+export type TicketStatus = (typeof TICKET_STATUSES)[number];
+
+export interface TicketMarker {
+  id: string;
+  file: string;
+  blockedBy: string[];
+  status: TicketStatus;
+}
+
+const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
+
+function parseMarkerLine(line: string, file: string): TicketMarker {
+  const match = MARKER_RE.exec(line);
+  if (!match) {
+    throw new Error(
+      `pool load: ${file} has no line-1 state marker ` +
+        `(expected <!-- state: id=.. blocked-by=.. status=.. -->)`,
+    );
+  }
+  const fields = new Map<string, string>();
+  for (const pair of match[1].split(/\s+/)) {
+    const eq = pair.indexOf("=");
+    if (eq > 0) fields.set(pair.slice(0, eq), pair.slice(eq + 1));
+  }
+  const id = fields.get("id");
+  const status = fields.get("status");
+  if (!id) throw new Error(`pool load: ${file}: marker is missing id=`);
+  if (!status || !(TICKET_STATUSES as readonly string[]).includes(status)) {
+    throw new Error(
+      `pool load: ${file}: marker status must be one of ${TICKET_STATUSES.join("|")}, got '${status ?? ""}'`,
+    );
+  }
+  const blockedRaw = fields.get("blocked-by") ?? "none";
+  const blockedBy =
+    blockedRaw === "none" ? [] : blockedRaw.split(",").filter(Boolean);
+  return { id, file, blockedBy, status: status as TicketStatus };
+}
+
+export function readMarker(file: string): TicketMarker {
+  const firstLine = readFileSync(file, "utf8").split("\n", 1)[0] ?? "";
+  return parseMarkerLine(firstLine, file);
+}
+
+export function writeMarkerStatus(file: string, status: TicketStatus): void {
+  const raw = readFileSync(file, "utf8");
+  const newline = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(newline);
+  if (!MARKER_RE.test(lines[0])) {
+    throw new Error(`marker write: ${file} has no line-1 state marker`);
+  }
+  lines[0] = lines[0].replace(/status=[a-z-]+/, `status=${status}`);
+  writeFileSync(file, lines.join(newline));
+}
+
+export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
+  const files = readdirSync(issuesDir)
+    .filter((file) => file.endsWith(".md"))
+    .sort();
+  if (files.length === 0) {
+    throw new Error(`pool load: no Issue files in ${issuesDir}`);
+  }
+  const markers = files.map((file) => readMarker(join(issuesDir, file)));
+  const seen = new Set<string>();
+  for (const marker of markers) {
+    if (seen.has(marker.id)) {
+      throw new Error(`pool load: duplicate ticket id '${marker.id}'`);
+    }
+    seen.add(marker.id);
+  }
+  return markers;
+}
+[0m
+[0m$ [0mgrep -rn "fleet" --include="*.md" --include="*.ts" --include="*.json" . ~/.claude/commands/skills/personal/my-console-runner/ 2>/dev/null | grep -v node_modules | grep -v "\.scratch" | grep -v "pool-worktrees/26/engine/fleet"
+./engine/fleet.test.ts:12:} from "./fleet.ts";
+./engine/fleet.test.ts:17:  const dir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+./engine/fleet.test.ts:42:describe("fleet registry upsert", () => {
+./engine/fleet.test.ts:146:describe("fleet registry prune-on-read", () => {
+./engine/fleet.test.ts:196:describe("fleet registry readFleetEntry", () => {
+./engine/fleet.ts:2: * The fleet registry: a machine-wide JSON file recording every live console
+./engine/fleet.ts:59: * Read the fleet, pruning before returning: entries whose pid is dead or
+./engine/fleet.ts:70: * Best-effort lookup of a fleet entry, used to enrich a pool-lock refusal with
+./engine/server.test.ts:21:import { readFleetEntries } from "./fleet.ts";
+./engine/server.test.ts:84:function fleetRegistry(poolDir: string): string {
+./engine/server.test.ts:85:  return join(poolDir, "fleet.json");
+./engine/server.test.ts:94:    registryPath: fleetRegistry(poolDir),
+./engine/server.test.ts:327:    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:339:      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:366:    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:378:      const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:393:      registryPath: fleetRegistry(poolDir),
+./engine/server.test.ts:437:    const serverA = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:444:    const serverB = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:454:      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:462:    const server = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:472:      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:485:      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:498:    const server = createPoolServer({ poolDir, port: flagPort, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:506:    const server = createPoolServer({ poolDir, defaultPort: port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:514:    const server = createPoolServer({ poolDir, defaultPort: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+./engine/server.test.ts:537:describe("fleet registration", () => {
+./engine/server.test.ts:542:    const registryPath = fleetRegistry(poolDir);
+./engine/server.test.ts:563:    const registryPath = fleetRegistry(poolDir);
+./engine/server.test.ts:594:    const registryPath = fleetRegistry(poolDir);
+./engine/server.test.ts:622:    const registryPath = fleetRegistry(poolDir);
+./engine/server.ts:28:} from "./fleet.ts";
+./engine/server.ts:291: * message naming that pid, its fleet-registry port when known, and the pool
+./engine/server.ts:477:        `fleet registry: ${err instanceof Error ? err.message : String(err)}`,
+/home/billy/.claude/commands/skills/personal/my-console-runner/SKILL.md:191:   A live pool is refused at boot with a message naming the live pid, its fleet-registry port
+/home/billy/.claude/commands/skills/personal/my-console-runner/SKILL.md:218:  it claims it, refuses a live pool with a message naming the pid, the fleet-registry port when
+[0m
+Now I understand the structure. Let me check how the skill and docs reference the fleet command, and look at the existing test conventions once more.
+I have the full picture. Let me record a note in the Issue, then implement.
+[0m← [0mEdit .scratch/console-pool/issues/26-fleet-list-command.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+@@ -23,4 +23,7 @@
+ 
+ ## Notes
+ 
+ - Keep the output script-friendly: plain lines, no decoration, so it composes with `xargs open` and friends.
++- The spec file `spec-fleet-of-consoles.md` does not exist in this worktree's `.scratch/`; it lives in the main repo's `.scratch/console-pool/` (gitignored, not carried into worktrees). Read it from there; its content is the authority.
++- Design: new `engine/fleet-cli.ts` beside `engine/server.ts`, run as `bun run engine/fleet-cli.ts [--registry <path>]`. The `--registry` flag is the test seam so the suite never touches `~/.agent-graphs/pools.json` (same reason every server test passes a temp `registryPath`). Output is exactly `poolDir → http://localhost:<port>` per live pool, and `no live consoles` when nothing is live, exit 0. No-live-consoles message goes to stdout per the spec's "prints a clear 'no live consoles' line" wording.
++- Prune is read-time (ticket 25's `readFleetEntries`), so the command never rewrites the registry; the read-only test pins that the file is byte-identical after a run.
+
+[0m
+[0m← [0mWrite engine/fleet-cli.ts
+Wrote file successfully.
+[0m
+[0m← [0mEdit engine/fleet-cli.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
+@@ -1,9 +1,9 @@
+ /**
+  * The fleet list command: answers "what's running". It reads the fleet
+  * registry and, because reads prune (see fleet.ts), dead servers and deleted
+  * pools never appear. Each live pool prints as one plain line,
+- * `poolDir -> http://localhost:<port>`, so the output composes with xargs and
++ * `poolDir → http://localhost:<port>`, so the output composes with xargs and
+  * friends. The command is strictly read-only: it never starts, stops, or
+  * signals anything, and it never rewrites the registry.
+  */
+ 
+
+[0m
+The spec prescribes a literal `→` arrow in the output format. Let me match it exactly.
+[0m← [0mEdit engine/fleet-cli.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/engine/fleet-cli.ts
+@@ -13,16 +13,16 @@
+ export const NO_LIVE_CONSOLES = "no live consoles";
+ 
+ /**
+  * The lines the command prints, in registry order: one per live pool as
+- * `poolDir -> http://localhost:<port>`, or the no-live-consoles line when the
++ * `poolDir → http://localhost:<port>`, or the no-live-consoles line when the
+  * pruned registry is empty.
+  */
+ export function listFleet(registryPath: string): string[] {
+   const entries = readFleetEntries(registryPath);
+   if (entries.length === 0) return [NO_LIVE_CONSOLES];
+   return entries.map(
+-    (entry) => `${entry.poolDir} -> http://localhost:${entry.port}`,
++    (entry) => `${entry.poolDir} → http://localhost:${entry.port}`,
+   );
+ }
+ 
+ export function runFleetCli(registryPath: string = defaultRegistryPath()): void {
+
+[0m
+[0m← [0mWrite engine/fleet-cli.test.ts
+Wrote file successfully.
+[0m
+Now the test file, following the `server.test.ts` CLI-spawn precedent and `fleet.test.ts` temp-dir conventions.
+[0m$ [0mbun test engine/fleet-cli.test.ts 2>&1 | tail -30
+bun test v1.3.14 (0d9b296a)
+
+ 6 pass
+ 0 fail
+ 12 expect() calls
+Ran 6 tests across 1 file. [154.00ms]
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -20
+$ tsc --noEmit
+[0m
+[0m$ [0mbun run build 2>&1 | tail -6
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+Typecheck and new tests clean. Now the full suite plus a manual smoke of the actual command output.
+[0m$ [0mbun test 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 183 pass
+ 0 fail
+ 722 expect() calls
+Ran 183 tests across 6 files. [17.10s]
+[0m
+[0m$ [0mcat ui/package.json; echo "---"; ls ui/; echo "---node_modules---"; ls ui/node_modules 2>/dev/null | head -5; ls node_modules 2>/dev/null | head -5
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+---
+bun.lock
+index.html
+package.json
+src
+tsconfig.json
+vite.config.ts
+---node_modules---
+[0m
+UI build failed — `vite` not found. Let me check the UI setup.
+[0m$ [0mcat ui/bun.lock | head -20; echo "---gitignore---"; cat .gitignore
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "console-prototype-ui",
+      "devDependencies": {
+        "bun-types": "^1.3.14",
+        "typescript": "^7.0.2",
+        "vite": "^8.2.1",
+      },
+    },
+  },
+  "packages": {
+    "@oxc-project/types": ["@oxc-project/types@0.144.0", "", {}, "sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg=="],
+
+    "@rolldown/binding-android-arm64": ["@rolldown/binding-android-arm64@1.2.4", "", { "os": "android", "cpu": "arm64" }, "sha512-jHC2cnyKz5xU2fhECtFl8OZ83cYNt13GZQD+0uMJ/X3o+ijmd56okHhTUwxVSHPx1IRVIJEZ1/1pPzeLCU6XKA=="],
+
+    "@rolldown/binding-darwin-arm64": ["@rolldown/binding-darwin-arm64@1.2.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Dc5mPD8F5F/FS8i01syd7FTF6yB2fVthH/TRkjwJkzUK6EpoxHtqvZQP5Zwq80/5z19TWYHIg1KOHboCgVx/aQ=="],
+
+---gitignore---
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
+.scratch/console/runs/
+.scratch/console/verify-*.ts
+[0m
+[0m$ [0mbun install 2>&1 | tail -8
+bun install v1.3.14 (0d9b296a)
+
++ bun-types@1.3.14
++ typescript@7.0.2
++ vite@8.2.1
+
+22 packages installed [24.00ms]
+[0m
+[0m$ [0mbun run build 2>&1 | tail -8
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-8DjdoIpQ.css  12.93 kB │ gzip: 2.71 kB
+dist/assets/index-CIHO-7CS.js   23.94 kB │ gzip: 8.23 kB
+
+✓ built in 56ms
+[0m
+Build clean. Now a manual smoke of the real command output.
+[0m$ [0mtmp=$(mktemp -d); mkdir -p "$tmp/live-pool"; sleep 0.1; true; echo "=== mixed registry ==="; printf '[{"poolDir":"%s/live-pool","port":8787,"pid":%s,"startedAt":"t"},{"poolDir":"%s/dead-pool","port":8790,"pid":999999,"startedAt":"t"}]' "$tmp" "$$" "$tmp" > "$tmp/pools.json"; bun run engine/fleet-cli.ts --registry "$tmp/pools.json"; echo "exit=$?"; echo "=== empty registry ==="; printf '[]' > "$tmp/empty.json"; bun run engine/fleet-cli.ts --registry "$tmp/empty.json"; echo "exit=$?"; echo "=== absent registry ==="; bun run engine/fleet-cli.ts --registry "$tmp/none.json"; echo "exit=$?"; rm -rf "$tmp"
+=== mixed registry ===
+/tmp/tmp.kcLfwuvKis/live-pool → http://localhost:8787
+exit=0
+=== empty registry ===
+no live consoles
+exit=0
+=== absent registry ===
+no live consoles
+exit=0
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/26-fleet-list-command.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+@@ -9,14 +9,14 @@
+ A thin CLI entry beside the server (not a flag on it) that answers "what's running": it reads the fleet registry (prune-on-read from ticket 25 applies, so dead servers and deleted pools never appear) and prints one line per live pool as `poolDir → http://localhost:<port>`. The command is strictly read-only — it never starts, stops, or signals anything. An empty registry prints a clear "no live consoles" line rather than nothing.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Running the command lists every live pool with its URL, one per line
+-- [ ] Dead-pid and missing-poolDir entries are pruned and never printed
+-- [ ] An empty or absent registry prints a clear no-live-consoles message and exits zero
+-- [ ] The command never mutates server or pool state beyond the prune
+-- [ ] Test seam: listed output and pruning covered against a temp registry with live and spare pids
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Running the command lists every live pool with its URL, one per line
++- [x] Dead-pid and missing-poolDir entries are pruned and never printed
++- [x] An empty or absent registry prints a clear no-live-consoles message and exits zero
++- [x] The command never mutates server or pool state beyond the prune
++- [x] Test seam: listed output and pruning covered against a temp registry with live and spare pids
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 25 — Fleet registry, written on start (the registry module and its prune-on-read are the command's whole substrate)
+
+[0m
+All green. Let me tick the acceptance criteria and set the state marker.
+[0m← [0mEdit .scratch/console-pool/issues/26-fleet-list-command.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26/.scratch/console-pool/issues/26-fleet-list-command.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=26 blocked-by=25 status=in-progress -->
++<!-- state: id=26 blocked-by=25 status=done -->
+ 
+ # 26 — Fleet list command
+ 
+ Spec: `.scratch/console-pool/spec-fleet-of-consoles.md`.
+
+[0m
+[0m$ [0mgit status --short && echo "---" && git diff --stat
+?? .scratch/console-pool/issues/26-fleet-list-command.md
+?? engine/fleet-cli.test.ts
+?? engine/fleet-cli.ts
+---
+[0m
+[0m$ [0mgit add engine/fleet-cli.ts engine/fleet-cli.test.ts && git commit -m "console: add fleet list command that prints live pools" 2>&1 | tail -5 && git log --oneline -1
+[pool/26 b7f5148] console: add fleet list command that prints live pools
+ 2 files changed, 183 insertions(+)
+ create mode 100644 engine/fleet-cli.test.ts
+ create mode 100644 engine/fleet-cli.ts
+b7f5148 console: add fleet list command that prints live pools
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/26.outcome.json
+Wrote file successfully.
+[0m
+Committed. Now the outcome JSON.
+Issue 26 done. Added `engine/fleet-cli.ts` — the fleet list command beside `server.ts`:
+
+- Reads the registry via ticket 25's `readFleetEntries` (prune-on-read), prints `poolDir → http://localhost:<port>` per live pool, or `no live consoles` (exit 0) when none. Strictly read-only; never rewrites the registry.
+- `--registry <path>` flag is the test seam so the suite never touches `~/.agent-graphs/pools.json`.
+- `engine/fleet-cli.test.ts` spawns the real CLI against temp registries with live and spare pids (lists, prunes, empty/absent/all-pruned, and pins the file byte-identical after a run).
+
+All criteria ticked, status `done`, commit `b7f5148` on `pool/26`. 183 tests, `tsc --noEmit`, and the UI build all clean (the build needed `bun install` in `ui/` first — deps weren't installed in this worktree). Outcome recorded to `runs/26.outcome.json`.

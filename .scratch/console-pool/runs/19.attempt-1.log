@@ -1,0 +1,1133 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/19-live-log-tailing.md
+[0m→ [0mRead CONTEXT.md
+[0m✗ [0mRead .scratch/console-pool/spec-ticket-log-and-detail-resize.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m→ [0mRead NOTES.md
+[0m✱ [0mGlob ".scratch/console-pool/**/*.md"[90m 0 matches[0m
+[0m
+[0m$ [0mls -la /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/
+total 96
+drwxr-xr-x 1 billy billy   316 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    24 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy 65341 Aug 22 11:52 bun.lock
+-rw-r--r-- 1 billy billy  3487 Aug 22 11:52 CONTEXT.md
+drwxr-xr-x 1 billy billy    48 Aug 22 11:52 docs
+drwxr-xr-x 1 billy billy   294 Aug 22 11:52 engine
+-rw-r--r-- 1 billy billy    69 Aug 22 11:52 .git
+-rw-r--r-- 1 billy billy    99 Aug 22 11:52 .gitignore
+-rw-r--r-- 1 billy billy    93 Aug 22 11:52 langgraph.json
+drwxr-xr-x 1 billy billy   126 Aug 22 11:52 mock-tickets
+drwxr-xr-x 1 billy billy    20 Aug 22 11:52 mock-tickets-deadlock
+-rw-r--r-- 1 billy billy  3883 Aug 22 11:52 NOTES.md
+-rw-r--r-- 1 billy billy   566 Aug 22 11:52 package.json
+-rw-r--r-- 1 billy billy   987 Aug 22 11:52 README.md
+drwxr-xr-x 1 billy billy    38 Aug 22 11:52 .scratch
+drwxr-xr-x 1 billy billy    36 Aug 22 11:52 scripts
+drwxr-xr-x 1 billy billy   100 Aug 22 11:52 src
+drwxr-xr-x 1 billy billy    30 Aug 22 11:52 tickets
+-rw-r--r-- 1 billy billy   310 Aug 22 11:52 tsconfig.json
+drwxr-xr-x 1 billy billy   140 Aug 22 11:52 ui
+[0m
+[0m$ [0mfind /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch -type f | head -50
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/AGENT.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/console.json
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/02-interrupt-engine.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/03-durability.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/05-worktrees-parallel.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/06-resolver-agent.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/07-server-and-pool-ui.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/08-inline-interrupts-ui.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/09-final-review-interrupt.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/10-console-runner-skill.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/11-review-pass.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/12-ticket-cards-open-detail.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/13-stream-stays-connected.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/14-flow-neighbourhood-highlight.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/15-skill-mac-linux.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/run.sh
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/spec-console-flight-fixes.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/spec-ticket-pools.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/AGENT.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/01-walking-skeleton.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/02-live-streaming.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/03-start-run.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/04-graph-canvas.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/05-canvas-interactions.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/06-interrupts-inline.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/07-ticket-cards.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/08-state-inspector.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/09-final-review.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/10-detail-panel-skeleton.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/11-detail-content.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/12-detail-interrupts.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/13-resizable-drawers.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/issues/14-review-detail-and-drawers.md
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/run.sh
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console/spec-detail-and-resizable-drawers.md
+[0m
+[0m$ [0mls -la /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/ 2>/dev/null; echo "---"; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/ui/
+total 112
+drwxr-xr-x 1 billy billy   780 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy   160 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy  4708 Aug 22 11:52 01-pool-engine-skeleton.md
+-rw-r--r-- 1 billy billy  4988 Aug 22 11:52 02-interrupt-engine.md
+-rw-r--r-- 1 billy billy  5860 Aug 22 11:52 03-durability.md
+-rw-r--r-- 1 billy billy  4494 Aug 22 11:52 04-harness-spawn-kernel.md
+-rw-r--r-- 1 billy billy  6259 Aug 22 11:52 05-worktrees-parallel.md
+-rw-r--r-- 1 billy billy  5510 Aug 22 11:52 06-resolver-agent.md
+-rw-r--r-- 1 billy billy  4881 Aug 22 11:52 07-server-and-pool-ui.md
+-rw-r--r-- 1 billy billy  7814 Aug 22 11:52 08-inline-interrupts-ui.md
+-rw-r--r-- 1 billy billy  3508 Aug 22 11:52 09-final-review-interrupt.md
+-rw-r--r-- 1 billy billy  5904 Aug 22 11:52 10-console-runner-skill.md
+-rw-r--r-- 1 billy billy 14877 Aug 22 11:52 11-review-pass.md
+-rw-r--r-- 1 billy billy  3847 Aug 22 11:52 12-ticket-cards-open-detail.md
+-rw-r--r-- 1 billy billy  3289 Aug 22 11:52 13-stream-stays-connected.md
+-rw-r--r-- 1 billy billy  3345 Aug 22 11:52 14-flow-neighbourhood-highlight.md
+-rw-r--r-- 1 billy billy  3414 Aug 22 11:52 15-skill-mac-linux.md
+-rw-r--r-- 1 billy billy  1901 Aug 22 11:52 19-live-log-tailing.md
+---
+bun.lock
+index.html
+package.json
+src
+tsconfig.json
+vite.config.ts
+[0m
+[0m→ [0mRead .scratch/console-pool/spec-console-flight-fixes.md
+[0m→ [0mRead .scratch/console-pool/spec-ticket-pools.md
+[0m
+[0m$ [0mls -la /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/; echo "==="; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/engine/ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/ui/src/
+total 112
+drwxr-xr-x 1 billy billy   780 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy   160 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy  4708 Aug 22 11:52 01-pool-engine-skeleton.md
+-rw-r--r-- 1 billy billy  4988 Aug 22 11:52 02-interrupt-engine.md
+-rw-r--r-- 1 billy billy  5860 Aug 22 11:52 03-durability.md
+-rw-r--r-- 1 billy billy  4494 Aug 22 11:52 04-harness-spawn-kernel.md
+-rw-r--r-- 1 billy billy  6259 Aug 22 11:52 05-worktrees-parallel.md
+-rw-r--r-- 1 billy billy  5510 Aug 22 11:52 06-resolver-agent.md
+-rw-r--r-- 1 billy billy  4881 Aug 22 11:52 07-server-and-pool-ui.md
+-rw-r--r-- 1 billy billy  7814 Aug 22 11:52 08-inline-interrupts-ui.md
+-rw-r--r-- 1 billy billy  3508 Aug 22 11:52 09-final-review-interrupt.md
+-rw-r--r-- 1 billy billy  5904 Aug 22 11:52 10-console-runner-skill.md
+-rw-r--r-- 1 billy billy 14877 Aug 22 11:52 11-review-pass.md
+-rw-r--r-- 1 billy billy  3847 Aug 22 11:52 12-ticket-cards-open-detail.md
+-rw-r--r-- 1 billy billy  3289 Aug 22 11:52 13-stream-stays-connected.md
+-rw-r--r-- 1 billy billy  3345 Aug 22 11:52 14-flow-neighbourhood-highlight.md
+-rw-r--r-- 1 billy billy  3414 Aug 22 11:52 15-skill-mac-linux.md
+-rw-r--r-- 1 billy billy  1901 Aug 22 11:52 19-live-log-tailing.md
+===
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/engine/:
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.ts
+fleet.test.ts
+fleet.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+server.test.ts
+server.ts
+spawn.ts
+worktrees.ts
+
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/ui/src/:
+client.ts
+main.ts
+project.test.ts
+project.ts
+styles.css
+view.ts
+vite-env.d.ts
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/ 2>/dev/null; echo "==="; git -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 log --oneline -15
+01.log
+02.log
+03.log
+04.log
+05.log
+06.log
+07.log
+08.log
+09.log
+10.log
+10.outcome.json
+11.log
+11.outcome.json
+12.log
+12.outcome.json
+13.log
+13.outcome.json
+14.log
+14.outcome.json
+15.log
+15.outcome.json
+16.log
+16.outcome.json
+16.resolver.json
+16.resolver.log
+17.events.jsonl
+17.log
+17.outcome.json
+18.events.jsonl
+18.log
+18.outcome.json
+19.events.jsonl
+19.log
+20.log
+20.outcome.json
+21.events.jsonl
+21.log
+21.outcome.json
+23.log
+23.outcome.json
+24.events.jsonl
+24.log
+24.outcome.json
+25.events.jsonl
+25.log
+25.outcome.json
+26.events.jsonl
+26.log
+27.events.jsonl
+27.log
+27.outcome.json
+server.log
+server.pid
+===
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 branch -vv; echo "==="; git -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 status
++ main    ff3d0a8 (/home/billy/repos/learning/ai-agent-graphs) [origin/main: ahead 13] console: register each bound server in the machine-wide fleet registry
++ pool/18 d85baf3 (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18) console: raw log pane in the ticket Detail
+* pool/19 ff3d0a8 console: register each bound server in the machine-wide fleet registry
++ pool/20 0382112 (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/20) console: resizable Detail panel via a left-edge drag handle
++ pool/23 7d37820 (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23) console: enforce one server per pool with a pid-file lock
++ pool/25 5b01388 (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/25) Merge branch 'pool/24'
++ pool/26 ff3d0a8 (/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/26) console: register each bound server in the machine-wide fleet registry
+===
+On branch pool/19
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/19-live-log-tailing.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.outcome.json; echo; echo "==="; tail -30 /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.log 2>/dev/null | head -60
+{"summary": "Issue 18 done: added GET /api/log serving ANSI-stripped byte ranges of an attempt's raw log (offset, nextOffset, totalSize, attempts list incl. rotated older attempts and resolvers), the events endpoint now also returns the ticket's spec text, and the ticket Detail renders a raw log pane below the timeline with clickable attempt rows; a never-run ticket shows its spec text with a no-attempts marker. Server tests cover range reads, ANSI stripping, chunk paging, UTF-8 boundary safety, and the attempt list; projection tests cover attempt selection and the never-run fallback. 177 engine + 68 UI tests, both typechecks, and the build pass.", "commitSha": "d85baf3"}
+===
+M  ui/src/main.ts
+M  ui/src/project.test.ts
+M  ui/src/project.ts
+M  ui/src/styles.css
+M  ui/src/view.ts
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+[0m
+Previous tickets didn't commit their issue files (constraint: never commit `.scratch/`). Let me commit only the code files.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 && git commit -m "console: raw log pane in the ticket Detail" 2>&1 | tail -5
+[pool/18 d85baf3] console: raw log pane in the ticket Detail
+ 8 files changed, 931 insertions(+), 32 deletions(-)
+[0m
+Committed as d85baf3. Let me record the outcome.
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 && git log --oneline -2 && echo "---" && git status --porcelain
+d85baf3 console: raw log pane in the ticket Detail
+5b01388 Merge branch 'pool/24'
+---
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+[0m
+Done. Issue 18 complete, committed as `d85baf3`, state marker set to `done`.
+
+**What landed:**
+- **`GET /api/log?ticket=<id>&attempt=<n>&offset=<bytes>`** — serves an attempt's raw log from a byte offset, ANSI-stripped server-side, reporting `offset`/`nextOffset`/`totalSize` plus the ticket's attempt list (implement/resolver/reconstructed, with rotated `attempt-N` files resolvable). Chunks at 64KB with UTF-8-safe boundaries; the offset contract is what ticket 19's tailing reuses.
+- **Events endpoint** now also returns the ticket's `spec` text (issue body after the title), feeding the never-run fallback.
+- **UI**: Detail renders the raw log pane below the timeline; clicking an attempt row switches the pane to that attempt's log; a never-run ticket shows its spec text with a "no attempts yet" marker instead of timeline and log. Selection and the never-run fallback are pure projection; fetched content/selection live in module scope so full-DOM rebuilds never drop them.
+
+**Verification:** 177 engine/server/fleet + 68 UI tests pass, both `tsc --noEmit`, `vite build` clean. A review pass (code-review skill) flagged UTF-8 chunk-splitting and duplicated state reset — both fixed and pinned by tests. Tail-first loading and snapshot-refetch liveness are deferred to ticket 19 by design.
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 merge-base --is-ancestor d85baf3 HEAD && echo "18 is ancestor of HEAD" || echo "18 NOT in HEAD"; echo "==="; git -C /home/billy/repos/learning/ai-agent-graphs log --oneline main | head -25
+18 NOT in HEAD
+===
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+c63885c console: light up the selection's flow neighbourhood
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+3a36537 console: ticket card clicks open the Detail panel
+2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+f4229f0 console: close the run on a final Review interrupt
+01ebe54 console: answer interrupts inline from the card and Detail
+[0m
+[0m✱ [0mGrep "api/log|nextOffset|totalSize|/api/events"[90m in engine · 4 matches[0m
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs log --oneline --all | head -40
+d85baf3 console: raw log pane in the ticket Detail
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+624ad5a On main: escaped ticket-23 pool-lock variant
+b3109a4 index on main: b084321 console: glossary — Attempt, Ticket log; Detail resizable
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+c63885c console: light up the selection's flow neighbourhood
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+3a36537 console: ticket card clicks open the Detail panel
+2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+f4229f0 console: close the run on a final Review interrupt
+01ebe54 console: answer interrupts inline from the card and Detail
+5e2070e console-pool: kimi k3 for all remaining tickets; reset 08 after driver crash
+716b7ab console: re-point the Console at the pool engine with a server and pool projection
+e8b5e27 console: add the resolver agent and merge-approval to the pool engine
+eab196f console-pool: mark 05 done after verification and review
+73adbe8 console: tidy worktree merge helpers after the two-axis review
+3205e21 console-pool: per-ticket orchestrator overrides; reset 05 to ready for part-done finish
+05ae74b console-pool: record issue notes and markers for 03-05
+653efbb console: worktrees and parallel super-steps (part-done, review pending)
+2de1a36 console: port the harness spawn kernel from run.sh into the pool engine
+ded62a3 console: add durability and rehydration to the pool engine
+75c027c console-pool: record runner status markers and notes from the interrupted 01-02 run
+81a74ba console: add interrupt engine with checkpoint, crash, and deadlock interrupts
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.events.jsonl 2>/dev/null; echo "==="; cat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/console.json 2>/dev/null
+{"at":"2026-08-22T10:52:40.435Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T10:52:40.479Z","attempt":1,"kind":"spawned","payload":{}}
+===
+{
+  "defaults": {
+    "harness": "opencode",
+    "model": "opencode-go/deepseek-v4-flash",
+    "drivers": "implement"
+  },
+  "assign": {
+    "11": { "drivers": "code-review" },
+    "22": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" },
+    "28": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" }
+  },
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent, same model as the orchestrator. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.",
+  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"opencode-go/deepseek-v4-flash\"}}",
+  "resolver": "opencode",
+  "reviewer": "a reviewer checks acceptance criteria only, never code quality; a failure buys the orchestrator one fix attempt, then the Issue becomes a checkpoint carrying the disagreement in its brief",
+  "checkpoint": "a write outside the repository other than Issue 10's skill file, an undecided decision the Issue and its context do not settle, or a material guess"
+}
+[0m
+[0m✱ [0mGrep "log"[90m in engine/server.ts · 100 matches[0m
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 show d85baf3 --stat | head -30
+commit d85baf36403571140c7d7e2f6b23b79696ddb9db
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 11:37:15 2026 +0100
+
+    console: raw log pane in the ticket Detail
+
+ engine/server.test.ts  | 204 ++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts       | 208 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ ui/src/client.ts       |  23 +++++-
+ ui/src/main.ts         | 147 +++++++++++++++++++++++++++++-----
+ ui/src/project.test.ts | 114 ++++++++++++++++++++++++++-
+ ui/src/project.ts      | 103 ++++++++++++++++++++++++
+ ui/src/styles.css      |  79 +++++++++++++++++++
+ ui/src/view.ts         |  85 ++++++++++++++++++--
+ 8 files changed, 931 insertions(+), 32 deletions(-)
+[0m
+[0m✱ [0mGrep "pathname === "/api"[90m in engine/server.ts · 5 matches[0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && git log --oneline HEAD -5 && echo "===" && git log --oneline main -3 && echo "=== pool/18 vs main:" && git log --oneline main..pool/18
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+===
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+=== pool/18 vs main:
+d85baf3 console: raw log pane in the ticket Detail
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.log 2>/dev/null | tail -60
+ded62a3 console: add durability and rehydration to the pool engine
+75c027c console-pool: record runner status markers and notes from the interrupted 01-02 run
+81a74ba console: add interrupt engine with checkpoint, crash, and deadlock interrupts
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.events.jsonl 2>/dev/null; echo "==="; cat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/console.json 2>/dev/null
+{"at":"2026-08-22T10:52:40.435Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T10:52:40.479Z","attempt":1,"kind":"spawned","payload":{}}
+===
+{
+  "defaults": {
+    "harness": "opencode",
+    "model": "opencode-go/deepseek-v4-flash",
+    "drivers": "implement"
+  },
+  "assign": {
+    "11": { "drivers": "code-review" },
+    "22": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" },
+    "28": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" }
+  },
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent, same model as the orchestrator. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.",
+  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"opencode-go/deepseek-v4-flash\"}}",
+  "resolver": "opencode",
+  "reviewer": "a reviewer checks acceptance criteria only, never code quality; a failure buys the orchestrator one fix attempt, then the Issue becomes a checkpoint carrying the disagreement in its brief",
+  "checkpoint": "a write outside the repository other than Issue 10's skill file, an undecided decision the Issue and its context do not settle, or a material guess"
+}
+[0m
+[0m✱ [0mGrep "log"[90m in engine/server.ts · 100 matches[0m
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 show d85baf3 --stat | head -30
+commit d85baf36403571140c7d7e2f6b23b79696ddb9db
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 11:37:15 2026 +0100
+
+    console: raw log pane in the ticket Detail
+
+ engine/server.test.ts  | 204 ++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/server.ts       | 208 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ ui/src/client.ts       |  23 +++++-
+ ui/src/main.ts         | 147 +++++++++++++++++++++++++++++-----
+ ui/src/project.test.ts | 114 ++++++++++++++++++++++++++-
+ ui/src/project.ts      | 103 ++++++++++++++++++++++++
+ ui/src/styles.css      |  79 +++++++++++++++++++
+ ui/src/view.ts         |  85 ++++++++++++++++++--
+ 8 files changed, 931 insertions(+), 32 deletions(-)
+[0m
+[0m✱ [0mGrep "pathname === "/api"[90m in engine/server.ts · 5 matches[0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && git log --oneline HEAD -5 && echo "===" && git log --oneline main -3 && echo "=== pool/18 vs main:" && git log --oneline main..pool/18
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+===
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+=== pool/18 vs main:
+d85baf3 console: raw log pane in the ticket Detail
+[0m
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git log --oneline pool/18 -5 && echo "=== parents of d85baf3:" && git log --format='%h %p' -1 d85baf3 && echo "=== spec files in scratch:" && ls .scratch/console-pool/
+d85baf3 console: raw log pane in the ticket Detail
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+=== parents of d85baf3:
+d85baf3 5b01388
+=== spec files in scratch:
+AGENT.md
+console.db
+console.json
+issues
+runs
+run.sh
+spec-console-flight-fixes.md
+spec-fleet-of-consoles.md
+spec-ticket-log-and-detail-resize.md
+spec-ticket-pools.md
+[0m
+[0m$ [0mls -la /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/ 2>/dev/null; echo "=== worktree scratch:"; ls -la /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/ 2>/dev/null; echo "=== gitignore:"; cat /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.gitignore
+total 304
+drwxr-xr-x 1 billy billy    310 Aug 22 11:37 .
+drwxr-xr-x 1 billy billy     38 Aug 18 21:53 ..
+-rw-r--r-- 1 billy billy   8091 Aug 21 21:58 AGENT.md
+-rw-r--r-- 1 billy billy 221184 Aug 22 11:37 console.db
+-rw-r--r-- 1 billy billy   1635 Aug 22 01:19 console.json
+drwxr-xr-x 1 billy billy   1406 Aug 22 11:10 issues
+drwxr-xr-x 1 billy billy   1104 Aug 22 11:52 runs
+-rwxr-xr-x 1 billy billy  16432 Aug 21 13:31 run.sh
+-rw-r--r-- 1 billy billy  11814 Aug 21 22:30 spec-console-flight-fixes.md
+-rw-r--r-- 1 billy billy   8459 Aug 22 01:05 spec-fleet-of-consoles.md
+-rw-r--r-- 1 billy billy  11489 Aug 22 01:03 spec-ticket-log-and-detail-resize.md
+-rw-r--r-- 1 billy billy  13711 Aug 22 00:27 spec-ticket-pools.md
+=== worktree scratch:
+total 60
+drwxr-xr-x 1 billy billy   160 Aug 22 11:52 .
+drwxr-xr-x 1 billy billy    38 Aug 22 11:52 ..
+-rw-r--r-- 1 billy billy  8091 Aug 22 11:52 AGENT.md
+-rw-r--r-- 1 billy billy  1467 Aug 22 11:52 console.json
+drwxr-xr-x 1 billy billy   780 Aug 22 11:52 issues
+-rwxr-xr-x 1 billy billy 16432 Aug 22 11:52 run.sh
+-rw-r--r-- 1 billy billy 11814 Aug 22 11:52 spec-console-flight-fixes.md
+-rw-r--r-- 1 billy billy 13711 Aug 22 11:52 spec-ticket-pools.md
+=== gitignore:
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
+.scratch/console/runs/
+.scratch/console/verify-*.ts
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/AGENT.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/run.sh
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.log
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/ | tail -20; echo "=== statuses:"; for f in /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/*.md; do echo "$(basename "$f"): $(grep -oE 'status=[a-z-]*' "$f" | head -1)"; done
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+16-per-ticket-event-timeline.md
+17-attempt-log-retention.md
+18-raw-log-pane-in-detail.md
+19-live-log-tailing.md
+20-resizable-detail.md
+21-fullscreen-detail.md
+22-review-pass-ticket-log-detail.md
+23-engine-pool-lock.md
+24-pinned-pool-ports.md
+25-fleet-registry.md
+26-fleet-list-command.md
+27-skill-fleet-conventions.md
+28-review-pass-fleet-batch.md
+=== statuses:
+01-pool-engine-skeleton.md: status=done
+02-interrupt-engine.md: status=done
+03-durability.md: status=done
+04-harness-spawn-kernel.md: status=done
+05-worktrees-parallel.md: status=done
+06-resolver-agent.md: status=done
+07-server-and-pool-ui.md: status=done
+08-inline-interrupts-ui.md: status=done
+09-final-review-interrupt.md: status=done
+10-console-runner-skill.md: status=done
+11-review-pass.md: status=done
+12-ticket-cards-open-detail.md: status=done
+13-stream-stays-connected.md: status=done
+14-flow-neighbourhood-highlight.md: status=done
+15-skill-mac-linux.md: status=done
+16-per-ticket-event-timeline.md: status=done
+17-attempt-log-retention.md: status=done
+18-raw-log-pane-in-detail.md: status=done
+19-live-log-tailing.md: status=in-progress
+20-resizable-detail.md: status=done
+21-fullscreen-detail.md: status=done
+22-review-pass-ticket-log-detail.md: status=ready
+23-engine-pool-lock.md: status=done
+24-pinned-pool-ports.md: status=done
+25-fleet-registry.md: status=done
+26-fleet-list-command.md: status=in-progress
+27-skill-fleet-conventions.md: status=done
+28-review-pass-fleet-batch.md: status=ready
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs log --all --oneline --grep="18" | head; echo "=== does main have /api/log?"; git -C /home/billy/repos/learning/ai-agent-graphs show main:engine/server.ts 2>/dev/null | grep -c "api/log"
+=== does main have /api/log?
+0
+[0m
+I have the full picture of the context now. Let me check the pool's actual issue state and the engine's merge behavior, since issue 18's commit isn't in my branch.
+[0m→ [0mRead engine/worktrees.ts
+Issue 18 is `done` but its commit `d85baf3` lives only on branch `pool/18`, not merged into `main`. My worktree is at `ff3d0a8` (= main). Let me understand the engine's merge flow to see whether 18's work should be present.
+[0m
+[0m$ [0mgit -C /home/billy/repos/learning/ai-agent-graphs log --format='%h %p %s' -1 ff3d0a8; echo "=== graph around 18:"; git -C /home/billy/repos/learning/ai-agent-graphs log --graph --oneline --all | head -40
+ff3d0a8 5b01388 console: register each bound server in the machine-wide fleet registry
+=== graph around 18:
+* d85baf3 console: raw log pane in the ticket Detail
+| * ff3d0a8 console: register each bound server in the machine-wide fleet registry
+|/  
+*   5b01388 Merge branch 'pool/24'
+|\  
+| * 1da30a6 console: resolve pool port from flag, console.json pin, or next free
+* |   4f99aad Merge branch 'pool/17'
+|\ \  
+| * | 9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+| |/  
+* |   31267a1 Merge branch 'pool/21'
+|\ \  
+| * | 7c9637c console: fullscreen Detail mode via a header toggle
+| |/  
+* / 4263f89 console: resolve pool port from flag, console.json pin, or next free
+|/  
+*   8d00da7 console-pool: merge ticket 23 (engine pool lock)
+|\  
+| * 7d37820 console: enforce one server per pool with a pid-file lock
+* |   a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+|\ \  
+| * | 0382112 console: resizable Detail panel via a left-edge drag handle
+| |/  
+* / ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+|/  
+| * 624ad5a On main: escaped ticket-23 pool-lock variant
+|/| 
+| * b3109a4 index on main: b084321 console: glossary — Attempt, Ticket log; Detail resizable
+|/  
+* b084321 console: glossary — Attempt, Ticket log; Detail resizable
+* 88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+* c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+* c63885c console: light up the selection's flow neighbourhood
+* 8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+* d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+* 3a36537 console: ticket card clicks open the Detail panel
+* 2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+* f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+* 0a0d662 console-pool: runner notes for 08/09/10
+* f4229f0 console: close the run on a final Review interrupt
+[0m
+Issue 18's commit is NOT in my worktree (`main` at `ff3d0a8` doesn't include `d85baf3`). The `/api/log` endpoint Issue 18 built doesn't exist here. Let me check the merge state carefully.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git branch -a --contains d85baf3; echo "=== main checkout status:"; git status --short | head; echo "=== does main worktree have server.pid?"; ls .scratch/console-pool/server.pid 2>/dev/null && cat .scratch/console-pool/server.pid; echo; echo "=== is pool server running?"; ps aux | grep -i "console-pool" | grep -v grep | head
++ pool/18
+=== main checkout status:
+ M .scratch/console-pool/console.json
+ M CONTEXT.md
+?? .scratch/console-pool/console.db
+?? .scratch/console-pool/issues/16-per-ticket-event-timeline.md
+?? .scratch/console-pool/issues/17-attempt-log-retention.md
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+?? .scratch/console-pool/issues/19-live-log-tailing.md
+?? .scratch/console-pool/issues/20-resizable-detail.md
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+?? .scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+=== does main worktree have server.pid?
+
+=== is pool server running?
+billy     176616  0.2  0.1 74054904 66616 ?      Ssl  10:08   0:15 bun engine/server.ts --pool /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool --port 8787
+billy     304610 33.9  0.8 75936320 585056 ?     Sl   11:52   1:05 opencode run --command implement .scratch/console-pool/issues/19-live-log-tailing.md   Standing instructions for this job:  # Runner agent instructions  Every agent the runner starts gets this file appended to its system prompt. One agent works one Issue, then exits. The next agent starts fresh and reads this again.  Everything above the CONFIG marker is the same in every runner. Author only what is below it.  ## Your role  You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name through your harness's subagent mechanism. On claude the runner defines them for you; on opencode and cursor they are whatever your user's own config defines under those names, so if a named agent does not exist, do the reading yourself rather than inventing one.  **Write the substance of the Issue yourself.** The code that answers it, the test that pins the behaviour, the prose that lands in the repository and the commit message are all yours. This is deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller one throws that away. Delegating a decision you were given to make is a failure, not efficiency.  Use the read-only subagents freely and early. They are cheap and they keep your own context clear.  ## The state protocol  Line 1 of your Issue file is a state marker:  ``` <!-- state: id=NN blocked-by=.. status=.. --> ```  The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.  If you exit without setting it, the runner treats that as a failure and halts.  ### Set `status=done` when  Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion cannot be met, the Issue is a `checkpoint`, not `done`.  ### Set `status=checkpoint` when  - it needs a device, an emulator, or a live backend - it needs a write to an external system, or contact with anyone outside the codebase - it needs a decision the Issue and its context do not already settle - you would have to guess at something material to proceed - the build or the test suite fails for a reason the Issue does not cover  Then **append a `## Brief` section to the bottom of the Issue** saying:  1. what you completed, precisely 2. what the human has to do 3. what should happen after they have done it  Keep the brief decision-ready. It is the report, not the raw work.  ## Write into the Issue, not only at the end  **The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent reads the Issue.  You can run out of context, and the run can be interrupted. Either way anything you were holding in your head is lost. So append to the Issue as you go, whenever you learn something the next agent would not get from the code alone:  - a finding, and whether it is proven or inferred - something you tried that did not work, and why, so nobody repeats it - a decision you made that the Issue did not settle for you - anything you were about to do next  Write it before you start anything long or risky. A build, a device attempt or a large refactor might not return.  Keep it short. A few lines under a `## Notes` heading is enough, and it stands alongside the `## Brief` section rather than replacing it.  If the runner has to stop you, it appends its own note saying so. That note can only report the working tree and the tail of the log. It cannot report what you knew. That part is yours.  ## Halting is the mechanism, not a failure  The runner halts on `checkpoint` and prints your brief. **Expect a good share of a real queue to stop this way.** Do the autonomous part first, then stop cleanly.  Stopping honestly beats guessing every time. Nothing is gained by a `done` that is not true.  ## Finishing  Tick each acceptance criterion in the Issue as you satisfy it.  Commit to the current branch when the Issue is done and when you stop. One commit per Issue, and the message is yours to write.  ## Standing constraints, all non-negotiable  - Leave the branch as you found it. Commit to the branch you are on, and create none. - Leave pushing and pull requests to the human. Commits are where your work stops. - Write commit messages and documentation with no AI tool attribution of any kind: no   co-author trailer, no generated-with footer, in commits, code, docs or anywhere else. - Write prose without em dashes. - Label a claim as inference when it is inference.  <!-- ============================================================ CONFIG -->  Author everything below. One `/my-console-runner` interview fills it in.  ## Read before you touch anything  In this order: your Issue, then the files this job's context lives in.  - `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words. - `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 built it; Issue 11 reviews against it. - `NOTES.md` (repo root) — prototype status and lessons learned. - `engine/` and `ui/` (repo root) — the pool engine and Console this queue built, now the code under review in Issue 11. - `~/.claude/commands/skills/personal/my-console-runner/` — Issue 10's output: `SKILL.md` and `AGENT.template.md`. - `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Treat its comments about harness quirks as load-bearing. - `mock-tickets/` and `mock-tickets-deadlock/` (repo root) — example pools in the old front-matter format. Useful as fixtures; the pool format is the line-1 state marker on your own Issue files.  ## Commit message format  ``` console: <what changed, in the imperative> ```  One commit per Issue. Commit only the paths your Issue touches — never `.scratch/`, never `node_modules/` or `dist/`.  ## This job's constraints  - Stack is fixed: vanilla TypeScript + Vite + bun, the engine in `engine/`, the UI in `ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides. - Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `bun run build` in `ui/`. - Test the pool engine only through its public interface, with stub harness scripts and temp pool directories. Never test engine internals. The UI projection is tested as pure functions over snapshot fixtures, following the existing `project.test.ts` precedent. - Never start a long-lived server and leave it running: a server an agent starts dies with that process tree. Verify a server as a smoke check (start, probe, kill) or make it a checkpoint. - The merge resolver runs on opencode. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve. - No Issue runs on cursor. The cursor launch line in the spawn kernel comes from Cursor's documentation and is unproven. - Issue 10 writes a skill under `~/.claude/commands/skills/personal/`. That write outside the repo is the point of the Issue. Any other write outside the repo is a checkpoint. - `scripts/.env` and any other `.env` file are gitignored secrets. Never print or commit them. - A reviewer checks acceptance criteria only, never code quality. A review failure buys the orchestrator one fix attempt; if it still fails, the Issue becomes a checkpoint and the brief carries the disagreement. - A checkpoint on this job means: a write outside the repository other than Issue 10's skill file, a decision the Issue and its context do not settle, or a material guess. - Issue 11 is a review Issue driven by `code-review`. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.  ## Which Issues are expected to stop  - 10 — already sits at checkpoint; its first end-to-end Console launch is Billy's to watch. Answering that interrupt resumes the pool. - 11 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.  ---  The subagent roster for this job. Dispatch them by name. Each harness defines its own agents; on claude they come from the runner's config, on opencode and cursor from your own setup:  - deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent, same model as the orchestrator. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.  ---  Outcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:  - 18: Issue 18 done: added GET /api/log serving ANSI-stripped byte ranges of an attempt's raw log (offset, nextOffset, totalSize, attempts list incl. rotated older attempts and resolvers), the events endpoint now also returns the ticket's spec text, and the ticket Detail renders a raw log pane below the timeline with clickable attempt rows; a never-run ticket shows its spec text with a no-attempts marker. Server tests cover range reads, ANSI stripping, chunk paging, UTF-8 boundary safety, and the attempt list; projection tests cover attempt selection and the never-run fallback. 177 engine + 68 UI tests, both typechecks, and the build pass. (commit d85baf3)  ---  When you finish, record your outcome as JSON at /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.outcome.json: {"summary": "what you did, in a sentence or two", "commitSha": "the sha of your commit, or null"}. --model opencode-go/deepseek-v4-flash --auto
+billy     304611 32.7  0.8 76041876 568780 ?     Sl   11:52   1:03 opencode run --command implement .scratch/console-pool/issues/26-fleet-list-command.md   Standing instructions for this job:  # Runner agent instructions  Every agent the runner starts gets this file appended to its system prompt. One agent works one Issue, then exits. The next agent starts fresh and reads this again.  Everything above the CONFIG marker is the same in every runner. Author only what is below it.  ## Your role  You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name through your harness's subagent mechanism. On claude the runner defines them for you; on opencode and cursor they are whatever your user's own config defines under those names, so if a named agent does not exist, do the reading yourself rather than inventing one.  **Write the substance of the Issue yourself.** The code that answers it, the test that pins the behaviour, the prose that lands in the repository and the commit message are all yours. This is deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller one throws that away. Delegating a decision you were given to make is a failure, not efficiency.  Use the read-only subagents freely and early. They are cheap and they keep your own context clear.  ## The state protocol  Line 1 of your Issue file is a state marker:  ``` <!-- state: id=NN blocked-by=.. status=.. --> ```  The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.  If you exit without setting it, the runner treats that as a failure and halts.  ### Set `status=done` when  Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion cannot be met, the Issue is a `checkpoint`, not `done`.  ### Set `status=checkpoint` when  - it needs a device, an emulator, or a live backend - it needs a write to an external system, or contact with anyone outside the codebase - it needs a decision the Issue and its context do not already settle - you would have to guess at something material to proceed - the build or the test suite fails for a reason the Issue does not cover  Then **append a `## Brief` section to the bottom of the Issue** saying:  1. what you completed, precisely 2. what the human has to do 3. what should happen after they have done it  Keep the brief decision-ready. It is the report, not the raw work.  ## Write into the Issue, not only at the end  **The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent reads the Issue.  You can run out of context, and the run can be interrupted. Either way anything you were holding in your head is lost. So append to the Issue as you go, whenever you learn something the next agent would not get from the code alone:  - a finding, and whether it is proven or inferred - something you tried that did not work, and why, so nobody repeats it - a decision you made that the Issue did not settle for you - anything you were about to do next  Write it before you start anything long or risky. A build, a device attempt or a large refactor might not return.  Keep it short. A few lines under a `## Notes` heading is enough, and it stands alongside the `## Brief` section rather than replacing it.  If the runner has to stop you, it appends its own note saying so. That note can only report the working tree and the tail of the log. It cannot report what you knew. That part is yours.  ## Halting is the mechanism, not a failure  The runner halts on `checkpoint` and prints your brief. **Expect a good share of a real queue to stop this way.** Do the autonomous part first, then stop cleanly.  Stopping honestly beats guessing every time. Nothing is gained by a `done` that is not true.  ## Finishing  Tick each acceptance criterion in the Issue as you satisfy it.  Commit to the current branch when the Issue is done and when you stop. One commit per Issue, and the message is yours to write.  ## Standing constraints, all non-negotiable  - Leave the branch as you found it. Commit to the branch you are on, and create none. - Leave pushing and pull requests to the human. Commits are where your work stops. - Write commit messages and documentation with no AI tool attribution of any kind: no   co-author trailer, no generated-with footer, in commits, code, docs or anywhere else. - Write prose without em dashes. - Label a claim as inference when it is inference.  <!-- ============================================================ CONFIG -->  Author everything below. One `/my-console-runner` interview fills it in.  ## Read before you touch anything  In this order: your Issue, then the files this job's context lives in.  - `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words. - `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 built it; Issue 11 reviews against it. - `NOTES.md` (repo root) — prototype status and lessons learned. - `engine/` and `ui/` (repo root) — the pool engine and Console this queue built, now the code under review in Issue 11. - `~/.claude/commands/skills/personal/my-console-runner/` — Issue 10's output: `SKILL.md` and `AGENT.template.md`. - `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Treat its comments about harness quirks as load-bearing. - `mock-tickets/` and `mock-tickets-deadlock/` (repo root) — example pools in the old front-matter format. Useful as fixtures; the pool format is the line-1 state marker on your own Issue files.  ## Commit message format  ``` console: <what changed, in the imperative> ```  One commit per Issue. Commit only the paths your Issue touches — never `.scratch/`, never `node_modules/` or `dist/`.  ## This job's constraints  - Stack is fixed: vanilla TypeScript + Vite + bun, the engine in `engine/`, the UI in `ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides. - Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `bun run build` in `ui/`. - Test the pool engine only through its public interface, with stub harness scripts and temp pool directories. Never test engine internals. The UI projection is tested as pure functions over snapshot fixtures, following the existing `project.test.ts` precedent. - Never start a long-lived server and leave it running: a server an agent starts dies with that process tree. Verify a server as a smoke check (start, probe, kill) or make it a checkpoint. - The merge resolver runs on opencode. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve. - No Issue runs on cursor. The cursor launch line in the spawn kernel comes from Cursor's documentation and is unproven. - Issue 10 writes a skill under `~/.claude/commands/skills/personal/`. That write outside the repo is the point of the Issue. Any other write outside the repo is a checkpoint. - `scripts/.env` and any other `.env` file are gitignored secrets. Never print or commit them. - A reviewer checks acceptance criteria only, never code quality. A review failure buys the orchestrator one fix attempt; if it still fails, the Issue becomes a checkpoint and the brief carries the disagreement. - A checkpoint on this job means: a write outside the repository other than Issue 10's skill file, a decision the Issue and its context do not settle, or a material guess. - Issue 11 is a review Issue driven by `code-review`. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.  ## Which Issues are expected to stop  - 10 — already sits at checkpoint; its first end-to-end Console launch is Billy's to watch. Answering that interrupt resumes the pool. - 11 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.  ---  The subagent roster for this job. Dispatch them by name. Each harness defines its own agents; on claude they come from the runner's config, on opencode and cursor from your own setup:  - deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent, same model as the orchestrator. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.  ---  Outcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:  - 25: Extended engine/fleet.ts with upsertFleetEntry (keyed by poolDir, recreates missing/corrupt files) and prune-on-read readFleetEntries; createPoolServer now resolves poolDir and upserts its {poolDir,port,pid,startedAt} entry after a successful bind, best-effort so registry failures never brick a bound console. Added module-seam tests in fleet.test.ts (live process.pid and spawned-reaped spare pids) and a fleet-registration block in server.test.ts; all booting server tests use a temp registry path. 177 tests, typecheck, and UI build clean. (commit ff3d0a8)  ---  When you finish, record your outcome as JSON at /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/26.outcome.json: {"summary": "what you did, in a sentence or two", "commitSha": "the sha of your commit, or null"}. --model opencode-go/deepseek-v4-flash --auto
+[0m
+The merge state is confusing. Let me verify whether issue 18's commit is reachable anywhere and check the engine's merge flow.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && grep -n "mergeBranch\|removeWorktree\|commitMerge\|prepareWorktree\|branchFor" engine/engine.ts | head -40
+37:  branchFor,
+38:  commitMerge,
+42:  mergeBranch,
+43:  prepareWorktree,
+44:  removeWorktree,
+374:              `ticket ${merge.marker.id}: merged ${branchFor(merge.marker.id)} ` +
+710:  const result = mergeBranch(session.cwd, branch);
+726:  const branch = branchFor(marker.id);
+751:  removeWorktree(session.cwd, worktree);
+862:    branch: branchFor(marker.id),
+970:      `the resolution is staged on branch ${branchFor(marker.id)}; approve to ` +
+986:    branch: branchFor(marker.id),
+988:  commitMerge(worktree);
+1014:  removeWorktree(session.cwd, worktree);
+1042:    branch: branchFor(marker.id),
+1354:  const worktree = prepareWorktree(session.cwd, marker.id);
+1391:  if (result.ok) removeWorktree(session.cwd, worktree);
+1400:  const branch = branchFor(marker.id);
+[0m
+Issue 18's work isn't in my branch, which is a problem since 19 is blocked by 18. Let me understand the engine's merge flow and how the pool actually merges completed ticket branches.
+[0m→ [0mRead engine/engine.ts[90m [offset=680, limit=80][0m
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.events.jsonl 2>/dev/null; echo "==="; ls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/ | grep -E "resolver|merge" ; echo "=== server log tail:"; tail -20 /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/server.log 2>/dev/null
+{"at":"2026-08-22T09:58:56.321Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T09:58:56.370Z","attempt":1,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T10:37:26.717Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"in-progress"}}
+{"at":"2026-08-22T10:37:26.718Z","attempt":1,"kind":"crash","payload":{"code":0}}
+{"at":"2026-08-22T10:52:40.432Z","attempt":1,"kind":"answered","payload":{"kind":"crash"}}
+===
+16.resolver.json
+16.resolver.log
+=== server log tail:
+
+GET - /api/events?ticket=16 failed
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/api/events",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /api/events?ticket=16 failed
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+Failed to start server. Is port 8787 in use?
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool)
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && echo "=== /api/log in server.ts?"; grep -c "api/log" engine/server.ts; echo "=== fetchLog in client.ts?"; grep -c "api/log\|fetchLog" ui/src/client.ts; echo "=== raw log / attempt in main.ts?"; grep -c "attempt\|logPane\|rawLog\|no-attempts" ui/src/main.ts; echo "=== attempt in project.ts?"; grep -c "attempt" ui/src/project.ts; echo "=== d85baf3 files diff vs worktree:"; git diff --stat d85baf3 HEAD -- engine ui 2>/dev/null | tail -15
+=== /api/log in server.ts?
+0
+=== fetchLog in client.ts?
+0
+=== raw log / attempt in main.ts?
+0
+=== attempt in project.ts?
+16
+=== d85baf3 files diff vs worktree:
+ engine/fleet.test.ts   | 231 ++++++++++++++++++++++++++++++---
+ engine/fleet.ts        | 101 +++++++++++----
+ engine/server.test.ts  | 345 ++++++++++++++++++-------------------------------
+ engine/server.ts       | 241 +++++-----------------------------
+ ui/src/client.ts       |  23 +---
+ ui/src/main.ts         | 147 +++------------------
+ ui/src/project.test.ts | 114 +---------------
+ ui/src/project.ts      | 103 ---------------
+ ui/src/styles.css      |  79 -----------
+ ui/src/view.ts         |  85 ++----------
+ 10 files changed, 476 insertions(+), 993 deletions(-)
+[0m
+Issue 18's work appears absent from my branch. Let me verify precisely what's in the worktree versus what issue 18 added.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git worktree list; echo "=== MERGE_HEAD?"; ls .git/MERGE_HEAD 2>/dev/null && cat .git/MERGE_HEAD; echo "=== pool/18 worktree:"; git -C .git/pool-worktrees/18 log --oneline -3 2>/dev/null; git -C .git/pool-worktrees/18 status --short 2>/dev/null | head
+/home/billy/repos/learning/ai-agent-graphs                        b7f5148 [main]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 d85baf3 [pool/18]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 ff3d0a8 [pool/19]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/20 0382112 [pool/20]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23 7d37820 [pool/23]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/25 5b01388 [pool/25]
+=== MERGE_HEAD?
+=== pool/18 worktree:
+d85baf3 console: raw log pane in the ticket Detail
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git log --oneline -5 main; echo "=== does b7f5148 contain 18?"; git merge-base --is-ancestor d85baf3 main && echo "18 in main" || echo "18 NOT in main"; echo "=== main vs my HEAD:"; git log --oneline HEAD..main | head; echo "=== diff stat of main vs my HEAD:"; git diff --stat HEAD main | tail
+b7f5148 console: add fleet list command that prints live pools
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+=== does b7f5148 contain 18?
+18 NOT in main
+=== main vs my HEAD:
+=== diff stat of main vs my HEAD:
+[0m
+The main checkout is now at `b7f5148`, which wasn't in the earlier log. Let me check it.
+[0m→ [0mRead engine/engine.ts[90m [limit=120, offset=330][0m
+My worktree (pool/19) doesn't have issue 18's code, and 18 is marked done but its branch was never merged into main. Let me check the engine's merge scheduling and the live server state.
+[0m
+[0m$ [0mcurl -s http://localhost:8787/api/state 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('tickets:', json.dumps(d.get('tickets'), indent=0)[:800]); print('interrupts:', json.dumps(d.get('interrupts'), indent=0)[:600]); print('phase:', d.get('phase'))" 2>/dev/null || echo "API unreachable"
+tickets: null
+interrupts: null
+phase: None
+[0m
+[0m$ [0mcurl -s http://localhost:8787/api/state | head -c 1200; echo
+{"snapshot":{"seq":7,"phase":"running","state":{"tickets":[{"id":"01","title":"01 — Pool engine walking skeleton","blockedBy":[],"status":"done"},{"id":"02","title":"02 — Interrupt engine","blockedBy":["01"],"status":"done"},{"id":"03","title":"03 — Durability and rehydration","blockedBy":["01"],"status":"done"},{"id":"04","title":"04 — Harness spawn kernel","blockedBy":["01"],"status":"done"},{"id":"05","title":"05 — Worktrees and parallel super-steps","blockedBy":["01"],"status":"done"},{"id":"06","title":"06 — Resolver agent and conflict approval","blockedBy":["02","05"],"status":"done"},{"id":"07","title":"07 — Server and pool projection UI","blockedBy":["01"],"status":"done"},{"id":"08","title":"08 — Inline interrupts in card and Detail","blockedBy":["02","07"],"status":"done"},{"id":"09","title":"09 — Final Review interrupt","blockedBy":["02","08"],"status":"done"},{"id":"10","title":"10 — my-console-runner skill","blockedBy":["04","06","07"],"status":"done"},{"id":"11","title":"11 — Review pass against the spec","blockedBy":["01","02","03","04","05","06","07","08","09","10","12","13","14","15"],"status":"done"},{"id":"12","title":"12 — Ticket cards op
+[0m
+[0m$ [0mcurl -s http://localhost:8787/api/state | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for t in d['snapshot']['state']['tickets']:
+    print(t['id'], t['status'])
+print('---interrupts---')
+for i in d['snapshot']['state'].get('interrupts',[]):
+    print(i.get('kind'), i.get('ticketId'), (i.get('body') or '')[:80])
+print('phase:', d['snapshot']['phase'])
+"
+01 done
+02 done
+03 done
+04 done
+05 done
+06 done
+07 done
+08 done
+09 done
+10 done
+11 done
+12 done
+13 done
+14 done
+15 done
+16 done
+17 done
+18 done
+19 in-progress
+20 done
+21 done
+22 ready
+23 done
+24 done
+25 done
+26 in-progress
+27 done
+28 ready
+---interrupts---
+crash 25 /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/25.log
+phase: running
+[0m
+[0m$ [0mcat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.events.jsonl; echo "=== 18.log head (first run) vs when committed:"; grep -c . /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.log; echo "=== git log on pool/18 with dates:"; cd /home/billy/repos/learning/ai-agent-graphs && git log --format='%h %ci %s' -3 pool/18
+{"at":"2026-08-22T09:58:56.321Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T09:58:56.370Z","attempt":1,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T10:37:26.717Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"in-progress"}}
+{"at":"2026-08-22T10:37:26.718Z","attempt":1,"kind":"crash","payload":{"code":0}}
+{"at":"2026-08-22T10:52:40.432Z","attempt":1,"kind":"answered","payload":{"kind":"crash"}}
+=== 18.log head (first run) vs when committed:
+3763
+=== git log on pool/18 with dates:
+d85baf3 2026-08-22 11:37:15 +0100 console: raw log pane in the ticket Detail
+5b01388 2026-08-22 10:58:56 +0100 Merge branch 'pool/24'
+1da30a6 2026-08-22 10:53:20 +0100 console: resolve pool port from flag, console.json pin, or next free
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && grep -n "mergeTicket\|async function drive\|function drive" engine/engine.ts | head
+264:async function drive(session: Session): Promise<PoolRun> {
+348:                  result: mergeTicket(session, marker, result.plan.worktree!),
+1385:function mergeTicket(
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && ls .scratch/console-pool/runs/ | grep -E "^18"; echo "=== events mtime:"; stat -c '%y %n' .scratch/console-pool/runs/18.events.jsonl .scratch/console-pool/runs/18.log
+18.events.jsonl
+18.log
+18.outcome.json
+=== events mtime:
+2026-08-22 11:52:40.431807054 +0100 .scratch/console-pool/runs/18.events.jsonl
+2026-08-22 11:37:26.614922326 +0100 .scratch/console-pool/runs/18.log
+[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=70, offset=1330][0m
+Issue 18's commit is not in my worktree. This is a potential blocker. Let me verify how the engine wires blocked tickets to their blockers' merged code, and whether there's a pending merge.
+[0m→ [0mRead engine/engine.ts[90m [limit=130, offset=560][0m
+The pool state shows issue 18 done but its branch never merged into main. Let me check the engine's answer-to-crash flow and whether issue 18's merge is pending.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && tail -40 .scratch/console-pool/runs/18.log
+engine/engine.test.ts | 170 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/engine.ts      |  35 ++++++++++-
+ engine/events.ts      |  17 +++++
+ 3 files changed, 219 insertions(+), 3 deletions(-)
+[0m
+Let me check whether previous tickets' commits included their `.scratch/` issue files, to follow the same convention.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 && git add engine/server.ts engine/server.test.ts ui/src/client.ts ui/src/main.ts ui/src/project.ts ui/src/project.test.ts ui/src/styles.css ui/src/view.ts && git status --porcelain
+M  engine/server.test.ts
+M  engine/server.ts
+M  ui/src/client.ts
+M  ui/src/main.ts
+M  ui/src/project.test.ts
+M  ui/src/project.ts
+M  ui/src/styles.css
+M  ui/src/view.ts
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+[0m
+Previous tickets didn't commit their issue files (constraint: never commit `.scratch/`). Let me commit only the code files.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 && git commit -m "console: raw log pane in the ticket Detail" 2>&1 | tail -5
+[pool/18 d85baf3] console: raw log pane in the ticket Detail
+ 8 files changed, 931 insertions(+), 32 deletions(-)
+[0m
+Committed as d85baf3. Let me record the outcome.
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/18.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/18 && git log --oneline -2 && echo "---" && git status --porcelain
+d85baf3 console: raw log pane in the ticket Detail
+5b01388 Merge branch 'pool/24'
+---
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+[0m
+Done. Issue 18 complete, committed as `d85baf3`, state marker set to `done`.
+
+**What landed:**
+- **`GET /api/log?ticket=<id>&attempt=<n>&offset=<bytes>`** — serves an attempt's raw log from a byte offset, ANSI-stripped server-side, reporting `offset`/`nextOffset`/`totalSize` plus the ticket's attempt list (implement/resolver/reconstructed, with rotated `attempt-N` files resolvable). Chunks at 64KB with UTF-8-safe boundaries; the offset contract is what ticket 19's tailing reuses.
+- **Events endpoint** now also returns the ticket's `spec` text (issue body after the title), feeding the never-run fallback.
+- **UI**: Detail renders the raw log pane below the timeline; clicking an attempt row switches the pane to that attempt's log; a never-run ticket shows its spec text with a "no attempts yet" marker instead of timeline and log. Selection and the never-run fallback are pure projection; fetched content/selection live in module scope so full-DOM rebuilds never drop them.
+
+**Verification:** 177 engine/server/fleet + 68 UI tests pass, both `tsc --noEmit`, `vite build` clean. A review pass (code-review skill) flagged UTF-8 chunk-splitting and duplicated state reset — both fixed and pinned by tests. Tail-first loading and snapshot-refetch liveness are deferred to ticket 19 by design.
+[0m
+Issue 18's code is absent from my branch, and its branch was never merged into main. This could be a pool engine anomaly I must not solve myself. Let me gather the facts precisely before deciding.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git reflog main | head -15; echo "=== reflog pool/19:"; git reflog pool/19 | head -8; echo "=== log all branches around:"; git log --all --oneline --graph | head -25
+b7f5148 main@{0}: merge pool/26: Fast-forward
+ff3d0a8 main@{1}: commit: console: register each bound server in the machine-wide fleet registry
+5b01388 main@{2}: merge pool/24: Merge made by the 'ort' strategy.
+4f99aad main@{3}: merge pool/17: Merge made by the 'ort' strategy.
+31267a1 main@{4}: merge pool/21: Merge made by the 'ort' strategy.
+4263f89 main@{5}: commit: console: resolve pool port from flag, console.json pin, or next free
+8d00da7 main@{6}: commit (merge): console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 main@{7}: merge pool/20: Merge made by the 'ort' strategy.
+ae6f99f main@{8}: merge pool/16: Fast-forward
+b084321 main@{9}: commit: console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd main@{10}: commit: console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 main@{11}: commit: console: close the review pass: crash read-back, resolver name, stream grace
+c63885c main@{12}: commit: console: light up the selection's flow neighbourhood
+8b820ca main@{13}: commit: console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af main@{14}: commit: console: pass the spawn cwd as PWD so opencode roots in the worktree
+=== reflog pool/19:
+ff3d0a8 pool/19@{0}: branch: Created from HEAD
+=== log all branches around:
+* b7f5148 console: add fleet list command that prints live pools
+* ff3d0a8 console: register each bound server in the machine-wide fleet registry
+| * d85baf3 console: raw log pane in the ticket Detail
+|/  
+*   5b01388 Merge branch 'pool/24'
+|\  
+| * 1da30a6 console: resolve pool port from flag, console.json pin, or next free
+* |   4f99aad Merge branch 'pool/17'
+|\ \  
+| * | 9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+| |/  
+* |   31267a1 Merge branch 'pool/21'
+|\ \  
+| * | 7c9637c console: fullscreen Detail mode via a header toggle
+| |/  
+* / 4263f89 console: resolve pool port from flag, console.json pin, or next free
+|/  
+*   8d00da7 console-pool: merge ticket 23 (engine pool lock)
+|\  
+| * 7d37820 console: enforce one server per pool with a pid-file lock
+* |   a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+|\ \  
+| * | 0382112 console: resizable Detail panel via a left-edge drag handle
+| |/  
+* / ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+[0m
+The picture is getting clear but I must understand the merge state precisely before deciding anything. Issue 18 is done but its commit is not on main or in my worktree.
+[0m$ [0mcurl -s http://localhost:8787/api/state | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+st=d['snapshot']['state']
+print('log channel (tail 25):')
+for line in st.get('log',[])[-25:]:
+    print('  ', line)
+print()
+print('reviewApproved:', st.get('reviewApproved'))
+print('outcomes:', json.dumps(st.get('outcomes',{}), indent=0)[:400])
+"
+log channel (tail 25):
+   interrupt answered for 16 (merge-conflict): merge landed
+   pool quiescent: interrupts pending for 20, 23, 17
+   rehydrated from checkpoint: 3 interrupt(s), 10 outcome(s) restored
+   pool quiescent: interrupts pending for 20, 23, 17
+   interrupt cleared for 20 (crash): marker says done
+   interrupt cleared for 23 (crash): marker says done
+   interrupt cleared for 17 (checkpoint): marker says ready
+   rehydrated from checkpoint: 3 interrupt(s), 10 outcome(s) restored
+   super-step 1: 17, 21, 24
+   ticket 17: exited 0, marker done
+   ticket 21: exited 0, marker done
+   ticket 24: exited 0, marker done
+   ticket 21: merged pool/21 onto the working branch
+   ticket 17: merged pool/17 onto the working branch
+   ticket 24: merged pool/24 onto the working branch
+   super-step 2: 18, 25, 27
+   ticket 18: exited 0, marker in-progress
+   ticket 25: exited 0, marker in-progress
+   ticket 27: exited 0, marker done
+   ticket 27: merged pool/27 onto the working branch
+   interrupt raised for 18 (crash)
+   interrupt raised for 25 (crash)
+   pool quiescent: interrupts pending for 18, 25
+   interrupt answered for 18 (crash): already done on disk
+   super-step 3: 19, 26
+
+reviewApproved: None
+outcomes: {
+"10": {
+"summary": "Verified the proving flight had completed on this pool: /my-console-runner wrote console.json and AGENT.md, started the server bound to the pool, and the Console answered its launch interrupt inline and spawned this agent per the console.json assignment. Ticked the final acceptance criterion, recorded the evidence in the Issue, and set status=done. No commit: the skill lives
+[0m
+I've been investigating the merge anomaly. Let me confirm the pool's own narrative from the engine state before deciding anything.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && grep -n "blockedBy\|blocked-by\|blockers\|merge.*block\|blocker" engine/engine.ts engine/pool.ts | head -20
+engine/engine.ts:182:      marker.blockedBy.every((id) => tickets[id] === "done"),
+engine/engine.ts:1161:      if (!reset.has(marker.id) && marker.blockedBy.some((b) => reset.has(b))) {
+engine/engine.ts:1242:    const ok = marker.blockedBy.every((b) => canComplete(b, visiting));
+engine/engine.ts:1271:      `interrupt cleared for ${interrupt.ticketId} (deadlock): blockers can complete again`,
+engine/engine.ts:1275:    const blocking = marker.blockedBy.filter(
+engine/engine.ts:1281:      body: `blockers can never complete: ${blocking.join(", ")}`,
+engine/engine.ts:1288:      payload: { blockers: blocking },
+engine/engine.ts:1469:  const upstream = marker.blockedBy.flatMap((id) => {
+engine/pool.ts:16:  blockedBy: string[];
+engine/pool.ts:27:        `(expected <!-- state: id=.. blocked-by=.. status=.. -->)`,
+engine/pool.ts:43:  const blockedRaw = fields.get("blocked-by") ?? "none";
+engine/pool.ts:44:  const blockedBy =
+engine/pool.ts:46:  return { id, file, blockedBy, status: status as TicketStatus };
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && grep -n "ready\|isReady\|blockedBy" engine/engine.ts | head -25
+175:export function readyTickets(
+181:      tickets[marker.id] === "ready" &&
+182:      marker.blockedBy.every((id) => tickets[id] === "done"),
+279:      const ready = readyTickets(session.markers, session.state.tickets);
+280:      if (ready.length === 0) break;
+283:        ready.map((marker) => [
+290:          ready.map((marker) => [marker.id, "in-progress" as const]),
+293:          `super-step ${session.superStep}: ${ready.map((m) => m.id).join(", ")}`,
+297:      for (const marker of ready) {
+309:        ready.map((marker) => [
+314:            ready.length,
+330:        ready.map((marker) =>
+475:  "and the agent left no brief. The ticket is back to ready; read the " +
+481:// agent holding it died with the last process, so it goes back to ready
+483:// stored interrupt whose marker says done or ready (a human answered or
+510:      writeMarkerStatus(marker.file, "ready");
+512:      marker.status = "ready";
+515:          "back to ready",
+543:    return status === "done" || status === "ready";
+678:    writeMarkerStatus(marker.file, "ready");
+679:    marker.status = "ready";
+693:        (marker.status === "done" ? "already done on disk" : "resumed"),
+701:// for the merge and comes straight back: its content already matches the
+716:// resolved it by hand in the main checkout sees "Already up to date" and a
+1093:      "send back; their downstream tickets return to ready with them.",
+[0m
+The pool log tells the story. Let me verify one thing before concluding: whether the engine merges blocker branches into a blocked ticket's worktree at spawn time.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git show main:engine/server.ts | grep -c "api/log"; echo "=== main checkout actual file:"; grep -c "api/log" /home/billy/repos/learning/ai-agent-graphs/engine/server.ts; echo "=== events for 18 merged?"; grep -c merged .scratch/console-pool/runs/18.events.jsonl; echo "=== main worktree branch:"; git -C /home/billy/repos/learning/ai-agent-graphs branch --show-current
+0
+=== main checkout actual file:
+0
+=== events for 18 merged?
+0
+=== main worktree branch:
+main
+[0m
+I've established the critical facts. Let me verify one last thing before deciding: whether main truly lacks issue 18's code and whether the engine considers 18 merged.
+[0m→ [0mRead .scratch/console-pool/issues/19-live-log-tailing.md
+I have all the facts now. Let me reason through the situation carefully before acting.
+
+**The state I've established (proven):**
+1. Issue 18 is marked `done` in the pool, with outcome recorded (commit `d85baf3` on branch `pool/18`).
+2. But `pool/18` was **never merged into main**. Main's reflog shows merges of pool/16, 17, 20, 21, 23, 24, 25, 26 — no pool/18. `git merge-base --is-ancestor d85baf3 main` is false.
+3. My worktree `pool/19` branched from `ff3d0a8` (= main), which lacks issue 18's `/api/log` endpoint and the Detail's raw log pane entirely.
+4. Why: the engine log channel shows issue 18's first attempt exited with marker `in-progress` (crash), so no merge was queued; the crash interrupt was then answered "already done on disk", which clears the interrupt but does **not** merge the branch.
+
+This is a pool engine gap: a crash-answered-with-done ticket never gets its branch merged. Per my standing constraints, "Unexpected repo state is a checkpoint, not a puzzle to solve." Issue 19 is explicitly blocked by 18 and must build on the raw log pane and offset-serving endpoint that live only on the orphaned `pool/18` branch.
+
+Let me record the finding in the Issue, set the checkpoint status, and write the brief.
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/19-live-log-tailing.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=19 blocked-by=18 status=in-progress -->
++<!-- state: id=19 blocked-by=18 status=checkpoint -->
+ 
+ # 19 — Live log tailing
+ 
+ Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`.
+
+[0m
+I have all the facts. This is a genuine pool-engine anomaly, not something I should solve myself. Let me record my findings and checkpoint.
+[0m← [0mEdit .scratch/console-pool/issues/19-live-log-tailing.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+@@ -24,4 +24,11 @@
+ 
+ ## Notes
+ 
+ - UI-only liveness state (pin, offsets, selected attempt) lives in module scope per the established idiom; the projection stays pure over snapshot plus events data.
++
++## Notes (this run, 2026-08-22)
++
++- **Blocker's code is absent from this worktree.** Issue 18 is marked done and its outcome (commit d85baf3 on branch pool/18) is recorded, but pool/18 was never merged onto main. This worktree (pool/19, branched from ff3d0a8 = main at spawn) has no `/api/log` endpoint in engine/server.ts and no raw log pane in ui/src/main.ts. Proven, not inferred: `git branch --contains d85baf3` lists only pool/18; `git merge-base --is-ancestor d85baf3 main` is false; main's reflog merges pool/16, 17, 20, 21, 23, 24, 25, 26 but never pool/18.
++- **Why it happened (proven from the pool's log channel).** Super-step 2 ran 18, 25, 27. Ticket 18 exited with marker `in-progress` (its first attempt), so the engine raised a crash interrupt and queued no merge. The crash was later answered and the engine logged "interrupt answered for 18 (crash): already done on disk", which clears the interrupt but does not merge the branch. So the engine treats 18 as done while its commit sits orphaned on pool/18. This is a pool-engine gap: a crash-answered-as-done ticket never gets its branch merged.
++- **Consequence.** Issue 19 is blocked by 18 precisely so it can build live tailing on the raw log pane and the offset-serving endpoint. Neither exists here. Building them again would duplicate issue 18's work, which is explicitly forbidden. Merging pool/18 onto my branch myself would be solving repo state the engine owns, also against the standing constraints.
++- **What I did not do:** no code changes, no merge, no git mutation. This Issue stops at checkpoint.
+
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/19-live-log-tailing.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+@@ -31,4 +31,13 @@
+ - **Blocker's code is absent from this worktree.** Issue 18 is marked done and its outcome (commit d85baf3 on branch pool/18) is recorded, but pool/18 was never merged onto main. This worktree (pool/19, branched from ff3d0a8 = main at spawn) has no `/api/log` endpoint in engine/server.ts and no raw log pane in ui/src/main.ts. Proven, not inferred: `git branch --contains d85baf3` lists only pool/18; `git merge-base --is-ancestor d85baf3 main` is false; main's reflog merges pool/16, 17, 20, 21, 23, 24, 25, 26 but never pool/18.
+ - **Why it happened (proven from the pool's log channel).** Super-step 2 ran 18, 25, 27. Ticket 18 exited with marker `in-progress` (its first attempt), so the engine raised a crash interrupt and queued no merge. The crash was later answered and the engine logged "interrupt answered for 18 (crash): already done on disk", which clears the interrupt but does not merge the branch. So the engine treats 18 as done while its commit sits orphaned on pool/18. This is a pool-engine gap: a crash-answered-as-done ticket never gets its branch merged.
+ - **Consequence.** Issue 19 is blocked by 18 precisely so it can build live tailing on the raw log pane and the offset-serving endpoint. Neither exists here. Building them again would duplicate issue 18's work, which is explicitly forbidden. Merging pool/18 onto my branch myself would be solving repo state the engine owns, also against the standing constraints.
+ - **What I did not do:** no code changes, no merge, no git mutation. This Issue stops at checkpoint.
++
++## Brief
++
++1. **What I completed.** Diagnosis only. I confirmed that issue 19's blocker (18) is marked done with its work committed (d85baf3 on pool/18), but that branch was never merged onto main, so this worktree lacks the raw log pane and the `/api/log` endpoint that issue 19 must make live. Root cause: issue 18's first attempt exited with an in-progress marker, the engine raised a crash interrupt, and answering it as "already done on disk" cleared the interrupt without merging pool/18.
++2. **What you have to do.** Merge branch `pool/18` onto main, then re-run this Issue. Suggested commands, run in the main checkout at the repo root:
++   - `git checkout main && git merge pool/18`
++   - then `cd .scratch/console-pool && ./run.sh reset 19`
++   The merge brings the raw log pane and `/api/log` endpoint onto the branch the engine spawns 19 from. (If you prefer, resolve the engine gap first so a crash-answered-as-done ticket always merges; either way the manual merge unblocks this Issue.)
++3. **What should happen after.** The runner re-spawns issue 19 on a main that contains issue 18's work. The live tailing then proceeds exactly as this Issue's What to build describes, and the acceptance criteria can be genuinely met.
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19 && git status --short && echo "=== untracked only, nothing tracked changed ===" && git log --oneline -1
+?? .scratch/console-pool/issues/19-live-log-tailing.md
+=== untracked only, nothing tracked changed ===
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+[0m
+The worktree has no code changes to commit (issue files live under `.scratch/` which is never committed). Let me verify state and record the outcome.
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/19.outcome.json
+Wrote file successfully.
+[0m
+No tracked changes exist (only the untracked issue file under `.scratch/`, which is never committed). Recording the outcome:
+[0m$ [0mhead -1 /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md; echo "==="; tail -25 /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/19/.scratch/console-pool/issues/19-live-log-tailing.md
+<!-- state: id=19 blocked-by=18 status=checkpoint -->
+===
+- [ ] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+- 18 — Raw log pane in the Detail (the pane and the offset-serving endpoint this makes live)
+
+## Notes
+
+- UI-only liveness state (pin, offsets, selected attempt) lives in module scope per the established idiom; the projection stays pure over snapshot plus events data.
+
+## Notes (this run, 2026-08-22)
+
+- **Blocker's code is absent from this worktree.** Issue 18 is marked done and its outcome (commit d85baf3 on branch pool/18) is recorded, but pool/18 was never merged onto main. This worktree (pool/19, branched from ff3d0a8 = main at spawn) has no `/api/log` endpoint in engine/server.ts and no raw log pane in ui/src/main.ts. Proven, not inferred: `git branch --contains d85baf3` lists only pool/18; `git merge-base --is-ancestor d85baf3 main` is false; main's reflog merges pool/16, 17, 20, 21, 23, 24, 25, 26 but never pool/18.
+- **Why it happened (proven from the pool's log channel).** Super-step 2 ran 18, 25, 27. Ticket 18 exited with marker `in-progress` (its first attempt), so the engine raised a crash interrupt and queued no merge. The crash was later answered and the engine logged "interrupt answered for 18 (crash): already done on disk", which clears the interrupt but does not merge the branch. So the engine treats 18 as done while its commit sits orphaned on pool/18. This is a pool-engine gap: a crash-answered-as-done ticket never gets its branch merged.
+- **Consequence.** Issue 19 is blocked by 18 precisely so it can build live tailing on the raw log pane and the offset-serving endpoint. Neither exists here. Building them again would duplicate issue 18's work, which is explicitly forbidden. Merging pool/18 onto my branch myself would be solving repo state the engine owns, also against the standing constraints.
+- **What I did not do:** no code changes, no merge, no git mutation. This Issue stops at checkpoint.
+
+## Brief
+
+1. **What I completed.** Diagnosis only. I confirmed that issue 19's blocker (18) is marked done with its work committed (d85baf3 on pool/18), but that branch was never merged onto main, so this worktree lacks the raw log pane and the `/api/log` endpoint that issue 19 must make live. Root cause: issue 18's first attempt exited with an in-progress marker, the engine raised a crash interrupt, and answering it as "already done on disk" cleared the interrupt without merging pool/18.
+2. **What you have to do.** Merge branch `pool/18` onto main, then re-run this Issue. Suggested commands, run in the main checkout at the repo root:
+   - `git checkout main && git merge pool/18`
+   - then `cd .scratch/console-pool && ./run.sh reset 19`
+   The merge brings the raw log pane and `/api/log` endpoint onto the branch the engine spawns 19 from. (If you prefer, resolve the engine gap first so a crash-answered-as-done ticket always merges; either way the manual merge unblocks this Issue.)
+3. **What should happen after.** The runner re-spawns issue 19 on a main that contains issue 18's work. The live tailing then proceeds exactly as this Issue's What to build describes, and the acceptance criteria can be genuinely met.
+[0m
+Issue 19 checkpointed.
+
+**What I found (proven):** Issue 18 is marked done with its work committed (`d85baf3` on `pool/18`), but that branch was **never merged onto main**. My worktree lacks the `/api/log` endpoint and the raw log pane that issue 19's live tailing must build on. The pool log channel shows why: issue 18's first attempt exited with an in-progress marker → crash interrupt → answering it as "already done on disk" cleared the interrupt without merging `pool/18`. That's a pool-engine gap.
+
+**What I did:** diagnosis only, no code changes, no git mutation. Set the marker to `checkpoint`, wrote notes + a decision-ready Brief on the Issue, recorded the outcome.
+
+**What you do:** merge `pool/18` onto main, then `./run.sh reset 19`. After that, issue 19 re-spawns on a main that has the raw log pane and can genuinely meet its acceptance criteria.

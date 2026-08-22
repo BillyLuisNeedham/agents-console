@@ -1,0 +1,12 @@
+{"at":"2026-08-22T11:57:43.271Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T11:57:43.273Z","attempt":1,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T11:59:15.061Z","attempt":2,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T11:59:15.099Z","attempt":2,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T12:10:29.829Z","attempt":2,"kind":"exited","payload":{"code":0,"status":"checkpoint"}}
+{"at":"2026-08-22T12:16:03.732Z","attempt":2,"kind":"checkpoint","payload":{}}
+{"at":"2026-08-22T13:52:59.017Z","attempt":2,"kind":"answered","payload":{"kind":"checkpoint"}}
+{"at":"2026-08-22T13:52:59.020Z","attempt":3,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T13:52:59.028Z","attempt":3,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T13:58:26.122Z","attempt":3,"kind":"exited","payload":{"code":0,"status":"in-progress"}}
+{"at":"2026-08-22T13:58:26.122Z","attempt":3,"kind":"crash","payload":{"code":0}}
+{"at":"2026-08-22T13:58:26.185Z","attempt":3,"kind":"answered","payload":{"kind":"crash"}}

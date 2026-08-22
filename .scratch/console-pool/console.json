@@ -1,14 +1,18 @@
 {
   "defaults": {
     "harness": "opencode",
-    "model": "kimi-for-coding-oauth/k3",
+    "model": "opencode-go/deepseek-v4-flash",
     "drivers": "implement"
   },
   "assign": {
-    "11": { "drivers": "code-review" }
+    "11": { "drivers": "code-review" },
+    "22": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" },
+    "28": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" },
+    "30": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" },
+    "32": { "model": "kimi-for-coding-oauth/k3", "drivers": "code-review" }
   },
-  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own model.",
-  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. On opencode this maps to the deepseek agent, DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"deepseek\"}}",
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent, same model as the orchestrator. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.",
+  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"opencode-go/deepseek-v4-flash\"}}",
   "resolver": "opencode",
   "reviewer": "a reviewer checks acceptance criteria only, never code quality; a failure buys the orchestrator one fix attempt, then the Issue becomes a checkpoint carrying the disagreement in its brief",
   "checkpoint": "a write outside the repository other than Issue 10's skill file, an undecided decision the Issue and its context do not settle, or a material guess"

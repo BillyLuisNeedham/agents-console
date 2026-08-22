@@ -1,0 +1,9 @@
+{"at":"2026-08-22T10:52:40.435Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T10:52:40.479Z","attempt":1,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T11:11:31.615Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"checkpoint"}}
+{"at":"2026-08-22T11:11:31.647Z","attempt":1,"kind":"checkpoint","payload":{}}
+{"at":"2026-08-22T11:42:46.132Z","attempt":1,"kind":"answered","payload":{"kind":"checkpoint"}}
+{"at":"2026-08-22T11:42:46.137Z","attempt":2,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T11:42:46.145Z","attempt":2,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T11:57:42.990Z","attempt":2,"kind":"exited","payload":{"code":0,"status":"done"}}
+{"at":"2026-08-22T11:57:43.249Z","attempt":2,"kind":"merged","payload":{}}

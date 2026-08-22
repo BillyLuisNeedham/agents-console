@@ -1,0 +1,1 @@
+{"resolved": true, "note": "git merge main reported 'Already up to date': main is at the merge base (b084321) and pool/16 is exactly one commit ahead (ae6f99f, the ticket's own work), so no divergent commits or conflicting files existed to resolve or stage. The branch merges cleanly onto main as-is."}

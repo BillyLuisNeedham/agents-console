@@ -1,0 +1,1550 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/04-harness-spawn-kernel.md
+[0m→ [0mRead CONTEXT.md
+[0m→ [0mRead .scratch/console-pool/spec-ticket-pools.md
+[0m
+[0m$ [0mls .scratch/console-pool/issues/ && git log --oneline -10 && git status --short
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+ded62a3 console: add durability and rehydration to the pool engine
+75c027c console-pool: record runner status markers and notes from the interrupted 01-02 run
+81a74ba console: add interrupt engine with checkpoint, crash, and deadlock interrupts
+4e96563 console: add the pool engine walking skeleton
+41ac900 console-pool: ticket queue, spec, and runner for the pool engine
+12aea8c remove the lessons; promote the console prototype to the repo root
+591fb52 console: close the Detail review, accept findings and fix the spec vocab
+98cb424 console: review the Detail panel and resizable drawers iteration
+04f6a61 console: add a drag handle to resize the bottom drawers
+527d7a2 console: answer interrupts from the Detail panel
+ M .scratch/console-pool/issues/03-durability.md
+ M .scratch/console-pool/issues/04-harness-spawn-kernel.md
+?? .scratch/console-pool/runs/
+[0m
+[0m✗ [0mRead prototype/NOTES.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/prototype/NOTES.md
+[0m
+[0m$ [0mgit status && ls prototype/src/ && ls .scratch/console/ && ls .scratch/console-pool/
+On branch main
+Your branch is ahead of 'origin/main' by 4 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/console-pool/issues/03-durability.md
+	modified:   .scratch/console-pool/issues/04-harness-spawn-kernel.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/runs/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ls: cannot access 'prototype/src/': No such file or directory
+[0m
+[0m$ [0mls && git diff .scratch/console-pool/issues/03-durability.md .scratch/console-pool/issues/04-harness-spawn-kernel.md
+bun.lock
+CONTEXT.md
+docs
+engine
+langgraph.json
+mock-tickets
+mock-tickets-deadlock
+node_modules
+NOTES.md
+package.json
+README.md
+scripts
+src
+tickets
+tsconfig.json
+ui
+diff --git a/.scratch/console-pool/issues/03-durability.md b/.scratch/console-pool/issues/03-durability.md
+index 3acb22c..0294b47 100644
+--- a/.scratch/console-pool/issues/03-durability.md
++++ b/.scratch/console-pool/issues/03-durability.md
+@@ -1,4 +1,4 @@
+-<!-- state: id=03 blocked-by=01 status=ready -->
++<!-- state: id=03 blocked-by=01 status=done -->
+ 
+ # 03 — Durability and rehydration
+ 
+@@ -10,12 +10,12 @@ The engine's durability story. Line-1 state markers are dual-written alongside e
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Every checkpoint write is accompanied by the corresponding line-1 marker writes
+-- [ ] On rehydration, a marker that disagrees with the checkpoint wins
+-- [ ] A killed engine resumes the same pool from rehydrated state without re-running done tickets
+-- [ ] Pending interrupts survive a restart and are still answerable
+-- [ ] A pool part-run by the engine can be inspected by `run.sh status` and continued by it
+-- [ ] Covered by engine-seam tests, including a kill-mid-super-step scenario
++- [x] Every checkpoint write is accompanied by the corresponding line-1 marker writes
++- [x] On rehydration, a marker that disagrees with the checkpoint wins
++- [x] A killed engine resumes the same pool from rehydrated state without re-running done tickets
++- [x] Pending interrupts survive a restart and are still answerable
++- [x] A pool part-run by the engine can be inspected by `run.sh status` and continued by it
++- [x] Covered by engine-seam tests, including a kill-mid-super-step scenario
+ 
+ ## Blocked by
+ 
+@@ -23,49 +23,31 @@ The engine's durability story. Line-1 state markers are dual-written alongside e
+ 
+ ---
+ 
+-## Brief, written by the runner
+-
+-The agent stopped without setting its own status, last seen as 'in-progress'. It crashed, ran out of context, or was killed. It had no chance to write a brief or to commit.
+-
+-- Stopped: 2026-08-18 22:52
+-- Log: `.scratch/console-pool/runs/03.log`
+-- Working tree at the stop:
+-
+-```
+- M .scratch/console-pool/issues/01-pool-engine-skeleton.md
+- M .scratch/console-pool/issues/02-interrupt-engine.md
+- M .scratch/console-pool/issues/03-durability.md
+-?? .scratch/console-pool/runs/
+-```
+-
+-Last lines of the log:
+-
+-```
+--rwxr-xr-x 1 billy billy 16244 Aug 18 22:10 run.sh
+--rw-r--r-- 1 billy billy 13136 Aug 18 21:50 spec-ticket-pools.md
+-81a74ba console: add interrupt engine with checkpoint, crash, and deadlock interrupts
+-4e96563 console: add the pool engine walking skeleton
+-41ac900 console-pool: ticket queue, spec, and runner for the pool engine
+-12aea8c remove the lessons; promote the console prototype to the repo root
+-591fb52 console: close the Detail review, accept findings and fix the spec vocab
+-98cb424 console: review the Detail panel and resizable drawers iteration
+-04f6a61 console: add a drag handle to resize the bottom drawers
+-527d7a2 console: answer interrupts from the Detail panel
+- M .scratch/console-pool/issues/01-pool-engine-skeleton.md
+- M .scratch/console-pool/issues/02-interrupt-engine.md
+- M .scratch/console-pool/issues/03-durability.md
+-?? .scratch/console-pool/runs/
+-[0m
+-[0m• [0mRead spec and engine state[90m Deepseek Agent[0m
+-[0m✓ [0mRead spec and engine state[90m Deepseek Agent[0m
+-[0m→ [0mRead engine/engine.ts
+-Now let me read the engine code itself, since the substance is mine to write.
+-[0m→ [0mRead engine/pool.ts
+-[0m→ [0mRead engine/checkpoints.ts
+-[0m→ [0mRead engine/engine.test.ts
+-Now let me read `run.sh` to understand the interop seam for AC5.
+-[0m→ [0mRead .scratch/console-pool/run.sh
+-[91m[1mError: [0mYou've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/code/#pricing
+-```
+-
+-Nothing above is confirmed. Read the log before you trust any part of this Issue.
++## Notes
++
++- The previous agent on this Issue crashed before writing anything (its runner brief is below, kept for the record). This run started from a clean tree: no engine changes had survived.
++- Rehydration (`rehydrate` in engine/engine.ts) runs once at `runPool` start, before the drive loop. The last sqlite checkpoint restores the `log`, `outcomes` and `interrupts` channels; the `tickets` channel always comes from the line-1 markers, so markers win every disagreement. `CheckpointStore.latest()` reads the newest row.
++- Marker semantics at load: `in-progress` with no pending interrupt means the agent died with the last process, so the marker goes back to `ready` and the engine appends a `## Brief, written by the engine` note to the Issue (run.sh's rule that a stop leaves a trace in the Issue). `in-progress` with a pending crash interrupt is left alone: the interrupt says a human has not looked yet. A stored interrupt whose marker says `done` or `ready` (a human answered or `run.sh reset` it on disk) is stale and clears. A `checkpoint` marker with no stored interrupt (a pool run.sh halted) re-raises its interrupt from the Brief, which is what makes run.sh pools answerable in the engine.
++- Outcomes re-read from `runs/<id>.outcome.json` for done tickets, disk winning over the checkpoint. This is what recovers a finished ticket's outcome after a kill mid-super-step, where the ticket completed but no checkpoint landed (proven by the kill test: 01's outcome survives with zero checkpoint rows).
++- Dual-write: `persist(session)` (write markers, then sqlite) is the only path that writes checkpoints, and the in-progress marker write moved from `runTicket` up into the drive loop, so the markers on disk agree with state at every emitted snapshot. The AC1 test asserts exactly that through `onSnapshot`.
++- run.sh interop test copies the real `.scratch/console-pool/run.sh` into a temp pool, fakes `claude` on PATH and HOME for `~/.issue-runner`, and `git init`s (no commits, so preflight's dirty-tracked-files refusal passes with everything untracked). It proves `run.sh status` reads the engine's board and `run.sh` continues the pool without re-running the done ticket.
++- `stalled` is now unreachable through the public seam by construction (every non-done marker funnels to ready or to an interrupt), so the old stalled test was replaced rather than ported. The phase stays in `RunPhase` as a defensive residue. (Inference: no marker combination reaches it after rehydration.)
++
++## Review findings, and what changed because of them
++
++Two-axis review (standards + spec, parallel sub-agents) ran on the working tree before commit. Acted on:
++
++- A stored interrupt survived a human `run.sh reset` (marker back to ready): the ticket re-ran but the interrupt lingered in state for ever. Rehydration now clears stored interrupts for markers that say ready as well as done, with a test.
++- The in-progress reset left no trace on the Issue file, breaking run.sh's shared rule. The engine now appends a `## Brief, written by the engine` note when it resets a stranded in-progress marker.
++- Outcomes were restored only from the checkpoint, so a kill mid-super-step lost a finished ticket's outcome even though its outcome file was on disk. Done tickets' outcome files now win at rehydration; the kill test asserts the recovery.
++- The checkpoint-interrupt literal was built in two places (drive loop and rehydration); extracted to `checkpointInterrupt(marker)`.
++- The tickets channel merge in rehydration now goes through `applyUpdate` like every other mutation, instead of poking the map directly.
++
++Noted, not acted on:
++
++- `CheckpointStore.latest()` does not guard `JSON.parse`. sqlite commits are atomic per row, so a torn row is not a realistic kill artifact; a corrupt db should fail loudly at startup anyway.
++- Standards axis flagged that `persist` has three call sites with different ordering against `emit`. Deliberate: the pre-spawn emit needs markers written but no checkpoint yet (a super-step start is not a checkpoint boundary, per the spec's "checkpoint after each super-step").
++
++## Brief, written by the runner (2026-08-18, superseded)
++
++The first agent on this Issue stopped without setting its own status: it hit a usage-limit error mid-read, before writing any code. Its brief and log tail are in `.scratch/console-pool/runs/03.log`. Nothing from that run survived in the tree; this Issue was worked fresh.
+diff --git a/.scratch/console-pool/issues/04-harness-spawn-kernel.md b/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+index e42f8b2..c60112c 100644
+--- a/.scratch/console-pool/issues/04-harness-spawn-kernel.md
++++ b/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+@@ -1,4 +1,4 @@
+-<!-- state: id=04 blocked-by=01 status=ready -->
++<!-- state: id=04 blocked-by=01 status=in-progress -->
+ 
+ # 04 — Harness spawn kernel
+[0m
+[0m$ [0mls engine/ && ls .scratch/console/ 2>/dev/null; ls .scratch/console-pool/
+checkpoints.ts
+engine.test.ts
+engine.ts
+pool.ts
+prompt.ts
+spawn.ts
+AGENT.md
+issues
+runs
+run.sh
+spec-detail-and-resizable-drawers.md
+verify-02.ts
+verify-03.ts
+verify-04.ts
+verify-06.ts
+verify-07.ts
+verify-10.ts
+verify-11.ts
+verify-12.ts
+verify-13.ts
+AGENT.md
+issues
+runs
+run.sh
+spec-ticket-pools.md
+[0m
+[0m→ [0mRead NOTES.md
+[0m→ [0mRead engine/spawn.ts
+[0m→ [0mRead engine/prompt.ts
+[0m→ [0mRead .scratch/console-pool/run.sh
+[0m→ [0mRead engine/engine.ts
+[0m
+[0m$ [0mgit log --oneline --all -- engine/spawn.ts engine/prompt.ts && git log -1 --stat ded62a3 | head -30
+4e96563 console: add the pool engine walking skeleton
+commit ded62a3c59805fdeb5892ab47655da33e05539c1
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Wed Aug 19 22:10:52 2026 +0100
+
+    console: add durability and rehydration to the pool engine
+
+ engine/checkpoints.ts |   7 +
+ engine/engine.test.ts | 486 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ engine/engine.ts      | 130 +++++++++++++-
+ 3 files changed, 605 insertions(+), 18 deletions(-)
+[0m
+[0m$ [0mls .scratch/console-pool/ && cat .scratch/console-pool/AGENT.md 2>/dev/null; cat .scratch/console-pool/console.json 2>/dev/null; echo ---; cat .scratch/console/AGENT.md 2>/dev/null | head -50
+AGENT.md
+issues
+runs
+run.sh
+spec-ticket-pools.md
+# Runner agent instructions
+
+Every agent the runner starts gets this file appended to its system prompt. One agent works one
+Issue, then exits. The next agent starts fresh and reads this again.
+
+Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+
+## Your role
+
+You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
+subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
+through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
+and cursor they are whatever your user's own config defines under those names, so if a named agent
+does not exist, do the reading yourself rather than inventing one.
+
+**Write the substance of the Issue yourself.** The code that answers it, the test that pins the
+behaviour, the prose that lands in the repository and the commit message are all yours. This is
+deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller
+one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
+
+Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+
+## The state protocol
+
+Line 1 of your Issue file is a state marker:
+
+```
+<!-- state: id=NN blocked-by=.. status=.. -->
+```
+
+The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
+exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+
+If you exit without setting it, the runner treats that as a failure and halts.
+
+### Set `status=done` when
+
+Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
+cannot be met, the Issue is a `checkpoint`, not `done`.
+
+### Set `status=checkpoint` when
+
+- it needs a device, an emulator, or a live backend
+- it needs a write to an external system, or contact with anyone outside the codebase
+- it needs a decision the Issue and its context do not already settle
+- you would have to guess at something material to proceed
+- the build or the test suite fails for a reason the Issue does not cover
+
+Then **append a `## Brief` section to the bottom of the Issue** saying:
+
+1. what you completed, precisely
+2. what the human has to do
+3. what should happen after they have done it
+
+Keep the brief decision-ready. It is the report, not the raw work.
+
+## Write into the Issue, not only at the end
+
+**The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent
+reads the Issue.
+
+You can run out of context, and the run can be interrupted. Either way anything you were holding in
+your head is lost. So append to the Issue as you go, whenever you learn something the next agent
+would not get from the code alone:
+
+- a finding, and whether it is proven or inferred
+- something you tried that did not work, and why, so nobody repeats it
+- a decision you made that the Issue did not settle for you
+- anything you were about to do next
+
+Write it before you start anything long or risky. A build, a device attempt or a large refactor might
+not return.
+
+Keep it short. A few lines under a `## Notes` heading is enough, and it stands alongside the
+`## Brief` section rather than replacing it.
+
+If the runner has to stop you, it appends its own note saying so. That note can only report the
+working tree and the tail of the log. It cannot report what you knew. That part is yours.
+
+## Halting is the mechanism, not a failure
+
+The runner halts on `checkpoint` and prints your brief. **Expect a good share of a real queue to stop
+this way.** Do the autonomous part first, then stop cleanly.
+
+Stopping honestly beats guessing every time. Nothing is gained by a `done` that is not true.
+
+## Finishing
+
+Tick each acceptance criterion in the Issue as you satisfy it.
+
+Commit to the current branch when the Issue is done and when you stop. One commit per Issue, and the
+message is yours to write.
+
+## Standing constraints, all non-negotiable
+
+- Leave the branch as you found it. Commit to the branch you are on, and create none.
+- Leave pushing and pull requests to the human. Commits are where your work stops.
+- Write commit messages and documentation with no AI tool attribution of any kind: no
+  co-author trailer, no generated-with footer, in commits, code, docs or anywhere else.
+- Write prose without em dashes.
+- Label a claim as inference when it is inference.
+
+<!-- ============================================================ CONFIG -->
+
+Author everything below. One `/my-issue-runner` interview fills it in.
+
+## Read before you touch anything
+
+In this order: your Issue, then the files this job's context lives in.
+
+- `CONTEXT.md` (repo root) — the domain glossary. Use its terms; never its avoid-words.
+- `.scratch/console-pool/spec-ticket-pools.md` — the spec this queue implements. Issues 01 to 10 build it; Issue 11 reviews against it.
+- `prototype/NOTES.md` — prototype status and lessons learned.
+- `prototype/src/graph.ts`, `state.ts`, `nodes.ts`, `tickets.ts` — the LangGraph reference implementation the lessons were built on. Read it for the graph vocabulary made concrete. The pool engine replaces this path; do not extend it.
+- `prototype/ui/src/` — the existing Console. The canvas, node cards, Detail panel, drawers and styles are kept. `client.ts` and `project.ts` are the LangGraph adapter that Issue 07 deletes and replaces.
+- `.scratch/console/run.sh` and `.scratch/console/AGENT.md` — the previous pool's runner. Issue 04 ports its spawn mechanics; treat its comments about harness quirks as load-bearing.
+- `prototype/mock-tickets/` and `prototype/mock-tickets-deadlock/` — example pools in the old front-matter format. Useful as fixtures; the new pool format is the line-1 state marker on your own Issue files.
+
+## Commit message format
+
+```
+console: <what changed, in the imperative>
+```
+
+One commit per Issue. Commit only the paths your Issue touches — never `.scratch/`, never `node_modules/` or `dist/`.
+
+## This job's constraints
+
+- Stack is fixed: vanilla TypeScript + Vite + bun, the engine in the prototype, the UI in `prototype/ui/`. No UI framework. No new runtime dependencies without a checkpoint — sqlite comes from `bun:sqlite`, which Bun provides.
+- Tests run with `bun test`; types with `tsc --noEmit`; the UI build with `vite build` in `prototype/ui/`.
+- Test the pool engine only through its public interface, with stub harness scripts and temp pool directories. Never test engine internals. The UI projection is tested as pure functions over snapshot fixtures, following the existing `project.test.ts` precedent.
+- Never start a long-lived server and leave it running: a server an agent starts dies with that process tree. Verify a server as a smoke check (start, probe, kill) or make it a checkpoint.
+- Issues 05 and 06 do git worktree and merge work. Never force-push, never delete branches or worktrees the Issue did not create, never run `git clean`. Unexpected repo state is a checkpoint, not a puzzle to solve.
+- Issue 04 spawns real harness CLIs. The first real spawn is a proving flight: a harness behaving in a way the Issue does not cover is a checkpoint, not an improvisation.
+- `agent` (the cursor CLI) is not installed on this machine. No Issue runs on cursor; Issue 04 only writes that launch line from Cursor's documentation.
+- Issue 10 writes a skill under `~/.claude/commands/skills/personal/`. That write outside the repo is the point of the Issue. Any other write outside the repo is a checkpoint.
+- `prototype/.env` and `prototype/scripts/.env` are gitignored secrets. Never print or commit them.
+- Issue 11 is a review Issue. It changes no code. If the review finds problems it ends as a checkpoint and the brief carries the disagreement; a clean review ends it as done.
+
+## Which Issues are expected to stop
+
+- 04 — the first real harness spawn is a proving flight, and a surprise there is a checkpoint by design.
+- 10 — the first end-to-end launch of the new skill is Billy's to watch.
+- 11 — stops when the review finds anything, because the disagreement is Billy's call, not the agent's.
+---
+# Runner agent instructions
+
+Every agent the runner starts gets this file appended to its system prompt. One agent works one
+Issue, then exits. The next agent starts fresh and reads this again.
+
+Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+
+## Your role
+
+You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
+subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
+through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
+and cursor they are whatever your user's own config defines under those names, so if a named agent
+does not exist, do the reading yourself rather than inventing one.
+
+**Write the substance of the Issue yourself.** The code that answers it, the test that pins the
+behaviour, the prose that lands in the repository and the commit message are all yours. This is
+deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller
+one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
+
+Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+
+## The state protocol
+
+Line 1 of your Issue file is a state marker:
+
+```
+<!-- state: id=NN blocked-by=.. status=.. -->
+```
+
+The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
+exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+
+If you exit without setting it, the runner treats that as a failure and halts.
+
+### Set `status=done` when
+
+Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
+cannot be met, the Issue is a `checkpoint`, not `done`.
+
+### Set `status=checkpoint` when
+
+- it needs a device, an emulator, or a live backend
+- it needs a write to an external system, or contact with anyone outside the codebase
+- it needs a decision the Issue and its context do not already settle
+- you would have to guess at something material to proceed
+- the build or the test suite fails for a reason the Issue does not cover
+
+Then **append a `## Brief` section to the bottom of the Issue** saying:
+[0m
+[0m→ [0mRead engine/engine.test.ts
+[0m
+[0m# [0mTodos
+[•] Verify installed harness CLIs and their flag shapes (claude, opencode)
+[ ] Confirm cursor launch line against Cursor CLI docs
+[ ] Add cursor case to engine/spawn.ts
+[ ] Add engine-seam tests with fake CLI binaries on PATH (AC7)
+[ ] Run bun test + tsc --noEmit
+[ ] Proving flight: real harness on a trivial ticket in a scratch pool (AC6)
+[ ] Code review the diff, update Issue (ACs, notes, status), commit engine/
+[0m
+I've read the Issue, spec, CONTEXT.md, engine code, and run.sh. Current state: the spawn kernel partially exists from Issue 01 (claude + opencode in `engine/spawn.ts`, glued prompt in `engine/prompt.ts`, marker read-back and per-ticket logs in `engine/engine.ts`). Gaps: no cursor case, no PATH-fake-binary selection tests, and no real-harness proving flight. Setting up a work plan.
+[0m$ [0mcommand -v claude opencode agent; echo "---"; claude --help 2>&1 | head -60
+/home/billy/.local/bin/claude
+/home/billy/.local/bin/opencode
+---
+Usage: claude [options] [command] [prompt]
+
+Claude Code - starts an interactive session by default, use -p/--print for
+non-interactive output
+
+Arguments:
+  prompt                                Your prompt
+
+Options:
+  --add-dir <directories...>            Additional directories to allow tool
+                                        access to
+  --agent <agent>                       Agent for the current session. Overrides
+                                        the 'agent' setting.
+  --agents <json>                       JSON object defining custom agents (e.g.
+                                        '{"reviewer": {"description": "Reviews
+                                        code", "prompt": "You are a code
+                                        reviewer"}}')
+  --allow-dangerously-skip-permissions  Enable bypassing all permission checks
+                                        as an option, without it being enabled
+                                        by default. Recommended only for
+                                        sandboxes with no internet access.
+  --allowedTools, --allowed-tools <tools...>
+      Comma or space-separated list of tool names to allow (e.g. "Bash(git *)
+      Edit")
+  --append-system-prompt <prompt>       Append a system prompt to the default
+                                        system prompt
+  --autocompact <auto|tokens>           Auto-compact window size (auto, or
+                                        100k–1M tokens)
+  --ax-screen-reader                    Render screen-reader friendly output
+                                        (flat text, no decorative borders or
+                                        animations).
+  --bg, --background                    Start the session as a background agent
+                                        and return immediately (manage with
+                                        `claude agents`)
+  --bare                                Minimal mode: skip hooks, LSP, plugin
+                                        sync, attribution, auto-memory,
+                                        background prefetches, keychain reads,
+                                        and CLAUDE.md auto-discovery. Sets
+                                        CLAUDE_CODE_SIMPLE=1. Anthropic auth is
+                                        strictly ANTHROPIC_API_KEY or
+                                        apiKeyHelper via --settings (OAuth and
+                                        keychain are never read). 3P providers
+                                        (Bedrock/Vertex/Foundry) use their own
+                                        credentials. Skills still resolve via
+                                        /skill-name. Explicitly provide context
+                                        via: --system-prompt[-file],
+                                        --append-system-prompt[-file], --add-dir
+                                        (CLAUDE.md dirs), --mcp-config,
+                                        --settings, --agents, --plugin-dir.
+  --betas <betas...>                    Beta headers to include in API requests
+                                        (API key users only)
+  --brief                               Enable SendUserMessage tool for
+                                        agent-to-user communication
+  --chrome                              Enable Claude in Chrome integration
+  --cloud [description|session_id|url]  Create a cloud session with the given
+                                        description, or attach to an existing
+                                        one by session ID or claude.ai/code URL
+  -c, --continue                        Continue the most recent conversation in
+                                        the current directory
+  --dangerously-skip-permissions        Bypass all permission checks.
+[0m
+[0m$ [0mclaude --help 2>&1 | grep -A4 "permission-mode"; echo "---"; opencode run --help 2>&1 | head -50
+--permission-mode <mode>              Permission mode to use for the session
+                                        (choices: "acceptEdits", "auto",
+                                        "bypassPermissions", "manual",
+                                        "dontAsk", "plan")
+  --plugin-dir <path>                   Load a plugin from a directory or .zip
+---
+opencode run [message..]
+
+run opencode with a message
+
+Positionals:
+  message  message to send                                                     [array] [default: []]
+
+Options:
+  -h, --help         show help                                                             [boolean]
+  -v, --version      show version number                                                   [boolean]
+      --print-logs   print logs to stderr                                                  [boolean]
+      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure         run without external plugins                                          [boolean]
+      --command      the command to run, use message for args                               [string]
+  -c, --continue     continue the last session                                             [boolean]
+  -s, --session      session id to continue                                                 [string]
+      --fork         fork the session before continuing (requires --continue or --session) [boolean]
+      --share        share the session                                                     [boolean]
+  -m, --model        model to use in the format of provider/model                           [string]
+      --agent        agent to use                                                           [string]
+      --format       format: default (formatted) or json (raw JSON events)
+                                          [string] [choices: "default", "json"] [default: "default"]
+  -f, --file         file(s) to attach to message                                            [array]
+      --title        title for the session (uses truncated prompt if no value provided)     [string]
+      --attach       attach to a running opencode server (e.g., http://localhost:4096)      [string]
+  -p, --password     basic auth password (defaults to OPENCODE_SERVER_PASSWORD)             [string]
+  -u, --username     basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')
+                                                                                            [string]
+      --dir          directory to run in, path on remote server if attaching                [string]
+      --port         port for the local server (defaults to random port if no value provided)
+                                                                                            [number]
+      --variant      model variant (provider-specific reasoning effort, e.g., high, max, minimal)
+                                                                                            [string]
+      --thinking     show thinking blocks                                                  [boolean]
+  -i, --interactive  run in direct interactive split-footer mode          [boolean] [default: false]
+      --auto         auto-approve permissions that are not explicitly denied (dangerous!)
+                                                                          [boolean] [default: false]
+[0m
+claude `--permission-mode auto` and opencode `--command`/`--auto` are both valid on this machine. Now checking Cursor's CLI docs for the cursor launch line.
+[0m✗ [0mWebFetch https://cursor.com/docs/cli/usage failed
+[91m[1mError: [0mStatusCode: non 2xx status code (404 GET https://cursor.com/docs/cli/usage)
+[0m% [0mWebFetch https://docs.cursor.com/en/cli/usage
+[0m% [0mWebFetch https://docs.cursor.com/cli/headless
+[0m→ [0mRead engine/pool.ts
+[0m
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+@@ -40,8 +40,20 @@
+     "--model",
+     ctx.model,
+     "--auto",
+   ],
++  // UNPROVEN: written from Cursor's CLI docs, not yet run on a real queue.
++  cursor: (ctx) => [
++    "agent",
++    "-p",
++    ctx.prompt,
++    "--model",
++    ctx.model,
++    "--force",
++    "--trust",
++    "--output-format",
++    "text",
++  ],
+ };
+ 
+ function afterFirstLine(prompt: string): string {
+   const newline = prompt.indexOf("\n");
+
+[0m
+Marker writes are pure TS (the GNU/BSD sed quirk is sidestepped, not re-hit). Now adding the harness-CLI selection tests with fake binaries on PATH.
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+@@ -1,8 +1,9 @@
+ import { afterEach, describe, expect, it } from "bun:test";
+ import { Database } from "bun:sqlite";
+ import {
+   chmodSync,
++  existsSync,
+   mkdtempSync,
+   mkdirSync,
+   readFileSync,
+   rmSync,
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+@@ -385,8 +385,226 @@
+     expect(typeof logText).toBe("string");
+   });
+ });
+ 
++describe("harness CLIs", () => {
++  // Fake CLI binaries on PATH exercise the real default harnesses: the
++  // engine resolves the console.json harness name to a binary and launches
++  // it in the shape run.sh proved. Each fake records its argv one argument
++  // per file (argv.0, argv.1, ...) so assertions see exact strings, newline-
++  // carrying prompts included.
++
++  interface FakeCli {
++    binDir: string;
++    recordDir: string;
++  }
++
++  function fakeCli(
++    poolDir: string,
++    binary: string,
++    argExtract: string[],
++    opts: { setDone?: boolean; exitCode?: number } = {},
++  ): FakeCli {
++    const binDir = join(poolDir, "bin");
++    const recordDir = join(poolDir, "record");
++    mkdirSync(binDir, { recursive: true });
++    mkdirSync(recordDir, { recursive: true });
++    writeFileSync(
++      join(binDir, binary),
++      [
++        "#!/usr/bin/env bash",
++        "set -uo pipefail",
++        'out="$FAKE_RECORD_DIR"',
++        "i=0",
++        'for a in "$@"; do printf \'%s\' "$a" > "$out/argv.$i"; i=$((i+1)); done',
++        // Distinguish a closed stdin (instant EOF, what the engine sets up)
++        // from an open one (the read would block until the timeout).
++        "start=$SECONDS",
++        "if read -t 2 _line; then stdin=data",
++        "elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open",
++        "else stdin=eof; fi",
++        'printf \'%s\' "$stdin" > "$out/stdin"',
++        ...argExtract,
++        ...(opts.setDone ?? true
++          ? ['sed -i "1s/status=[a-z-]*/status=done/" "$rel"']
++          : []),
++        `echo "fake ${binary} ran"`,
++        `exit ${opts.exitCode ?? 0}`,
++        "",
++      ].join("\n"),
++    );
++    chmodSync(join(binDir, binary), 0o755);
++    return { binDir, recordDir };
++  }
++
++  // claude and cursor take the whole prompt after -p; its first line is
++  // "/<driver> <issueRel>".
++  const extractFromPrintFlag = [
++    'prompt=""',
++    "while [ $# -gt 0 ]; do",
++    '  case "$1" in',
++    '    -p) prompt="$2"; shift 2 ;;',
++    "    *) shift ;;",
++    "  esac",
++    "done",
++    'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
++  ];
++
++  // opencode takes the message after --command <driver>; its first line is
++  // the bare issueRel.
++  const extractFromCommandMessage = [
++    'seen=0; msg=""',
++    'for a in "$@"; do',
++    '  if [ "$seen" = "2" ]; then msg="$a"; break; fi',
++    '  if [ "$seen" = "1" ]; then seen=2; fi',
++    '  if [ "$a" = "--command" ]; then seen=1; fi',
++    "done",
++    'rel="$(printf \'%s\' "$msg" | head -1)"',
++  ];
++
++  function recordedArgs(recordDir: string): string[] {
++    const args: string[] = [];
++    for (let i = 0; ; i++) {
++      const path = join(recordDir, `argv.${i}`);
++      if (!existsSync(path)) break;
++      args.push(readFileSync(path, "utf8"));
++    }
++    return args;
++  }
++
++  async function withFakePath(
++    fake: FakeCli,
++    fn: () => Promise<void>,
++  ): Promise<void> {
++    const originalPath = process.env.PATH;
++    const originalRecord = process.env.FAKE_RECORD_DIR;
++    process.env.PATH = `${fake.binDir}:${originalPath}`;
++    process.env.FAKE_RECORD_DIR = fake.recordDir;
++    try {
++      await fn();
++    } finally {
++      process.env.PATH = originalPath;
++      if (originalRecord === undefined) delete process.env.FAKE_RECORD_DIR;
++      else process.env.FAKE_RECORD_DIR = originalRecord;
++    }
++  }
++
++  function oneTicketPool(harness: string, model: string): string {
++    return makePool({
++      tickets: [
++        {
++          file: "01-a.md",
++          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
++        },
++      ],
++      config: { defaults: { harness, model } },
++      agentMd: "# Runner agent instructions\n\nDo the thing.",
++    });
++  }
++
++  it("spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode", async () => {
++    const poolDir = oneTicketPool("claude", "claude-test");
++    const fake = fakeCli(poolDir, "claude", extractFromPrintFlag);
++
++    let run: Awaited<ReturnType<typeof runPool>>;
++    await withFakePath(fake, async () => {
++      run = await runPool({ poolDir });
++    });
++
++    expect(run!.phase).toBe("done");
++    const argv = recordedArgs(fake.recordDir);
++    expect(argv[0]).toBe("-p");
++    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
++    expect(argv[1]).toContain("Standing instructions for this job:");
++    expect(argv.slice(2)).toEqual([
++      "--model",
++      "claude-test",
++      "--permission-mode",
++      "auto",
++      "--output-format",
++      "text",
++    ]);
++    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
++    expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
++    const logText = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
++    expect(logText).toContain("fake claude ran");
++  });
++
++  it("drives opencode through --command with the bare driver name and the issue path leading the message", async () => {
++    const poolDir = oneTicketPool("opencode", "opencode-test");
++    const fake = fakeCli(poolDir, "opencode", extractFromCommandMessage);
++
++    let run: Awaited<ReturnType<typeof runPool>>;
++    await withFakePath(fake, async () => {
++      run = await runPool({ poolDir });
++    });
++
++    expect(run!.phase).toBe("done");
++    const argv = recordedArgs(fake.recordDir);
++    expect(argv[0]).toBe("run");
++    expect(argv[1]).toBe("--command");
++    expect(argv[2]).toBe("implement");
++    expect(argv[3]).toMatch(/^issues\/01-a\.md\n/);
++    expect(argv[3]).toContain("Standing instructions for this job:");
++    expect(argv[3]).not.toContain("/implement");
++    expect(argv.slice(4)).toEqual(["--model", "opencode-test", "--auto"]);
++    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
++  });
++
++  it("launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh)", async () => {
++    const poolDir = oneTicketPool("cursor", "cursor-test");
++    const fake = fakeCli(poolDir, "agent", extractFromPrintFlag);
++
++    let run: Awaited<ReturnType<typeof runPool>>;
++    await withFakePath(fake, async () => {
++      run = await runPool({ poolDir });
++    });
++
++    expect(run!.phase).toBe("done");
++    const argv = recordedArgs(fake.recordDir);
++    expect(argv[0]).toBe("-p");
++    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
++    expect(argv.slice(2)).toEqual([
++      "--model",
++      "cursor-test",
++      "--force",
++      "--trust",
++      "--output-format",
++      "text",
++    ]);
++    expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
++  });
++
++  it("drives status from the marker a spawned CLI leaves behind, done or untouched alike", async () => {
++    const doneDir = oneTicketPool("claude", "claude-test");
++    const doneFake = fakeCli(doneDir, "claude", extractFromPrintFlag);
++    let run: Awaited<ReturnType<typeof runPool>>;
++    await withFakePath(doneFake, async () => {
++      run = await runPool({ poolDir: doneDir });
++    });
++    expect(run!.phase).toBe("done");
++    expect(run!.final.tickets["01"]).toBe("done");
++
++    const crashDir = oneTicketPool("claude", "claude-test");
++    const crashFake = fakeCli(crashDir, "claude", extractFromPrintFlag, {
++      setDone: false,
++      exitCode: 1,
++    });
++    await withFakePath(crashFake, async () => {
++      run = await runPool({ poolDir: crashDir });
++    });
++    expect(run!.phase).toBe("quiescent");
++    expect(run!.interrupts).toEqual([
++      {
++        ticketId: "01",
++        kind: "crash",
++        body: join(crashDir, "runs", "01.log"),
++      },
++    ]);
++    expect(markerLine(crashDir, "01-a.md")).toContain("status=in-progress");
++  });
++});
++
+ describe("checkpoints", () => {
+   it("writes a sqlite checkpoint to the pool directory after every super-step", async () => {
+     const poolDir = makePool({
+       tickets: [
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -25
+at drive (/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts:238:15)
+      at runPool (/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts:204:10)
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:559:19)
+      at withFakePath (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:483:13)
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:558:11)
+(fail) harness CLIs > launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh) [2.45ms]
+579 |     const doneFake = fakeCli(doneDir, "claude", extractFromPrintFlag);
+580 |     let run: Awaited<ReturnType<typeof runPool>>;
+581 |     await withFakePath(doneFake, async () => {
+582 |       run = await runPool({ poolDir: doneDir });
+583 |     });
+584 |     expect(run!.phase).toBe("done");
+                             ^
+error: expect(received).toBe(expected)
+
+Expected: "done"
+Received: "quiescent"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:584:24)
+(fail) harness CLIs > drives status from the marker a spawned CLI leaves behind, done or untouched alike [1571.49ms]
+
+ 33 pass
+ 4 fail
+ 147 expect() calls
+Ran 37 tests across 1 file. [5.45s]
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | grep -B5 "fail)" | head -60
+Expected: "done"
+Received: "quiescent"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:513:24)
+(fail) harness CLIs > spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode [1571.55ms]
+--
+
+Expected: "done"
+Received: "quiescent"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:541:24)
+(fail) harness CLIs > drives opencode through --command with the bare driver name and the issue path leading the message [1525.15ms]
+--
+      at drive (/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts:238:15)
+      at runPool (/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts:204:10)
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:559:19)
+      at withFakePath (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:483:13)
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:558:11)
+(fail) harness CLIs > launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh) [2.22ms]
+--
+
+Expected: "done"
+Received: "quiescent"
+
+      at <anonymous> (/home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts:584:24)
+(fail) harness CLIs > drives status from the marker a spawned CLI leaves behind, done or untouched alike [1522.40ms]
+[0m
+[0m$ [0mrm -rf /tmp/dbg-pool && mkdir -p /tmp/dbg-pool/issues /tmp/dbg-pool/bin /tmp/dbg-pool/record && printf '<!-- state: id=01 blocked-by=none status=ready -->\n\n# 01\n' > /tmp/dbg-pool/issues/01-a.md && printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail' 'out="$FAKE_RECORD_DIR"' 'i=0' 'for a in "$@"; do printf '"'"'%s'"'"' "$a" > "$out/argv.$i"; i=$((i+1)); done' 'start=$SECONDS' 'if read -t 2 _line; then stdin=data' 'elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open' 'else stdin=eof; fi' 'printf '"'"'%s'"'"' "$stdin" > "$out/stdin"' 'prompt=""' 'while [ $# -gt 0 ]; do case "$1" in -p) prompt="$2"; shift 2 ;; *) shift ;; esac; done' 'rel="$(printf '"'"'%s'"'"' "$prompt" | head -1 | sed '"'"'s|^/[^ ]* ||'"'"')"' 'sed -i "1s/status=[a-z-]*/status=done/" "$rel"' 'echo "fake claude ran"' 'exit 0' > /tmp/dbg-pool/bin/claude && chmod +x /tmp/dbg-pool/bin/claude && printf '%s' '{"defaults":{"harness":"claude","model":"claude-test"}}' > /tmp/dbg-pool/console.json && printf '# Runner agent instructions\n\nDo the thing.\n' > /tmp/dbg-pool/AGENT.md && FAKE_RECORD_DIR=/tmp/dbg-pool/record PATH=/tmp/dbg-pool/bin:$PATH bun -e 'import { runPool } from "./engine/engine.ts"; const run = await runPool({ poolDir: "/tmp/dbg-pool" }); console.log("phase:", run.phase); console.log("interrupts:", JSON.stringify(run.interrupts)); console.log(run.final.log.join("\n"));' 2>&1 | tail -20; ls /tmp/dbg-pool/record; cat /tmp/dbg-pool/runs/01.log 2>/dev/null | head -5
+phase: done
+interrupts: []
+super-step 1: 01
+ticket 01: exited 0, marker done, no outcome recorded
+pool done: every ticket reached done
+argv.0
+argv.1
+argv.2
+argv.3
+argv.4
+argv.5
+argv.6
+argv.7
+stdin
+fake claude ran
+[0m
+Works standalone. Debugging the test context specifically:
+[0m$ [0mcat > /tmp/dbg.test.ts <<'EOF'
+import { expect, it } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runPool } from "/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts";
+
+it("debug fake claude", async () => {
+  const poolDir = mkdtempSync(join(tmpdir(), "pool-"));
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  writeFileSync(join(poolDir, "issues", "01-a.md"), "<!-- state: id=01 blocked-by=none status=ready -->\n\n# 01\n");
+  writeFileSync(join(poolDir, "console.json"), JSON.stringify({ defaults: { harness: "claude", model: "claude-test" } }));
+  const binDir = join(poolDir, "bin");
+  const recordDir = join(poolDir, "record");
+  mkdirSync(binDir); mkdirSync(recordDir);
+  writeFileSync(join(binDir, "claude"), [
+    "#!/usr/bin/env bash",
+    "set -uo pipefail",
+    'out="$FAKE_RECORD_DIR"',
+    "i=0",
+    'for a in "$@"; do printf \'%s\' "$a" > "$out/argv.$i"; i=$((i+1)); done',
+    "start=$SECONDS",
+    "if read -t 2 _line; then stdin=data",
+    "elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open",
+    "else stdin=eof; fi",
+    'printf \'%s\' "$stdin" > "$out/stdin"',
+    'prompt=""',
+    "while [ $# -gt 0 ]; do case \"$1\" in -p) prompt=\"$2\"; shift 2 ;; *) shift ;; esac; done",
+    'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
+    'sed -i "1s/status=[a-z-]*/status=done/" "$rel"',
+    'echo "fake claude ran"',
+    "exit 0",
+    "",
+  ].join("\n"));
+  chmodSync(join(binDir, "claude"), 0o755);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath}`;
+  process.env.FAKE_RECORD_DIR = recordDir;
+  try {
+    const run = await runPool({ poolDir });
+    console.log("phase:", run.phase);
+    console.log("interrupts:", JSON.stringify(run.interrupts));
+    console.log("records:", existsSync(join(recordDir, "stdin")) ? readFileSync(join(recordDir, "stdin"), "utf8") : "none");
+    console.log("log:", readFileSync(join(poolDir, "runs", "01.log"), "utf8"));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+EOF
+bun test /tmp/dbg.test.ts 2>&1 | tail -20
+bun test v1.3.14 (0d9b296a)
+
+../../../../../tmp/dbg.test.ts:
+phase: quiescent
+interrupts: [{"ticketId":"01","kind":"crash","body":"/tmp/pool-ZX22Rg/runs/01.log"}]
+records: none
+log: Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access
+"claude-test" is not a model this version of Claude Code recognizes, so auto-compact will keep this session within 200k tokens (the context window it assumes). If the model accepts more, append [1m] to the model name for 1M; to make it recognized, map it in the modelOverrides setting or update Claude Code; CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 restores the previous wait-for-the-API behavior.
+
+
+ 1 pass
+ 0 fail
+Ran 1 test across 1 file. [1.65s]
+[0m
+[0m$ [0mcat > /tmp/pathcheck.ts <<'EOF'
+const fakeDir = "/tmp/fakebin";
+await Bun.write("ignored", "");
+const proc1 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe" });
+console.log("default env:", proc1.exitCode, proc1.stderr.toString().trim());
+const proc2 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: `${fakeDir}:${process.env.PATH}` } });
+console.log("env option:", proc2.exitCode, proc2.stdout.toString().trim(), proc2.stderr.toString().trim());
+process.env.PATH = `${fakeDir}:${process.env.PATH}`;
+const proc3 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe" });
+console.log("mutated process.env:", proc3.exitCode, proc3.stdout.toString().trim(), proc3.stderr.toString().trim());
+const proc4 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+console.log("mutated + spread env:", proc4.exitCode, proc4.stdout.toString().trim());
+EOF
+mkdir -p /tmp/fakebin && printf '#!/usr/bin/env bash\necho FAKE-RAN\n' > /tmp/fakebin/myfakecli && chmod +x /tmp/fakebin/myfakecli && bun /tmp/pathcheck.ts
+1 | const fakeDir = "/tmp/fakebin";
+2 | await Bun.write("ignored", "");
+3 | const proc1 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe" });
+                      ^
+error: Executable not found in $PATH: "myfakecli"
+  path: "myfakecli",
+ errno: -2,
+  code: "ENOENT"
+
+      at /tmp/pathcheck.ts:3:19
+
+Bun v1.3.14 (Linux x64)
+[0m
+[0m$ [0mcat > /tmp/pathcheck.ts <<'EOF'
+const fakeDir = "/tmp/fakebin";
+try { Bun.spawnSync(["myfakecli"], { stdout: "pipe" }); } catch (e) { console.log("default env: ENOENT"); }
+const proc2 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: `${fakeDir}:${process.env.PATH}` } });
+console.log("env option:", proc2.exitCode, proc2.stdout.toString().trim());
+process.env.PATH = `${fakeDir}:${process.env.PATH}`;
+try {
+  const proc3 = Bun.spawnSync(["myfakecli"], { stdout: "pipe" });
+  console.log("mutated process.env:", proc3.exitCode, proc3.stdout.toString().trim());
+} catch { console.log("mutated process.env: ENOENT"); }
+try {
+  const proc4 = Bun.spawnSync(["myfakecli"], { stdout: "pipe", env: { ...process.env } });
+  console.log("mutated + spread env:", proc4.exitCode, proc4.stdout.toString().trim());
+} catch { console.log("mutated + spread env: ENOENT"); }
+EOF
+bun /tmp/pathcheck.ts
+default env: ENOENT
+env option: 0 FAKE-RAN
+mutated process.env: ENOENT
+mutated + spread env: 0 FAKE-RAN
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -651,10 +651,14 @@
+ async function spawnToLog(
+   argv: string[],
+   ctx: SpawnContext,
+ ): Promise<number> {
++  // env is passed explicitly: Bun resolves argv[0] against a cached PATH
++  // unless an env is given, and the parent environment at spawn time is
++  // what the child should inherit.
+   const proc = Bun.spawn(argv, {
+     cwd: ctx.cwd,
++    env: { ...process.env },
+     stdin: "ignore",
+     stdout: "pipe",
+     stderr: "pipe",
+   });
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 37 pass
+ 0 fail
+ 171 expect() calls
+Ran 37 tests across 1 file. [630.00ms]
+[0m
+All 37 tests pass. Typecheck next, then the proving flight.
+[0m$ [0mbunx tsc --noEmit 2>&1 | head -20
+(no output)
+[0m
+[0m# [0mTodos
+[✓] Verify installed harness CLIs and their flag shapes (claude, opencode)
+[✓] Confirm cursor launch line against Cursor CLI docs
+[✓] Add cursor case to engine/spawn.ts
+[✓] Add engine-seam tests with fake CLI binaries on PATH (AC7)
+[✓] Run bun test + tsc --noEmit
+[•] Proving flight: real harness on a trivial ticket in a scratch pool (AC6)
+[ ] Code review the diff, update Issue (ACs, notes, status), commit engine/
+[0m
+[0m$ [0mcat ~/.issue-runner 2>/dev/null; echo ---; ls ~/.claude/commands/skills/engineering/implement/ 2>/dev/null && head -5 ~/.claude/commands/skills/engineering/implement/SKILL.md
+harness=opencode
+model=kimi-for-coding-oauth/k3
+---
+agents
+SKILL.md
+---
+name: implement
+description: "Implement a piece of work based on a spec or set of tickets."
+disable-model-invocation: true
+---
+[0m
+[0m$ [0m[ -n "${ANTHROPIC_API_KEY:-}" ] && echo "ANTHROPIC_API_KEY set" || echo "ANTHROPIC_API_KEY unset"; ls ~/.config/opencode/command/ 2>/dev/null | head; echo ---; opencode --version
+ANTHROPIC_API_KEY unset
+android-adaptive.md
+android-agp-9-upgrade.md
+android-android-cli.md
+android-android-intent-security.md
+android-appfunctions.md
+android-camerax.md
+android-display-glasses-with-jetpack-compose-glimmer.md
+android-edge-to-edge.md
+android-engage-sdk-integration.md
+android-leanback-to-compose-tv-migration.md
+---
+1.18.18
+[0m
+[0m$ [0mls ~/.config/opencode/command/ | grep -E "^(implement|code-review)" ; echo ---; cat ~/.config/opencode/command/implement.md 2>/dev/null | head -20
+code-review.md
+implement.md
+---
+---
+description: "Implement a piece of work based on a spec or set of tickets."
+---
+<!-- generated by link-opencode-commands.sh -->
+Read `/home/billy/.claude/commands/skills/engineering/implement/SKILL.md` in full and follow it as your instructions for this task.
+
+Resolve any relative paths it mentions against `/home/billy/.claude/commands/skills/engineering/implement/`.
+
+The user's input, which may be empty:
+
+$ARGUMENTS
+[0m
+opencode stubs exist and claude auth is broken on this machine (subscription disabled, no API key), so the proving flight uses opencode — also the `~/.issue-runner` default harness, and the quirkiest launch line (`--command`). Building the scratch pool and flying it:
+[0m$ [0mrm -rf /tmp/console-flight && mkdir -p /tmp/console-flight/issues && printf '%s\n' '<!-- state: id=01 blocked-by=none status=ready -->' '' '# 01 — Trivial proving flight' '' 'This ticket exists to prove the pool engine can spawn a real harness CLI end to end.' 'Do exactly this, nothing else:' '' '1. Rewrite line 1 of this file with status=done, keeping id and blocked-by unchanged.' '2. Record your outcome JSON at the path your prompt names: {"summary": "proving flight ran", "commitSha": null}.' '3. Stop. Make no other edits. Commit nothing.' '' '## Acceptance criteria' '' '- [ ] line-1 marker reads status=done' '- [ ] outcome JSON recorded' > /tmp/console-flight/issues/01-trivial.md && printf '%s' '{"defaults":{"harness":"opencode","model":"kimi-for-coding-oauth/k3","drivers":"implement"}}' > /tmp/console-flight/console.json && printf '# Runner agent instructions\n\nThis is a proving flight. The Issue is the whole job. Do not dispatch subagents.\n' > /tmp/console-flight/AGENT.md && ls -R /tmp/console-flight
+/tmp/console-flight:
+AGENT.md
+console.json
+issues
+
+/tmp/console-flight/issues:
+01-trivial.md
+[0m
+[0m$ [0mcat > /tmp/console-flight/fly.ts <<'EOF'
+import { runPool } from "/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts";
+const run = await runPool({ poolDir: "/tmp/console-flight" });
+console.log("phase:", run.phase);
+console.log("interrupts:", JSON.stringify(run.interrupts));
+console.log("tickets:", JSON.stringify(run.final.tickets));
+console.log("outcomes:", JSON.stringify(run.final.outcomes));
+console.log("log:", JSON.stringify(run.final.log, null, 2));
+EOF
+bun /tmp/console-flight/fly.ts
+phase: done
+interrupts: []
+tickets: {"01":"done"}
+outcomes: {"01":{"summary":"proving flight ran","commitSha":null}}
+log: [
+  "super-step 1: 01",
+  "ticket 01: exited 0, marker done",
+  "pool done: every ticket reached done"
+]
+[0m
+The proving flight succeeded on the first attempt. Verifying the artifacts on disk:
+[0m$ [0mhead -1 /tmp/console-flight/issues/01-trivial.md && ls /tmp/console-flight/runs/ && cat /tmp/console-flight/runs/01.outcome.json && wc -l /tmp/console-flight/runs/01.log && tail -5 /tmp/console-flight/runs/01.log
+<!-- state: id=01 blocked-by=none status=done -->
+01.log
+01.outcome.json
+{"summary": "proving flight ran", "commitSha": null}
+85 /tmp/console-flight/runs/01.log
+
+[0m
+[0m← [0mWrite runs/01.outcome.json
+Wrote file successfully.
+[0m
+[0m
+[0m→ [0mSkill "code-review"
+[0m• [0mStandards review of diff[90m Deepseek Agent[0m
+[0m• [0mSpec review of diff[90m Deepseek Agent[0m
+Reviewing the working-tree diff (fixed point: HEAD; spec: the Issue file + `.scratch/console-pool/spec-ticket-pools.md`) with two parallel sub-agents per the code-review skill:
+[0m✓ [0mStandards review of diff[90m Deepseek Agent[0m
+[0m✓ [0mSpec review of diff[90m Deepseek Agent[0m
+[0m
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+@@ -5,8 +5,9 @@
+   prompt: string;
+   driver: string;
+   harness: string;
+   model: string;
++  agents?: string;
+   logPath: string;
+   outcomePath: string;
+   cwd: string;
+ }
+
+[0m
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+@@ -25,8 +25,11 @@
+   "--model",
+   ctx.model,
+   "--permission-mode",
+   "auto",
++  // The roster JSON the glued prompt promises claude. opencode and cursor
++  // get the roster as prose only, same as run.sh.
++  ...(ctx.agents ? ["--agents", ctx.agents] : []),
+   "--output-format",
+   "text",
+ ],
+ // opencode does not expand a slash command inside a run message, so the
+
+[0m
+Two findings worth acting on before commit:
+
+1. **Spec: claude launch drops run.sh's `--agents "$AGENTS"`** — the glued roster text promises "on claude they come from the runner's config", which is false without it. Adding an optional `agents` field to console.json, threaded to claude's launch.
+2. **Spec: log lands only after exit, streams concatenated, not run.sh's live interleaved `2>&1 | tee`** — switching to streaming both pipes into the log in arrival order so logs can be tailed live.
+
+The rest (test-block duplication, "message" wording — that's opencode's own CLI term) I'll note in the Issue and leave.
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -37,8 +37,9 @@
+ export interface PoolConfig {
+   defaults?: { harness?: string; model?: string; drivers?: string };
+   assign?: Record<string, TicketAssignment>;
+   roster?: string;
++  agents?: string;
+ }
+ 
+ export type InterruptKind = "checkpoint" | "crash" | "deadlock";
+ 
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -623,8 +623,9 @@
+   prompt,
+   driver,
+   harness: assignment.harness,
+   model: assignment.model,
++  agents: snapshot.config.agents,
+   logPath,
+   outcomePath,
+   cwd: env.cwd,
+ };
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -663,17 +663,36 @@
+     stdin: "ignore",
+     stdout: "pipe",
+     stderr: "pipe",
+   });
+-  const [stdout, stderr, exitCode] = await Promise.all([
+-    new Response(proc.stdout).text(),
+-    new Response(proc.stderr).text(),
++  const [exitCode] = await Promise.all([
+     proc.exited,
++    pumpToLog(proc.stdout, ctx.logPath),
++    pumpToLog(proc.stderr, ctx.logPath),
+   ]);
+-  await Bun.write(ctx.logPath, stdout + stderr);
+   return exitCode;
+ }
+ 
++// Both streams land in the per-ticket log in arrival order, and land live,
++// matching run.sh's `2>&1 | tee`: a log can be tailed while the harness is
++// still running, and a crash log reads in the order the output happened.
++async function pumpToLog(
++  stream: ReadableStream<Uint8Array>,
++  logPath: string,
++): Promise<void> {
++  const writer = createWriteStream(logPath, { flags: "a" });
++  for await (const chunk of stream) {
++    if (!writer.write(chunk)) {
++      await once(writer, "drain");
++    }
++  }
++  await new Promise<void>((resolve, reject) => {
++    writer.end((error: Error | null | undefined) =>
++      error ? reject(error) : resolve(),
++    );
++  });
++}
++
+ function readOutcome(path: string): Outcome | null {
+   if (!existsSync(path)) return null;
+   try {
+     const parsed = JSON.parse(readFileSync(path, "utf8"));
+
+[0m
+Let me restructure to a single shared writer (one fd, cleaner ordering) and fix imports:
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -663,34 +663,31 @@
+     stdin: "ignore",
+     stdout: "pipe",
+     stderr: "pipe",
+   });
++  // Both streams land in one log writer in arrival order, and land live,
++  // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
++  // is still running, and a crash log reads in the order the output
++  // happened.
++  const log = createWriteStream(ctx.logPath);
++  const pump = async (stream: ReadableStream<Uint8Array>) => {
++    for await (const chunk of stream) {
++      if (!log.write(chunk)) {
++        await once(log, "drain");
++      }
++    }
++  };
+   const [exitCode] = await Promise.all([
+     proc.exited,
+-    pumpToLog(proc.stdout, ctx.logPath),
+-    pumpToLog(proc.stderr, ctx.logPath),
++    pump(proc.stdout),
++    pump(proc.stderr),
+   ]);
+-  return exitCode;
+-}
+-
+-// Both streams land in the per-ticket log in arrival order, and land live,
+-// matching run.sh's `2>&1 | tee`: a log can be tailed while the harness is
+-// still running, and a crash log reads in the order the output happened.
+-async function pumpToLog(
+-  stream: ReadableStream<Uint8Array>,
+-  logPath: string,
+-): Promise<void> {
+-  const writer = createWriteStream(logPath, { flags: "a" });
+-  for await (const chunk of stream) {
+-    if (!writer.write(chunk)) {
+-      await once(writer, "drain");
+-    }
+-  }
+   await new Promise<void>((resolve, reject) => {
+-    writer.end((error: Error | null | undefined) =>
++    log.end((error: Error | null | undefined) =>
+       error ? reject(error) : resolve(),
+     );
+   });
++  return exitCode;
+ }
+ 
+ function readOutcome(path: string): Outcome | null {
+   if (!existsSync(path)) return null;
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -1,10 +1,12 @@
+ import {
+   appendFileSync,
++  createWriteStream,
+   existsSync,
+   mkdirSync,
+   readFileSync,
+ } from "node:fs";
++import { once } from "node:events";
+ import { join, relative } from "node:path";
+ import { CheckpointStore } from "./checkpoints.ts";
+ import {
+   loadPoolMarkers,
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+@@ -487,23 +487,29 @@
+     else process.env.FAKE_RECORD_DIR = originalRecord;
+   }
+ }
+ 
+-function oneTicketPool(harness: string, model: string): string {
++function oneTicketPool(
++  harness: string,
++  model: string,
++  extra?: Partial<PoolConfig>,
++): string {
+   return makePool({
+     tickets: [
+       {
+         file: "01-a.md",
+         marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+       },
+     ],
+-    config: { defaults: { harness, model } },
++    config: { defaults: { harness, model }, ...extra },
+     agentMd: "# Runner agent instructions\n\nDo the thing.",
+   });
+ }
+ 
+ it("spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode", async () => {
+-  const poolDir = oneTicketPool("claude", "claude-test");
++  const agents =
++    '{"deepseek":{"description":"General-purpose subagent","prompt":"Do the reading.","model":"deepseek"}}';
++  const poolDir = oneTicketPool("claude", "claude-test", { agents });
+   const fake = fakeCli(poolDir, "claude", extractFromPrintFlag);
+ 
+   let run: Awaited<ReturnType<typeof runPool>>;
+   await withFakePath(fake, async () => {
+@@ -519,8 +525,10 @@
+     "--model",
+     "claude-test",
+     "--permission-mode",
+     "auto",
++    "--agents",
++    agents,
+     "--output-format",
+     "text",
+   ]);
+   expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -6 && bunx tsc --noEmit && echo TYPES-OK
+bun test v1.3.14 (0d9b296a)
+
+ 37 pass
+ 0 fail
+ 171 expect() calls
+Ran 37 tests across 1 file. [629.00ms]
+TYPES-OK
+[0m
+[0m$ [0mrm -rf /tmp/console-flight && mkdir -p /tmp/console-flight/issues && printf '%s\n' '<!-- state: id=01 blocked-by=none status=ready -->' '' '# 01 — Trivial proving flight' '' 'This ticket exists to prove the pool engine can spawn a real harness CLI end to end.' 'Do exactly this, nothing else:' '' '1. Rewrite line 1 of this file with status=done, keeping id and blocked-by unchanged.' '2. Record your outcome JSON at the path your prompt names: {"summary": "proving flight ran", "commitSha": null}.' '3. Stop. Make no other edits. Commit nothing.' '' '## Acceptance criteria' '' '- [ ] line-1 marker reads status=done' '- [ ] outcome JSON recorded' > /tmp/console-flight/issues/01-trivial.md && printf '%s' '{"defaults":{"harness":"opencode","model":"kimi-for-coding-oauth/k3","drivers":"implement"}}' > /tmp/console-flight/console.json && printf '# Runner agent instructions\n\nThis is a proving flight. The Issue is the whole job. Do not dispatch subagents.\n' > /tmp/console-flight/AGENT.md && cat > /tmp/console-flight/fly.ts <<'EOF'
+import { runPool } from "/home/billy/repos/learning/ai-agent-graphs/engine/engine.ts";
+const run = await runPool({ poolDir: "/tmp/console-flight" });
+console.log("phase:", run.phase);
+console.log("interrupts:", JSON.stringify(run.interrupts));
+console.log("tickets:", JSON.stringify(run.final.tickets));
+console.log("outcomes:", JSON.stringify(run.final.outcomes));
+console.log("log:", JSON.stringify(run.final.log, null, 2));
+EOF
+bun /tmp/console-flight/fly.ts && head -1 /tmp/console-flight/issues/01-trivial.md && tail -3 /tmp/console-flight/runs/01.log
+phase: done
+interrupts: []
+tickets: {"01":"done"}
+outcomes: {"01":{"summary":"proving flight ran","commitSha":null}}
+log: [
+  "super-step 1: 01",
+  "ticket 01: exited 0, marker done",
+  "pool done: every ticket reached done"
+]
+<!-- state: id=01 blocked-by=none status=done -->
+Wrote file successfully.
+[0m
+Done. Issue line 1 marked `status=done`, outcome JSON written to `/tmp/console-flight/runs/01.outcome.json` with `commitSha: null`. No commit made, per the Issue's instructions.
+[0m
+[0m$ [0mwc -l /tmp/console-flight/runs/01.log && git status --short -- engine/ && git diff --stat -- engine/
+84 /tmp/console-flight/runs/01.log
+ M engine/engine.test.ts
+ M engine/engine.ts
+ M engine/spawn.ts
+ engine/engine.test.ts | 227 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ engine/engine.ts      |  32 ++++++-
+ engine/spawn.ts       |  16 ++++
+ 3 files changed, 271 insertions(+), 4 deletions(-)
+[0m
+All green. Writing the Issue record, then committing.
+[0m← [0mEdit .scratch/console-pool/issues/04-harness-spawn-kernel.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=04 blocked-by=01 status=in-progress -->
++<!-- state: id=04 blocked-by=01 status=done -->
+ 
+ # 04 — Harness spawn kernel
+ 
+ Spec: `.scratch/console-pool/spec-ticket-pools.md`
+
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/04-harness-spawn-kernel.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/04-harness-spawn-kernel.md
+@@ -9,15 +9,28 @@
+ Real harness execution, ported from run.sh's proven spawn mechanics into the engine. Each ticket spawns its assigned harness CLI (claude, opencode, or cursor's agent) non-interactively with stdin closed, in the permission mode that works unattended, with the glued prompt: driver skill first, then AGENT.md, the skill chain, and the roster glued behind. The per-ticket harness and model come from console.json (written by the runner skill; a hand-written console.json works for this ticket). Each ticket's output lands in the pool's runs directory as a per-ticket log, matching my-issue-runner's convention. The opencode path drives the skill through `--command` with the bare skill name; the cursor launch line follows Cursor's CLI docs and is treated as unproven. The known hard-won quirks (GNU/BSD sed differences, gated permission modes failing unattended) are carried over, not rediscovered.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] A ticket spawns its console.json-assigned harness and model with stdin closed and the unattended permission mode
+-- [ ] The prompt glues driver skill + AGENT.md + chain + roster in run.sh's proven shape
+-- [ ] opencode reaches its driver via `--command`; the cursor launch line matches Cursor's documented CLI
+-- [ ] Each ticket writes a per-ticket log to the pool's runs directory
+-- [ ] Marker read-back after exit drives status exactly as with stub harnesses (the engine cannot tell the difference)
+-- [ ] Proven end-to-end with at least one real harness running a trivial real ticket in a scratch pool
+-- [ ] Harness selection logic covered by engine-seam tests with fake CLI binaries on PATH
++- [x] A ticket spawns its console.json-assigned harness and model with stdin closed and the unattended permission mode
++- [x] The prompt glues driver skill + AGENT.md + chain + roster in run.sh's proven shape
++- [x] opencode reaches its driver via `--command`; the cursor launch line matches Cursor's documented CLI
++- [x] Each ticket writes a per-ticket log to the pool's runs directory
++- [x] Marker read-back after exit drives status exactly as with stub harnesses (the engine cannot tell the difference)
++- [x] Proven end-to-end with at least one real harness running a trivial real ticket in a scratch pool
++- [x] Harness selection logic covered by engine-seam tests with fake CLI binaries on PATH
+ 
+ ## Blocked by
+ 
+ - 01 — Pool engine walking skeleton
++
++---
++
++## Notes
++
++- Much of the kernel already existed from Issue 01's walking skeleton (claude/opencode cases in `engine/spawn.ts`, glued prompt in `engine/prompt.ts`, marker read-back and per-ticket logs in `engine/engine.ts`). This Issue added the cursor case, the PATH-faked selection tests, and closed the gaps review found.
++- Bun quirk, proven by test failure: `Bun.spawn` resolves argv[0] against a cached PATH unless an `env` option is given. `spawnToLog` now passes `env: { ...process.env }`, which is also what makes fake-binaries-on-PATH work as a seam.
++- `console.json` gained an optional `agents` field (roster JSON), threaded to claude's launch as `--agents`. Review finding: run.sh's claude line carries `--agents "$AGENTS"` and the glued roster prose tells the spawned agent "on claude they come from the runner's config", which was false without it. opencode and cursor get the roster as prose only, same as run.sh. The spec's console.json list does not name `agents`; recorded here as a decision, Issue 10 writes it and Issue 11 can weigh it.
++- Per-ticket logs now stream both pipes into one writer in arrival order, live, matching run.sh's `2>&1 | tee`. Before, the log appeared only at exit with stdout and stderr concatenated (review finding).
++- Cursor launch line: `agent -p <prompt> --model <model> --force --trust --output-format text`, ported verbatim from run.sh and still marked UNPROVEN. `agent` is not installed here; Cursor's docs pages are JS-rendered so live re-verification was not possible, and run.sh's line is the record of what the docs said.
++- Proving flight (AC6): real opencode (`kimi-for-coding-oauth/k3`, the `~/.issue-runner` default) ran a trivial ticket in `/tmp/console-flight` through `runPool`, driven via `--command implement`. The spawned agent set its own marker to done and wrote its outcome JSON; the engine read both back, phase done, `runs/01.log` 84 lines. Flown twice: once before and once after the log-streaming change. No surprises.
++- claude was not flown: its auth on this machine is broken (subscription access disabled, no ANTHROPIC_API_KEY). That is environment, not spawn mechanics; the claude argv shape is pinned by the fake-CLI test instead. (Inference: claude's flag shape is valid per `claude --help` on this machine, which lists `auto` among the permission modes.)
++- Reviewed with the two-axis code-review (standards + spec, parallel sub-agents). Acted on: the two spec findings above. Not acted on: test-block duplication (the choreography repeats four times but each test reads top to bottom on its own) and the word "message" in the opencode test (that is opencode's own CLI term for the argument).
+
+[0m
+[0m$ [0mbun test 2>&1 | tail -6 && git add engine/spawn.ts engine/engine.ts engine/engine.test.ts && git commit -m "console: port the harness spawn kernel from run.sh into the pool engine" && git log --oneline -2 && git status --short
+bun test v1.3.14 (0d9b296a)
+
+ 119 pass
+ 0 fail
+ 339 expect() calls
+Ran 119 tests across 2 files. [646.00ms]
+[main 2de1a36] console: port the harness spawn kernel from run.sh into the pool engine
+ 3 files changed, 271 insertions(+), 4 deletions(-)
+2de1a36 console: port the harness spawn kernel from run.sh into the pool engine
+ded62a3 console: add durability and rehydration to the pool engine
+ M .scratch/console-pool/issues/03-durability.md
+ M .scratch/console-pool/issues/04-harness-spawn-kernel.md
+?? .scratch/console-pool/runs/
+?? ignored
+[0m
+[0m$ [0mrm ignored && rm -f /tmp/dbg.test.ts /tmp/pathcheck.ts && rm -rf /tmp/dbg-pool /tmp/fakebin && git status --short
+M .scratch/console-pool/issues/03-durability.md
+ M .scratch/console-pool/issues/04-harness-spawn-kernel.md
+?? .scratch/console-pool/runs/
+[0m
+Issue 04 done, committed as `2de1a36` (engine/ only; `.scratch/` left for the runner).
+
+What landed:
+- `engine/spawn.ts` — cursor case added (`agent -p … --force --trust`, UNPROVEN, from run.sh's documented line); claude now takes `--agents` when console.json carries the roster JSON.
+- `engine/engine.ts` — per-ticket logs stream both pipes live in arrival order (run.sh's `2>&1 | tee` semantics); `Bun.spawn` now gets `env` explicitly because Bun otherwise resolves binaries against a cached PATH (proven by test failure).
+- `engine/engine.test.ts` — 4 new engine-seam tests driving fake `claude`/`opencode`/`agent` binaries on PATH: argv shapes, bare driver via `--command`, stdin closed (instant EOF), marker read-back for both done and crash outcomes.
+- Proving flight: real opencode (`kimi-for-coding-oauth/k3`) ran a trivial ticket in `/tmp/console-flight` end to end — agent set its own marker, outcome recorded, phase done. Flown twice (before and after the log change). claude not flown: its auth is broken on this machine (subscription disabled, no API key), noted in the Issue.
+- Two-axis code review ran before commit; both spec findings acted on. Full suite: 119 pass, `tsc --noEmit` clean.

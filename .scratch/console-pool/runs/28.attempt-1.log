@@ -1,0 +1,542 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/code-review/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/28-review-pass-fleet-batch.md
+[0m
+[0m$ [0mgit log --oneline -12 && git status --short
+b7f5148 console: add fleet list command that prints live pools
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+ M .scratch/console-pool/console.json
+ M CONTEXT.md
+ M engine/server.ts
+ M ui/src/client.ts
+ M ui/src/styles.css
+ M ui/src/view.ts
+?? .scratch/console-pool/console.db
+?? .scratch/console-pool/issues/16-per-ticket-event-timeline.md
+?? .scratch/console-pool/issues/17-attempt-log-retention.md
+?? .scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+?? .scratch/console-pool/issues/19-live-log-tailing.md
+?? .scratch/console-pool/issues/20-resizable-detail.md
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+?? .scratch/console-pool/issues/22-review-pass-ticket-log-detail.md
+?? .scratch/console-pool/issues/23-engine-pool-lock.md
+?? .scratch/console-pool/issues/24-pinned-pool-ports.md
+?? .scratch/console-pool/issues/25-fleet-registry.md
+?? .scratch/console-pool/issues/26-fleet-list-command.md
+?? .scratch/console-pool/issues/27-skill-fleet-conventions.md
+?? .scratch/console-pool/issues/28-review-pass-fleet-batch.md
+?? .scratch/console-pool/runs/
+?? .scratch/console-pool/spec-fleet-of-consoles.md
+?? .scratch/console-pool/spec-ticket-log-and-detail-resize.md
+?? docs/adr/
+?? ui/src/prototype/
+[0m
+[0m→ [0mRead .scratch/console-pool/spec-fleet-of-consoles.md
+[0m→ [0mRead docs/adr/0001-one-console-per-pool.md
+[0m
+[0m$ [0mgit diff --stat && git log --oneline a4d1a29..HEAD
+.scratch/console-pool/console.json | 10 +++++----
+ CONTEXT.md                         |  9 +++++++-
+ engine/server.ts                   | 43 ++++++++++++++++++++++++++++++++++++
+ ui/src/client.ts                   | 12 ++++++++++
+ ui/src/styles.css                  | 45 ++++++++++++++++++++++++++++++++++++++
+ ui/src/view.ts                     |  8 +++----
+ 6 files changed, 118 insertions(+), 9 deletions(-)
+b7f5148 console: add fleet list command that prints live pools
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+7d37820 console: enforce one server per pool with a pid-file lock
+[0m
+[0m$ [0mgit diff a4d1a29...HEAD --stat
+engine/engine.test.ts    | 170 ++++++++++++++++++++++
+ engine/engine.ts         |  36 ++++-
+ engine/events.ts         |  17 +++
+ engine/fleet-cli.test.ts | 141 +++++++++++++++++++
+ engine/fleet-cli.ts      |  42 ++++++
+ engine/fleet.test.ts     | 247 ++++++++++++++++++++++++++++++++
+ engine/fleet.ts          | 102 ++++++++++++++
+ engine/ports.test.ts     |  55 ++++++++
+ engine/ports.ts          |  40 ++++++
+ engine/server.test.ts    | 358 ++++++++++++++++++++++++++++++++++++++++++++++-
+ engine/server.ts         | 306 ++++++++++++++++++++++++++++++----------
+ ui/src/styles.css        |  23 +++
+ ui/src/view.ts           |  88 +++++++++++-
+ 13 files changed, 1541 insertions(+), 84 deletions(-)
+[0m
+[0m$ [0mgit diff engine/server.ts CONTEXT.md | head -120
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 43dbf0a..58fe46e 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -58,10 +58,17 @@ _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
+ The final human judgment of finished ticket work, after implement tickets have run.
+ _Avoid_: per-ticket lint, typecheck (those are not Review)
+ 
++**Pool**:
++The set of tickets one Console run works, identified by its directory on disk. Hermetic: no ticket edges cross pool boundaries. One Console server binds one pool at a time.
++_Avoid_: project, workspace, queue
++
+ **Console**:
+-Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail.
++Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail. One Console process serves exactly one Pool; running several pools means several Consoles, each on its own port.
+ _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
+ 
++**Fleet**:
++The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
++
+ **Detail**:
+ The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
+ _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
+diff --git a/engine/server.ts b/engine/server.ts
+index 28100ae..310a693 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -207,6 +207,38 @@ function readTicketEvents(poolDir: string, ticketId: string): TicketEventsRespon
+   };
+ }
+ 
++// PROTOTYPE — throwaway
++// The ticket body endpoint answers with the ticket's raw markdown. Issue files
++// are named `<id>-<slug>.md`; match by the id prefix before the first `-`,
++// falling back to an exact `<id>.md`. The lookup is scoped to files readdir
++// reports from the pool's issues directory, so an arbitrary id can never walk
++// out of it (plain string equality, no regex on the id).
++function readTicketBody(
++  poolDir: string,
++  ticketId: string,
++): { id: string; body: string } | null {
++  const issuesDir = join(poolDir, "issues");
++  let files: string[] = [];
++  try {
++    files = readdirSync(issuesDir);
++  } catch {
++    return null;
++  }
++  const markdown = files.filter((file) => file.endsWith(".md"));
++  const exact = markdown.find((file) => file === `${ticketId}.md`);
++  if (exact) {
++    return { id: ticketId, body: readFileSync(join(issuesDir, exact), "utf8") };
++  }
++  const prefixed = markdown.find((file) => {
++    const dash = file.indexOf("-");
++    return dash > 0 && file.slice(0, dash) === ticketId;
++  });
++  if (prefixed) {
++    return { id: ticketId, body: readFileSync(join(issuesDir, prefixed), "utf8") };
++  }
++  return null;
++}
++
+ function readLockedPid(poolDir: string): number | null {
+   let raw: string;
+   try {
+@@ -422,6 +454,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+           return Response.json(readTicketEvents(poolDir, ticketId));
+         }
+ 
++        // PROTOTYPE — throwaway: the raw markdown body of a ticket's Issue
++        // file, for the ticket-detail view variants (issue #11).
++        if (pathname === "/api/ticket") {
++          const ticketId = url.searchParams.get("id") ?? "";
++          const ticket = readTicketBody(poolDir, ticketId);
++          if (!ticket) {
++            return Response.json({ error: "not found" }, { status: 404 });
++          }
++          return Response.json(ticket);
++        }
++
+         if (pathname === "/api/stream") {
+           // The stream is silent whenever the pool waits at an interrupt, so it
+           // opts out of the default idle timeout; every other route keeps it.
+[0m
+[0m$ [0mgit log --oneline --all | head -30 && git branch -a
+b7f5148 console: add fleet list command that prints live pools
+d85baf3 console: raw log pane in the ticket Detail
+ff3d0a8 console: register each bound server in the machine-wide fleet registry
+5b01388 Merge branch 'pool/24'
+1da30a6 console: resolve pool port from flag, console.json pin, or next free
+4f99aad Merge branch 'pool/17'
+9d760f9 console: rotate raw logs to attempt-numbered names on re-run
+31267a1 Merge branch 'pool/21'
+7c9637c console: fullscreen Detail mode via a header toggle
+4263f89 console: resolve pool port from flag, console.json pin, or next free
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+624ad5a On main: escaped ticket-23 pool-lock variant
+b3109a4 index on main: b084321 console: glossary — Attempt, Ticket log; Detail resizable
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+c63885c console: light up the selection's flow neighbourhood
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+3a36537 console: ticket card clicks open the Detail panel
+2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+f4229f0 console: close the run on a final Review interrupt
+01ebe54 console: answer interrupts inline from the card and Detail
+5e2070e console-pool: kimi k3 for all remaining tickets; reset 08 after driver crash
+* main
++ pool/18
++ pool/19
++ pool/20
++ pool/23
++ pool/25
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/main
+[0m
+[0m$ [0mgit diff a4d1a29...HEAD -- engine/engine.ts engine/events.ts
+diff --git a/engine/engine.ts b/engine/engine.ts
+index da35449..ed1daa1 100644
+--- a/engine/engine.ts
++++ b/engine/engine.ts
+@@ -11,7 +11,13 @@ import {
+ import { once } from "node:events";
+ import { homedir } from "node:os";
+ import { dirname, join, relative } from "node:path";
+-import { appendEvent, lastAttempt, nextAttempt } from "./events.ts";
++import {
++  appendEvent,
++  lastAttempt,
++  lastAttemptOfKind,
++  nextAttempt,
++  type TicketEventKind,
++} from "./events.ts";
+ import { CheckpointStore } from "./checkpoints.ts";
+ import {
+   loadPoolMarkers,
+@@ -61,6 +67,7 @@ export interface PoolConfig {
+   roster?: string;
+   agents?: string;
+   resolver?: string;
++  port?: number;
+ }
+ 
+ export type InterruptKind =
+@@ -902,14 +909,15 @@ async function runResolver(
+   resolver: ResolverSpec,
+   result: MergeResult,
+ ): Promise<ResolverAttempt> {
++  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
++  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
++  rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
+   appendEvent(session.runsDir, marker.id, {
+     at: new Date().toISOString(),
+     attempt: nextAttempt(session.runsDir, marker.id),
+     kind: "resolver",
+     payload: { files: result.conflicted },
+   });
+-  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
+-  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
+   const prompt = buildResolverPrompt({
+     id: marker.id,
+     worktree: worktree.path,
+@@ -1424,6 +1432,27 @@ function manualMergeInterrupt(
+   };
+ }
+ 
++// Attempt rotation on re-run (ADR 0002): before a new attempt writes, an
++// existing well-known raw log moves to its attempt-numbered name so a re-run
++// never destroys the ticket's history. The number is the attempt the events
++// file recorded for the run that wrote the file: the last implement spawn for
++// `<id>.log`, the last resolver run for `<id>.resolver.log`. A pre-feature
++// log (written before events existed) rotates to attempt-0.
++function rotateAttemptLog(
++  runsDir: string,
++  ticketId: string,
++  wellKnownPath: string,
++  kind: TicketEventKind,
++): void {
++  if (!existsSync(wellKnownPath)) return;
++  const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
++  const suffix = kind === "resolver" ? ".resolver" : "";
++  renameSync(
++    wellKnownPath,
++    join(runsDir, `${ticketId}.attempt-${attempt}${suffix}.log`),
++  );
++}
++
+ async function runTicket(
+   marker: TicketMarker,
+   snapshot: PoolState,
+@@ -1433,6 +1462,7 @@ async function runTicket(
+ ): Promise<TicketResult> {
+   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
+   const logPath = join(env.runsDir, `${marker.id}.log`);
++  rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
+   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+   const issueRel = relative(plan.cwd, plan.issuePath);
+ 
+diff --git a/engine/events.ts b/engine/events.ts
+index 902c24b..8fc611d 100644
+--- a/engine/events.ts
++++ b/engine/events.ts
+@@ -92,4 +92,21 @@ export function lastAttempt(runsDir: string, ticketId: string): number {
+     (max, event) => Math.max(max, event.attempt),
+     0,
+   );
++}
++
++/**
++ * The ticket's latest attempt carrying the given event kind, or 0 if none.
++ * Used by attempt rotation to name a well-known raw log by the run that wrote
++ * it: the last implement spawn for `<id>.log`, the last resolver run for
++ * `<id>.resolver.log`.
++ */
++export function lastAttemptOfKind(
++  runsDir: string,
++  ticketId: string,
++  kind: TicketEventKind,
++): number {
++  return readEvents(runsDir, ticketId).reduce(
++    (max, event) => (event.kind === kind ? Math.max(max, event.attempt) : max),
++    0,
++  );
+ }
+\ No newline at end of file
+[0m
+[0m$ [0mgit show 4263f89 --stat | head -20; echo ---; git show 1da30a6 --stat | head -20; echo ---; git diff 4263f89 1da30a6 --stat
+commit 4263f89091cf897c51a2a9bea1de25dcad343864
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 10:29:46 2026 +0100
+
+    console: resolve pool port from flag, console.json pin, or next free
+    
+    console.json gains a top-level port; a busy pinned port fails loudly naming it, --port overrides for one launch, and the unpinned path keeps 8787-or-next-free. A failed pinned bind clears the pid it claimed.
+
+ engine/engine.ts      |   1 +
+ engine/ports.test.ts  |  55 +++++++++++++
+ engine/ports.ts       |  40 +++++++++
+ engine/server.test.ts | 133 +++++++++++++++++++++++++++++-
+ engine/server.ts      | 221 ++++++++++++++++++++++++++++++++++----------------
+ 5 files changed, 377 insertions(+), 73 deletions(-)
+---
+commit 1da30a61d55f77681f70f7cfc686764d93663e3f
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 10:53:20 2026 +0100
+
+    console: resolve pool port from flag, console.json pin, or next free
+    
+    console.json gains a top-level port; a busy pinned port fails loudly naming it, --port overrides for one launch, and the unpinned path keeps 8787-or-next-free. A failed pinned bind clears the pid it claimed.
+
+ engine/engine.ts      |   1 +
+ engine/ports.test.ts  |  55 +++++++++++++
+ engine/ports.ts       |  40 +++++++++
+ engine/server.test.ts | 133 +++++++++++++++++++++++++++++-
+ engine/server.ts      | 221 ++++++++++++++++++++++++++++++++++----------------
+ 5 files changed, 377 insertions(+), 73 deletions(-)
+---
+[0m
+[0m$ [0mgit -C /home/billy/.claude/commands/skills/personal/my-console-runner log --oneline -5 2>/dev/null || git -C /home/billy/.claude/commands log --oneline -5 -- skills/personal/my-console-runner 2>/dev/null; git -C /home/billy/.claude rev-parse --show-toplevel 2>/dev/null
+35e7170 my-console-runner: pin the pool port and defer the lock to the engine
+6b95018 my-console-runner: launch on mac and linux
+85c6347 my-console-runner: point the Console at a ticket pool
+17e18aa my-issue-runner: support claude, opencode and cursor harnesses
+29b619b Merge remote-tracking branch 'upstream/main'
+[0m
+[0m$ [0mgit -C /home/billy/.claude show 35e7170 --stat 2>/dev/null | head -20
+(no output)
+[0m
+[0m$ [0mgit -C /home/billy/.claude show 35e7170 --stat
+fatal: not a git repository (or any parent up to mount point /)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+[0m
+[0m$ [0mgit show 35e7170 --stat && git status --short
+commit 35e717036b37cbbb5dbf742ea020b787e741274c
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 11:09:01 2026 +0100
+
+    my-console-runner: pin the pool port and defer the lock to the engine
+
+ skills/personal/my-console-runner/SKILL.md | 75 ++++++++++++++++++++++--------
+ 1 file changed, 56 insertions(+), 19 deletions(-)
+[0m
+[0m$ [0mgit rev-parse --show-toplevel && git show 35e7170 | head -150
+/home/billy/.claude/commands
+commit 35e717036b37cbbb5dbf742ea020b787e741274c
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 11:09:01 2026 +0100
+
+    my-console-runner: pin the pool port and defer the lock to the engine
+
+diff --git a/skills/personal/my-console-runner/SKILL.md b/skills/personal/my-console-runner/SKILL.md
+index c725413..560a15a 100644
+--- a/skills/personal/my-console-runner/SKILL.md
++++ b/skills/personal/my-console-runner/SKILL.md
+@@ -1,6 +1,6 @@
+ ---
+ name: my-console-runner
+-description: Point the Console at an existing ticket pool. Detects the pool's facts, interviews for the same six answers my-issue-runner asks, writes console.json and AGENT.md into the pool directory, then starts the Console server bound to that pool and opens the browser. Use when Issues already exist and you want to drive them from the Console instead of the terminal runner.
++description: Point the Console at an existing ticket pool. Detects the pool's facts, interviews for my-issue-runner's six answers plus the pool port, writes console.json and AGENT.md into the pool directory, then starts the Console server bound to that pool and opens the browser. Use when Issues already exist and you want to drive them from the Console instead of the terminal runner.
+ ---
+ 
+ Issues already exist. This skill connects them to the Console.
+@@ -51,7 +51,7 @@ changes into a commit that says it is the work of an Issue.
+ 
+ ## 2. Ask
+ 
+-Six questions, each with your recommendation attached:
++Seven questions, each with your recommendation attached:
+ 
+ 1. Which skill or skills drive each Issue, and whether that differs per Issue
+ 2. The default harness and model. If `~/.issue-runner` already exists, read it, confirm it, and
+@@ -61,6 +61,11 @@ Six questions, each with your recommendation attached:
+ 4. The subagent roster, and a model for each
+ 5. Whether a reviewer exists, and what authority it has
+ 6. What counts as a checkpoint on this job specifically
++7. Which port the pool should pin. Probe 8787 at setup time; recommend it when it is free,
++   otherwise the next free port, or the pool's current pin on a re-interview. A concrete answer
++   becomes the `port` key in `console.json` and must bind exactly at launch or the engine
++   refuses loudly naming the port. `auto` (or next free) writes no key, so the engine hunts
++   8787-or-next-free at boot.
+ 
+ Recommend the orchestrator's own model for every subagent unless there is a reason to go smaller.
+ Delegating a skill to a cheaper model moves the substance of an Issue onto that model, which is
+@@ -70,7 +75,7 @@ If a reviewer is wanted, recommend it check acceptance criteria only and never c
+ that a failure buy the orchestrator one fix attempt before the Issue becomes a checkpoint carrying
+ the disagreement in its brief. That bounds a weaker model's power to strand good work.
+ 
+-The merge resolver is config, not a seventh question. Recommend the default harness for it, say
++The merge resolver is config, not a question. Recommend the default harness for it, say
+ that an explicit `none` opts out so every conflict comes straight to the human, and write whatever
+ is agreed as the `resolver` key.
+ 
+@@ -103,7 +108,7 @@ stop for it.
+ 
+ ## 4. Generate
+ 
+-Write `console.json` into the pool directory. All six answers land here as data:
++Write `console.json` into the pool directory. All seven answers land here as data:
+ 
+ ```json
+ {
+@@ -114,6 +119,7 @@ Write `console.json` into the pool directory. All six answers land here as data:
+   "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent...",
+   "agents": "{\"deepseek\": {\"description\": \"general-purpose subagent\", \"model\": \"...\"}}",
+   "resolver": "opencode",
++  "port": 8787,
+   "reviewer": "a reviewer checks acceptance criteria only; a failure buys one fix attempt",
+   "checkpoint": "a device, an external write, an undecided decision, or a material guess"
+ }
+@@ -128,6 +134,9 @@ Write `console.json` into the pool directory. All six answers land here as data:
+ - `resolver` is the merge resolver harness, or `none`. The engine falls back to the
+   `~/.issue-runner` default when the key is absent, but write it explicitly so the pool's config
+   says what it does.
++- `port` records the port answer when it is a concrete number. Omit it for `auto`, so the engine
++  hunts 8787-or-next-free at boot. A pinned port must bind exactly at launch or the engine
++  refuses loudly naming the port.
+ - `reviewer` and `checkpoint` record answers 5 and 6. The engine does not read them; the agents
+   do, through `AGENT.md`. Write both places from the one answer.
+ 
+@@ -151,30 +160,52 @@ One action, in order:
+ 
+ 1. Build the Console if it is not built: `~/repos/learning/ai-agent-graphs/ui/dist/` must exist.
+    If it does not, run `bun install` and `bun run build` in `~/repos/learning/ai-agent-graphs/ui/`.
+-2. Pick a port: 8787, or the next free one if it is taken.
+-3. If the pool's `runs/server.pid` names a live process, a server is already bound to this pool:
+-   skip to opening the browser. One pool, one server.
+-4. Start the server detached so it outlives this session, from the engine repo:
++2. Start the server detached so it outlives this session, from the engine repo. The engine
++   resolves the port itself: the `--port` flag wins, then the `console.json` pin, then
++   8787-or-next-free. Do not write `runs/server.pid`; that file is the engine's pool lock.
++   Run the launch as one command so the boot verdict is readable before the shell returns:
+ 
+    ```
+-   nohup bun run engine/server.ts --pool "<pool>" --port <port> \
++   mkdir -p "<pool>/runs"
++   : > "<pool>/runs/server.log"
++   nohup bun run engine/server.ts --pool "<pool>" \
+      >> "<pool>/runs/server.log" 2>&1 &
+-   echo $! > "<pool>/runs/server.pid"
++   spawned=$!
++   port=""
++   for _ in $(seq 1 40); do
++     if ! kill -0 "$spawned" 2>/dev/null; then
++       echo "The engine refused or failed at boot; its message:"
++       tail -n 5 "<pool>/runs/server.log"
++       exit 1
++     fi
++     port=$(sed -n 's/.*pool server on http:\/\/localhost:\([0-9]*\).*/\1/p' \
++       "<pool>/runs/server.log" | tail -n 1)
++     [ -n "$port" ] && break
++     sleep 0.25
++   done
+    ```
+ 
+-5. Probe `http://localhost:<port>/api/state` until it answers with a snapshot. Then open the
++   The log is truncated first so a boot line is always fresh: a relaunch must never read a
++   previous server's line and mistake it for a new boot.
++
++   A live pool is refused at boot with a message naming the live pid, its fleet-registry port
++   when known, and the pool directory. Surface that message verbatim and stop: open the running
++   console or kill the pid it names. One pool, one server, and the engine's lock is the truth.
++   An empty `$port` after the loop means the server is up but the pool is slow to boot; read
++   `runs/server.log` and report what it says.
++3. Probe `http://localhost:$port/api/state` until it answers with a snapshot. Then open the
+    browser with the platform's opener:
+ 
+    ```
+    if [ "$(uname)" = "Darwin" ]; then
+-     open "http://localhost:<port>"
++     open "http://localhost:$port"
+    else
+-     xdg-open "http://localhost:<port>"
++     xdg-open "http://localhost:$port"
+    fi
+    ```
+ 
+-Report the URL, the log path and the pid path. To stop the server later, kill the pid in
+-`runs/server.pid`.
++Report the URL and the log path. To stop the server later, kill the pid in `runs/server.pid`;
++the engine writes it when it claims the pool.
+ 
+ Then stop. The run from here is the human's: tickets spawn real harnesses, checkpoints arrive as
+ interrupts, and the first launch of a pool is theirs to watch.
+@@ -183,6 +214,12 @@ interrupts, and the first launch of a pool is theirs to watch.
+ 
+ Leave these alone rather than rediscovering them:
+ 
++- The pool lock: one server per pool, enforced at boot. `runs/server.pid` is the engine's file;
++  it claims it, refuses a live pool with a message naming the pid, the fleet-registry port when
++  known, and the pool directory, and clears it on a failed bind. The skill never reads or writes
++  it.
++- The port pin: `console.json`'s `port` key pins the pool's URL. A pinned port binds exactly at
++  launch or boot fails loudly naming the port; an unpinned pool hunts 8787-or-next-free at boot.
+ - The spawn kernel is ported from `run.sh`: non-interactive invocation with stdin closed, the
+[0m
+The batch is committed cleanly (23–26 in this repo, 27 in the skills repo). The dirty working tree is unrelated prototype work marked "PROTOTYPE — throwaway" plus uncommitted CONTEXT.md glossary additions — I'll note it but not touch it.
+[0m$ [0mls CODING_STANDARDS.md CONTRIBUTING.md docs/agents 2>&1; ls *.md docs 2>/dev/null
+ls: cannot access 'CODING_STANDARDS.md': No such file or directory
+ls: cannot access 'CONTRIBUTING.md': No such file or directory
+ls: cannot access 'docs/agents': No such file or directory
+CONTEXT.md
+NOTES.md
+README.md
+
+docs:
+adr
+langgraph-js-api-2026.md
+[0m

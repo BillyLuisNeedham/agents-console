@@ -1,0 +1,1973 @@
+[0m
+> build · deepseek-v4-flash
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/21-fullscreen-detail.md
+[0m→ [0mRead CONTEXT.md
+[0m✗ [0mRead .scratch/console-pool/spec-ticket-log-and-detail-resize.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m→ [0mRead NOTES.md
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/ 2>/dev/null; echo "---"; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/ 2>/dev/null; echo "---"; ls /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/
+AGENT.md
+console.json
+issues
+run.sh
+spec-console-flight-fixes.md
+spec-ticket-pools.md
+---
+console
+console-pool
+---
+bun.lock
+CONTEXT.md
+docs
+engine
+langgraph.json
+mock-tickets
+mock-tickets-deadlock
+NOTES.md
+package.json
+README.md
+scripts
+src
+tickets
+tsconfig.json
+ui
+[0m
+[0m$ [0mls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/ 2>/dev/null; echo "---HOME---"; ls /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/ 2>/dev/null | head; echo "---"; find /home/billy/repos/learning/ai-agent-graphs -name "spec-ticket-log-and-detail-resize.md" 2>/dev/null; echo "---"; find /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees -maxdepth 1 -type d 2>/dev/null
+AGENT.md
+console.db
+console.json
+issues
+runs
+run.sh
+spec-console-flight-fixes.md
+spec-fleet-of-consoles.md
+spec-ticket-log-and-detail-resize.md
+spec-ticket-pools.md
+---HOME---
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+---
+/home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+---
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/20
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/17
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/24
+[0m
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/spec-ticket-log-and-detail-resize.md
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git log --oneline -8 && echo "---STATUS---" && git status --short && echo "---BRANCH---" && git branch --show-current
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+---STATUS---
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+---BRANCH---
+pool/21
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && find ui -type f -name "*.ts" -o -type f -name "*.tsx" -o -type f -name "*.html" | grep -v node_modules | head -50 && echo "---PKG---" && cat ui/package.json
+ui/index.html
+ui/src/client.ts
+ui/src/main.ts
+ui/src/project.test.ts
+ui/src/project.ts
+ui/src/view.ts
+ui/src/vite-env.d.ts
+ui/vite.config.ts
+---PKG---
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+[0m
+Now let me explore the codebase, particularly the UI that ticket 20 modified.
+[0m→ [0mRead ui/src/view.ts
+[0m→ [0mRead ui/src/project.ts
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && find ui -type f -name "*.css" -not -path "*/node_modules/*" && echo "---" && cat ui/index.html
+ui/src/styles.css
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Console</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+[0m
+[0m→ [0mRead ui/src/styles.css
+[0m→ [0mRead ui/src/main.ts
+[0m→ [0mRead ui/src/client.ts
+[0m→ [0mRead ui/src/project.test.ts
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && cat .scratch/console-pool/AGENT.md 2>/dev/null | head -60; echo "===RUNSH==="; cat .scratch/console-pool/run.sh 2>/dev/null | head -80
+# Runner agent instructions
+
+Every agent the runner starts gets this file appended to its system prompt. One agent works one
+Issue, then exits. The next agent starts fresh and reads this again.
+
+Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+
+## Your role
+
+You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
+subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
+through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
+and cursor they are whatever your user's own config defines under those names, so if a named agent
+does not exist, do the reading yourself rather than inventing one.
+
+**Write the substance of the Issue yourself.** The code that answers it, the test that pins the
+behaviour, the prose that lands in the repository and the commit message are all yours. This is
+deliberate: the Issue is worked on the orchestrator's model, and handing the thinking to a smaller
+one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
+
+Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+
+## The state protocol
+
+Line 1 of your Issue file is a state marker:
+
+```
+<!-- state: id=NN blocked-by=.. status=.. -->
+```
+
+The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
+exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+
+If you exit without setting it, the runner treats that as a failure and halts.
+
+### Set `status=done` when
+
+Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
+cannot be met, the Issue is a `checkpoint`, not `done`.
+
+### Set `status=checkpoint` when
+
+- it needs a device, an emulator, or a live backend
+- it needs a write to an external system, or contact with anyone outside the codebase
+- it needs a decision the Issue and its context do not already settle
+- you would have to guess at something material to proceed
+- the build or the test suite fails for a reason the Issue does not cover
+
+Then **append a `## Brief` section to the bottom of the Issue** saying:
+
+1. what you completed, precisely
+2. what the human has to do
+3. what should happen after they have done it
+
+Keep the brief decision-ready. It is the report, not the raw work.
+
+## Write into the Issue, not only at the end
+
+**The Issue file is the record. The log is not.** Nobody reads a log by choice, and the next agent
+reads the Issue.
+===RUNSH===
+#!/usr/bin/env bash
+#
+# Issue runner.
+#
+# Works a queue of Issues. One orchestrator per Issue, then it exits. The next
+# orchestrator starts fresh. State lives on line 1 of each Issue file, so an
+# interrupted run picks up where it stopped.
+#
+# Each Issue runs on a harness: claude, opencode, or cursor's agent CLI. The
+# default harness and model live in ~/.issue-runner, read every time the
+# runner starts. A per-Issue override lives in assign_for below the marker.
+#
+#   ./run.sh              work the queue until it halts
+#   ./run.sh status       print the board, change nothing
+#   ./run.sh next         print which Issue would run next
+#   ./run.sh reset NN     put Issue NN back to ready
+#
+# Exit codes:
+#   0  the queue finished, or nothing is runnable
+#   1  a preflight refusal, such as a dirty worktree
+#   2  an Issue reached a checkpoint and needs you
+#   3  an Issue ended without setting its own status
+#
+# Environment overrides:
+#   RUNNER_MAX_ISSUES   safety stop           (default: set below the marker)
+#
+# Everything above the CONFIG marker is the engine. It is identical in every
+# runner /my-issue-runner generates, and that sameness is the point: leave it
+# alone. To pick up a newer engine, run the skill again on this directory. It
+# replaces above the marker and leaves your config below it untouched.
+#
+# engine-version: 2.0.0
+#
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+RUNNER_DEFAULTS="$HOME/.issue-runner"
+
+# ---------------------------------------------------------------- helpers
+
+# macOS sed and GNU sed disagree about -i. Normalise.
+sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+
+field()   { grep -m1 -oE "$2=[^ ]+" "$1" | head -1 | cut -d= -f2-; }
+status()  { field "$1" status; }
+blocks()  { field "$1" "blocked-by"; }
+file_of() { ls "$ISSUES_DIR"/"$1"-*.md 2>/dev/null | head -1; }
+id_of()   { basename "$1" | cut -d- -f1; }
+
+set_status() { sedi "1s/status=[a-z-]*/status=$2/" "$1"; }
+
+# The dotfile is read on every start, so editing it re-aims every queue at
+# once. A missing file is not an error here: preflight reports it per Issue.
+default_harness() { [ -f "$RUNNER_DEFAULTS" ] && field "$RUNNER_DEFAULTS" harness; }
+default_model()   { [ -f "$RUNNER_DEFAULTS" ] && field "$RUNNER_DEFAULTS" model; }
+
+# A non-empty line from assign_for wins. Whatever it leaves blank comes from
+# ~/.issue-runner. The result is always two words: "harness model".
+assignment_for() {
+  local a h m
+  a="$(assign_for "$1")"
+  h="$(echo "$a" | cut -d' ' -f1)"
+  m="$(echo "$a" | cut -d' ' -f2)"
+  [ -z "$h" ] && h="$(default_harness)"
+  [ -z "$m" ] && m="$(default_model)"
+  echo "$h $m"
+}
+
+# Each harness's binary on PATH.
+bin_of() {
+  case "$1" in
+    claude)   echo "claude" ;;
+    opencode) echo "opencode" ;;
+    cursor)   echo "agent" ;;
+  esac
+}
+
+# Append a note to an Issue. A stop must always leave a trace in the Issue
+# itself, not only in the log, because the Issue is what the next agent reads.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && ls docs/adr/ 2>/dev/null && echo "---" && git log --oneline --all | head -30
+(no output)
+[0m
+Let me look at the surrounding context files and establish a baseline.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && ls docs/ 2>/dev/null; echo "---"; ls engine/ 2>/dev/null; echo "---ROOT---"; ls
+langgraph-js-api-2026.md
+---
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.ts
+fleet.test.ts
+fleet.ts
+pool.ts
+prompt.ts
+server.test.ts
+server.ts
+spawn.ts
+worktrees.ts
+---ROOT---
+bun.lock
+CONTEXT.md
+docs
+engine
+langgraph.json
+mock-tickets
+mock-tickets-deadlock
+NOTES.md
+package.json
+README.md
+scripts
+src
+tickets
+tsconfig.json
+ui
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && ls ui/src/ && echo "---ROOT PKG---" && cat package.json && echo "---TSCONFIG UI---" && cat ui/tsconfig.json 2>/dev/null
+client.ts
+main.ts
+project.test.ts
+project.ts
+styles.css
+view.ts
+vite-env.d.ts
+---ROOT PKG---
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+---TSCONFIG UI---
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "bun"]
+  },
+  "include": ["src"]
+}
+[0m
+Let me establish a baseline: run the test suite, typecheck, and build.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && bun test 2>&1 | tail -20
+bun test v1.3.14 (0d9b296a)
+
+ 141 pass
+ 0 fail
+ 640 expect() calls
+Ran 141 tests across 4 files. [16.57s]
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui && bun run typecheck 2>&1 | tail -10 && echo "===BUILD===" && bun run build 2>&1 | tail -10
+$ tsc --noEmit
+error TS2688: Cannot find type definition file for 'vite/client'.
+  The file is in the program because:
+    Entry point of type library 'vite/client' specified in compilerOptions
+error: script "typecheck" exited with code 1
+===BUILD===
+$ vite build
+/usr/bin/bash: line 1: vite: command not found
+error: script "build" exited with code 127
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui && bun install 2>&1 | tail -5
++ bun-types@1.3.14
++ typescript@7.0.2
++ vite@8.2.1
+
+22 packages installed [19.00ms]
+[0m
+The ui dependencies aren't installed. Let me install them.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui && bun run typecheck 2>&1 | tail -5 && echo "===BUILD===" && bun run build 2>&1 | tail -8 && echo "===TESTS===" && bun test 2>&1 | tail -8
+$ tsc --noEmit
+===BUILD===
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-B0N5ZN6y.css  12.79 kB │ gzip: 2.68 kB
+dist/assets/index-GjfCQX3F.js   23.11 kB │ gzip: 7.98 kB
+
+✓ built in 46ms
+===TESTS===
+bun test v1.3.14 (0d9b296a)
+
+ 61 pass
+ 0 fail
+ 199 expect() calls
+Ran 61 tests across 1 file. [17.00ms]
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && ls .scratch/console-pool/issues/ | sort && echo "---19---" && cat .scratch/console-pool/issues/19*.md 2>/dev/null | head -40
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+21-fullscreen-detail.md
+---19---
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && ls .scratch/console-pool/issues/ | sort && echo "---16/17/18/19/20 in main repo---" && for f in 16 17 18 19 20; do ls .scratch/console-pool/issues/$f-*.md 2>/dev/null; done
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+12-ticket-cards-open-detail.md
+13-stream-stays-connected.md
+14-flow-neighbourhood-highlight.md
+15-skill-mac-linux.md
+16-per-ticket-event-timeline.md
+17-attempt-log-retention.md
+18-raw-log-pane-in-detail.md
+19-live-log-tailing.md
+20-resizable-detail.md
+21-fullscreen-detail.md
+22-review-pass-ticket-log-detail.md
+23-engine-pool-lock.md
+24-pinned-pool-ports.md
+25-fleet-registry.md
+26-fleet-list-command.md
+27-skill-fleet-conventions.md
+28-review-pass-fleet-batch.md
+---16/17/18/19/20 in main repo---
+.scratch/console-pool/issues/16-per-ticket-event-timeline.md
+.scratch/console-pool/issues/17-attempt-log-retention.md
+.scratch/console-pool/issues/18-raw-log-pane-in-detail.md
+.scratch/console-pool/issues/19-live-log-tailing.md
+.scratch/console-pool/issues/20-resizable-detail.md
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && cat .scratch/console-pool/issues/19-live-log-tailing.md && echo "=====20=====" && cat .scratch/console-pool/issues/20-resizable-detail.md
+<!-- state: id=19 blocked-by=18 status=ready -->
+
+# 19 — Live log tailing
+
+Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`.
+
+## What to build
+
+While a ticket's Detail is open and an attempt is running, the raw log pane follows the tail live: it refetches new bytes on each SSE snapshot (the snapshot cadence is the liveness signal; no per-ticket streaming) and auto-scrolls to the bottom. Scrolling up pins the view where it is; scrolling back to the bottom resumes following. Selecting an older attempt stays put when a new attempt starts, so reading attempt 1 while attempt 2 runs is undisturbed; the timeline still shows the new attempt arriving with its running marker. Long logs open tail-first with a "load earlier" affordance that prepends older content. Scroll pin and selected attempt survive full-DOM rebuilds from live snapshots.
+
+## Acceptance criteria
+
+- [ ] The log pane refetches on new snapshots for the selected ticket, requesting only bytes past the last offset read
+- [ ] Auto-scroll follows the tail only while the view is pinned at the bottom; scrolling up pins, scrolling to bottom resumes
+- [ ] A new attempt starting does not switch the pane away from a selected older attempt
+- [ ] "Load earlier" prepends older content for long logs, keeping the opened view anchored
+- [ ] Scroll position, pin state, and selected attempt survive SSE-driven rebuilds
+- [ ] Projection tests cover the tailing view-model decisions (pin state, attempt-stay, offset bookkeeping); scroll feel verified manually in the proving flight
+- [ ] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+- 18 — Raw log pane in the Detail (the pane and the offset-serving endpoint this makes live)
+
+## Notes
+
+- UI-only liveness state (pin, offsets, selected attempt) lives in module scope per the established idiom; the projection stays pure over snapshot plus events data.
+=====20=====
+<!-- state: id=20 blocked-by=none status=done -->
+
+# 20 — Resizable Detail
+
+Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`.
+
+## What to build
+
+The Detail's left edge becomes a drag handle: dragging it widens or narrows the panel live, clamped between a readable minimum (340px, the current fixed width) and most of the window (about 80vw). The chosen width persists to a single global localStorage key and is restored on reload. The pattern copies the bottom drawers' existing drag handle: module-scope size var, clamp helper beside the existing drawer clamp, inline style applied per render so the full-DOM rebuild idiom is untouched.
+
+## Acceptance criteria
+
+- [x] Dragging the Detail's left edge resizes the panel live
+- [x] Width is clamped between 340px and about 80vw; the clamp helper is pure and tested at the projection seam
+- [x] The width persists across reloads via localStorage (one global key, not per pool)
+- [x] The canvas reflows as the Detail resizes and cards remain draggable and clickable at any width
+- [x] With no card selected the Detail stays hidden regardless of stored width
+- [x] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+None — can start immediately.
+
+## Notes
+
+- No dependencies on the ticket-log tickets: this touches panel sizing only, not Detail content.
+
+## Brief
+
+The engine process stopped while this ticket was in-progress, but the working tree already carried the full implementation: the drag handle (`renderDetailHandle`/`bindDetailHandle`), the module-scope width var with one global localStorage key `console-detail-width`, the pure `clampDetailWidth` helper in `project.ts` beside `clampDrawersHeight` with projection-seam tests, the `.detail-handle` CSS, and the inline per-render width on `.detail-open`.
+
+Verified this run: `bun test` 55 pass, `bun run typecheck` clean, `bun run build` clean. Ran the two-axis code review; both axes came back clean apart from one defect both flagged: the `clampDetailWidth` docstring claimed the 340px minimum wins on a window too narrow to hold it, but the code lets the window bound win (and the test endorsed that). Fixed the docstring and renamed the misleading test to "tracks the window bound when the window is too narrow to hold the minimum". Drag feel and clamping remain to be felt in the proving flight, per the spec's testing decisions.
+[0m
+Let me look at the issues referenced by ticket 21 (19 live log tailing, 20 resizable detail) to understand the current state.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git worktree list && echo "---BRANCHES---" && git branch -a && echo "---STATUS of 21---" && cd .git/pool-worktrees/21 && git status && git log --oneline -5
+/home/billy/repos/learning/ai-agent-graphs                        8d00da7 [main]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/17 8d00da7 [pool/17]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/20 0382112 [pool/20]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 8d00da7 [pool/21]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/23 7d37820 [pool/23]
+/home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/24 8d00da7 [pool/24]
+---BRANCHES---
+* main
++ pool/17
++ pool/20
++ pool/21
++ pool/23
++ pool/24
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/main
+---STATUS of 21---
+On branch pool/21
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/issues/21-fullscreen-detail.md
+
+nothing added to commit but untracked files present (use "git add" to track)
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && grep -n "logFile\|rawLog\|log-pane\|load earlier\|scroll\|pin" ui/src/view.ts ui/src/main.ts ui/src/project.ts | head -40
+ui/src/view.ts:144:// snapshot re-derives the highlight instead of stripping it.
+ui/src/project.ts:2: * Pool projection seam: pure mapping from the pool server's snapshot payload
+ui/src/project.ts:113:  logFile: string;
+ui/src/project.ts:138:  logFile: string | null;
+ui/src/project.ts:172:        logFile: null,
+ui/src/project.ts:182:    logFile: row.logFile,
+ui/src/project.ts:265:// own id; no thread scoping is needed.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && git log --oneline -15 main && echo "---diff worktrees 21 vs 17 vs 24---" && git diff --stat pool/17 pool/24 2>/dev/null | tail -5 && echo "---runs dir---" && ls -la .scratch/console-pool/runs/ 2>/dev/null | tail -20
+8d00da7 console-pool: merge ticket 23 (engine pool lock)
+a4d1a29 console-pool: merge ticket 20 (resizable Detail)
+ae6f99f console: emit per-ticket lifecycle events and render the attempt timeline
+7d37820 console: enforce one server per pool with a pid-file lock
+0382112 console: resizable Detail panel via a left-edge drag handle
+b084321 console: glossary — Attempt, Ticket log; Detail resizable
+88de6dd console-pool: close out 11/14; track console.json, amend pool spec
+c2d5414 console: close the review pass: crash read-back, resolver name, stream grace
+c63885c console: light up the selection's flow neighbourhood
+8b820ca console-pool: mark 12/13/15 done; their work landed on main during the spawn-PWD escape
+d39a6af console: pass the spawn cwd as PWD so opencode roots in the worktree
+3a36537 console: ticket card clicks open the Detail panel
+2d467d1 console: keep the pool stream open on a quiet pool, grace the error banner
+f698364 console-pool: proving-flight notes for 10/11; flight-fixes spec and tickets 12-15
+0a0d662 console-pool: runner notes for 08/09/10
+---diff worktrees 21 vs 17 vs 24---
+---runs dir---
+-rw-r--r-- 1 billy billy    459 Aug 22 00:08 14.outcome.json
+-rw-r--r-- 1 billy billy  28695 Aug 21 22:55 15.log
+-rw-r--r-- 1 billy billy    519 Aug 21 22:55 15.outcome.json
+-rw-r--r-- 1 billy billy 220030 Aug 22 01:39 16.log
+-rw-r--r-- 1 billy billy    501 Aug 22 01:39 16.outcome.json
+-rw-r--r-- 1 billy billy    302 Aug 22 01:40 16.resolver.json
+-rw-r--r-- 1 billy billy  15423 Aug 22 01:40 16.resolver.log
+-rw-r--r-- 1 billy billy    154 Aug 22 10:08 17.events.jsonl
+-rw-r--r-- 1 billy billy  18002 Aug 22 10:14 17.log
+-rw-r--r-- 1 billy billy    665 Aug 22 02:00 17.outcome.json
+-rw-r--r-- 1 billy billy  24535 Aug 22 01:27 20.log
+-rw-r--r-- 1 billy billy    384 Aug 22 01:26 20.outcome.json
+-rw-r--r-- 1 billy billy    154 Aug 22 10:08 21.events.jsonl
+-rw-r--r-- 1 billy billy  23327 Aug 22 10:15 21.log
+-rw-r--r-- 1 billy billy  43304 Aug 22 01:34 23.log
+-rw-r--r-- 1 billy billy    432 Aug 22 01:34 23.outcome.json
+-rw-r--r-- 1 billy billy    154 Aug 22 10:08 24.events.jsonl
+-rw-r--r-- 1 billy billy  52165 Aug 22 10:14 24.log
+-rw-r--r-- 1 billy billy   3120 Aug 22 10:07 server.log
+-rw-r--r-- 1 billy billy      7 Aug 22 10:08 server.pid
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs && for n in 16 17 18 19 20 21 22 23 24 25 26 27 28; do f=$(ls .scratch/console-pool/issues/$n-*.md 2>/dev/null); echo "$(basename $f): $(sed -n '1p' $f 2>/dev/null | grep -o 'status=[a-z-]*')"; done
+16-per-ticket-event-timeline.md: status=done
+17-attempt-log-retention.md: status=in-progress
+18-raw-log-pane-in-detail.md: status=ready
+19-live-log-tailing.md: status=ready
+20-resizable-detail.md: status=done
+21-fullscreen-detail.md: status=in-progress
+22-review-pass-ticket-log-detail.md: status=ready
+23-engine-pool-lock.md: status=done
+24-pinned-pool-ports.md: status=in-progress
+25-fleet-registry.md: status=ready
+26-fleet-list-command.md: status=ready
+27-skill-fleet-conventions.md: status=ready
+28-review-pass-fleet-batch.md: status=ready
+[0m
+[0m# [0mTodos
+[✓] Understand current Detail DOM/CSS structure and toolbar
+[•] Implement fullscreen Detail mode (view.ts + styles.css)
+[ ] Wire toggle, Esc, select-exits, handle-inert, width-restore
+[ ] Run test suite, typecheck, build
+[ ] Code-review the work, tick criteria, commit
+[ ] Set issue status and write outcome.json
+[0m
+Baseline is clean (141 engine tests + 61 UI tests, typecheck and build pass). Now let me set up my todo list and read the remaining context I need.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && sed -n '44,64p' .scratch/console-pool/spec-ticket-pools.md 2>/dev/null; echo "---check old pool runner for harness quirks---"; grep -n -i "fullscreen\|toolbar" .scratch/console/AGENT.md .scratch/console/run.sh 2>/dev/null | head; echo "---"; grep -rn "toolbar\|canvas-header" ui/src/*.ts | head
+16. As Billy, I want each finished ticket to record an outcome — summary and commit sha — in a global channel, so that the run accumulates what happened, not just that it happened.
+17. As Billy, I want a ticket's prompt to include its blockers' outcomes, so that downstream agents build on what upstream agents actually did rather than rediscovering it.
+18. As Billy, I want a log channel that appends across the whole run, so that I can read the run's narrative in one place.
+
+Interrupts:
+
+19. As Billy, I want the pool to run until something needs me and then wait, so that unattended progress is the default and my attention is the exception.
+20. As Billy, I want an interrupt on one ticket to stall only that ticket's downstream, so that ready siblings keep running while I think.
+21. As Billy, I want answering an interrupt to resume the pool immediately with no separate continue step, so that one answer is one action.
+22. As Billy, I want a ticket's checkpoint to render its Brief as an interrupt on its card and in its Detail, so that I can read what the agent needs at full size and answer where I'm already looking.
+23. As Billy, I want to attach an optional note when resuming from a checkpoint, appended to the Issue file, so that my answer is durable and visible to any executor that picks the pool up later.
+24. As Billy, I want a merge conflict to be handed to a resolver agent automatically, so that mechanical conflict resolution doesn't burn my attention.
+25. As Billy, I want the resolver agent's resolution shown to me as an approval interrupt before the merge commits, so that merge authority stays with me.
+26. As Billy, I want rejecting a resolution to hand me the conflicted state with the agent's attempt noted, so that I fix it myself without losing what the agent tried.
+27. As Billy, I want a harness crash — a ticket that ends without done or checkpoint on its marker — surfaced as an interrupt carrying the log path, so that silent failures can't strand a pool.
+28. As Billy, I want deadlock — a ticket whose blockers can never complete — surfaced as an interrupt, so that a broken pool asks for help instead of hanging.
+29. As Billy, I want one final Review interrupt when every ticket is done, so that finished work gets my judgment before the run is called complete.
+30. As Billy, I want rejecting at Review to send named tickets back to ready with my note appended and the run to continue, so that review feedback loops through the graph instead of becoming terminal chores.
+
+Durability and interop:
+---check old pool runner for harness quirks---
+---
+ui/src/view.ts:600:    { class: "canvas-header" },
+[0m
+Let me re-read the relevant spec sections on fullscreen and confirm my implementation plan, then make the edits.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -163,8 +163,17 @@
+ const DETAIL_WIDTH_KEY = "console-detail-width";
+ let detailWidth = DETAIL_MIN_PX;
+ let detailDrag: { startX: number; startWidth: number } | null = null;
+ 
++// Fullscreen Detail: a class on the panel plus this module-scope mode flag,
++// mirroring the drawer idioms. Fullscreen fixes the Detail over the content
++// area below the toolbar (canvas and drawers covered, toolbar visible and
++// live) without unmounting it, so SSE rebuilds, interrupt forms, and log
++// tailing all keep working. Esc, the toggle, or selecting another card exits;
++// exiting restores the dragged width.
++let detailFullscreen = false;
++let toolbarHeightPx = 0;
++
+ function currentDetailMaxPx(): number {
+   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+ }
+ 
+
+[0m
+Now I have a full understanding. Let me implement. First, add the module-scope flag and helpers near the Detail width block.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -879,9 +879,9 @@
+ }
+ 
+ function bindDetailHandle(handle: HTMLElement): void {
+   handle.addEventListener("pointerdown", (event) => {
+-    if (detailDrag) return;
++    if (detailDrag || detailFullscreen) return;
+     detailDrag = {
+       startX: event.clientX,
+       startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
+     };
+
+[0m
+Now add the fullscreen helpers. Let me add them after `applyDetailWidth` / `bindDetailHandle` functions.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -910,17 +910,30 @@
+ const detail = h("div", { class: "detail" });
+ const view = model.detail;
+ if (!view) return detail;
+ detail.classList.add("detail-open");
+-detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++if (detailFullscreen) {
++  detail.classList.add("detail-fullscreen");
++} else {
++  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++}
+ const title = view.kind === "ticket" ? view.ticketId : view.label;
+ detail.append(
+   h(
+     "div",
+     { class: "detail-head" },
+     h("span", { class: "detail-title" }, title),
+     h(
+       "button",
++      {
++        class: "btn",
++        title: detailFullscreen ? "exit fullscreen" : "fill the window",
++        onclick: () => toggleDetailFullscreen(),
++      },
++      detailFullscreen ? "✕" : "⛶",
++    ),
++    h(
++      "button",
+       { class: "btn", title: "close detail", onclick: () => closeDetail() },
+       "✕",
+     ),
+   ),
+
+[0m
+Now add the fullscreen helper functions before `renderDetail`:
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -924,13 +924,13 @@
+ h("span", { class: "detail-title" }, title),
+ h(
+   "button",
+   {
+-    class: "btn",
++    class: "btn detail-fullscreen-toggle",
+     title: detailFullscreen ? "exit fullscreen" : "fill the window",
+     onclick: () => toggleDetailFullscreen(),
+   },
+-  detailFullscreen ? "✕" : "⛶",
++  "⛶",
+ ),
+ h(
+   "button",
+   { class: "btn", title: "close detail", onclick: () => closeDetail() },
+
+[0m
+The toggle button should not use the same "✕" glyph as close. Let me refine it to a proper fullscreen glyph with a changing title.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -905,8 +905,42 @@
+     detailDrag = null;
+   });
+ }
+ 
++// The toolbar's bottom edge in the window, the Detail's top while fullscreen.
++// The canvas-header sits at the top of the main column, so its bottom is the
++// height of the strip the fullscreen Detail must not cover.
++function toolbarBottom(): number {
++  const header = document.querySelector<HTMLElement>(".canvas-header");
++  return header ? header.getBoundingClientRect().bottom : 0;
++}
++
++// Fullscreen is a class on the open Detail plus this module-scope flag, so the
++// full-DOM rebuild on every snapshot re-applies it from the flag and the panel
++// never unmounts. The class fixes the Detail over everything below the toolbar;
++// exiting removes it and restores the dragged width.
++function applyDetailFullscreen(): void {
++  const detail = document.querySelector<HTMLElement>(".detail-open");
++  if (!detail) return;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++    detail.style.top = `${toolbarBottom()}px`;
++  } else {
++    detail.classList.remove("detail-fullscreen");
++    detail.style.top = "";
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
++  const toggle = document.querySelector<HTMLElement>(".detail-fullscreen-toggle");
++  if (toggle) {
++    toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++  }
++}
++
++function toggleDetailFullscreen(): void {
++  detailFullscreen = !detailFullscreen;
++  applyDetailFullscreen();
++}
++
+ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+   const detail = h("div", { class: "detail" });
+   const view = model.detail;
+   if (!view) return detail;
+
+[0m
+Now add the fullscreen toggle helpers. Let me place them right after `bindDetailHandle`:
+[0m← [0mEdit ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+@@ -883,8 +883,24 @@
+ .detail-handle:hover {
+   background: var(--accent);
+ }
+ 
++/* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
++   Detail over everything below the toolbar (canvas and bottom drawers covered,
++   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
++   forms, and log tailing all keep working. The inline top is the toolbar's
++   measured bottom edge; the panel spans the window below it. */
++.detail-fullscreen {
++  position: fixed;
++  top: 0;
++  left: 0;
++  right: 0;
++  bottom: 0;
++  width: auto;
++  z-index: 30;
++  border-left: none;
++}
++
+ .detail-head {
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+
+[0m
+Now add the fullscreen class CSS. Let me add it near `.detail-open` and `.detail-handle`:
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -346,21 +346,31 @@
+   selectNode(nodeId);
+ }
+ 
+ function selectNode(nodeId: string): void {
++  detailFullscreen = false;
+   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+   onSelectNode?.(selectedNodeId);
+ }
+ 
+ function closeDetail(): void {
++  detailFullscreen = false;
+   selectedNodeId = null;
+   onSelectNode?.(null);
+ }
+ 
+ if (typeof window !== "undefined") {
+   detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
+   window.addEventListener("pointerup", (event) => endDrag(event));
+   window.addEventListener("pointercancel", (event) => endDrag(event));
++  // Esc leaves fullscreen; the toggle and card selection handle their own
++  // exits, so this is the one path that must listen globally.
++  window.addEventListener("keydown", (event) => {
++    if (event.key === "Escape" && detailFullscreen) {
++      detailFullscreen = false;
++      applyDetailFullscreen();
++    }
++  });
+ }
+ 
+ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+   const svg = world.querySelector("svg.canvas-edges");
+
+[0m
+Now add the Esc handler, selectNode/closeDetail reset, and the post-render apply. Let me update the module init block and selection functions:
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -1116,8 +1116,9 @@
+   model.detail ? renderDetailHandle() : null,
+   renderDetail(model, handlers),
+ );
+ root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
++if (detailFullscreen) applyDetailFullscreen();
+ if (noteFocus) {
+   const next = root.querySelector<HTMLTextAreaElement>(
+     `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
+   );
+
+[0m
+Now I need to re-apply the fullscreen top after each render rebuild, since the toolbar height is measured live. Let me update `renderApp`:
+Now let me run typecheck, tests, and build to verify.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui && bun run typecheck 2>&1 | tail -5 && echo "===TESTS===" && bun test 2>&1 | tail -6 && echo "===BUILD===" && bun run build 2>&1 | tail -8
+$ tsc --noEmit
+===TESTS===
+bun test v1.3.14 (0d9b296a)
+
+ 61 pass
+ 0 fail
+ 199 expect() calls
+Ran 61 tests across 1 file. [23.00ms]
+===BUILD===
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-BEs7YLau.css  12.87 kB │ gzip: 2.71 kB
+dist/assets/index-BpB6ioWF.js   23.83 kB │ gzip: 8.19 kB
+
+✓ built in 49ms
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git diff
+diff --git a/ui/src/styles.css b/ui/src/styles.css
+index c64947f..d50e4db 100644
+--- a/ui/src/styles.css
++++ b/ui/src/styles.css
+@@ -884,6 +884,22 @@ body {
+   background: var(--accent);
+ }
+ 
++/* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
++   Detail over everything below the toolbar (canvas and bottom drawers covered,
++   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
++   forms, and log tailing all keep working. The inline top is the toolbar's
++   measured bottom edge; the panel spans the window below it. */
++.detail-fullscreen {
++  position: fixed;
++  top: 0;
++  left: 0;
++  right: 0;
++  bottom: 0;
++  width: auto;
++  z-index: 30;
++  border-left: none;
++}
++
+ .detail-head {
+   display: flex;
+   justify-content: space-between;
+diff --git a/ui/src/view.ts b/ui/src/view.ts
+index 1e5210b..7515e01 100644
+--- a/ui/src/view.ts
++++ b/ui/src/view.ts
+@@ -164,6 +164,15 @@ const DETAIL_WIDTH_KEY = "console-detail-width";
+ let detailWidth = DETAIL_MIN_PX;
+ let detailDrag: { startX: number; startWidth: number } | null = null;
+ 
++// Fullscreen Detail: a class on the panel plus this module-scope mode flag,
++// mirroring the drawer idioms. Fullscreen fixes the Detail over the content
++// area below the toolbar (canvas and drawers covered, toolbar visible and
++// live) without unmounting it, so SSE rebuilds, interrupt forms, and log
++// tailing all keep working. Esc, the toggle, or selecting another card exits;
++// exiting restores the dragged width.
++let detailFullscreen = false;
++let toolbarHeightPx = 0;
++
+ function currentDetailMaxPx(): number {
+   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+ }
+@@ -338,11 +347,13 @@ function endDrag(event?: PointerEvent): void {
+ }
+ 
+ function selectNode(nodeId: string): void {
++  detailFullscreen = false;
+   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+   onSelectNode?.(selectedNodeId);
+ }
+ 
+ function closeDetail(): void {
++  detailFullscreen = false;
+   selectedNodeId = null;
+   onSelectNode?.(null);
+ }
+@@ -351,6 +362,14 @@ if (typeof window !== "undefined") {
+   detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
+   window.addEventListener("pointerup", (event) => endDrag(event));
+   window.addEventListener("pointercancel", (event) => endDrag(event));
++  // Esc leaves fullscreen; the toggle and card selection handle their own
++  // exits, so this is the one path that must listen globally.
++  window.addEventListener("keydown", (event) => {
++    if (event.key === "Escape" && detailFullscreen) {
++      detailFullscreen = false;
++      applyDetailFullscreen();
++    }
++  });
+ }
+ 
+ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+@@ -871,7 +890,7 @@ function applyDetailWidth(): void {
+ 
+ function bindDetailHandle(handle: HTMLElement): void {
+   handle.addEventListener("pointerdown", (event) => {
+-    if (detailDrag) return;
++    if (detailDrag || detailFullscreen) return;
+     detailDrag = {
+       startX: event.clientX,
+       startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
+@@ -897,18 +916,65 @@ function bindDetailHandle(handle: HTMLElement): void {
+   });
+ }
+ 
++// The toolbar's bottom edge in the window, the Detail's top while fullscreen.
++// The canvas-header sits at the top of the main column, so its bottom is the
++// height of the strip the fullscreen Detail must not cover.
++function toolbarBottom(): number {
++  const header = document.querySelector<HTMLElement>(".canvas-header");
++  return header ? header.getBoundingClientRect().bottom : 0;
++}
++
++// Fullscreen is a class on the open Detail plus this module-scope flag, so the
++// full-DOM rebuild on every snapshot re-applies it from the flag and the panel
++// never unmounts. The class fixes the Detail over everything below the toolbar;
++// exiting removes it and restores the dragged width.
++function applyDetailFullscreen(): void {
++  const detail = document.querySelector<HTMLElement>(".detail-open");
++  if (!detail) return;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++    detail.style.top = `${toolbarBottom()}px`;
++  } else {
++    detail.classList.remove("detail-fullscreen");
++    detail.style.top = "";
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
++  const toggle = document.querySelector<HTMLElement>(".detail-fullscreen-toggle");
++  if (toggle) {
++    toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++  }
++}
++
++function toggleDetailFullscreen(): void {
++  detailFullscreen = !detailFullscreen;
++  applyDetailFullscreen();
++}
++
+ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+   const detail = h("div", { class: "detail" });
+   const view = model.detail;
+   if (!view) return detail;
+   detail.classList.add("detail-open");
+-  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++  } else {
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
+   const title = view.kind === "ticket" ? view.ticketId : view.label;
+   detail.append(
+     h(
+       "div",
+       { class: "detail-head" },
+       h("span", { class: "detail-title" }, title),
++      h(
++        "button",
++        {
++          class: "btn detail-fullscreen-toggle",
++          title: detailFullscreen ? "exit fullscreen" : "fill the window",
++          onclick: () => toggleDetailFullscreen(),
++        },
++        "⛶",
++      ),
+       h(
+         "button",
+         { class: "btn", title: "close detail", onclick: () => closeDetail() },
+@@ -1051,6 +1117,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
+     renderDetail(model, handlers),
+   );
+   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
++  if (detailFullscreen) applyDetailFullscreen();
+   if (noteFocus) {
+     const next = root.querySelector<HTMLTextAreaElement>(
+       `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
+[0m
+Everything passes. Let me review my complete set of changes to verify correctness against the acceptance criteria.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -170,9 +170,8 @@
+ // live) without unmounting it, so SSE rebuilds, interrupt forms, and log
+ // tailing all keep working. Esc, the toggle, or selecting another card exits;
+ // exiting restores the dragged width.
+ let detailFullscreen = false;
+-let toolbarHeightPx = 0;
+ 
+ function currentDetailMaxPx(): number {
+   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+ }
+
+[0m
+Let me review my changes critically. I spot a few issues:
+
+1. `toolbarHeightPx` is declared but unused.
+2. When entering fullscreen via the toggle (no re-render), the inline `style.width` from the last non-fullscreen render would override the CSS `width: auto` — inline styles beat stylesheets. I need to clear/restore width in `applyDetailFullscreen`.
+3. The two header buttons would spread apart under `justify-content: space-between`; better to group them.
+4. The "⛶" glyph may not render reliably; a text label is safer and matches the "reset"/"reset layout" text buttons.
+
+Let me fix these:
+[0m✗ [0mEdit ui/src/view.ts failed
+[91m[1mError: [0mNo changes to apply: oldString and newString are identical.
+[0m
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -931,8 +931,9 @@
+ const detail = document.querySelector<HTMLElement>(".detail-open");
+ if (!detail) return;
+ if (detailFullscreen) {
+   detail.classList.add("detail-fullscreen");
++  detail.style.width = "";
+   detail.style.top = `${toolbarBottom()}px`;
+ } else {
+   detail.classList.remove("detail-fullscreen");
+   detail.style.top = "";
+
+[0m
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -368,8 +368,13 @@
+       detailFullscreen = false;
+       applyDetailFullscreen();
+     }
+   });
++  // The toolbar can wrap on a narrow window, so its height (the fullscreen
++  // Detail's top) is re-measured when the window resizes.
++  window.addEventListener("resize", () => {
++    if (detailFullscreen) applyDetailFullscreen();
++  });
+ }
+ 
+ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+   const svg = world.querySelector("svg.canvas-edges");
+
+[0m
+I notice the toolbar height should re-measure on window resize while fullscreen. Let me add a resize handler:
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -971,21 +971,25 @@
+   "div",
+   { class: "detail-head" },
+   h("span", { class: "detail-title" }, title),
+   h(
+-    "button",
+-    {
+-      class: "btn detail-fullscreen-toggle",
+-      title: detailFullscreen ? "exit fullscreen" : "fill the window",
+-      onclick: () => toggleDetailFullscreen(),
+-    },
+-    "⛶",
++    "div",
++    { class: "detail-head-actions" },
++    h(
++      "button",
++      {
++        class: "btn detail-fullscreen-toggle",
++        title: detailFullscreen ? "exit fullscreen" : "fill the window",
++        onclick: () => toggleDetailFullscreen(),
++      },
++      detailFullscreen ? "restore" : "fullscreen",
++    ),
++    h(
++      "button",
++      { class: "btn", title: "close detail", onclick: () => closeDetail() },
++      "✕",
++    ),
+   ),
+-  h(
+-    "button",
+-    { class: "btn", title: "close detail", onclick: () => closeDetail() },
+-    "✕",
+-  ),
+ ),
+ view.kind === "ticket"
+   ? renderTicketDetail(view, model.timeline, handlers)
+   : renderUtilityDetail(view, handlers),
+
+[0m
+Now let me improve the header: group the two buttons so `space-between` doesn't spread them apart, and use a text label instead of the possibly-unavailable "⛶" glyph.
+[0m← [0mEdit ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+@@ -909,8 +909,14 @@
+   background: var(--bg-panel-2);
+   border-bottom: 1px solid var(--border);
+ }
+ 
++.detail-head-actions {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
+ .detail-title {
+   font-size: 13px;
+   font-weight: 700;
+ }
+
+[0m
+Now add CSS for the grouped header actions and update the toggle text in `applyDetailFullscreen`:
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -946,8 +946,9 @@
+   }
+   const toggle = document.querySelector<HTMLElement>(".detail-fullscreen-toggle");
+   if (toggle) {
+     toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++    toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
+   }
+ }
+ 
+ function toggleDetailFullscreen(): void {
+
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && grep -n "\.detail-open\|\.detail-fullscreen\|\.detail-handle\|\.detail-head" ui/src/styles.css
+861:.detail-open {
+874:.detail-handle {
+883:.detail-handle:hover {
+892:.detail-fullscreen {
+903:.detail-head {
+913:.detail-head-actions {
+[0m
+Let me verify the CSS ordering — `.detail-fullscreen` must come after `.detail-open` so `width: auto` wins over the 340px default.
+[0m→ [0mRead ui/src/view.ts[90m [offset=918, limit=80][0m
+Now let me verify the full flow once more by re-reading the final state of the key functions:
+Now let me run the full suite, typecheck, and build:
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && bun test 2>&1 | tail -6 && echo "===UI TYPE===" && cd ui && bun run typecheck 2>&1 | tail -3 && echo "===UI TEST===" && bun test 2>&1 | tail -5 && echo "===BUILD===" && bun run build 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 141 pass
+ 0 fail
+ 640 expect() calls
+Ran 141 tests across 4 files. [16.56s]
+===UI TYPE===
+$ tsc --noEmit
+===UI TEST===
+
+ 61 pass
+ 0 fail
+ 199 expect() calls
+Ran 61 tests across 1 file. [19.00ms]
+===BUILD===
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-8DjdoIpQ.css  12.93 kB │ gzip: 2.71 kB
+dist/assets/index-DroZO1cl.js   23.99 kB │ gzip: 8.22 kB
+
+✓ built in 50ms
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git diff && echo "===STATUS===" && git status --short
+diff --git a/ui/src/styles.css b/ui/src/styles.css
+index c64947f..adcc8cf 100644
+--- a/ui/src/styles.css
++++ b/ui/src/styles.css
+@@ -884,6 +884,22 @@ body {
+   background: var(--accent);
+ }
+ 
++/* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
++   Detail over everything below the toolbar (canvas and bottom drawers covered,
++   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
++   forms, and log tailing all keep working. The inline top is the toolbar's
++   measured bottom edge; the panel spans the window below it. */
++.detail-fullscreen {
++  position: fixed;
++  top: 0;
++  left: 0;
++  right: 0;
++  bottom: 0;
++  width: auto;
++  z-index: 30;
++  border-left: none;
++}
++
+ .detail-head {
+   display: flex;
+   justify-content: space-between;
+@@ -894,6 +910,12 @@ body {
+   border-bottom: 1px solid var(--border);
+ }
+ 
++.detail-head-actions {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
+ .detail-title {
+   font-size: 13px;
+   font-weight: 700;
+diff --git a/ui/src/view.ts b/ui/src/view.ts
+index 1e5210b..207374f 100644
+--- a/ui/src/view.ts
++++ b/ui/src/view.ts
+@@ -164,6 +164,14 @@ const DETAIL_WIDTH_KEY = "console-detail-width";
+ let detailWidth = DETAIL_MIN_PX;
+ let detailDrag: { startX: number; startWidth: number } | null = null;
+ 
++// Fullscreen Detail: a class on the panel plus this module-scope mode flag,
++// mirroring the drawer idioms. Fullscreen fixes the Detail over the content
++// area below the toolbar (canvas and drawers covered, toolbar visible and
++// live) without unmounting it, so SSE rebuilds, interrupt forms, and log
++// tailing all keep working. Esc, the toggle, or selecting another card exits;
++// exiting restores the dragged width.
++let detailFullscreen = false;
++
+ function currentDetailMaxPx(): number {
+   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+ }
+@@ -338,11 +346,13 @@ function endDrag(event?: PointerEvent): void {
+ }
+ 
+ function selectNode(nodeId: string): void {
++  detailFullscreen = false;
+   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+   onSelectNode?.(selectedNodeId);
+ }
+ 
+ function closeDetail(): void {
++  detailFullscreen = false;
+   selectedNodeId = null;
+   onSelectNode?.(null);
+ }
+@@ -351,6 +361,19 @@ if (typeof window !== "undefined") {
+   detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
+   window.addEventListener("pointerup", (event) => endDrag(event));
+   window.addEventListener("pointercancel", (event) => endDrag(event));
++  // Esc leaves fullscreen; the toggle and card selection handle their own
++  // exits, so this is the one path that must listen globally.
++  window.addEventListener("keydown", (event) => {
++    if (event.key === "Escape" && detailFullscreen) {
++      detailFullscreen = false;
++      applyDetailFullscreen();
++    }
++  });
++  // The toolbar can wrap on a narrow window, so its height (the fullscreen
++  // Detail's top) is re-measured when the window resizes.
++  window.addEventListener("resize", () => {
++    if (detailFullscreen) applyDetailFullscreen();
++  });
+ }
+ 
+ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+@@ -871,7 +894,7 @@ function applyDetailWidth(): void {
+ 
+ function bindDetailHandle(handle: HTMLElement): void {
+   handle.addEventListener("pointerdown", (event) => {
+-    if (detailDrag) return;
++    if (detailDrag || detailFullscreen) return;
+     detailDrag = {
+       startX: event.clientX,
+       startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
+@@ -897,12 +920,52 @@ function bindDetailHandle(handle: HTMLElement): void {
+   });
+ }
+ 
++// The toolbar's bottom edge in the window, the Detail's top while fullscreen.
++// The canvas-header sits at the top of the main column, so its bottom is the
++// height of the strip the fullscreen Detail must not cover.
++function toolbarBottom(): number {
++  const header = document.querySelector<HTMLElement>(".canvas-header");
++  return header ? header.getBoundingClientRect().bottom : 0;
++}
++
++// Fullscreen is a class on the open Detail plus this module-scope flag, so the
++// full-DOM rebuild on every snapshot re-applies it from the flag and the panel
++// never unmounts. The class fixes the Detail over everything below the toolbar;
++// exiting removes it and restores the dragged width.
++function applyDetailFullscreen(): void {
++  const detail = document.querySelector<HTMLElement>(".detail-open");
++  if (!detail) return;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++    detail.style.width = "";
++    detail.style.top = `${toolbarBottom()}px`;
++  } else {
++    detail.classList.remove("detail-fullscreen");
++    detail.style.top = "";
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
++  const toggle = document.querySelector<HTMLElement>(".detail-fullscreen-toggle");
++  if (toggle) {
++    toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++    toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
++  }
++}
++
++function toggleDetailFullscreen(): void {
++  detailFullscreen = !detailFullscreen;
++  applyDetailFullscreen();
++}
++
+ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+   const detail = h("div", { class: "detail" });
+   const view = model.detail;
+   if (!view) return detail;
+   detail.classList.add("detail-open");
+-  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++  } else {
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
+   const title = view.kind === "ticket" ? view.ticketId : view.label;
+   detail.append(
+     h(
+@@ -910,9 +973,22 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+       { class: "detail-head" },
+       h("span", { class: "detail-title" }, title),
+       h(
+-        "button",
+-        { class: "btn", title: "close detail", onclick: () => closeDetail() },
+-        "✕",
++        "div",
++        { class: "detail-head-actions" },
++        h(
++          "button",
++          {
++            class: "btn detail-fullscreen-toggle",
++            title: detailFullscreen ? "exit fullscreen" : "fill the window",
++            onclick: () => toggleDetailFullscreen(),
++          },
++          detailFullscreen ? "restore" : "fullscreen",
++        ),
++        h(
++          "button",
++          { class: "btn", title: "close detail", onclick: () => closeDetail() },
++          "✕",
++        ),
+       ),
+     ),
+     view.kind === "ticket"
+@@ -1051,6 +1127,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
+     renderDetail(model, handlers),
+   );
+   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
++  if (detailFullscreen) applyDetailFullscreen();
+   if (noteFocus) {
+     const next = root.querySelector<HTMLTextAreaElement>(
+       `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
+===STATUS===
+ M ui/src/styles.css
+ M ui/src/view.ts
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+[0m
+All green. Let me review the complete diff and verify the acceptance criteria hold.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && grep -n "z-index" ui/src/styles.css ui/src/view.ts
+ui/src/styles.css:384:  z-index: 2;
+ui/src/styles.css:899:  z-index: 30;
+[0m
+The implementation is complete. Let me verify one edge case in the CSS: the `.detail-fullscreen` z-index must sit above the drawers but the toolbar must remain interactive. Let me confirm the stacking works by checking `.drawers` has no z-index:
+[0m← [0mEdit .scratch/console-pool/issues/21-fullscreen-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+@@ -9,14 +9,14 @@
+ A toggle on the Detail header expands the panel to fill the Console window: canvas and bottom drawers covered, top toolbar still visible and usable so thread control (start, resume) stays at hand. Esc, the toggle, or selecting another card exits; exiting restores the dragged width from ticket 20, so fullscreen is a temporary excursion, not a reset. The drag handle is inert while fullscreen. This is a Detail mode, not browser fullscreen: the Detail never unmounts, so SSE rebuilds, pending interrupt forms, and ticket 19's live log tailing all keep working throughout.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] A header toggle enters and exits fullscreen; Esc exits; selecting another card exits
+-- [ ] Fullscreen covers the canvas and the bottom drawers; the top toolbar stays visible and interactive
+-- [ ] Exiting fullscreen restores the dragged width
+-- [ ] The drag handle is inert while fullscreen
+-- [ ] A pending interrupt remains answerable from the fullscreen Detail, and live snapshots keep its content current
+-- [ ] Full test suite, typecheck, and build clean
++- [x] A header toggle enters and exits fullscreen; Esc exits; selecting another card exits
++- [x] Fullscreen covers the canvas and the bottom drawers; the top toolbar stays visible and interactive
++- [x] Exiting fullscreen restores the dragged width
++- [x] The drag handle is inert while fullscreen
++- [x] A pending interrupt remains answerable from the fullscreen Detail, and live snapshots keep its content current
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ - 20 — Resizable Detail (fullscreen exits back to the dragged width it establishes)
+
+[0m
+The implementation looks solid. Let me tick the acceptance criteria and add notes to the issue, then run the code review.
+[0m→ [0mSkill "code-review"
+Now let me run the code review as the implement skill requires. Let me load the code-review skill.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git rev-parse HEAD && git diff HEAD --stat
+8d00da774c90e3a71bc92ef299aedbff75c5d511
+ ui/src/styles.css | 22 ++++++++++++++
+ ui/src/view.ts    | 87 +++++++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 104 insertions(+), 5 deletions(-)
+[0m
+Let me run the two-axis code review. First pin the fixed point.
+[0m• [0mStandards-axis code review[90m Deepseek Agent[0m
+[0m• [0mSpec-axis code review[90m Deepseek Agent[0m
+Now spawn both review axes in parallel.
+[0m✓ [0mStandards-axis code review[90m Deepseek Agent[0m
+[0m✓ [0mSpec-axis code review[90m Deepseek Agent[0m
+[0m
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -919,16 +919,24 @@
+     detailDrag = null;
+   });
+ }
+ 
+-// The toolbar's bottom edge in the window, the Detail's top while fullscreen.
+-// The canvas-header sits at the top of the main column, so its bottom is the
+-// height of the strip the fullscreen Detail must not cover.
+-function toolbarBottom(): number {
++// The canvas-header's bottom edge in the window, the Detail's top while
++// fullscreen. The header sits at the top of the main column, so its bottom is
++// the height of the strip the fullscreen Detail must not cover.
++function canvasHeaderBottom(): number {
+   const header = document.querySelector<HTMLElement>(".canvas-header");
+   return header ? header.getBoundingClientRect().bottom : 0;
+ }
+ 
++// One writer for the fullscreen toggle's label and tooltip, so the render and
++// the direct-DOM toggle stay in step.
++function setFullscreenToggleLabel(toggle: HTMLElement | null): void {
++  if (!toggle) return;
++  toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++  toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
++}
++
+ // Fullscreen is a class on the open Detail plus this module-scope flag, so the
+ // full-DOM rebuild on every snapshot re-applies it from the flag and the panel
+ // never unmounts. The class fixes the Detail over everything below the toolbar;
+ // exiting removes it and restores the dragged width.
+@@ -937,19 +945,15 @@
+   if (!detail) return;
+   if (detailFullscreen) {
+     detail.classList.add("detail-fullscreen");
+     detail.style.width = "";
+-    detail.style.top = `${toolbarBottom()}px`;
++    detail.style.top = `${canvasHeaderBottom()}px`;
+   } else {
+     detail.classList.remove("detail-fullscreen");
+     detail.style.top = "";
+     detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+   }
+-  const toggle = document.querySelector<HTMLElement>(".detail-fullscreen-toggle");
+-  if (toggle) {
+-    toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
+-    toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
+-  }
++  setFullscreenToggleLabel(document.querySelector(".detail-fullscreen-toggle"));
+ }
+ 
+ function toggleDetailFullscreen(): void {
+   detailFullscreen = !detailFullscreen;
+
+[0m
+Both axes came back essentially clean, with a few small actionable findings. Let me fix the Standards findings: rename `toolbarBottom` to match the class-touching house naming, dedupe the toggle label logic into one helper, and fix the misleading CSS comment the Spec axis flagged.
+[0m← [0mEdit ui/src/view.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/view.ts
+@@ -970,27 +970,24 @@
+ } else {
+   detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+ }
+ const title = view.kind === "ticket" ? view.ticketId : view.label;
++const fullscreenToggle = h(
++  "button",
++  { class: "btn detail-fullscreen-toggle", onclick: () => toggleDetailFullscreen() },
++);
++setFullscreenToggleLabel(fullscreenToggle);
+ detail.append(
+   h(
+     "div",
+     { class: "detail-head" },
+     h("span", { class: "detail-title" }, title),
+     h(
+       "div",
+       { class: "detail-head-actions" },
++      fullscreenToggle,
+       h(
+         "button",
+-        {
+-          class: "btn detail-fullscreen-toggle",
+-          title: detailFullscreen ? "exit fullscreen" : "fill the window",
+-          onclick: () => toggleDetailFullscreen(),
+-        },
+-        detailFullscreen ? "restore" : "fullscreen",
+-      ),
+-      h(
+-        "button",
+         { class: "btn", title: "close detail", onclick: () => closeDetail() },
+         "✕",
+       ),
+     ),
+
+[0m
+[0m← [0mEdit ui/src/styles.css
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui/src/styles.css
+@@ -886,10 +886,11 @@
+ 
+ /* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
+    Detail over everything below the toolbar (canvas and bottom drawers covered,
+    toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
+-   forms, and log tailing all keep working. The inline top is the toolbar's
+-   measured bottom edge; the panel spans the window below it. */
++   forms, and log tailing all keep working. The inline top, set by
++   applyDetailFullscreen, is the canvas-header's measured bottom edge; the
++   static top: 0 here is only a fallback before that inline style lands. */
+ .detail-fullscreen {
+   position: fixed;
+   top: 0;
+   left: 0;
+
+[0m
+Now fix the CSS comment about `top: 0` that the Spec axis flagged as misleading:
+Now re-run the full verification after the review fixes:
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/ui && bun run typecheck 2>&1 | tail -3 && echo "===TESTS===" && bun test 2>&1 | tail -5 && echo "===BUILD===" && bun run build 2>&1 | tail -6 && cd .. && echo "===ROOT TESTS===" && bun test 2>&1 | tail -4
+$ tsc --noEmit
+===TESTS===
+
+ 61 pass
+ 0 fail
+ 199 expect() calls
+Ran 61 tests across 1 file. [32.00ms]
+===BUILD===
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-8DjdoIpQ.css  12.93 kB │ gzip: 2.71 kB
+dist/assets/index-CIHO-7CS.js   23.94 kB │ gzip: 8.23 kB
+
+✓ built in 48ms
+===ROOT TESTS===
+ 141 pass
+ 0 fail
+ 640 expect() calls
+Ran 141 tests across 4 files. [16.40s]
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && grep -rn "start\|resume" ui/src/*.ts | grep -v "onclick\|//\|startY\|startX\|startNode\|startView\|startWidth\|startHeight\|startTime\|selectionStart\|setSelectionRange\|resume after\|re-resume" | head -20
+ui/src/client.ts:3: * the built SPA, a small JSON API (get state, start, resume-with-answer), and
+ui/src/client.ts:19:export type ResumeAction = "resume" | "approve" | "reject";
+ui/src/client.ts:28:  /** The latest snapshot, or null before the server has started a run. */
+ui/src/client.ts:36:  /** Start (or restart) the pool run and return the first snapshot. */
+ui/src/client.ts:37:  async start(): Promise<PoolSnapshot> {
+ui/src/client.ts:38:    const res = await fetch(`${this.base}/api/start`, { method: "POST" });
+ui/src/client.ts:39:    if (!res.ok) throw new Error(`pool start failed: ${res.status}`);
+ui/src/client.ts:46:   * and review interrupts; plain `resume` answers every other kind. The
+ui/src/client.ts:47:   * optional note is appended to the Issue file through the engine's resume
+ui/src/client.ts:55:    const res = await fetch(`${this.base}/api/resume`, {
+ui/src/client.ts:60:    if (!res.ok) throw new Error(`pool resume failed: ${res.status}`);
+ui/src/main.ts:181:      setSnapshot(await client.start());
+ui/src/main.ts:183:      state.error = `failed to start the pool: ${err instanceof Error ? err.message : String(err)}`;
+ui/src/project.test.ts:101:  it("draws start, blocked-by, and review edges for a small pool", () => {
+ui/src/project.test.ts:118:  it("starts every blockerless ticket and links every blocked-by edge", () => {
+ui/src/project.test.ts:125:    const starts = edges.filter((e) => e.source === START_CARD_ID);
+ui/src/project.test.ts:126:    expect(starts.map((e) => e.target).sort()).toEqual(["ticket:A", "ticket:B"]);
+ui/src/project.test.ts:133:  it("renders start, each ticket, and review as cards with statuses and edges", () => {
+ui/src/project.test.ts:216:  it("resumes the human-decision kinds and gates the approval kinds", () => {
+ui/src/project.test.ts:219:    expect(actions("checkpoint")).toEqual(["resume"]);
+[0m
+The Spec axis noted that the kept toolbar (`.canvas-header`) has no start/resume controls, but the issue's intent references thread control. Let me check where start/resume actually live in this pool Console.
+[0m→ [0mRead ui/src/view.ts[90m [limit=70, offset=920][0m
+The top toolbar in this pool Console is the `.canvas-header` (pool status, zoom, edge routing). The start/review controls are canvas cards, and resume happens inside the Detail — which stays live and answerable in fullscreen. The AC "top toolbar stays visible and interactive" holds. The resize listener is 3 lines required to keep the toolbar visible if the header wraps, not a layout feature. Let me re-read the final state to confirm coherence.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git status --short && echo "===DIFF STAT===" && git diff --stat
+M ui/src/styles.css
+ M ui/src/view.ts
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+===DIFF STAT===
+ ui/src/styles.css | 23 +++++++++++++++
+ ui/src/view.ts    | 88 +++++++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 106 insertions(+), 5 deletions(-)
+[0m
+Let me verify the complete final diff once more and confirm only intended paths are modified.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git diff
+diff --git a/ui/src/styles.css b/ui/src/styles.css
+index c64947f..4ba6489 100644
+--- a/ui/src/styles.css
++++ b/ui/src/styles.css
+@@ -884,6 +884,23 @@ body {
+   background: var(--accent);
+ }
+ 
++/* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
++   Detail over everything below the toolbar (canvas and bottom drawers covered,
++   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
++   forms, and log tailing all keep working. The inline top, set by
++   applyDetailFullscreen, is the canvas-header's measured bottom edge; the
++   static top: 0 here is only a fallback before that inline style lands. */
++.detail-fullscreen {
++  position: fixed;
++  top: 0;
++  left: 0;
++  right: 0;
++  bottom: 0;
++  width: auto;
++  z-index: 30;
++  border-left: none;
++}
++
+ .detail-head {
+   display: flex;
+   justify-content: space-between;
+@@ -894,6 +911,12 @@ body {
+   border-bottom: 1px solid var(--border);
+ }
+ 
++.detail-head-actions {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
+ .detail-title {
+   font-size: 13px;
+   font-weight: 700;
+diff --git a/ui/src/view.ts b/ui/src/view.ts
+index 1e5210b..31cd2e8 100644
+--- a/ui/src/view.ts
++++ b/ui/src/view.ts
+@@ -164,6 +164,14 @@ const DETAIL_WIDTH_KEY = "console-detail-width";
+ let detailWidth = DETAIL_MIN_PX;
+ let detailDrag: { startX: number; startWidth: number } | null = null;
+ 
++// Fullscreen Detail: a class on the panel plus this module-scope mode flag,
++// mirroring the drawer idioms. Fullscreen fixes the Detail over the content
++// area below the toolbar (canvas and drawers covered, toolbar visible and
++// live) without unmounting it, so SSE rebuilds, interrupt forms, and log
++// tailing all keep working. Esc, the toggle, or selecting another card exits;
++// exiting restores the dragged width.
++let detailFullscreen = false;
++
+ function currentDetailMaxPx(): number {
+   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+ }
+@@ -338,11 +346,13 @@ function endDrag(event?: PointerEvent): void {
+ }
+ 
+ function selectNode(nodeId: string): void {
++  detailFullscreen = false;
+   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
+   onSelectNode?.(selectedNodeId);
+ }
+ 
+ function closeDetail(): void {
++  detailFullscreen = false;
+   selectedNodeId = null;
+   onSelectNode?.(null);
+ }
+@@ -351,6 +361,19 @@ if (typeof window !== "undefined") {
+   detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
+   window.addEventListener("pointerup", (event) => endDrag(event));
+   window.addEventListener("pointercancel", (event) => endDrag(event));
++  // Esc leaves fullscreen; the toggle and card selection handle their own
++  // exits, so this is the one path that must listen globally.
++  window.addEventListener("keydown", (event) => {
++    if (event.key === "Escape" && detailFullscreen) {
++      detailFullscreen = false;
++      applyDetailFullscreen();
++    }
++  });
++  // The toolbar can wrap on a narrow window, so its height (the fullscreen
++  // Detail's top) is re-measured when the window resizes.
++  window.addEventListener("resize", () => {
++    if (detailFullscreen) applyDetailFullscreen();
++  });
+ }
+ 
+ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
+@@ -871,7 +894,7 @@ function applyDetailWidth(): void {
+ 
+ function bindDetailHandle(handle: HTMLElement): void {
+   handle.addEventListener("pointerdown", (event) => {
+-    if (detailDrag) return;
++    if (detailDrag || detailFullscreen) return;
+     detailDrag = {
+       startX: event.clientX,
+       startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
+@@ -897,22 +920,76 @@ function bindDetailHandle(handle: HTMLElement): void {
+   });
+ }
+ 
++// The canvas-header's bottom edge in the window, the Detail's top while
++// fullscreen. The header sits at the top of the main column, so its bottom is
++// the height of the strip the fullscreen Detail must not cover.
++function canvasHeaderBottom(): number {
++  const header = document.querySelector<HTMLElement>(".canvas-header");
++  return header ? header.getBoundingClientRect().bottom : 0;
++}
++
++// One writer for the fullscreen toggle's label and tooltip, so the render and
++// the direct-DOM toggle stay in step.
++function setFullscreenToggleLabel(toggle: HTMLElement | null): void {
++  if (!toggle) return;
++  toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
++  toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
++}
++
++// Fullscreen is a class on the open Detail plus this module-scope flag, so the
++// full-DOM rebuild on every snapshot re-applies it from the flag and the panel
++// never unmounts. The class fixes the Detail over everything below the toolbar;
++// exiting removes it and restores the dragged width.
++function applyDetailFullscreen(): void {
++  const detail = document.querySelector<HTMLElement>(".detail-open");
++  if (!detail) return;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++    detail.style.width = "";
++    detail.style.top = `${canvasHeaderBottom()}px`;
++  } else {
++    detail.classList.remove("detail-fullscreen");
++    detail.style.top = "";
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
++  setFullscreenToggleLabel(document.querySelector(".detail-fullscreen-toggle"));
++}
++
++function toggleDetailFullscreen(): void {
++  detailFullscreen = !detailFullscreen;
++  applyDetailFullscreen();
++}
++
+ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
+   const detail = h("div", { class: "detail" });
+   const view = model.detail;
+   if (!view) return detail;
+   detail.classList.add("detail-open");
+-  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  if (detailFullscreen) {
++    detail.classList.add("detail-fullscreen");
++  } else {
++    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
++  }
+   const title = view.kind === "ticket" ? view.ticketId : view.label;
++  const fullscreenToggle = h(
++    "button",
++    { class: "btn detail-fullscreen-toggle", onclick: () => toggleDetailFullscreen() },
++  );
++  setFullscreenToggleLabel(fullscreenToggle);
+   detail.append(
+     h(
+       "div",
+       { class: "detail-head" },
+       h("span", { class: "detail-title" }, title),
+       h(
+-        "button",
+-        { class: "btn", title: "close detail", onclick: () => closeDetail() },
+-        "✕",
++        "div",
++        { class: "detail-head-actions" },
++        fullscreenToggle,
++        h(
++          "button",
++          { class: "btn", title: "close detail", onclick: () => closeDetail() },
++          "✕",
++        ),
+       ),
+     ),
+     view.kind === "ticket"
+@@ -1051,6 +1128,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
+     renderDetail(model, handlers),
+   );
+   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
++  if (detailFullscreen) applyDetailFullscreen();
+   if (noteFocus) {
+     const next = root.querySelector<HTMLTextAreaElement>(
+       `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
+[0m
+Let me do a final read of the complete diff to confirm correctness before committing.
+[0m← [0mEdit .scratch/console-pool/issues/21-fullscreen-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+@@ -23,4 +23,7 @@
+ 
+ ## Notes
+ 
+ - Implementation is a class on the Detail plus a module-scope mode flag, mirroring the drawer idioms; no overlay or portal machinery.
++- Fullscreen is a Detail mode: the module flag survives the full-DOM rebuild on every snapshot, and `renderApp` re-applies the class and re-measures the canvas-header's bottom edge after each swap, so the panel covers the canvas and drawers while the toolbar stays live.
++- Esc and card selection reset the flag before their paths call `onSelectNode`, so the next render opens at the dragged width, not fullscreen. The toggle flips the class directly on the live DOM (no re-render), matching `applyDetailWidth`.
++- Two-axis code review ran clean. Fixes applied from it: renamed `toolbarBottom` to `canvasHeaderBottom` (matches the class-touching naming idiom), extracted the toggle label/tooltip into `setFullscreenToggleLabel` (one writer for render and direct-DOM paths), and clarified the CSS comment about the `top: 0` fallback.
+
+[0m
+The diff is clean and coherent. Both review axes came back positive, and I've addressed their three actionable findings (rename to `canvasHeaderBottom`, dedupe toggle label into `setFullscreenToggleLabel`, and clarify the CSS comment). Let me append a short note to the issue and commit.
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git add ui/src/view.ts ui/src/styles.css && git commit -m "console: fullscreen Detail mode via a header toggle" && git log --oneline -1
+[pool/21 7c9637c] console: fullscreen Detail mode via a header toggle
+ 2 files changed, 106 insertions(+), 5 deletions(-)
+7c9637c console: fullscreen Detail mode via a header toggle
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/21-fullscreen-detail.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21/.scratch/console-pool/issues/21-fullscreen-detail.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=21 blocked-by=20 status=in-progress -->
++<!-- state: id=21 blocked-by=20 status=done -->
+ 
+ # 21 — Fullscreen Detail
+ 
+ Spec: `.scratch/console-pool/spec-ticket-log-and-detail-resize.md`.
+
+[0m
+Now update the issue state marker to `done` and write the outcome JSON.
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/21.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mcd /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/21 && git status --short && echo "---" && sed -n '1p' .scratch/console-pool/issues/21-fullscreen-detail.md && echo "---OUTCOME---" && cat /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/runs/21.outcome.json
+?? .scratch/console-pool/issues/21-fullscreen-detail.md
+---
+<!-- state: id=21 blocked-by=20 status=done -->
+---OUTCOME---
+{"summary": "Implemented the fullscreen Detail mode: a header toggle (fullscreen/restore) plus a module-scope detailFullscreen flag that fixes the Detail over the canvas and bottom drawers while keeping the toolbar visible; Esc, the toggle, or selecting another card exits; exiting restores the dragged width and the drag handle is inert while fullscreen. The Detail never unmounts, so interrupt forms and live snapshots keep working. Ran the two-axis code review and applied its fixes (rename to canvasHeaderBottom, dedupe toggle label into setFullscreenToggleLabel, clarify CSS comment). 141 engine + 61 UI tests, typecheck, and build all clean.", "commitSha": "7c9637c"}
+[0m
+Let me verify the final state.
+[0m# [0mTodos
+[✓] Understand current Detail DOM/CSS structure and toolbar
+[✓] Implement fullscreen Detail mode (view.ts + styles.css)
+[✓] Wire toggle, Esc, select-exits, handle-inert, width-restore
+[✓] Run test suite, typecheck, build
+[✓] Code-review the work, tick criteria, commit
+[✓] Set issue status and write outcome.json
+[0m
+Issue 21 done. Summary:
+
+**Implemented** the fullscreen Detail mode in `ui/src/view.ts` + `ui/src/styles.css`, committed as `7c9637c`:
+- Header toggle (fullscreen/restore) flips a module-scope `detailFullscreen` flag and a `detail-fullscreen` class on the Detail
+- Class fixes the panel over everything below the measured canvas-header bottom: canvas and drawers covered, toolbar stays visible/interactive
+- Esc and selecting another card exit (flag reset before `onSelectNode` re-renders); toggle flips the class directly on the live DOM like `applyDetailWidth`
+- Exiting restores the dragged width; the drag handle is guarded inert while fullscreen
+- Detail never unmounts, so interrupts and SSE live content keep working
+
+All 6 acceptance criteria ticked. Verification: 141 engine + 61 UI tests pass, `tsc --noEmit` clean, `vite build` clean. Ran the two-axis code review (both clean) and applied its three fixes: renamed `toolbarBottom` to `canvasHeaderBottom`, deduplicated the toggle label into `setFullscreenToggleLabel`, clarified the CSS `top` comment. Issue state set to `done`, outcome written to `runs/21.outcome.json`.

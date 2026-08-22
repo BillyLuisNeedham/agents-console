@@ -1,0 +1,864 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-pool/issues/01-pool-engine-skeleton.md
+[0m✗ [0mRead prototype/NOTES.md failed
+[91m[1mError: [0mFile not found: /home/billy/repos/learning/ai-agent-graphs/prototype/NOTES.md
+[0m→ [0mRead .scratch/console-pool/spec-ticket-pools.md
+[0m✱ [0mGlob "prototype/**/*.md"[90m 0 matches[0m
+[0m
+[0m$ [0mls -la && git status && git log --oneline -5 && git branch --show-current
+total 100
+drwxr-xr-x 1 billy billy   372 Aug 18 21:09 .
+drwxr-xr-x 1 billy billy    82 Aug 14 23:00 ..
+-rw-r--r-- 1 billy billy 65341 Aug 18 21:09 bun.lock
+-rw-r--r-- 1 billy billy  2907 Aug 18 21:09 CONTEXT.md
+drwxr-xr-x 1 billy billy    48 Aug 18 21:09 docs
+-rw-r--r-- 1 billy billy    94 Aug 18 21:09 .env
+drwxr-xr-x 1 billy billy   144 Aug 18 22:15 .git
+-rw-r--r-- 1 billy billy    99 Aug 18 21:09 .gitignore
+drwxr-xr-x 1 billy billy   164 Aug 18 21:09 .langgraph_api
+-rw-r--r-- 1 billy billy    93 Aug 18 21:09 langgraph.json
+drwxr-xr-x 1 billy billy   126 Aug 18 21:09 mock-tickets
+drwxr-xr-x 1 billy billy    20 Aug 18 21:09 mock-tickets-deadlock
+drwxr-xr-x 1 billy billy  4076 Aug 18 20:49 node_modules
+-rw-r--r-- 1 billy billy  3883 Aug 18 21:09 NOTES.md
+-rw-r--r-- 1 billy billy   566 Aug 18 21:09 package.json
+-rw-r--r-- 1 billy billy   987 Aug 18 21:09 README.md
+drwxr-xr-x 1 billy billy    64 Aug 18 21:09 .run
+drwxr-xr-x 1 billy billy    38 Aug 18 21:53 .scratch
+drwxr-xr-x 1 billy billy    44 Aug 18 21:09 scripts
+drwxr-xr-x 1 billy billy   100 Aug 18 21:09 src
+drwxr-xr-x 1 billy billy    30 Aug 18 21:09 tickets
+-rw-r--r-- 1 billy billy   300 Aug 18 21:09 tsconfig.json
+drwxr-xr-x 1 billy billy   164 Aug 18 21:09 ui
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/console-pool/issues/01-pool-engine-skeleton.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/console-pool/runs/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+41ac900 console-pool: ticket queue, spec, and runner for the pool engine
+12aea8c remove the lessons; promote the console prototype to the repo root
+591fb52 console: close the Detail review, accept findings and fix the spec vocab
+98cb424 console: review the Detail panel and resizable drawers iteration
+04f6a61 console: add a drag handle to resize the bottom drawers
+main
+[0m
+[0m→ [0mRead NOTES.md
+The prototype was promoted to repo root (commit 12aea8c), so the runner's `prototype/` paths now live at the root. Reading the required context files:
+[0m→ [0mRead src/graph.ts
+[0m→ [0mRead src/state.ts
+[0m→ [0mRead src/nodes.ts
+[0m→ [0mRead src/tickets.ts
+[0m→ [0mRead .scratch/console/AGENT.md
+[0m→ [0mRead .scratch/console/run.sh
+[0m
+[0m$ [0mls ui/src/ mock-tickets/ mock-tickets-deadlock/ .scratch/console-pool/ .scratch/console-pool/issues/ && cat package.json tsconfig.json .gitignore
+mock-tickets/:
+M10.md
+M11.md
+M12.md
+M1.md
+M2.md
+M3.md
+M4.md
+M5.md
+M6.md
+M7.md
+M8.md
+M9.md
+
+mock-tickets-deadlock/:
+D1.md
+D2.md
+
+.scratch/console-pool/:
+AGENT.md
+issues
+runs
+run.sh
+spec-ticket-pools.md
+
+.scratch/console-pool/issues/:
+01-pool-engine-skeleton.md
+02-interrupt-engine.md
+03-durability.md
+04-harness-spawn-kernel.md
+05-worktrees-parallel.md
+06-resolver-agent.md
+07-server-and-pool-ui.md
+08-inline-interrupts-ui.md
+09-final-review-interrupt.md
+10-console-runner-skill.md
+11-review-pass.md
+
+ui/src/:
+client.ts
+data.ts
+main.ts
+mock.ts
+project.test.ts
+project.ts
+styles.css
+variants
+view.ts
+vite-env.d.ts
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  },
+  "include": ["src"]
+}
+node_modules/
+dist/
+.run/
+.langgraph_api/
+.env
+.scratch/console/runs/
+.scratch/console/verify-*.ts
+[0m
+[0m$ [0mcat mock-tickets/M1.md mock-tickets/M2.md mock-tickets-deadlock/D1.md && head -50 ui/src/project.test.ts
+---
+id: M1
+blockedBy: []
+---
+Create the notes table schema and migration
+---
+id: M2
+blockedBy: [M1]
+---
+Implement notes CRUD API endpoints
+---
+id: D1
+blockedBy: [D2]
+---
+Ship the feature that depends on the migration
+/// <reference types="bun" />
+
+import { describe, expect, it } from "bun:test";
+import type { Thread } from "@langchain/langgraph-sdk";
+import {
+  applyStreamPart,
+  clampDrawersHeight,
+  DRAWER_MAX_VH,
+  DRAWER_MIN_VH,
+  finishRun,
+  initRun,
+  edgePath,
+  layoutGraph,
+  layoutStorageKey,
+  mergeLayout,
+  nextNodeSelection,
+  parseStoredLayout,
+  projectChannels,
+  projectDetail,
+  projectLog,
+  projectInterruptForm,
+  projectNodeCards,
+  projectNodeChannels,
+  projectNodeStateSlice,
+  projectNodes,
+  projectResume,
+  projectStartRun,
+  projectThreadSummary,
+  projectTicketCards,
+  projectTicketEdges,
+  projectTopology,
+  strokeWidthForZoom,
+  syncRunValues,
+  visibleThreads,
+  zoomAtCursor,
+  type RunProjection,
+} from "./project";
+
+type Raw = Record<string, unknown>;
+
+function thread(overrides: Partial<Thread<Raw>> = {}): Thread<Raw> {
+  return {
+    thread_id: "t-1",
+    created_at: "2026-08-16T10:00:00Z",
+    updated_at: "2026-08-16T10:05:00Z",
+    state_updated_at: "2026-08-16T10:05:00Z",
+    metadata: {},
+    status: "idle",
+    values: {},
+    interrupts: {},
+[0m
+[0m$ [0mbun --version && node --version
+1.3.14
+v26.4.0
+[0m
+[0m$ [0mcat .scratch/console-pool/issues/02-interrupt-engine.md .scratch/console-pool/issues/03-durability.md .scratch/console-pool/issues/04-harness-spawn-kernel.md
+<!-- state: id=02 blocked-by=01 status=ready -->
+
+# 02 — Interrupt engine
+
+Spec: `.scratch/console-pool/spec-ticket-pools.md`
+
+## What to build
+
+The engine's interrupt model. When a ticket's marker comes back as `checkpoint`, the engine raises an interrupt carrying the Issue's Brief; when a harness exits without setting a status, it raises a crash interrupt carrying the ticket's log path; when a ticket's blockers can never complete (cycle, or an upstream ticket failed terminally), it raises a deadlock interrupt. An interrupt pauses only its own ticket's subtree — ready siblings keep running in later super-steps. The engine exposes resume-with-answer: the caller answers an interrupt (with an optional note), the note is appended to the Issue file, and the pool continues automatically with no separate continue step. The engine reports quiescence — nothing running, interrupts pending — as a distinct state from done.
+
+## Acceptance criteria
+
+- [ ] `status=checkpoint` on a marker raises an interrupt carrying the ticket's Brief
+- [ ] A harness exit with no status set raises a crash interrupt carrying the log path
+- [ ] A ticket whose blockers can never complete raises a deadlock interrupt
+- [ ] An interrupted ticket's ready siblings continue running in subsequent super-steps
+- [ ] Resume-with-answer restarts the interrupted ticket's subtree and continues the pool with no separate continue action
+- [ ] A resume note is appended to the Issue file
+- [ ] Quiescent (all stopped, interrupts pending) is distinguishable from done (all tickets done) in emitted state
+- [ ] All of the above covered by engine-seam tests with stub harnesses
+
+## Blocked by
+
+- 01 — Pool engine walking skeleton
+<!-- state: id=03 blocked-by=01 status=ready -->
+
+# 03 — Durability and rehydration
+
+Spec: `.scratch/console-pool/spec-ticket-pools.md`
+
+## What to build
+
+The engine's durability story. Line-1 state markers are dual-written alongside every sqlite checkpoint, and on any disagreement the marker wins — the file on disk is the human-readable truth shared with `run.sh`. An engine process that stops mid-run (kill, crash, machine restart) can be started again against the same pool directory and rehydrates: tickets marked done stay done, in-progress tickets are treated per their marker (an interrupted agent's marker semantics match my-issue-runner's: back to ready with the note it left), pending interrupts are restored, and the run continues from the next super-step. A pool driven partway by the Console remains drivable by `run.sh` and vice versa.
+
+## Acceptance criteria
+
+- [ ] Every checkpoint write is accompanied by the corresponding line-1 marker writes
+- [ ] On rehydration, a marker that disagrees with the checkpoint wins
+- [ ] A killed engine resumes the same pool from rehydrated state without re-running done tickets
+- [ ] Pending interrupts survive a restart and are still answerable
+- [ ] A pool part-run by the engine can be inspected by `run.sh status` and continued by it
+- [ ] Covered by engine-seam tests, including a kill-mid-super-step scenario
+
+## Blocked by
+
+- 01 — Pool engine walking skeleton
+<!-- state: id=04 blocked-by=01 status=ready -->
+
+# 04 — Harness spawn kernel
+
+Spec: `.scratch/console-pool/spec-ticket-pools.md`
+
+## What to build
+
+Real harness execution, ported from run.sh's proven spawn mechanics into the engine. Each ticket spawns its assigned harness CLI (claude, opencode, or cursor's agent) non-interactively with stdin closed, in the permission mode that works unattended, with the glued prompt: driver skill first, then AGENT.md, the skill chain, and the roster glued behind. The per-ticket harness and model come from console.json (written by the runner skill; a hand-written console.json works for this ticket). Each ticket's output lands in the pool's runs directory as a per-ticket log, matching my-issue-runner's convention. The opencode path drives the skill through `--command` with the bare skill name; the cursor launch line follows Cursor's CLI docs and is treated as unproven. The known hard-won quirks (GNU/BSD sed differences, gated permission modes failing unattended) are carried over, not rediscovered.
+
+## Acceptance criteria
+
+- [ ] A ticket spawns its console.json-assigned harness and model with stdin closed and the unattended permission mode
+- [ ] The prompt glues driver skill + AGENT.md + chain + roster in run.sh's proven shape
+- [ ] opencode reaches its driver via `--command`; the cursor launch line matches Cursor's documented CLI
+- [ ] Each ticket writes a per-ticket log to the pool's runs directory
+- [ ] Marker read-back after exit drives status exactly as with stub harnesses (the engine cannot tell the difference)
+- [ ] Proven end-to-end with at least one real harness running a trivial real ticket in a scratch pool
+- [ ] Harness selection logic covered by engine-seam tests with fake CLI binaries on PATH
+
+## Blocked by
+
+- 01 — Pool engine walking skeleton
+[0m
+Context is read. The prototype was promoted to repo root, so engine paths resolve there. Baseline checks before writing:
+[0m$ [0mbun test 2>&1 | tail -20
+bun test v1.3.14 (0d9b296a)
+
+ 82 pass
+ 0 fail
+ 168 expect() calls
+Ran 82 tests across 1 file. [30.00ms]
+[0m
+[0m$ [0mbunx tsc --noEmit && echo TSC-OK; ls ui/
+TSC-OK
+bun.lock
+index.html
+node_modules
+package.json
+src
+tsconfig.json
+vite.config.ts
+[0m
+Baseline green. Appending a design note to the Issue before the long work, per the state protocol:
+[0m← [0mEdit .scratch/console-pool/issues/01-pool-engine-skeleton.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+@@ -21,4 +21,12 @@
+ 
+ ## Blocked by
+ 
+ None — can start immediately
++
++## Notes
++
++- Repo layout changed since the runner instructions were written: commit 12aea8c promoted the prototype to the repo root, so `prototype/src/...` is now `src/...` and `prototype/NOTES.md` is `NOTES.md`. (Proven: git log + ls.)
++- Engine lives in `engine/` at the repo root, a sibling of the LangGraph path in `src/` which stays untouched. Public interface is `engine/engine.ts`; everything else in the directory is internal.
++- The spawn seam is a harness resolver: `Record<name, (ctx) => argv>`. The engine always spawns the process itself (stdin closed, output to `runs/<id>.log`); tests inject stub resolvers, Issue 04 hardens the default claude/opencode/cursor resolvers.
++- Outcome mechanism: the harness writes `runs/<id>.outcome.json` (`{summary, commitSha}`) and the glued prompt instructs it to. The engine trusts the file; it does not derive the sha from git itself. (Decision: the Issue did not settle how outcomes are produced.)
++- Skeleton treats a pool that cannot advance as `phase: "stalled"` in emitted state and stops. Crash/checkpoint/deadlock interrupts are Issue 02; rehydration semantics are Issue 03. An `in-progress` marker at load is not re-run by the skeleton.
+
+[0m
+Now the engine. First the internal modules:
+[0m← [0mWrite engine/pool.ts
+Wrote file successfully.
+[0m
+[0m← [0mWrite engine/prompt.ts
+Wrote file successfully.
+[0m
+[0m← [0mWrite engine/spawn.ts
+Wrote file successfully.
+[0m
+[0m← [0mWrite engine/checkpoints.ts
+Wrote file successfully.
+[0m
+Now the public interface and the super-step loop:
+[0m← [0mWrite engine/engine.ts
+Wrote file successfully.
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -14,8 +14,11 @@
+   type HarnessCommand,
+   type SpawnContext,
+ } from "./spawn.ts";
+ 
++export type { TicketStatus } from "./pool.ts";
++export type { HarnessCommand, SpawnContext } from "./spawn.ts";
++
+ export interface Outcome {
+   summary: string;
+   commitSha: string | null;
+ }
+
+[0m
+Adding type re-exports so consumers and tests touch only `engine.ts`:
+[0m← [0mEdit tsconfig.json
+Index: /home/billy/repos/learning/ai-agent-graphs/tsconfig.json
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/tsconfig.json
++++ /home/billy/repos/learning/ai-agent-graphs/tsconfig.json
+@@ -9,6 +9,6 @@
+     "verbatimModuleSyntax": true,
+     "allowImportingTsExtensions": true,
+     "types": ["bun"]
+   },
+-  "include": ["src"]
++  "include": ["src", "engine"]
+ }
+
+[0m
+[0m$ [0mbunx tsc --noEmit && echo TSC-OK
+TSC-OK
+[0m
+Typecheck passes. Now the seam tests:
+[0m← [0mWrite engine/engine.test.ts
+Wrote file successfully.
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -30
+bun test v1.3.14 (0d9b296a)
+
+ 14 pass
+ 0 fail
+ 45 expect() calls
+Ran 14 tests across 1 file. [97.00ms]
+[0m
+[0m$ [0mbun test 2>&1 | tail -6 && bunx tsc --noEmit && echo TSC-OK && cd ui && bun run build 2>&1 | tail -4
+bun test v1.3.14 (0d9b296a)
+
+ 96 pass
+ 0 fail
+ 213 expect() calls
+Ran 96 tests across 2 files. [110.00ms]
+TSC-OK
+dist/assets/index-C8ULm2Xc.css  10.63 kB │ gzip:  2.37 kB
+dist/assets/index-lbwBaO-L.js   67.98 kB │ gzip: 21.05 kB
+
+✓ built in 57ms
+[0m
+All green. Now the code review step per the implement skill:
+[0m→ [0mRead /home/billy/.agents/skills/code-review/SKILL.md
+The change is uncommitted, so I'll mark intent-to-add to make the new files visible to `git diff`, then run both review axes in parallel sub-agents:
+[0m
+[0m$ [0mgit add -N engine/ && git diff HEAD --stat && git log --oneline -1
+.../console-pool/issues/01-pool-engine-skeleton.md |  10 +-
+ engine/checkpoints.ts                              |  28 ++
+ engine/engine.test.ts                              | 445 +++++++++++++++++++++
+ engine/engine.ts                                   | 346 ++++++++++++++++
+ engine/pool.ts                                     |  81 ++++
+ engine/prompt.ts                                   |  66 +++
+ engine/spawn.ts                                    |  61 +++
+ tsconfig.json                                      |   2 +-
+ 8 files changed, 1037 insertions(+), 2 deletions(-)
+41ac900 console-pool: ticket queue, spec, and runner for the pool engine
+[0m
+[0m• [0mStandards-axis code review[90m Deepseek Agent[0m
+[0m• [0mSpec-axis code review[90m Deepseek Agent[0m
+[0m✓ [0mStandards-axis code review[90m Deepseek Agent[0m
+[0m✓ [0mSpec-axis code review[90m Deepseek Agent[0m
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -118,11 +118,14 @@
+ const harnesses = { ...defaultHarnesses, ...options.harnesses };
+ const agentMd = readOptional(join(poolDir, "AGENT.md")) ?? "";
+ const cwd = repoRootOf(poolDir);
+ 
+-for (const marker of markers) {
+-  resolveAssignment(marker, config, harnesses);
+-}
++const assignments = new Map(
++  markers.map((marker) => [
++    marker.id,
++    resolveAssignment(marker, config, harnesses),
++  ]),
++);
+ 
+ let state: PoolState = {
+   tickets: Object.fromEntries(markers.map((m) => [m.id, m.status])),
+   log: [],
+
+[0m
+Both axes reported. Acting on the material findings: emit in-progress transitions, checkpoint terminal state, drop the cursor resolver (job constraints assign it to Issue 04), precompute assignments, rename `step`.
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -140,20 +140,30 @@
+     options.onSnapshot?.(snapshot);
+   };
+ 
+   const store = new CheckpointStore(poolDir);
++  let phase: Exclude<RunPhase, "running">;
+   try {
+     emit("running");
+-    let step = 0;
++    let superStep = 0;
+     for (;;) {
+       const ready = readyTickets(markers, state.tickets);
+       if (ready.length === 0) break;
+-      step += 1;
++      superStep += 1;
++      state = applyUpdate(state, {
++        tickets: Object.fromEntries(
++          ready.map((marker) => [marker.id, "in-progress" as const]),
++        ),
++        log: [
++          `super-step ${superStep}: ${ready.map((m) => m.id).join(", ")}`,
++        ],
++      });
++      emit("running");
+       const snapshot = state;
+ 
+       const updates = await Promise.all(
+         ready.map((marker) =>
+-          runTicket(marker, snapshot, {
++          runTicket(marker, snapshot, assignments.get(marker.id)!, {
+             poolDir,
+             runsDir,
+             issuesDir,
+             agentMd,
+@@ -162,35 +172,34 @@
+           }),
+         ),
+       );
+ 
+-      let joined = applyUpdate(snapshot, {
+-        log: [`super-step ${step}: ${ready.map((m) => m.id).join(", ")}`],
+-      });
++      let joined = snapshot;
+       for (const update of updates) {
+         joined = applyUpdate(joined, update);
+       }
+       state = joined;
+       store.write(state);
+       emit("running");
+     }
++
++    const pending = markers
++      .map((m) => m.id)
++      .filter((id) => state.tickets[id] !== "done");
++    phase = pending.length === 0 ? "done" : "stalled";
++    state = applyUpdate(state, {
++      log: [
++        phase === "done"
++          ? "pool done: every ticket reached done"
++          : `pool stalled: ${pending.join(", ")} cannot run`,
++      ],
++    });
++    store.write(state);
++    emit(phase);
+   } finally {
+     store.close();
+   }
+-
+-  const pending = markers
+-    .map((m) => m.id)
+-    .filter((id) => state.tickets[id] !== "done");
+-  const phase = pending.length === 0 ? "done" : "stalled";
+-  state = applyUpdate(state, {
+-    log: [
+-      phase === "done"
+-        ? "pool done: every ticket reached done"
+-        : `pool stalled: ${pending.join(", ")} cannot run`,
+-    ],
+-  });
+-  emit(phase);
+-  return { phase, final: state, snapshots };
++  return { phase: phase!, final: state, snapshots };
+ }
+ 
+ interface TicketEnv {
+   poolDir: string;
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -209,14 +209,20 @@
+   harnesses: Record<string, HarnessCommand>;
+   cwd: string;
+ }
+ 
++interface Assignment {
++  harness: string;
++  model: string;
++  drivers: string;
++}
++
+ async function runTicket(
+   marker: TicketMarker,
+   snapshot: PoolState,
++  assignment: Assignment,
+   env: TicketEnv,
+ ): Promise<PoolUpdate> {
+-  const assignment = resolveAssignment(marker, snapshot.config, env.harnesses);
+   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
+   const logPath = join(env.runsDir, `${marker.id}.log`);
+   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+   const issueRel = relative(env.cwd, marker.file);
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -308,9 +308,9 @@
+ function resolveAssignment(
+   marker: TicketMarker,
+   config: PoolConfig,
+   harnesses: Record<string, HarnessCommand>,
+-): { harness: string; model: string; drivers: string } {
++): Assignment {
+   const assign = config.assign?.[marker.id] ?? {};
+   const harness = assign.harness ?? config.defaults?.harness ?? "";
+   const model = assign.model ?? config.defaults?.model ?? "";
+   const drivers =
+
+[0m
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/spawn.ts
+@@ -40,20 +40,8 @@
+     "--model",
+     ctx.model,
+     "--auto",
+   ],
+-  // UNPROVEN: written from Cursor's CLI docs, not yet run on a real queue.
+-  cursor: (ctx) => [
+-    "agent",
+-    "-p",
+-    ctx.prompt,
+-    "--model",
+-    ctx.model,
+-    "--force",
+-    "--trust",
+-    "--output-format",
+-    "text",
+-  ],
+ };
+ 
+ function afterFirstLine(prompt: string): string {
+   const newline = prompt.indexOf("\n");
+
+[0m
+[0m← [0mEdit engine/pool.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/pool.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/pool.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/pool.ts
+@@ -61,9 +61,9 @@
+   lines[0] = lines[0].replace(/status=[a-z-]+/, `status=${status}`);
+   writeFileSync(file, lines.join(newline));
+ }
+ 
+-export function loadPool(issuesDir: string): TicketMarker[] {
++export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
+   const files = readdirSync(issuesDir)
+     .filter((file) => file.endsWith(".md"))
+     .sort();
+   if (files.length === 0) {
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -1,9 +1,9 @@
+ import { existsSync, mkdirSync, readFileSync } from "node:fs";
+ import { join, relative } from "node:path";
+ import { CheckpointStore } from "./checkpoints.ts";
+ import {
+-  loadPool,
++  loadPoolMarkers,
+   readMarker,
+   writeMarkerStatus,
+   type TicketMarker,
+   type TicketStatus,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.ts
+@@ -110,9 +110,9 @@
+ export async function runPool(options: RunOptions): Promise<PoolRun> {
+   const poolDir = options.poolDir;
+   const issuesDir = join(poolDir, "issues");
+   const runsDir = join(poolDir, "runs");
+-  const markers = loadPool(issuesDir);
++  const markers = loadPoolMarkers(issuesDir);
+   mkdirSync(runsDir, { recursive: true });
+ 
+   const config = readConfig(poolDir);
+   const harnesses = { ...defaultHarnesses, ...options.harnesses };
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+@@ -198,8 +198,15 @@
+ 
+   expect(run.phase).toBe("done");
+   expect(run.final.log).toContain("super-step 1: 01");
+   expect(run.final.log).toContain("super-step 2: 02");
++  expect(
++    run.snapshots.some(
++      (snapshot) =>
++        snapshot.state.tickets["01"] === "in-progress" &&
++        snapshot.state.tickets["02"] === "ready",
++    ),
++  ).toBe(true);
+ });
+ 
+ it("runs the ready set against one shared starting snapshot", async () => {
+   const poolDir = makePool({
+
+[0m
+Updating the tests for the new emission and checkpoint counts, plus pinning in-progress observability:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/engine/engine.test.ts
+@@ -393,15 +393,18 @@
+       .query("SELECT state FROM checkpoints ORDER BY seq")
+       .all() as { state: string }[];
+     db.close();
+ 
+-    expect(rows.length).toBe(2);
++    expect(rows.length).toBe(3);
+     const first = JSON.parse(rows[0].state);
+     const second = JSON.parse(rows[1].state);
++    const terminal = JSON.parse(rows[2].state);
+     expect(first.tickets).toEqual({ "01": "done", "02": "ready" });
+     expect(second.tickets).toEqual({ "01": "done", "02": "done" });
+     expect(second.outcomes["01"].summary).toBe("summary-01");
+-    expect(run.snapshots.length).toBe(4);
++    expect(terminal.log.at(-1)).toBe("pool done: every ticket reached done");
++    expect(run.snapshots.length).toBe(6);
++    expect(run.snapshots.at(-1)?.phase).toBe("done");
+   });
+ });
+ 
+ describe("stops", () => {
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -6 && bunx tsc --noEmit && echo TSC-OK
+bun test v1.3.14 (0d9b296a)
+
+ 14 pass
+ 0 fail
+ 48 expect() calls
+Ran 14 tests across 1 file. [99.00ms]
+TSC-OK
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/01-pool-engine-skeleton.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+@@ -9,16 +9,16 @@
+ A bespoke pool engine that can take a directory of Issue files (line-1 state markers: id, blocked-by, status) and run it to completion against stub harnesses. State lives in four channels — `tickets` (id to status map), `log` (append), `outcomes` (id to summary + commit sha), `config` (static console.json contents) — each with its reducer. The scheduler computes ready (every blocker done), runs the ready set as one super-step against a shared starting snapshot, and applies reducers at the join. Each ticket spawns a stub harness process (a script that sets its line-1 marker and exits) using the glued-prompt shape; after exit the engine reads the marker back and merges the ticket's partial update. After each super-step the engine checkpoints state to a sqlite file in the pool directory. The whole engine is exercisable from a test: point it at a temp pool, run, observe the state snapshots it emits and the files it writes.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Engine loads a pool from Issue files with line-1 markers and rejects a pool with missing markers
+-- [ ] Ready set is computed as every ticket whose blockers are all done
+-- [ ] A super-step runs the ready set against one shared starting snapshot and merges updates via channel reducers
+-- [ ] Stub harness spawn + marker read-back drives ticket status transitions (ready → in-progress → done)
+-- [ ] A ticket's outcome (summary + commit sha) lands in the outcomes channel and is available to downstream prompts
+-- [ ] A sqlite checkpoint is written to the pool directory after every super-step
+-- [ ] A pool whose tickets all reach done terminates the run cleanly
+-- [ ] Engine behaviour is covered by tests through its public interface only, using stub harness scripts and temp pool directories
++- [x] Engine loads a pool from Issue files with line-1 markers and rejects a pool with missing markers
++- [x] Ready set is computed as every ticket whose blockers are all done
++- [x] A super-step runs the ready set against one shared starting snapshot and merges updates via channel reducers
++- [x] Stub harness spawn + marker read-back drives ticket status transitions (ready → in-progress → done)
++- [x] A ticket's outcome (summary + commit sha) lands in the outcomes channel and is available to downstream prompts
++- [x] A sqlite checkpoint is written to the pool directory after every super-step
++- [x] A pool whose tickets all reach done terminates the run cleanly
++- [x] Engine behaviour is covered by tests through its public interface only, using stub harness scripts and temp pool directories
+ 
+ ## Blocked by
+ 
+ None — can start immediately
+
+[0m
+All green. Ticking criteria and recording the review outcome in the Issue:
+[0m← [0mEdit .scratch/console-pool/issues/01-pool-engine-skeleton.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+@@ -29,4 +29,19 @@
+ - Engine lives in `engine/` at the repo root, a sibling of the LangGraph path in `src/` which stays untouched. Public interface is `engine/engine.ts`; everything else in the directory is internal.
+ - The spawn seam is a harness resolver: `Record<name, (ctx) => argv>`. The engine always spawns the process itself (stdin closed, output to `runs/<id>.log`); tests inject stub resolvers, Issue 04 hardens the default claude/opencode/cursor resolvers.
+ - Outcome mechanism: the harness writes `runs/<id>.outcome.json` (`{summary, commitSha}`) and the glued prompt instructs it to. The engine trusts the file; it does not derive the sha from git itself. (Decision: the Issue did not settle how outcomes are produced.)
+ - Skeleton treats a pool that cannot advance as `phase: "stalled"` in emitted state and stops. Crash/checkpoint/deadlock interrupts are Issue 02; rehydration semantics are Issue 03. An `in-progress` marker at load is not re-run by the skeleton.
++
++## Review findings, and what changed because of them
++
++Two-axis review (standards + spec) ran on the working tree before commit. Acted on:
++
++- Snapshots now expose the in-progress leg: statuses merge into state and a snapshot emits at super-step start, before spawning. A UI reading snapshots can render in-progress cards.
++- The terminal state (including the `pool done` / `pool stalled` log line) is checkpointed, so the last sqlite row matches the returned final state.
++- The cursor launch line was removed from the default harness registry: the job constraints assign writing it to Issue 04. claude and opencode stay as direct copies of run.sh's proven shapes.
++- Assignments resolve once at load (fail fast, like run.sh's preflight) and are reused at spawn.
++
++Noted for later Issues, not fixed here:
++
++- A harness that exits without touching its marker reads back as the engine's own in-progress write, so the skeleton cannot distinguish crash from live. It surfaces as `stalled` plus a log line carrying the exit code. Issue 02 owns raising the crash interrupt; it can diff the marker's mtime or content against the engine's write if it needs the distinction. (Inference: mtime works; content compare is certain.)
++- A ticket that forgets its outcome file is silently absent from downstream prompts. The log line `no outcome recorded` is the only trace.
++- The checkpoint test reads console.db's schema directly. Sanctioned by the spec's Testing Decisions (assert on the files the engine writes), but if the schema changes the test is what breaks.
+
+[0m
+[0m$ [0mbun test 2>&1 | tail -5 && bunx tsc --noEmit && echo TSC-OK
+96 pass
+ 0 fail
+ 216 expect() calls
+Ran 96 tests across 2 files. [111.00ms]
+TSC-OK
+[0m
+[0m← [0mEdit .scratch/console-pool/issues/01-pool-engine-skeleton.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-pool/issues/01-pool-engine-skeleton.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=01 blocked-by=none status=in-progress -->
++<!-- state: id=01 blocked-by=none status=done -->
+ 
+ # 01 — Pool engine walking skeleton
+ 
+ Spec: `.scratch/console-pool/spec-ticket-pools.md`
+
+[0m
+[0m$ [0mgit add engine/ tsconfig.json && git status --short && git commit -m "console: add the pool engine walking skeleton" && git log --oneline -2
+M .scratch/console-pool/issues/01-pool-engine-skeleton.md
+A  engine/checkpoints.ts
+A  engine/engine.test.ts
+A  engine/engine.ts
+A  engine/pool.ts
+A  engine/prompt.ts
+A  engine/spawn.ts
+M  tsconfig.json
+?? .scratch/console-pool/runs/
+[main 4e96563] console: add the pool engine walking skeleton
+ 7 files changed, 1044 insertions(+), 1 deletion(-)
+ create mode 100644 engine/checkpoints.ts
+ create mode 100644 engine/engine.test.ts
+ create mode 100644 engine/engine.ts
+ create mode 100644 engine/pool.ts
+ create mode 100644 engine/prompt.ts
+ create mode 100644 engine/spawn.ts
+4e96563 console: add the pool engine walking skeleton
+41ac900 console-pool: ticket queue, spec, and runner for the pool engine
+[0m
+Issue 01 done, committed as `4e96563` (engine/ + tsconfig.json only; `.scratch/` untouched).
+
+**What landed** — `engine/` with public interface `engine/engine.ts` (`runPool`):
+- Line-1 marker pool loading, rejects markerless/empty pools and duplicate ids (`engine/pool.ts:62`)
+- Four channels with reducers: tickets (last-write), log (append), outcomes (keyed), config (static console.json)
+- Super-steps: ready = all blockers done; ready set spawned in parallel against one shared snapshot; updates merged at the join; in-progress statuses emitted at super-step start
+- Glued-prompt spawn (driver skill + AGENT.md + chain + roster + upstream outcomes), stdin closed, per-ticket logs in `runs/`; harness resolution injectable, claude/opencode defaults ported from run.sh (cursor deliberately left to Issue 04)
+- sqlite checkpoints to `console.db` after every super-step plus terminal state
+- 14 seam tests via stub harness scripts and temp pools; full suite 96 pass, `tsc --noEmit` clean
+
+**Review** ran both axes in sub-agents; fixes applied (in-progress visibility, terminal checkpoint, cursor removal, assignment precompute). Deferred notes for Issues 02/03 are written in the Issue file, which now reads `status=done`.
