@@ -1,4 +1,4 @@
-<!-- state: id=01 blocked-by=none status=checkpoint -->
+<!-- state: id=01 blocked-by=none status=done -->
 
 # 01 — Ticket body endpoint
 
@@ -16,7 +16,7 @@ The pool server gains a read-only `GET /api/ticket?id=<ticketId>` endpoint so th
 - [x] Unknown id returns 404 `{ error: "not found" }`
 - [x] Pool client has `getTicket(id)` returning the body or null on 404
 - [x] Endpoint covered by tests in the engine server test suite (hit, prefix hit, marker stripped, 404) — prior art: existing endpoint tests there
-- [ ] Full test suite, typecheck, and build clean
+- [x] Full test suite, typecheck, and build clean
 
 ## Blocked by
 
@@ -35,3 +35,11 @@ None — can start immediately.
 1. Completed: `GET /api/ticket?id=<id>` in engine/server.ts (exact `<id>.md` first, then prefix before the first `-`, directory-listing scoped; line-1 state marker plus its separating blank lines stripped server-side via pool.ts's now-exported MARKER_RE; 404 `{ error: "not found" }` on no match). Pool client `getTicket(id)` in ui/src/client.ts returning `{ id, body }` or null on 404, with `TicketBodyResponse` in ui/src/project.ts. Four new tests in engine/server.test.ts (hit, prefix hit, marker stripped, 404), all passing. Six of seven acceptance criteria ticked.
 2. The human has to do: decide the fate of the committed throwaway prototype sketches (`ui/src/prototype/*`, commit 7c72b0e). `bun run typecheck` in `ui/` fails on them at pool start, before any of my changes: they import `h`, `renderInterrupt`, `renderTimelineSection`, `statusLabel` from `../view`, which view.ts does not export. This red typecheck is not caused by this Issue, so per the job constraints I did not fix it silently. My recommendation: add `"exclude": ["src/prototype"]` to `ui/tsconfig.json` — the sketches stay on disk for reference but stop pretending to compile. Deleting them or adding the missing exports to view.ts are the alternatives.
 3. After that: rerun `bun run typecheck` in `ui/`. Once green, the last criterion (full test suite, typecheck, and build clean) is satisfied and this Issue can be flipped to done; the endpoint and client work itself is finished and fully tested.
+
+## Resume note
+
+get rid of the throwaway prototype sketches if you no longer need them. if you need them, keep them just make it work then write a ticket to delete them at the end of the run
+
+## Resolution
+
+The endpoint and client work was complete; the sketches were reference-only and nothing imports them, so they were deleted (`git rm -r ui/src/prototype`, 4 files). No delete-later ticket needed. After deletion: ui `bun run typecheck` clean, ui `bun test` 82 pass / 0 fail, ui `vite build` clean, root `bun test` 230 pass / 0 fail, root `tsc --noEmit` clean. All seven acceptance criteria now hold; status set to done.
