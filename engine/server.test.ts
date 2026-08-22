@@ -18,6 +18,7 @@ import {
   type PoolServer,
   type PoolServerOptions,
 } from "./server.ts";
+import { readFleetEntries } from "./fleet.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
 const servers: PoolServer[] = [];
@@ -79,8 +80,19 @@ function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Reco
   return { stub: harness };
 }
 
+/** A temp registry path inside the pool dir, so tests never touch the real one. */
+function fleetRegistry(poolDir: string): string {
+  return join(poolDir, "fleet.json");
+}
+
 async function startServer(poolDir: string, harnesses: Record<string, HarnessCommand>): Promise<PoolServer> {
-  const server = createPoolServer({ poolDir, port: 0, harnesses, distDir: "/nonexistent" });
+  const server = createPoolServer({
+    poolDir,
+    port: 0,
+    harnesses,
+    distDir: "/nonexistent",
+    registryPath: fleetRegistry(poolDir),
+  });
   servers.push(server);
   return server;
 }
@@ -312,7 +324,7 @@ function makeLockedPool(): string {
 describe("pool lock", () => {
   it("writes its own pid on a successful boot", () => {
     const poolDir = makeLockedPool();
-    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
       `${process.pid}`,
@@ -324,7 +336,7 @@ describe("pool lock", () => {
     writePidFile(poolDir, process.pid);
     let message = "";
     try {
-      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
@@ -351,7 +363,7 @@ describe("pool lock", () => {
   it("takes over a stale pid file on boot", () => {
     const poolDir = makeLockedPool();
     writePidFile(poolDir, deadPid());
-    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
       `${process.pid}`,
@@ -363,7 +375,7 @@ describe("pool lock", () => {
       const poolDir = makeLockedPool();
       mkdirSync(join(poolDir, "runs"), { recursive: true });
       writeFileSync(join(poolDir, "runs", "server.pid"), bogus);
-      const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+      const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
       servers.push(server);
       expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
         `${process.pid}`,
@@ -378,6 +390,7 @@ describe("pool lock", () => {
       poolDir,
       port: 0,
       distDir: "/nonexistent",
+      registryPath: fleetRegistry(poolDir),
       force: true,
     } as unknown as PoolServerOptions;
     expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
@@ -421,14 +434,14 @@ describe("pinned pool ports", () => {
   it("binds the console.json port on every launch", async () => {
     const port = await freePort();
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port });
-    const serverA = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    const serverA = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(serverA);
     expect(serverA.url).toBe(`http://localhost:${port}`);
     await serverA.close();
     // Relaunch the same pool: the previous server is gone, so its pid is stale
     // and the lock lets the new boot take over and bind the same pin.
     writePidFile(poolDir, deadPid());
-    const serverB = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    const serverB = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(serverB);
     expect(serverB.url).toBe(`http://localhost:${port}`);
   });
@@ -438,7 +451,7 @@ describe("pinned pool ports", () => {
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     let message = "";
     try {
-      createPoolServer({ poolDir, distDir: "/nonexistent" });
+      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
@@ -446,7 +459,7 @@ describe("pinned pool ports", () => {
     // The failed boot must not leave a live-looking pid, or the retry refuses.
     expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
     await held.release();
-    const server = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).toBe(`http://localhost:${held.port}`);
   });
@@ -456,7 +469,7 @@ describe("pinned pool ports", () => {
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     let message = "";
     try {
-      createPoolServer({ poolDir, distDir: "/nonexistent" });
+      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
@@ -469,7 +482,7 @@ describe("pinned pool ports", () => {
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
     let message = "";
     try {
-      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent" });
+      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
@@ -482,7 +495,7 @@ describe("pinned pool ports", () => {
     const flagPort = await freePort();
     expect(flagPort).not.toBe(configPort);
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: configPort });
-    const server = createPoolServer({ poolDir, port: flagPort, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, port: flagPort, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).toBe(`http://localhost:${flagPort}`);
   });
@@ -490,7 +503,7 @@ describe("pinned pool ports", () => {
   it("with no pin, binds the default port when it is free", async () => {
     const port = await freePort();
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
-    const server = createPoolServer({ poolDir, defaultPort: port, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, defaultPort: port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).toBe(`http://localhost:${port}`);
   });
@@ -498,7 +511,7 @@ describe("pinned pool ports", () => {
   it("with no pin, hunts to the next free port when the default is busy", async () => {
     const held = await holdPort();
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
-    const server = createPoolServer({ poolDir, defaultPort: held.port, distDir: "/nonexistent" });
+    const server = createPoolServer({ poolDir, defaultPort: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).not.toBe(`http://localhost:${held.port}`);
     expect(server.url).toMatch(/^http:\/\/localhost:\d+$/);
@@ -517,6 +530,106 @@ describe("pinned pool ports", () => {
     const stderr = await new Response(child.stderr).text();
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(String(held.port));
+    await held.release();
+  });
+});
+
+describe("fleet registration", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("upserts its entry in the registry after a successful bind", () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const registryPath = fleetRegistry(poolDir);
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(server);
+    const entries = readFleetEntries(registryPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      poolDir,
+      pid: process.pid,
+    });
+    expect(typeof entries[0].port).toBe("number");
+    expect(typeof entries[0].startedAt).toBe("string");
+    expect(entries[0].port).toBe(Number(new URL(server.url).port));
+  });
+
+  it("relaunching the same pool updates the entry rather than duplicating", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const registryPath = fleetRegistry(poolDir);
+    const serverA = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(serverA);
+    const portA = Number(new URL(serverA.url).port);
+    expect(readFleetEntries(registryPath)).toHaveLength(1);
+
+    // Stop the first server and stale its pid, then relaunch: the pool's lock
+    // passes, so the new server binds and upserts its own entry in place.
+    await serverA.close();
+    writePidFile(poolDir, deadPid());
+    const serverB = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(serverB);
+    const portB = Number(new URL(serverB.url).port);
+    const entries = readFleetEntries(registryPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].pid).toBe(process.pid);
+    expect(entries[0].port).toBe(portB);
+  });
+
+  it("a corrupt registry file is recreated on write, not a boot failure", () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const registryPath = fleetRegistry(poolDir);
+    writeFileSync(registryPath, "{ not json");
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(server);
+    expect(readFleetEntries(registryPath)).toHaveLength(1);
+  });
+
+  it("an absent registry is created on write, not a boot failure", () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const registryPath = join(poolDir, "nested", "pools.json");
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(server);
+    expect(readFleetEntries(registryPath)).toHaveLength(1);
+  });
+
+  it("a failed bind registers nothing", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker }], { port: held.port });
+    const registryPath = fleetRegistry(poolDir);
+    let message = "";
+    try {
+      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(held.port));
+    // Registration happens only after a successful bind: a failed boot must
+    // never advertise a port in the registry.
+    expect(readFleetEntries(registryPath)).toEqual([]);
     await held.release();
   });
 });

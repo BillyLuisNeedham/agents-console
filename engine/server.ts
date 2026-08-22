@@ -18,10 +18,14 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
 import { readEvents, type TicketEvent } from "./events.ts";
-import { defaultRegistryPath, readFleetEntry } from "./fleet.ts";
+import {
+  defaultRegistryPath,
+  readFleetEntry,
+  upsertFleetEntry,
+} from "./fleet.ts";
 import { loadPoolMarkers } from "./pool.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
@@ -304,8 +308,9 @@ function acquirePoolLock(poolDir: string, registryPath: string): void {
 }
 
 export function createPoolServer(options: PoolServerOptions): PoolServer {
-  const poolDir = options.poolDir;
-  acquirePoolLock(poolDir, options.registryPath ?? defaultRegistryPath());
+  const poolDir = resolve(options.poolDir);
+  const registryPath = options.registryPath ?? defaultRegistryPath();
+  acquirePoolLock(poolDir, registryPath);
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const meta = loadMeta(poolDir);
@@ -452,6 +457,26 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     // not leave a live-looking pid behind, or the next launch refuses itself.
     rmSync(join(poolDir, "runs", "server.pid"), { force: true });
     throw err;
+  }
+
+  // The bind succeeded, so the pool is live and advertises itself. Boot order
+  // is lock -> bind -> register: the registry never names a port that did not
+  // actually get bound. Registration is best-effort — a registry write that
+  // fails must not take down a console that already bound successfully.
+  const boundPort = server.port;
+  if (boundPort !== undefined) {
+    try {
+      upsertFleetEntry(registryPath, {
+        poolDir,
+        port: boundPort,
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(
+        `fleet registry: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   return {
