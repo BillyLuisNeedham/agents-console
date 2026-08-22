@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "fleet": "bun run engine/fleet-cli.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
