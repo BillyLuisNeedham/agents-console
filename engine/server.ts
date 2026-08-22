@@ -6,8 +6,8 @@
  *
  * The engine's snapshot carries `state.tickets` as an id -> status map; the
  * server enriches it into an array of {id, title, blockedBy, status} so the
- * projection can draw blocked-by edges and show titles, reading the pool's
- * marker files once at start for the metadata.
+ * projection can draw blocked-by edges and show titles. The metadata (title,
+ * spec, blockedBy) is the engine's own marker parsing, loaded once at start.
  */
 
 import {
@@ -20,7 +20,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
+import {
+  readConfig,
+  runPool,
+  type HarnessCommand,
+  type PoolSnapshot,
+} from "./engine.ts";
 import {
   attemptLogName,
   parseAttemptLogName,
@@ -33,7 +38,7 @@ import {
   readFleetEntryByPort,
   upsertFleetEntry,
 } from "./fleet.ts";
-import { loadPoolMarkers } from "./pool.ts";
+import { loadPoolMarkers, type TicketMarker } from "./pool.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
@@ -78,43 +83,13 @@ export interface PoolServer {
   close: () => Promise<void>;
 }
 
-interface TicketMeta {
-  id: string;
-  title: string;
-  blockedBy: string[];
-  /** The ticket's spec text: everything after the title heading. */
-  spec: string;
-}
-
-function readTitle(file: string): string {
-  const firstHeading = readFileSync(file, "utf8")
-    .split("\n")
-    .find((line) => line.startsWith("# "));
-  if (!firstHeading) return "(untitled)";
-  return firstHeading.replace(/^#\s+/, "").trim();
-}
-
-/** The issue body after the title heading and its leading blank line. */
-function readSpec(file: string): string {
-  const lines = readFileSync(file, "utf8").split("\n");
-  const headingIndex = lines.findIndex((line) => line.startsWith("# "));
-  const body = lines.slice(headingIndex + 1).join("\n").trim();
-  return body;
-}
-
-function loadMeta(poolDir: string): TicketMeta[] {
-  const issuesDir = join(poolDir, "issues");
-  const markers = loadPoolMarkers(issuesDir);
-  return markers.map((marker) => ({
-    id: marker.id,
-    title: readTitle(marker.file),
-    blockedBy: marker.blockedBy,
-    spec: readSpec(marker.file),
-  }));
+/** The pool's ticket metadata, as the engine parses it from the Issue files. */
+function loadMeta(poolDir: string): TicketMarker[] {
+  return loadPoolMarkers(join(poolDir, "issues"));
 }
 
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
-function enrich(snapshot: PoolSnapshot, meta: TicketMeta[]): EnrichedSnapshot {
+function enrich(snapshot: PoolSnapshot, meta: TicketMarker[]): EnrichedSnapshot {
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -353,7 +328,7 @@ interface ReconstructedAttempt {
 // The events endpoint answers for tickets the pool actually owns. Scoping to
 // the known ticket ids also keeps the lookup inside the pool's runs
 // directory: an arbitrary id can never walk out of it.
-function knownTicketIds(meta: TicketMeta[]): Set<string> {
+function knownTicketIds(meta: TicketMarker[]): Set<string> {
   return new Set(meta.map((m) => m.id));
 }
 
@@ -388,7 +363,7 @@ function reconstructAttempts(
 function readTicketEvents(
   poolDir: string,
   ticketId: string,
-  meta: TicketMeta[],
+  meta: TicketMarker[],
 ): TicketEventsResponse {
   const runsDir = join(poolDir, "runs");
   const events = readEvents(runsDir, ticketId);
@@ -422,27 +397,6 @@ function pidIsLive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
-}
-
-/** The pool's pinned port from console.json, or undefined when it pins none. */
-function readConfigPort(poolDir: string): number | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(join(poolDir, "console.json"), "utf8");
-  } catch {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return undefined;
-  }
-  const port = (parsed as Record<string, unknown>).port;
-  return port === undefined ? undefined : (port as number);
 }
 
 function isAddressInUse(err: unknown): boolean {
@@ -605,7 +559,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
   const resolution = resolvePort(
     options.port,
-    readConfigPort(poolDir),
+    readConfig(poolDir).port,
     options.defaultPort ?? DEFAULT_PORT,
   );
   let server: Bun.Server<undefined>;

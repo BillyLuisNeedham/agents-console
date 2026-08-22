@@ -15,11 +15,18 @@ export interface TicketMarker {
   file: string;
   blockedBy: string[];
   status: TicketStatus;
+  /** The issue file's title: its first "# " heading, or "(untitled)". */
+  title: string;
+  /** The issue body after the title heading and its leading blank line. */
+  spec: string;
 }
 
 const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
 
-function parseMarkerLine(line: string, file: string): TicketMarker {
+function parseMarkerLine(
+  line: string,
+  file: string,
+): Omit<TicketMarker, "title" | "spec"> {
   const match = MARKER_RE.exec(line);
   if (!match) {
     throw new Error(
@@ -46,9 +53,24 @@ function parseMarkerLine(line: string, file: string): TicketMarker {
   return { id, file, blockedBy, status: status as TicketStatus };
 }
 
+// The issue file's heading grammar, parsed here beside the marker loading:
+// the title is the first "# " heading, the spec everything after it. One
+// parser owns this format, so a heading-format change breaks exactly here.
+function readTitle(lines: string[]): string {
+  const firstHeading = lines.find((line) => line.startsWith("# "));
+  if (!firstHeading) return "(untitled)";
+  return firstHeading.replace(/^#\s+/, "").trim();
+}
+
+function readSpec(lines: string[]): string {
+  const headingIndex = lines.findIndex((line) => line.startsWith("# "));
+  return lines.slice(headingIndex + 1).join("\n").trim();
+}
+
 export function readMarker(file: string): TicketMarker {
-  const firstLine = readFileSync(file, "utf8").split("\n", 1)[0] ?? "";
-  return parseMarkerLine(firstLine, file);
+  const lines = readFileSync(file, "utf8").split("\n");
+  const marker = parseMarkerLine(lines[0], file);
+  return { ...marker, title: readTitle(lines), spec: readSpec(lines) };
 }
 
 export function writeMarkerStatus(file: string, status: TicketStatus): void {

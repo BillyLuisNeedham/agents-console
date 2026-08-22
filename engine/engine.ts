@@ -1617,7 +1617,12 @@ function resolveAssignment(
   return { harness, model, drivers };
 }
 
-function readConfig(poolDir: string): PoolConfig {
+/**
+ * The pool's config loader, the single parser of console.json. The server
+ * consumes the same parsed config it hands the engine, so the file is read
+ * and validated exactly once.
+ */
+export function readConfig(poolDir: string): PoolConfig {
   const raw = readOptional(join(poolDir, "console.json"));
   if (!raw) return {};
   const parsed = JSON.parse(raw);
