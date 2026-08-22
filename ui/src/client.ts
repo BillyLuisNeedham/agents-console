@@ -75,6 +75,18 @@ export class PoolClient {
     return res.json();
   }
 
+  // PROTOTYPE — throwaway: the selected ticket's raw markdown body (the
+  // line-1 `<!-- state: ... -->` marker included; the UI strips it) for the
+  // ticket-detail view variants (issue #11). Null when no Issue file matches.
+  async getTicket(ticketId: string): Promise<{ id: string; body: string } | null> {
+    const res = await fetch(
+      `${this.base}/api/ticket?id=${encodeURIComponent(ticketId)}`,
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`ticket body failed: ${res.status}`);
+    return res.json();
+  }
+
   /**
    * A byte range of an attempt's raw log, ANSI-stripped server-side. `offset`
    * is a raw byte offset; the response reports `nextOffset` (where the next

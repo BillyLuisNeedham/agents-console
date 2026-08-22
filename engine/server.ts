@@ -406,6 +406,38 @@ function readTicketEvents(
   };
 }
 
+// PROTOTYPE — throwaway
+// The ticket body endpoint answers with the ticket's raw markdown. Issue files
+// are named `<id>-<slug>.md`; match by the id prefix before the first `-`,
+// falling back to an exact `<id>.md`. The lookup is scoped to files readdir
+// reports from the pool's issues directory, so an arbitrary id can never walk
+// out of it (plain string equality, no regex on the id).
+function readTicketBody(
+  poolDir: string,
+  ticketId: string,
+): { id: string; body: string } | null {
+  const issuesDir = join(poolDir, "issues");
+  let files: string[] = [];
+  try {
+    files = readdirSync(issuesDir);
+  } catch {
+    return null;
+  }
+  const markdown = files.filter((file) => file.endsWith(".md"));
+  const exact = markdown.find((file) => file === `${ticketId}.md`);
+  if (exact) {
+    return { id: ticketId, body: readFileSync(join(issuesDir, exact), "utf8") };
+  }
+  const prefixed = markdown.find((file) => {
+    const dash = file.indexOf("-");
+    return dash > 0 && file.slice(0, dash) === ticketId;
+  });
+  if (prefixed) {
+    return { id: ticketId, body: readFileSync(join(issuesDir, prefixed), "utf8") };
+  }
+  return null;
+}
+
 function readLockedPid(poolDir: string): number | null {
   let raw: string;
   try {
@@ -690,6 +722,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const range = await readLogRange(join(runsDir, logFile), offset, end);
           return Response.json({ ...range, attempts });
+        }
+
+        if (pathname === "/api/ticket") {
+          // PROTOTYPE — throwaway: the raw markdown body of a ticket's Issue
+          // file, for the ticket-detail view variants (issue #11).
+          const ticketId = url.searchParams.get("id") ?? "";
+          const ticket = readTicketBody(poolDir, ticketId);
+          if (!ticket) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json(ticket);
         }
 
         if (pathname === "/api/stream") {

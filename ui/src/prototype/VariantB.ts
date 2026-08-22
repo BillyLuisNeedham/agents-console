@@ -292,7 +292,15 @@ export function VariantB(props: VariantProps): HTMLElement {
   const logBody = h("div", { class: "proto-b-log-body" });
   logBody.hidden = !logOpen;
   if (props.timeline) {
-    logBody.append(renderTimelineSection(props.timeline));
+    // PROTOTYPE — throwaway: adapted to the current renderTimelineSection
+    // (ticketId, timeline, logPane, handlers) signature; the variant has no
+    // log pane, and a no-op attempt selector keeps row clicks inert here.
+    logBody.append(
+      renderTimelineSection(detail.ticketId, props.timeline, null, {
+        onAnswer: props.onAnswer,
+        onSelectAttempt: () => {},
+      } as any),
+    );
   } else {
     logBody.append(h("div", { class: "proto-b-dim" }, "no timeline yet"));
   }

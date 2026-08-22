@@ -66,6 +66,12 @@ const logState = {
   earlierInFlight: false,
 };
 
+// PROTOTYPE — throwaway: the selected ticket's raw markdown body for the
+// ticket-detail view variants (issue #11). Module scope like the timeline, so
+// a full-DOM rebuild never drops it; a null value means the server reported
+// the ticket missing.
+const ticketBodies = new Map<string, string | null>();
+
 function resetLogPane(): void {
   logState.ticketId = null;
   logState.attempt = null;
@@ -299,6 +305,12 @@ function model(): AppModel {
     detailTicketId !== null && timelineState.ticketId === detailTicketId;
   const logIsCurrent =
     detailTicketId !== null && logState.ticketId === detailTicketId;
+  // PROTOTYPE — throwaway: the selected ticket's cached raw body for the
+  // ticket-detail view variants (issue #11); null when the selection is not a
+  // ticket, not yet fetched, or known missing.
+  const ticketBody = detailTicketId
+    ? (ticketBodies.get(detailTicketId) ?? null)
+    : null;
   return {
     phase: view?.phase ?? null,
     phaseLabel: view ? phaseLabel(view.phase) : "connecting",
@@ -331,6 +343,7 @@ function model(): AppModel {
           logIsCurrent ? logState.error : null,
         )
       : null,
+    ticketBody,
   };
 }
 
@@ -347,6 +360,36 @@ function render(): void {
     onSelectNode: (nodeId) => {
       state.selectedId = nodeId;
       void loadTimeline();
+      // PROTOTYPE — throwaway: fetch the selected ticket's raw body for the
+      // ticket-detail view variants (issue #11). Cached per ticket, so only a
+      // first visit fetches; a slow fetch answering after a newer selection
+      // re-renders only when the selection is still this ticket (the same
+      // guard loadTimeline uses).
+      const bodyTicketId = state.snapshot
+        ? selectedTicket(state.snapshot, state.selectedId)
+        : null;
+      if (bodyTicketId && !ticketBodies.has(bodyTicketId)) {
+        void client
+          .getTicket(bodyTicketId)
+          .then((ticket) => {
+            ticketBodies.set(bodyTicketId, ticket?.body ?? null);
+            if (
+              state.snapshot &&
+              selectedTicket(state.snapshot, state.selectedId) === bodyTicketId
+            ) {
+              render();
+            }
+          })
+          .catch(() => {
+            ticketBodies.set(bodyTicketId, null);
+            if (
+              state.snapshot &&
+              selectedTicket(state.snapshot, state.selectedId) === bodyTicketId
+            ) {
+              render();
+            }
+          });
+      }
       render();
     },
     onSelectAttempt: (ticketId, attempt) => {
@@ -418,6 +461,12 @@ async function boot(): Promise<void> {
       graceTimer = null;
     }
   };
+  // PROTOTYPE — throwaway: the variant switcher cycles the ?variant= URL param
+  // and fires this window event; re-render on the same path as a snapshot
+  // render.
+  window.addEventListener("proto-variant-change", () => {
+    render();
+  });
   client.stream({
     onSnapshot: (snapshot) => {
       cancelGrace();

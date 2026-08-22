@@ -291,12 +291,24 @@ function renderFacts(props: VariantProps): HTMLElement {
             "details",
             { class: "proto-c-details" },
             h("summary", {}, "timeline"),
-            renderTimelineSection(timeline),
+            renderTimelineSection(detail.ticketId, timeline, null, {
+              onAnswer: props.onAnswer,
+              onSelectAttempt: () => {},
+            } as any),
           ),
         ),
       );
     } else {
-      facts.append(h("div", { class: "proto-c-fact-full" }, renderTimelineSection(timeline)));
+      facts.append(
+        h(
+          "div",
+          { class: "proto-c-fact-full" },
+          renderTimelineSection(detail.ticketId, timeline, null, {
+            onAnswer: props.onAnswer,
+            onSelectAttempt: () => {},
+          } as any),
+        ),
+      );
     }
   } else if (phase === "before") {
     facts.append(

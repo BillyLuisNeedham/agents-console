@@ -207,7 +207,15 @@ function renderProgress(props: VariantProps): HTMLElement {
   }
   if (timeline) {
     if (detail.interrupt) sections.push(h("div", { class: "proto-a-divider" }));
-    sections.push(renderTimelineSection(timeline));
+    // PROTOTYPE — throwaway: adapted to the current renderTimelineSection
+    // (ticketId, timeline, logPane, handlers) signature; the variant has no
+    // log pane, and a no-op attempt selector keeps row clicks inert here.
+    sections.push(
+      renderTimelineSection(detail.ticketId, timeline, null, {
+        onAnswer: props.onAnswer,
+        onSelectAttempt: () => {},
+      } as any),
+    );
   }
   return h("div", { class: "proto-a-panel" }, ...sections);
 }

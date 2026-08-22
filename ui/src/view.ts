@@ -39,6 +39,14 @@ import {
   type ViewTransform,
 } from "./project";
 
+// PROTOTYPE — throwaway: the ticket-detail view variants (issue #11). These
+// files import h/statusLabel/etc. back from this module — a circular import,
+// safe because every use here is at call time, never at module evaluation.
+import { currentVariant, renderPrototypeSwitcher } from "./prototype/switcher";
+import { VariantA, variantName as variantNameA } from "./prototype/VariantA";
+import { VariantB, variantName as variantNameB } from "./prototype/VariantB";
+import { VariantC, variantName as variantNameC } from "./prototype/VariantC";
+
 export interface AppModel {
   phase: PoolPhase | null;
   phaseLabel: string;
@@ -54,6 +62,10 @@ export interface AppModel {
   detail: DetailView | null;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
+  // PROTOTYPE — throwaway: the selected ticket's raw body for the ticket-
+  // detail view variants (issue #11); null when not a ticket, not fetched,
+  // or known missing.
+  ticketBody: string | null;
 }
 
 export interface Handlers {
@@ -65,7 +77,7 @@ export interface Handlers {
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
 }
 
-function h<K extends keyof HTMLElementTagNameMap>(
+export function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props: Record<string, unknown> = {},
   ...kids: (Node | string | null)[]
@@ -541,7 +553,7 @@ function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEd
 // Cards
 // ---------------------------------------------------------------------------
 
-function statusLabel(status: PoolStatus): string {
+export function statusLabel(status: PoolStatus): string {
   return status === "in-progress" ? "running" : status;
 }
 
@@ -549,7 +561,7 @@ function statusLabel(status: PoolStatus): string {
 // interrupt is read and answered. The kind-specific body comes from the
 // engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
 // or attempt.
-function renderInterrupt(interrupt: InterruptView, handlers: Handlers): HTMLElement {
+export function renderInterrupt(interrupt: InterruptView, handlers: Handlers): HTMLElement {
   const box = h(
     "div",
     { class: "interrupt-box" },
@@ -834,7 +846,7 @@ function formatEventTime(iso: string): string {
 // running attempt is marked; a reconstructed timeline (a pre-feature pool
 // with no events file) notes that its rows came from log files. Clicking an
 // attempt row selects that attempt's raw log in the pane below.
-function renderTimelineSection(
+export function renderTimelineSection(
   ticketId: string,
   timeline: TimelineView,
   logPane: LogPaneView | null,
@@ -1020,6 +1032,38 @@ function renderTicketDetail(
   return body;
 }
 
+// PROTOTYPE — throwaway: the ticket Detail's body for the view variants
+// (issue #11). A ?variant= URL param matching A/B/C swaps in that variant's
+// own rendering with the ticket's raw body and timeline; the header
+// (title/fullscreen/close) stays the shared one, and an unknown or missing
+// param keeps the stock renderTicketDetail path unchanged.
+function renderTicketDetailBody(
+  detail: Extract<DetailView, { kind: "ticket" }>,
+  model: AppModel,
+  handlers: Handlers,
+): HTMLElement {
+  const variant = currentVariant();
+  if (variant === "A" || variant === "B" || variant === "C") {
+    const props = {
+      detail,
+      body: model.ticketBody,
+      timeline: model.timeline ?? null,
+      // The variants' looser string action matches the Detail's
+      // InterruptAction at runtime; the targeted cast keeps tsc quiet
+      // (sanctioned for prototypes, as in the variants themselves).
+      onAnswer: handlers.onAnswer as (
+        ticketId: string,
+        action: string,
+        note?: string,
+      ) => void,
+    };
+    if (variant === "A") return VariantA(props);
+    if (variant === "B") return VariantB(props);
+    return VariantC(props);
+  }
+  return renderTicketDetail(detail, model.timeline, model.logPane, handlers);
+}
+
 function renderUtilityDetail(
   detail: Extract<DetailView, { kind: "utility" }>,
   handlers: Handlers,
@@ -1146,7 +1190,7 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
       ),
     ),
     view.kind === "ticket"
-      ? renderTicketDetail(view, model.timeline, model.logPane, handlers)
+      ? renderTicketDetailBody(view, model, handlers)
       : renderUtilityDetail(view, handlers),
   );
   return detail;
@@ -1280,7 +1324,25 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     model.detail ? renderDetailHandle() : null,
     renderDetail(model, handlers),
   );
-  root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
+  root.replaceChildren(
+    (() => {
+      const shell = h("div", { class: "shell" }, content, renderDrawers(model, handlers));
+      // PROTOTYPE — throwaway: the variant switcher floats over the app, but
+      // only when a ?variant= URL param is present — its absence is the
+      // production gate that keeps the stock UI clean.
+      const variant = currentVariant();
+      if (variant !== null) {
+        shell.append(
+          renderPrototypeSwitcher(variant, ["A", "B", "C"], {
+            A: variantNameA,
+            B: variantNameB,
+            C: variantNameC,
+          }),
+        );
+      }
+      return shell;
+    })(),
+  );
   if (detailFullscreen) applyDetailFullscreen();
   restoreLogScroll(model);
   if (noteFocus) {
