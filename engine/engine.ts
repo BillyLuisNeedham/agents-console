@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import {
   appendEvent,
+  attemptLogName,
   lastAttempt,
   lastAttemptOfKind,
   nextAttempt,
@@ -909,7 +910,7 @@ async function runResolver(
   result: MergeResult,
 ): Promise<ResolverAttempt> {
   const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
-  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
+  const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
   rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
@@ -1435,8 +1436,9 @@ function manualMergeInterrupt(
 // existing well-known raw log moves to its attempt-numbered name so a re-run
 // never destroys the ticket's history. The number is the attempt the events
 // file recorded for the run that wrote the file: the last implement spawn for
-// `<id>.log`, the last resolver run for `<id>.resolver.log`. A pre-feature
-// log (written before events existed) rotates to attempt-0.
+// the base log, the last resolver run for the resolver log. A pre-feature
+// log (written before events existed) rotates to attempt-0. The names come
+// from the events module's naming contract.
 function rotateAttemptLog(
   runsDir: string,
   ticketId: string,
@@ -1445,10 +1447,9 @@ function rotateAttemptLog(
 ): void {
   if (!existsSync(wellKnownPath)) return;
   const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
-  const suffix = kind === "resolver" ? ".resolver" : "";
   renameSync(
     wellKnownPath,
-    join(runsDir, `${ticketId}.attempt-${attempt}${suffix}.log`),
+    join(runsDir, attemptLogName(ticketId, attempt, kind === "resolver")),
   );
 }
 
@@ -1460,7 +1461,7 @@ async function runTicket(
   plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
-  const logPath = join(env.runsDir, `${marker.id}.log`);
+  const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
   rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
   const issueRel = relative(plan.cwd, plan.issuePath);
