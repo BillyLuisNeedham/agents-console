@@ -884,6 +884,23 @@ body {
   background: var(--accent);
 }
 
+/* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
+   Detail over everything below the toolbar (canvas and bottom drawers covered,
+   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
+   forms, and log tailing all keep working. The inline top, set by
+   applyDetailFullscreen, is the canvas-header's measured bottom edge; the
+   static top: 0 here is only a fallback before that inline style lands. */
+.detail-fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  z-index: 30;
+  border-left: none;
+}
+
 .detail-head {
   display: flex;
   justify-content: space-between;
@@ -892,6 +909,12 @@ body {
   padding: 10px 12px;
   background: var(--bg-panel-2);
   border-bottom: 1px solid var(--border);
+}
+
+.detail-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .detail-title {

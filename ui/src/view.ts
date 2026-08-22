@@ -164,6 +164,14 @@ const DETAIL_WIDTH_KEY = "console-detail-width";
 let detailWidth = DETAIL_MIN_PX;
 let detailDrag: { startX: number; startWidth: number } | null = null;
 
+// Fullscreen Detail: a class on the panel plus this module-scope mode flag,
+// mirroring the drawer idioms. Fullscreen fixes the Detail over the content
+// area below the toolbar (canvas and drawers covered, toolbar visible and
+// live) without unmounting it, so SSE rebuilds, interrupt forms, and log
+// tailing all keep working. Esc, the toggle, or selecting another card exits;
+// exiting restores the dragged width.
+let detailFullscreen = false;
+
 function currentDetailMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
 }
@@ -338,11 +346,13 @@ function endDrag(event?: PointerEvent): void {
 }
 
 function selectNode(nodeId: string): void {
+  detailFullscreen = false;
   selectedNodeId = nextNodeSelection(selectedNodeId, nodeId);
   onSelectNode?.(selectedNodeId);
 }
 
 function closeDetail(): void {
+  detailFullscreen = false;
   selectedNodeId = null;
   onSelectNode?.(null);
 }
@@ -351,6 +361,19 @@ if (typeof window !== "undefined") {
   detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
   window.addEventListener("pointerup", (event) => endDrag(event));
   window.addEventListener("pointercancel", (event) => endDrag(event));
+  // Esc leaves fullscreen; the toggle and card selection handle their own
+  // exits, so this is the one path that must listen globally.
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && detailFullscreen) {
+      detailFullscreen = false;
+      applyDetailFullscreen();
+    }
+  });
+  // The toolbar can wrap on a narrow window, so its height (the fullscreen
+  // Detail's top) is re-measured when the window resizes.
+  window.addEventListener("resize", () => {
+    if (detailFullscreen) applyDetailFullscreen();
+  });
 }
 
 function bindCanvas(viewport: HTMLElement, world: HTMLElement, edges: TopologyEdge[]): void {
@@ -871,7 +894,7 @@ function applyDetailWidth(): void {
 
 function bindDetailHandle(handle: HTMLElement): void {
   handle.addEventListener("pointerdown", (event) => {
-    if (detailDrag) return;
+    if (detailDrag || detailFullscreen) return;
     detailDrag = {
       startX: event.clientX,
       startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
@@ -897,22 +920,76 @@ function bindDetailHandle(handle: HTMLElement): void {
   });
 }
 
+// The canvas-header's bottom edge in the window, the Detail's top while
+// fullscreen. The header sits at the top of the main column, so its bottom is
+// the height of the strip the fullscreen Detail must not cover.
+function canvasHeaderBottom(): number {
+  const header = document.querySelector<HTMLElement>(".canvas-header");
+  return header ? header.getBoundingClientRect().bottom : 0;
+}
+
+// One writer for the fullscreen toggle's label and tooltip, so the render and
+// the direct-DOM toggle stay in step.
+function setFullscreenToggleLabel(toggle: HTMLElement | null): void {
+  if (!toggle) return;
+  toggle.title = detailFullscreen ? "exit fullscreen" : "fill the window";
+  toggle.textContent = detailFullscreen ? "restore" : "fullscreen";
+}
+
+// Fullscreen is a class on the open Detail plus this module-scope flag, so the
+// full-DOM rebuild on every snapshot re-applies it from the flag and the panel
+// never unmounts. The class fixes the Detail over everything below the toolbar;
+// exiting removes it and restores the dragged width.
+function applyDetailFullscreen(): void {
+  const detail = document.querySelector<HTMLElement>(".detail-open");
+  if (!detail) return;
+  if (detailFullscreen) {
+    detail.classList.add("detail-fullscreen");
+    detail.style.width = "";
+    detail.style.top = `${canvasHeaderBottom()}px`;
+  } else {
+    detail.classList.remove("detail-fullscreen");
+    detail.style.top = "";
+    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+  }
+  setFullscreenToggleLabel(document.querySelector(".detail-fullscreen-toggle"));
+}
+
+function toggleDetailFullscreen(): void {
+  detailFullscreen = !detailFullscreen;
+  applyDetailFullscreen();
+}
+
 function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
   const detail = h("div", { class: "detail" });
   const view = model.detail;
   if (!view) return detail;
   detail.classList.add("detail-open");
-  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+  if (detailFullscreen) {
+    detail.classList.add("detail-fullscreen");
+  } else {
+    detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+  }
   const title = view.kind === "ticket" ? view.ticketId : view.label;
+  const fullscreenToggle = h(
+    "button",
+    { class: "btn detail-fullscreen-toggle", onclick: () => toggleDetailFullscreen() },
+  );
+  setFullscreenToggleLabel(fullscreenToggle);
   detail.append(
     h(
       "div",
       { class: "detail-head" },
       h("span", { class: "detail-title" }, title),
       h(
-        "button",
-        { class: "btn", title: "close detail", onclick: () => closeDetail() },
-        "✕",
+        "div",
+        { class: "detail-head-actions" },
+        fullscreenToggle,
+        h(
+          "button",
+          { class: "btn", title: "close detail", onclick: () => closeDetail() },
+          "✕",
+        ),
       ),
     ),
     view.kind === "ticket"
@@ -1051,6 +1128,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     renderDetail(model, handlers),
   );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
+  if (detailFullscreen) applyDetailFullscreen();
   if (noteFocus) {
     const next = root.querySelector<HTMLTextAreaElement>(
       `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
