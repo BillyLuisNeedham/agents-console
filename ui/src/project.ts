@@ -4,6 +4,8 @@
  * renders. No network calls, no DOM: fixtures in, view model out.
  */
 
+import { marked } from "marked";
+
 // ---------------------------------------------------------------------------
 // Pool snapshot (wire format served by the pool server)
 // ---------------------------------------------------------------------------
@@ -253,10 +255,8 @@ export interface LogPaneView {
   hasMore: boolean;
   /** Older bytes exist before the held window: offer "load earlier". */
   hasEarlier: boolean;
-  /** The ticket has never run: show the spec text with a marker instead of timeline and log. */
+  /** The ticket has never run: no attempts, no pane content. */
   neverRun: boolean;
-  /** The ticket's spec text, shown in the never-run fallback. */
-  spec: string;
   error: string | null;
 }
 
@@ -289,7 +289,6 @@ export function selectLogAttempt(
 export function projectLogPane(
   timeline: TimelineView | null,
   clickedAttempt: number | null,
-  spec: string,
   log: { content: string; firstOffset: number; offset: number; totalSize: number } | null,
   error: string | null,
 ): LogPaneView | null {
@@ -305,7 +304,6 @@ export function projectLogPane(
       hasMore: false,
       hasEarlier: false,
       neverRun: true,
-      spec,
       error: null,
     };
   }
@@ -320,7 +318,6 @@ export function projectLogPane(
     hasMore: loaded.offset < loaded.totalSize,
     hasEarlier: loaded.firstOffset > 0,
     neverRun: false,
-    spec,
     error,
   };
 }
@@ -683,6 +680,48 @@ export function projectDetailTab(
 ): DetailTab {
   if (override && override.ticketId === detail.ticketId) return override.tab;
   return defaultDetailTab(detail.status, detail.interrupt !== null);
+}
+
+// ---------------------------------------------------------------------------
+// Detail tab bar
+// ---------------------------------------------------------------------------
+
+export interface DetailTabView {
+  id: DetailTab;
+  label: string;
+  active: boolean;
+  /** The Progress tab carries the pending-interrupt dot, mirroring the canvas card. */
+  interruptDot: boolean;
+}
+
+/**
+ * The Detail's tab bar: Spec, Progress and Outcome in a fixed order, so the
+ * bar never reshapes as the ticket moves through its phases. The active tab
+ * comes from the same rule as the tab default (a manual choice for this
+ * ticket wins), and a pending interrupt marks the Progress tab with the red
+ * dot the canvas card already shows.
+ */
+export function projectDetailTabs(
+  detail: TicketDetailView,
+  override: TabOverride | null,
+): DetailTabView[] {
+  const active = projectDetailTab(detail, override);
+  const tab = (id: DetailTab, label: string): DetailTabView => ({
+    id,
+    label,
+    active: id === active,
+    interruptDot: id === "progress" && detail.interrupt !== null,
+  });
+  return [tab("spec", "Spec"), tab("progress", "Progress"), tab("outcome", "Outcome")];
+}
+
+/**
+ * The Spec tab's body: the ticket's markdown rendered to HTML. The DOM layer
+ * assigns it as innerHTML; the ticket files are the pool's own prose, served
+ * same-origin, so no sanitiser sits between.
+ */
+export function ticketBodyHtml(body: string): string {
+  return marked(body, { async: false });
 }
 
 /**
