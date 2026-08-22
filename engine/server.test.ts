@@ -325,6 +325,62 @@ describe("ticket events endpoint", () => {
   });
 });
 
+describe("ticket body endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("serves the ticket's body for an exact <id>.md file", async () => {
+    const poolDir = makePool([{ file: "01.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/ticket?id=01`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; body: string };
+    expect(body.id).toBe("01");
+    expect(body.body).toBe("# body\n");
+  });
+
+  it("resolves an <id>-<slug>.md file by its prefix before the first '-'", async () => {
+    const poolDir = makePool([{ file: "01-ticket-body.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/ticket?id=01`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; body: string };
+    expect(body.id).toBe("01");
+    expect(body.body).toBe("# body\n");
+  });
+
+  it("strips the line-1 state marker from the served body", async () => {
+    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    tempDirs.push(poolDir);
+    mkdirSync(join(poolDir, "issues"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "issues", "01-a.md"),
+      `${marker}\n\n# Ticket body\n\nSpec: what to build\n`,
+    );
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/ticket?id=01`);
+    const body = (await res.json()) as { id: string; body: string };
+    expect(body.body).not.toContain("<!--");
+    expect(body.body).toBe("# Ticket body\n\nSpec: what to build\n");
+  });
+
+  it("answers 404 for an id with no Issue file", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/ticket?id=zzz`);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("not found");
+  });
+});
+
 describe("ticket log endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 

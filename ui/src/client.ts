@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { PoolSnapshot, TicketEventsResponse, TicketLogResponse } from "./project";
+import type { PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -72,6 +72,20 @@ export class PoolClient {
       `${this.base}/api/events?ticket=${encodeURIComponent(ticketId)}`,
     );
     if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
+    return res.json();
+  }
+
+  /**
+   * The selected ticket's markdown body (the line-1 `<!-- state: ... -->`
+   * marker stripped server-side) for the ticket Detail. Null when no Issue
+   * file matches the id.
+   */
+  async getTicket(ticketId: string): Promise<TicketBodyResponse | null> {
+    const res = await fetch(
+      `${this.base}/api/ticket?id=${encodeURIComponent(ticketId)}`,
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`ticket body failed: ${res.status}`);
     return res.json();
   }
 
