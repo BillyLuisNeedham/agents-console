@@ -43,6 +43,7 @@ import {
 } from "./fleet.ts";
 import {
   loadPoolMarkers,
+  MARKER_RE,
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
@@ -383,6 +384,57 @@ function readTicketEvents(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ticket body endpoint
+// ---------------------------------------------------------------------------
+
+export interface TicketBodyResponse {
+  id: string;
+  /** The Issue file's markdown with the line-1 state marker stripped. */
+  body: string;
+}
+
+// The line-1 `<!-- state: ... -->` marker is pool metadata, never prose for
+// the UI: drop it, and the blank lines that separated it from the body.
+function stripStateMarker(text: string): string {
+  const lines = text.split("\n");
+  if (!MARKER_RE.test(lines[0] ?? "")) return text;
+  let first = 1;
+  while (first < lines.length && lines[first].trim() === "") first += 1;
+  return lines.slice(first).join("\n");
+}
+
+// The ticket body endpoint answers with the ticket's markdown body. Issue
+// files are named `<id>.md` or `<id>-<slug>.md`; match the exact name first,
+// then any file whose prefix before the first `-` equals the id. The lookup
+// is scoped to the files readdir reports from the pool's issues directory, so
+// an arbitrary id can never walk out of it (plain string equality, no regex
+// on the id).
+function readTicketBody(
+  poolDir: string,
+  ticketId: string,
+): TicketBodyResponse | null {
+  const issuesDir = join(poolDir, "issues");
+  let files: string[] = [];
+  try {
+    files = readdirSync(issuesDir);
+  } catch {
+    return null;
+  }
+  const markdown = files.filter((file) => file.endsWith(".md"));
+  const file =
+    markdown.find((file) => file === `${ticketId}.md`) ??
+    markdown.find((file) => {
+      const dash = file.indexOf("-");
+      return dash > 0 && file.slice(0, dash) === ticketId;
+    });
+  if (!file) return null;
+  return {
+    id: ticketId,
+    body: stripStateMarker(readFileSync(join(issuesDir, file), "utf8")),
+  };
+}
+
 function readLockedPid(poolDir: string): number | null {
   let raw: string;
   try {
@@ -662,6 +714,15 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const range = await readLogRange(join(runsDir, logFile), offset, end);
           return Response.json({ ...range, attempts });
+        }
+
+        if (pathname === "/api/ticket") {
+          const ticketId = url.searchParams.get("id") ?? "";
+          const ticket = readTicketBody(poolDir, ticketId);
+          if (!ticket) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          return Response.json(ticket);
         }
 
         if (pathname === "/api/stream") {

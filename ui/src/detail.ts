@@ -16,6 +16,9 @@ import {
   DETAIL_MIN_PX,
   parseStoredDetailWidth,
   statusLabel,
+  ticketBodyHtml,
+  type DetailTab,
+  type DetailTabView,
   type DetailView,
   type InterruptAction,
   type InterruptView,
@@ -34,6 +37,11 @@ export interface DetailModel {
   detail: DetailView | null;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
+  /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
+  detailTabs: DetailTabView[] | null;
+  /** The ticket's markdown body: undefined while the fetch is out, null when the pool has none. */
+  detailBody: string | null | undefined;
+  detailBodyError: string | null;
 }
 
 /** The handlers the Detail's interactive elements report through. */
@@ -41,6 +49,7 @@ export interface DetailHandlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
+  onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 
 /** A note textarea's focus, captured before a rebuild and restored after. */
@@ -171,7 +180,7 @@ export class Detail {
         ),
       ),
       view.kind === "ticket"
-        ? this.renderTicketDetail(view, model.timeline, model.logPane, handlers)
+        ? this.renderTicketDetail(view, model, handlers)
         : this.renderUtilityDetail(view, handlers),
     );
     return detail;
@@ -375,69 +384,141 @@ export class Detail {
     return pane;
   }
 
-  // A never-run ticket: the ticket's spec text in place of timeline and log,
-  // with a "no attempts yet" marker, so clicking any ticket tells you
-  // something.
-  private renderNeverRun(logPane: LogPaneView): HTMLElement {
-    const body = h("div", { class: "never-run" });
-    body.append(h("div", { class: "dim never-run-marker" }, "no attempts yet"));
-    if (logPane.spec) {
+  // The ticket Detail's body is the Spec / Progress / Outcome tab bar; the
+  // tab panels hold what the old stacked layout carried.
+  private renderTicketDetail(
+    detail: Extract<DetailView, { kind: "ticket" }>,
+    model: DetailModel,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const body = h("div", { class: "detail-body" });
+    const tabs = model.detailTabs ?? [];
+    body.append(this.renderDetailTabs(tabs, detail.ticketId, handlers));
+    const active = tabs.find((tab) => tab.active)?.id ?? "spec";
+    if (active === "spec") {
+      body.append(this.renderSpecTab(detail, model.detailBody, model.detailBodyError));
+    } else if (active === "progress") {
       body.append(
-        h("div", { class: "dim" }, "spec"),
-        h("pre", { class: "detail-pre never-run-spec" }, logPane.spec),
+        this.renderProgressTab(detail, model.timeline, model.logPane, handlers),
       );
+    } else {
+      body.append(this.renderOutcomeTab(detail));
     }
     return body;
   }
 
-  private renderTicketDetail(
+  private renderDetailTabs(
+    tabs: DetailTabView[],
+    ticketId: string,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    return h(
+      "div",
+      { class: "detail-tabs", role: "tablist" },
+      ...tabs.map((tab) =>
+        h(
+          "button",
+          {
+            type: "button",
+            role: "tab",
+            class: "detail-tab" + (tab.active ? " detail-tab-active" : ""),
+            onclick: () => handlers.onSelectTab(ticketId, tab.id),
+          },
+          tab.label,
+          tab.interruptDot
+            ? h("span", { class: "dot dot-interrupt", title: "interrupt pending" })
+            : null,
+        ),
+      ),
+    );
+  }
+
+  // One tab panel's container: the column the Spec, Progress and Outcome
+  // bodies share.
+  private detailPanel(...kids: (Node | string | null)[]): HTMLElement {
+    return h("div", { class: "detail-panel" }, ...kids);
+  }
+
+  // The Spec tab: the ticket's markdown body rendered to HTML, preceded by
+  // the blockers line.
+  private renderSpecTab(
+    detail: Extract<DetailView, { kind: "ticket" }>,
+    body: string | null | undefined,
+    error: string | null,
+  ): HTMLElement {
+    const panel = this.detailPanel(
+      h(
+        "div",
+        { class: "dim detail-blockers" },
+        detail.blockedBy.length > 0
+          ? `blocked by ${detail.blockedBy.join(", ")}`
+          : "no blockers",
+      ),
+    );
+    if (body === undefined) {
+      panel.append(
+        error
+          ? h("div", { class: "error-inline" }, error)
+          : h("div", { class: "dim" }, "loading ticket body..."),
+      );
+    } else if (body === null) {
+      panel.append(h("div", { class: "dim" }, "no ticket body"));
+    } else {
+      const md = h("div", { class: "detail-md" });
+      md.innerHTML = ticketBodyHtml(body);
+      panel.append(md);
+    }
+    return panel;
+  }
+
+  // The Progress tab: the status, the interrupt form (the Detail's only
+  // action surface) and the timeline, with attempt rows opening raw logs in
+  // the pane below. A never-run ticket's timeline carries its own "no
+  // attempts yet" marker, and its log pane stays closed.
+  private renderProgressTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
     timeline: TimelineView | null,
     logPane: LogPaneView | null,
     handlers: DetailHandlers,
   ): HTMLElement {
-    const body = h("div", { class: "detail-body" });
-    body.append(
+    const panel = this.detailPanel(
       h("div", { class: "dim" }, "status"),
       h(
         "div",
         { class: `detail-status ticket-state-${detail.status}` },
         statusLabel(detail.status),
       ),
-      h("div", { class: "dim" }, "blocked by"),
-      h(
-        "div",
-        { class: "card-text" },
-        detail.blockedBy.length > 0 ? detail.blockedBy.join(", ") : "none",
-      ),
     );
     if (detail.interrupt) {
-      body.append(this.renderInterrupt(detail.interrupt, handlers));
+      panel.append(this.renderInterrupt(detail.interrupt, handlers));
     }
-    if (logPane?.neverRun) {
-      // A never-run ticket shows its spec text with a "no attempts yet"
-      // marker in place of timeline and log.
-      body.append(this.renderNeverRun(logPane));
-    } else {
-      if (timeline) {
-        body.append(
-          this.renderTimelineSection(detail.ticketId, timeline, logPane, handlers),
-        );
-      }
-      if (logPane) {
-        body.append(this.renderLogPane(logPane, detail.ticketId, handlers));
-      }
-    }
-    if (detail.outcome) {
-      body.append(
-        h("div", { class: "dim" }, "outcome"),
-        h("pre", { class: "detail-pre" }, detail.outcome.summary || "-"),
+    if (timeline) {
+      panel.append(
+        this.renderTimelineSection(detail.ticketId, timeline, logPane, handlers),
       );
-      if (detail.outcome.commitSha) {
-        body.append(h("div", { class: "dim" }, `commit ${detail.outcome.commitSha}`));
-      }
     }
-    return body;
+    if (logPane && !logPane.neverRun) {
+      panel.append(this.renderLogPane(logPane, detail.ticketId, handlers));
+    }
+    return panel;
+  }
+
+  // The Outcome tab: the summary and commit sha once the ticket has
+  // finished, or a dim placeholder before then so the tab bar never
+  // reshapes.
+  private renderOutcomeTab(
+    detail: Extract<DetailView, { kind: "ticket" }>,
+  ): HTMLElement {
+    const outcome = detail.outcome;
+    if (!outcome) {
+      return this.detailPanel(h("div", { class: "dim" }, "not finished yet"));
+    }
+    return this.detailPanel(
+      h("pre", { class: "detail-pre" }, outcome.summary || "-"),
+      outcome.commitSha
+        ? h("div", { class: "dim" }, `commit ${outcome.commitSha}`)
+        : null,
+    );
   }
 
   private renderUtilityDetail(

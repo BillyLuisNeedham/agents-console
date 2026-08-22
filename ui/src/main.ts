@@ -11,11 +11,13 @@ import { LogPane } from "./log-pane";
 import {
   phaseLabel,
   projectDetail,
+  projectDetailTabs,
   projectLogPane,
   projectPool,
   projectTimeline,
   selectLogAttempt,
   type PoolSnapshot,
+  type TabOverride,
   type TicketEventsResponse,
   type TimelineView,
 } from "./project";
@@ -42,7 +44,6 @@ const state = {
 const timelineState = {
   ticketId: null as string | null,
   view: null as TimelineView | null,
-  spec: "",
 };
 
 // The selected ticket's raw log pane: one module owns the byte-window state
@@ -60,6 +61,49 @@ const logPane = new LogPane({
 // drawers modules and composed here once for the session.
 const consoleView = new ConsoleView();
 
+// Ticket bodies for the Spec tab: fetched once per ticket on first selection
+// and held for the session; a 404 caches null so a known-missing body is
+// never refetched. Module scope so a full-DOM rebuild never drops them.
+const ticketBodies = new Map<string, string | null>();
+const ticketBodyFetches = new Set<string>();
+// A failed body fetch, keyed by ticket id: surfaced on the Spec tab, and the
+// next selection retries because nothing was cached.
+const ticketBodyErrors = new Map<string, string>();
+
+// The manually chosen Detail tab. One value carrying its ticket id: the
+// projection ignores it for any other ticket, so changing the selection
+// reasserts the phase default. Memory only; no URL state, no persistence.
+let tabOverride: TabOverride | null = null;
+
+/**
+ * Fetch the selected ticket's body once, on first selection. The cache write
+ * is keyed by ticket id so a slow answer cannot clobber a newer selection's
+ * body; the render after it lands fires only while the ticket is still
+ * selected (the same guard the timeline and log fetches use).
+ */
+function ensureTicketBody(ticketId: string): void {
+  if (ticketBodies.has(ticketId) || ticketBodyFetches.has(ticketId)) return;
+  ticketBodyFetches.add(ticketId);
+  client
+    .getTicket(ticketId)
+    .then((ticket) => {
+      ticketBodies.set(ticketId, ticket?.body ?? null);
+      ticketBodyErrors.delete(ticketId);
+    })
+    .catch((err) => {
+      ticketBodyErrors.set(
+        ticketId,
+        `ticket body fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    })
+    .finally(() => {
+      ticketBodyFetches.delete(ticketId);
+      if (state.snapshot && selectedTicket(state.snapshot, state.selectedId) === ticketId) {
+        render();
+      }
+    });
+}
+
 function selectedTicket(snapshot: PoolSnapshot, selectedId: string | null): string | null {
   if (!selectedId) return null;
   const card = projectPool(snapshot).cards.find((c) => c.id === selectedId);
@@ -73,7 +117,6 @@ function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
       )
     : undefined;
   timelineState.ticketId = ticketId;
-  timelineState.spec = response.spec;
   timelineState.view = projectTimeline(
     response,
     card?.kind === "ticket" ? card.status : "ready",
@@ -100,7 +143,6 @@ async function loadTimeline(): Promise<void> {
   if (!ticketId) {
     timelineState.ticketId = null;
     timelineState.view = null;
-    timelineState.spec = "";
     logPane.reset();
     render();
     return;
@@ -154,12 +196,21 @@ function model(): AppModel {
     seq: state.snapshot?.seq ?? 0,
     error: state.error,
     detail,
+    detailTabs:
+      detail?.kind === "ticket" ? projectDetailTabs(detail, tabOverride) : null,
+    detailBody:
+      detailTicketId !== null && ticketBodies.has(detailTicketId)
+        ? (ticketBodies.get(detailTicketId) ?? null)
+        : undefined,
+    detailBodyError:
+      detailTicketId !== null
+        ? (ticketBodyErrors.get(detailTicketId) ?? null)
+        : null,
     timeline: isCurrent ? timelineState.view : null,
     logPane: detailTicketId
       ? projectLogPane(
           isCurrent ? timelineState.view : null,
           logIsCurrent ? logPane.state.attempt : null,
-          isCurrent ? timelineState.spec : "",
           logIsCurrent
             ? {
                 content: logPane.state.content,
@@ -186,7 +237,15 @@ function render(): void {
     },
     onSelectNode: (nodeId) => {
       state.selectedId = nodeId;
+      if (state.snapshot) {
+        const ticketId = selectedTicket(state.snapshot, nodeId);
+        if (ticketId) ensureTicketBody(ticketId);
+      }
       void loadTimeline();
+      render();
+    },
+    onSelectTab: (ticketId, tab) => {
+      tabOverride = { ticketId, tab };
       render();
     },
     onSelectAttempt: (ticketId, attempt) => {

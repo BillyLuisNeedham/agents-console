@@ -1082,22 +1082,125 @@ body {
   font-size: 11px;
 }
 
-/* --------------------------------------------------------- never-run */
+/* ---------------------------------------------------------- detail tabs */
 
-.never-run {
+/* The ticket Detail's tab bar: a fixed Spec / Progress / Outcome order, so
+   the bar never reshapes as the ticket moves through its phases. */
+.detail-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 5px 12px 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.detail-tab:hover {
+  color: var(--text);
+}
+
+.detail-tab-active,
+.detail-tab-active:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.detail-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+  gap: 8px;
+  min-width: 0;
 }
 
-.never-run-marker {
+.detail-blockers {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The Spec tab's rendered markdown: prose sized to the panel, code in the
+   panel-inset style the raw log and detail-pre already use. */
+.detail-md {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  user-select: text;
+  overflow-wrap: break-word;
+}
+
+.detail-md h1,
+.detail-md h2,
+.detail-md h3,
+.detail-md h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.detail-md h1:first-child,
+.detail-md h2:first-child,
+.detail-md h3:first-child,
+.detail-md p:first-child,
+.detail-md ul:first-child,
+.detail-md ol:first-child {
+  margin-top: 0;
+}
+
+.detail-md p,
+.detail-md ul,
+.detail-md ol {
+  margin: 4px 0;
+}
+
+.detail-md ul,
+.detail-md ol {
+  padding-left: 20px;
+}
+
+.detail-md code {
+  font-family: var(--mono);
   font-size: 11px;
-  font-style: italic;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 3px;
 }
 
-.never-run-spec {
-  max-height: 60vh;
+.detail-md pre {
+  margin: 4px 0;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: auto;
+}
+
+.detail-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.detail-md a {
+  color: var(--accent);
+}
+
+.detail-md blockquote {
+  margin: 4px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
 }
 
 /* ------------------------------------------------------- flow highlight */

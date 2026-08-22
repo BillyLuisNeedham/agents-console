@@ -11,6 +11,8 @@
 import {
   flowNeighbourhood,
   nextNodeSelection,
+  type DetailTab,
+  type DetailTabView,
   type DetailView,
   type InterruptAction,
   type LogPaneView,
@@ -38,6 +40,12 @@ export interface AppModel {
   seq: number;
   error: string | null;
   detail: DetailView | null;
+  /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
+  detailTabs: DetailTabView[] | null;
+  /** The selected ticket's body: undefined while the first fetch is out, null for known-missing. */
+  detailBody: string | null | undefined;
+  /** The last body fetch's failure for the selected ticket, if any. */
+  detailBodyError: string | null;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
 }
@@ -49,6 +57,7 @@ export interface Handlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
+  onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 
 /**
