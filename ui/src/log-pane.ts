@@ -1,0 +1,328 @@
+/**
+ * Log pane: the ticket log's byte-window state machine, one deep module for
+ * the Console's most delicate behavior. The pane opens an attempt's raw log
+ * tail-first, tails it live on the snapshot cadence, and prepends earlier
+ * windows on demand. Two guards define it: a clicked attempt is never
+ * switched away from (attempt-stay), and a slow fetch answering after a newer
+ * selection never clobbers the newer pane (stale-selection). The fetch is
+ * injected at construction, so the guards run under unit tests with fake
+ * fetches; the scroll pin and the prepend anchor live here too, so the view
+ * only renders and the bootstrap only drives.
+ */
+
+import {
+  earlierLogOffset,
+  initialLogWindow,
+  logAtBottom,
+  logTailOffset,
+  selectLogAttempt,
+  type TimelineView,
+} from "./project";
+
+// ---------------------------------------------------------------------------
+// Injected fetch seam
+// ---------------------------------------------------------------------------
+
+/**
+ * A byte range of an attempt's log, as the wire serves it. `offset` is where
+ * the range was read from, `nextOffset` where the next range starts, and
+ * `totalSize` the log's full byte size; the pane pages until `nextOffset`
+ * reaches `totalSize`.
+ */
+export interface LogChunk {
+  content: string;
+  offset: number;
+  nextOffset: number;
+  totalSize: number;
+}
+
+/**
+ * The one wire call the pane needs: a byte range of a ticket's attempt log,
+ * optionally bounded by `end` (how "load earlier" reads exactly the prefix
+ * before the bytes the pane already holds).
+ */
+export type LogFetch = (
+  ticketId: string,
+  attempt: number,
+  offset: number,
+  end?: number,
+) => Promise<LogChunk>;
+
+export interface LogPaneOptions {
+  fetch: LogFetch;
+  /** Called after every state change the view should repaint. */
+  onChange: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// The byte-window state machine
+// ---------------------------------------------------------------------------
+
+export class LogPane {
+  /**
+   * The held window: which ticket and attempt the pane shows, the bytes held
+   * (`firstOffset`..`offset` bookend the window inside a log of `totalSize`),
+   * and the last fetch error. `clicked` records whether the attempt was
+   * picked by hand: a clicked attempt stays when a new attempt starts, an
+   * unclicked pane follows the running one.
+   */
+  readonly state = {
+    ticketId: null as string | null,
+    attempt: null as number | null,
+    clicked: false,
+    content: "",
+    firstOffset: 0,
+    offset: 0,
+    totalSize: 0,
+    error: null as string | null,
+  };
+
+  private readonly fetchChunk: LogFetch;
+  private readonly onChange: () => void;
+  private tailInFlight = false;
+  private earlierInFlight = false;
+
+  constructor(options: LogPaneOptions) {
+    this.fetchChunk = options.fetch;
+    this.onChange = options.onChange;
+  }
+
+  /** Clear the pane: the selection went away. The caller repaints. */
+  reset(): void {
+    this.resetWindow(null);
+  }
+
+  /**
+   * Open an attempt's raw log tail-first: probe the size (an offset past EOF
+   * serves empty content plus the total), fetch the last window, then tail
+   * whatever grew in the meantime. A null attempt holds an empty pane for a
+   * ticket with no attempts. A slow answer only lands when it is still the
+   * selected attempt.
+   */
+  async open(
+    ticketId: string,
+    attempt: number | null,
+    clicked: boolean,
+  ): Promise<void> {
+    this.resetWindow(ticketId);
+    this.state.attempt = attempt;
+    this.state.clicked = clicked;
+    this.onChange();
+    if (attempt === null) return;
+    try {
+      const probe = await this.fetchChunk(
+        ticketId,
+        attempt,
+        Number.MAX_SAFE_INTEGER,
+      );
+      if (!this.isCurrent(ticketId, attempt)) return;
+      const chunk = await this.fetchChunk(
+        ticketId,
+        attempt,
+        initialLogWindow(probe.totalSize),
+      );
+      if (!this.isCurrent(ticketId, attempt)) return;
+      this.state.content = chunk.content;
+      this.state.firstOffset = chunk.offset;
+      this.state.offset = chunk.nextOffset;
+      this.state.totalSize = chunk.totalSize;
+      this.onChange();
+      // The attempt may have grown while the open fetched.
+      void this.tail(ticketId, attempt);
+    } catch {
+      this.fail(ticketId, attempt);
+    }
+  }
+
+  /**
+   * The snapshot-cadence liveness step for the open pane. Attempt-stay: a
+   * clicked attempt is never switched away from; an unclicked pane follows
+   * the running attempt as new attempts start. The selected attempt tails.
+   */
+  follow(
+    ticketId: string,
+    timeline: TimelineView | null,
+  ): Promise<void> | void {
+    if (!timeline) return;
+    if (this.state.attempt === null) {
+      if (timeline.attempts.length > 0) {
+        return this.open(ticketId, selectLogAttempt(timeline, null), false);
+      }
+      return;
+    }
+    const desired = selectLogAttempt(
+      timeline,
+      this.state.clicked ? this.state.attempt : null,
+    );
+    if (desired === null) return;
+    if (desired !== this.state.attempt) {
+      return this.open(ticketId, desired, false);
+    }
+    return this.tail(ticketId, desired);
+  }
+
+  /**
+   * A hand-picked attempt from the timeline: clicked, so attempt-stay keeps
+   * it when a newer attempt starts. Re-picking the shown attempt is a no-op.
+   */
+  selectAttempt(ticketId: string, attempt: number): void {
+    if (this.state.ticketId === ticketId && this.state.attempt === attempt) {
+      return;
+    }
+    void this.open(ticketId, attempt, true);
+  }
+
+  /**
+   * Prepend the window before the oldest byte held ("load earlier"). The
+   * fetch is bounded by `firstOffset`, so the range cannot overlap the held
+   * content. The anchor captured before the mutation keeps the opened view
+   * put across the rebuild.
+   */
+  async loadEarlier(ticketId: string, attempt: number): Promise<void> {
+    if (this.earlierInFlight) return;
+    if (!this.isCurrent(ticketId, attempt)) return;
+    const from = earlierLogOffset(this.state.firstOffset);
+    if (from === null) return;
+    this.earlierInFlight = true;
+    try {
+      const chunk = await this.fetchChunk(
+        ticketId,
+        attempt,
+        from,
+        this.state.firstOffset,
+      );
+      if (!this.isCurrent(ticketId, attempt)) return;
+      captureLogAnchor();
+      this.state.content = chunk.content + this.state.content;
+      this.state.firstOffset = chunk.offset;
+      this.onChange();
+    } catch {
+      this.fail(ticketId, attempt);
+    } finally {
+      this.earlierInFlight = false;
+    }
+  }
+
+  /**
+   * Append whatever bytes the selected attempt's log has grown since the
+   * last read: the live tail, driven by the snapshot cadence. Fetches only
+   * bytes past the last offset read; a no-op once caught up.
+   */
+  private async tail(ticketId: string, attempt: number): Promise<void> {
+    if (this.tailInFlight) return;
+    if (!this.isCurrent(ticketId, attempt)) return;
+    this.tailInFlight = true;
+    try {
+      while (logTailOffset(this.state.offset, this.state.totalSize) !== null) {
+        const from = this.state.offset;
+        const chunk = await this.fetchChunk(ticketId, attempt, from);
+        if (!this.isCurrent(ticketId, attempt)) return;
+        this.state.content += chunk.content;
+        this.state.offset = chunk.nextOffset;
+        this.state.totalSize = chunk.totalSize;
+        this.onChange();
+        if (chunk.nextOffset <= from) break;
+      }
+    } catch {
+      this.fail(ticketId, attempt);
+    } finally {
+      this.tailInFlight = false;
+    }
+  }
+
+  /** A failed fetch marks the pane, but only while it is still selected. */
+  private fail(ticketId: string, attempt: number): void {
+    if (this.isCurrent(ticketId, attempt)) {
+      this.state.error = `log fetch failed: ${ticketId}:${attempt}`;
+      this.onChange();
+    }
+  }
+
+  /** The stale-selection guard: an answer lands only while still selected. */
+  private isCurrent(ticketId: string, attempt: number): boolean {
+    return this.state.ticketId === ticketId && this.state.attempt === attempt;
+  }
+
+  private resetWindow(ticketId: string | null): void {
+    this.state.ticketId = ticketId;
+    this.state.attempt = null;
+    this.state.clicked = false;
+    this.state.content = "";
+    this.state.firstOffset = 0;
+    this.state.offset = 0;
+    this.state.totalSize = 0;
+    this.state.error = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scroll pin and prepend anchor
+// ---------------------------------------------------------------------------
+
+// Module scope so the full-DOM rebuild on every snapshot keeps the pin and
+// the reading position. The pane follows the tail only while pinned at the
+// bottom; scrolling up unpins, scrolling back into the bottom slack resumes.
+// Switching ticket or attempt resets to following.
+let paneKey: string | null = null;
+let pinned = true;
+let scrollTop = 0;
+// Armed between a "load earlier" content change and the render that shows
+// it: the prepend's added height is applied to the scroll position so the
+// opened view stays anchored on the same line.
+let anchor: { prevHeight: number; prevTop: number } | null = null;
+
+/**
+ * Remember the log pane's current scroll metrics, to be applied by the render
+ * that lands a prepend. Called just before the held content changes.
+ */
+function captureLogAnchor(): void {
+  if (typeof document === "undefined") return;
+  const pre = document.querySelector<HTMLElement>(".log-pane-content");
+  if (pre) anchor = { prevHeight: pre.scrollHeight, prevTop: pre.scrollTop };
+}
+
+/**
+ * The user's own scroll moves the pin: at the tail the pane follows, off the
+ * tail the reading position holds. The view's scroll listener reports here.
+ */
+export function noteLogScroll(
+  top: number,
+  clientHeight: number,
+  scrollHeight: number,
+): void {
+  pinned = logAtBottom(top, clientHeight, scrollHeight);
+  scrollTop = top;
+}
+
+/**
+ * Re-applies pin, reading position, and a pending prepend anchor to the
+ * freshly rebuilt log pane after every render. `key` identifies the pane's
+ * ticket and attempt; a changed key resets to following the tail.
+ */
+export function restoreLogScroll(key: string | null): void {
+  if (key !== paneKey) {
+    paneKey = key;
+    pinned = true;
+    scrollTop = 0;
+    anchor = null;
+  }
+  if (typeof document === "undefined") return;
+  const pre = document.querySelector<HTMLElement>(".log-pane-content");
+  if (!pre || key === null) return;
+  if (anchor) {
+    const delta = pre.scrollHeight - anchor.prevHeight;
+    pre.scrollTop = Math.max(0, anchor.prevTop + delta);
+    anchor = null;
+    pinned = logAtBottom(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
+    scrollTop = pre.scrollTop;
+    return;
+  }
+  if (pinned) {
+    pre.scrollTop = pre.scrollHeight;
+  } else {
+    pre.scrollTop = Math.min(
+      scrollTop,
+      Math.max(0, pre.scrollHeight - pre.clientHeight),
+    );
+  }
+}
