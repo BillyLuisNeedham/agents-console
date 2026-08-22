@@ -19,7 +19,7 @@ import {
   type TicketEventsResponse,
   type TimelineView,
 } from "./project";
-import { renderApp, type AppModel } from "./view";
+import { ConsoleView, type AppModel } from "./view";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
@@ -54,6 +54,11 @@ const logPane = new LogPane({
     client.getLog(ticketId, attempt, offset, end),
   onChange: () => render(),
 });
+
+// The per-session view state: selection, dragged card positions, panel
+// width, drawer height, and note drafts, owned by the canvas, detail, and
+// drawers modules and composed here once for the session.
+const consoleView = new ConsoleView();
 
 function selectedTicket(snapshot: PoolSnapshot, selectedId: string | null): string | null {
   if (!selectedId) return null;
@@ -170,7 +175,7 @@ function model(): AppModel {
 }
 
 function render(): void {
-  renderApp(root, model(), {
+  consoleView.render(root, model(), {
     onToggleLog: () => {
       state.logOpen = !state.logOpen;
       render();

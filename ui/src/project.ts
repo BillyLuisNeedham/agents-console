@@ -565,6 +565,10 @@ export function projectLog(raw: unknown): string[] {
   return (raw as { log: unknown[] }).log.filter((line): line is string => typeof line === "string");
 }
 
+export function statusLabel(status: PoolStatus): string {
+  return status === "in-progress" ? "running" : status;
+}
+
 export function phaseLabel(phase: PoolPhase): string {
   switch (phase) {
     case "running":
