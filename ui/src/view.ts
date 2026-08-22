@@ -19,7 +19,6 @@ import {
   parseStoredLayout,
   strokeWidthForZoom,
   layoutStorageKey,
-  logAtBottom,
   nextNodeSelection,
   zoomAtCursor,
   type CardBox,
@@ -38,6 +37,7 @@ import {
   type UtilityCardView,
   type ViewTransform,
 } from "./project";
+import { noteLogScroll, restoreLogScroll } from "./log-pane";
 
 export interface AppModel {
   phase: PoolPhase | null;
@@ -177,63 +177,6 @@ let detailDrag: { startX: number; startWidth: number } | null = null;
 // tailing all keep working. Esc, the toggle, or selecting another card exits;
 // exiting restores the dragged width.
 let detailFullscreen = false;
-
-// Log pane scroll state: module scope so the full-DOM rebuild on every
-// snapshot keeps the pin and the reading position. The pane follows the tail
-// only while pinned at the bottom; scrolling up unpins, scrolling back into
-// the bottom slack resumes. Switching ticket or attempt resets to following.
-let logPaneKey: string | null = null;
-let logPinned = true;
-let logScrollTop = 0;
-// Armed between a "load earlier" content change and the render that shows
-// it: the prepend's added height is applied to the scroll position so the
-// opened view stays anchored on the same line.
-let logAnchor: { prevHeight: number; prevTop: number } | null = null;
-
-/**
- * Remember the log pane's current scroll metrics, to be applied by the render
- * that lands a prepend. Called just before the held content changes.
- */
-export function captureLogAnchor(): void {
-  const pre = document.querySelector<HTMLElement>(".log-pane-content");
-  if (pre) logAnchor = { prevHeight: pre.scrollHeight, prevTop: pre.scrollTop };
-}
-
-// Re-applies pin, reading position, and a pending prepend anchor to the freshly
-// rebuilt log pane after every render.
-function restoreLogScroll(model: AppModel): void {
-  const key =
-    model.detail?.kind === "ticket" &&
-    model.logPane &&
-    !model.logPane.neverRun &&
-    model.logPane.selectedAttempt !== null
-      ? `${model.detail.ticketId}:${model.logPane.selectedAttempt}`
-      : null;
-  if (key !== logPaneKey) {
-    logPaneKey = key;
-    logPinned = true;
-    logScrollTop = 0;
-    logAnchor = null;
-  }
-  const pre = document.querySelector<HTMLElement>(".log-pane-content");
-  if (!pre || key === null) return;
-  if (logAnchor) {
-    const delta = pre.scrollHeight - logAnchor.prevHeight;
-    pre.scrollTop = Math.max(0, logAnchor.prevTop + delta);
-    logAnchor = null;
-    logPinned = logAtBottom(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
-    logScrollTop = pre.scrollTop;
-    return;
-  }
-  if (logPinned) {
-    pre.scrollTop = pre.scrollHeight;
-  } else {
-    pre.scrollTop = Math.min(
-      logScrollTop,
-      Math.max(0, pre.scrollHeight - pre.clientHeight),
-    );
-  }
-}
 
 function currentDetailMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
@@ -952,8 +895,7 @@ function renderLogPane(
     logPane.content.length > 0 ? logPane.content : "(no output yet)",
   );
   pre.addEventListener("scroll", () => {
-    logPinned = logAtBottom(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
-    logScrollTop = pre.scrollTop;
+    noteLogScroll(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
   });
   pane.append(pre);
   if (logPane.hasMore) {
@@ -1282,7 +1224,14 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
   );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));
   if (detailFullscreen) applyDetailFullscreen();
-  restoreLogScroll(model);
+  const logPaneKey =
+    model.detail?.kind === "ticket" &&
+    model.logPane &&
+    !model.logPane.neverRun &&
+    model.logPane.selectedAttempt !== null
+      ? `${model.detail.ticketId}:${model.logPane.selectedAttempt}`
+      : null;
+  restoreLogScroll(logPaneKey);
   if (noteFocus) {
     const next = root.querySelector<HTMLTextAreaElement>(
       `textarea[data-note-key="${CSS.escape(noteFocus.key)}"]`,
