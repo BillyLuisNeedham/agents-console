@@ -61,6 +61,7 @@ export interface PoolConfig {
   roster?: string;
   agents?: string;
   resolver?: string;
+  port?: number;
 }
 
 export type InterruptKind =

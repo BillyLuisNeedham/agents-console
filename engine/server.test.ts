@@ -32,7 +32,10 @@ afterEach(() => {
   }
 });
 
-function makePool(tickets: { file: string; marker: string }[]): string {
+function makePool(
+  tickets: { file: string; marker: string }[],
+  config: Partial<PoolConfig> = {},
+): string {
   const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
@@ -41,7 +44,11 @@ function makePool(tickets: { file: string; marker: string }[]): string {
   }
   writeFileSync(
     join(poolDir, "console.json"),
-    JSON.stringify({ defaults: { harness: "stub", model: "m" } } satisfies PoolConfig, null, 2),
+    JSON.stringify(
+      { defaults: { harness: "stub", model: "m" }, ...config } satisfies PoolConfig,
+      null,
+      2,
+    ),
   );
   return poolDir;
 }
@@ -389,5 +396,127 @@ describe("pool lock", () => {
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(String(process.pid));
     expect(stderr).toContain(poolDir);
+  });
+});
+
+const portMarker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+/** Bind a real socket on an ephemeral port and keep it open. */
+async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
+  const server = Bun.serve({ port: 0, fetch: () => new Response("held") });
+  const port = server.port;
+  if (port === undefined) throw new Error("failed to bind an ephemeral port");
+  return { port, release: () => server.stop(true) };
+}
+
+/** A port that is free right now, on an ephemeral range. */
+async function freePort(): Promise<number> {
+  const held = await holdPort();
+  const port = held.port;
+  await held.release();
+  return port;
+}
+
+describe("pinned pool ports", () => {
+  it("binds the console.json port on every launch", async () => {
+    const port = await freePort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    const serverA = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    servers.push(serverA);
+    expect(serverA.url).toBe(`http://localhost:${port}`);
+    await serverA.close();
+    // Relaunch the same pool: the previous server is gone, so its pid is stale
+    // and the lock lets the new boot take over and bind the same pin.
+    writePidFile(poolDir, deadPid());
+    const serverB = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    servers.push(serverB);
+    expect(serverB.url).toBe(`http://localhost:${port}`);
+  });
+
+  it("a failed pinned bind clears the lock it claimed, so a retry can boot", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    let message = "";
+    try {
+      createPoolServer({ poolDir, distDir: "/nonexistent" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(held.port));
+    // The failed boot must not leave a live-looking pid, or the retry refuses.
+    expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+    await held.release();
+    const server = createPoolServer({ poolDir, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(server.url).toBe(`http://localhost:${held.port}`);
+  });
+
+  it("refuses a busy console.json pin, naming the port", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    let message = "";
+    try {
+      createPoolServer({ poolDir, distDir: "/nonexistent" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(held.port));
+    await held.release();
+  });
+
+  it("refuses a busy --port pin, naming the port", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    let message = "";
+    try {
+      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(held.port));
+    await held.release();
+  });
+
+  it("--port overrides the console.json pin for that launch", async () => {
+    const configPort = await freePort();
+    const flagPort = await freePort();
+    expect(flagPort).not.toBe(configPort);
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: configPort });
+    const server = createPoolServer({ poolDir, port: flagPort, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(server.url).toBe(`http://localhost:${flagPort}`);
+  });
+
+  it("with no pin, binds the default port when it is free", async () => {
+    const port = await freePort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const server = createPoolServer({ poolDir, defaultPort: port, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(server.url).toBe(`http://localhost:${port}`);
+  });
+
+  it("with no pin, hunts to the next free port when the default is busy", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const server = createPoolServer({ poolDir, defaultPort: held.port, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(server.url).not.toBe(`http://localhost:${held.port}`);
+    expect(server.url).toMatch(/^http:\/\/localhost:\d+$/);
+    await held.release();
+  });
+
+  it("exits non-zero from the CLI when a --port pin is busy, naming the port", async () => {
+    const held = await holdPort();
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const repoDir = join(import.meta.dir, "..");
+    const child = Bun.spawn(
+      ["bun", "run", "engine/server.ts", "--pool", poolDir, "--port", String(held.port)],
+      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await child.exited;
+    const stderr = await new Response(child.stderr).text();
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain(String(held.port));
+    await held.release();
   });
 });
