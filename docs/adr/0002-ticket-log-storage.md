@@ -1,0 +1,7 @@
+# Ticket log storage: per-ticket events.jsonl plus attempt-rotated raw logs
+
+The Console needs a per-ticket log: a lifecycle timeline plus the raw harness output of every attempt. We decided the pool engine appends structured events (timestamp, attempt number, kind, small payload) to `runs/<id>.events.jsonl` as they happen, and that re-running a ticket rotates its raw logs — `<id>.log` and `<id>.resolver.log` always hold the current attempt, older attempts move to `<id>.attempt-N.log` / `<id>.attempt-N.resolver.log`.
+
+Two alternatives were rejected. Filtering the pool-level log channel by ticket id is lossy — that channel is coarse prose written for the bottom drawer, and several lifecycle moments never reach it. Deriving the timeline from sqlite checkpoints couples the log to checkpoint retention and cannot see anything that happens mid-super-step (spawn, live output, exit). Append-only JSONL costs one write at each lifecycle point the engine already passes through, is readable by the UI without parsing prose, and keeps `runs/` the single directory a human tails by hand — the founding spec's "log-reading habits carry over" rule.
+
+The on-disk shape is the hard-to-reverse part: pools accumulate these files, and old pools without `events.jsonl` are only ever backfilled approximately (attempt rows reconstructed from existing log files), so the format should be treated as stable from the first write.
