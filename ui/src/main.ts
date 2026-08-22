@@ -2,7 +2,7 @@
  * Console: the pool rendered as node cards on a canvas. One Bun server per
  * pool serves the built SPA, a JSON API, and an SSE stream pushing a full
  * snapshot on every change. The UI renders from those snapshots only; ticket
- * cards and their blocked-by edges replace the old LangGraph thread UI.
+ * cards and their blocked-by edges render the thread.
  */
 
 import "./styles.css";
