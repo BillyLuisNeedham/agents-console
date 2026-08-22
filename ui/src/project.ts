@@ -96,6 +96,8 @@ interface PoolState {
 export interface PoolSnapshot {
   seq: number;
   phase: PoolPhase;
+  /** The pool's display name, computed server-side from the pool directory. */
+  poolName: string;
   state: PoolState;
 }
 

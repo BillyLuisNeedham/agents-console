@@ -68,6 +68,7 @@ function snapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
   return {
     seq: 0,
     phase: "running",
+    poolName: "repo/pool",
     state: {
       tickets: [],
       log: [],

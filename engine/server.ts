@@ -71,6 +71,8 @@ interface EnrichedTicketState {
 interface EnrichedSnapshot {
   seq: number;
   phase: RunPhase;
+  /** The pool's display name: the last two path segments of the pool directory. */
+  poolName: string;
   state: {
     tickets: EnrichedTicketState[];
     log: string[];
@@ -94,10 +96,11 @@ function loadMeta(poolDir: string): TicketMarker[] {
 }
 
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
-function enrich(snapshot: PoolSnapshot, meta: TicketMarker[]): EnrichedSnapshot {
+function enrich(snapshot: PoolSnapshot, meta: TicketMarker[], poolName: string): EnrichedSnapshot {
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
+    poolName,
     state: {
       tickets: meta.map((m) => ({
         id: m.id,
@@ -560,6 +563,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const meta = loadMeta(poolDir);
   const ticketIds = knownTicketIds(meta);
+  const poolName = poolDir.split("/").slice(-2).join("/");
 
   let latest: EnrichedSnapshot | null = null;
   let currentRun: Awaited<ReturnType<typeof runPool>> | null = null;
@@ -584,7 +588,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     const run = await runPool({
       poolDir,
       harnesses,
-      onSnapshot: (snapshot) => broadcast(enrich(snapshot, meta)),
+      onSnapshot: (snapshot) => broadcast(enrich(snapshot, meta, poolName)),
     });
     currentRun = run;
     return latest!;

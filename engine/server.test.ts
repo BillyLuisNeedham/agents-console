@@ -40,6 +40,15 @@ function makePool(
 ): string {
   const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
   tempDirs.push(poolDir);
+  return makePoolInto(poolDir, tickets, config);
+}
+
+/** Write a pool's issues and console.json into a directory the caller chose. */
+function makePoolInto(
+  poolDir: string,
+  tickets: { file: string; marker: string }[],
+  config: Partial<PoolConfig> = {},
+): string {
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   for (const ticket of tickets) {
     writeFileSync(join(poolDir, "issues", ticket.file), `${ticket.marker}\n\n# body\n`);
@@ -120,6 +129,24 @@ describe("pool server", () => {
     expect(approved.phase).toBe("done");
     expect(approved.state.interrupts).toEqual([]);
     expect(server.latest?.phase).toBe("done");
+  });
+
+  it("carries the pool's display name, the last two path segments, on the enriched snapshot", async () => {
+    const shapes: [string, string][] = [
+      ["ai-agent-graphs-fix/tickets", "ai-agent-graphs-fix/tickets"],
+      ["other-worktree/tickets", "other-worktree/tickets"],
+      ["repo/.scratch/tickets", ".scratch/tickets"],
+    ];
+    for (const [rel, expected] of shapes) {
+      const root = mkdtempSync(join(tmpdir(), "pool-name-"));
+      tempDirs.push(root);
+      const poolDir = makePoolInto(join(root, rel), [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ]);
+      const server = await startServer(poolDir, stubHarness({}));
+      const snapshot = await server.start();
+      expect(snapshot.poolName).toBe(expected);
+    }
   });
 
   it("serves get state, start, and resume over HTTP", async () => {
