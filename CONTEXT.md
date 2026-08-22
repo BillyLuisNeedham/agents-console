@@ -58,9 +58,16 @@ _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
 The final human judgment of finished ticket work, after implement tickets have run.
 _Avoid_: per-ticket lint, typecheck (those are not Review)
 
+**Pool**:
+The set of tickets one Console run works, identified by its directory on disk. Hermetic: no ticket edges cross pool boundaries. One Console server binds one pool at a time.
+_Avoid_: project, workspace, queue
+
 **Console**:
-Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail.
+Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail. One Console process serves exactly one Pool; running several pools means several Consoles, each on its own port.
 _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
+
+**Fleet**:
+The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
 
 **Detail**:
 The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
