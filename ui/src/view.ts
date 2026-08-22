@@ -7,7 +7,10 @@
  */
 
 import {
+  clampDetailWidth,
   clampDrawersHeight,
+  DETAIL_MAX_FRACTION,
+  DETAIL_MIN_PX,
   DRAWER_DEFAULT_VH,
   edgePath,
   flowNeighbourhood,
@@ -151,6 +154,37 @@ function flowClass(id: string): string {
 // stream. One shared vh height drives both drawer bodies.
 let drawersHeight = DRAWER_DEFAULT_VH;
 let drawerDrag: { startY: number; startHeight: number } | null = null;
+
+// Detail width: module scope like the drawers, so the panel keeps its dragged
+// width across the full-DOM rebuild on every render. One global localStorage
+// key (not per pool) remembers it across reloads.
+const DETAIL_WIDTH_KEY = "console-detail-width";
+let detailWidth = DETAIL_MIN_PX;
+let detailDrag: { startX: number; startWidth: number } | null = null;
+
+function currentDetailMaxPx(): number {
+  return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+}
+
+function readStoredDetailWidth(): number {
+  try {
+    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
+    if (raw == null) return DETAIL_MIN_PX;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : DETAIL_MIN_PX;
+  } catch {
+    // quota or private mode: the default width applies
+    return DETAIL_MIN_PX;
+  }
+}
+
+function writeStoredDetailWidth(): void {
+  try {
+    localStorage.setItem(DETAIL_WIDTH_KEY, String(detailWidth));
+  } catch {
+    // quota or private mode: the width just will not persist
+  }
+}
 
 // Interrupt note drafts, keyed by ticket id: module scope so a snapshot
 // re-render (siblings keep running while an interrupt waits) never wipes a
@@ -312,6 +346,7 @@ function closeDetail(): void {
 }
 
 if (typeof window !== "undefined") {
+  detailWidth = clampDetailWidth(readStoredDetailWidth(), currentDetailMaxPx());
   window.addEventListener("pointerup", (event) => endDrag(event));
   window.addEventListener("pointercancel", (event) => endDrag(event));
 }
@@ -748,11 +783,47 @@ function renderUtilityDetail(
   return body;
 }
 
+function applyDetailWidth(): void {
+  const width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
+  for (const el of document.querySelectorAll<HTMLElement>(".detail-open")) {
+    el.style.width = width;
+  }
+}
+
+function bindDetailHandle(handle: HTMLElement): void {
+  handle.addEventListener("pointerdown", (event) => {
+    if (detailDrag) return;
+    detailDrag = {
+      startX: event.clientX,
+      startWidth: clampDetailWidth(detailWidth, currentDetailMaxPx()),
+    };
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // pointer already gone
+    }
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!detailDrag) return;
+    const dx = event.clientX - detailDrag.startX;
+    detailWidth = clampDetailWidth(detailDrag.startWidth - dx, currentDetailMaxPx());
+    applyDetailWidth();
+  });
+  handle.addEventListener("pointerup", () => {
+    detailDrag = null;
+    writeStoredDetailWidth();
+  });
+  handle.addEventListener("pointercancel", () => {
+    detailDrag = null;
+  });
+}
+
 function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
   const detail = h("div", { class: "detail" });
   const view = model.detail;
   if (!view) return detail;
   detail.classList.add("detail-open");
+  detail.style.width = `${clampDetailWidth(detailWidth, currentDetailMaxPx())}px`;
   const title = view.kind === "ticket" ? view.ticketId : view.label;
   detail.append(
     h(
@@ -768,6 +839,15 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
     view.kind === "ticket" ? renderTicketDetail(view, handlers) : renderUtilityDetail(view, handlers),
   );
   return detail;
+}
+
+// The Detail's left edge as a drag handle, sitting between the canvas and the
+// panel. Rendered only while a Detail is open, so a closed panel leaves no
+// orphan strip.
+function renderDetailHandle(): HTMLElement {
+  const handle = h("div", { class: "detail-handle", title: "drag to resize detail" });
+  bindDetailHandle(handle);
+  return handle;
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +935,7 @@ function renderDrawers(model: AppModel, handlers: Handlers): HTMLElement {
 export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers): void {
   endDrag();
   drawerDrag = null;
+  detailDrag = null;
   onSelectNode = handlers.onSelectNode;
   const liveIds = new Set(model.cards.map((card) => card.id));
   for (const id of [...nodePos.keys()]) {
@@ -885,6 +966,7 @@ export function renderApp(root: HTMLElement, model: AppModel, handlers: Handlers
     "div",
     { class: "content" },
     renderMain(model, handlers),
+    model.detail ? renderDetailHandle() : null,
     renderDetail(model, handlers),
   );
   root.replaceChildren(h("div", { class: "shell" }, content, renderDrawers(model, handlers)));

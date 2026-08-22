@@ -861,12 +861,27 @@ body {
 .detail-open {
   display: flex;
   flex-direction: column;
-  flex: 0 0 340px;
+  flex: 0 0 auto;
   width: 340px;
   min-width: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
   overflow-y: auto;
+}
+
+/* The Detail's left edge as a drag handle: a stretch strip between the canvas
+   and the panel, shown only while a Detail is open. */
+.detail-handle {
+  flex: 0 0 8px;
+  cursor: ew-resize;
+  background: var(--bg-panel-2);
+  border-right: 1px solid var(--border);
+  touch-action: none;
+  user-select: none;
+}
+
+.detail-handle:hover {
+  background: var(--accent);
 }
 
 .detail-head {

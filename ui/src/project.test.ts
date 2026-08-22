@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  clampDetailWidth,
   clampDrawersHeight,
+  DETAIL_MAX_FRACTION,
+  DETAIL_MIN_PX,
   DRAWER_MAX_VH,
   DRAWER_MIN_VH,
   edgePath,
@@ -535,6 +538,29 @@ describe("clampDrawersHeight", () => {
 
   it("passes values inside the range through unchanged", () => {
     expect(clampDrawersHeight(32)).toBe(32);
+  });
+});
+
+describe("clampDetailWidth", () => {
+  it("clamps below the readable minimum", () => {
+    expect(clampDetailWidth(100, 1600)).toBe(DETAIL_MIN_PX);
+  });
+
+  it("clamps above the window fraction (about 80vw)", () => {
+    expect(clampDetailWidth(2000, 1600)).toBe(1600);
+  });
+
+  it("passes values inside the range through unchanged", () => {
+    expect(clampDetailWidth(600, 1600)).toBe(600);
+  });
+
+  it("tracks the window bound when the window is too narrow to hold the minimum", () => {
+    expect(clampDetailWidth(600, 200)).toBe(200);
+  });
+
+  it("keeps the maximum at about 80% of the window", () => {
+    expect(DETAIL_MAX_FRACTION).toBeCloseTo(0.8);
+    expect(clampDetailWidth(100000, Math.round(1440 * DETAIL_MAX_FRACTION))).toBe(1152);
   });
 });
 

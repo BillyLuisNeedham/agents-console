@@ -492,3 +492,21 @@ export const DRAWER_DEFAULT_VH = 32;
 export function clampDrawersHeight(vh: number): number {
   return Math.min(DRAWER_MAX_VH, Math.max(DRAWER_MIN_VH, vh));
 }
+
+// ---------------------------------------------------------------------------
+// Detail width clamp
+// ---------------------------------------------------------------------------
+
+export const DETAIL_MIN_PX = 340;
+/** The Detail's maximum width, as a fraction of the window width. */
+export const DETAIL_MAX_FRACTION = 0.8;
+
+/**
+ * Clamp a Detail width in px to the readable minimum and most of the window.
+ * `maxPx` is the caller-computed window fraction (about 80vw). On a window too
+ * narrow to hold the 340px minimum, the window bound wins and the panel
+ * tracks the window.
+ */
+export function clampDetailWidth(px: number, maxPx: number): number {
+  return Math.min(maxPx, Math.max(DETAIL_MIN_PX, px));
+}
