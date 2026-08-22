@@ -1,0 +1,339 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/issue-11-pool/issues/04-prototype-cleanup.md
+[0m
+[0m$ [0mgit status && git log --oneline -5 && git branch --show-current
+On branch main
+Your branch is ahead of 'origin/main' by 5 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/issue-11-pool/issues/02-tab-default-projection.md
+	modified:   .scratch/issue-11-pool/issues/03-tabbed-detail-panel.md
+	modified:   .scratch/issue-11-pool/issues/04-prototype-cleanup.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/issue-11-pool/console.db
+	.scratch/issue-11-pool/runs/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+8b83e92 Merge branch 'pool/01'
+b6288c5 ui: delete throwaway prototype sketches, unblocking typecheck
+9687435 ui: project the Detail's default tab from ticket phase
+c818d21 console: serve a ticket's markdown body at /api/ticket
+ebfb2cd console-pool: issue-11 tabbed-detail pool — 4 issues, config, agent instructions
+main
+[0m
+[0m✱ [0mGrep "variant|proto-variant"[90m in . · 0 matches[0m
+[0m
+[0m$ [0mls ui/src && ls ui/src/* 2>/dev/null | head -50
+client.ts
+main.ts
+project.test.ts
+project.ts
+styles.css
+view.ts
+vite-env.d.ts
+ui/src/client.ts
+ui/src/main.ts
+ui/src/project.test.ts
+ui/src/project.ts
+ui/src/styles.css
+ui/src/view.ts
+ui/src/vite-env.d.ts
+[0m
+[0m$ [0mgit grep -n -i "variant" -- ui/ ':!ui/node_modules' ':!ui/bun.lock' | head -30; git grep -n "proto-variant" | head
+.scratch/issue-11-pool/issues/04-prototype-cleanup.md:9:With the tabbed Detail shipped, the throwaway prototype scaffolding leaves main: the `?variant=` floating switcher, its styles, the `proto-variant-change` listener, and the losing Variants B and C (Variant A's file goes too if anything of it remains once ticket 03 has rewritten the design properly). No `?variant=` param should have any effect on the Console afterward. The full prototype — all three variants plus wiring — remains on the `prototype/ticket-details` branch as the primary source, so nothing is lost.
+[0m
+[0m$ [0mgit ls-tree -r prototype/ticket-details --name-only -- ui/src/ && git grep -c "variant" prototype/ticket-details -- ui/src/ | head
+ui/src/client.ts
+ui/src/main.ts
+ui/src/project.test.ts
+ui/src/project.ts
+ui/src/prototype/VariantA.ts
+ui/src/prototype/VariantB.ts
+ui/src/prototype/VariantC.ts
+ui/src/prototype/switcher.ts
+ui/src/styles.css
+ui/src/view.ts
+ui/src/vite-env.d.ts
+prototype/ticket-details:ui/src/client.ts:1
+prototype/ticket-details:ui/src/main.ts:5
+prototype/ticket-details:ui/src/prototype/VariantA.ts:3
+prototype/ticket-details:ui/src/prototype/VariantB.ts:2
+prototype/ticket-details:ui/src/prototype/VariantC.ts:1
+prototype/ticket-details:ui/src/prototype/switcher.ts:13
+prototype/ticket-details:ui/src/styles.css:2
+prototype/ticket-details:ui/src/view.ts:21
+[0m
+[0m$ [0mrg -n -i "variant|switcher|proto" ui/src/ ui/index.html 2>/dev/null; echo "exit=$?"
+exit=1
+[0m
+The prototype is already fully removed from main (done by ticket 03, commit b6288c5) and intact on `prototype/ticket-details`. Verifying no leftovers remain and running the full suite.
+[0m$ [0mls ui/ && rg -n "URLSearchParams|location.search" ui/src/ ui/index.html 2>/dev/null; echo "exit=$?"
+bun.lock
+dist
+index.html
+node_modules
+package.json
+src
+tsconfig.json
+vite.config.ts
+ui/src/client.ts:105:    const params = new URLSearchParams({
+exit=0
+[0m
+[0m→ [0mRead ui/src/client.ts[90m [limit=30, offset=95][0m
+[0m
+[0m$ [0mcat package.json | head -30 && cat ui/package.json
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -3 && bun test 2>&1 | tail -5 && bun run build 2>&1 | tail -6
+$ tsc --noEmit
+
+ 87 pass
+ 0 fail
+ 261 expect() calls
+Ran 87 tests across 1 file. [26.00ms]
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-Df7VZWQy.js   29.43 kB │ gzip: 9.72 kB
+
+✓ built in 55ms
+[0m
+[0m$ [0mbun test 2>&1 | tail -5
+235 pass
+ 0 fail
+ 857 expect() calls
+Ran 235 tests across 6 files. [17.15s]
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -3
+$ tsc --noEmit
+[0m
+All green. Verifying history and what the uncommitted issue-file changes are before I commit.
+[0m$ [0mgit merge-base --is-ancestor 504f313 HEAD && echo "504f313 in main" ; git log --oneline -3 504f313 2>/dev/null; git diff --stat .scratch/issue-11-pool/issues/
+504f313 ui: make the ticket Detail a Spec / Progress / Outcome tab bar
+8b83e92 Merge branch 'pool/01'
+b6288c5 ui: delete throwaway prototype sketches, unblocking typecheck
+ .../issues/02-tab-default-projection.md            | 21 +++++++++-----
+ .../issue-11-pool/issues/03-tabbed-detail-panel.md | 32 ++++++++++++++++------
+ .../issue-11-pool/issues/04-prototype-cleanup.md   |  2 +-
+ 3 files changed, 38 insertions(+), 17 deletions(-)
+[0m
+[0m$ [0mgit diff .scratch/issue-11-pool/issues/02-tab-default-projection.md .scratch/issue-11-pool/issues/03-tabbed-detail-panel.md .scratch/issue-11-pool/issues/04-prototype-cleanup.md
+diff --git a/.scratch/issue-11-pool/issues/02-tab-default-projection.md b/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+index a744221..99287ba 100644
+--- a/.scratch/issue-11-pool/issues/02-tab-default-projection.md
++++ b/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+@@ -1,4 +1,4 @@
+-<!-- state: id=02 blocked-by=none status=ready -->
++<!-- state: id=02 blocked-by=none status=done -->
+ 
+ # 02 — Tab-default projection
+ 
+@@ -10,13 +10,20 @@ The ui projection layer (the pure, DOM-free seam where `projectDetail` and the o
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
+-- [ ] A pending interrupt maps to Progress on every status, including done
+-- [ ] A manual tab choice overrides the default for the current ticket
+-- [ ] The override resets when the selected ticket changes
+-- [ ] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
++- [x] A pending interrupt maps to Progress on every status, including done
++- [x] A manual tab choice overrides the default for the current ticket
++- [x] The override resets when the selected ticket changes
++- [x] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ None — can start immediately.
++
++## Notes
++
++- Delivered as `DetailTab`, `TabOverride`, `defaultDetailTab` and `projectDetailTab` in `ui/src/project.ts`, tested in `ui/src/project.test.ts`. The override is data: `{ ticketId, tab }` or null for auto. A choice carries its ticket id, so a stale choice from a previous selection does not apply and the default reasserts itself; that is how the reset-on-ticket-change rule is modelled.
++- A manual choice also overrides the interrupt-driven Progress default. The Issue says the interrupt wins over the status default and a manual choice overrides the default; spec user story 10 (the panel does not yank itself back) settles that the manual choice wins outright.
++- Typecheck caveat (pre-existing, not caused by this ticket): `bun run typecheck` in `ui/` was already red at pool start. Every error is in `src/prototype/` (the throwaway sketches from commit 7c72b0e import names `view.ts` does not export). Verified red with my changes stashed, and verified my changed files contribute zero errors. Nothing outside `src/prototype/` imports it, and ticket 04 deletes those files, so I left them and the tsconfig alone: if the red were disqualifying, tickets 02 and 03 could never pass since 04 is blocked by 03. Full `bun test` (ui: 87 pass) and `bun run build` are clean; the engine suite is untouched and green (144 pass).
++- `ui/node_modules` did not exist in this worktree; ran `bun install` in `ui/` (lockfile unchanged).
+diff --git a/.scratch/issue-11-pool/issues/03-tabbed-detail-panel.md b/.scratch/issue-11-pool/issues/03-tabbed-detail-panel.md
+index 7e58839..71824f8 100644
+--- a/.scratch/issue-11-pool/issues/03-tabbed-detail-panel.md
++++ b/.scratch/issue-11-pool/issues/03-tabbed-detail-panel.md
+@@ -1,4 +1,4 @@
+-<!-- state: id=03 blocked-by=01,02 status=ready -->
++<!-- state: id=03 blocked-by=01,02 status=done -->
+ 
+ # 03 — Tabbed Detail panel
+ 
+@@ -14,15 +14,29 @@ The default tab comes from the projection built in ticket 02; a pending interrup
+ 
+ ## Acceptance criteria
+ 
+-- [ ] The ticket Detail body is the Spec / Progress / Outcome tab bar; the old stacked layout is gone
+-- [ ] Spec renders the ticket body as markdown (headings, lists, code blocks) with a dim blockers line above it
+-- [ ] Progress carries the interrupt form and the timeline; attempt rows still open raw logs in the log pane
+-- [ ] Outcome shows summary + commit sha, or a dim placeholder before the ticket finishes
+-- [ ] Default tab follows the ticket-02 projection; manual choice is remembered per ticket and resets on ticket change
+-- [ ] A pending interrupt adds a red dot to the Progress tab
+-- [ ] The body is fetched once per ticket and cached; a slow fetch never clobbers a newer selection
+-- [ ] Full test suite, typecheck, and build clean
++- [x] The ticket Detail body is the Spec / Progress / Outcome tab bar; the old stacked layout is gone
++- [x] Spec renders the ticket body as markdown (headings, lists, code blocks) with a dim blockers line above it
++- [x] Progress carries the interrupt form and the timeline; attempt rows still open raw logs in the log pane
++- [x] Outcome shows summary + commit sha, or a dim placeholder before the ticket finishes
++- [x] Default tab follows the ticket-02 projection; manual choice is remembered per ticket and resets on ticket change
++- [x] A pending interrupt adds a red dot to the Progress tab
++- [x] The body is fetched once per ticket and cached; a slow fetch never clobbers a newer selection
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ 01 — Ticket body endpoint; 02 — Tab-default projection.
++
++## Notes
++
++- Infra collision (proven): worktree and branch names are shared across pools by ticket id (`pool/<id>` under `.git/pool-worktrees/`). The arch-review pool's engine merged its own ticket 03 into `arch/cleanup` at ~21:27 and deleted the shared `pool/03` branch and the worktree this attempt was spawned in, minutes after spawn. No ticket-03 work was lost (none had been written). I recreated `.git/pool-worktrees/03` as a fresh `pool/03` branched from `main` (8b83e92, which carries tickets 01 and 02) and continued there. Risk of a repeat is low: the arch-review ticket 03 is merged, so its engine will not touch `pool/03` again.
++- Decisions the Issue left open, settled here:
++  - The never-run spec fallback in the old stacked Detail (`renderNeverRun`, fed by the events endpoint's `spec` field) was deleted: the Spec tab owns the ticket body now, and a never-run ticket's Progress tab shows the timeline's own "no attempts yet" marker. The now-dead `spec` threading (`LogPaneView.spec`, the `projectLogPane` spec parameter, `timelineState.spec`) was removed with it; the events endpoint's wire field is untouched.
++  - Tab memory keeps ticket 02's single-`TabOverride` design: a choice made on ticket A survives viewing ticket B and returning to A, but choosing a tab on B replaces it. That is the semantics the projection documents and tests; the criterion's "remembered per ticket, resets on ticket change" reads onto it.
++  - A failed body fetch (not a 404) caches nothing, records a `ticket body fetch failed: ...` line shown on the Spec tab (mirroring how the log fetches surface errors), and retries on the next selection. 404 still caches null for the session.
++  - `marked` output is assigned to innerHTML unsanitised: the bodies are the pool's own Issue files, served same-origin. A pool that ever renders third-party markdown needs a sanitiser; noted in `ticketBodyHtml`'s doc comment.
++- Review (two-axis, per the implement flow): no hard standards violations; the spec axis's two real findings (swallowed fetch error, dead spec threading) are fixed above. Findings deliberately not acted on: per-ticket tab memory as a Map (contradicts ticket 02's documented design) and a sanitiser dependency (not asked for; trust note above).
++
++## Resume note
++
++can you try again
+diff --git a/.scratch/issue-11-pool/issues/04-prototype-cleanup.md b/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+index a8d4efa..bde2b8b 100644
+--- a/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
++++ b/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+@@ -1,4 +1,4 @@
+-<!-- state: id=04 blocked-by=03 status=ready -->
++<!-- state: id=04 blocked-by=03 status=in-progress -->
+ 
+ # 04 — Prototype cleanup
+[0m
+[0m$ [0mgit branch -a --contains 504f313; git log --oneline main..504f313; git status -sb | head -3; ls .git/pool-worktrees/ 2>/dev/null
++ pool/03
+504f313 ui: make the ticket Detail a Spec / Progress / Outcome tab bar
+## main...origin/main [ahead 5]
+ M .scratch/issue-11-pool/issues/02-tab-default-projection.md
+ M .scratch/issue-11-pool/issues/03-tabbed-detail-panel.md
+03
+11
+18
+20
+22
+23
+25
+29
+31
+[0m
+[0m$ [0mgit grep -n -i "variant\|switcher" pool/03 -- ui/ | grep -v bun.lock; echo "exit=$?"
+exit=1
+[0m
+All criteria verified. Updating the issue file and committing.
+[0m← [0mEdit .scratch/issue-11-pool/issues/04-prototype-cleanup.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=04 blocked-by=03 status=in-progress -->
++<!-- state: id=04 blocked-by=03 status=done -->
+ 
+ # 04 — Prototype cleanup
+ 
+ Spec: GitHub issue #15 (BillyLuisNeedham/agents-console).
+
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/04-prototype-cleanup.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/04-prototype-cleanup.md
+@@ -9,13 +9,20 @@
+ With the tabbed Detail shipped, the throwaway prototype scaffolding leaves main: the `?variant=` floating switcher, its styles, the `proto-variant-change` listener, and the losing Variants B and C (Variant A's file goes too if anything of it remains once ticket 03 has rewritten the design properly). No `?variant=` param should have any effect on the Console afterward. The full prototype — all three variants plus wiring — remains on the `prototype/ticket-details` branch as the primary source, so nothing is lost.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] The prototype switcher and its keyboard listener are gone from the ui
+-- [ ] The losing variant components are gone from main
+-- [ ] `?variant=A|B|C` has no visible effect
+-- [ ] The `prototype/ticket-details` branch still holds the full prototype for reference
+-- [ ] Full test suite, typecheck, and build clean
++- [x] The prototype switcher and its keyboard listener are gone from the ui
++- [x] The losing variant components are gone from main
++- [x] `?variant=A|B|C` has no visible effect
++- [x] The `prototype/ticket-details` branch still holds the full prototype for reference
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ 03 — Tabbed Detail panel.
++
++## Notes
++
++- The deletion this ticket existed to do had already landed on main as b6288c5 ("ui: delete throwaway prototype sketches, unblocking typecheck"), made during ticket 03 after ticket 02 found the sketches were the only typecheck errors. So this attempt was verification, not deletion; no code change was left to make.
++- Verified on main: no `variant`/`switcher`/`proto` reference anywhere in `ui/src` or `ui/index.html` (the one `URLSearchParams` in `client.ts:105` builds the `/api/log` query, unrelated); nothing reads `location.search`, so `?variant=A|B|C` is inert. `ui/src/prototype/` does not exist. The same check on the `pool/03` tip (504f313, ticket 03's unmerged work) is also clean, so the merge will not reintroduce anything.
++- Verified on `prototype/ticket-details`: the full prototype survives there — `ui/src/prototype/switcher.ts`, `VariantA.ts`, `VariantB.ts`, `VariantC.ts`, plus its wiring in `main.ts`, `view.ts` and `styles.css`.
++- Verified green on main: engine `bun test` 235 pass / 0 fail, engine `tsc --noEmit` clean; ui `bun test` 87 pass / 0 fail, ui `tsc --noEmit` clean, `vite build` clean.
+
+[0m
+[0m$ [0mgit add .scratch/issue-11-pool/issues/04-prototype-cleanup.md && git commit -m "ui: verify prototype scaffolding fully removed from main" && git rev-parse HEAD
+[main 066e4ce] ui: verify prototype scaffolding fully removed from main
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+066e4ceb24d5d43304854dd9acf88eb9d02f462e
+[0m
+[0m← [0mWrite .scratch/issue-11-pool/runs/04.outcome.json
+Wrote file successfully.
+[0m
+Done, status=done. The cleanup had already landed on main as b6288c5 during ticket 03, so this was verification: no variant/switcher references in the ui, `?variant=` inert, full prototype intact on `prototype/ticket-details`, pool/03's tip clean, and all suites/typecheck/build green. Committed as 066e4ce; outcome recorded at runs/04.outcome.json.

@@ -1,0 +1,733 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+[0m→ [0mRead .
+[0m
+[0m$ [0mgit status && git log --oneline -5 && git branch --show-current
+On branch pool/01
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ebfb2cd console-pool: issue-11 tabbed-detail pool — 4 issues, config, agent instructions
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+0574fee console-pool: record the completed 30-ticket pool — issues, specs, run logs, and final config
+7161efa Merge branch 'pool/31'
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+pool/01
+[0m
+[0m→ [0mRead CONTEXT.md
+[0m→ [0mRead .scratch/issue-11-pool/console.json
+[0m→ [0mRead engine
+[0m→ [0mRead engine/server.ts
+[0m→ [0mRead engine/server.test.ts
+[0m✱ [0mGrep "getEvents"[90m in . · 11 matches[0m
+Now let me find the pool client with `getEvents` and the ADRs.
+[0m
+[0m$ [0mls docs/adr/ ui/
+docs/adr/:
+0001-one-console-per-pool.md
+0002-ticket-log-storage.md
+
+ui/:
+bun.lock
+index.html
+package.json
+src
+tsconfig.json
+vite.config.ts
+[0m
+[0m→ [0mRead ui/src/client.ts
+[0m→ [0mRead engine/pool.ts
+[0m
+[0m$ [0mgit show prototype/ticket-details --stat | head -40
+commit 84c6fa515ecd1e42cf1f7f27ba5614b39dc0738d
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 20:40:48 2026 +0100
+
+    ui: throwaway prototype wiring for tabbed ticket detail (issue #11)
+
+ engine/server.ts             | 43 +++++++++++++++++++++++++
+ ui/src/client.ts             | 12 +++++++
+ ui/src/main.ts               | 49 +++++++++++++++++++++++++++++
+ ui/src/prototype/VariantA.ts | 10 +++++-
+ ui/src/prototype/VariantB.ts | 10 +++++-
+ ui/src/prototype/VariantC.ts | 16 ++++++++--
+ ui/src/styles.css            | 45 +++++++++++++++++++++++++++
+ ui/src/view.ts               | 74 ++++++++++++++++++++++++++++++++++++++++----
+ 8 files changed, 249 insertions(+), 10 deletions(-)
+[0m
+[0m$ [0mgit show prototype/ticket-details -- engine/server.ts ui/src/client.ts
+commit 84c6fa515ecd1e42cf1f7f27ba5614b39dc0738d
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 20:40:48 2026 +0100
+
+    ui: throwaway prototype wiring for tabbed ticket detail (issue #11)
+
+diff --git a/engine/server.ts b/engine/server.ts
+index 48c837d..a592e4c 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -406,6 +406,38 @@ function readTicketEvents(
+   };
+ }
+ 
++// PROTOTYPE — throwaway
++// The ticket body endpoint answers with the ticket's raw markdown. Issue files
++// are named `<id>-<slug>.md`; match by the id prefix before the first `-`,
++// falling back to an exact `<id>.md`. The lookup is scoped to files readdir
++// reports from the pool's issues directory, so an arbitrary id can never walk
++// out of it (plain string equality, no regex on the id).
++function readTicketBody(
++  poolDir: string,
++  ticketId: string,
++): { id: string; body: string } | null {
++  const issuesDir = join(poolDir, "issues");
++  let files: string[] = [];
++  try {
++    files = readdirSync(issuesDir);
++  } catch {
++    return null;
++  }
++  const markdown = files.filter((file) => file.endsWith(".md"));
++  const exact = markdown.find((file) => file === `${ticketId}.md`);
++  if (exact) {
++    return { id: ticketId, body: readFileSync(join(issuesDir, exact), "utf8") };
++  }
++  const prefixed = markdown.find((file) => {
++    const dash = file.indexOf("-");
++    return dash > 0 && file.slice(0, dash) === ticketId;
++  });
++  if (prefixed) {
++    return { id: ticketId, body: readFileSync(join(issuesDir, prefixed), "utf8") };
++  }
++  return null;
++}
++
+ function readLockedPid(poolDir: string): number | null {
+   let raw: string;
+   try {
+@@ -692,6 +724,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+           return Response.json({ ...range, attempts });
+         }
+ 
++        if (pathname === "/api/ticket") {
++          // PROTOTYPE — throwaway: the raw markdown body of a ticket's Issue
++          // file, for the ticket-detail view variants (issue #11).
++          const ticketId = url.searchParams.get("id") ?? "";
++          const ticket = readTicketBody(poolDir, ticketId);
++          if (!ticket) {
++            return Response.json({ error: "not found" }, { status: 404 });
++          }
++          return Response.json(ticket);
++        }
++
+         if (pathname === "/api/stream") {
+           // The stream is silent whenever the pool waits at an interrupt, so it
+           // opts out of the default idle timeout; every other route keeps it.
+diff --git a/ui/src/client.ts b/ui/src/client.ts
+index 398b071..9900eea 100644
+--- a/ui/src/client.ts
++++ b/ui/src/client.ts
+@@ -75,6 +75,18 @@ export class PoolClient {
+     return res.json();
+   }
+ 
++  // PROTOTYPE — throwaway: the selected ticket's raw markdown body (the
++  // line-1 `<!-- state: ... -->` marker included; the UI strips it) for the
++  // ticket-detail view variants (issue #11). Null when no Issue file matches.
++  async getTicket(ticketId: string): Promise<{ id: string; body: string } | null> {
++    const res = await fetch(
++      `${this.base}/api/ticket?id=${encodeURIComponent(ticketId)}`,
++    );
++    if (res.status === 404) return null;
++    if (!res.ok) throw new Error(`ticket body failed: ${res.status}`);
++    return res.json();
++  }
++
+   /**
+    * A byte range of an attempt's raw log, ANSI-stripped server-side. `offset`
+    * is a raw byte offset; the response reports `nextOffset` (where the next
+[0m
+[0m$ [0mgrep -n "TicketEventsResponse\|TicketLogResponse\|export" ui/src/project.ts | head -30; cat package.json; ls ui/src/
+11:export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
+13:export interface PoolOutcome {
+18:export interface PoolInterrupt {
+31:export type InterruptAction = "resume" | "approve" | "reject";
+33:export interface InterruptFormAction {
+39:export interface InterruptFormView {
+46:export interface InterruptView extends PoolInterrupt {
+73:export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
+77:export interface PoolTicketState {
+84:export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
+86:export interface PoolState {
+94:export interface PoolSnapshot {
+104:export interface TicketEvent {
+111:export interface ReconstructedAttempt {
+117:export interface TicketEventsResponse {
+129:export interface LogAttemptInfo {
+136:export interface TicketLogResponse {
+148:export interface TimelineEventView {
+154:export interface TimelineAttemptView {
+162:export interface TimelineView {
+174:export function projectTimeline(
+175:  response: TicketEventsResponse,
+231:export interface LogPaneView {
+258:export function selectLogAttempt(
+279:export function projectLogPane(
+327:export const LOG_TAIL_BYTES = 64 * 1024;
+330:export function initialLogWindow(totalSize: number): number {
+338:export function logTailOffset(offset: number, totalSize: number): number | null {
+346:export function earlierLogOffset(firstOffset: number): number | null {
+351:export const LOG_BOTTOM_SLACK_PX = 24;
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+client.ts
+main.ts
+project.test.ts
+project.ts
+prototype
+styles.css
+view.ts
+vite-env.d.ts
+[0m
+[0m→ [0mRead ui/src/project.ts[90m [offset=104, limit=45][0m
+[0m
+[0m$ [0mcat ui/package.json; grep -n "test\|typecheck\|build" package.json ui/package.json
+{
+  "name": "console-prototype-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Console: the pool engine's UI, rendering ticket cards and blocked-by edges on a canvas.",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.14",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
+package.json:6:    "typecheck": "tsc --noEmit",
+ui/package.json:9:    "test": "bun test",
+ui/package.json:10:    "typecheck": "tsc --noEmit",
+ui/package.json:11:    "build": "vite build"
+[0m
+I have full context. The prototype branch has the reference implementation; I'll fold it in properly with server-side marker stripping. Writing a note to the Issue first, then implementing.
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -20,4 +20,11 @@
+ 
+ ## Blocked by
+ 
+ None — can start immediately.
++
++## Notes
++
++- Read: engine/server.ts (handler pattern at /api/events and /api/log), engine/server.test.ts (prior art describes), engine/pool.ts (MARKER_RE, loadPoolMarkers), ui/src/client.ts (getEvents style), ui/src/project.ts (wire types), prototype branch reference (`git show prototype/ticket-details -- engine/server.ts ui/src/client.ts`).
++- Decision: strip the line-1 marker plus the blank lines that follow it, so `body` starts at the first content line. The marker and its separating blank are pool metadata as a unit; the Issue settles the marker, and no acceptance criterion speaks to the blank line.
++- Decision: reuse pool.ts's MARKER_RE (exported) for detection rather than a second marker regex, so "what is a state marker line" stays single-sourced.
++- Note: exact-name-first vs prefix priority cannot be tested at the server level — loadPoolMarkers rejects duplicate ids, so a real pool can never hold both `01.md` and `01-b.md`. The code still checks exact first, per the Issue.
+
+[0m
+Now the engine changes. First export MARKER_RE from pool.ts:
+[0m← [0mEdit engine/pool.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/pool.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/pool.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/pool.ts
+@@ -16,9 +16,9 @@
+   blockedBy: string[];
+   status: TicketStatus;
+ }
+ 
+-const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
++export const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
+ 
+ function parseMarkerLine(line: string, file: string): TicketMarker {
+   const match = MARKER_RE.exec(line);
+   if (!match) {
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+@@ -27,9 +27,9 @@
+   readFleetEntry,
+   readFleetEntryByPort,
+   upsertFleetEntry,
+ } from "./fleet.ts";
+-import { loadPoolMarkers } from "./pool.ts";
++import { loadPoolMarkers, MARKER_RE } from "./pool.ts";
+ import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
+ import { defaultHarnesses } from "./spawn.ts";
+ 
+ export interface PoolServerOptions {
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+@@ -405,8 +405,59 @@
+     spec,
+   };
+ }
+ 
++// ---------------------------------------------------------------------------
++// Ticket body endpoint
++// ---------------------------------------------------------------------------
++
++export interface TicketBodyResponse {
++  id: string;
++  /** The Issue file's markdown with the line-1 state marker stripped. */
++  body: string;
++}
++
++// The line-1 `<!-- state: ... -->` marker is pool metadata, never prose for
++// the UI: drop it, and the blank lines that separated it from the body.
++function stripStateMarker(text: string): string {
++  const lines = text.split("\n");
++  if (!MARKER_RE.test(lines[0] ?? "")) return text;
++  let first = 1;
++  while (first < lines.length && lines[first].trim() === "") first += 1;
++  return lines.slice(first).join("\n");
++}
++
++// The ticket body endpoint answers with the ticket's markdown body. Issue
++// files are named `<id>.md` or `<id>-<slug>.md`; match the exact name first,
++// then any file whose prefix before the first `-` equals the id. The lookup
++// is scoped to the files readdir reports from the pool's issues directory, so
++// an arbitrary id can never walk out of it (plain string equality, no regex
++// on the id).
++function readTicketBody(
++  poolDir: string,
++  ticketId: string,
++): TicketBodyResponse | null {
++  const issuesDir = join(poolDir, "issues");
++  let files: string[] = [];
++  try {
++    files = readdirSync(issuesDir);
++  } catch {
++    return null;
++  }
++  const markdown = files.filter((file) => file.endsWith(".md"));
++  const file =
++    markdown.find((file) => file === `${ticketId}.md`) ??
++    markdown.find((file) => {
++      const dash = file.indexOf("-");
++      return dash > 0 && file.slice(0, dash) === ticketId;
++    });
++  if (!file) return null;
++  return {
++    id: ticketId,
++    body: stripStateMarker(readFileSync(join(issuesDir, file), "utf8")),
++  };
++}
++
+ function readLockedPid(poolDir: string): number | null {
+   let raw: string;
+   try {
+     raw = readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim();
+
+[0m
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.ts
+@@ -742,8 +742,17 @@
+   const range = await readLogRange(join(runsDir, logFile), offset, end);
+   return Response.json({ ...range, attempts });
+ }
+ 
++if (pathname === "/api/ticket") {
++  const ticketId = url.searchParams.get("id") ?? "";
++  const ticket = readTicketBody(poolDir, ticketId);
++  if (!ticket) {
++    return Response.json({ error: "not found" }, { status: 404 });
++  }
++  return Response.json(ticket);
++}
++
+ if (pathname === "/api/stream") {
+   // The stream is silent whenever the pool waits at an interrupt, so it
+   // opts out of the default idle timeout; every other route keeps it.
+   bunServer.timeout(req, 0);
+
+[0m
+Now the route, after the `/api/log` block:
+Now the tests, between the events and log describes:
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/engine/server.test.ts
+@@ -324,8 +324,64 @@
+     expect(body.spec).not.toContain("Ticket body");
+   });
+ });
+ 
++describe("ticket body endpoint", () => {
++  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
++
++  it("serves the ticket's body for an exact <id>.md file", async () => {
++    const poolDir = makePool([{ file: "01.md", marker }]);
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/ticket?id=01`);
++    expect(res.status).toBe(200);
++    const body = (await res.json()) as { id: string; body: string };
++    expect(body.id).toBe("01");
++    expect(body.body).toBe("# body\n");
++  });
++
++  it("resolves an <id>-<slug>.md file by its prefix before the first '-'", async () => {
++    const poolDir = makePool([{ file: "01-ticket-body.md", marker }]);
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/ticket?id=01`);
++    expect(res.status).toBe(200);
++    const body = (await res.json()) as { id: string; body: string };
++    expect(body.id).toBe("01");
++    expect(body.body).toBe("# body\n");
++  });
++
++  it("strips the line-1 state marker from the served body", async () => {
++    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
++    tempDirs.push(poolDir);
++    mkdirSync(join(poolDir, "issues"), { recursive: true });
++    writeFileSync(
++      join(poolDir, "issues", "01-a.md"),
++      `${marker}\n\n# Ticket body\n\nSpec: what to build\n`,
++    );
++    writeFileSync(
++      join(poolDir, "console.json"),
++      JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
++    );
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/ticket?id=01`);
++    const body = (await res.json()) as { id: string; body: string };
++    expect(body.body).not.toContain("<!--");
++    expect(body.body).toBe("# Ticket body\n\nSpec: what to build\n");
++  });
++
++  it("answers 404 for an id with no Issue file", async () => {
++    const poolDir = makePool([{ file: "01-a.md", marker }]);
++    const server = await startServer(poolDir, stubHarness({}));
++
++    const res = await fetch(`${server.url}/api/ticket?id=zzz`);
++    expect(res.status).toBe(404);
++    const body = (await res.json()) as { error: string };
++    expect(body.error).toBe("not found");
++  });
++});
++
+ describe("ticket log endpoint", () => {
+   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+ 
+   it("serves an attempt's log from a byte offset with the total size", async () => {
+
+[0m
+[0m← [0mEdit ui/src/project.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/project.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/project.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/project.ts
+@@ -122,8 +122,18 @@
+   spec: string;
+ }
+ 
+ // ---------------------------------------------------------------------------
++// Ticket body wire type (served by /api/ticket)
++// ---------------------------------------------------------------------------
++
++export interface TicketBodyResponse {
++  id: string;
++  /** The Issue file's markdown with the line-1 state marker stripped. */
++  body: string;
++}
++
++// ---------------------------------------------------------------------------
+ // Log pane wire types (served by /api/log)
+ // ---------------------------------------------------------------------------
+ 
+ export interface LogAttemptInfo {
+
+[0m
+Now the UI side — wire type in project.ts and `getTicket` in client.ts:
+[0m← [0mEdit ui/src/client.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
+@@ -5,9 +5,9 @@
+  * renders from those snapshots only; this module is the only code that talks
+  * to the server.
+  */
+ 
+-import type { PoolSnapshot, TicketEventsResponse, TicketLogResponse } from "./project";
++import type { PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
+ 
+ const DEFAULT_BASE = "";
+ const STREAM_PATH = "/api/stream";
+ 
+
+[0m
+[0m← [0mEdit ui/src/client.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/ui/src/client.ts
+@@ -75,8 +75,22 @@
+   return res.json();
+ }
+ 
+ /**
++ * The selected ticket's markdown body (the line-1 `<!-- state: ... -->`
++ * marker stripped server-side) for the ticket Detail. Null when no Issue
++ * file matches the id.
++ */
++async getTicket(ticketId: string): Promise<TicketBodyResponse | null> {
++  const res = await fetch(
++    `${this.base}/api/ticket?id=${encodeURIComponent(ticketId)}`,
++  );
++  if (res.status === 404) return null;
++  if (!res.ok) throw new Error(`ticket body failed: ${res.status}`);
++  return res.json();
++}
++
++/**
+  * A byte range of an attempt's raw log, ANSI-stripped server-side. `offset`
+  * is a raw byte offset; the response reports `nextOffset` (where the next
+  * range starts) and `totalSize`, so the pane pages until offset reaches the
+  * total. The optional `end` bounds the range, which is how "load earlier"
+
+[0m
+Now verify: typechecks and the server test file first:
+[0m$ [0mbun run typecheck
+$ tsc --noEmit
+error TS2688: Cannot find type definition file for 'vite/client'.
+  The file is in the program because:
+    Entry point of type library 'vite/client' specified in compilerOptions
+error: script "typecheck" exited with code 1
+[0m
+[0m$ [0mbun run typecheck && bun test engine/server.test.ts 2>&1 | tail -15
+$ tsc --noEmit
+bun test v1.3.14 (0d9b296a)
+
+ 51 pass
+ 0 fail
+ 148 expect() calls
+Ran 51 tests across 1 file. [14.54s]
+[0m
+UI typecheck fails on missing `vite/client` types — likely ui deps aren't installed in this worktree. Checking:
+[0m$ [0mls ui/node_modules 2>&1 | head -3; ls node_modules/.bin/tsc 2>&1
+ls: cannot access 'ui/node_modules': No such file or directory
+ls: cannot access 'node_modules/.bin/tsc': No such file or directory
+[0m
+Deps aren't installed in this worktree. Installing ui deps with bun:
+[0m$ [0mbun install 2>&1 | tail -3 && bun run typecheck && bun run build 2>&1 | tail -5
++ vite@8.2.1
+
+22 packages installed [22.00ms]
+$ tsc --noEmit
+src/prototype/VariantA.ts(3,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantA.ts(3,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantA.ts(3,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantA.ts(3,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantB.ts(16,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantB.ts(16,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantB.ts(16,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantB.ts(16,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantC.ts(18,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantC.ts(18,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantC.ts(18,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantC.ts(18,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/switcher.ts(11,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+error: script "typecheck" exited with code 1
+[0m
+These errors are in the committed throwaway prototype sketches, files I haven't touched. Verifying they're pre-existing at HEAD:
+[0m$ [0mgit status --short; git show HEAD:ui/src/view.ts | grep -c "export function h\|export function renderInterrupt\|export function renderTimelineSection\|export function statusLabel"; git show HEAD:ui/src/prototype/VariantA.ts | head -5; cat ui/tsconfig.json
+M .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+ M engine/pool.ts
+ M engine/server.test.ts
+ M engine/server.ts
+ M ui/src/client.ts
+ M ui/src/project.ts
+0
+// PROTOTYPE — throwaway. Variant A "Phase tabs" for issue #11 (see ticket details).
+
+import { h, renderInterrupt, renderTimelineSection, statusLabel } from "../view";
+import type { TicketDetailView, TimelineView } from "../project";
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "bun"]
+  },
+  "include": ["src"]
+}
+[0m
+[0m$ [0mbun test 2>&1 | tail -5; bun run build 2>&1 | tail -8
+82 pass
+ 0 fail
+ 248 expect() calls
+Ran 82 tests across 1 file. [23.00ms]
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-Df7VZWQy.js   29.43 kB │ gzip: 9.72 kB
+
+✓ built in 49ms
+[0m
+[0m$ [0mbun test 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 230 pass
+ 0 fail
+ 844 expect() calls
+Ran 230 tests across 6 files. [17.28s]
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=01 blocked-by=none status=in-progress -->
++<!-- state: id=01 blocked-by=none status=checkpoint -->
+ 
+ # 01 — Ticket body endpoint
+ 
+ Spec: GitHub issue #15 (BillyLuisNeedham/agents-console). Prototype reference: branch `prototype/ticket-details`.
+
+[0m
+Everything is green except the pre-existing ui typecheck failure from the committed PROTOTYPE sketches. Per the standing instructions, that's a checkpoint, not a silent fix. Updating the Issue:
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -9,14 +9,14 @@
+ The pool server gains a read-only `GET /api/ticket?id=<ticketId>` endpoint so the Console UI can read a ticket's full markdown body. It resolves the ticket's Issue file inside the pool's issues directory — exact `<id>.md` first, then any `<id>-<slug>.md` whose filename prefix before the first `-` equals the id (directory-listing scoped; the id is never used as a path). On a hit it returns `200` JSON `{ id, body }` where `body` is the file text with the line-1 `<!-- state: ... -->` marker stripped (the marker is pool metadata, never prose for the UI). On no match it returns `404` JSON `{ error: "not found" }`. The pool client gains a `getTicket(id)` method returning `{ id, body }` or null on 404, matching the existing `getEvents` style. Follow the existing `/api/events` handler pattern; the prototype branch has a reference implementation, but strip the marker server-side (the prototype did not).
+ 
+ ## Acceptance criteria
+ 
+-- [ ] `GET /api/ticket?id=<id>` returns `{ id, body }` for an exact `<id>.md` file
+-- [ ] `<id>-<slug>.md` files resolve by their prefix before the first `-`
+-- [ ] The line-1 state marker is stripped from `body` server-side
+-- [ ] Unknown id returns 404 `{ error: "not found" }`
+-- [ ] Pool client has `getTicket(id)` returning the body or null on 404
+-- [ ] Endpoint covered by tests in the engine server test suite (hit, prefix hit, marker stripped, 404) — prior art: existing endpoint tests there
++- [x] `GET /api/ticket?id=<id>` returns `{ id, body }` for an exact `<id>.md` file
++- [x] `<id>-<slug>.md` files resolve by their prefix before the first `-`
++- [x] The line-1 state marker is stripped from `body` server-side
++- [x] Unknown id returns 404 `{ error: "not found" }`
++- [x] Pool client has `getTicket(id)` returning the body or null on 404
++- [x] Endpoint covered by tests in the engine server test suite (hit, prefix hit, marker stripped, 404) — prior art: existing endpoint tests there
+ - [ ] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -27,4 +27,11 @@
+ - Read: engine/server.ts (handler pattern at /api/events and /api/log), engine/server.test.ts (prior art describes), engine/pool.ts (MARKER_RE, loadPoolMarkers), ui/src/client.ts (getEvents style), ui/src/project.ts (wire types), prototype branch reference (`git show prototype/ticket-details -- engine/server.ts ui/src/client.ts`).
+ - Decision: strip the line-1 marker plus the blank lines that follow it, so `body` starts at the first content line. The marker and its separating blank are pool metadata as a unit; the Issue settles the marker, and no acceptance criterion speaks to the blank line.
+ - Decision: reuse pool.ts's MARKER_RE (exported) for detection rather than a second marker regex, so "what is a state marker line" stays single-sourced.
+ - Note: exact-name-first vs prefix priority cannot be tested at the server level — loadPoolMarkers rejects duplicate ids, so a real pool can never hold both `01.md` and `01-b.md`. The code still checks exact first, per the Issue.
++- Verification: root `bun test` 230 pass / 0 fail; ui `bun test` 82 pass / 0 fail; root `tsc --noEmit` clean; ui `vite build` clean. ui `tsc --noEmit` fails, pre-existing (see Brief).
++
++## Brief
++
++1. Completed: `GET /api/ticket?id=<id>` in engine/server.ts (exact `<id>.md` first, then prefix before the first `-`, directory-listing scoped; line-1 state marker plus its separating blank lines stripped server-side via pool.ts's now-exported MARKER_RE; 404 `{ error: "not found" }` on no match). Pool client `getTicket(id)` in ui/src/client.ts returning `{ id, body }` or null on 404, with `TicketBodyResponse` in ui/src/project.ts. Four new tests in engine/server.test.ts (hit, prefix hit, marker stripped, 404), all passing. Six of seven acceptance criteria ticked.
++2. The human has to do: decide the fate of the committed throwaway prototype sketches (`ui/src/prototype/*`, commit 7c72b0e). `bun run typecheck` in `ui/` fails on them at pool start, before any of my changes: they import `h`, `renderInterrupt`, `renderTimelineSection`, `statusLabel` from `../view`, which view.ts does not export. This red typecheck is not caused by this Issue, so per the job constraints I did not fix it silently. My recommendation: add `"exclude": ["src/prototype"]` to `ui/tsconfig.json` — the sketches stay on disk for reference but stop pretending to compile. Deleting them or adding the missing exports to view.ts are the alternatives.
++3. After that: rerun `bun run typecheck` in `ui/`. Once green, the last criterion (full test suite, typecheck, and build clean) is satisfied and this Issue can be flipped to done; the endpoint and client work itself is finished and fully tested.
+
+[0m
+[0m$ [0mgit add engine/pool.ts engine/server.ts engine/server.test.ts ui/src/client.ts ui/src/project.ts .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md && git status --short && git commit -m "console: serve a ticket's markdown body at /api/ticket
+
+The pool server gains a read-only GET /api/ticket?id=<ticketId> endpoint
+that resolves the ticket's Issue file in the pool's issues directory
+(exact <id>.md first, then the <id>-<slug>.md prefix before the first
+dash, directory-listing scoped) and answers { id, body } with the line-1
+state marker stripped server-side; unknown ids get 404. The pool client
+gains getTicket(id) returning the body or null on 404, in the getEvents
+style. Covered by four new engine server tests (hit, prefix hit, marker
+stripped, 404)." && git log --oneline -1
+M  .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+M  engine/pool.ts
+M  engine/server.test.ts
+M  engine/server.ts
+M  ui/src/client.ts
+M  ui/src/project.ts
+[pool/01 c818d21] console: serve a ticket's markdown body at /api/ticket
+ 6 files changed, 164 insertions(+), 10 deletions(-)
+c818d21 console: serve a ticket's markdown body at /api/ticket
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/runs/01.outcome.json
+Wrote file successfully.
+[0m
+Checkpoint. The endpoint and client work is complete, tested, and committed (`c818d21`):
+
+- `GET /api/ticket?id=<id>` in `engine/server.ts` — exact `<id>.md` first, then `<id>-<slug>.md` prefix, directory-listing scoped, marker stripped server-side, 404 `{ error: "not found" }`
+- `PoolClient.getTicket(id)` in `ui/src/client.ts`, `TicketBodyResponse` in `ui/src/project.ts`
+- 4 new tests in `engine/server.test.ts`; root suite 230 pass, ui suite 82 pass, root typecheck and ui build clean
+
+The one blocker: `ui/` typecheck was already red at pool start — the committed throwaway sketches (`ui/src/prototype/*`, commit 7c72b0e) import symbols `view.ts` doesn't export. Not caused by this Issue, so per the job constraints I left it and wrote a decision-ready brief in the Issue (recommendation: exclude `src/prototype` from `ui/tsconfig.json`).

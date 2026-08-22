@@ -1,0 +1,4 @@
+{"at":"2026-08-22T20:11:45.825Z","attempt":1,"kind":"scheduled","payload":{}}
+{"at":"2026-08-22T20:11:45.909Z","attempt":1,"kind":"spawned","payload":{}}
+{"at":"2026-08-22T20:19:40.604Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"done"}}
+{"at":"2026-08-22T20:19:40.663Z","attempt":1,"kind":"merged","payload":{}}

@@ -1,0 +1,745 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/issue-11-pool/issues/02-tab-default-projection.md
+[0m→ [0mRead .
+[0m
+[0m$ [0mgit status && git log --oneline -5
+On branch pool/02
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/issue-11-pool/issues/02-tab-default-projection.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ebfb2cd console-pool: issue-11 tabbed-detail pool — 4 issues, config, agent instructions
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+0574fee console-pool: record the completed 30-ticket pool — issues, specs, run logs, and final config
+7161efa Merge branch 'pool/31'
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+[0m
+[0m$ [0mfind ui -type f -name "*.ts" -o -type d -name node_modules -prune | head -50; echo ---; ls ui
+ui/src/client.ts
+ui/src/main.ts
+ui/src/project.test.ts
+ui/src/project.ts
+ui/src/prototype/VariantA.ts
+ui/src/prototype/VariantB.ts
+ui/src/prototype/VariantC.ts
+ui/src/prototype/switcher.ts
+ui/src/view.ts
+ui/src/vite-env.d.ts
+ui/vite.config.ts
+---
+bun.lock
+index.html
+package.json
+src
+tsconfig.json
+vite.config.ts
+[0m
+[0m→ [0mRead ui/src/project.ts
+[0m→ [0mRead ui/src/project.test.ts
+[0m→ [0mRead ui/package.json
+[0m
+[0m$ [0mcat docs/adr/0001-one-console-per-pool.md docs/adr/0002-ticket-log-storage.md 2>/dev/null | head -80; echo ===; cat .scratch/issue-11-pool/console.json
+# One Console server per Pool; pools are hermetic
+
+Running several pools means several Console server processes, one per pool, each on its own port — not one server hosting many pools. A pool's identity is its directory on disk, and no ticket edges cross pool boundaries.
+
+We considered a single multi-pool server (one process, one port, UI switching between pools) and deferred it: multi-process already works with zero engine changes, and the real friction is discoverability, which a machine-wide fleet registry (`~/.agent-graphs/pools.json`) plus a `fleet` list command solves cheaply. Multi-process also gives fault isolation — one crashed pool run can't take others down.
+
+Because the engine assumes exclusive ownership of its pool (checkpoint DB, line-1 state markers, git worktrees, run logs are all written non-atomically), the engine enforces one-server-per-pool itself: it writes `runs/server.pid` on boot, refuses to start if that pid is alive, and takes over if it's stale. The pid-file convention was previously advisory (launcher-only) and the failure mode was silent corruption, so enforcement lives in `createPoolServer`, not the skill.
+
+**Consequences**: each pool pins its port in `console.json` for a stable URL; a busy pinned port fails loudly (with a `--port` override for one-offs). If window-juggling across consoles proves painful, the multi-pool server can be revisited — the refactor is bounded (the server's closure over one `poolDir` becomes a `Map<poolDir, Session>`) but nothing in the current work precludes it.
+# Ticket log storage: per-ticket events.jsonl plus attempt-rotated raw logs
+
+The Console needs a per-ticket log: a lifecycle timeline plus the raw harness output of every attempt. We decided the pool engine appends structured events (timestamp, attempt number, kind, small payload) to `runs/<id>.events.jsonl` as they happen, and that re-running a ticket rotates its raw logs — `<id>.log` and `<id>.resolver.log` always hold the current attempt, older attempts move to `<id>.attempt-N.log` / `<id>.attempt-N.resolver.log`.
+
+Two alternatives were rejected. Filtering the pool-level log channel by ticket id is lossy — that channel is coarse prose written for the bottom drawer, and several lifecycle moments never reach it. Deriving the timeline from sqlite checkpoints couples the log to checkpoint retention and cannot see anything that happens mid-super-step (spawn, live output, exit). Append-only JSONL costs one write at each lifecycle point the engine already passes through, is readable by the UI without parsing prose, and keeps `runs/` the single directory a human tails by hand — the founding spec's "log-reading habits carry over" rule.
+
+The on-disk shape is the hard-to-reverse part: pools accumulate these files, and old pools without `events.jsonl` are only ever backfilled approximately (attempt rows reconstructed from existing log files), so the format should be treated as stable from the first write.
+===
+{
+  "defaults": {
+    "harness": "opencode",
+    "model": "kimi-for-coding-oauth/k3",
+    "drivers": "implement"
+  },
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent. Dispatch it liberally and in parallel for the reading, the searching and the mechanical work — split independent subproblems across several instances rather than doing them yourself. Keep the judgement and the substance of the Issue on your own ticket.",
+  "agents": "{\"deepseek\": {\"description\": \"General-purpose subagent for reading, searching and mechanical work. DeepSeek V4 Flash via opencode go. Dispatch it liberally and in parallel.\", \"prompt\": \"You are a general-purpose subagent. Do the reading, the searching and the mechanical work the orchestrator delegates to you. Answer concisely, with file paths and line numbers for anything you find. State plainly when something does not exist rather than guessing.\", \"model\": \"opencode-go/deepseek-v4-flash\"}}",
+  "resolver": "opencode",
+  "reviewer": "a reviewer checks acceptance criteria only, never code quality; a failure buys the orchestrator one fix attempt, then the Issue becomes a checkpoint carrying the disagreement in its brief",
+  "checkpoint": "a write outside the repository, an undecided decision the Issue and its context do not settle, or a material guess"
+}
+[0m
+[0m$ [0mgh issue view 15 --repo BillyLuisNeedham/agents-console 2>&1 | head -120
+title:	Tabbed ticket Detail: Spec / Progress / Outcome
+state:	OPEN
+author:	BillyLuisNeedham (Billy Needham)
+labels:	ready-for-agent
+comments:	0
+assignees:	
+projects:	
+milestone:	
+issue-type:	
+parent:	
+sub-issues:	
+sub-issues-completed:	
+blocked-by:	
+blocking:	
+number:	15
+--
+Spec for #11. Prototype capture: branch `prototype/ticket-details` (three Detail variants + wiring, throwaway). Winner: **Variant A — Phase tabs**.
+
+## Problem Statement
+
+Clicking a ticket card in the Console opens the Detail panel, but the panel never shows the ticket's body — the prose describing the work. Before a ticket starts there is no way to read what it will do; while it runs, status, pending actions, and history are shown as one undifferentiated stack; when it finishes, the outcome is buried in the same stack. The Detail doesn't adapt to where the ticket is in its lifecycle.
+
+## Solution
+
+The ticket Detail becomes three tabs — **Spec / Progress / Outcome** — matching the three phases of a ticket's life:
+
+- **Spec**: the ticket's markdown body, rendered, with a dim "blocked by" line — everything needed to understand the work before it starts.
+- **Progress**: current status, the pending interrupt form (the action surface), and the attempt timeline whose rows open raw logs in the log pane.
+- **Outcome**: the outcome summary and commit sha once done; a dim placeholder before.
+
+The Detail opens on the tab that matches the ticket's phase, a pending interrupt always pulls focus to Progress (with a red dot on the tab), and a manually chosen tab is remembered per ticket.
+
+## User Stories
+
+1. As a Console user, I want to read the full ticket body before work starts, so that I understand the work before committing to it.
+2. As a Console user, I want the ticket body rendered as markdown (headings, lists, code blocks), so that long specs are readable.
+3. As a Console user, I want to see the ticket's blockers alongside its body, so that I know what must finish first.
+4. As a Console user, I want the Detail to open on the Spec tab for a ready ticket, so that reading the work is the default before anything runs.
+5. As a Console user, I want the Detail to open on the Progress tab for a running or checkpointed ticket, so that I immediately see what's happening.
+6. As a Console user, I want the Detail to open on the Outcome tab for a done ticket, so that the end state is the first thing I see.
+7. As a Console user, I want a pending interrupt to take me to the Progress tab regardless of status, so that I never miss an action I need to take.
+8. As a Console user, I want a red dot on the Progress tab while an interrupt is pending, so that the action is visible even when I'm on another tab.
+9. As a Console user, I want to answer the interrupt from the Progress tab, so that the graph can continue.
+10. As a Console user, I want my manually chosen tab remembered per ticket as I click around the canvas, so that the panel doesn't yank itself back on every snapshot.
+11. As a Console user, I want the tab default to reset when I select a different ticket, so that each ticket presents its own phase.
+12. As a Console user, I want the attempt timeline on the Progress tab, so that I can see the ticket's history of work.
+13. As a Console user, I want timeline attempt rows to open that attempt's raw log in the log pane, so that the tabbed Detail keeps parity with today's Detail.
+14. As a Console user, I want the outcome summary and commit sha on the Outcome tab, so that I can judge the end state.
+15. As a Console user, I want the Outcome tab visible but dim before the ticket finishes, so that the tab bar is stable and predictable.
+16. As a Console user, I want the tab names to match the project glossary (Spec, Progress, Outcome), so that the UI speaks the domain language.
+17. As a maintainer, I want the ticket body served by a dedicated read-only endpoint with the line-1 state marker stripped, so that the UI never renders pool metadata as prose.
+18. As a maintainer, I want the prototype switcher and losing variants gone from main, so that only the validated decision ships.
+
+## Implementation Decisions
+
+- **Detail body** (ui view layer): the existing ticket Detail body is replaced entirely by the tabbed version — no feature flag, no fallback layout. The Detail header (title, fullscreen, close) is unchanged, as are utility-card Details.
+- **Tab-default projection** (ui projection layer): a pure function maps ticket phase to the default tab: `ready → Spec`; `in-progress`/`checkpoint → Progress`; `done → Outcome`; a pending interrupt → Progress (interrupt wins over every status, including done). Manual selection is held per ticket in memory and overrides the default until the selection changes ticket. No URL state, no persistence.
+- **Ticket body endpoint** (pool server): `GET /api/ticket?id=<ticketId>` returns `200 { id, body }` with the line-1 `<!-- state: ... -->` marker stripped server-side, or `404 { error: "not found" }`. Read-only; resolves `<id>.md` then `<id>-<slug>.md` within the pool's issues directory.
+- **Client**: a `getTicket` method on the pool client, fetched once per ticket on first selection and cached in memory for the session (null cached for known-missing); a late response never clobbers a newer selection.
+- **Markdown**: rendered with `marked` (new ui dependency).
+- **Interrupt affordance**: the existing interrupt form component is reused unchanged inside the Progress tab; the red dot on the Progress tab mirrors the canvas card's interrupt dot.
+- **Timeline**: the existing timeline section component is reused inside the Progress tab with full attempt-row → log-pane behavior (the prototype's inert rows were a prototype shortcut).
+- **Prototype disposition**: the variant switcher and Variants B/C are removed from main when this lands; all three variants plus wiring remain on the `prototype/ticket-details` branch as the primary source.
+
+## Testing Decisions
+
+Good tests here test external behavior at the two existing seams, not DOM structure:
+
+- **Tab-default projection** — unit tests in the ui projection test suite (prior art: the existing `project.test.ts` projections). Cases: each status → its tab; interrupt pending on any status → Progress; manual override respected; override resets on ticket change.
+- **`/api/ticket` endpoint** — handler tests in the engine server test suite (prior art: the existing `server.test.ts` endpoint tests). Cases: exact `<id>.md`; `<id>-<slug>.md` prefix match; marker stripped from body; unknown id → 404.
+- No new test seams; the view layer stays untested as today.
+
+## Out of Scope
+
+- Deep links / URL routing (`?ticket=&tab=`) — the Console has no routing; deferred as separate work.
+- New underway actions beyond answering interrupts (retry, skip, kill) — that's engine surface, not this UI work.
+- Changes to utility-card Details (START/REVIEW), the canvas, or the log pane itself.
+- Serving raw attempt log contents over the API.
+
+## Further Notes
+
+- Originates from #11 ("See ticket details").
+- The three prototype variants and the `?variant=` switcher are preserved on branch `prototype/ticket-details`; the design was chosen by clicking through them against a live pool.
+[0m
+I have everything I need: the Issue, spec #15, the projection seam (`ui/src/project.ts`), and prior art tests. This ticket is pure projection logic plus tests. Writing the substance myself.
+[0m$ [0mcat package.json
+{
+  "name": "agent-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "node src/smoke.ts",
+    "studio": "langgraphjs dev"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.8",
+    "@langchain/langgraph": "^1.4.10",
+    "@langchain/langgraph-checkpoint": "^1.0.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^1.4.4",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
+[0m
+[0m← [0mEdit ui/src/project.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.ts
+@@ -622,9 +622,61 @@
+   }
+   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
+ }
+ 
++// ---------------------------------------------------------------------------
++// Detail tab default
++// ---------------------------------------------------------------------------
++
++export type DetailTab = "spec" | "progress" | "outcome";
++
+ /**
++ * A manually chosen tab, held per ticket: the ticket id the choice belongs
++ * to plus the chosen tab. Null means "auto": the default for the ticket's
++ * phase. Because the choice carries its ticket id, the view layer keeps one
++ * value and a stale choice from a previous selection simply does not apply.
++ */
++export interface TabOverride {
++  ticketId: string;
++  tab: DetailTab;
++}
++
++/**
++ * The tab a ticket's Detail opens on: Progress for anything live or waiting
++ * on a human, Spec before the ticket has run, Outcome once it is done. A
++ * pending interrupt always wins over the status, even on a done ticket: the
++ * interrupt is the action surface, and the action surface is Progress.
++ */
++export function defaultDetailTab(
++  status: PoolStatus,
++  interruptPending: boolean,
++): DetailTab {
++  if (interruptPending) return "progress";
++  switch (status) {
++    case "ready":
++      return "spec";
++    case "in-progress":
++    case "checkpoint":
++      return "progress";
++    case "done":
++      return "outcome";
++  }
++}
++
++/**
++ * The tab a ticket's Detail shows. A manual choice for this ticket wins;
++ * a choice made on another ticket does not apply, so the default reasserts
++ * itself when the selection changes ticket.
++ */
++export function projectDetailTab(
++  detail: TicketDetailView,
++  override: TabOverride | null,
++): DetailTab {
++  if (override && override.ticketId === detail.ticketId) return override.tab;
++  return defaultDetailTab(detail.status, detail.interrupt !== null);
++}
++
++/**
+  * The next Detail selection after a card press-release. Clicking the selected
+  * card again clears the selection; clicking any other card swaps to it.
+  */
+ export function nextNodeSelection(current: string | null, clicked: string): string | null {
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -422,15 +422,8 @@
+   });
+ });
+ 
+ describe("phaseLabel", () => {
+-  it("labels the phases", () => {
+-    expect(phaseLabel("running")).toBe("running");
+-    expect(phaseLabel("quiescent")).toBe("waiting on you");
+-    expect(phaseLabel("done")).toBe("done");
+-    expect(phaseLabel("stalled")).toBe("stalled");
+-  });
+-});
+ 
+ describe("projectLog", () => {
+   it("extracts string log lines and drops the rest", () => {
+     expect(projectLog({ log: ["a", 42, "b"] })).toEqual(["a", "b"]);
+
+[0m
+Now the tests, appended near the `projectDetail` describe block:
+That edit clobbered the phaseLabel block; restoring it with the new tests inserted before it:
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -421,9 +421,71 @@
+     expect(projectDetail(snapshot(), "ticket:zzz")).toBeNull();
+   });
+ });
+ 
++describe("projectDetailTab", () => {
++  function detail(
++    status: PoolStatus,
++    interrupt: TicketDetailView["interrupt"] = null,
++    ticketId = "A",
++  ): TicketDetailView {
++    return {
++      kind: "ticket",
++      ticketId,
++      title: `ticket ${ticketId}`,
++      status,
++      blockedBy: [],
++      outcome: null,
++      interrupt,
++    };
++  }
++
++  const pending = (ticketId = "A"): TicketDetailView["interrupt"] => ({
++    ticketId,
++    kind: "checkpoint",
++    body: "the brief",
++    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
++  });
++
++  it("maps each pool status to its default tab", () => {
++    expect(projectDetailTab(detail("ready"), null)).toBe("spec");
++    expect(projectDetailTab(detail("in-progress"), null)).toBe("progress");
++    expect(projectDetailTab(detail("checkpoint"), null)).toBe("progress");
++    expect(projectDetailTab(detail("done"), null)).toBe("outcome");
++  });
++
++  it("maps a pending interrupt to Progress on every status, including done", () => {
++    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
++      expect(projectDetailTab(detail(status, pending()), null)).toBe("progress");
++    }
++  });
++
++  it("lets a manual tab choice override the default for the current ticket", () => {
++    const override: TabOverride = { ticketId: "A", tab: "spec" };
++    expect(projectDetailTab(detail("done"), override)).toBe("spec");
++    expect(projectDetailTab(detail("ready"), { ticketId: "A", tab: "outcome" })).toBe("outcome");
++  });
++
++  it("lets a manual choice override the interrupt-driven Progress tab", () => {
++    const override: TabOverride = { ticketId: "A", tab: "outcome" };
++    expect(projectDetailTab(detail("checkpoint", pending()), override)).toBe("outcome");
++  });
++
++  it("resets the override when the selected ticket changes", () => {
++    const override: TabOverride = { ticketId: "A", tab: "spec" };
++    expect(projectDetailTab(detail("done", null, "B"), override)).toBe("outcome");
++    expect(projectDetailTab(detail("in-progress", null, "B"), override)).toBe("progress");
++  });
++});
++
+ describe("phaseLabel", () => {
++  it("labels the phases", () => {
++    expect(phaseLabel("running")).toBe("running");
++    expect(phaseLabel("quiescent")).toBe("waiting on you");
++    expect(phaseLabel("done")).toBe("done");
++    expect(phaseLabel("stalled")).toBe("stalled");
++  });
++});
+ 
+ describe("projectLog", () => {
+   it("extracts string log lines and drops the rest", () => {
+     expect(projectLog({ log: ["a", 42, "b"] })).toEqual(["a", "b"]);
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -3,8 +3,9 @@
+ import { describe, expect, it } from "bun:test";
+ import {
+   clampDetailWidth,
+   clampDrawersHeight,
++  defaultDetailTab,
+   DETAIL_MAX_FRACTION,
+   DETAIL_MIN_PX,
+   DRAWER_MAX_VH,
+   DRAWER_MIN_VH,
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -25,8 +25,9 @@
+ parseStoredDetailWidth,
+ parseStoredLayout,
+ phaseLabel,
+ projectDetail,
++projectDetailTab,
+ projectLog,
+ projectLogPane,
+ projectPool,
+ projectPoolEdges,
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -41,8 +41,10 @@
+   zoomAtCursor,
+   type PoolSnapshot,
+   type PoolStatus,
+   type PoolTicketState,
++  type TabOverride,
++  type TicketDetailView,
+   type TicketEvent,
+   type TicketEventsResponse,
+   type TimelineView,
+ } from "./project";
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/ui/src/project.test.ts
+@@ -3,9 +3,8 @@
+ import { describe, expect, it } from "bun:test";
+ import {
+   clampDetailWidth,
+   clampDrawersHeight,
+-  defaultDetailTab,
+   DETAIL_MAX_FRACTION,
+   DETAIL_MIN_PX,
+   DRAWER_MAX_VH,
+   DRAWER_MIN_VH,
+
+[0m
+[0m$ [0mbun test 2>&1 | tail -20 && bun run typecheck && bun run build 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 87 pass
+ 0 fail
+ 261 expect() calls
+Ran 87 tests across 1 file. [25.00ms]
+$ tsc --noEmit
+error TS2688: Cannot find type definition file for 'vite/client'.
+  The file is in the program because:
+    Entry point of type library 'vite/client' specified in compilerOptions
+error: script "typecheck" exited with code 1
+[0m
+Typecheck failure looks like missing dependencies in this worktree. Checking:
+[0m$ [0mls ui/node_modules 2>&1 | head -5; ls node_modules 2>&1 | head -5
+ls: cannot access 'ui/node_modules': No such file or directory
+ls: cannot access 'node_modules': No such file or directory
+[0m
+[0m$ [0mbun install 2>&1 | tail -3 && bun run typecheck && bun run build 2>&1 | tail -8
++ vite@8.2.1
+
+22 packages installed [32.00ms]
+$ tsc --noEmit
+src/prototype/VariantA.ts(3,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantA.ts(3,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantA.ts(3,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantA.ts(3,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantB.ts(16,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantB.ts(16,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantB.ts(16,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantB.ts(16,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/VariantC.ts(18,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+src/prototype/VariantC.ts(18,13): error TS2459: Module '"../view"' declares 'renderInterrupt' locally, but it is not exported.
+src/prototype/VariantC.ts(18,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantC.ts(18,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/switcher.ts(11,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+error: script "typecheck" exited with code 1
+[0m
+All errors are in `src/prototype/` files I didn't touch. Verifying this predates my change:
+[0m$ [0mgit stash -q && bun run typecheck 2>&1 | tail -4; git stash pop -q && git status --short
+src/prototype/VariantC.ts(18,30): error TS2459: Module '"../view"' declares 'renderTimelineSection' locally, but it is not exported.
+src/prototype/VariantC.ts(18,53): error TS2459: Module '"../view"' declares 'statusLabel' locally, but it is not exported.
+src/prototype/switcher.ts(11,10): error TS2459: Module '"../view"' declares 'h' locally, but it is not exported.
+error: script "typecheck" exited with code 1
+ M ../.scratch/issue-11-pool/issues/02-tab-default-projection.md
+ M src/project.test.ts
+ M src/project.ts
+[0m
+[0m$ [0mcat tsconfig.json; bun run build 2>&1 | tail -10
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "bun"]
+  },
+  "include": ["src"]
+}
+$ vite build
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 8 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-aLCzL345.js   29.24 kB │ gzip: 9.69 kB
+
+✓ built in 49ms
+[0m
+Build and tests pass; typecheck fails only on pre-existing prototype sketches. Let me check the pool's other issues to see how the prototype files are meant to be handled:
+[0m$ [0mls .scratch/issue-11-pool/issues/ && head -30 .scratch/issue-11-pool/issues/01*.md .scratch/issue-11-pool/issues/03*.md .scratch/issue-11-pool/issues/04*.md
+01-ticket-body-endpoint.md
+02-tab-default-projection.md
+03-tabbed-detail-panel.md
+04-prototype-cleanup.md
+==> .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md <==
+<!-- state: id=01 blocked-by=none status=ready -->
+
+# 01 — Ticket body endpoint
+
+Spec: GitHub issue #15 (BillyLuisNeedham/agents-console). Prototype reference: branch `prototype/ticket-details`.
+
+## What to build
+
+The pool server gains a read-only `GET /api/ticket?id=<ticketId>` endpoint so the Console UI can read a ticket's full markdown body. It resolves the ticket's Issue file inside the pool's issues directory — exact `<id>.md` first, then any `<id>-<slug>.md` whose filename prefix before the first `-` equals the id (directory-listing scoped; the id is never used as a path). On a hit it returns `200` JSON `{ id, body }` where `body` is the file text with the line-1 `<!-- state: ... -->` marker stripped (the marker is pool metadata, never prose for the UI). On no match it returns `404` JSON `{ error: "not found" }`. The pool client gains a `getTicket(id)` method returning `{ id, body }` or null on 404, matching the existing `getEvents` style. Follow the existing `/api/events` handler pattern; the prototype branch has a reference implementation, but strip the marker server-side (the prototype did not).
+
+## Acceptance criteria
+
+- [ ] `GET /api/ticket?id=<id>` returns `{ id, body }` for an exact `<id>.md` file
+- [ ] `<id>-<slug>.md` files resolve by their prefix before the first `-`
+- [ ] The line-1 state marker is stripped from `body` server-side
+- [ ] Unknown id returns 404 `{ error: "not found" }`
+- [ ] Pool client has `getTicket(id)` returning the body or null on 404
+- [ ] Endpoint covered by tests in the engine server test suite (hit, prefix hit, marker stripped, 404) — prior art: existing endpoint tests there
+- [ ] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+None — can start immediately.
+
+==> .scratch/issue-11-pool/issues/03-tabbed-detail-panel.md <==
+<!-- state: id=03 blocked-by=01,02 status=ready -->
+
+# 03 — Tabbed Detail panel
+
+Spec: GitHub issue #15 (BillyLuisNeedham/agents-console). Prototype reference: branch `prototype/ticket-details`, Variant A "Phase tabs" — the design winner, chosen by clicking through three variants against a live pool. Rewrite it properly; do not promote prototype code verbatim.
+
+## What to build
+
+Clicking a ticket card in the Console opens a Detail whose body is three tabs — **Spec / Progress / Outcome** — replacing the current single-stack ticket Detail entirely (no feature flag, no fallback; the Detail header with title/fullscreen/close and the utility-card Details are unchanged).
+
+**Spec** shows the ticket's markdown body rendered with `marked` (new ui dependency), preceded by a dim `blocked by X, Y` / `no blockers` line. **Progress** shows the status, the existing interrupt form component unchanged (the only action surface), and the existing timeline section with full attempt-row → log-pane behavior (clicking an attempt row opens that attempt's raw log, exactly as today's Detail). **Outcome** shows the outcome summary and commit sha; before the ticket finishes it stays visible with a dim "not finished yet" placeholder so the tab bar never reshapes.
+
+The default tab comes from the projection built in ticket 02; a pending interrupt also puts a red dot on the Progress tab, mirroring the canvas card's interrupt dot. The ticket body is fetched via the endpoint from ticket 01: fetched once per ticket on first selection, cached in memory for the session (null cached for known-missing), and a late response never clobbers a newer selection (mirror the guard the timeline/log fetches use). Tab state lives in memory only — no URL state, no persistence.
+
+## Acceptance criteria
+
+- [ ] The ticket Detail body is the Spec / Progress / Outcome tab bar; the old stacked layout is gone
+- [ ] Spec renders the ticket body as markdown (headings, lists, code blocks) with a dim blockers line above it
+- [ ] Progress carries the interrupt form and the timeline; attempt rows still open raw logs in the log pane
+- [ ] Outcome shows summary + commit sha, or a dim placeholder before the ticket finishes
+- [ ] Default tab follows the ticket-02 projection; manual choice is remembered per ticket and resets on ticket change
+- [ ] A pending interrupt adds a red dot to the Progress tab
+- [ ] The body is fetched once per ticket and cached; a slow fetch never clobbers a newer selection
+- [ ] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+01 — Ticket body endpoint; 02 — Tab-default projection.
+
+==> .scratch/issue-11-pool/issues/04-prototype-cleanup.md <==
+<!-- state: id=04 blocked-by=03 status=ready -->
+
+# 04 — Prototype cleanup
+
+Spec: GitHub issue #15 (BillyLuisNeedham/agents-console).
+
+## What to build
+
+With the tabbed Detail shipped, the throwaway prototype scaffolding leaves main: the `?variant=` floating switcher, its styles, the `proto-variant-change` listener, and the losing Variants B and C (Variant A's file goes too if anything of it remains once ticket 03 has rewritten the design properly). No `?variant=` param should have any effect on the Console afterward. The full prototype — all three variants plus wiring — remains on the `prototype/ticket-details` branch as the primary source, so nothing is lost.
+
+## Acceptance criteria
+
+- [ ] The prototype switcher and its keyboard listener are gone from the ui
+- [ ] The losing variant components are gone from main
+- [ ] `?variant=A|B|C` has no visible effect
+- [ ] The `prototype/ticket-details` branch still holds the full prototype for reference
+- [ ] Full test suite, typecheck, and build clean
+
+## Blocked by
+
+03 — Tabbed Detail panel.
+[0m
+[0m✱ [0mGrep "prototype|switcher|Variant"[90m in ui/src · 27 matches[0m
+Issue 04 deletes the prototype sketches, so this red typecheck predates the pool and gates every ui ticket until then. Checking whether the live app even references the prototype files:
+Nothing outside `src/prototype/` imports it — dead reference code, red at pool start, owned by ticket 04. Checking engine tests and prior commit conventions:
+[0m
+[0m$ [0mls engine; cat engine/package.json 2>/dev/null | head -20; git show --stat HEAD~1 --oneline | head -15
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.ts
+fleet-cli.test.ts
+fleet-cli.ts
+fleet.test.ts
+fleet.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+server.test.ts
+server.ts
+spawn.ts
+worktrees.ts
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+ ui/src/prototype/VariantA.ts | 291 ++++++++++++++++++++++++++++++++++
+ ui/src/prototype/VariantB.ts | 330 ++++++++++++++++++++++++++++++++++++++
+ ui/src/prototype/VariantC.ts | 367 +++++++++++++++++++++++++++++++++++++++++++
+ ui/src/prototype/switcher.ts |  91 +++++++++++
+ 4 files changed, 1079 insertions(+)
+[0m
+[0m$ [0mgit log --format='%h %s' --all -20 | grep -iE 'ui:|console:' | head; git show aec2f65 --stat | head -12
+c818d21 console: serve a ticket's markdown body at /api/ticket
+84c6fa5 ui: throwaway prototype wiring for tabbed ticket detail (issue #11)
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+commit aec2f6595bff69d4f303b4a8cf36c5d8833b8cfc
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 14:39:27 2026 +0100
+
+    console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+
+ engine/engine.test.ts  |  6 ++++--
+ engine/server.test.ts  | 25 +++++++++++++++++++++++++
+ engine/server.ts       | 23 ++++++++++++++++++++---
+ ui/src/project.test.ts | 29 +++++++++++++++++++++++++++++
+ ui/src/project.ts      | 17 +++++++++++++++++
+ ui/src/view.ts         |  9 +++++----
+[0m
+[0m$ [0mbun test 2>&1 | tail -4
+144 pass
+ 0 fail
+ 586 expect() calls
+Ran 144 tests across 5 files. [17.25s]
+[0m
+[0m$ [0mgit log --format='%h %s' pool/31 2>/dev/null | head -8; git show c818d21 --stat | head -15
+aec2f65 console: deflake resolver rotation, fix UTF-8 log head, pin detail width
+f9fda2b Merge branch 'pool/29'
+7a4b1fc console: harden pool lock, port conflict, and fleet registry writes
+2e51fe1 console: record ADRs 0001 (one console per pool) and 0002 (ticket log storage)
+f510b09 console: live-tail the ticket log pane on the snapshot cadence
+b832f08 Merge branch 'pool/18'
+a10b68e console: glossary — Pool, Fleet; one Console per pool
+b7f5148 console: add fleet list command that prints live pools
+commit c818d21a8094e2c273d76593ab7c96fdcacc6c0e
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 21:17:35 2026 +0100
+
+    console: serve a ticket's markdown body at /api/ticket
+    
+    The pool server gains a read-only GET /api/ticket?id=<ticketId> endpoint
+    that resolves the ticket's Issue file in the pool's issues directory
+    (exact <id>.md first, then the <id>-<slug>.md prefix before the first
+    dash, directory-listing scoped) and answers { id, body } with the line-1
+    state marker stripped server-side; unknown ids get 404. The pool client
+    gains getTicket(id) returning the body or null on 404, in the getEvents
+    style. Covered by four new engine server tests (hit, prefix hit, marker
+    stripped, 404).
+[0m
+Ticket 01's parallel commit didn't include its issue file, so I'll commit only code. Final verification that typecheck errors are confined to `src/prototype/`:
+[0m$ [0mbun run typecheck 2>&1 | grep -v 'src/prototype/' | grep -v '^$' | grep -v 'exited with code' ; echo "non-prototype errors above (none expected)"
+$ tsc --noEmit
+non-prototype errors above (none expected)
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/02-tab-default-projection.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=02 blocked-by=none status=in-progress -->
++<!-- state: id=02 blocked-by=none status=done -->
+ 
+ # 02 — Tab-default projection
+ 
+ Spec: GitHub issue #15 (BillyLuisNeedham/agents-console).
+
+[0m
+Updating the Issue: criteria ticked, Notes on the pre-existing typecheck state, status done.
+[0m← [0mEdit .scratch/issue-11-pool/issues/02-tab-default-projection.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/02/.scratch/issue-11-pool/issues/02-tab-default-projection.md
+@@ -9,14 +9,21 @@
+ The ui projection layer (the pure, DOM-free seam where `projectDetail` and the other projections already live) gains a pure function that decides which Detail tab a ticket shows: `ready → Spec`; `in-progress` or `checkpoint → Progress`; `done → Outcome`; a pending interrupt → Progress regardless of status (the interrupt always wins, even on a done ticket). A manually chosen tab overrides the default for that ticket; the override resets when the selected ticket changes. Model the override as data the projection can reason about (e.g. the selected ticket id plus the manually chosen tab, or null for "auto"), so the whole rule is testable without the DOM. The view layer will call this projection; this ticket delivers only the pure logic and its tests, so it can land green before any UI uses it.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
+-- [ ] A pending interrupt maps to Progress on every status, including done
+-- [ ] A manual tab choice overrides the default for the current ticket
+-- [ ] The override resets when the selected ticket changes
+-- [ ] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
++- [x] A pending interrupt maps to Progress on every status, including done
++- [x] A manual tab choice overrides the default for the current ticket
++- [x] The override resets when the selected ticket changes
++- [x] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ None — can start immediately.
++
++## Notes
++
++- Delivered as `DetailTab`, `TabOverride`, `defaultDetailTab` and `projectDetailTab` in `ui/src/project.ts`, tested in `ui/src/project.test.ts`. The override is data: `{ ticketId, tab }` or null for auto. A choice carries its ticket id, so a stale choice from a previous selection does not apply and the default reasserts itself; that is how the reset-on-ticket-change rule is modelled.
++- A manual choice also overrides the interrupt-driven Progress default. The Issue says the interrupt wins over the status default and a manual choice overrides the default; spec user story 10 (the panel does not yank itself back) settles that the manual choice wins outright.
++- Typecheck caveat (pre-existing, not caused by this ticket): `bun run typecheck` in `ui/` was already red at pool start. Every error is in `src/prototype/` (the throwaway sketches from commit 7c72b0e import names `view.ts` does not export). Verified red with my changes stashed, and verified my changed files contribute zero errors. Nothing outside `src/prototype/` imports it, and ticket 04 deletes those files, so I left them and the tsconfig alone: if the red were disqualifying, tickets 02 and 03 could never pass since 04 is blocked by 03. Full `bun test` (ui: 87 pass) and `bun run build` are clean; the engine suite is untouched and green (144 pass).
++- `ui/node_modules` did not exist in this worktree; ran `bun install` in `ui/` (lockfile unchanged).
+
+[0m
+[0m$ [0mgit add ui/src/project.ts ui/src/project.test.ts && git commit -m "ui: project the Detail's default tab from ticket phase
+
+The ui projection layer gains the tab-default rule for the tabbed
+ticket Detail: ready maps to Spec, in-progress and checkpoint to
+Progress, done to Outcome, and a pending interrupt maps to Progress on
+every status, including done. A manual tab choice is modelled as data
+(a ticket id plus the chosen tab, or null for auto) and overrides the
+default for that ticket only, so the default reasserts itself when the
+selection changes ticket. Pure logic and unit tests only; the view
+layer wires in under ticket 03." && git log --oneline -1
+[pool/02 9687435] ui: project the Detail's default tab from ticket phase
+ 2 files changed, 110 insertions(+)
+9687435 ui: project the Detail's default tab from ticket phase
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/runs/02.outcome.json
+Wrote file successfully.
+[0m
+Done — ticket 02 marked `status=done`, committed as `9687435` on `pool/02`, outcome recorded.
+
+- `ui/src/project.ts`: `DetailTab`, `TabOverride`, `defaultDetailTab` (interrupt wins over every status), `projectDetailTab` (per-ticket manual override, ignored for other tickets so the reset falls out of the data shape)
+- `ui/src/project.test.ts`: 5 new tests covering every acceptance criterion; 87 pass, build clean
+- One caveat in the Issue Notes: ui typecheck was red at pool start, all errors confined to the throwaway `src/prototype/` sketches (verified pre-existing via stash; ticket 04 deletes them). My files add zero errors.

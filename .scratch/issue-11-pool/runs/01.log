@@ -1,0 +1,119 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+[0m
+[0m$ [0mgit status && git log --oneline -5
+On branch pool/01
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+c818d21 console: serve a ticket's markdown body at /api/ticket
+ebfb2cd console-pool: issue-11 tabbed-detail pool — 4 issues, config, agent instructions
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+0574fee console-pool: record the completed 30-ticket pool — issues, specs, run logs, and final config
+7161efa Merge branch 'pool/31'
+[0m
+[0m$ [0mls ui/src/prototype/ 2>/dev/null && git log --oneline -1 7c72b0e 2>/dev/null
+switcher.ts
+VariantA.ts
+VariantB.ts
+VariantC.ts
+7c72b0e ui: throwaway prototype sketches (kept for reference, marked PROTOTYPE)
+[0m
+[0m✱ [0mGrep "prototype"[90m in ui/src · 3 matches[0m
+Nothing imports them. Deleting the sketches and verifying.
+[0m
+[0m$ [0mgit rm -r ui/src/prototype
+rm 'ui/src/prototype/VariantA.ts'
+rm 'ui/src/prototype/VariantB.ts'
+rm 'ui/src/prototype/VariantC.ts'
+rm 'ui/src/prototype/switcher.ts'
+[0m
+[0m$ [0mbun run typecheck && bun test 2>&1 | tail -5
+$ tsc --noEmit
+
+ 82 pass
+ 0 fail
+ 248 expect() calls
+Ran 82 tests across 1 file. [21.00ms]
+[0m
+[0m$ [0mbun test 2>&1 | tail -5 && bunx tsc --noEmit
+230 pass
+ 0 fail
+ 844 expect() calls
+Ran 230 tests across 6 files. [17.37s]
+[0m
+[0m$ [0mbun run build 2>&1 | tail -5
+dist/index.html                  0.39 kB │ gzip: 0.26 kB
+dist/assets/index-D_lr3k7K.css  13.81 kB │ gzip: 2.84 kB
+dist/assets/index-Df7VZWQy.js   29.43 kB │ gzip: 9.72 kB
+
+✓ built in 40ms
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=01 blocked-by=none status=in-progress -->
++<!-- state: id=01 blocked-by=none status=done -->
+ 
+ # 01 — Ticket body endpoint
+ 
+ Spec: GitHub issue #15 (BillyLuisNeedham/agents-console). Prototype reference: branch `prototype/ticket-details`.
+
+[0m
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -15,9 +15,9 @@
+ - [x] The line-1 state marker is stripped from `body` server-side
+ - [x] Unknown id returns 404 `{ error: "not found" }`
+ - [x] Pool client has `getTicket(id)` returning the body or null on 404
+ - [x] Endpoint covered by tests in the engine server test suite (hit, prefix hit, marker stripped, 404) — prior art: existing endpoint tests there
+-- [ ] Full test suite, typecheck, and build clean
++- [x] Full test suite, typecheck, and build clean
+ 
+ ## Blocked by
+ 
+ None — can start immediately.
+
+[0m
+All green: root 230 pass, ui 82 pass, both typechecks and vite build clean. Updating the Issue.
+[0m← [0mEdit .scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
++++ /home/billy/repos/learning/ai-agent-graphs/.git/pool-worktrees/01/.scratch/issue-11-pool/issues/01-ticket-body-endpoint.md
+@@ -38,4 +38,8 @@
+ 
+ ## Resume note
+ 
+ get rid of the throwaway prototype sketches if you no longer need them. if you need them, keep them just make it work then write a ticket to delete them at the end of the run
++
++## Resolution
++
++The endpoint and client work was complete; the sketches were reference-only and nothing imports them, so they were deleted (`git rm -r ui/src/prototype`, 4 files). No delete-later ticket needed. After deletion: ui `bun run typecheck` clean, ui `bun test` 82 pass / 0 fail, ui `vite build` clean, root `bun test` 230 pass / 0 fail, root `tsc --noEmit` clean. All seven acceptance criteria now hold; status set to done.
+
+[0m
+[0m$ [0mgit add -A && git commit -m "ui: delete throwaway prototype sketches, unblocking typecheck" && git log --oneline -1
+[pool/01 b6288c5] ui: delete throwaway prototype sketches, unblocking typecheck
+ 5 files changed, 10 insertions(+), 1081 deletions(-)
+ delete mode 100644 ui/src/prototype/VariantA.ts
+ delete mode 100644 ui/src/prototype/VariantB.ts
+ delete mode 100644 ui/src/prototype/VariantC.ts
+ delete mode 100644 ui/src/prototype/switcher.ts
+b6288c5 ui: delete throwaway prototype sketches, unblocking typecheck
+[0m
+[0m← [0mWrite /home/billy/repos/learning/ai-agent-graphs/.scratch/issue-11-pool/runs/01.outcome.json
+Wrote file successfully.
+[0m
+Done. Issue 01 is `status=done`: the prototype sketches were unreferenced, so I deleted them, everything is green (root 230 tests, ui 82 tests, both typechecks, vite build), and the outcome is recorded at runs/01.outcome.json with commit b6288c5.
