@@ -21,6 +21,7 @@ import {
   logTailOffset,
   mergeLayout,
   nextNodeSelection,
+  parseStoredDetailWidth,
   parseStoredLayout,
   phaseLabel,
   projectDetail,
@@ -880,6 +881,34 @@ describe("clampDetailWidth", () => {
   it("keeps the maximum at about 80% of the window", () => {
     expect(DETAIL_MAX_FRACTION).toBeCloseTo(0.8);
     expect(clampDetailWidth(100000, Math.round(1440 * DETAIL_MAX_FRACTION))).toBe(1152);
+  });
+});
+
+describe("parseStoredDetailWidth", () => {
+  it("round-trips a stored width string through a reload", () => {
+    // The write path stores String(detailWidth) under one global key; the
+    // read path parses it back and clamps to the current window. A stored
+    // 600 on a reload with the same window comes back as 600.
+    const maxPx = Math.round(1440 * DETAIL_MAX_FRACTION);
+    expect(parseStoredDetailWidth("600", maxPx)).toBe(600);
+  });
+
+  it("falls back to the minimum when nothing is stored", () => {
+    expect(parseStoredDetailWidth(null, 1600)).toBe(DETAIL_MIN_PX);
+  });
+
+  it("falls back to the minimum for a non-numeric or non-finite stored value", () => {
+    expect(parseStoredDetailWidth("abc", 1600)).toBe(DETAIL_MIN_PX);
+    expect(parseStoredDetailWidth("Infinity", 1600)).toBe(DETAIL_MIN_PX);
+  });
+
+  it("clamps a stored width that is out of range on reload", () => {
+    expect(parseStoredDetailWidth("10", 1600)).toBe(DETAIL_MIN_PX);
+    expect(parseStoredDetailWidth("5000", 1600)).toBe(1600);
+  });
+
+  it("tracks the window bound on a narrow window", () => {
+    expect(parseStoredDetailWidth("600", 200)).toBe(200);
   });
 });
 
