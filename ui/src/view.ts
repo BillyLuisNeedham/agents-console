@@ -25,6 +25,7 @@ import {
   type EdgeMode,
   type InterruptAction,
   type InterruptView,
+  type LogPaneView,
   type Point,
   type PoolCardView,
   type PoolPhase,
@@ -50,12 +51,14 @@ export interface AppModel {
   error: string | null;
   detail: DetailView | null;
   timeline: TimelineView | null;
+  logPane: LogPaneView | null;
 }
 
 export interface Handlers {
   onToggleLog: () => void;
   onToggleInspector: () => void;
   onSelectNode: (nodeId: string | null) => void;
+  onSelectAttempt: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
 }
 
@@ -769,8 +772,14 @@ function formatEventTime(iso: string): string {
 // The ticket's timeline: one row per attempt with its events, read from the
 // events endpoint and rendered under the interrupt form. The currently
 // running attempt is marked; a reconstructed timeline (a pre-feature pool
-// with no events file) notes that its rows came from log files.
-function renderTimelineSection(timeline: TimelineView): HTMLElement {
+// with no events file) notes that its rows came from log files. Clicking an
+// attempt row selects that attempt's raw log in the pane below.
+function renderTimelineSection(
+  ticketId: string,
+  timeline: TimelineView,
+  logPane: LogPaneView | null,
+  handlers: Handlers,
+): HTMLElement {
   const body = h("div", { class: "timeline" });
   body.append(h("div", { class: "dim" }, "timeline"));
   if (timeline.attempts.length === 0) {
@@ -787,15 +796,18 @@ function renderTimelineSection(timeline: TimelineView): HTMLElement {
     );
   }
   for (const attempt of timeline.attempts) {
+    const selected = logPane?.selectedAttempt === attempt.number;
     const row = h(
       "div",
       {
         class:
           "timeline-attempt" +
-          (attempt.running ? " timeline-attempt-running" : ""),
+          (attempt.running ? " timeline-attempt-running" : "") +
+          (selected ? " timeline-attempt-selected" : ""),
+        role: "button",
+        title: "show this attempt's raw log",
+        onclick: () => handlers.onSelectAttempt(ticketId, attempt.number),
       },
-    );
-    row.append(
       h(
         "div",
         { class: "timeline-attempt-head" },
@@ -807,6 +819,7 @@ function renderTimelineSection(timeline: TimelineView): HTMLElement {
         attempt.running
           ? h("span", { class: "timeline-running" }, "running")
           : null,
+        selected ? h("span", { class: "timeline-selected" }, "showing") : null,
         attempt.reconstructed
           ? h("span", { class: "dim" }, "reconstructed")
           : null,
@@ -833,9 +846,56 @@ function renderTimelineSection(timeline: TimelineView): HTMLElement {
   return body;
 }
 
+// The raw log pane below the timeline: the harness output of the selected
+// attempt, read end to end. Content is fetched as byte ranges and already
+// ANSI-stripped server-side. While a fetch is in flight the previously loaded
+// content stays visible.
+function renderLogPane(logPane: LogPaneView): HTMLElement {
+  const pane = h("div", { class: "log-pane" });
+  pane.append(
+    h(
+      "div",
+      { class: "log-pane-head" },
+      h("span", { class: "dim" }, "raw log"),
+      logPane.selectedAttempt !== null
+        ? h("span", { class: "log-pane-attempt" }, `attempt ${logPane.selectedAttempt}`)
+        : null,
+      logPane.error
+        ? h("span", { class: "error-inline log-pane-error" }, logPane.error)
+        : null,
+    ),
+  );
+  pane.append(
+    h(
+      "pre",
+      { class: "log-pane-content" },
+      logPane.content.length > 0 ? logPane.content : "(no output yet)",
+    ),
+  );
+  if (logPane.hasMore) {
+    pane.append(h("div", { class: "dim log-pane-more" }, "loading more..."));
+  }
+  return pane;
+}
+
+// A never-run ticket: the ticket's spec text in place of timeline and log,
+// with a "no attempts yet" marker, so clicking any ticket tells you something.
+function renderNeverRun(logPane: LogPaneView): HTMLElement {
+  const body = h("div", { class: "never-run" });
+  body.append(h("div", { class: "dim never-run-marker" }, "no attempts yet"));
+  if (logPane.spec) {
+    body.append(
+      h("div", { class: "dim" }, "spec"),
+      h("pre", { class: "detail-pre never-run-spec" }, logPane.spec),
+    );
+  }
+  return body;
+}
+
 function renderTicketDetail(
   detail: Extract<DetailView, { kind: "ticket" }>,
   timeline: TimelineView | null,
+  logPane: LogPaneView | null,
   handlers: Handlers,
 ): HTMLElement {
   const body = h("div", { class: "detail-body" });
@@ -852,8 +912,17 @@ function renderTicketDetail(
   if (detail.interrupt) {
     body.append(renderInterrupt(detail.interrupt, handlers));
   }
-  if (timeline) {
-    body.append(renderTimelineSection(timeline));
+  if (logPane?.neverRun) {
+    // A never-run ticket shows its spec text with a "no attempts yet" marker
+    // in place of timeline and log.
+    body.append(renderNeverRun(logPane));
+  } else {
+    if (timeline) {
+      body.append(renderTimelineSection(detail.ticketId, timeline, logPane, handlers));
+    }
+    if (logPane) {
+      body.append(renderLogPane(logPane));
+    }
   }
   if (detail.outcome) {
     body.append(
@@ -993,7 +1062,7 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
       ),
     ),
     view.kind === "ticket"
-      ? renderTicketDetail(view, model.timeline, handlers)
+      ? renderTicketDetail(view, model.timeline, model.logPane, handlers)
       : renderUtilityDetail(view, handlers),
   );
   return detail;

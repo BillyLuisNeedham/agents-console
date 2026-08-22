@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { PoolSnapshot, TicketEventsResponse } from "./project";
+import type { PoolSnapshot, TicketEventsResponse, TicketLogResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -72,6 +72,27 @@ export class PoolClient {
       `${this.base}/api/events?ticket=${encodeURIComponent(ticketId)}`,
     );
     if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
+    return res.json();
+  }
+
+  /**
+   * A byte range of an attempt's raw log, ANSI-stripped server-side. `offset`
+   * is a raw byte offset; the response reports `nextOffset` (where the next
+   * range starts) and `totalSize`, so the pane pages until offset reaches the
+   * total. Ticket 19's tailing reuses this offset contract for growth.
+   */
+  async getLog(
+    ticketId: string,
+    attempt: number,
+    offset: number,
+  ): Promise<TicketLogResponse> {
+    const params = new URLSearchParams({
+      ticket: ticketId,
+      attempt: String(attempt),
+      offset: String(offset),
+    });
+    const res = await fetch(`${this.base}/api/log?${params}`);
+    if (!res.ok) throw new Error(`ticket log failed: ${res.status}`);
     return res.json();
   }
 

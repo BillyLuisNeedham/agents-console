@@ -19,10 +19,12 @@ import {
   phaseLabel,
   projectDetail,
   projectLog,
+  projectLogPane,
   projectPool,
   projectPoolEdges,
   projectTimeline,
   REVIEW_CARD_ID,
+  selectLogAttempt,
   START_CARD_ID,
   strokeWidthForZoom,
   ticketCardId,
@@ -33,6 +35,7 @@ import {
   type PoolTicketState,
   type TicketEvent,
   type TicketEventsResponse,
+  type TimelineView,
 } from "./project";
 
 function ticket(
@@ -442,7 +445,7 @@ describe("projectTimeline", () => {
   }
 
   function response(events: TicketEvent[]): TicketEventsResponse {
-    return { events, attempts: [], reconstructed: false };
+    return { events, attempts: [], reconstructed: false, spec: "the spec" };
   }
 
   it("groups events into one row per attempt and marks the running attempt", () => {
@@ -522,6 +525,7 @@ describe("projectTimeline", () => {
           { attempt: 2, logFile: "01.attempt-2.log", modifiedAt: "2026-01-01T00:00:01.000Z" },
         ],
         reconstructed: true,
+        spec: "the spec",
       },
       "in-progress",
     );
@@ -541,11 +545,117 @@ describe("projectTimeline", () => {
 
   it("is empty for a ticket with no events and no log files", () => {
     const view = projectTimeline(
-      { events: [], attempts: [], reconstructed: true },
+      { events: [], attempts: [], reconstructed: true, spec: "the spec" },
       "ready",
     );
     expect(view.attempts).toEqual([]);
     expect(view.reconstructed).toBe(true);
+  });
+});
+
+function timelineView(attempts: { number: number; running: boolean }[]): TimelineView {
+  return {
+    attempts: attempts.map(({ number, running }) => ({
+      number,
+      events: [],
+      reconstructed: false,
+      running,
+      logFile: null,
+    })),
+    reconstructed: false,
+  };
+}
+
+describe("selectLogAttempt", () => {
+  it("prefers the running attempt, then the latest, then null", () => {
+    const timeline = timelineView([
+      { number: 1, running: false },
+      { number: 2, running: true },
+      { number: 3, running: false },
+    ]);
+    expect(selectLogAttempt(timeline, null)).toBe(2);
+    expect(selectLogAttempt(timeline, 1)).toBe(1);
+    expect(selectLogAttempt(timeline, 3)).toBe(3);
+    expect(selectLogAttempt(timelineView([]), null)).toBeNull();
+  });
+});
+
+describe("projectLogPane", () => {
+  it("shows a never-run fallback with the spec text when the timeline is empty", () => {
+    const pane = projectLogPane(
+      timelineView([]),
+      null,
+      "the ticket spec text",
+      null,
+      null,
+    );
+    expect(pane).not.toBeNull();
+    expect(pane?.neverRun).toBe(true);
+    expect(pane?.selectedAttempt).toBeNull();
+    expect(pane?.spec).toBe("the ticket spec text");
+    expect(pane?.content).toBe("");
+  });
+
+  it("projects the selected attempt and its fetched content", () => {
+    const pane = projectLogPane(
+      timelineView([
+        { number: 1, running: false },
+        { number: 2, running: true },
+      ]),
+      null,
+      "spec",
+      { content: "the log", offset: 50, totalSize: 100 },
+      null,
+    );
+    expect(pane).not.toBeNull();
+    expect(pane?.neverRun).toBe(false);
+    expect(pane?.selectedAttempt).toBe(2);
+    expect(pane?.content).toBe("the log");
+    expect(pane?.offset).toBe(50);
+    expect(pane?.totalSize).toBe(100);
+    expect(pane?.hasMore).toBe(true);
+  });
+
+  it("marks the pane complete when the offset reaches the total size", () => {
+    const pane = projectLogPane(
+      timelineView([{ number: 1, running: false }]),
+      null,
+      "spec",
+      { content: "all", offset: 100, totalSize: 100 },
+      null,
+    );
+    expect(pane?.hasMore).toBe(false);
+  });
+
+  it("keeps a clicked attempt selected over the running attempt", () => {
+    const pane = projectLogPane(
+      timelineView([
+        { number: 1, running: true },
+        { number: 2, running: false },
+      ]),
+      2,
+      "spec",
+      null,
+      null,
+    );
+    expect(pane?.selectedAttempt).toBe(2);
+    expect(pane?.content).toBe("");
+  });
+
+  it("carries a fetch error into the pane", () => {
+    const pane = projectLogPane(
+      timelineView([{ number: 1, running: false }]),
+      1,
+      "spec",
+      null,
+      "log fetch failed",
+    );
+    expect(pane?.error).toBe("log fetch failed");
+  });
+
+  it("projects null while the timeline has not loaded", () => {
+    const pane = projectLogPane(null, null, "spec", null, null);
+    expect(pane).toBeNull();
   });
 });
 

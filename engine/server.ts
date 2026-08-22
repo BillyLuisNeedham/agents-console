@@ -11,6 +11,7 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -75,6 +76,8 @@ interface TicketMeta {
   id: string;
   title: string;
   blockedBy: string[];
+  /** The ticket's spec text: everything after the title heading. */
+  spec: string;
 }
 
 function readTitle(file: string): string {
@@ -85,6 +88,14 @@ function readTitle(file: string): string {
   return firstHeading.replace(/^#\s+/, "").trim();
 }
 
+/** The issue body after the title heading and its leading blank line. */
+function readSpec(file: string): string {
+  const lines = readFileSync(file, "utf8").split("\n");
+  const headingIndex = lines.findIndex((line) => line.startsWith("# "));
+  const body = lines.slice(headingIndex + 1).join("\n").trim();
+  return body;
+}
+
 function loadMeta(poolDir: string): TicketMeta[] {
   const issuesDir = join(poolDir, "issues");
   const markers = loadPoolMarkers(issuesDir);
@@ -92,6 +103,7 @@ function loadMeta(poolDir: string): TicketMeta[] {
     id: marker.id,
     title: readTitle(marker.file),
     blockedBy: marker.blockedBy,
+    spec: readSpec(marker.file),
   }));
 }
 
@@ -147,6 +159,162 @@ export interface TicketEventsResponse {
   events: TicketEvent[];
   attempts: ReconstructedAttempt[];
   reconstructed: boolean;
+  /** The ticket's spec text: the issue file body after the title heading. */
+  spec: string;
+}
+
+// ---------------------------------------------------------------------------
+// Ticket log endpoint
+// ---------------------------------------------------------------------------
+
+/** The largest byte range a single log response serves. Larger logs page. */
+export const LOG_CHUNK_BYTES = 64 * 1024;
+
+export interface LogAttemptInfo {
+  attempt: number;
+  kind: "implement" | "resolver" | "reconstructed";
+  logFile: string;
+  current: boolean;
+}
+
+export interface TicketLogResponse {
+  content: string;
+  offset: number;
+  nextOffset: number;
+  totalSize: number;
+  attempts: LogAttemptInfo[];
+}
+
+// ANSI escape sequences: CSI (colors, cursor movement) and OSC (title, hyperlinks)
+// are stripped server-side so the served log reads as clean text.
+const ANSI_ESCAPE_RE =
+  /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_RE, "");
+}
+
+/**
+ * The ticket's attempts as log sources, in attempt order. Event-based tickets
+ * (an events file exists) derive implement/resolver attempts from the events:
+ * the latest of each kind holds its well-known path, older attempts their
+ * rotated `<id>.attempt-N` name. A pre-feature ticket (no events file) uses
+ * the reconstructed attempt rows, each with the log file it was built from.
+ */
+export function listAttemptLogs(
+  runsDir: string,
+  ticketId: string,
+): LogAttemptInfo[] {
+  const events = readEvents(runsDir, ticketId);
+  if (events.length > 0) {
+    const spawned = events.filter((e) => e.kind === "spawned");
+    const resolvers = events.filter((e) => e.kind === "resolver");
+    const maxSpawned = spawned.reduce((m, e) => Math.max(m, e.attempt), 0);
+    const maxResolver = resolvers.reduce((m, e) => Math.max(m, e.attempt), 0);
+    const byAttempt = new Map<number, LogAttemptInfo>();
+    for (const event of spawned) {
+      const current = event.attempt === maxSpawned;
+      byAttempt.set(event.attempt, {
+        attempt: event.attempt,
+        kind: "implement",
+        current,
+        logFile: current
+          ? `${ticketId}.log`
+          : `${ticketId}.attempt-${event.attempt}.log`,
+      });
+    }
+    for (const event of resolvers) {
+      const current = event.attempt === maxResolver;
+      byAttempt.set(event.attempt, {
+        attempt: event.attempt,
+        kind: "resolver",
+        current,
+        logFile: current
+          ? `${ticketId}.resolver.log`
+          : `${ticketId}.attempt-${event.attempt}.resolver.log`,
+      });
+    }
+    return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
+  }
+  const reconstructed = reconstructAttempts(runsDir, ticketId);
+  return reconstructed.map((row, index) => ({
+    attempt: row.attempt,
+    kind: "reconstructed" as const,
+    logFile: row.logFile,
+    current: index === reconstructed.length - 1,
+  }));
+}
+
+/** Resolve an attempt number to its log file name, or null for an unknown attempt. */
+function attemptLogFile(
+  runsDir: string,
+  ticketId: string,
+  attempt: number,
+): string | null {
+  const found = listAttemptLogs(runsDir, ticketId).find(
+    (info) => info.attempt === attempt,
+  );
+  return found?.logFile ?? null;
+}
+
+/**
+ * The UTF-8 length of the leading char at `index`, or 0 when `index` sits on a
+ * continuation byte or past the buffer. Used to avoid splitting a multi-byte
+ * char across a byte-range boundary, which would decode as U+FFFD in the pane.
+ */
+function utf8CharLength(bytes: Uint8Array, index: number): number {
+  const lead = bytes[index];
+  if (lead === undefined) return 0;
+  if (lead < 0x80) return 1;
+  if ((lead & 0xe0) === 0xc0) return 2;
+  if ((lead & 0xf0) === 0xe0) return 3;
+  if ((lead & 0xf8) === 0xf0) return 4;
+  return 0;
+}
+
+/**
+ * Trim a raw byte slice so no multi-byte UTF-8 char straddles its tail: a
+ * leading char whose continuation bytes fall past `end` is cut out, so the
+ * next range read (from the trimmed end) brings it back whole.
+ */
+function utf8End(bytes: Uint8Array, start: number, end: number): number {
+  let cut = end;
+  let i = end - 1;
+  while (i >= start && (bytes[i] & 0xc0) === 0x80) {
+    cut = i;
+    i -= 1;
+  }
+  if (i >= start) {
+    const len = utf8CharLength(bytes, i);
+    if (len > 0 && i + len > end) cut = i;
+  }
+  return cut;
+}
+
+/**
+ * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
+ * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
+ * returned `nextOffset` until it equals `totalSize`.
+ */
+async function readLogRange(
+  logPath: string,
+  offset: number,
+): Promise<{ content: string; offset: number; nextOffset: number; totalSize: number }> {
+  if (!existsSync(logPath)) {
+    return { content: "", offset: 0, nextOffset: 0, totalSize: 0 };
+  }
+  const file = Bun.file(logPath);
+  const totalSize = file.size;
+  const start = Math.min(Math.max(0, offset), totalSize);
+  const end = Math.min(start + LOG_CHUNK_BYTES, totalSize);
+  const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+  const decodeEnd = utf8End(bytes, 0, bytes.length);
+  return {
+    content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
+    offset: start,
+    nextOffset: start + decodeEnd,
+    totalSize,
+  };
 }
 
 export interface ReconstructedAttempt {
@@ -194,16 +362,22 @@ function reconstructAttempts(
     }));
 }
 
-function readTicketEvents(poolDir: string, ticketId: string): TicketEventsResponse {
+function readTicketEvents(
+  poolDir: string,
+  ticketId: string,
+  meta: TicketMeta[],
+): TicketEventsResponse {
   const runsDir = join(poolDir, "runs");
   const events = readEvents(runsDir, ticketId);
+  const spec = meta.find((m) => m.id === ticketId)?.spec ?? "";
   if (events.length > 0) {
-    return { events, attempts: [], reconstructed: false };
+    return { events, attempts: [], reconstructed: false, spec };
   }
   return {
     events: [],
     attempts: reconstructAttempts(runsDir, ticketId),
     reconstructed: true,
+    spec,
   };
 }
 
@@ -419,7 +593,35 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           if (!ticketIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
-          return Response.json(readTicketEvents(poolDir, ticketId));
+          return Response.json(readTicketEvents(poolDir, ticketId, meta));
+        }
+
+        if (pathname === "/api/log") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          if (!ticketIds.has(ticketId)) {
+            return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+          }
+          const runsDir = join(poolDir, "runs");
+          const attempts = listAttemptLogs(runsDir, ticketId);
+          const rawAttempt = url.searchParams.get("attempt");
+          const rawOffset = url.searchParams.get("offset");
+          // The offset is a byte offset into the raw log; the client pages by
+          // continuing from the returned nextOffset. Default to the current
+          // (latest) attempt and offset 0.
+          const attempt =
+            rawAttempt !== null && rawAttempt !== ""
+              ? Number(rawAttempt)
+              : (attempts[attempts.length - 1]?.attempt ?? 0);
+          const offset = rawOffset !== null && rawOffset !== "" ? Number(rawOffset) : 0;
+          const logFile = attemptLogFile(runsDir, ticketId, attempt);
+          if (!logFile) {
+            return Response.json(
+              { error: `unknown attempt ${attempt} for ${ticketId}` },
+              { status: 404 },
+            );
+          }
+          const range = await readLogRange(join(runsDir, logFile), offset);
+          return Response.json({ ...range, attempts });
         }
 
         if (pathname === "/api/stream") {

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createPoolServer,
+  LOG_CHUNK_BYTES,
   type PoolServer,
   type PoolServerOptions,
 } from "./server.ts";
@@ -299,6 +300,209 @@ describe("ticket events endpoint", () => {
     const server = await startServer(poolDir, stubHarness({}));
 
     const res = await fetch(`${server.url}/api/events?ticket=zzz`);
+    expect(res.status).toBe(404);
+  });
+
+  it("serves the ticket's spec text alongside its events", async () => {
+    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    tempDirs.push(poolDir);
+    mkdirSync(join(poolDir, "issues"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "issues", "01-a.md"),
+      `${marker}\n\n# Ticket body\n\nSpec: what to build\n\n## Details\nmore\n`,
+    );
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/events?ticket=01`);
+    const body = (await res.json()) as { spec: string };
+    expect(body.spec).toContain("what to build");
+    expect(body.spec).not.toContain("Ticket body");
+  });
+});
+
+describe("ticket log endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("serves an attempt's log from a byte offset with the total size", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "0123456789abcdef\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=4`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      offset: number;
+      nextOffset: number;
+      totalSize: number;
+      attempts: unknown[];
+    };
+    expect(body.offset).toBe(4);
+    expect(body.content).toBe("456789abcdef\n");
+    expect(body.totalSize).toBe(17);
+    expect(body.nextOffset).toBe(17);
+    expect(body.attempts).toEqual([
+      { attempt: 1, kind: "reconstructed", logFile: "01.log", current: true },
+    ]);
+  });
+
+  it("strips ANSI escape sequences from the served content", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(
+      join(runsDir, "01.log"),
+      "line \u001b[31mred\u001b[0m text\n\u001b]0;title\u0007next\n",
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
+    const body = (await res.json()) as { content: string };
+    expect(body.content).toBe("line red text\nnext\n");
+  });
+
+  it("pages a log larger than one chunk through offsets", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    const big = "x".repeat(LOG_CHUNK_BYTES + 16) + "\n";
+    writeFileSync(join(runsDir, "01.log"), big);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const first = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0`);
+    const firstBody = (await first.json()) as {
+      content: string;
+      nextOffset: number;
+      totalSize: number;
+    };
+    expect(firstBody.content).toHaveLength(LOG_CHUNK_BYTES);
+    expect(firstBody.nextOffset).toBe(LOG_CHUNK_BYTES);
+    expect(firstBody.totalSize).toBe(big.length);
+
+    const second = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=1&offset=${firstBody.nextOffset}`,
+    );
+    const secondBody = (await second.json()) as { content: string; nextOffset: number };
+    expect(secondBody.content).toBe("x".repeat(16) + "\n");
+    expect(secondBody.nextOffset).toBe(big.length);
+  });
+
+  it("does not split a multi-byte UTF-8 character across a chunk boundary", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // A two-byte char (é = U+00E9) whose first byte lands at the end of the
+    // first chunk: the range must trim the partial lead byte, so the second
+    // read brings the full char back and nothing decodes as U+FFFD.
+    const lead = "a".repeat(LOG_CHUNK_BYTES - 1);
+    writeFileSync(join(runsDir, "01.log"), lead + "é tail\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const first = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0`);
+    const firstBody = (await first.json()) as {
+      content: string;
+      nextOffset: number;
+    };
+    expect(firstBody.content).not.toContain("\uFFFD");
+    expect(firstBody.nextOffset).toBe(LOG_CHUNK_BYTES - 1);
+
+    const second = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=1&offset=${firstBody.nextOffset}`,
+    );
+    const secondBody = (await second.json()) as { content: string };
+    expect(secondBody.content).toBe("é tail\n");
+    expect(secondBody.content).not.toContain("\uFFFD");
+  });
+
+  it("returns empty content for an offset at or past the end", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "short\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=100`);
+    const body = (await res.json()) as { content: string; totalSize: number };
+    expect(body.content).toBe("");
+    expect(body.totalSize).toBe(6);
+  });
+
+  it("lists event-based attempts with their rotated log files", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // Implement attempt 1 rotated away, resolver attempt 2 current, implement
+    // attempt 3 current.
+    writeFileSync(
+      join(runsDir, "01.events.jsonl"),
+      [
+        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 2, kind: "resolver", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "exited", payload: {} }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
+    writeFileSync(join(runsDir, "01.resolver.log"), "resolver\n");
+    writeFileSync(join(runsDir, "01.log"), "third\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      attempts: { attempt: number; kind: string; logFile: string; current: boolean }[];
+    };
+    // The older rotated log is readable through its attempt number.
+    expect(body.content).toBe("first\n");
+    expect(body.attempts).toEqual([
+      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", current: false },
+      { attempt: 2, kind: "resolver", logFile: "01.resolver.log", current: true },
+      { attempt: 3, kind: "implement", logFile: "01.log", current: true },
+    ]);
+
+    const third = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
+    const thirdBody = (await third.json()) as { content: string };
+    expect(thirdBody.content).toBe("third\n");
+  });
+
+  it("defaults to the latest attempt when none is named", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "latest\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01`);
+    const body = (await res.json()) as { content: string; attempts: unknown[] };
+    expect(body.content).toBe("latest\n");
+    expect(body.attempts).toHaveLength(1);
+  });
+
+  it("rejects an unknown attempt number", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "latest\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=99`);
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects a ticket id the pool does not own", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=zzz&attempt=1`);
     expect(res.status).toBe(404);
   });
 });
