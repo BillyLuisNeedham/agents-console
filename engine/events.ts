@@ -93,3 +93,20 @@ export function lastAttempt(runsDir: string, ticketId: string): number {
     0,
   );
 }
+
+/**
+ * The ticket's latest attempt carrying the given event kind, or 0 if none.
+ * Used by attempt rotation to name a well-known raw log by the run that wrote
+ * it: the last implement spawn for `<id>.log`, the last resolver run for
+ * `<id>.resolver.log`.
+ */
+export function lastAttemptOfKind(
+  runsDir: string,
+  ticketId: string,
+  kind: TicketEventKind,
+): number {
+  return readEvents(runsDir, ticketId).reduce(
+    (max, event) => (event.kind === kind ? Math.max(max, event.attempt) : max),
+    0,
+  );
+}
