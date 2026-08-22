@@ -421,6 +421,31 @@ describe("ticket log endpoint", () => {
     expect(secondBody.content).not.toContain("\uFFFD");
   });
 
+  it("does not split a multi-byte UTF-8 character at a range's head", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // é = U+00E9 is two bytes, at byte offsets 10 and 11. A tail-first open or
+    // load-earlier read can request an offset mid-character: a range starting
+    // at byte 11 (a continuation byte) must drop the partial char and report
+    // the adjusted offset, so the pane head never decodes as U+FFFD.
+    writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=11`);
+    const body = (await res.json()) as {
+      content: string;
+      offset: number;
+      nextOffset: number;
+      totalSize: number;
+    };
+    expect(body.content).toBe(" tail\n");
+    expect(body.content).not.toContain("\uFFFD");
+    expect(body.offset).toBe(12);
+    expect(body.nextOffset).toBe(18);
+    expect(body.totalSize).toBe(18);
+  });
+
   it("returns empty content for an offset at or past the end", async () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");

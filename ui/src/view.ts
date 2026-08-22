@@ -15,6 +15,7 @@ import {
   edgePath,
   flowNeighbourhood,
   mergeLayout,
+  parseStoredDetailWidth,
   parseStoredLayout,
   strokeWidthForZoom,
   layoutStorageKey,
@@ -240,10 +241,10 @@ function currentDetailMaxPx(): number {
 
 function readStoredDetailWidth(): number {
   try {
-    const raw = localStorage.getItem(DETAIL_WIDTH_KEY);
-    if (raw == null) return DETAIL_MIN_PX;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : DETAIL_MIN_PX;
+    return parseStoredDetailWidth(
+      localStorage.getItem(DETAIL_WIDTH_KEY),
+      currentDetailMaxPx(),
+    );
   } catch {
     // quota or private mode: the default width applies
     return DETAIL_MIN_PX;

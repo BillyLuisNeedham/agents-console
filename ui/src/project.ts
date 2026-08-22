@@ -776,3 +776,20 @@ export const DETAIL_MAX_FRACTION = 0.8;
 export function clampDetailWidth(px: number, maxPx: number): number {
   return Math.min(maxPx, Math.max(DETAIL_MIN_PX, px));
 }
+
+/**
+ * The Detail width persistence round trip: the width is stored as a plain
+ * number string under one global key, and a reload parses it back and clamps
+ * it to the current window. A missing, unparseable, or non-finite stored
+ * value falls back to the readable minimum.
+ */
+export function parseStoredDetailWidth(
+  raw: string | null,
+  maxPx: number,
+): number {
+  const parsed = raw == null ? Number.NaN : Number(raw);
+  return clampDetailWidth(
+    Number.isFinite(parsed) ? parsed : DETAIL_MIN_PX,
+    maxPx,
+  );
+}

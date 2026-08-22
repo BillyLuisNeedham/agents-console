@@ -293,6 +293,20 @@ function utf8End(bytes: Uint8Array, start: number, end: number): number {
 }
 
 /**
+ * Trim a raw byte slice so no multi-byte UTF-8 char straddles its head: a
+ * range that begins on a continuation byte drops the partial char and starts
+ * at the next lead byte, so the pane head never decodes as U+FFFD. The byte
+ * count removed is reported back so the caller can adjust the served offset.
+ */
+function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
+  let cut = start;
+  while (cut < end && (bytes[cut] & 0xc0) === 0x80) {
+    cut += 1;
+  }
+  return cut - start;
+}
+
+/**
  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
  * returned `nextOffset` until it equals `totalSize`. An optional `end` bounds
@@ -316,10 +330,13 @@ async function readLogRange(
       : start + LOG_CHUNK_BYTES;
   const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
   const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
-  const decodeEnd = utf8End(bytes, 0, bytes.length);
+  const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
+  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
   return {
-    content: stripAnsi(new TextDecoder().decode(bytes.subarray(0, decodeEnd))),
-    offset: start,
+    content: stripAnsi(
+      new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
+    ),
+    offset: start + headTrim,
     nextOffset: start + decodeEnd,
     totalSize,
   };
