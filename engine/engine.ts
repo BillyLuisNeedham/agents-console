@@ -11,7 +11,13 @@ import {
 import { once } from "node:events";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { appendEvent, lastAttempt, nextAttempt } from "./events.ts";
+import {
+  appendEvent,
+  lastAttempt,
+  lastAttemptOfKind,
+  nextAttempt,
+  type TicketEventKind,
+} from "./events.ts";
 import { CheckpointStore } from "./checkpoints.ts";
 import {
   loadPoolMarkers,
@@ -902,14 +908,15 @@ async function runResolver(
   resolver: ResolverSpec,
   result: MergeResult,
 ): Promise<ResolverAttempt> {
+  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
+  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
+  rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: nextAttempt(session.runsDir, marker.id),
     kind: "resolver",
     payload: { files: result.conflicted },
   });
-  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
-  const logPath = join(session.runsDir, `${marker.id}.resolver.log`);
   const prompt = buildResolverPrompt({
     id: marker.id,
     worktree: worktree.path,
@@ -1424,6 +1431,27 @@ function manualMergeInterrupt(
   };
 }
 
+// Attempt rotation on re-run (ADR 0002): before a new attempt writes, an
+// existing well-known raw log moves to its attempt-numbered name so a re-run
+// never destroys the ticket's history. The number is the attempt the events
+// file recorded for the run that wrote the file: the last implement spawn for
+// `<id>.log`, the last resolver run for `<id>.resolver.log`. A pre-feature
+// log (written before events existed) rotates to attempt-0.
+function rotateAttemptLog(
+  runsDir: string,
+  ticketId: string,
+  wellKnownPath: string,
+  kind: TicketEventKind,
+): void {
+  if (!existsSync(wellKnownPath)) return;
+  const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
+  const suffix = kind === "resolver" ? ".resolver" : "";
+  renameSync(
+    wellKnownPath,
+    join(runsDir, `${ticketId}.attempt-${attempt}${suffix}.log`),
+  );
+}
+
 async function runTicket(
   marker: TicketMarker,
   snapshot: PoolState,
@@ -1433,6 +1461,7 @@ async function runTicket(
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
   const logPath = join(env.runsDir, `${marker.id}.log`);
+  rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
   const issueRel = relative(plan.cwd, plan.issuePath);
 

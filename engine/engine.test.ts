@@ -475,6 +475,75 @@ describe("ticket events", () => {
   });
 });
 
+describe("attempt log rotation", () => {
+  interface EventLine {
+    at: string;
+    attempt: number;
+    kind: string;
+    payload: Record<string, unknown>;
+  }
+
+  function readEventsFile(poolDir: string, id: string): EventLine[] {
+    const raw = readFileSync(
+      join(poolDir, "runs", `${id}.events.jsonl`),
+      "utf8",
+    );
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as EventLine);
+  }
+
+  it("rotates the raw log to its attempt-numbered name before a re-run writes", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    // A harness that stamps each spawn into the log so the rotated file and
+    // the well-known path hold distinguishable content.
+    const script = join(poolDir, "stamp-stub.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; status="$2"; stamp="$3"',
+        'echo "attempt-output-$stamp"',
+        'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(script, 0o755);
+    let spawn = 0;
+    const harness: HarnessCommand = (ctx) => {
+      spawn += 1;
+      const status = spawn === 1 ? "checkpoint" : "done";
+      return ["bash", script, ctx.issuePath, status, String(spawn)];
+    };
+
+    const run = await runPool({ poolDir, harnesses: { stub: harness } });
+    const resumed = await run.resume("01", "go on");
+    const done = await approveReview(resumed);
+    expect(done.phase).toBe("done");
+
+    // Attempt 1's output rotated away, attempt 2's at the long-standing path.
+    const rotated = readFileSync(join(poolDir, "runs", "01.attempt-1.log"), "utf8");
+    expect(rotated).toContain("attempt-output-1");
+    const live = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
+    expect(live).toContain("attempt-output-2");
+    // The events file records both attempts, agreeing with the rotated names.
+    const events = readEventsFile(poolDir, "01");
+    expect(events.some((e) => e.kind === "spawned" && e.attempt === 1)).toBe(true);
+    expect(events.some((e) => e.kind === "spawned" && e.attempt === 2)).toBe(true);
+  });
+});
+
 describe("channels", () => {
   it("lands outcomes in the channel and injects them into downstream prompts", async () => {
     const poolDir = makePool({
@@ -2911,5 +2980,106 @@ describe("worktrees", () => {
       runPool({ poolDir, harnesses: rig.harnesses }),
     ).rejects.toThrow(/resolver names unknown harness 'does-not-exist'/);
   }, 15000);
+
+  it("rotates the resolver log to its attempt-numbered name on a second resolver run", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        // 04 is an independent sibling that also rewrites shared.txt in round
+        // 2: rejecting it alongside 02 leaves two tickets ready at once, and
+        // 02 waits on 04's merged change before overwriting shared.txt again,
+        // so the second merge conflicts and the resolver runs a second time.
+        tickets: [
+          readyTicket("01"),
+          readyTicket("02"),
+          readyTicket("03", "02"),
+          readyTicket("04"),
+        ],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": [
+        {
+          waitMerged: "work-01",
+          workFile: "shared.txt",
+          workLine: "from-02",
+          overwrite: true,
+          commitMsg: "work-02",
+        },
+        {
+          waitMerged: "work-04-again",
+          workFile: "shared.txt",
+          workLine: "from-02-again",
+          overwrite: true,
+          commitMsg: "work-02-again",
+        },
+      ],
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+      "04": [
+        { workFile: "four.txt", commitMsg: "work-04" },
+        {
+          workFile: "shared.txt",
+          workLine: "from-04-again",
+          overwrite: true,
+          commitMsg: "work-04-again",
+        },
+      ],
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "resolved-by-agent",
+        note: "kept both lines",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+
+    const approved = await run.approve("02");
+    expect(approved.phase).toBe("quiescent");
+
+    // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
+    // in a worktree alongside 04 and conflicts again.
+    const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
+    expect(
+      rejected.interrupts.some((i) => i.kind === "merge-approval"),
+    ).toBe(true);
+
+    // Implement attempt 1 rotated away; attempt 3 sits at the long-standing
+    // path. Resolver attempt 2 rotated away; attempt 4 sits at its path.
+    expect(existsSync(join(poolDir, "runs", "02.attempt-1.log"))).toBe(true);
+    expect(existsSync(join(poolDir, "runs", "02.log"))).toBe(true);
+    expect(existsSync(join(poolDir, "runs", "02.attempt-2.resolver.log"))).toBe(
+      true,
+    );
+    expect(existsSync(join(poolDir, "runs", "02.resolver.log"))).toBe(true);
+
+    // Rotated names agree with the attempt numbers in the events file.
+    const events = readFileSync(
+      join(poolDir, "runs", "02.events.jsonl"),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { attempt: number; kind: string });
+    expect(
+      events.filter((e) => e.kind === "spawned").map((e) => e.attempt),
+    ).toEqual([1, 3]);
+    expect(
+      events.filter((e) => e.kind === "resolver").map((e) => e.attempt),
+    ).toEqual([2, 4]);
+  }, 20000);
   });
 });
