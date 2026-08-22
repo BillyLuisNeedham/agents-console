@@ -578,6 +578,25 @@ function makeLockedPool(): string {
   ]);
 }
 
+/**
+ * A pool for CLI-level tests: one ticket that is already done, so the boot
+ * never spawns a real harness, with a harness name that resolves.
+ */
+function makeCliPool(): string {
+  const poolDir = mkdtempSync(join(tmpdir(), "pool-cli-"));
+  tempDirs.push(poolDir);
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  writeFileSync(
+    join(poolDir, "issues", "01-a.md"),
+    "<!-- state: id=01 blocked-by=none status=done -->\n\n# body\n",
+  );
+  writeFileSync(
+    join(poolDir, "console.json"),
+    JSON.stringify({ defaults: { harness: "claude", model: "m" } }, null, 2),
+  );
+  return poolDir;
+}
+
 describe("pool lock", () => {
   it("writes its own pid on a successful boot", () => {
     const poolDir = makeLockedPool();
@@ -651,6 +670,39 @@ describe("pool lock", () => {
       force: true,
     } as unknown as PoolServerOptions;
     expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
+  });
+
+  it("two near-simultaneous launches cannot both pass the lock; the loser names the winner", async () => {
+    const poolDir = makeCliPool();
+    const registryPath = fleetRegistry(poolDir);
+    const repoDir = join(import.meta.dir, "..");
+    const args = [
+      "bun",
+      "run",
+      "engine/server.ts",
+      "--pool",
+      poolDir,
+      "--port",
+      "0",
+      "--registry",
+      registryPath,
+    ];
+    const childA = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    const childB = Bun.spawn(args, { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    // Exactly one launch holds the lock and serves; the other exits non-zero
+    // naming the winner's pid. The first to exit is the loser.
+    const loser = await Promise.race([
+      childA.exited.then(() => childA),
+      childB.exited.then(() => childB),
+    ]);
+    const winner = loser === childA ? childB : childA;
+    const exitCode = await loser.exited;
+    expect(exitCode).not.toBe(0);
+    const stderr = await new Response(loser.stderr).text();
+    expect(stderr).toContain("locked by live server");
+    expect(stderr).toContain(String(winner.pid));
+    winner.kill();
+    await winner.exited;
   });
 
   it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
@@ -744,6 +796,111 @@ describe("pinned pool ports", () => {
       message = err instanceof Error ? err.message : String(err);
     }
     expect(message).toContain(String(held.port));
+    await held.release();
+  });
+
+  it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
+    const held = await holdPort();
+    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    tempDirs.push(holderPool);
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    const registryPath = join(poolDir, "pools.json");
+    writeFileSync(
+      registryPath,
+      JSON.stringify([
+        { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
+      ]),
+    );
+    let message = "";
+    try {
+      createPoolServer({ poolDir, distDir: "/nonexistent", registryPath });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(held.port));
+    expect(message).toContain(holderPool);
+    expect(message).toContain(String(process.pid));
+    await held.release();
+  });
+
+  it("names a live holder's pool and pid when a second server boots into its pin", async () => {
+    const port = await freePort();
+    const holderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    const registryPath = fleetRegistry(holderPool);
+    const holder = createPoolServer({
+      poolDir: holderPool,
+      distDir: "/nonexistent",
+      registryPath,
+    });
+    servers.push(holder);
+    expect(holder.url).toBe(`http://localhost:${port}`);
+    // The holder is a real, registered, live server. A second pool pinned to
+    // the same port must fail naming the holder's pool directory and pid.
+    const contenderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    let message = "";
+    try {
+      createPoolServer({
+        poolDir: contenderPool,
+        distDir: "/nonexistent",
+        registryPath,
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(port));
+    expect(message).toContain(holderPool);
+    expect(message).toContain(String(process.pid));
+  });
+
+  it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
+    const held = await holdPort();
+    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    tempDirs.push(holderPool);
+    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const registryPath = join(poolDir, "pools.json");
+    writeFileSync(
+      registryPath,
+      JSON.stringify([
+        { poolDir: holderPool, port: held.port, pid: process.pid, startedAt: "t" },
+      ]),
+    );
+    const repoDir = join(import.meta.dir, "..");
+    const child = Bun.spawn(
+      [
+        "bun",
+        "run",
+        "engine/server.ts",
+        "--pool",
+        poolDir,
+        "--port",
+        String(held.port),
+        "--registry",
+        registryPath,
+      ],
+      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await child.exited;
+    const stderr = await new Response(child.stderr).text();
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain(holderPool);
+    expect(stderr).toContain(String(process.pid));
+    await held.release();
+  });
+
+  it("a failed launch never deletes a pid file naming another live server", async () => {
+    const held = await holdPort();
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, process.pid);
+    let message = "";
+    try {
+      createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("locked by live server");
+    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
+      String(process.pid),
+    );
     await held.release();
   });
 
@@ -888,5 +1045,48 @@ describe("fleet registration", () => {
     // never advertise a port in the registry.
     expect(readFleetEntries(registryPath)).toEqual([]);
     await held.release();
+  });
+
+  it("two servers booting different pools concurrently both end up in the registry", async () => {
+    const poolA = makeCliPool();
+    const poolB = makeCliPool();
+    const registryPath = fleetRegistry(poolA);
+    const repoDir = join(import.meta.dir, "..");
+    const argsFor = (pool: string) => [
+      "bun",
+      "run",
+      "engine/server.ts",
+      "--pool",
+      pool,
+      "--port",
+      "0",
+      "--registry",
+      registryPath,
+    ];
+    const childA = Bun.spawn(argsFor(poolA), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    const childB = Bun.spawn(argsFor(poolB), { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    // Poll the raw registry until both pools have landed. The lock around the
+    // write means the later writer reads the earlier entry, so neither boot
+    // can overwrite the other.
+    const deadline = Date.now() + 20_000;
+    let entries: { poolDir: string; port: number; pid: number; startedAt: string }[] = [];
+    while (Date.now() < deadline) {
+      try {
+        entries = JSON.parse(readFileSync(registryPath, "utf8")) as typeof entries;
+      } catch {
+        entries = [];
+      }
+      if (entries.length === 2) break;
+      await Bun.sleep(50);
+    }
+    childA.kill();
+    childB.kill();
+    await Promise.all([childA.exited, childB.exited]);
+    expect(entries.map((e) => e.poolDir).sort()).toEqual(
+      [poolA, poolB].sort(),
+    );
+    expect(entries.map((e) => e.pid).sort()).toEqual(
+      [childA.pid, childB.pid].sort(),
+    );
   });
 });

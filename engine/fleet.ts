@@ -7,7 +7,14 @@
  * on the next read.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -85,18 +92,94 @@ export function readFleetEntry(
 }
 
 /**
+ * Best-effort lookup of a fleet entry by port, used to name the holder on a
+ * busy pinned port. Only live, pruned entries are candidates; an absent,
+ * corrupt, or unmatched registry yields null, and callers never depend on the
+ * registry existing.
+ */
+export function readFleetEntryByPort(
+  registryPath: string,
+  port: number,
+): FleetEntry | null {
+  return (
+    readFleetEntries(registryPath).find((entry) => entry.port === port) ?? null
+  );
+}
+
+/** The pid named in a lock file, or null when it is empty or unreadable. */
+function readLockPid(lockPath: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+  const pid = Number(raw);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/** How long a registry write waits on a foreign lock before giving up. */
+export const FLEET_LOCK_TIMEOUT_MS = 10_000;
+
+/**
  * Upsert one console's entry, keyed by pool directory: relaunching the same
  * pool replaces its old entry rather than duplicating it. A missing or corrupt
  * registry file is recreated, never an error.
+ *
+ * Writes are serialized with a lock file, so two servers booting different
+ * pools at the same moment cannot lose one entry, and the registry itself is
+ * replaced by rename so a reader never sees a half-written file. The lock is
+ * claimed with O_EXCL; a lock whose holder pid is dead is a crashed writer's
+ * and is cleared, while a live holder is waited on up to FLEET_LOCK_TIMEOUT_MS.
  */
 export function upsertFleetEntry(
   registryPath: string,
   entry: FleetEntry,
 ): void {
-  const entries = readRegistry(registryPath).filter(
-    (existing) => existing.poolDir !== entry.poolDir,
-  );
-  entries.push(entry);
+  const lockPath = `${registryPath}.lock`;
   mkdirSync(dirname(registryPath), { recursive: true });
-  writeFileSync(registryPath, JSON.stringify(entries, null, 2));
+  const deadline = Date.now() + FLEET_LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const holder = readLockPid(lockPath);
+      if (holder !== null) {
+        if (pidIsLive(holder)) {
+          if (Date.now() > deadline) {
+            throw new Error(
+              `fleet registry: lock ${lockPath} is held by live pid ${holder}`,
+            );
+          }
+          Bun.sleepSync(10);
+          continue;
+        }
+        // The holder's process is gone: a crashed writer. Clear its lock.
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      // Empty or unreadable: a writer is mid-claim, its pid appears within
+      // microseconds. A lock still empty past the deadline is a crashed
+      // writer's, so clear it and retry.
+      if (Date.now() > deadline) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      Bun.sleepSync(10);
+      continue;
+    }
+    try {
+      const entries = readRegistry(registryPath).filter(
+        (existing) => existing.poolDir !== entry.poolDir,
+      );
+      entries.push(entry);
+      const tempPath = `${registryPath}.tmp`;
+      writeFileSync(tempPath, JSON.stringify(entries, null, 2));
+      renameSync(tempPath, registryPath);
+      return;
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  }
 }

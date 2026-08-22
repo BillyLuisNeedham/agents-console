@@ -2,7 +2,14 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -140,6 +147,38 @@ describe("fleet registry upsert", () => {
     expect(readFleetEntries(registry)).toEqual([
       { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
     ]);
+  });
+
+  it("clears a lock left by a crashed writer and upserts anyway", () => {
+    const dir = tempDir();
+    const poolDir = join(dir, "pool");
+    mkdirSync(poolDir, { recursive: true });
+    const registry = join(dir, "pools.json");
+    writeFileSync(`${registry}.lock`, `${deadPid()}\n`);
+    upsertFleetEntry(registry, {
+      poolDir,
+      port: 8787,
+      pid: process.pid,
+      startedAt: "t",
+    });
+    expect(readFleetEntries(registry)).toEqual([
+      { poolDir, port: 8787, pid: process.pid, startedAt: "t" },
+    ]);
+    expect(existsSync(`${registry}.lock`)).toBe(false);
+  });
+
+  it("replaces the registry by rename, leaving no temp or lock file behind", () => {
+    const dir = tempDir();
+    const poolDir = join(dir, "pool");
+    mkdirSync(poolDir, { recursive: true });
+    const registry = join(dir, "pools.json");
+    upsertFleetEntry(registry, {
+      poolDir,
+      port: 8787,
+      pid: process.pid,
+      startedAt: "t",
+    });
+    expect(readdirSync(dir).sort()).toEqual(["pool", "pools.json"]);
   });
 });
 

@@ -25,6 +25,7 @@ import { readEvents, type TicketEvent } from "./events.ts";
 import {
   defaultRegistryPath,
   readFleetEntry,
+  readFleetEntryByPort,
   upsertFleetEntry,
 } from "./fleet.ts";
 import { loadPoolMarkers } from "./pool.ts";
@@ -435,20 +436,28 @@ function isAddressInUse(err: unknown): boolean {
 
 /**
  * Bind the pool server per the resolution. A pinned port that is busy is a
- * hard failure naming the port; only the unpinned path hunts upward from the
- * default for a free one. Port 0 means "any free port" (Bun ephemeral).
+ * hard failure naming the port and, when the fleet registry knows the holder,
+ * the conflicting pool directory and pid; only the unpinned path hunts upward
+ * from the default for a free one. Port 0 means "any free port" (Bun
+ * ephemeral).
  */
 function bindPoolServer(
   resolution: PortResolution,
   serve: (port: number) => Bun.Server<undefined>,
+  registryPath: string,
 ): Bun.Server<undefined> {
   if (resolution.pinned) {
     try {
       return serve(resolution.port);
     } catch (err) {
       if (isAddressInUse(err)) {
+        const holder = readFleetEntryByPort(registryPath, resolution.port);
+        const holderText = holder
+          ? ` by pool ${holder.poolDir} (pid ${holder.pid})`
+          : "";
         throw new Error(
-          `port ${resolution.port} is already in use; free it or pass a different --port`,
+          `port ${resolution.port} is already in use${holderText}; ` +
+            "free it or pass a different --port",
         );
       }
       throw err;
@@ -472,20 +481,50 @@ function bindPoolServer(
  * message naming that pid, its fleet-registry port when known, and the pool
  * directory. Otherwise claim the pool by writing our own pid. There is no
  * force override: a live lock always means use the running console or kill it.
+ *
+ * The claim is atomic (O_EXCL create), so two near-simultaneous launches of
+ * the same pool cannot both pass. A stale lock is cleared only when it still
+ * names a dead pid or is still unreadable after a beat, so a lock another
+ * server is mid-way through claiming is never trampled.
  */
 function acquirePoolLock(poolDir: string, registryPath: string): void {
-  const livePid = readLockedPid(poolDir);
-  if (livePid !== null && pidIsLive(livePid)) {
-    const entry = readFleetEntry(registryPath, poolDir, livePid);
-    const portText = entry ? ` on port ${entry.port}` : "";
-    throw new Error(
-      `pool ${poolDir} is locked by live server pid ${livePid}${portText}; ` +
-        "open the running console or kill it",
-    );
+  const pidPath = join(poolDir, "runs", "server.pid");
+  mkdirSync(join(poolDir, "runs"), { recursive: true });
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      writeFileSync(pidPath, `${process.pid}\n`, { flag: "wx" });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const holder = readLockedPid(poolDir);
+    if (holder !== null) {
+      if (pidIsLive(holder)) {
+        const entry = readFleetEntry(registryPath, poolDir, holder);
+        const portText = entry ? ` on port ${entry.port}` : "";
+        throw new Error(
+          `pool ${poolDir} is locked by live server pid ${holder}${portText}; ` +
+            "open the running console or kill it",
+        );
+      }
+      // A dead holder is a stale lock. Remove it only if it still names the
+      // same dead pid on re-read: a live server may have claimed it since.
+      if (readLockedPid(poolDir) === holder) {
+        rmSync(pidPath, { force: true });
+      }
+      continue;
+    }
+    // Empty or unreadable: a writer may be mid-claim, its pid landing within
+    // microseconds. Wait a beat and re-read; a lock still empty afterwards is
+    // garbage from a crashed or bogus earlier state, and is cleared.
+    Bun.sleepSync(25);
+    if (readLockedPid(poolDir) === null) {
+      rmSync(pidPath, { force: true });
+    }
   }
-  const runsDir = join(poolDir, "runs");
-  mkdirSync(runsDir, { recursive: true });
-  writeFileSync(join(runsDir, "server.pid"), `${process.pid}\n`);
+  throw new Error(
+    `pool ${poolDir}: could not claim the pool lock after five attempts`,
+  );
 }
 
 export function createPoolServer(options: PoolServerOptions): PoolServer {
@@ -556,7 +595,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   );
   let server: Bun.Server<undefined>;
   try {
-    server = bindPoolServer(resolution, (port) =>
+    server = bindPoolServer(
+      resolution,
+      (port) =>
       Bun.serve({
         port,
       async fetch(req, bunServer) {
@@ -663,17 +704,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         return new Response("not found", { status: 404 });
       },
       }),
+      registryPath,
     );
   } catch (err) {
     // The lock was claimed before the bind; a bind that never happened must
-    // not leave a live-looking pid behind, or the next launch refuses itself.
-    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+    // not leave our own live-looking pid behind, or the next launch refuses
+    // itself. Only our pid is removed: a lock another live server holds must
+    // survive this launch's failure.
+    if (readLockedPid(poolDir) === process.pid) {
+      rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+    }
     throw err;
   }
 
   // The bind succeeded, so the pool is live and advertises itself. Boot order
   // is lock -> bind -> register: the registry never names a port that did not
-  // actually get bound. Registration is best-effort — a registry write that
+  // actually get bound. Registration is best-effort: a registry write that
   // fails must not take down a console that already bound successfully.
   const boundPort = server.port;
   if (boundPort !== undefined) {
@@ -709,15 +755,26 @@ export function runServerCli(): void {
   const args = process.argv.slice(2);
   const poolIndex = args.indexOf("--pool");
   const portIndex = args.indexOf("--port");
+  const registryIndex = args.indexOf("--registry");
   const poolDir = poolIndex >= 0 ? args[poolIndex + 1] : undefined;
   const port = portIndex >= 0 ? Number(args[portIndex + 1]) : undefined;
+  const registryPath =
+    registryIndex >= 0 && args[registryIndex + 1]
+      ? args[registryIndex + 1]
+      : undefined;
   if (!poolDir) {
-    console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
+    console.error(
+      "usage: bun run engine/server.ts --pool <dir> [--port <n>] [--registry <file>]",
+    );
     process.exit(1);
   }
   let server: PoolServer;
   try {
-    server = createPoolServer({ poolDir, ...(port !== undefined ? { port } : {}) });
+    server = createPoolServer({
+      poolDir,
+      ...(port !== undefined ? { port } : {}),
+      ...(registryPath !== undefined ? { registryPath } : {}),
+    });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
