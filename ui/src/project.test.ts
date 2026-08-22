@@ -25,6 +25,8 @@ import {
   parseStoredLayout,
   phaseLabel,
   projectDetail,
+  projectDetailTab,
+  projectDetailTabs,
   projectLog,
   projectLogPane,
   projectPool,
@@ -35,11 +37,14 @@ import {
   START_CARD_ID,
   strokeWidthForZoom,
   ticketCardId,
+  ticketBodyHtml,
   ticketDepth,
   zoomAtCursor,
   type PoolSnapshot,
   type PoolStatus,
   type PoolTicketState,
+  type TabOverride,
+  type TicketDetailView,
   type TicketEvent,
   type TicketEventsResponse,
   type TimelineView,
@@ -422,6 +427,130 @@ describe("projectDetail", () => {
   });
 });
 
+describe("projectDetailTab", () => {
+  function detail(
+    status: PoolStatus,
+    interrupt: TicketDetailView["interrupt"] = null,
+    ticketId = "A",
+  ): TicketDetailView {
+    return {
+      kind: "ticket",
+      ticketId,
+      title: `ticket ${ticketId}`,
+      status,
+      blockedBy: [],
+      outcome: null,
+      interrupt,
+    };
+  }
+
+  const pending = (ticketId = "A"): TicketDetailView["interrupt"] => ({
+    ticketId,
+    kind: "checkpoint",
+    body: "the brief",
+    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+  });
+
+  it("maps each pool status to its default tab", () => {
+    expect(projectDetailTab(detail("ready"), null)).toBe("spec");
+    expect(projectDetailTab(detail("in-progress"), null)).toBe("progress");
+    expect(projectDetailTab(detail("checkpoint"), null)).toBe("progress");
+    expect(projectDetailTab(detail("done"), null)).toBe("outcome");
+  });
+
+  it("maps a pending interrupt to Progress on every status, including done", () => {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+      expect(projectDetailTab(detail(status, pending()), null)).toBe("progress");
+    }
+  });
+
+  it("lets a manual tab choice override the default for the current ticket", () => {
+    const override: TabOverride = { ticketId: "A", tab: "spec" };
+    expect(projectDetailTab(detail("done"), override)).toBe("spec");
+    expect(projectDetailTab(detail("ready"), { ticketId: "A", tab: "outcome" })).toBe("outcome");
+  });
+
+  it("lets a manual choice override the interrupt-driven Progress tab", () => {
+    const override: TabOverride = { ticketId: "A", tab: "outcome" };
+    expect(projectDetailTab(detail("checkpoint", pending()), override)).toBe("outcome");
+  });
+
+  it("resets the override when the selected ticket changes", () => {
+    const override: TabOverride = { ticketId: "A", tab: "spec" };
+    expect(projectDetailTab(detail("done", null, "B"), override)).toBe("outcome");
+    expect(projectDetailTab(detail("in-progress", null, "B"), override)).toBe("progress");
+  });
+});
+
+describe("projectDetailTabs", () => {
+  function detail(
+    status: PoolStatus,
+    interrupt: TicketDetailView["interrupt"] = null,
+    ticketId = "A",
+  ): TicketDetailView {
+    return {
+      kind: "ticket",
+      ticketId,
+      title: `ticket ${ticketId}`,
+      status,
+      blockedBy: [],
+      outcome: null,
+      interrupt,
+    };
+  }
+
+  const pending = (ticketId = "A"): TicketDetailView["interrupt"] => ({
+    ticketId,
+    kind: "checkpoint",
+    body: "the brief",
+    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+  });
+
+  it("projects the fixed Spec / Progress / Outcome bar on every status", () => {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+      const tabs = projectDetailTabs(detail(status), null);
+      expect(tabs.map((tab) => tab.id)).toEqual(["spec", "progress", "outcome"]);
+      expect(tabs.map((tab) => tab.label)).toEqual(["Spec", "Progress", "Outcome"]);
+      expect(tabs.filter((tab) => tab.active)).toHaveLength(1);
+    }
+  });
+
+  it("activates the tab the default projection chooses", () => {
+    const tabs = projectDetailTabs(detail("done"), null);
+    expect(tabs.find((tab) => tab.active)?.id).toBe("outcome");
+  });
+
+  it("activates a manual choice made for this ticket", () => {
+    const tabs = projectDetailTabs(detail("done"), { ticketId: "A", tab: "spec" });
+    expect(tabs.find((tab) => tab.active)?.id).toBe("spec");
+  });
+
+  it("puts the interrupt dot on the Progress tab only while one is pending", () => {
+    const tabs = projectDetailTabs(detail("in-progress", pending()), null);
+    expect(tabs.find((tab) => tab.id === "progress")?.interruptDot).toBe(true);
+    expect(tabs.find((tab) => tab.id === "spec")?.interruptDot).toBe(false);
+    expect(tabs.find((tab) => tab.id === "outcome")?.interruptDot).toBe(false);
+    const quiet = projectDetailTabs(detail("in-progress"), null);
+    expect(quiet.every((tab) => !tab.interruptDot)).toBe(true);
+  });
+});
+
+describe("ticketBodyHtml", () => {
+  it("renders headings, lists and code blocks as HTML", () => {
+    const html = ticketBodyHtml("# Title\n\n- one\n- two\n\n```ts\nconst x = 1;\n```\n");
+    expect(html).toContain("<h1>Title</h1>");
+    expect(html).toContain("<li>one</li>");
+    expect(html).toContain("<code");
+    expect(html).toContain("const x = 1;");
+  });
+
+  it("renders inline code and paragraphs", () => {
+    const html = ticketBodyHtml("some prose with `code` inside");
+    expect(html).toContain("<p>");
+    expect(html).toContain("<code>code</code>");
+  });
+});
+
 describe("phaseLabel", () => {
   it("labels the phases", () => {
     expect(phaseLabel("running")).toBe("running");
@@ -588,18 +717,11 @@ describe("selectLogAttempt", () => {
 });
 
 describe("projectLogPane", () => {
-  it("shows a never-run fallback with the spec text when the timeline is empty", () => {
-    const pane = projectLogPane(
-      timelineView([]),
-      null,
-      "the ticket spec text",
-      null,
-      null,
-    );
+  it("projects a never-run pane with no selected attempt when the timeline is empty", () => {
+    const pane = projectLogPane(timelineView([]), null, null, null);
     expect(pane).not.toBeNull();
     expect(pane?.neverRun).toBe(true);
     expect(pane?.selectedAttempt).toBeNull();
-    expect(pane?.spec).toBe("the ticket spec text");
     expect(pane?.content).toBe("");
   });
 
@@ -610,7 +732,6 @@ describe("projectLogPane", () => {
         { number: 2, running: true },
       ]),
       null,
-      "spec",
       { content: "the log", firstOffset: 0, offset: 50, totalSize: 100 },
       null,
     );
@@ -627,7 +748,6 @@ describe("projectLogPane", () => {
     const pane = projectLogPane(
       timelineView([{ number: 1, running: false }]),
       null,
-      "spec",
       { content: "all", firstOffset: 0, offset: 100, totalSize: 100 },
       null,
     );
@@ -641,7 +761,6 @@ describe("projectLogPane", () => {
         { number: 2, running: false },
       ]),
       2,
-      "spec",
       null,
       null,
     );
@@ -653,7 +772,6 @@ describe("projectLogPane", () => {
     const pane = projectLogPane(
       timelineView([{ number: 1, running: false }]),
       1,
-      "spec",
       null,
       "log fetch failed",
     );
@@ -661,7 +779,7 @@ describe("projectLogPane", () => {
   });
 
   it("projects null while the timeline has not loaded", () => {
-    const pane = projectLogPane(null, null, "spec", null, null);
+    const pane = projectLogPane(null, null, null, null);
     expect(pane).toBeNull();
   });
 
@@ -670,7 +788,6 @@ describe("projectLogPane", () => {
     const atHead = projectLogPane(
       timeline,
       null,
-      "spec",
       { content: "all", firstOffset: 0, offset: 3, totalSize: 3 },
       null,
     );
@@ -678,7 +795,6 @@ describe("projectLogPane", () => {
     const midFile = projectLogPane(
       timeline,
       null,
-      "spec",
       { content: "tail", firstOffset: LOG_TAIL_BYTES, offset: LOG_TAIL_BYTES + 4, totalSize: LOG_TAIL_BYTES + 4 },
       null,
     );

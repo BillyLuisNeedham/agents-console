@@ -17,7 +17,7 @@ export interface TicketMarker {
   status: TicketStatus;
 }
 
-const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
+export const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
 
 function parseMarkerLine(line: string, file: string): TicketMarker {
   const match = MARKER_RE.exec(line);

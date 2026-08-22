@@ -21,8 +21,11 @@ import {
   layoutStorageKey,
   logAtBottom,
   nextNodeSelection,
+  ticketBodyHtml,
   zoomAtCursor,
   type CardBox,
+  type DetailTab,
+  type DetailTabView,
   type DetailView,
   type EdgeMode,
   type InterruptAction,
@@ -52,6 +55,12 @@ export interface AppModel {
   seq: number;
   error: string | null;
   detail: DetailView | null;
+  /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
+  detailTabs: DetailTabView[] | null;
+  /** The selected ticket's body: undefined while the first fetch is out, null for known-missing. */
+  detailBody: string | null | undefined;
+  /** The last body fetch's failure for the selected ticket, if any. */
+  detailBodyError: string | null;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
 }
@@ -63,6 +72,7 @@ export interface Handlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
+  onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 
 function h<K extends keyof HTMLElementTagNameMap>(
@@ -962,60 +972,133 @@ function renderLogPane(
   return pane;
 }
 
-// A never-run ticket: the ticket's spec text in place of timeline and log,
-// with a "no attempts yet" marker, so clicking any ticket tells you something.
-function renderNeverRun(logPane: LogPaneView): HTMLElement {
-  const body = h("div", { class: "never-run" });
-  body.append(h("div", { class: "dim never-run-marker" }, "no attempts yet"));
-  if (logPane.spec) {
-    body.append(
-      h("div", { class: "dim" }, "spec"),
-      h("pre", { class: "detail-pre never-run-spec" }, logPane.spec),
-    );
-  }
-  return body;
+// One tab panel's container: the column the Spec, Progress and Outcome
+// bodies share.
+function detailPanel(...kids: (Node | string | null)[]): HTMLElement {
+  return h("div", { class: "detail-panel" }, ...kids);
 }
 
-function renderTicketDetail(
+// The Spec tab: the ticket's markdown body rendered to HTML, preceded by the
+// blockers line. The body arrives async after first selection: undefined
+// while the fetch is out, null when the pool has no body for the ticket.
+function renderSpecTab(
+  detail: Extract<DetailView, { kind: "ticket" }>,
+  body: string | null | undefined,
+  error: string | null,
+): HTMLElement {
+  const panel = detailPanel(
+    h(
+      "div",
+      { class: "dim detail-blockers" },
+      detail.blockedBy.length > 0
+        ? `blocked by ${detail.blockedBy.join(", ")}`
+        : "no blockers",
+    ),
+  );
+  if (body === undefined) {
+    panel.append(
+      error
+        ? h("div", { class: "error-inline" }, error)
+        : h("div", { class: "dim" }, "loading ticket body..."),
+    );
+  } else if (body === null) {
+    panel.append(h("div", { class: "dim" }, "no ticket body"));
+  } else {
+    const md = h("div", { class: "detail-md" });
+    md.innerHTML = ticketBodyHtml(body);
+    panel.append(md);
+  }
+  return panel;
+}
+
+// The Progress tab: the status, the interrupt form (the Detail's only action
+// surface) and the timeline, with attempt rows opening raw logs in the pane
+// below. A never-run ticket's timeline carries its own "no attempts yet"
+// marker, and its log pane stays closed.
+function renderProgressTab(
   detail: Extract<DetailView, { kind: "ticket" }>,
   timeline: TimelineView | null,
   logPane: LogPaneView | null,
   handlers: Handlers,
 ): HTMLElement {
-  const body = h("div", { class: "detail-body" });
-  body.append(
+  const panel = detailPanel(
     h("div", { class: "dim" }, "status"),
-    h("div", { class: `detail-status ticket-state-${detail.status}` }, statusLabel(detail.status)),
-    h("div", { class: "dim" }, "blocked by"),
     h(
       "div",
-      { class: "card-text" },
-      detail.blockedBy.length > 0 ? detail.blockedBy.join(", ") : "none",
+      { class: `detail-status ticket-state-${detail.status}` },
+      statusLabel(detail.status),
     ),
   );
   if (detail.interrupt) {
-    body.append(renderInterrupt(detail.interrupt, handlers));
+    panel.append(renderInterrupt(detail.interrupt, handlers));
   }
-  if (logPane?.neverRun) {
-    // A never-run ticket shows its spec text with a "no attempts yet" marker
-    // in place of timeline and log.
-    body.append(renderNeverRun(logPane));
+  if (timeline) {
+    panel.append(renderTimelineSection(detail.ticketId, timeline, logPane, handlers));
+  }
+  if (logPane && !logPane.neverRun) {
+    panel.append(renderLogPane(logPane, detail.ticketId, handlers));
+  }
+  return panel;
+}
+
+// The Outcome tab: the summary and commit sha once the ticket has finished,
+// or a dim placeholder before then so the tab bar never reshapes.
+function renderOutcomeTab(
+  detail: Extract<DetailView, { kind: "ticket" }>,
+): HTMLElement {
+  const outcome = detail.outcome;
+  if (!outcome) {
+    return detailPanel(h("div", { class: "dim" }, "not finished yet"));
+  }
+  return detailPanel(
+    h("pre", { class: "detail-pre" }, outcome.summary || "-"),
+    outcome.commitSha ? h("div", { class: "dim" }, `commit ${outcome.commitSha}`) : null,
+  );
+}
+
+function renderDetailTabs(
+  tabs: DetailTabView[],
+  ticketId: string,
+  handlers: Handlers,
+): HTMLElement {
+  return h(
+    "div",
+    { class: "detail-tabs", role: "tablist" },
+    ...tabs.map((tab) =>
+      h(
+        "button",
+        {
+          type: "button",
+          role: "tab",
+          class: "detail-tab" + (tab.active ? " detail-tab-active" : ""),
+          onclick: () => handlers.onSelectTab(ticketId, tab.id),
+        },
+        tab.label,
+        tab.interruptDot
+          ? h("span", { class: "dot dot-interrupt", title: "interrupt pending" })
+          : null,
+      ),
+    ),
+  );
+}
+
+// The ticket Detail's body is the Spec / Progress / Outcome tab bar; the tab
+// panels hold what the old stacked layout carried.
+function renderTicketDetail(
+  detail: Extract<DetailView, { kind: "ticket" }>,
+  model: AppModel,
+  handlers: Handlers,
+): HTMLElement {
+  const body = h("div", { class: "detail-body" });
+  const tabs = model.detailTabs ?? [];
+  body.append(renderDetailTabs(tabs, detail.ticketId, handlers));
+  const active = tabs.find((tab) => tab.active)?.id ?? "spec";
+  if (active === "spec") {
+    body.append(renderSpecTab(detail, model.detailBody, model.detailBodyError));
+  } else if (active === "progress") {
+    body.append(renderProgressTab(detail, model.timeline, model.logPane, handlers));
   } else {
-    if (timeline) {
-      body.append(renderTimelineSection(detail.ticketId, timeline, logPane, handlers));
-    }
-    if (logPane) {
-      body.append(renderLogPane(logPane, detail.ticketId, handlers));
-    }
-  }
-  if (detail.outcome) {
-    body.append(
-      h("div", { class: "dim" }, "outcome"),
-      h("pre", { class: "detail-pre" }, detail.outcome.summary || "-"),
-    );
-    if (detail.outcome.commitSha) {
-      body.append(h("div", { class: "dim" }, `commit ${detail.outcome.commitSha}`));
-    }
+    body.append(renderOutcomeTab(detail));
   }
   return body;
 }
@@ -1146,7 +1229,7 @@ function renderDetail(model: AppModel, handlers: Handlers): HTMLElement {
       ),
     ),
     view.kind === "ticket"
-      ? renderTicketDetail(view, model.timeline, model.logPane, handlers)
+      ? renderTicketDetail(view, model, handlers)
       : renderUtilityDetail(view, handlers),
   );
   return detail;
