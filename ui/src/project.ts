@@ -596,6 +596,15 @@ export interface PoolTabStatus {
   color: string;
 }
 
+/** The tab status colors, from the Console palette. The favicon's boot dot
+ *  consumes the idle color before any snapshot lands. */
+export const POOL_TAB_COLORS = {
+  needsInput: "#f85149",
+  running: "#d29922",
+  complete: "#3fb950",
+  idle: "#8b949e",
+} as const;
+
 /**
  * The pool's at-a-glance status for the browser tab, worst-first: any pending
  * interrupt or a stalled phase needs input; otherwise a running phase is
@@ -606,15 +615,15 @@ export interface PoolTabStatus {
  */
 export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
   if (snapshot.state.interrupts.length > 0 || snapshot.phase === "stalled") {
-    return { word: "needs input", color: "#f85149" };
+    return { word: "needs input", color: POOL_TAB_COLORS.needsInput };
   }
   if (snapshot.phase === "running") {
-    return { word: "running", color: "#d29922" };
+    return { word: "running", color: POOL_TAB_COLORS.running };
   }
   if (snapshot.phase === "done") {
-    return { word: "complete", color: "#3fb950" };
+    return { word: "complete", color: POOL_TAB_COLORS.complete };
   }
-  return { word: "idle", color: "#8b949e" };
+  return { word: "idle", color: POOL_TAB_COLORS.idle };
 }
 
 // ---------------------------------------------------------------------------

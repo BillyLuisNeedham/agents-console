@@ -10,6 +10,7 @@ import { PoolClient } from "./client";
 import { LogPane } from "./log-pane";
 import {
   phaseLabel,
+  POOL_TAB_COLORS,
   poolStatus,
   projectDetail,
   projectDetailTabs,
@@ -29,6 +30,32 @@ if (!appRoot) throw new Error("#app not found");
 const root: HTMLElement = appRoot;
 
 const client = new PoolClient();
+
+// The favicon: one reused link element whose href is a canvas-drawn dot in
+// the pool status color. The idle grey dot stands from page load, before the
+// first snapshot lands; every applied snapshot swaps the dot on the title's
+// cadence.
+const faviconLink = document.createElement("link");
+faviconLink.rel = "icon";
+document.head.appendChild(faviconLink);
+let faviconColor = "";
+
+function setFavicon(color: string): void {
+  if (color === faviconColor) return;
+  faviconColor = color;
+  const canvas = document.createElement("canvas");
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(16, 16, 14, 0, Math.PI * 2);
+  ctx.fill();
+  faviconLink.href = canvas.toDataURL("image/png");
+}
+
+setFavicon(POOL_TAB_COLORS.idle);
 
 const state = {
   snapshot: null as PoolSnapshot | null,
@@ -273,7 +300,9 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.snapshot = snapshot;
   state.connected = true;
   state.error = null;
-  document.title = `${poolStatus(snapshot).word} — ${snapshot.poolName}`;
+  const status = poolStatus(snapshot);
+  document.title = `${status.word} — ${snapshot.poolName}`;
+  setFavicon(status.color);
   // A new snapshot can move the selected ticket (spawned, exited, merged),
   // so the timeline refetches on that cadence; the events file is append-only
   // and small, so a refetch is cheap.
