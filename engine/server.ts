@@ -21,7 +21,12 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
-import { readEvents, type TicketEvent } from "./events.ts";
+import {
+  attemptLogName,
+  parseAttemptLogName,
+  readEvents,
+  type TicketEvent,
+} from "./events.ts";
 import {
   defaultRegistryPath,
   readFleetEntry,
@@ -199,8 +204,9 @@ function stripAnsi(text: string): string {
  * The ticket's attempts as log sources, in attempt order. Event-based tickets
  * (an events file exists) derive implement/resolver attempts from the events:
  * the latest of each kind holds its well-known path, older attempts their
- * rotated `<id>.attempt-N` name. A pre-feature ticket (no events file) uses
- * the reconstructed attempt rows, each with the log file it was built from.
+ * rotated attempt-numbered name (both named by the events module's contract).
+ * A pre-feature ticket (no events file) uses the reconstructed attempt rows,
+ * each with the log file it was built from.
  */
 function listAttemptLogs(
   runsDir: string,
@@ -219,9 +225,7 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "implement",
         current,
-        logFile: current
-          ? `${ticketId}.log`
-          : `${ticketId}.attempt-${event.attempt}.log`,
+        logFile: attemptLogName(ticketId, current ? null : event.attempt, false),
       });
     }
     for (const event of resolvers) {
@@ -230,9 +234,7 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "resolver",
         current,
-        logFile: current
-          ? `${ticketId}.resolver.log`
-          : `${ticketId}.attempt-${event.attempt}.resolver.log`,
+        logFile: attemptLogName(ticketId, current ? null : event.attempt, true),
       });
     }
     return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
@@ -355,10 +357,10 @@ function knownTicketIds(meta: TicketMeta[]): Set<string> {
   return new Set(meta.map((m) => m.id));
 }
 
-// Attempt logs are `<id>.log`, `<id>.attempt-N.log`, `<id>.resolver.log`, and
-// `<id>.attempt-N.resolver.log`, in the pool's runs directory. A ticket with
-// no events file (a pre-feature pool) is backfilled one attempt row per
-// existing log file, in modification-time order, marked as reconstructed.
+// Attempt logs are the four names the events module's naming contract
+// produces, in the pool's runs directory. A ticket with no events file (a
+// pre-feature pool) is backfilled one attempt row per existing log file, in
+// modification-time order, marked as reconstructed.
 function reconstructAttempts(
   runsDir: string,
   ticketId: string,
@@ -369,12 +371,8 @@ function reconstructAttempts(
   } catch {
     return [];
   }
-  const escaped = ticketId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const logName = new RegExp(
-    `^${escaped}(?:\\.attempt-\\d+)?(?:\\.resolver)?\\.log$`,
-  );
   return files
-    .filter((file) => logName.test(file))
+    .filter((file) => parseAttemptLogName(ticketId, file) !== null)
     .map((file) => {
       const stat = statSync(join(runsDir, file));
       return { file, mtime: stat.mtimeMs };
