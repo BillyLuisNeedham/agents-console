@@ -930,7 +930,7 @@ async function runResolver(
     id: marker.id,
     issuePath: marker.file,
     issueRel: relative(session.cwd, marker.file),
-    prompt,
+    body: prompt,
     driver: RESOLVER_DRIVER,
     harness: resolver.harness,
     model: resolver.model,
@@ -1472,9 +1472,7 @@ async function runTicket(
   });
 
   const prompt = buildPrompt({
-    driver,
     chain,
-    issueRel,
     agentMd: env.agentMd,
     roster: snapshot.config.roster ?? "",
     upstream,
@@ -1485,7 +1483,7 @@ async function runTicket(
     id: marker.id,
     issuePath: plan.issuePath,
     issueRel,
-    prompt,
+    body: prompt,
     driver,
     harness: assignment.harness,
     model: assignment.model,

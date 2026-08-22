@@ -2,7 +2,7 @@ export interface SpawnContext {
   id: string;
   issuePath: string;
   issueRel: string;
-  prompt: string;
+  body: string;
   driver: string;
   harness: string;
   model: string;
@@ -14,14 +14,19 @@ export interface SpawnContext {
 
 export type HarnessCommand = (ctx: SpawnContext) => string[];
 
-// One case per harness, matching run.sh's launch shapes: the prompt leads
-// with the driver skill, stdin is closed at spawn time by the engine, and the
-// harness runs with its fullest auto-approve mode. There is no spend cap.
+// One case per harness, matching run.sh's launch shapes: the driver and issue
+// reference arrive as structured fields and each adapter builds its own
+// invocation from them, so a prompt-format change cannot silently break one
+// harness while the others keep working. stdin is closed at spawn time by the
+// engine, and the harness runs with its fullest auto-approve mode. There is no
+// spend cap.
 export const defaultHarnesses: Record<string, HarnessCommand> = {
+  // claude expands the /driver line at the top of the -p prompt as a slash
+  // command, so the adapter assembles that line from the structured fields.
   claude: (ctx) => [
     "claude",
     "-p",
-    ctx.prompt,
+    `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--permission-mode",
@@ -40,7 +45,7 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     "run",
     "--command",
     ctx.driver,
-    `${ctx.issueRel}\n\n${afterFirstLine(ctx.prompt)}`,
+    `${ctx.issueRel}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--auto",
@@ -49,7 +54,7 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
   cursor: (ctx) => [
     "agent",
     "-p",
-    ctx.prompt,
+    `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--force",
@@ -58,8 +63,3 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     "text",
   ],
 };
-
-function afterFirstLine(prompt: string): string {
-  const newline = prompt.indexOf("\n");
-  return newline === -1 ? "" : prompt.slice(newline + 1);
-}
