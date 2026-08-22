@@ -1,4 +1,4 @@
-<!-- state: id=02 blocked-by=none status=ready -->
+<!-- state: id=02 blocked-by=none status=done -->
 
 # 02 — Tab-default projection
 
@@ -10,13 +10,20 @@ The ui projection layer (the pure, DOM-free seam where `projectDetail` and the o
 
 ## Acceptance criteria
 
-- [ ] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
-- [ ] A pending interrupt maps to Progress on every status, including done
-- [ ] A manual tab choice overrides the default for the current ticket
-- [ ] The override resets when the selected ticket changes
-- [ ] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
-- [ ] Full test suite, typecheck, and build clean
+- [x] Pure projection maps each pool status to its default tab (ready→Spec, in-progress/checkpoint→Progress, done→Outcome)
+- [x] A pending interrupt maps to Progress on every status, including done
+- [x] A manual tab choice overrides the default for the current ticket
+- [x] The override resets when the selected ticket changes
+- [x] All of the above covered by unit tests in the ui projection test suite — prior art: existing `project.test.ts` projections
+- [x] Full test suite, typecheck, and build clean
 
 ## Blocked by
 
 None — can start immediately.
+
+## Notes
+
+- Delivered as `DetailTab`, `TabOverride`, `defaultDetailTab` and `projectDetailTab` in `ui/src/project.ts`, tested in `ui/src/project.test.ts`. The override is data: `{ ticketId, tab }` or null for auto. A choice carries its ticket id, so a stale choice from a previous selection does not apply and the default reasserts itself; that is how the reset-on-ticket-change rule is modelled.
+- A manual choice also overrides the interrupt-driven Progress default. The Issue says the interrupt wins over the status default and a manual choice overrides the default; spec user story 10 (the panel does not yank itself back) settles that the manual choice wins outright.
+- Typecheck caveat (pre-existing, not caused by this ticket): `bun run typecheck` in `ui/` was already red at pool start. Every error is in `src/prototype/` (the throwaway sketches from commit 7c72b0e import names `view.ts` does not export). Verified red with my changes stashed, and verified my changed files contribute zero errors. Nothing outside `src/prototype/` imports it, and ticket 04 deletes those files, so I left them and the tsconfig alone: if the red were disqualifying, tickets 02 and 03 could never pass since 04 is blocked by 03. Full `bun test` (ui: 87 pass) and `bun run build` are clean; the engine suite is untouched and green (144 pass).
+- `ui/node_modules` did not exist in this worktree; ran `bun install` in `ui/` (lockfile unchanged).
