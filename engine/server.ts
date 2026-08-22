@@ -22,9 +22,12 @@ import {
 import { join, resolve } from "node:path";
 import {
   readConfig,
+  REVIEW_TICKET_ID,
   runPool,
   type HarnessCommand,
+  type InterruptKind,
   type PoolSnapshot,
+  type RunPhase,
 } from "./engine.ts";
 import {
   attemptLogName,
@@ -38,7 +41,11 @@ import {
   readFleetEntryByPort,
   upsertFleetEntry,
 } from "./fleet.ts";
-import { loadPoolMarkers, type TicketMarker } from "./pool.ts";
+import {
+  loadPoolMarkers,
+  type TicketMarker,
+  type TicketStatus,
+} from "./pool.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
@@ -53,24 +60,21 @@ export interface PoolServerOptions {
   registryPath?: string;
 }
 
-type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
-type PoolPhase = "running" | "done" | "quiescent" | "stalled";
-
 interface EnrichedTicketState {
   id: string;
   title: string;
   blockedBy: string[];
-  status: PoolStatus;
+  status: TicketStatus;
 }
 
 interface EnrichedSnapshot {
   seq: number;
-  phase: PoolPhase;
+  phase: RunPhase;
   state: {
     tickets: EnrichedTicketState[];
     log: string[];
     outcomes: Record<string, { summary: string; commitSha: string | null }>;
-    interrupts: { ticketId: string; kind: string; body: string }[];
+    interrupts: { ticketId: string; kind: InterruptKind; body: string }[];
     config: Record<string, unknown>;
   };
 }
@@ -547,6 +551,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   ): Promise<EnrichedSnapshot> {
     const run = currentRun;
     if (!run) throw new Error("pool not started");
+    if (action !== "resume") {
+      // Only the run's review gate (REVIEW_TICKET_ID) and a ticket's
+      // merge-approval take approve/reject; anything else is a malformed
+      // request, so fail at the seam instead of the engine silently treating
+      // it as a resume.
+      const kind = latest?.state.interrupts.find(
+        (i) => i.ticketId === ticketId,
+      )?.kind;
+      if (kind !== "review" && kind !== "merge-approval") {
+        throw new Error(
+          `answer: approve/reject needs the review gate (${REVIEW_TICKET_ID}) ` +
+            `or a merge-approval interrupt, got ${kind ?? "no interrupt"} ` +
+            `for ${ticketId}`,
+        );
+      }
+    }
     const next =
       action === "approve"
         ? await run.approve(ticketId, note)

@@ -70,7 +70,7 @@ export interface PoolConfig {
   port?: number;
 }
 
-type InterruptKind =
+export type InterruptKind =
   | "checkpoint"
   | "crash"
   | "deadlock"
@@ -109,7 +109,7 @@ interface PoolUpdate {
   reviewApproved?: boolean;
 }
 
-type RunPhase = "running" | "done" | "quiescent" | "stalled";
+export type RunPhase = "running" | "done" | "quiescent" | "stalled";
 
 export interface PoolSnapshot {
   seq: number;
