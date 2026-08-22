@@ -1,10 +1,12 @@
 /// <reference types="bun" />
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -13,6 +15,7 @@ import { join } from "node:path";
 import {
   createPoolServer,
   type PoolServer,
+  type PoolServerOptions,
 } from "./server.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
@@ -204,4 +207,112 @@ describe("pool server", () => {
     expect(closed).toBe(false);
     reader.cancel();
   }, 25_000);
+});
+
+function writePidFile(poolDir: string, pid: number): void {
+  mkdirSync(join(poolDir, "runs"), { recursive: true });
+  writeFileSync(join(poolDir, "runs", "server.pid"), `${pid}\n`);
+}
+
+/** A real pid that has exited and been reaped, so it probes as dead. */
+function deadPid(): number {
+  const child = spawnSync("true");
+  if (!child.pid) throw new Error("failed to spawn a child for a dead pid");
+  return child.pid;
+}
+
+function makeLockedPool(): string {
+  return makePool([
+    { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+  ]);
+}
+
+describe("pool lock", () => {
+  it("writes its own pid on a successful boot", () => {
+    const poolDir = makeLockedPool();
+    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
+      `${process.pid}`,
+    );
+  });
+
+  it("refuses a live lock, naming the live pid and the pool directory", () => {
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, process.pid);
+    let message = "";
+    try {
+      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain(String(process.pid));
+    expect(message).toContain(poolDir);
+    expect(message).not.toContain("on port");
+  });
+
+  it("names the live server's port when the registry knows it", () => {
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, process.pid);
+    const registryPath = join(poolDir, "pools.json");
+    writeFileSync(
+      registryPath,
+      JSON.stringify([
+        { poolDir, port: 8799, pid: process.pid, startedAt: "t" },
+      ]),
+    );
+    expect(() =>
+      createPoolServer({ poolDir, port: 0, distDir: "/nonexistent", registryPath }),
+    ).toThrow("on port 8799");
+  });
+
+  it("takes over a stale pid file on boot", () => {
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, deadPid());
+    const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+    servers.push(server);
+    expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
+      `${process.pid}`,
+    );
+  });
+
+  it("takes over a pid file that is not a positive integer", () => {
+    for (const bogus of ["0", "-1", "not-a-pid", ""]) {
+      const poolDir = makeLockedPool();
+      mkdirSync(join(poolDir, "runs"), { recursive: true });
+      writeFileSync(join(poolDir, "runs", "server.pid"), bogus);
+      const server = createPoolServer({ poolDir, port: 0, distDir: "/nonexistent" });
+      servers.push(server);
+      expect(readFileSync(join(poolDir, "runs", "server.pid"), "utf8").trim()).toBe(
+        `${process.pid}`,
+      );
+    }
+  });
+
+  it("has no force override: a live lock refuses even when forced", () => {
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, process.pid);
+    const forced = {
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      force: true,
+    } as unknown as PoolServerOptions;
+    expect(() => createPoolServer(forced)).toThrow(/locked by live server/);
+  });
+
+  it("exits non-zero from the CLI against a live lock, naming pid and pool", async () => {
+    const poolDir = makeLockedPool();
+    writePidFile(poolDir, process.pid);
+    const repoDir = join(import.meta.dir, "..");
+    const child = Bun.spawn(
+      ["bun", "run", "engine/server.ts", "--pool", poolDir, "--port", "8799"],
+      { cwd: repoDir, stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await child.exited;
+    const stderr = await new Response(child.stderr).text();
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain(String(process.pid));
+    expect(stderr).toContain(poolDir);
+  });
 });
