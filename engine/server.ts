@@ -43,17 +43,17 @@ export interface PoolServerOptions {
   registryPath?: string;
 }
 
-export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
-export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
+type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
+type PoolPhase = "running" | "done" | "quiescent" | "stalled";
 
-export interface EnrichedTicketState {
+interface EnrichedTicketState {
   id: string;
   title: string;
   blockedBy: string[];
   status: PoolStatus;
 }
 
-export interface EnrichedSnapshot {
+interface EnrichedSnapshot {
   seq: number;
   phase: PoolPhase;
   state: {
@@ -156,7 +156,7 @@ function serveStatic(distDir: string, pathname: string): Response | null {
 // Ticket events endpoint
 // ---------------------------------------------------------------------------
 
-export interface TicketEventsResponse {
+interface TicketEventsResponse {
   events: TicketEvent[];
   attempts: ReconstructedAttempt[];
   reconstructed: boolean;
@@ -171,14 +171,14 @@ export interface TicketEventsResponse {
 /** The largest byte range a single log response serves. Larger logs page. */
 export const LOG_CHUNK_BYTES = 64 * 1024;
 
-export interface LogAttemptInfo {
+interface LogAttemptInfo {
   attempt: number;
   kind: "implement" | "resolver" | "reconstructed";
   logFile: string;
   current: boolean;
 }
 
-export interface TicketLogResponse {
+interface TicketLogResponse {
   content: string;
   offset: number;
   nextOffset: number;
@@ -191,7 +191,7 @@ export interface TicketLogResponse {
 const ANSI_ESCAPE_RE =
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
 
-export function stripAnsi(text: string): string {
+function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
 }
 
@@ -202,7 +202,7 @@ export function stripAnsi(text: string): string {
  * rotated `<id>.attempt-N` name. A pre-feature ticket (no events file) uses
  * the reconstructed attempt rows, each with the log file it was built from.
  */
-export function listAttemptLogs(
+function listAttemptLogs(
   runsDir: string,
   ticketId: string,
 ): LogAttemptInfo[] {
@@ -342,7 +342,7 @@ async function readLogRange(
   };
 }
 
-export interface ReconstructedAttempt {
+interface ReconstructedAttempt {
   attempt: number;
   logFile: string;
   modifiedAt: string;
@@ -768,7 +768,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   };
 }
 
-export function runServerCli(): void {
+function runServerCli(): void {
   const args = process.argv.slice(2);
   const poolIndex = args.indexOf("--pool");
   const portIndex = args.indexOf("--port");

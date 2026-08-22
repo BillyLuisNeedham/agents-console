@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const TICKET_STATUSES = [
+const TICKET_STATUSES = [
   "ready",
   "in-progress",
   "done",

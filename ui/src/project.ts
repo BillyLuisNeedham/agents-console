@@ -10,12 +10,12 @@
 
 export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
 
-export interface PoolOutcome {
+interface PoolOutcome {
   summary: string;
   commitSha: string | null;
 }
 
-export interface PoolInterrupt {
+interface PoolInterrupt {
   ticketId: string;
   kind: string;
   body: string;
@@ -30,13 +30,13 @@ export interface PoolInterrupt {
 
 export type InterruptAction = "resume" | "approve" | "reject";
 
-export interface InterruptFormAction {
+interface InterruptFormAction {
   action: InterruptAction;
   label: string;
   tone: "primary" | "danger";
 }
 
-export interface InterruptFormView {
+interface InterruptFormView {
   title: string;
   actions: InterruptFormAction[];
   notePlaceholder?: string;
@@ -83,7 +83,7 @@ export interface PoolTicketState {
 
 export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
 
-export interface PoolState {
+interface PoolState {
   tickets: PoolTicketState[];
   log: string[];
   outcomes: Record<string, PoolOutcome>;
@@ -108,7 +108,7 @@ export interface TicketEvent {
   payload: Record<string, unknown>;
 }
 
-export interface ReconstructedAttempt {
+interface ReconstructedAttempt {
   attempt: number;
   logFile: string;
   modifiedAt: string;
@@ -126,7 +126,7 @@ export interface TicketEventsResponse {
 // Log pane wire types (served by /api/log)
 // ---------------------------------------------------------------------------
 
-export interface LogAttemptInfo {
+interface LogAttemptInfo {
   attempt: number;
   kind: "implement" | "resolver" | "reconstructed";
   logFile: string;
@@ -145,13 +145,13 @@ export interface TicketLogResponse {
 // Timeline view model
 // ---------------------------------------------------------------------------
 
-export interface TimelineEventView {
+interface TimelineEventView {
   kind: string;
   at: string;
   payload: Record<string, unknown>;
 }
 
-export interface TimelineAttemptView {
+interface TimelineAttemptView {
   number: number;
   events: TimelineEventView[];
   reconstructed: boolean;
@@ -393,7 +393,7 @@ export interface UtilityCardView {
 
 export type PoolCardView = TicketCardView | UtilityCardView;
 
-export interface PoolView {
+interface PoolView {
   seq: number;
   phase: PoolPhase;
   cards: PoolCardView[];
@@ -415,10 +415,6 @@ export function ticketCardId(ticketId: string): string {
 
 export function isTicketCardId(id: string): boolean {
   return id.startsWith(TICKET_PREFIX);
-}
-
-export function isUtilityCardId(id: string): boolean {
-  return id === START_CARD_ID || id === REVIEW_CARD_ID;
 }
 
 // There is one pool per server, so a card's stored position is keyed by its
@@ -455,7 +451,7 @@ export function ticketDepth(
 }
 
 /** Default positions: START above, tickets layered by dependency depth, REVIEW below. */
-export function layoutPool(
+function layoutPool(
   tickets: PoolTicketState[],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
@@ -586,7 +582,7 @@ export function phaseLabel(phase: PoolPhase): string {
 // Detail content
 // ---------------------------------------------------------------------------
 
-export interface TicketDetailView {
+interface TicketDetailView {
   kind: "ticket";
   ticketId: string;
   title: string;
@@ -596,7 +592,7 @@ export interface TicketDetailView {
   interrupt: InterruptView | null;
 }
 
-export interface UtilityDetailView {
+interface UtilityDetailView {
   kind: "utility";
   id: string;
   label: string;
@@ -696,8 +692,8 @@ export function edgePath(
   };
 }
 
-export const MIN_ZOOM = 0.25;
-export const MAX_ZOOM = 2.5;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2.5;
 
 export interface ViewTransform {
   x: number;

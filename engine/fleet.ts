@@ -18,7 +18,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export interface FleetEntry {
+interface FleetEntry {
   poolDir: string;
   port: number;
   pid: number;
@@ -119,7 +119,7 @@ function readLockPid(lockPath: string): number | null {
 }
 
 /** How long a registry write waits on a foreign lock before giving up. */
-export const FLEET_LOCK_TIMEOUT_MS = 10_000;
+const FLEET_LOCK_TIMEOUT_MS = 10_000;
 
 /**
  * Upsert one console's entry, keyed by pool directory: relaunching the same

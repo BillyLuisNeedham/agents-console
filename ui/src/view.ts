@@ -56,7 +56,7 @@ export interface AppModel {
   logPane: LogPaneView | null;
 }
 
-export interface Handlers {
+interface Handlers {
   onToggleLog: () => void;
   onToggleInspector: () => void;
   onSelectNode: (nodeId: string | null) => void;

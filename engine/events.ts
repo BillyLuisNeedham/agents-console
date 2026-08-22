@@ -15,7 +15,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const EVENT_KINDS = [
+const EVENT_KINDS = [
   "scheduled",
   "spawned",
   "exited",
@@ -39,7 +39,7 @@ export interface TicketEvent {
   payload: Record<string, unknown>;
 }
 
-export function eventsFile(runsDir: string, ticketId: string): string {
+function eventsFile(runsDir: string, ticketId: string): string {
   return join(runsDir, `${ticketId}.events.jsonl`);
 }
 
@@ -55,7 +55,9 @@ export function appendEvent(
 /**
  * Parse the append-only events file. The file is only ever appended to, but a
  * crash could tear a line, so a malformed or partial line is skipped and the
- * rest of the timeline stays readable.
+ * rest of the timeline stays readable. A line whose kind is not in the
+ * module's known kind list is skipped the same way, so the reader validates
+ * against the one list that also drives the kind type.
  */
 export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   const path = eventsFile(runsDir, ticketId);
@@ -65,7 +67,11 @@ export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as TicketEvent;
-      if (typeof parsed?.kind !== "string" || typeof parsed.attempt !== "number") {
+      if (
+        typeof parsed?.kind !== "string" ||
+        typeof parsed.attempt !== "number" ||
+        !(EVENT_KINDS as readonly string[]).includes(parsed.kind)
+      ) {
         continue;
       }
       events.push(parsed);

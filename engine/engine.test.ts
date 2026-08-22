@@ -17,8 +17,8 @@ import {
   type HarnessCommand,
   type PoolConfig,
   type PoolRun,
-  type SpawnContext,
 } from "./engine.ts";
+import type { SpawnContext } from "./spawn.ts";
 
 const tempDirs: string[] = [];
 

@@ -1,6 +1,6 @@
 import type { Outcome } from "./engine.ts";
 
-export interface ResolverPromptParts {
+interface ResolverPromptParts {
   id: string;
   worktree: string;
   branch: string;
@@ -31,7 +31,7 @@ export function buildResolverPrompt(parts: ResolverPromptParts): string {
   ].join("\n");
 }
 
-export interface PromptParts {
+interface PromptParts {
   driver: string;
   chain: string[];
   issueRel: string;

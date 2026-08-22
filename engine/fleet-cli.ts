@@ -10,14 +10,14 @@
 import { defaultRegistryPath, readFleetEntries } from "./fleet.ts";
 
 /** The line printed when no console is live. */
-export const NO_LIVE_CONSOLES = "no live consoles";
+const NO_LIVE_CONSOLES = "no live consoles";
 
 /**
  * The lines the command prints, in registry order: one per live pool as
  * `poolDir → http://localhost:<port>`, or the no-live-consoles line when the
  * pruned registry is empty.
  */
-export function listFleet(registryPath: string): string[] {
+function listFleet(registryPath: string): string[] {
   const entries = readFleetEntries(registryPath);
   if (entries.length === 0) return [NO_LIVE_CONSOLES];
   return entries.map(
@@ -25,7 +25,7 @@ export function listFleet(registryPath: string): string[] {
   );
 }
 
-export function runFleetCli(registryPath: string = defaultRegistryPath()): void {
+function runFleetCli(registryPath: string = defaultRegistryPath()): void {
   for (const line of listFleet(registryPath)) {
     console.log(line);
   }

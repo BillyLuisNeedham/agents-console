@@ -6,7 +6,7 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-export interface GitProbe {
+interface GitProbe {
   ok: boolean;
   out: string;
   err: string;
@@ -59,7 +59,7 @@ export function branchFor(ticketId: string): string {
 // would break ticket worktree creation.
 const commonDirCache = new Map<string, string>();
 
-export function gitCommonDir(repoRoot: string): string {
+function gitCommonDir(repoRoot: string): string {
   const cached = commonDirCache.get(repoRoot);
   if (cached) return cached;
   const probe = git(repoRoot, [

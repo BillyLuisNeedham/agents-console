@@ -47,15 +47,14 @@ import {
   type WorktreeInfo,
 } from "./worktrees.ts";
 
-export type { TicketStatus } from "./pool.ts";
-export type { HarnessCommand, SpawnContext } from "./spawn.ts";
+export type { HarnessCommand } from "./spawn.ts";
 
 export interface Outcome {
   summary: string;
   commitSha: string | null;
 }
 
-export interface TicketAssignment {
+interface TicketAssignment {
   harness?: string;
   model?: string;
   drivers?: string;
@@ -70,7 +69,7 @@ export interface PoolConfig {
   port?: number;
 }
 
-export type InterruptKind =
+type InterruptKind =
   | "checkpoint"
   | "crash"
   | "deadlock"
@@ -83,13 +82,13 @@ export type InterruptKind =
 // projection's REVIEW_CARD_ID is the same string by contract).
 export const REVIEW_TICKET_ID = "REVIEW";
 
-export interface Interrupt {
+interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
 }
 
-export interface PoolState {
+interface PoolState {
   tickets: Record<string, TicketStatus>;
   log: string[];
   outcomes: Record<string, Outcome>;
@@ -101,7 +100,7 @@ export interface PoolState {
   reviewApproved: boolean;
 }
 
-export interface PoolUpdate {
+interface PoolUpdate {
   tickets?: Record<string, TicketStatus>;
   log?: string[];
   outcomes?: Record<string, Outcome>;
@@ -109,7 +108,7 @@ export interface PoolUpdate {
   reviewApproved?: boolean;
 }
 
-export type RunPhase = "running" | "done" | "quiescent" | "stalled";
+type RunPhase = "running" | "done" | "quiescent" | "stalled";
 
 export interface PoolSnapshot {
   seq: number;
@@ -117,7 +116,7 @@ export interface PoolSnapshot {
   state: PoolState;
 }
 
-export interface RunOptions {
+interface RunOptions {
   poolDir: string;
   harnesses?: Record<string, HarnessCommand>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
@@ -172,7 +171,7 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   };
 }
 
-export function readyTickets(
+function readyTickets(
   markers: TicketMarker[],
   tickets: PoolState["tickets"],
 ): TicketMarker[] {
