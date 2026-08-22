@@ -591,6 +591,32 @@ export function phaseLabel(phase: PoolPhase): string {
   }
 }
 
+export interface PoolTabStatus {
+  word: string;
+  color: string;
+}
+
+/**
+ * The pool's at-a-glance status for the browser tab, worst-first: any pending
+ * interrupt or a stalled phase needs input; otherwise a running phase is
+ * running, a done phase is complete, and anything else is idle. Quiescent
+ * always carries a pending interrupt, so it lands on needs input without a
+ * rule of its own. Colors come from the Console palette; the tab title and the
+ * favicon both consume this value.
+ */
+export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
+  if (snapshot.state.interrupts.length > 0 || snapshot.phase === "stalled") {
+    return { word: "needs input", color: "#f85149" };
+  }
+  if (snapshot.phase === "running") {
+    return { word: "running", color: "#d29922" };
+  }
+  if (snapshot.phase === "done") {
+    return { word: "complete", color: "#3fb950" };
+  }
+  return { word: "idle", color: "#8b949e" };
+}
+
 // ---------------------------------------------------------------------------
 // Detail content
 // ---------------------------------------------------------------------------

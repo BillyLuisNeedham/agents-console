@@ -24,6 +24,7 @@ import {
   parseStoredDetailWidth,
   parseStoredLayout,
   phaseLabel,
+  poolStatus,
   projectDetail,
   projectDetailTab,
   projectDetailTabs,
@@ -568,6 +569,46 @@ describe("statusLabel", () => {
     expect(statusLabel("in-progress")).toBe("running");
     expect(statusLabel("done")).toBe("done");
     expect(statusLabel("checkpoint")).toBe("checkpoint");
+  });
+});
+
+describe("poolStatus", () => {
+  it("needs input in red when any interrupt is pending, whatever the phase", () => {
+    const interrupts = [{ ticketId: "a", kind: "checkpoint", body: "" }];
+    for (const phase of ["running", "done", "quiescent", "stalled"] as const) {
+      expect(poolStatus(snapshot({ phase, state: { ...snapshot().state, interrupts } }))).toEqual({
+        word: "needs input",
+        color: "#f85149",
+      });
+    }
+  });
+
+  it("needs input when stalled with no interrupts", () => {
+    expect(poolStatus(snapshot({ phase: "stalled" }))).toEqual({
+      word: "needs input",
+      color: "#f85149",
+    });
+  });
+
+  it("running in amber while the phase is running", () => {
+    expect(poolStatus(snapshot({ phase: "running" }))).toEqual({
+      word: "running",
+      color: "#d29922",
+    });
+  });
+
+  it("complete in green when the phase is done", () => {
+    expect(poolStatus(snapshot({ phase: "done" }))).toEqual({
+      word: "complete",
+      color: "#3fb950",
+    });
+  });
+
+  it("idle in grey for anything else", () => {
+    expect(poolStatus(snapshot({ phase: "quiescent" }))).toEqual({
+      word: "idle",
+      color: "#8b949e",
+    });
   });
 });
 

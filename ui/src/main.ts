@@ -10,6 +10,7 @@ import { PoolClient } from "./client";
 import { LogPane } from "./log-pane";
 import {
   phaseLabel,
+  poolStatus,
   projectDetail,
   projectDetailTabs,
   projectLogPane,
@@ -272,7 +273,7 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.snapshot = snapshot;
   state.connected = true;
   state.error = null;
-  document.title = snapshot.poolName;
+  document.title = `${poolStatus(snapshot).word} — ${snapshot.poolName}`;
   // A new snapshot can move the selected ticket (spawned, exited, merged),
   // so the timeline refetches on that cadence; the events file is append-only
   // and small, so a refetch is cheap.
