@@ -14,6 +14,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -22,11 +23,15 @@ import { runPool, type HarnessCommand, type PoolSnapshot } from "./engine.ts";
 import { readEvents, type TicketEvent } from "./events.ts";
 import { defaultRegistryPath, readFleetEntry } from "./fleet.ts";
 import { loadPoolMarkers } from "./pool.ts";
+import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
-  port: number;
+  /** The --port CLI flag; a pin when present. Absent falls to console.json then the default. */
+  port?: number;
+  /** Where the unpinned hunt starts when neither flag nor console.json pins a port. Defaults to 8787. */
+  defaultPort?: number;
   harnesses?: Record<string, HarnessCommand>;
   distDir?: string;
   registryPath?: string;
@@ -218,6 +223,65 @@ function pidIsLive(pid: number): boolean {
   }
 }
 
+/** The pool's pinned port from console.json, or undefined when it pins none. */
+function readConfigPort(poolDir: string): number | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(join(poolDir, "console.json"), "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const port = (parsed as Record<string, unknown>).port;
+  return port === undefined ? undefined : (port as number);
+}
+
+function isAddressInUse(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+}
+
+/**
+ * Bind the pool server per the resolution. A pinned port that is busy is a
+ * hard failure naming the port; only the unpinned path hunts upward from the
+ * default for a free one. Port 0 means "any free port" (Bun ephemeral).
+ */
+function bindPoolServer(
+  resolution: PortResolution,
+  serve: (port: number) => Bun.Server<undefined>,
+): Bun.Server<undefined> {
+  if (resolution.pinned) {
+    try {
+      return serve(resolution.port);
+    } catch (err) {
+      if (isAddressInUse(err)) {
+        throw new Error(
+          `port ${resolution.port} is already in use; free it or pass a different --port`,
+        );
+      }
+      throw err;
+    }
+  }
+  if (resolution.port === 0) return serve(0);
+  let port = resolution.port;
+  while (port <= 65535) {
+    try {
+      return serve(port);
+    } catch (err) {
+      if (!isAddressInUse(err)) throw err;
+      port += 1;
+    }
+  }
+  throw new Error(`no free port found from ${resolution.port} upward`);
+}
+
 /**
  * One server per pool. If runs/server.pid names a live process, refuse with a
  * message naming that pid, its fleet-registry port when known, and the pool
@@ -299,81 +363,96 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return latest!;
   }
 
-  const server = Bun.serve({
-    port: options.port,
-    async fetch(req, bunServer) {
-      const url = new URL(req.url);
-      const pathname = url.pathname;
+  const resolution = resolvePort(
+    options.port,
+    readConfigPort(poolDir),
+    options.defaultPort ?? DEFAULT_PORT,
+  );
+  let server: Bun.Server<undefined>;
+  try {
+    server = bindPoolServer(resolution, (port) =>
+      Bun.serve({
+        port,
+      async fetch(req, bunServer) {
+        const url = new URL(req.url);
+        const pathname = url.pathname;
 
-      if (pathname === "/api/state") {
-        return Response.json({ snapshot: latest });
-      }
+        if (pathname === "/api/state") {
+          return Response.json({ snapshot: latest });
+        }
 
-      if (pathname === "/api/start" && req.method === "POST") {
-        const snapshot = await start();
-        return Response.json({ snapshot });
-      }
-
-      if (pathname === "/api/resume" && req.method === "POST") {
-        try {
-          const body = (await req.json()) as {
-            ticketId?: unknown;
-            action?: unknown;
-            note?: unknown;
-          };
-          const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
-          const action = body.action === "approve" || body.action === "reject"
-            ? body.action
-            : "resume";
-          const note = typeof body.note === "string" ? body.note : undefined;
-          if (!ticketId) throw new Error("missing ticketId");
-          const snapshot = await answer(ticketId, action, note);
+        if (pathname === "/api/start" && req.method === "POST") {
+          const snapshot = await start();
           return Response.json({ snapshot });
-        } catch (err) {
-          return Response.json(
-            { error: err instanceof Error ? err.message : String(err) },
-            { status: 400 },
-          );
         }
-      }
 
-      if (pathname === "/api/events") {
-        const ticketId = url.searchParams.get("ticket") ?? "";
-        if (!ticketIds.has(ticketId)) {
-          return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+        if (pathname === "/api/resume" && req.method === "POST") {
+          try {
+            const body = (await req.json()) as {
+              ticketId?: unknown;
+              action?: unknown;
+              note?: unknown;
+            };
+            const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
+            const action = body.action === "approve" || body.action === "reject"
+              ? body.action
+              : "resume";
+            const note = typeof body.note === "string" ? body.note : undefined;
+            if (!ticketId) throw new Error("missing ticketId");
+            const snapshot = await answer(ticketId, action, note);
+            return Response.json({ snapshot });
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 400 },
+            );
+          }
         }
-        return Response.json(readTicketEvents(poolDir, ticketId));
-      }
 
-      if (pathname === "/api/stream") {
-        // The stream is silent whenever the pool waits at an interrupt, so it
-        // opts out of the default idle timeout; every other route keeps it.
-        bunServer.timeout(req, 0);
-        let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-        const stream = new ReadableStream<Uint8Array>({
-          start(ctrl) {
-            controller = ctrl;
-            clients.add(ctrl);
-            if (latest) ctrl.enqueue(encodeSnapshot(latest));
-          },
-          cancel() {
-            if (controller) clients.delete(controller);
-          },
-        });
-        return new Response(stream, {
-          headers: {
-            "content-type": "text/event-stream",
-            "cache-control": "no-cache",
-            connection: "keep-alive",
-          },
-        });
-      }
+        if (pathname === "/api/events") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          if (!ticketIds.has(ticketId)) {
+            return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+          }
+          return Response.json(readTicketEvents(poolDir, ticketId));
+        }
 
-      const staticRes = serveStatic(distDir, pathname);
-      if (staticRes) return staticRes;
-      return new Response("not found", { status: 404 });
-    },
-  });
+        if (pathname === "/api/stream") {
+          // The stream is silent whenever the pool waits at an interrupt, so it
+          // opts out of the default idle timeout; every other route keeps it.
+          bunServer.timeout(req, 0);
+          let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+          const stream = new ReadableStream<Uint8Array>({
+            start(ctrl) {
+              controller = ctrl;
+              clients.add(ctrl);
+              if (latest) ctrl.enqueue(encodeSnapshot(latest));
+            },
+            cancel() {
+              if (controller) clients.delete(controller);
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache",
+              connection: "keep-alive",
+            },
+          });
+        }
+
+        const staticRes = serveStatic(distDir, pathname);
+        if (staticRes) return staticRes;
+        return new Response("not found", { status: 404 });
+      },
+      }),
+    );
+  } catch (err) {
+    // The lock was claimed before the bind; a bind that never happened must
+    // not leave a live-looking pid behind, or the next launch refuses itself.
+    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+    throw err;
+  }
 
   return {
     get latest() {
@@ -394,14 +473,14 @@ export function runServerCli(): void {
   const poolIndex = args.indexOf("--pool");
   const portIndex = args.indexOf("--port");
   const poolDir = poolIndex >= 0 ? args[poolIndex + 1] : undefined;
-  const port = portIndex >= 0 ? Number(args[portIndex + 1]) : 8787;
+  const port = portIndex >= 0 ? Number(args[portIndex + 1]) : undefined;
   if (!poolDir) {
     console.error("usage: bun run engine/server.ts --pool <dir> [--port <n>]");
     process.exit(1);
   }
   let server: PoolServer;
   try {
-    server = createPoolServer({ poolDir, port });
+    server = createPoolServer({ poolDir, ...(port !== undefined ? { port } : {}) });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
