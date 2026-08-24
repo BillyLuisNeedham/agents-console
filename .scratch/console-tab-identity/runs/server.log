@@ -1,0 +1,8 @@
+ENOENT: no such file or directory, open '/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico'
+    path: "/home/billy/repos/learning/ai-agent-graphs/ui/dist/favicon.ico",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+GET - /favicon.ico failed
+pool server on http://localhost:8787 (/home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity)

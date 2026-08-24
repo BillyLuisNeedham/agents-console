@@ -1,0 +1,313 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+[0m→ [0mRead .scratch/console-tab-identity/spec-console-tab-identity.md
+[0m• [0mExplore UI projections module[90m Explore Agent[0m
+[0m✓ [0mExplore UI projections module[90m Explore Agent[0m
+[0m✱ [0mGrep "--.*(red|amber|green|grey|gray)|#[0-9a-fA-F]{6}"[90m in ui/src/styles.css · 12 matches[0m
+[0m→ [0mRead ui/src/project.ts[90m [offset=560, limit=50][0m
+[0m→ [0mRead ui/src/project.test.ts[90m [offset=540, limit=45][0m
+[0m→ [0mRead ui/src/project.test.ts[90m [limit=55][0m
+Now the projection in `project.ts`:
+[0m
+[0m← [0mEdit ui/src/project.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/project.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/project.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/project.ts
+@@ -590,8 +590,34 @@
+       return "stalled";
+   }
+ }
+ 
++export interface PoolTabStatus {
++  word: string;
++  color: string;
++}
++
++/**
++ * The pool's at-a-glance status for the browser tab, worst-first: any pending
++ * interrupt or a stalled phase needs input; otherwise a running phase is
++ * running, a done phase is complete, and anything else is idle. Quiescent
++ * always carries a pending interrupt, so it lands on needs input without a
++ * rule of its own. Colors come from the Console palette; the tab title and the
++ * favicon both consume this value.
++ */
++export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
++  if (snapshot.state.interrupts.length > 0 || snapshot.phase === "stalled") {
++    return { word: "needs input", color: "#f85149" };
++  }
++  if (snapshot.phase === "running") {
++    return { word: "running", color: "#d29922" };
++  }
++  if (snapshot.phase === "done") {
++    return { word: "complete", color: "#3fb950" };
++  }
++  return { word: "idle", color: "#8b949e" };
++}
++
+ // ---------------------------------------------------------------------------
+ // Detail content
+ // ---------------------------------------------------------------------------
+ 
+
+[0m
+Now the tests:
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+@@ -23,8 +23,9 @@
+ nextNodeSelection,
+ parseStoredDetailWidth,
+ parseStoredLayout,
+ phaseLabel,
++poolStatus,
+ projectDetail,
+ projectDetailTab,
+ projectDetailTabs,
+ projectLog,
+
+[0m
+[0m← [0mEdit ui/src/project.test.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/project.test.ts
+@@ -571,8 +571,48 @@
+     expect(statusLabel("checkpoint")).toBe("checkpoint");
+   });
+ });
+ 
++describe("poolStatus", () => {
++  it("needs input in red when any interrupt is pending, whatever the phase", () => {
++    const interrupts = [{ ticketId: "a", kind: "checkpoint", body: "" }];
++    for (const phase of ["running", "done", "quiescent", "stalled"] as const) {
++      expect(poolStatus(snapshot({ phase, state: { ...snapshot().state, interrupts } }))).toEqual({
++        word: "needs input",
++        color: "#f85149",
++      });
++    }
++  });
++
++  it("needs input when stalled with no interrupts", () => {
++    expect(poolStatus(snapshot({ phase: "stalled" }))).toEqual({
++      word: "needs input",
++      color: "#f85149",
++    });
++  });
++
++  it("running in amber while the phase is running", () => {
++    expect(poolStatus(snapshot({ phase: "running" }))).toEqual({
++      word: "running",
++      color: "#d29922",
++    });
++  });
++
++  it("complete in green when the phase is done", () => {
++    expect(poolStatus(snapshot({ phase: "done" }))).toEqual({
++      word: "complete",
++      color: "#3fb950",
++    });
++  });
++
++  it("idle in grey for anything else", () => {
++    expect(poolStatus(snapshot({ phase: "quiescent" }))).toEqual({
++      word: "idle",
++      color: "#8b949e",
++    });
++  });
++});
++
+ describe("projectLog", () => {
+   it("extracts string log lines and drops the rest", () => {
+     expect(projectLog({ log: ["a", 42, "b"] })).toEqual(["a", "b"]);
+   });
+
+[0m
+Now the title wiring in `main.ts`:
+[0m✱ [0mGrep "from "./project"|phaseLabel"[90m in ui/src/main.ts · 21 matches[0m
+[0m→ [0mRead ui/src/main.ts[90m [limit=18, offset=8][0m
+[0m
+[0m← [0mEdit ui/src/main.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
+@@ -9,8 +9,9 @@
+ import { PoolClient } from "./client";
+ import { LogPane } from "./log-pane";
+ import {
+   phaseLabel,
++  poolStatus,
+   projectDetail,
+   projectDetailTabs,
+   projectLogPane,
+   projectPool,
+
+[0m
+[0m← [0mEdit ui/src/main.ts
+Index: /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
++++ /home/billy/repos/learning/ai-agent-graphs/ui/src/main.ts
+@@ -272,9 +272,9 @@
+ function setSnapshot(snapshot: PoolSnapshot): void {
+   state.snapshot = snapshot;
+   state.connected = true;
+   state.error = null;
+-  document.title = snapshot.poolName;
++  document.title = `${poolStatus(snapshot).word} — ${snapshot.poolName}`;
+   // A new snapshot can move the selected ticket (spawned, exited, merged),
+   // so the timeline refetches on that cadence; the events file is append-only
+   // and small, so a refetch is cheap.
+   if (state.snapshot && state.selectedId) {
+
+[0m
+[0m$ [0mbun test
+bun test v1.3.14 (0d9b296a)
+
+ 111 pass
+ 0 fail
+ 346 expect() calls
+Ran 111 tests across 2 files. [69.00ms]
+[0m
+[0m$ [0mbun run typecheck
+$ tsc --noEmit
+[0m
+[0m$ [0mbun test && bun run typecheck
+bun test v1.3.14 (0d9b296a)
+
+ 273 pass
+ 0 fail
+ 975 expect() calls
+Ran 273 tests across 10 files. [17.07s]
+$ tsc --noEmit
+[0m
+[0m$ [0mbun run build
+$ vite build
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 14 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.39 kB │ gzip:  0.26 kB
+dist/assets/index-CBUdBygH.css  15.21 kB │ gzip:  3.09 kB
+dist/assets/index-CDxerSEF.js   77.60 kB │ gzip: 23.60 kB
+
+✓ built in 54ms
+[0m
+[0m← [0mEdit .scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=02 blocked-by=01 status=in-progress -->
++<!-- state: id=02 blocked-by=01 status=done -->
+ 
+ # 02 — Pool status word in the tab title
+ 
+ Spec: `.scratch/console-tab-identity/spec-console-tab-identity.md`
+
+[0m
+All checks pass. Updating the issue and committing:
+[0m← [0mEdit .scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/issues/02-pool-status-in-tab-title.md
+@@ -9,15 +9,21 @@
+ The tab title leads with the pool's status: `{status} — {name}`, e.g. `needs input — ai-agent-graphs-fix/tickets`. The status is a pure projection over the snapshot, worst-first: any pending interrupt, or the run phase `stalled`, is `needs input`; otherwise the phase `running` is `running`; otherwise the phase `done` is `complete`; anything else is `idle`. `quiescent` always carries a pending interrupt, so it needs no rule of its own. The projection returns both the status word and its color (red, amber, green, grey) so ticket 03 consumes the same value. The title is recomputed on every applied snapshot.
+ 
+ ## Acceptance criteria
+ 
+-- [ ] A pure projection maps any snapshot to one of `needs input`, `running`, `complete`, `idle`, with its color
+-- [ ] A snapshot with any pending interrupt projects `needs input`, whatever its phase
+-- [ ] A snapshot with phase `stalled` and no interrupts projects `needs input`
+-- [ ] Phases `running` and `done` with no pending interrupt project `running` and `complete` respectively
+-- [ ] The document title reads `{status word} — {pool name}`, lowercase status word, and updates on every applied snapshot
+-- [ ] The projection is unit-tested in the UI's existing projection test suite across every status branch
+-- [ ] `bun test` passes in both `engine/` and `ui/`, and both typecheck scripts pass
++- [x] A pure projection maps any snapshot to one of `needs input`, `running`, `complete`, `idle`, with its color
++- [x] A snapshot with any pending interrupt projects `needs input`, whatever its phase
++- [x] A snapshot with phase `stalled` and no interrupts projects `needs input`
++- [x] Phases `running` and `done` with no pending interrupt project `running` and `complete` respectively
++- [x] The document title reads `{status word} — {pool name}`, lowercase status word, and updates on every applied snapshot
++- [x] The projection is unit-tested in the UI's existing projection test suite across every status branch
++- [x] `bun test` passes in both `engine/` and `ui/`, and both typecheck scripts pass
+ 
++## Notes
++
++- Projection is `poolStatus` in `ui/src/project.ts`, returning `{ word, color }`; colors taken from the Console palette: red `--interrupt` #f85149, amber `--status-running` #d29922, green `--status-done` #3fb950, grey `--status-pending` #8b949e. Ticket 03 should consume the same value for the favicon.
++- The phase union has only four values, so `idle` is reachable only by a quiescent snapshot with no pending interrupts, a shape the engine never emits (quiescent always carries an interrupt). The idle branch is tested with exactly that synthetic shape, matching the spec's "anything else is idle".
++- Title wiring is one line in `setSnapshot` (`ui/src/main.ts`), the single point every applied snapshot routes through (boot, SSE, answer response), so the title recomputes on every snapshot.
++
+ ## Blocked by
+ 
+ - 01 — Pool name in the tab title
+
+[0m
+[0m$ [0mgit status --short && git log --oneline -3 && git branch --show-current
+M ui/src/main.ts
+ M ui/src/project.test.ts
+ M ui/src/project.ts
+?? .scratch/console-tab-identity/
+5bb1c45 engine: carry the pool display name on the enriched snapshot
+d6bf1d0 console-pool: record the issue-11 pool's run logs
+eece62b Merge pull request #17 from BillyLuisNeedham/arch/cleanup
+main
+[0m
+[0m$ [0mgit show --stat 5bb1c45
+commit 5bb1c45b4f8b8f009ab02aabcb8a41e8e5f5bfdc
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Sat Aug 22 23:08:31 2026 +0100
+
+    engine: carry the pool display name on the enriched snapshot
+    
+    The server computes the pool's display name as the last two path
+    segments of the pool directory and serves it as poolName on the
+    enriched snapshot; the Console sets the tab title from it on every
+    snapshot it applies.
+
+ engine/server.test.ts  | 27 +++++++++++++++++++++++++++
+ engine/server.ts       |  8 ++++++--
+ ui/src/main.ts         |  1 +
+ ui/src/project.test.ts |  1 +
+ ui/src/project.ts      |  2 ++
+ 5 files changed, 37 insertions(+), 2 deletions(-)
+[0m
+[0m$ [0mgit add ui/src/main.ts ui/src/project.ts ui/src/project.test.ts && git commit -m "ui: lead the tab title with the pool status word
+
+poolStatus projects a snapshot to one of needs input, running,
+complete or idle, worst-first, with the status color from the Console
+palette; setSnapshot sets the tab title to {status} - {pool name} on
+every applied snapshot." && git log --oneline -1
+[main 55c4e4e] ui: lead the tab title with the pool status word
+ 3 files changed, 69 insertions(+), 1 deletion(-)
+55c4e4e ui: lead the tab title with the pool status word
+[0m
+[0m← [0mWrite .scratch/console-tab-identity/runs/02.outcome.json
+Wrote file successfully.
+[0m
+[0m$ [0mgit rev-parse HEAD
+55c4e4e4361778d36118ef219f4f898a6a6bb738
+[0m
+[0m← [0mEdit .scratch/console-tab-identity/runs/02.outcome.json
+Index: /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/runs/02.outcome.json
+===================================================================
+--- /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/runs/02.outcome.json
++++ /home/billy/repos/learning/ai-agent-graphs/.scratch/console-tab-identity/runs/02.outcome.json
+@@ -1,1 +1,1 @@
+-{"summary": "Added poolStatus, a pure projection in ui/src/project.ts mapping a snapshot to needs input / running / complete / idle with its palette color, unit-tested across every branch; the tab title now reads {status} - {pool name} and recomputes on every applied snapshot. bun test and typecheck pass in engine and ui; ui/dist rebuilt.", "commitSha": "55c4e4e"}
++{"summary": "Added poolStatus, a pure projection in ui/src/project.ts mapping a snapshot to needs input / running / complete / idle with its palette color, unit-tested across every branch; the tab title now reads {status} - {pool name} and recomputes on every applied snapshot. bun test and typecheck pass in engine and ui; ui/dist rebuilt.", "commitSha": "55c4e4e4361778d36118ef219f4f898a6a6bb738"}
+
+[0m
+Done. Issue 02 complete:
+
+- `poolStatus` projection in `ui/src/project.ts:602` — worst-first rollup returning `{ word, color }` with palette hexes (red #f85149, amber #d29922, green #3fb950, grey #8b949e), ready for ticket 03's favicon
+- Tests across every branch in `ui/src/project.test.ts` (interrupt overrides any phase; stalled; running; done; idle via interrupt-free quiescent)
+- Title set in `setSnapshot` (`ui/src/main.ts:276`): `{status} — {poolName}` on every applied snapshot
+- `bun test` + typecheck pass in engine and ui; `ui/dist` rebuilt; committed as `55c4e4e`, issue marked `status=done`, outcome recorded
