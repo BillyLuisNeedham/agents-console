@@ -626,7 +626,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       const kind = latest?.state.interrupts.find(
         (i) => i.ticketId === ticketId,
       )?.kind;
-      if (kind !== "review" && kind !== "merge-approval") {
+      // No pending interrupt: this may be a retry of an answer already
+      // accepted and processed, which must be acknowledged again. The
+      // engine's queued-answer store decides (202 retry vs genuine 400).
+      if (kind !== undefined && kind !== "review" && kind !== "merge-approval") {
         throw new Error(
           `answer: approve/reject needs the review gate (${REVIEW_TICKET_ID}) ` +
             `or a merge-approval interrupt, got ${kind ?? "no interrupt"} ` +

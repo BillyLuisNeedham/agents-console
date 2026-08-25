@@ -194,6 +194,58 @@ describe("pool server", () => {
     expect(approved.phase).toBe("done");
   });
 
+  it("acknowledges a retried answer with 202 and no duplicate; a stranger answer still 400s", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    await server.start();
+    const first = await server.settled();
+    expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
+
+    const post = (body: unknown) =>
+      fetch(`${server.url}/api/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const resumeRes = await post({ ticketId: "01", action: "resume", note: "go on" });
+    expect(resumeRes.status).toBe(202);
+    const resumed = await server.settled();
+    expect(resumed.state.tickets.find((t) => t.id === "01")?.status).toBe("done");
+    expect(resumed.state.interrupts[0]?.kind).toBe("review");
+
+    // The client timed out waiting and retried the same answer. The
+    // interrupt is already processed and gone, but the accepted answer is in
+    // the store, so the retry is acknowledged again rather than erroring.
+    const retryRes = await post({ ticketId: "01", action: "resume", note: "go on" });
+    expect(retryRes.status).toBe(202);
+
+    // No second answered event and no second queued record were written.
+    const events = readFileSync(join(poolDir, "runs", "01.events.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string });
+    expect(events.filter((e) => e.kind === "answered")).toHaveLength(1);
+    const queue = JSON.parse(
+      readFileSync(join(poolDir, "runs", "queued-answers.json"), "utf8"),
+    ) as { answers: unknown[] };
+    expect(queue.answers).toHaveLength(1);
+
+    // Approvals are idempotent the same way, once the review gate is down.
+    const approveRes = await post({ ticketId: REVIEW_TICKET_ID, action: "approve" });
+    expect(approveRes.status).toBe(202);
+    await server.settled();
+    const approveRetry = await post({ ticketId: REVIEW_TICKET_ID, action: "approve" });
+    expect(approveRetry.status).toBe(202);
+
+    // A ticket with no pending interrupt and no accepted answer still 400s.
+    const strangerRes = await post({ ticketId: "02", action: "resume" });
+    expect(strangerRes.status).toBe(400);
+  });
+
   it("streams the latest snapshot to an SSE client on connect", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },

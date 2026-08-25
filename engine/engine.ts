@@ -226,7 +226,7 @@ interface Session {
   driving: boolean;
   settledPhase: Exclude<RunPhase, "running"> | null;
   settleWaiters: SettleWaiter[];
-  answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }>;
+  answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }[]>;
   handle: PoolRun;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
@@ -310,11 +310,17 @@ function makeHandle(session: Session): PoolRun {
     } catch (error) {
       return Promise.reject(error);
     }
+    // A retry of an answer that was already processed: acceptance recorded
+    // nothing new, so there is no drain to wait for.
+    if (record.processedAt !== null) return nextSettle(session);
     // The waiter registers before the kick: an idle kick drains
     // synchronously, and a drain that settles a waiter which does not exist
-    // yet hangs the promise forever.
+    // yet hangs the promise forever. Several answers can share one queued
+    // record (an idempotent retry returns it), so each seq holds a list.
     const processed = new Promise<void>((resolve, reject) => {
-      session.answerWaiters.set(record.seq, { resolve, reject });
+      const waiters = session.answerWaiters.get(record.seq) ?? [];
+      waiters.push({ resolve, reject });
+      session.answerWaiters.set(record.seq, waiters);
     });
     kickProcessing(session);
     return processed.then(() => nextSettle(session));
@@ -370,7 +376,9 @@ function settleDrive(
     else waiter.resolve(session.handle);
   }
   if (error) {
-    for (const [, waiter] of session.answerWaiters) waiter.reject(error);
+    for (const [, waiters] of session.answerWaiters) {
+      for (const waiter of waiters) waiter.reject(error);
+    }
     session.answerWaiters.clear();
   }
 }
@@ -730,6 +738,14 @@ function closeStore(session: Session): void {
 // state and never spawns an attempt, so it is safe mid-super-step. Processing
 // is the caller's follow-up (kickProcessing), so a waiter can be registered
 // between the two.
+//
+// Acceptance is idempotent so a client that timed out and retried is safe:
+// an answer matching one already queued (same ticket, same interrupt kind,
+// same payload) is acknowledged by returning the existing record, writing no
+// second event or record. An answer whose interrupt is already gone is
+// acknowledged the same way when the store holds its matching acceptance;
+// with no pending interrupt and no matching accepted answer it errors, as
+// before the split.
 function acceptAnswer(
   session: Session,
   ticketId: string,
@@ -740,6 +756,8 @@ function acceptAnswer(
     (i) => i.ticketId === ticketId,
   );
   if (!interrupt) {
+    const prior = session.answers.latestFor(ticketId, approve);
+    if (prior) return prior;
     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
   }
   if (interrupt.kind === "review" && approve === undefined) {
@@ -753,6 +771,15 @@ function acceptAnswer(
         `on ticket ${ticketId}`,
     );
   }
+  const duplicate = session.answers
+    .pending()
+    .find(
+      (a) =>
+        a.ticketId === ticketId &&
+        a.kind === interrupt.kind &&
+        a.approve === approve,
+    );
+  if (duplicate) return duplicate;
   appendEvent(session.runsDir, ticketId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, ticketId),
@@ -787,17 +814,17 @@ function kickProcessing(session: Session): void {
 // never takes the drive down with it.
 function drainAnswers(session: Session): void {
   for (const record of session.answers.pending()) {
-    const waiter = session.answerWaiters.get(record.seq);
+    const waiters = session.answerWaiters.get(record.seq) ?? [];
     session.answerWaiters.delete(record.seq);
     try {
       processAnswer(session, record);
     } catch (error) {
       session.answers.markProcessed(record.seq);
-      waiter?.reject(error);
+      for (const waiter of waiters) waiter.reject(error);
       continue;
     }
     session.answers.markProcessed(record.seq);
-    waiter?.resolve();
+    for (const waiter of waiters) waiter.resolve();
   }
 }
 

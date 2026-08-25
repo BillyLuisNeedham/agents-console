@@ -19,6 +19,8 @@ import {
   type PoolConfig,
   type PoolRun,
 } from "./engine.ts";
+import { appendEvent } from "./events.ts";
+import { QueuedAnswerStore } from "./queued-answers.ts";
 import type { SpawnContext } from "./spawn.ts";
 
 const tempDirs: string[] = [];
@@ -3279,6 +3281,112 @@ describe("accept/process split", () => {
     expect(done.phase).toBe("done");
     expect(done.final.log).toContain("review approved: the run is complete (ship it)");
   });
+
+  it("drains queued answers left behind by a killed server after rehydrate", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // The on-disk state a kill leaves behind when an answer was accepted but
+    // the process died before the drain: acceptance's exact writes (the
+    // answered event, then the queued record) with the interrupt still
+    // pending in the checkpoint.
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "answered",
+      payload: { kind: "checkpoint" },
+    });
+    new QueuedAnswerStore(join(poolDir, "runs")).enqueue({
+      ticketId: "01",
+      kind: "checkpoint",
+      note: "the name is Foo",
+      at: new Date().toISOString(),
+    });
+
+    const rig = stubHarness({ "01": { status: "done" } });
+    const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The queued answer took effect without resubmission: 01 resumed and
+    // finished, its dependent ran, and the run reached the review gate.
+    expect(restarted.phase).toBe("quiescent");
+    expect(restarted.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers).toHaveLength(1);
+    expect(queue.answers[0]?.processedAt).not.toBeNull();
+    // The only answered event is acceptance's own, written before the kill.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
+    ).toHaveLength(1);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Resume note");
+    expect(issueText).toContain("the name is Foo");
+  });
+
+  it("acknowledges a duplicate answer without a second event or record, and both callers settle", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-03");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["done"] },
+        "03": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["03"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01"),
+      "ticket 03 spawned with the checkpoint interrupt pending for 01",
+    );
+
+    // The client answered, timed out waiting, and retried the same answer
+    // while the first was still queued behind the in-flight super-step.
+    const first = run.resume("01", "carry on");
+    const retry = run.resume("01", "carry on");
+
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
+    ).toHaveLength(1);
+    expect(readQueuedAnswers(poolDir).answers).toHaveLength(1);
+
+    writeFileSync(sentinel, "go");
+    await first;
+    await retry;
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
+  }, 15000);
 
   it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
     const poolDir = makePool({

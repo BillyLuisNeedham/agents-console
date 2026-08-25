@@ -68,6 +68,25 @@ export class QueuedAnswerStore {
     return this.answers.filter((answer) => answer.processedAt === null);
   }
 
+  /**
+   * The most recent accepted answer for a ticket with the same payload shape
+   * (approve strict-equal, so a resume never matches a recorded approval).
+   * This is the idempotent-resume lookup: a retried answer finds its
+   * acceptance here and is acknowledged again rather than recorded twice.
+   */
+  latestFor(
+    ticketId: string,
+    approve: boolean | undefined,
+  ): QueuedAnswer | null {
+    for (let i = this.answers.length - 1; i >= 0; i -= 1) {
+      const answer = this.answers[i]!;
+      if (answer.ticketId === ticketId && answer.approve === approve) {
+        return answer;
+      }
+    }
+    return null;
+  }
+
   markProcessed(seq: number): void {
     const record = this.answers.find((answer) => answer.seq === seq);
     if (!record || record.processedAt !== null) return;
