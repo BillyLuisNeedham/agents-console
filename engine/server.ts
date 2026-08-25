@@ -634,12 +634,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         );
       }
     }
+    // The snapshot at acceptance: acceptance never mutates PoolState, so it
+    // still shows the interrupt pending. Read before the accept, because an
+    // idle pool processes the answer synchronously inside it and the fresh
+    // drive's first emit would already carry the post-processing state.
+    const accepted = latest!;
     run.accept(
       ticketId,
       note,
       action === "approve" ? true : action === "reject" ? false : undefined,
     );
-    return latest!;
+    return accepted;
   }
 
   const settled = (): Promise<EnrichedSnapshot> => {

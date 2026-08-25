@@ -310,9 +310,14 @@ function makeHandle(session: Session): PoolRun {
     } catch (error) {
       return Promise.reject(error);
     }
-    return new Promise<void>((resolve, reject) => {
+    // The waiter registers before the kick: an idle kick drains
+    // synchronously, and a drain that settles a waiter which does not exist
+    // yet hangs the promise forever.
+    const processed = new Promise<void>((resolve, reject) => {
       session.answerWaiters.set(record.seq, { resolve, reject });
-    }).then(() => nextSettle(session));
+    });
+    kickProcessing(session);
+    return processed.then(() => nextSettle(session));
   };
   const handle: PoolRun = {
     get phase() {
@@ -332,6 +337,7 @@ function makeHandle(session: Session): PoolRun {
     reject: (ticketId, note) => answer(ticketId, note, false),
     accept: (ticketId, note, approve) => {
       acceptAnswer(session, ticketId, note, approve);
+      kickProcessing(session);
     },
     get settled() {
       return nextSettle(session);
@@ -720,10 +726,10 @@ function closeStore(session: Session): void {
 
 // Acceptance (ADR-0004): the answer is recorded and acknowledged, nothing
 // else. The `answered` event lands in the ticket log first, then the
-// queued-answer record in its own persisted store, and only then is
-// processing scheduled: immediately when no drive is in flight (today's idle
-// behaviour), otherwise at the next super-step boundary. Acceptance never
-// mutates state and never spawns an attempt, so it is safe mid-super-step.
+// queued-answer record in its own persisted store. Acceptance never mutates
+// state and never spawns an attempt, so it is safe mid-super-step. Processing
+// is the caller's follow-up (kickProcessing), so a waiter can be registered
+// between the two.
 function acceptAnswer(
   session: Session,
   ticketId: string,
@@ -760,16 +766,19 @@ function acceptAnswer(
     ...(note !== undefined ? { note } : {}),
     at: new Date().toISOString(),
   });
-  // Idle: process immediately, as before the split, and kick the drive that
-  // spawns whatever the answer made ready. In flight: the record waits for
-  // the drive loop's boundary drain. Processing is synchronous, so an idle
-  // acceptance returns with the answer already applied and the drive marked
-  // in flight.
-  if (!session.driving) {
-    drainAnswers(session);
-    if (!session.driving) startDrive(session);
-  }
   return record;
+}
+
+// The processing kick, every answer path's second step. Idle: the drain
+// applies the answer right away (the behaviour before the split) and a fresh
+// drive starts, spawning whatever the answer made ready. In flight: the
+// queued record waits for the drive loop's boundary drain. The kick is
+// separate from acceptance so the answer path's waiter exists before an idle
+// drain can settle it.
+function kickProcessing(session: Session): void {
+  if (session.driving) return;
+  drainAnswers(session);
+  startDrive(session);
 }
 
 // The boundary drain: every queued answer is applied in submission order.
