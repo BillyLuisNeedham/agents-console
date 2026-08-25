@@ -20,6 +20,7 @@ import {
   type TicketEventKind,
 } from "./events.ts";
 import { CheckpointStore } from "./checkpoints.ts";
+import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   loadPoolMarkers,
   readMarker,
@@ -124,6 +125,13 @@ interface RunOptions {
   issueRunnerPath?: string;
 }
 
+// The live run handle. `startPool` returns it from the very first super-step,
+// with the drive proceeding in the background, so an answer is accepted at any
+// moment (ADR-0004). `resume`/`approve`/`reject` accept the answer
+// synchronously and resolve at the settle after it is processed; `accept` is
+// the same acceptance without the wait, for callers (the server) that
+// acknowledge and move on. The field getters read the session live, so they
+// are only meaningful once `settled` has resolved.
 export interface PoolRun {
   phase: Exclude<RunPhase, "running">;
   final: PoolState;
@@ -132,6 +140,8 @@ export interface PoolRun {
   resume: (ticketId: string, note?: string) => Promise<PoolRun>;
   approve: (ticketId: string, note?: string) => Promise<PoolRun>;
   reject: (ticketId: string, note?: string) => Promise<PoolRun>;
+  accept: (ticketId: string, note?: string, approve?: boolean) => void;
+  settled: Promise<PoolRun>;
   close: () => void;
 }
 
@@ -189,6 +199,11 @@ interface Assignment {
   drivers: string;
 }
 
+interface SettleWaiter {
+  resolve: (run: PoolRun) => void;
+  reject: (error: unknown) => void;
+}
+
 interface Session {
   poolDir: string;
   issuesDir: string;
@@ -204,13 +219,21 @@ interface Session {
   store: CheckpointStore;
   storeOpen: boolean;
   superStep: number;
-  resumeChain: Promise<PoolRun | null>;
+  answers: QueuedAnswerStore;
+  // True while a drive loop is in flight (between super-step boundaries
+  // included). Acceptance consults it: in flight the answer waits for the
+  // boundary drain; idle it is processed immediately and a fresh drive kicks.
+  driving: boolean;
+  settledPhase: Exclude<RunPhase, "running"> | null;
+  settleWaiters: SettleWaiter[];
+  answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }>;
+  handle: PoolRun;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
   resolverAttempts: Map<string, { files: string[]; note: string }>;
 }
 
-export async function runPool(options: RunOptions): Promise<PoolRun> {
+export function startPool(options: RunOptions): PoolRun {
   const poolDir = options.poolDir;
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
@@ -251,17 +274,109 @@ export async function runPool(options: RunOptions): Promise<PoolRun> {
     store: new CheckpointStore(poolDir),
     storeOpen: true,
     superStep: 0,
-    resumeChain: Promise.resolve(null),
+    answers: new QueuedAnswerStore(runsDir),
+    driving: false,
+    settledPhase: null,
+    settleWaiters: [],
+    answerWaiters: new Map(),
+    handle: undefined as unknown as PoolRun,
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     resolverAttempts: new Map(),
   };
 
   rehydrate(session);
-  return drive(session);
+  session.handle = makeHandle(session);
+  startDrive(session);
+  return session.handle;
 }
 
-async function drive(session: Session): Promise<PoolRun> {
+// runPool keeps the original await-to-settle contract: it resolves with the
+// handle once the drive first goes quiescent, done, or stalled. Callers that
+// need the handle during the first drive (the server) use startPool.
+export async function runPool(options: RunOptions): Promise<PoolRun> {
+  return startPool(options).settled;
+}
+
+function makeHandle(session: Session): PoolRun {
+  const answer = (
+    ticketId: string,
+    note: string | undefined,
+    approve: boolean | undefined,
+  ): Promise<PoolRun> => {
+    let record: QueuedAnswer;
+    try {
+      record = acceptAnswer(session, ticketId, note, approve);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return new Promise<void>((resolve, reject) => {
+      session.answerWaiters.set(record.seq, { resolve, reject });
+    }).then(() => nextSettle(session));
+  };
+  const handle: PoolRun = {
+    get phase() {
+      return session.settledPhase!;
+    },
+    get final() {
+      return session.state;
+    },
+    get snapshots() {
+      return session.snapshots;
+    },
+    get interrupts() {
+      return session.state.interrupts;
+    },
+    resume: (ticketId, note) => answer(ticketId, note, undefined),
+    approve: (ticketId, note) => answer(ticketId, note, true),
+    reject: (ticketId, note) => answer(ticketId, note, false),
+    accept: (ticketId, note, approve) => {
+      acceptAnswer(session, ticketId, note, approve);
+    },
+    get settled() {
+      return nextSettle(session);
+    },
+    close: () => closeStore(session),
+  };
+  return handle;
+}
+
+function nextSettle(session: Session): Promise<PoolRun> {
+  if (!session.driving) return Promise.resolve(session.handle);
+  return new Promise<PoolRun>((resolve, reject) => {
+    session.settleWaiters.push({ resolve, reject });
+  });
+}
+
+// The drive loop's endgame, reached exactly once per loop: waiters for the
+// next settle are flushed with the handle (or the loop's fatal error, which
+// also fails every answer still waiting on processing).
+function settleDrive(
+  session: Session,
+  phase: Exclude<RunPhase, "running"> | null,
+  error: unknown,
+): void {
+  session.driving = false;
+  if (phase !== null) session.settledPhase = phase;
+  const waiters = session.settleWaiters.splice(0);
+  for (const waiter of waiters) {
+    if (error) waiter.reject(error);
+    else waiter.resolve(session.handle);
+  }
+  if (error) {
+    for (const [, waiter] of session.answerWaiters) waiter.reject(error);
+    session.answerWaiters.clear();
+  }
+}
+
+function startDrive(session: Session): void {
+  session.driving = true;
+  // The loop's own settle path routes any fatal error to every waiter, so
+  // the rejection is already observed; nothing further can consume it here.
+  driveLoop(session).catch(() => {});
+}
+
+async function driveLoop(session: Session): Promise<void> {
   const emit = (phase: RunPhase) => {
     const snapshot: PoolSnapshot = {
       seq: session.snapshots.length,
@@ -276,6 +391,11 @@ async function drive(session: Session): Promise<PoolRun> {
   try {
     for (;;) {
       reconcileDeadlocks(session);
+      // The super-step boundary: answers accepted while the previous
+      // super-step was in flight are applied now, in submission order, after
+      // that super-step's join and persistence and before this one's
+      // scheduling. Processing never spawns; the scheduling below does.
+      drainAnswers(session);
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
       session.superStep += 1;
@@ -415,6 +535,7 @@ async function drive(session: Session): Promise<PoolRun> {
     }
   } catch (error) {
     closeStore(session);
+    settleDrive(session, null, error);
     throw error;
   }
 
@@ -456,16 +577,7 @@ async function drive(session: Session): Promise<PoolRun> {
   persist(session);
   emit(phase);
   if (phase !== "quiescent") closeStore(session);
-  return {
-    phase,
-    final: session.state,
-    snapshots: session.snapshots,
-    interrupts: session.state.interrupts,
-    resume: (ticketId, note) => enqueueAnswer(session, ticketId, note, undefined),
-    approve: (ticketId, note) => enqueueAnswer(session, ticketId, note, true),
-    reject: (ticketId, note) => enqueueAnswer(session, ticketId, note, false),
-    close: () => closeStore(session),
-  };
+  settleDrive(session, phase, null);
 }
 
 const ENGINE_RESET_NOTE =
@@ -606,30 +718,90 @@ function closeStore(session: Session): void {
   session.store.close();
 }
 
-function enqueueAnswer(
+// Acceptance (ADR-0004): the answer is recorded and acknowledged, nothing
+// else. The `answered` event lands in the ticket log first, then the
+// queued-answer record in its own persisted store, and only then is
+// processing scheduled: immediately when no drive is in flight (today's idle
+// behaviour), otherwise at the next super-step boundary. Acceptance never
+// mutates state and never spawns an attempt, so it is safe mid-super-step.
+function acceptAnswer(
   session: Session,
   ticketId: string,
-  note?: string,
-  approve?: boolean,
-): Promise<PoolRun> {
-  const queued = session.resumeChain.then(() =>
-    answerTicket(session, ticketId, note, approve),
-  );
-  session.resumeChain = queued.catch(() => null);
-  return queued;
-}
-
-async function answerTicket(
-  session: Session,
-  ticketId: string,
-  note?: string,
-  approve?: boolean,
-): Promise<PoolRun> {
+  note: string | undefined,
+  approve: boolean | undefined,
+): QueuedAnswer {
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === ticketId,
   );
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+  }
+  if (interrupt.kind === "review" && approve === undefined) {
+    throw new Error(
+      "answer: use approve() or reject() for the final review interrupt",
+    );
+  }
+  if (interrupt.kind === "merge-approval" && approve === undefined) {
+    throw new Error(
+      `answer: use approve() or reject() for the merge-approval interrupt ` +
+        `on ticket ${ticketId}`,
+    );
+  }
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, ticketId),
+    kind: "answered",
+    payload: { kind: interrupt.kind },
+  });
+  const record = session.answers.enqueue({
+    ticketId,
+    kind: interrupt.kind,
+    ...(approve !== undefined ? { approve } : {}),
+    ...(note !== undefined ? { note } : {}),
+    at: new Date().toISOString(),
+  });
+  // Idle: process immediately, as before the split, and kick the drive that
+  // spawns whatever the answer made ready. In flight: the record waits for
+  // the drive loop's boundary drain. Processing is synchronous, so an idle
+  // acceptance returns with the answer already applied and the drive marked
+  // in flight.
+  if (!session.driving) {
+    drainAnswers(session);
+    if (!session.driving) startDrive(session);
+  }
+  return record;
+}
+
+// The boundary drain: every queued answer is applied in submission order.
+// A answer that fails processing (a review reject naming no ticket, a stale
+// record whose interrupt is gone) rejects its own waiter and is consumed; it
+// never takes the drive down with it.
+function drainAnswers(session: Session): void {
+  for (const record of session.answers.pending()) {
+    const waiter = session.answerWaiters.get(record.seq);
+    session.answerWaiters.delete(record.seq);
+    try {
+      processAnswer(session, record);
+    } catch (error) {
+      session.answers.markProcessed(record.seq);
+      waiter?.reject(error);
+      continue;
+    }
+    session.answers.markProcessed(record.seq);
+    waiter?.resolve();
+  }
+}
+
+// Processing: apply one accepted answer to state and the markers. Everything
+// the old answer path did except the `answered` event (written at acceptance)
+// and the drive kick (the caller's: the boundary's loop continues, the idle
+// path starts a fresh drive after the drain).
+function processAnswer(session: Session, record: QueuedAnswer): void {
+  const interrupt = session.state.interrupts.find(
+    (i) => i.ticketId === record.ticketId,
+  );
+  if (!interrupt) {
+    throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
   session.markers = loadPoolMarkers(session.issuesDir);
   for (const m of session.markers) {
@@ -641,59 +813,50 @@ async function answerTicket(
     }
   }
   if (interrupt.kind === "review") {
-    if (approve === undefined) {
-      throw new Error(
-        "answer: use approve() or reject() for the final review interrupt",
-      );
+    if (record.approve) {
+      approveReview(session, interrupt, record.note);
+    } else {
+      rejectReview(session, interrupt, record.note);
     }
-    if (approve) return approveReview(session, interrupt, note);
-    return rejectReview(session, interrupt, note);
+    return;
   }
-  const marker = session.markers.find((m) => m.id === ticketId);
+  const marker = session.markers.find((m) => m.id === record.ticketId);
   if (!marker) {
     throw new Error(
-      `resume: ticket ${ticketId} has no Issue file in ${session.issuesDir}`,
+      `resume: ticket ${record.ticketId} has no Issue file in ${session.issuesDir}`,
     );
   }
-  appendEvent(session.runsDir, ticketId, {
-    at: new Date().toISOString(),
-    attempt: lastAttempt(session.runsDir, ticketId),
-    kind: "answered",
-    payload: { kind: interrupt.kind },
-  });
   if (interrupt.kind === "merge-conflict") {
-    return resumeMerge(session, marker, interrupt, note);
+    resumeMerge(session, marker, interrupt, record.note);
+    return;
   }
   if (interrupt.kind === "merge-approval") {
-    if (approve === undefined) {
-      throw new Error(
-        `answer: use approve() or reject() for the merge-approval interrupt ` +
-          `on ticket ${ticketId}`,
-      );
+    if (record.approve) {
+      approveMerge(session, marker, interrupt, record.note);
+    } else {
+      rejectMerge(session, marker, interrupt, record.note);
     }
-    if (approve) return approveMerge(session, marker, interrupt, note);
-    return rejectMerge(session, marker, interrupt, note);
+    return;
   }
   if (marker.status !== "done") {
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
   }
-  if (note && note.trim()) {
-    appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
+  if (record.note && record.note.trim()) {
+    appendFileSync(marker.file, `\n## Resume note\n\n${record.note.trim()}\n`);
   }
   session.state = applyUpdate(session.state, {
     tickets: Object.fromEntries(
       session.markers.map((m) => [m.id, m.status]),
     ),
     interrupts: session.state.interrupts.filter(
-      (i) => i.ticketId !== ticketId,
+      (i) => i.ticketId !== record.ticketId,
     ),
     log: [
-      `interrupt answered for ${ticketId} (${interrupt.kind}): ` +
+      `interrupt answered for ${record.ticketId} (${interrupt.kind}): ` +
         (marker.status === "done" ? "already done on disk" : "resumed"),
     ],
   });
-  return drive(session);
 }
 
 // The dual-write leaves the Issue file dirty on the working branch and git
@@ -717,12 +880,12 @@ function mergeWithIssueAside(
 // deleted branch counts as resolved; a fresh conflict refreshes the
 // interrupt and the pool stays quiescent. The ticket itself stays done: the
 // work was finished, only the merge was pending.
-async function resumeMerge(
+function resumeMerge(
   session: Session,
   marker: TicketMarker,
   interrupt: Interrupt,
   note?: string,
-): Promise<PoolRun> {
+): void {
   const branch = branchFor(marker.id);
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
@@ -746,7 +909,7 @@ async function resumeMerge(
       ],
       log: [`merge re-attempt for ${marker.id} still conflicts`],
     });
-    return drive(session);
+    return;
   }
   removeWorktree(session.cwd, worktree);
   appendEvent(session.runsDir, marker.id, {
@@ -762,7 +925,6 @@ async function resumeMerge(
         (result.detail.endsWith("is gone") ? ` (${result.detail})` : ""),
     ],
   });
-  return drive(session);
 }
 
 // The driver name must match a command stub under each harness's commands
@@ -975,12 +1137,12 @@ function approvalInterrupt(
 // Approving commits the resolver's staged resolution (an in-progress merge in
 // the worktree becomes a merge commit on the branch, so the follow-up merge
 // fast-forwards), then the pool continues automatically.
-async function approveMerge(
+function approveMerge(
   session: Session,
   marker: TicketMarker,
   interrupt: Interrupt,
   note?: string,
-): Promise<PoolRun> {
+): void {
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
     branch: branchFor(marker.id),
@@ -1009,7 +1171,7 @@ async function approveMerge(
       ],
       log: [`merge after resolver approval for ${marker.id} still conflicts`],
     });
-    return drive(session);
+    return;
   }
   removeWorktree(session.cwd, worktree);
   appendEvent(session.runsDir, marker.id, {
@@ -1025,18 +1187,17 @@ async function approveMerge(
         "resolution committed",
     ],
   });
-  return drive(session);
 }
 
 // Rejecting discards the resolver's staged resolution (the parked branch is
 // restored) and converts the approval into a manual-resolution interrupt
 // carrying the conflicted state plus the agent's attempt, for Billy to resolve.
-async function rejectMerge(
+function rejectMerge(
   session: Session,
   marker: TicketMarker,
   interrupt: Interrupt,
   note?: string,
-): Promise<PoolRun> {
+): void {
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
     branch: branchFor(marker.id),
@@ -1072,7 +1233,6 @@ async function rejectMerge(
       `merge-approval rejected for ${marker.id}: converted to manual resolution`,
     ],
   });
-  return drive(session);
 }
 
 // The final Review: the run's closing gate, raised once every ticket is done
@@ -1099,11 +1259,11 @@ function reviewInterrupt(session: Session): Interrupt {
 // stays inspectable through the server. The approval only stands if the
 // markers reloaded from disk are all done; a marker a human reset behind the
 // engine's back sends the pool around to a fresh Review instead.
-async function approveReview(
+function approveReview(
   session: Session,
   interrupt: Interrupt,
   note?: string,
-): Promise<PoolRun> {
+): void {
   const allDone = session.markers.every((m) => m.status === "done");
   session.state = applyUpdate(session.state, {
     tickets: Object.fromEntries(
@@ -1119,7 +1279,6 @@ async function approveReview(
     ],
     reviewApproved: allDone,
   });
-  return drive(session);
 }
 
 // A ticket id counts as named when it appears in the note delimited by
@@ -1138,11 +1297,11 @@ function namesTicket(note: string, id: string): boolean {
 // are dropped from the channel and from disk, so downstream prompts are never
 // fed a superseded summary. The run then continues until every ticket is done
 // again and a fresh Review is raised.
-async function rejectReview(
+function rejectReview(
   session: Session,
   interrupt: Interrupt,
   note?: string,
-): Promise<PoolRun> {
+): void {
   const text = note?.trim() ?? "";
   const named = session.markers
     .filter((marker) => namesTicket(text, marker.id))
@@ -1198,7 +1357,6 @@ async function rejectReview(
   });
   // The outcomes channel is a keyed merge, so removals go around the reducer.
   session.state = { ...session.state, outcomes };
-  return drive(session);
 }
 
 function raiseInterrupt(session: Session, interrupt: Interrupt): void {

@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   REVIEW_TICKET_ID,
   runPool,
+  startPool,
   type HarnessCommand,
   type PoolConfig,
   type PoolRun,
@@ -3064,5 +3065,247 @@ describe("worktrees", () => {
       events.filter((e) => e.kind === "resolver").map((e) => e.attempt),
     ).toEqual([2, 4]);
   }, 20000);
+  });
+});
+
+describe("accept/process split", () => {
+  interface EventLine {
+    at: string;
+    attempt: number;
+    kind: string;
+    payload: Record<string, unknown>;
+  }
+
+  function readEventsFile(poolDir: string, id: string): EventLine[] {
+    const raw = readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8");
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as EventLine);
+  }
+
+  interface QueuedAnswersFile {
+    nextSeq: number;
+    answers: {
+      seq: number;
+      ticketId: string;
+      kind: string;
+      approve?: boolean;
+      note?: string;
+      at: string;
+      processedAt: string | null;
+    }[];
+  }
+
+  function readQueuedAnswers(poolDir: string): QueuedAnswersFile {
+    return JSON.parse(
+      readFileSync(join(poolDir, "runs", "queued-answers.json"), "utf8"),
+    ) as QueuedAnswersFile;
+  }
+
+  async function waitFor(cond: () => boolean, what: string): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  // A stub harness whose blocked tickets hold their spawned script until the
+  // sentinel file appears, so a test can keep a super-step in flight while it
+  // answers an interrupt. Every other ticket takes the instant path.
+  function blockingHarness(
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
+    sentinel: string,
+  ): StubRig {
+    const poolLocal = tempDirs[tempDirs.length - 1];
+    const stubPath = join(poolLocal, "blocking-stub.sh");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"',
+        'if [ "$gate" = "block" ]; then',
+        '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+        "fi",
+        'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+        'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const spawned: Record<string, SpawnContext> = {};
+    const spawnOrder: string[] = [];
+    const counts: Record<string, number> = {};
+    const stub: HarnessCommand = (ctx) => {
+      spawned[ctx.id] = ctx;
+      spawnOrder.push(ctx.id);
+      const n = counts[ctx.id] ?? 0;
+      counts[ctx.id] = n + 1;
+      const b = behaviour[ctx.id] ?? {};
+      const statuses = b.statuses ?? (["done"] as const);
+      const status = statuses[Math.min(n, statuses.length - 1)];
+      return [
+        "bash",
+        stubPath,
+        ctx.issuePath,
+        status,
+        ctx.outcomePath,
+        b.block ? "block" : "-",
+        sentinel,
+      ];
+    };
+    return { harnesses: { stub }, spawned, spawnOrder };
+  }
+
+  it("accepts answers mid-super-step and drains them in submission order at the boundary", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+        { file: "04-d.md", marker: "<!-- state: id=04 blocked-by=03 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-04");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["checkpoint", "done"] },
+        "03": { statuses: ["done"] },
+        "04": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["04"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01") &&
+        run.interrupts.some((i) => i.ticketId === "02"),
+      "ticket 04 spawned with interrupts pending for 01 and 02",
+    );
+
+    const first = run.resume("02", "answered first");
+    const second = run.resume("01", "answered second");
+
+    // Acceptance was immediate: the answered events and the queued records
+    // landed while ticket 04's attempt still held the super-step open.
+    expect(readEventsFile(poolDir, "02").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "checkpoint",
+      "answered",
+    ]);
+    expect(readEventsFile(poolDir, "02").at(-1)?.payload).toEqual({
+      kind: "checkpoint",
+    });
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers.map((a) => a.ticketId)).toEqual(["02", "01"]);
+    expect(queue.answers.map((a) => a.kind)).toEqual(["checkpoint", "checkpoint"]);
+    expect(queue.answers.every((a) => a.processedAt === null)).toBe(true);
+
+    // The answer path never spawns: both tickets still sit at one attempt,
+    // and the resume promises are still waiting on the boundary.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "spawned"),
+    ).toHaveLength(1);
+    expect(
+      readEventsFile(poolDir, "02").filter((e) => e.kind === "spawned"),
+    ).toHaveLength(1);
+    let firstResolved = false;
+    void first.then(() => {
+      firstResolved = true;
+    });
+    await Bun.sleep(50);
+    expect(firstResolved).toBe(false);
+
+    writeFileSync(sentinel, "go");
+    await first;
+    await second;
+
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01", "02", "03", "04", "01", "02"]);
+    const log = run.final.log;
+    const answeredIdx = (id: string) =>
+      log.findIndex((line) => line === `interrupt answered for ${id} (checkpoint): resumed`);
+    const exited04 = log.findIndex((line) => line.startsWith("ticket 04: exited"));
+    const step3 = log.findIndex((line) => line === "super-step 3: 01, 02");
+    // Both answers were processed after the in-flight super-step joined, in
+    // submission order, before the next super-step was scheduled.
+    expect(answeredIdx("02")).toBeGreaterThan(exited04);
+    expect(answeredIdx("02")).toBeLessThan(answeredIdx("01"));
+    expect(answeredIdx("01")).toBeLessThan(step3);
+    // The answered event precedes the attempt it unblocked in the ticket log.
+    const kinds01 = readEventsFile(poolDir, "01").map((e) => e.kind);
+    expect(kinds01.indexOf("answered")).toBeLessThan(kinds01.lastIndexOf("spawned"));
+    expect(readQueuedAnswers(poolDir).answers.every((a) => a.processedAt !== null)).toBe(true);
+  }, 15000);
+
+  it("writes the answered event and queued record at acceptance for a review approval", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    run.accept(REVIEW_TICKET_ID, "ship it", true);
+
+    expect(readEventsFile(poolDir, REVIEW_TICKET_ID).map((e) => e.kind)).toEqual([
+      "answered",
+    ]);
+    expect(readEventsFile(poolDir, REVIEW_TICKET_ID)[0]?.payload).toEqual({
+      kind: "review",
+    });
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers).toHaveLength(1);
+    expect(queue.answers[0]).toMatchObject({
+      ticketId: REVIEW_TICKET_ID,
+      kind: "review",
+      approve: true,
+      note: "ship it",
+    });
+
+    const done = await run.settled;
+    expect(done.phase).toBe("done");
+    expect(done.final.log).toContain("review approved: the run is complete (ship it)");
+  });
+
+  it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    run.accept("01", "carry on");
+
+    // The record lives in runs/queued-answers.json, not in the checkpoint
+    // database's PoolState rows.
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers.map((a) => a.ticketId)).toEqual(["01"]);
+    const db = new Database(join(poolDir, "console.db"));
+    const rows = db
+      .query("SELECT state FROM checkpoints ORDER BY seq DESC LIMIT 1")
+      .all() as { state: string }[];
+    db.close();
+    expect(rows.at(-1)?.state ?? "").not.toContain("queued-answer");
+
+    const resumed = await run.settled;
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(resumed.final.tickets["01"]).toBe("done");
+    expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
   });
 });

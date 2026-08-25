@@ -23,9 +23,10 @@ import { join, resolve } from "node:path";
 import {
   readConfig,
   REVIEW_TICKET_ID,
-  runPool,
+  startPool,
   type HarnessCommand,
   type InterruptKind,
+  type PoolRun,
   type PoolSnapshot,
   type RunPhase,
 } from "./engine.ts";
@@ -86,6 +87,8 @@ export interface PoolServer {
   latest: EnrichedSnapshot | null;
   start: () => Promise<EnrichedSnapshot>;
   answer: (ticketId: string, action: "resume" | "approve" | "reject", note?: string) => Promise<EnrichedSnapshot>;
+  /** Resolves once the in-flight drive settles, with the settled snapshot. */
+  settled: () => Promise<EnrichedSnapshot>;
   url: string;
   close: () => Promise<void>;
 }
@@ -566,7 +569,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const poolName = poolDir.split("/").slice(-2).join("/");
 
   let latest: EnrichedSnapshot | null = null;
-  let currentRun: Awaited<ReturnType<typeof runPool>> | null = null;
+  let currentRun: PoolRun | null = null;
   let started = false;
 
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
@@ -583,23 +586,31 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     }
   }
 
-  async function driveRun(): Promise<EnrichedSnapshot> {
+  // The engine handle exists from the first super-step: startPool returns it
+  // immediately and the drive proceeds in the background, so answers are
+  // accepted from the very start of the run.
+  function driveRun(): EnrichedSnapshot {
     if (currentRun) currentRun.close();
-    const run = await runPool({
+    currentRun = startPool({
       poolDir,
       harnesses,
       onSnapshot: (snapshot) => broadcast(enrich(snapshot, meta, poolName)),
     });
-    currentRun = run;
     return latest!;
   }
 
   const start = (): Promise<EnrichedSnapshot> => {
-    if (started) return Promise.resolve(latest!);
-    started = true;
-    return driveRun();
+    if (!started) {
+      started = true;
+      driveRun();
+    }
+    return Promise.resolve(latest!);
   };
 
+  // Acceptance only (ADR-0004): the engine records the answer synchronously
+  // and the caller gets the current snapshot right away; processing happens
+  // immediately when the pool is idle and at the next super-step boundary
+  // otherwise.
   async function answer(
     ticketId: string,
     action: "resume" | "approve" | "reject",
@@ -623,15 +634,19 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         );
       }
     }
-    const next =
-      action === "approve"
-        ? await run.approve(ticketId, note)
-        : action === "reject"
-          ? await run.reject(ticketId, note)
-          : await run.resume(ticketId, note);
-    currentRun = next;
+    run.accept(
+      ticketId,
+      note,
+      action === "approve" ? true : action === "reject" ? false : undefined,
+    );
     return latest!;
   }
+
+  const settled = (): Promise<EnrichedSnapshot> => {
+    const run = currentRun;
+    if (!run) return Promise.resolve(latest!);
+    return run.settled.then(() => latest!);
+  };
 
   const resolution = resolvePort(
     options.port,
@@ -672,7 +687,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             const note = typeof body.note === "string" ? body.note : undefined;
             if (!ticketId) throw new Error("missing ticketId");
             const snapshot = await answer(ticketId, action, note);
-            return Response.json({ snapshot });
+            return Response.json({ snapshot }, { status: 202 });
           } catch (err) {
             return Response.json(
               { error: err instanceof Error ? err.message : String(err) },
@@ -797,6 +812,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     },
     start,
     answer,
+    settled,
     url: `http://localhost:${server.port}`,
     close: async () => {
       await server.stop(true);

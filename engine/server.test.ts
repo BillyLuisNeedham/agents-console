@@ -115,7 +115,8 @@ describe("pool server", () => {
     ]);
     const server = await startServer(poolDir, stubHarness({}));
 
-    const snapshot = await server.start();
+    await server.start();
+    const snapshot = await server.settled();
     expect(snapshot.phase).toBe("quiescent");
     expect(snapshot.state.interrupts.map((i) => i.kind)).toEqual(["review"]);
     const statuses = Object.fromEntries(snapshot.state.tickets.map((t) => [t.id, t.status]));
@@ -123,9 +124,11 @@ describe("pool server", () => {
     expect(snapshot.state.tickets.map((t) => t.blockedBy)).toEqual([[], ["01"]]);
     expect(snapshot.state.tickets.map((t) => t.title)).toEqual(["body", "body"]);
 
-    // Approving the review ends the run; the server stays up with the final
-    // state inspectable.
-    const approved = await server.answer(REVIEW_TICKET_ID, "approve");
+    // Approving the review is acknowledged immediately and ends the run once
+    // the answer is processed; the server stays up with the final state
+    // inspectable.
+    await server.answer(REVIEW_TICKET_ID, "approve");
+    const approved = await server.settled();
     expect(approved.phase).toBe("done");
     expect(approved.state.interrupts).toEqual([]);
     expect(server.latest?.phase).toBe("done");
@@ -155,7 +158,8 @@ describe("pool server", () => {
     ]);
     const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
 
-    const first = await server.start();
+    await server.start();
+    const first = await server.settled();
     expect(first.phase).toBe("quiescent");
     expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
     expect(first.state.tickets[0]?.status).toBe("checkpoint");
@@ -164,23 +168,30 @@ describe("pool server", () => {
     const stateBody = (await stateRes.json()) as { snapshot: typeof first };
     expect(stateBody.snapshot.phase).toBe("quiescent");
 
+    // The answer is acknowledged with 202 at acceptance; the snapshot it
+    // carries still shows the interrupt pending, because processing follows.
     const resumeRes = await fetch(`${server.url}/api/resume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ticketId: "01", action: "resume", note: "go on" }),
     });
+    expect(resumeRes.status).toBe(202);
     const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
-    expect(resumeBody.snapshot.phase).toBe("quiescent");
-    expect(resumeBody.snapshot.state.tickets[0]?.status).toBe("done");
-    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("review");
+    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("checkpoint");
+
+    const resumed = await server.settled();
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.state.tickets[0]?.status).toBe("done");
+    expect(resumed.state.interrupts[0]?.kind).toBe("review");
 
     const approveRes = await fetch(`${server.url}/api/resume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
     });
-    const approveBody = (await approveRes.json()) as { snapshot: typeof first };
-    expect(approveBody.snapshot.phase).toBe("done");
+    expect(approveRes.status).toBe(202);
+    const approved = await server.settled();
+    expect(approved.phase).toBe("done");
   });
 
   it("streams the latest snapshot to an SSE client on connect", async () => {
@@ -189,7 +200,9 @@ describe("pool server", () => {
     ]);
     const server = await startServer(poolDir, stubHarness({}));
     await server.start();
+    await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
+    await server.settled();
 
     const res = await fetch(`${server.url}/api/stream`);
     expect(res.status).toBe(200);
@@ -264,6 +277,7 @@ describe("ticket events endpoint", () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const server = await startServer(poolDir, stubHarness({}));
     await server.start();
+    await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
 
     const res = await fetch(`${server.url}/api/events?ticket=01`);
