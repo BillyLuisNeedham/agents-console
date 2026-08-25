@@ -116,6 +116,11 @@ export interface PoolSnapshot {
   seq: number;
   phase: RunPhase;
   state: PoolState;
+  // The queued-answer store's pending records at emit time, merged in as the
+  // snapshot is built. The store stays outside PoolState (ADR-0004); the
+  // snapshot is where the two meet, so every emitted frame carries the
+  // answered-and-waiting state with no change to super-step merge semantics.
+  queuedAnswers: QueuedAnswer[];
 }
 
 interface RunOptions {
@@ -390,16 +395,24 @@ function startDrive(session: Session): void {
   driveLoop(session).catch(() => {});
 }
 
-async function driveLoop(session: Session): Promise<void> {
-  const emit = (phase: RunPhase) => {
-    const snapshot: PoolSnapshot = {
-      seq: session.snapshots.length,
-      phase,
-      state: session.state,
-    };
-    session.snapshots.push(snapshot);
-    session.onSnapshot?.(snapshot);
+// One emit point for every snapshot the run produces: the drive loop's
+// lifecycle emits and the acceptance emit (a new queued answer while a
+// super-step is in flight). Each carries the store's pending answers at emit
+// time, and every markProcessed is followed by an emit, so the merged queue
+// in the snapshot stream never goes stale.
+function emitSnapshot(session: Session, phase: RunPhase): void {
+  const snapshot: PoolSnapshot = {
+    seq: session.snapshots.length,
+    phase,
+    state: session.state,
+    queuedAnswers: session.answers.pending(),
   };
+  session.snapshots.push(snapshot);
+  session.onSnapshot?.(snapshot);
+}
+
+async function driveLoop(session: Session): Promise<void> {
+  const emit = (phase: RunPhase) => emitSnapshot(session, phase);
 
   emit("running");
   try {
@@ -793,6 +806,12 @@ function acceptAnswer(
     ...(note !== undefined ? { note } : {}),
     at: new Date().toISOString(),
   });
+  // Mid-flight acceptance is the one moment the queue changes without an
+  // emit of its own, so push one: the answered-and-waiting state broadcasts
+  // now rather than at the next boundary. Idle acceptance skips this, as the
+  // synchronous drain and the fresh drive's first emit follow in the same
+  // tick and would only flash the waiting state.
+  if (session.driving) emitSnapshot(session, "running");
   return record;
 }
 

@@ -212,10 +212,23 @@ export class Detail {
   ): HTMLElement {
     const box = h(
       "div",
-      { class: "interrupt-box" },
+      { class: interrupt.queued ? "interrupt-box interrupt-box-queued" : "interrupt-box" },
       h("span", { class: "interrupt-kind" }, interrupt.form.title),
       h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
     );
+    // Answered-and-waiting: the answer is recorded and will be applied at the
+    // next super-step boundary, so the form steps aside for the waiting line.
+    // The interrupt stays on the card until processing clears it.
+    if (interrupt.queued) {
+      box.append(
+        h(
+          "div",
+          { class: "interrupt-waiting" },
+          "answered · waiting for the next super-step boundary",
+        ),
+      );
+      return box;
+    }
     const note = h("textarea", {
       class: "interrupt-note",
       placeholder:

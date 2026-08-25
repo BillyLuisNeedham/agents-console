@@ -23,6 +23,17 @@ interface PoolInterrupt {
   body: string;
 }
 
+/**
+ * An accepted answer still waiting for processing (a Queued answer). Merged
+ * into every snapshot at emit time from the queued-answer store; the waiting
+ * state the card and Detail render comes from matching one of these against
+ * a pending interrupt.
+ */
+interface PoolQueuedAnswer {
+  ticketId: string;
+  kind: string;
+}
+
 // ---------------------------------------------------------------------------
 // Interrupt forms: one form shape across the interrupt kinds, with a
 // kind-specific title and action set. Pure config over the interrupt; the
@@ -47,6 +58,8 @@ interface InterruptFormView {
 /** An interrupt with its form attached, as projected onto a card or Detail. */
 export interface InterruptView extends PoolInterrupt {
   form: InterruptFormView;
+  /** True while an accepted answer waits for processing: answered-and-waiting. */
+  queued: boolean;
 }
 
 const RESUME: InterruptFormAction = { action: "resume", label: "resume", tone: "primary" };
@@ -90,6 +103,7 @@ interface PoolState {
   log: string[];
   outcomes: Record<string, PoolOutcome>;
   interrupts: PoolInterrupt[];
+  queuedAnswers: PoolQueuedAnswer[];
   config: Record<string, unknown>;
 }
 
@@ -507,8 +521,15 @@ export function projectPoolEdges(
   return edges;
 }
 
-function toInterruptView(raw: PoolInterrupt | null): InterruptView | null {
-  return raw ? { ...raw, form: interruptForm(raw) } : null;
+function toInterruptView(raw: PoolInterrupt | null, state: PoolState): InterruptView | null {
+  if (!raw) return null;
+  return {
+    ...raw,
+    form: interruptForm(raw),
+    queued: state.queuedAnswers.some(
+      (answer) => answer.ticketId === raw.ticketId && answer.kind === raw.kind,
+    ),
+  };
 }
 
 function projectTicket(
@@ -525,7 +546,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
-    interrupt: toInterruptView(raw),
+    interrupt: toInterruptView(raw, state),
     x: pos.x,
     y: pos.y,
   };
@@ -544,7 +565,7 @@ function projectUtility(
     kind: "utility",
     id,
     label,
-    interrupt: toInterruptView(raw),
+    interrupt: toInterruptView(raw, state),
     x: pos.x,
     y: pos.y,
   };
@@ -606,15 +627,24 @@ export const POOL_TAB_COLORS = {
 } as const;
 
 /**
- * The pool's at-a-glance status for the browser tab, worst-first: any pending
- * interrupt or a stalled phase needs input; otherwise a running phase is
- * running, a done phase is complete, and anything else is idle. Quiescent
- * always carries a pending interrupt, so it lands on needs input without a
- * rule of its own. Colors come from the Console palette; the tab title and the
- * favicon both consume this value.
+ * The pool's at-a-glance status for the browser tab, worst-first: a pending
+ * interrupt with no queued answer or a stalled phase needs input; otherwise a
+ * running phase is running, a done phase is complete, and anything else is
+ * idle. An interrupt whose answer is already queued waits on the engine, not
+ * the operator, so it stays out of needs input. Quiescent always carries a
+ * pending interrupt, so it lands on needs input without a rule of its own.
+ * Colors come from the Console palette; the tab title and the favicon both
+ * consume this value.
  */
 export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
-  if (snapshot.state.interrupts.length > 0 || snapshot.phase === "stalled") {
+  const unanswered = snapshot.state.interrupts.some(
+    (interrupt) =>
+      !snapshot.state.queuedAnswers.some(
+        (answer) =>
+          answer.ticketId === interrupt.ticketId && answer.kind === interrupt.kind,
+      ),
+  );
+  if (unanswered || snapshot.phase === "stalled") {
     return { word: "needs input", color: POOL_TAB_COLORS.needsInput };
   }
   if (snapshot.phase === "running") {

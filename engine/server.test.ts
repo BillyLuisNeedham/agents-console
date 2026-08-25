@@ -90,6 +90,58 @@ function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Reco
   return { stub: harness };
 }
 
+// A stub harness whose blocked tickets hold their spawned script until the
+// sentinel file appears, so a test can keep a super-step in flight while it
+// answers an interrupt. Every other ticket takes the instant path.
+function blockingHarness(
+  behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
+  sentinel: string,
+): Record<string, HarnessCommand> {
+  const poolLocal = tempDirs[tempDirs.length - 1];
+  const stubPath = join(poolLocal, "blocking-stub.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"',
+      'if [ "$gate" = "block" ]; then',
+      '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+      "fi",
+      'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+      'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  const counts: Record<string, number> = {};
+  const harness: HarnessCommand = (ctx) => {
+    const n = counts[ctx.id] ?? 0;
+    counts[ctx.id] = n + 1;
+    const b = behaviour[ctx.id] ?? {};
+    const statuses = b.statuses ?? (["done"] as const);
+    const status = statuses[Math.min(n, statuses.length - 1)];
+    return [
+      "bash",
+      stubPath,
+      ctx.issuePath,
+      status,
+      ctx.outcomePath,
+      b.block ? "block" : "-",
+      sentinel,
+    ];
+  };
+  return { stub: harness };
+}
+
+async function waitFor(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(10);
+  }
+}
+
 /** A temp registry path inside the pool dir, so tests never touch the real one. */
 function fleetRegistry(poolDir: string): string {
   return join(poolDir, "fleet.json");
@@ -149,6 +201,10 @@ describe("pool server", () => {
       const server = await startServer(poolDir, stubHarness({}));
       const snapshot = await server.start();
       expect(snapshot.poolName).toBe(expected);
+      // Let the drive settle before afterEach removes the pool dir: a drive
+      // still writing attempt logs when its dir vanishes fails an unrelated
+      // test with the unhandled ENOENT.
+      await server.settled();
     }
   });
 
@@ -168,8 +224,9 @@ describe("pool server", () => {
     const stateBody = (await stateRes.json()) as { snapshot: typeof first };
     expect(stateBody.snapshot.phase).toBe("quiescent");
 
-    // The answer is acknowledged with 202 at acceptance; the snapshot it
-    // carries still shows the interrupt pending, because processing follows.
+    // The answer is acknowledged with 202 at acceptance. The pool is idle,
+    // so processing follows synchronously and the snapshot the 202 carries
+    // already shows it: no queued answer waiting, the interrupt gone.
     const resumeRes = await fetch(`${server.url}/api/resume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -177,7 +234,10 @@ describe("pool server", () => {
     });
     expect(resumeRes.status).toBe(202);
     const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
-    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("checkpoint");
+    expect(resumeBody.snapshot.state.queuedAnswers).toEqual([]);
+    expect(
+      resumeBody.snapshot.state.interrupts.some((i) => i.ticketId === "01"),
+    ).toBe(false);
 
     const resumed = await server.settled();
     expect(resumed.phase).toBe("quiescent");
@@ -245,6 +305,80 @@ describe("pool server", () => {
     const strangerRes = await post({ ticketId: "02", action: "resume" });
     expect(strangerRes.status).toBe(400);
   });
+
+  it("carries queued answers in the 202, /api/state, and SSE while a super-step is in flight", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+    ]);
+    const sentinel = join(poolDir, "release-03");
+    const server = await startServer(
+      poolDir,
+      blockingHarness(
+        {
+          "01": { statuses: ["checkpoint", "done"] },
+          "03": { statuses: ["done"], block: true },
+        },
+        sentinel,
+      ),
+    );
+    await server.start();
+    // Super-step 1 checkpoints 01 and finishes 02; super-step 2 spawns 03 and
+    // holds it open on the sentinel, with 01's interrupt pending throughout.
+    await waitFor(
+      () =>
+        server.latest?.state.interrupts.some((i) => i.ticketId === "01") === true &&
+        server.latest.state.tickets.find((t) => t.id === "03")?.status === "in-progress",
+      "super-step in flight with 01's interrupt pending",
+    );
+    type Snap = NonNullable<PoolServer["latest"]>;
+
+    // The 202's snapshot: the interrupt still pending, the answer visible as
+    // queued against it.
+    const resumeRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "resume", note: "go on" }),
+    });
+    expect(resumeRes.status).toBe(202);
+    const resumeBody = (await resumeRes.json()) as { snapshot: Snap };
+    expect(
+      resumeBody.snapshot.state.interrupts.some((i) => i.ticketId === "01"),
+    ).toBe(true);
+    expect(resumeBody.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
+    expect(resumeBody.snapshot.state.queuedAnswers[0]?.kind).toBe("checkpoint");
+
+    const stateRes = await fetch(`${server.url}/api/state`);
+    const stateBody = (await stateRes.json()) as { snapshot: Snap };
+    expect(stateBody.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
+
+    // An SSE client connecting now replays the latest snapshot, queue included.
+    const res = await fetch(`${server.url}/api/stream`);
+    const reader = res.body?.getReader();
+    expect(reader).toBeTruthy();
+    const decoder = new TextDecoder();
+    let data = "";
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && !data.includes('"queuedAnswers"')) {
+      const { value, done } = await reader!.read();
+      if (done) break;
+      data += decoder.decode(value, { stream: true });
+    }
+    reader!.cancel();
+    expect(data).toContain('"ticketId":"01"');
+
+    // Processing at the boundary clears the waiting state on the snapshot
+    // that follows, with no re-poll.
+    writeFileSync(sentinel, "go");
+    await server.settled();
+    const clearedRes = await fetch(`${server.url}/api/state`);
+    const cleared = (await clearedRes.json()) as { snapshot: Snap };
+    expect(cleared.snapshot.state.queuedAnswers).toEqual([]);
+    expect(
+      cleared.snapshot.state.interrupts.some((i) => i.ticketId === "01"),
+    ).toBe(false);
+  }, 15000);
 
   it("streams the latest snapshot to an SSE client on connect", async () => {
     const poolDir = makePool([

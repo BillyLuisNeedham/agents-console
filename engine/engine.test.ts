@@ -3248,6 +3248,51 @@ describe("accept/process split", () => {
     expect(readQueuedAnswers(poolDir).answers.every((a) => a.processedAt !== null)).toBe(true);
   }, 15000);
 
+  it("emits the queued answer on acceptance mid-flight and clears it at the boundary", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-03");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "03": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["03"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01"),
+      "ticket 03 spawned with 01's interrupt pending",
+    );
+
+    run.accept("01", "go on");
+
+    // Acceptance emitted a snapshot carrying the queued answer while the
+    // super-step was still in flight; the interrupt is still pending on it.
+    const accepted = run.snapshots.at(-1)!;
+    expect(accepted.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
+    expect(accepted.queuedAnswers[0]?.kind).toBe("checkpoint");
+    expect(accepted.state.interrupts.some((i) => i.ticketId === "01")).toBe(true);
+
+    writeFileSync(sentinel, "go");
+    await run.settled;
+
+    // The boundary drain processed the answer, and the snapshots that follow
+    // no longer carry it.
+    const settled = run.snapshots.at(-1)!;
+    expect(settled.queuedAnswers).toEqual([]);
+    expect(settled.state.interrupts.some((i) => i.ticketId === "01")).toBe(false);
+  }, 15000);
+
   it("writes the answered event and queued record at acceptance for a review approval", async () => {
     const poolDir = makePool({
       tickets: [

@@ -266,6 +266,12 @@ body {
   background: var(--interrupt);
 }
 
+/* Answered-and-waiting reads in the running amber: the answer landed and the
+   wait is on the engine, not on the operator. */
+.dot-queued {
+  background: var(--status-running);
+}
+
 /* ------------------------------------------------------------------- main */
 
 .main {
@@ -430,6 +436,23 @@ body {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* The answered-and-waiting Detail: the same moment as the card, at full
+   size, in the same amber. */
+.interrupt-box-queued {
+  border-color: var(--status-running);
+  background: rgba(210, 153, 34, 0.08);
+}
+
+.interrupt-box-queued .interrupt-kind {
+  color: var(--status-running);
+}
+
+.interrupt-waiting {
+  color: var(--status-running);
+  font-size: 11px;
+  letter-spacing: 0.04em;
 }
 
 .interrupt-check {
@@ -672,6 +695,13 @@ body {
   animation: interrupt-pulse 1.6s ease-in-out infinite;
 }
 
+/* The queued answer's card keeps the interrupt's unfaded presence but drops
+   the red pulse: nothing is asked of the operator any more. */
+.ticket-card-queued {
+  border-color: var(--status-running);
+  opacity: 1;
+}
+
 .interrupt-body {
   margin: 0;
   padding: 6px 8px;
@@ -723,6 +753,12 @@ body {
   border-style: solid;
   opacity: 1;
   animation: interrupt-pulse 1.6s ease-in-out infinite;
+}
+
+.node-card-utility-queued {
+  border-color: var(--status-running);
+  border-style: solid;
+  opacity: 1;
 }
 
 /* -------------------------------------------------------------- run strip */

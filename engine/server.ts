@@ -49,6 +49,7 @@ import {
   type TicketStatus,
 } from "./pool.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
+import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
 
 export interface PoolServerOptions {
@@ -79,6 +80,8 @@ interface EnrichedSnapshot {
     log: string[];
     outcomes: Record<string, { summary: string; commitSha: string | null }>;
     interrupts: { ticketId: string; kind: InterruptKind; body: string }[];
+    /** Accepted answers still waiting for processing (the Queued answers). */
+    queuedAnswers: QueuedAnswer[];
     config: Record<string, unknown>;
   };
 }
@@ -114,6 +117,7 @@ function enrich(snapshot: PoolSnapshot, meta: TicketMarker[], poolName: string):
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
       interrupts: snapshot.state.interrupts,
+      queuedAnswers: snapshot.queuedAnswers,
       config: snapshot.state.config as unknown as Record<string, unknown>,
     },
   };
@@ -637,17 +641,18 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         );
       }
     }
-    // The snapshot at acceptance: acceptance never mutates PoolState, so it
-    // still shows the interrupt pending. Read before the accept, because an
-    // idle pool processes the answer synchronously inside it and the fresh
-    // drive's first emit would already carry the post-processing state.
-    const accepted = latest!;
     run.accept(
       ticketId,
       note,
       action === "approve" ? true : action === "reject" ? false : undefined,
     );
-    return accepted;
+    // The snapshot after acceptance: mid-flight it carries the queued answer
+    // (the acceptance emit has already broadcast it), idle it carries the
+    // processed state, since the drain and the fresh drive's first emit run
+    // synchronously inside accept. Returning the pre-accept snapshot instead
+    // would race that SSE frame and could clobber the waiting state in the
+    // UI.
+    return latest!;
   }
 
   const settled = (): Promise<EnrichedSnapshot> => {

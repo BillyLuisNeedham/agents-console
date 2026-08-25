@@ -301,8 +301,10 @@ export class Canvas {
     if (card.interrupt) {
       head.append(
         h("span", {
-          class: "dot dot-interrupt",
-          title: `interrupt · ${card.interrupt.kind}`,
+          class: card.interrupt.queued ? "dot dot-queued" : "dot dot-interrupt",
+          title: card.interrupt.queued
+            ? `answered · waiting · ${card.interrupt.kind}`
+            : `interrupt · ${card.interrupt.kind}`,
         }),
       );
     }
@@ -311,7 +313,11 @@ export class Canvas {
       {
         class:
           `node-card ticket-card ticket-card-${card.status}` +
-          (card.interrupt ? " ticket-card-interrupt" : "") +
+          (card.interrupt
+            ? card.interrupt.queued
+              ? " ticket-card-queued"
+              : " ticket-card-interrupt"
+            : "") +
           this.flowClass(card.id, selection),
         "data-node-id": card.id,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
@@ -345,8 +351,10 @@ export class Canvas {
     if (card.interrupt) {
       head.append(
         h("span", {
-          class: "dot dot-interrupt",
-          title: `interrupt · ${card.interrupt.kind}`,
+          class: card.interrupt.queued ? "dot dot-queued" : "dot dot-interrupt",
+          title: card.interrupt.queued
+            ? `answered · waiting · ${card.interrupt.kind}`
+            : `interrupt · ${card.interrupt.kind}`,
         }),
       );
     }
@@ -355,7 +363,11 @@ export class Canvas {
       {
         class:
           "node-card node-card-utility" +
-          (card.interrupt ? " node-card-utility-interrupt" : "") +
+          (card.interrupt
+            ? card.interrupt.queued
+              ? " node-card-utility-queued"
+              : " node-card-utility-interrupt"
+            : "") +
           this.flowClass(card.id, selection),
         "data-node-id": card.id,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,

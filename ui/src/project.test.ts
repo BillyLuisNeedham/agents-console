@@ -65,19 +65,25 @@ function ticket(
   };
 }
 
-function snapshot(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
+function snapshot(
+  overrides: Omit<Partial<PoolSnapshot>, "state"> & {
+    state?: Partial<PoolSnapshot["state"]>;
+  } = {},
+): PoolSnapshot {
   return {
     seq: 0,
     phase: "running",
     poolName: "repo/pool",
+    ...overrides,
     state: {
       tickets: [],
       log: [],
       outcomes: {},
       interrupts: [],
+      queuedAnswers: [],
       config: {},
+      ...overrides.state,
     },
-    ...overrides,
   };
 }
 
@@ -334,6 +340,78 @@ describe("interrupt projection", () => {
   });
 });
 
+describe("queued-answer waiting state", () => {
+  function queuedSnapshot(): PoolSnapshot {
+    return snapshot({
+      state: {
+        tickets: [ticket("A"), ticket("B")],
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief A" },
+          { ticketId: "B", kind: "checkpoint", body: "brief B" },
+        ],
+        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+      },
+    });
+  }
+
+  it("projects the waiting state onto the card of the answered ticket only", () => {
+    const view = projectPool(queuedSnapshot());
+    const answered = view.cards.find((c) => c.id === "ticket:A");
+    const unanswered = view.cards.find((c) => c.id === "ticket:B");
+    expect(answered?.kind).toBe("ticket");
+    expect(unanswered?.kind).toBe("ticket");
+    if (answered?.kind === "ticket" && unanswered?.kind === "ticket") {
+      // The interrupt stays pending on both; the queued flag carries the
+      // "my click landed and is waiting" distinction.
+      expect(answered.interrupt?.queued).toBe(true);
+      expect(unanswered.interrupt?.queued).toBe(false);
+    }
+  });
+
+  it("mirrors the waiting state in the Detail", () => {
+    const detail = projectDetail(queuedSnapshot(), "ticket:A");
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.interrupt?.queued).toBe(true);
+      expect(detail.interrupt?.kind).toBe("checkpoint");
+    }
+  });
+
+  it("clears the waiting state on the snapshot where the answer is processed", () => {
+    const processed = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "in-progress" }), ticket("B")],
+        interrupts: [{ ticketId: "B", kind: "checkpoint", body: "brief B" }],
+      },
+    });
+    const card = projectPool(processed).cards.find((c) => c.id === "ticket:A");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.interrupt).toBeNull();
+    }
+    const other = projectPool(processed).cards.find((c) => c.id === "ticket:B");
+    expect(other?.kind).toBe("ticket");
+    if (other?.kind === "ticket") {
+      expect(other.interrupt?.queued).toBe(false);
+    }
+  });
+
+  it("matches the queued answer to its interrupt kind, not just the ticket", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [{ ticketId: "A", kind: "merge-approval", body: "resolution" }],
+        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+      },
+    });
+    const card = projectPool(snap).cards.find((c) => c.id === "ticket:A");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.interrupt?.queued).toBe(false);
+    }
+  });
+});
+
 describe("review projection", () => {
   function reviewSnapshot(): PoolSnapshot {
     return snapshot({
@@ -452,6 +530,7 @@ describe("projectDetailTab", () => {
     kind: "checkpoint",
     body: "the brief",
     form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+    queued: false,
   });
 
   it("maps each pool status to its default tab", () => {
@@ -507,6 +586,7 @@ describe("projectDetailTabs", () => {
     kind: "checkpoint",
     body: "the brief",
     form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+    queued: false,
   });
 
   it("projects the fixed Spec / Progress / Outcome bar on every status", () => {
@@ -585,6 +665,38 @@ describe("poolStatus", () => {
 
   it("needs input when stalled with no interrupts", () => {
     expect(poolStatus(snapshot({ phase: "stalled" }))).toEqual({
+      word: "needs input",
+      color: "#f85149",
+    });
+  });
+
+  it("stays out of needs input while every pending interrupt has a queued answer", () => {
+    const snap = snapshot({
+      phase: "running",
+      state: {
+        interrupts: [
+          { ticketId: "a", kind: "checkpoint", body: "" },
+          { ticketId: "b", kind: "checkpoint", body: "" },
+        ],
+        queuedAnswers: [
+          { ticketId: "a", kind: "checkpoint" },
+          { ticketId: "b", kind: "checkpoint" },
+        ],
+      },
+    });
+    expect(poolStatus(snap)).toEqual({ word: "running", color: "#d29922" });
+
+    const oneWaiting = snapshot({
+      phase: "running",
+      state: {
+        interrupts: [
+          { ticketId: "a", kind: "checkpoint", body: "" },
+          { ticketId: "b", kind: "checkpoint", body: "" },
+        ],
+        queuedAnswers: [{ ticketId: "a", kind: "checkpoint" }],
+      },
+    });
+    expect(poolStatus(oneWaiting)).toEqual({
       word: "needs input",
       color: "#f85149",
     });
