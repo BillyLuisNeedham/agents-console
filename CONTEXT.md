@@ -80,3 +80,7 @@ _Avoid_: run (that's the whole thread), execution, job
 **Ticket log**:
 The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.
 _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
+
+**Queued answer**:
+An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
+_Avoid_: pending answer (that's the interrupt, not the answer)
