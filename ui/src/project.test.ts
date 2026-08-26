@@ -535,6 +535,65 @@ describe("blocked-by-checkpoint notice", () => {
   });
 });
 
+describe("checkpoint visible at attempt exit", () => {
+  function windowSnapshot(): PoolSnapshot {
+    return snapshot({
+      phase: "running",
+      state: {
+        tickets: [
+          ticket("01", { status: "checkpoint" }),
+          ticket("02", { status: "in-progress" }),
+          ticket("03", { blockedBy: ["01"] }),
+        ],
+        interrupts: [{ ticketId: "01", kind: "checkpoint", body: "pick a name" }],
+      },
+    });
+  }
+
+  it("projects the full needs-human look on the checkpointed card while the sibling runs", () => {
+    const view = projectPool(windowSnapshot());
+    const card = view.cards.find((c) => c.id === ticketCardId("01"));
+    const sibling = view.cards.find((c) => c.id === ticketCardId("02"));
+    expect(card?.kind).toBe("ticket");
+    expect(sibling?.kind).toBe("ticket");
+    if (card?.kind === "ticket" && sibling?.kind === "ticket") {
+      expect(card.status).toBe("checkpoint");
+      expect(card.interrupt?.kind).toBe("checkpoint");
+      expect(card.interrupt?.body).toBe("pick a name");
+      expect(card.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+      expect(sibling.status).toBe("in-progress");
+      expect(sibling.interrupt).toBeNull();
+    }
+  });
+
+  it("offers the interrupt form in the Detail and reports needs input during the window", () => {
+    const detail = projectDetail(windowSnapshot(), ticketCardId("01"));
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.interrupt?.form.title).toBe("checkpoint");
+      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual([
+        "resume",
+      ]);
+    }
+    expect(poolStatus(windowSnapshot())).toEqual({
+      word: "needs input",
+      color: "#f85149",
+    });
+  });
+
+  it("shows the blocked-by-checkpoint notice on the dependent during the window", () => {
+    const view = projectPool(windowSnapshot());
+    const dependent = view.cards.find((c) => c.id === ticketCardId("03"));
+    expect(dependent?.kind).toBe("ticket");
+    if (dependent?.kind === "ticket") {
+      expect(dependent.blockedByCheckpoint).toEqual(["01"]);
+      expect(checkpointNotice(dependent.blockedByCheckpoint)).toBe(
+        "blocked by checkpoint on ticket 01 (waiting on you)",
+      );
+    }
+  });
+});
+
 describe("review projection", () => {
   function reviewSnapshot(): PoolSnapshot {
     return snapshot({
@@ -643,6 +702,7 @@ describe("projectDetailTab", () => {
       title: `ticket ${ticketId}`,
       status,
       blockedBy: [],
+      blockedByCheckpoint: [],
       outcome: null,
       interrupt,
     };
@@ -699,6 +759,7 @@ describe("projectDetailTabs", () => {
       title: `ticket ${ticketId}`,
       status,
       blockedBy: [],
+      blockedByCheckpoint: [],
       outcome: null,
       interrupt,
     };

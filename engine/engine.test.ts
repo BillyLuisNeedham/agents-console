@@ -3693,7 +3693,7 @@ describe("accept/process split", () => {
     ).toHaveLength(1);
   }, 15000);
 
-  it("joins a checkpoint into state at attempt exit, before a slow sibling exits", async () => {
+  it("raises a checkpoint's interrupt at attempt exit, before a slow sibling exits", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -3718,22 +3718,33 @@ describe("accept/process split", () => {
     const run = startPool({ poolDir, harnesses: rig.harnesses });
     await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
 
-    // The checkpoint status landed in state at exit while 02 still runs: the
-    // snapshot already carries the red status word and the marker agrees. The
-    // interrupt itself still waits for the super-step boundary.
+    // The checkpoint status and its interrupt both landed in state at exit
+    // while 02 still runs: the snapshot already carries the red status word,
+    // the pending interrupt, and the checkpoint event, and the marker agrees.
     await waitFor(
       () =>
         run.snapshots.some(
           (snapshot) =>
             snapshot.state.tickets["01"] === "checkpoint" &&
-            snapshot.state.tickets["02"] === "in-progress",
+            snapshot.state.tickets["02"] === "in-progress" &&
+            snapshot.state.interrupts.some(
+              (i) => i.ticketId === "01" && i.kind === "checkpoint",
+            ),
         ),
-      "snapshot showing 01 checkpoint while 02 still runs",
+      "snapshot showing 01 checkpoint with its interrupt pending while 02 still runs",
     );
     expect(
       readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
     ).toContain("status=checkpoint");
-    expect(run.interrupts).toEqual([]);
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    // The checkpoint event is recorded at exit, once.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "checkpoint"),
+    ).toHaveLength(1);
+    // The sibling is untouched: still in-progress, no pause, no crash.
+    expect(run.final.tickets["02"]).toBe("in-progress");
 
     writeFileSync(sentinel, "go");
     await run.settled;
@@ -3742,11 +3753,75 @@ describe("accept/process split", () => {
     expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
     expect(run.interrupts[0]?.body).toBe("pick a name");
     expect(run.final.tickets).toEqual({ "01": "checkpoint", "02": "done" });
-    // The checkpoint event was written exactly once, at the boundary; the
-    // at-exit join did not duplicate it.
+    // The boundary did not raise or record the checkpoint again.
     expect(
       readEventsFile(poolDir, "01").filter((e) => e.kind === "checkpoint"),
     ).toHaveLength(1);
+  }, 15000);
+
+  it("accepts an answer during the window, queues it, and processes it at the boundary", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-02");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["02"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01"),
+      "ticket 02 spawned with 01's checkpoint interrupt already pending",
+    );
+
+    // 02 has not been released, so the super-step is still in flight; the
+    // interrupt raised at 01's exit is answerable now. Acceptance is
+    // immediate: the answered event and the queued record land while 02
+    // still runs, and a snapshot pushes the waiting state to the Console.
+    const resume = run.resume("01", "the name is Foo");
+    const accepted = run.snapshots.at(-1)!;
+    expect(accepted.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
+    expect(accepted.queuedAnswers[0]?.kind).toBe("checkpoint");
+    expect(accepted.state.interrupts.some((i) => i.ticketId === "01")).toBe(true);
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
+    ).toHaveLength(1);
+    expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).toBeNull();
+    // The answer is queued, not processed: the marker is still checkpoint and
+    // the resume promise waits on the boundary.
+    expect(
+      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
+    ).toContain("status=checkpoint");
+    let resolved = false;
+    void resume.then(() => {
+      resolved = true;
+    });
+    await Bun.sleep(50);
+    expect(resolved).toBe(false);
+
+    writeFileSync(sentinel, "go");
+    await resume;
+
+    // The boundary drained the answer (01 back to ready) and the next
+    // super-step re-ran it to done; the sibling ran its own exit untouched.
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
   }, 15000);
 
   it("applies an at-exit terminal join exactly once and keeps the final snapshot sequence coherent", async () => {

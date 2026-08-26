@@ -515,10 +515,22 @@ async function driveLoop(session: Session): Promise<void> {
               // the card and in the snapshot stream while its siblings still
               // run. The boundary join skips it (joinedAtExit), so applying
               // the same update twice is a no-op; anything genuinely computed
-              // across results stays there. The checkpoint's interrupt still
-              // waits for the boundary.
+              // across results stays there. A checkpoint's interrupt is
+              // raised here too, so the card turns red and the interrupt is
+              // answerable while a sibling still runs; an answer accepted
+              // then is queued and processed at the next boundary
+              // (ADR-0004), so raising the interrupt processes nothing.
               session.state = applyUpdate(session.state, result.update);
               result.joinedAtExit = true;
+              if (result.status === "checkpoint") {
+                raiseInterrupt(session, checkpointInterrupt(result.marker));
+                appendEvent(session.runsDir, result.marker.id, {
+                  at: new Date().toISOString(),
+                  attempt: result.plan.attempt,
+                  kind: "checkpoint",
+                  payload: {},
+                });
+              }
               emit("running");
             }
             return result;
@@ -563,18 +575,11 @@ async function driveLoop(session: Session): Promise<void> {
         }
       }
       for (const { marker, status, logPath } of results) {
-        if (status === "checkpoint") {
-          raiseInterrupt(session, checkpointInterrupt(marker));
-          appendEvent(session.runsDir, marker.id, {
-            at: new Date().toISOString(),
-            attempt: lastAttempt(session.runsDir, marker.id),
-            kind: "checkpoint",
-            payload: {},
-          });
-        } else if (status === "in-progress") {
+        if (status === "in-progress") {
           // The crash event and the marker update landed at attempt exit;
-          // only the crash interrupt waits for the boundary, so the state
-          // join above stays the single writer of PoolState.
+          // the crash interrupt waits for the boundary. A checkpoint's
+          // interrupt was raised at exit, so the state join above stays the
+          // single writer of PoolState.
           raiseInterrupt(session, {
             ticketId: marker.id,
             kind: "crash",
