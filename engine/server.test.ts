@@ -306,6 +306,68 @@ describe("pool server", () => {
     expect(strangerRes.status).toBe(400);
   });
 
+  it("answers 400 for a review reject that names no ticket, recording nothing", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+    const first = await server.settled();
+    expect(first.state.interrupts[0]?.kind).toBe("review");
+
+    // A reject whose note names no ticket is genuinely invalid: the 400
+    // comes back from acceptance, and no answered event or queued record is
+    // written for an answer that had no effect.
+    const rejectRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ticketId: REVIEW_TICKET_ID,
+        action: "reject",
+        note: "this is not good enough",
+      }),
+    });
+    expect(rejectRes.status).toBe(400);
+    const body = (await rejectRes.json()) as { error: string };
+    expect(body.error).toMatch(/name at least one ticket/);
+
+    const state = await fetch(`${server.url}/api/state`);
+    const stateBody = (await state.json()) as { snapshot: typeof first };
+    expect(stateBody.snapshot.state.interrupts[0]?.kind).toBe("review");
+    expect(stateBody.snapshot.state.queuedAnswers).toEqual([]);
+    expect(existsSync(join(poolDir, "runs", "queued-answers.json"))).toBe(false);
+    const reviewEvents = join(poolDir, "runs", `${REVIEW_TICKET_ID}.events.jsonl`);
+    if (existsSync(reviewEvents)) {
+      expect(readFileSync(reviewEvents, "utf8")).not.toContain('"answered"');
+    }
+
+    // The gate still works: a reject that does name a ticket is accepted.
+    const validRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ticketId: REVIEW_TICKET_ID,
+        action: "reject",
+        note: "redo 01",
+      }),
+    });
+    expect(validRes.status).toBe(202);
+    const rejected = await server.settled();
+    expect(rejected.phase).toBe("quiescent");
+    expect(rejected.state.interrupts[0]?.kind).toBe("review");
+    expect(readFileSync(join(poolDir, "issues", "01-a.md"), "utf8")).toContain(
+      "## Review note",
+    );
+
+    const approveRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+    });
+    expect(approveRes.status).toBe(202);
+    await server.settled();
+  });
+
   it("carries queued answers in the 202, /api/state, and SSE while a super-step is in flight", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },

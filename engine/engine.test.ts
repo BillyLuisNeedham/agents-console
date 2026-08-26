@@ -1540,6 +1540,20 @@ describe("final review", () => {
     ).rejects.toThrow(/name at least one ticket/);
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
 
+    // The reject failed at acceptance, so nothing was recorded: no answered
+    // event in the log and no queued-answer record on disk. Before the
+    // acceptance-time check both were written and the failure surfaced only
+    // at processing, where no waiter was listening.
+    const reviewEvents = join(poolDir, "runs", `${REVIEW_TICKET_ID}.events.jsonl`);
+    if (existsSync(reviewEvents)) {
+      const kinds = readFileSync(reviewEvents, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => (JSON.parse(line) as { kind: string }).kind);
+      expect(kinds).not.toContain("answered");
+    }
+    expect(existsSync(join(poolDir, "runs", "queued-answers.json"))).toBe(false);
+
     const done = await approveReview(run);
     expect(done.phase).toBe("done");
   });

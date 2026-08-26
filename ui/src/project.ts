@@ -550,14 +550,23 @@ export function checkpointNotice(blockers: string[]): string {
   return `blocked by checkpoint on ${noun} ${blockers.join(", ")} (waiting on you)`;
 }
 
+/** True when the queued answer is the accepted answer for this interrupt. */
+function isAnswerQueued(
+  answers: PoolQueuedAnswer[],
+  interrupt: { ticketId: string; kind: string },
+): boolean {
+  return answers.some(
+    (answer) =>
+      answer.ticketId === interrupt.ticketId && answer.kind === interrupt.kind,
+  );
+}
+
 function toInterruptView(raw: PoolInterrupt | null, state: PoolState): InterruptView | null {
   if (!raw) return null;
   return {
     ...raw,
     form: interruptForm(raw),
-    queued: state.queuedAnswers.some(
-      (answer) => answer.ticketId === raw.ticketId && answer.kind === raw.kind,
-    ),
+    queued: isAnswerQueued(state.queuedAnswers, raw),
   };
 }
 
@@ -668,11 +677,7 @@ export const POOL_TAB_COLORS = {
  */
 export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
   const unanswered = snapshot.state.interrupts.some(
-    (interrupt) =>
-      !snapshot.state.queuedAnswers.some(
-        (answer) =>
-          answer.ticketId === interrupt.ticketId && answer.kind === interrupt.kind,
-      ),
+    (interrupt) => !isAnswerQueued(snapshot.state.queuedAnswers, interrupt),
   );
   if (unanswered || snapshot.phase === "stalled") {
     return { word: "needs input", color: POOL_TAB_COLORS.needsInput };

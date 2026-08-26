@@ -231,7 +231,9 @@ interface Session {
   settledPhase: Exclude<RunPhase, "running"> | null;
   settleWaiters: SettleWaiter[];
   answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }[]>;
-  handle: PoolRun;
+  // Null only until startPool assigns it just after rehydrate, before the
+  // drive starts; every read goes through handleOf, which guards that.
+  handle: PoolRun | null;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
   resolverAttempts: Map<string, { files: string[]; note: string }>;
@@ -281,15 +283,23 @@ export function startPool(options: RunOptions): PoolRun {
     settledPhase: null,
     settleWaiters: [],
     answerWaiters: new Map(),
-    handle: undefined as unknown as PoolRun,
+    handle: null,
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     resolverAttempts: new Map(),
   };
 
   rehydrate(session);
-  session.handle = makeHandle(session);
+  const handle = makeHandle(session);
+  session.handle = handle;
   startDrive(session);
+  return handle;
+}
+
+// The handle exists from just after rehydrate onward; settle paths only run
+// once the drive is going, so the guard never fires in practice.
+function handleOf(session: Session): PoolRun {
+  if (!session.handle) throw new Error("pool handle not initialised");
   return session.handle;
 }
 
@@ -356,7 +366,7 @@ function makeHandle(session: Session): PoolRun {
 }
 
 function nextSettle(session: Session): Promise<PoolRun> {
-  if (!session.driving) return Promise.resolve(session.handle);
+  if (!session.driving) return Promise.resolve(handleOf(session));
   return new Promise<PoolRun>((resolve, reject) => {
     session.settleWaiters.push({ resolve, reject });
   });
@@ -375,7 +385,7 @@ function settleDrive(
   const waiters = session.settleWaiters.splice(0);
   for (const waiter of waiters) {
     if (error) waiter.reject(error);
-    else waiter.resolve(session.handle);
+    else waiter.resolve(handleOf(session));
   }
   if (error) {
     for (const [, waiters] of session.answerWaiters) {
@@ -790,6 +800,14 @@ function acceptAnswer(
         a.approve === approve,
     );
   if (duplicate) return duplicate;
+  // A reject that names no ticket is genuinely invalid, so it fails here at
+  // acceptance (a 400 for the caller) rather than queueing an answer that
+  // would fail at processing with nobody listening. The duplicate check runs
+  // first so a retry of an already-accepted reject is still acknowledged.
+  if (interrupt.kind === "review" && approve === false) {
+    const named = namedReviewTickets(session.markers, note);
+    if (named.length === 0) throw new Error(reviewRejectUnnamedError(session.markers));
+  }
   appendEvent(session.runsDir, ticketId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, ticketId),
@@ -849,6 +867,9 @@ function drainAnswers(session: Session): void {
 // and the drive kick (the caller's: the boundary's loop continues, the idle
 // path starts a fresh drive after the drain).
 function processAnswer(session: Session, record: QueuedAnswer): void {
+  // The match is on ticketId alone even though the queued record also knows
+  // its kind: a ticket holds one pending interrupt at a time, and a record
+  // only drains while that interrupt is still up, so the kind cannot differ.
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === record.ticketId,
   );
@@ -1343,6 +1364,24 @@ function namesTicket(note: string, id: string): boolean {
   );
 }
 
+// The ticket ids a review reject's note names. Shared by acceptance (which
+// rejects an unnamed reject outright) and processing (which keeps the same
+// guard for a record accepted before this check existed).
+function namedReviewTickets(
+  markers: TicketMarker[],
+  note: string | undefined,
+): string[] {
+  const text = note?.trim() ?? "";
+  return markers.filter((marker) => namesTicket(text, marker.id)).map((m) => m.id);
+}
+
+function reviewRejectUnnamedError(markers: TicketMarker[]): string {
+  return (
+    "review reject: name at least one ticket in the note " +
+    `(known: ${markers.map((m) => m.id).join(", ")})`
+  );
+}
+
 // Rejecting sends the named tickets back to ready with the note appended to
 // their Issue files, and invalidates their downstream tickets to ready too:
 // anything built on rejected work runs again. Outcomes for the reset tickets
@@ -1354,15 +1393,9 @@ function rejectReview(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const text = note?.trim() ?? "";
-  const named = session.markers
-    .filter((marker) => namesTicket(text, marker.id))
-    .map((marker) => marker.id);
+  const named = namedReviewTickets(session.markers, note);
   if (named.length === 0) {
-    throw new Error(
-      "review reject: name at least one ticket in the note " +
-        `(known: ${session.markers.map((m) => m.id).join(", ")})`,
-    );
+    throw new Error(reviewRejectUnnamedError(session.markers));
   }
   const reset = new Set(named);
   let grew = true;
@@ -1386,7 +1419,7 @@ function rejectReview(
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
     if (named.includes(marker.id)) {
-      appendFileSync(marker.file, `\n## Review note\n\n${text}\n`);
+      appendFileSync(marker.file, `\n## Review note\n\n${note?.trim() ?? ""}\n`);
     }
     rmSync(join(session.runsDir, `${marker.id}.outcome.json`), {
       force: true,

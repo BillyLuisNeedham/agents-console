@@ -19,6 +19,7 @@ import {
   zoomAtCursor,
   type CardBox,
   type EdgeMode,
+  type InterruptView,
   type Point,
   type PoolCardView,
   type TicketCardView,
@@ -36,6 +37,18 @@ const DRAG_THRESHOLD = 4;
 const WORLD_MIN_WIDTH = 960;
 
 type Positioned = { id: string; x: number; y: number };
+
+// The pending/queued dot every card with an interrupt carries in its head:
+// a plain dot while the interrupt waits on the operator, a queued dot once
+// an answer is accepted and waiting on the engine.
+function interruptDot(interrupt: InterruptView): HTMLElement {
+  return h("span", {
+    class: interrupt.queued ? "dot dot-queued" : "dot dot-interrupt",
+    title: interrupt.queued
+      ? `answered · waiting · ${interrupt.kind}`
+      : `interrupt · ${interrupt.kind}`,
+  });
+}
 
 type Drag =
   | {
@@ -300,14 +313,7 @@ export class Canvas {
       ),
     );
     if (card.interrupt) {
-      head.append(
-        h("span", {
-          class: card.interrupt.queued ? "dot dot-queued" : "dot dot-interrupt",
-          title: card.interrupt.queued
-            ? `answered · waiting · ${card.interrupt.kind}`
-            : `interrupt · ${card.interrupt.kind}`,
-        }),
-      );
+      head.append(interruptDot(card.interrupt));
     }
     const blockers =
       card.blockedByCheckpoint.length > 0
@@ -358,14 +364,7 @@ export class Canvas {
       h("span", { class: "node-card-id" }, card.label),
     );
     if (card.interrupt) {
-      head.append(
-        h("span", {
-          class: card.interrupt.queued ? "dot dot-queued" : "dot dot-interrupt",
-          title: card.interrupt.queued
-            ? `answered · waiting · ${card.interrupt.kind}`
-            : `interrupt · ${card.interrupt.kind}`,
-        }),
-      );
+      head.append(interruptDot(card.interrupt));
     }
     return h(
       "div",
