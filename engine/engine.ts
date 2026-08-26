@@ -503,19 +503,37 @@ async function driveLoop(session: Session): Promise<void> {
                 });
               });
             }
-            // A crashed attempt was recorded at exit; push a snapshot now so
-            // the Console shows the crash within seconds, not when the
-            // slowest sibling's super-step ends.
-            if (result.status === "in-progress") emit("running");
+            if (result.status === "in-progress") {
+              // A crashed attempt was recorded at exit (the crash event
+              // landed in runTicket); push a snapshot now so the Console
+              // shows the crash within seconds, not when the slowest
+              // sibling's super-step ends.
+              emit("running");
+            } else {
+              // A terminal result (done or checkpoint) lands in state the
+              // moment the attempt exits, so its true status word shows on
+              // the card and in the snapshot stream while its siblings still
+              // run. The boundary join skips it (joinedAtExit), so applying
+              // the same update twice is a no-op; anything genuinely computed
+              // across results stays there. The checkpoint's interrupt still
+              // waits for the boundary.
+              session.state = applyUpdate(session.state, result.update);
+              result.joinedAtExit = true;
+              emit("running");
+            }
             return result;
           }),
         ),
       );
       await mergeQueue;
 
-      let joined = snapshot;
-      for (const { update } of results) {
-        joined = applyUpdate(joined, update);
+      let joined = session.state;
+      for (const result of results) {
+        // A terminal result (done or checkpoint) was joined at attempt exit;
+        // the boundary only folds in what remains, so the same update is
+        // never applied twice and the state join stays coherent.
+        if (result.joinedAtExit) continue;
+        joined = applyUpdate(joined, result.update);
       }
       session.state = joined;
       for (const merge of merges) {
@@ -555,15 +573,15 @@ async function driveLoop(session: Session): Promise<void> {
           });
         } else if (status === "in-progress") {
           // The crash event and the marker update landed at attempt exit;
-          // only the interrupt waits for the boundary, so the state join
-          // above stays the single writer of PoolState.
+          // only the crash interrupt waits for the boundary, so the state
+          // join above stays the single writer of PoolState.
           raiseInterrupt(session, {
             ticketId: marker.id,
             kind: "crash",
             body: logPath,
           });
         }
-    }
+      }
       persist(session);
       emit("running");
     }
@@ -1572,6 +1590,10 @@ interface TicketResult {
   exitCode: number;
   plan: TicketPlan;
   update: PoolUpdate;
+  // True when the drive loop applied this result's update to state at
+  // attempt exit (a terminal done/checkpoint); the boundary join skips it so
+  // the same update is never applied twice.
+  joinedAtExit: boolean;
 }
 
 // Where a ticket runs. A multi-ticket super-step gives every ticket its own
@@ -1766,6 +1788,7 @@ async function runTicket(
     logPath,
     exitCode,
     plan,
+    joinedAtExit: false,
     update: {
       tickets: { [marker.id]: status },
       log: [

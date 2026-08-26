@@ -3639,6 +3639,178 @@ describe("accept/process split", () => {
     ).toHaveLength(1);
   }, 15000);
 
+  it("joins a done result into state and emits a snapshot at attempt exit, before a slow sibling exits", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-02");
+    const rig = blockingHarness(
+      {
+        // 01 finishes done fast; 02 holds the super-step open until the
+        // sentinel lands.
+        "01": { statuses: ["done"] },
+        "02": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
+
+    // 02 has not been released, so the super-step is still in flight. A
+    // snapshot already shows 01 done while 02 still reads in-progress: the
+    // terminal status landed in state at 01's exit, and the marker on disk
+    // agrees.
+    await waitFor(
+      () =>
+        run.snapshots.some(
+          (snapshot) =>
+            snapshot.state.tickets["01"] === "done" &&
+            snapshot.state.tickets["02"] === "in-progress",
+        ),
+      "snapshot showing 01 done and 02 still in-progress",
+    );
+    expect(
+      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
+    ).toContain("status=done");
+    // A plain done carries no interrupt, even while it shows green early.
+    expect(run.interrupts).toEqual([]);
+
+    writeFileSync(sentinel, "go");
+    await run.settled;
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    // The exited line for the fast ticket was written exactly once: the
+    // boundary did not re-apply the at-exit join.
+    expect(
+      run.final.log.filter((line) => line === "ticket 01: exited 0, marker done"),
+    ).toHaveLength(1);
+  }, 15000);
+
+  it("joins a checkpoint into state at attempt exit, before a slow sibling exits", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-02");
+    const rig = blockingHarness(
+      {
+        // 01 checkpoints fast; 02 holds the super-step open until the sentinel.
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
+
+    // The checkpoint status landed in state at exit while 02 still runs: the
+    // snapshot already carries the red status word and the marker agrees. The
+    // interrupt itself still waits for the super-step boundary.
+    await waitFor(
+      () =>
+        run.snapshots.some(
+          (snapshot) =>
+            snapshot.state.tickets["01"] === "checkpoint" &&
+            snapshot.state.tickets["02"] === "in-progress",
+        ),
+      "snapshot showing 01 checkpoint while 02 still runs",
+    );
+    expect(
+      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
+    ).toContain("status=checkpoint");
+    expect(run.interrupts).toEqual([]);
+
+    writeFileSync(sentinel, "go");
+    await run.settled;
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    expect(run.interrupts[0]?.body).toBe("pick a name");
+    expect(run.final.tickets).toEqual({ "01": "checkpoint", "02": "done" });
+    // The checkpoint event was written exactly once, at the boundary; the
+    // at-exit join did not duplicate it.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "checkpoint"),
+    ).toHaveLength(1);
+  }, 15000);
+
+  it("applies an at-exit terminal join exactly once and keeps the final snapshot sequence coherent", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-02");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["done"], block: true },
+        "03": { statuses: ["done"] },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
+    // 03 is blocked by 02, so it is not in this super-step; the checkpoint
+    // snapshot is already out while 02 still holds the super-step open.
+    await waitFor(
+      () =>
+        run.snapshots.some(
+          (snapshot) =>
+            snapshot.state.tickets["01"] === "checkpoint" &&
+            snapshot.state.tickets["02"] === "in-progress",
+        ),
+      "snapshot showing 01 checkpoint while 02 still runs",
+    );
+
+    writeFileSync(sentinel, "go");
+    await run.settled;
+    const settled = run.snapshots.at(-1)!;
+
+    // The checkpoint attempt's update was joined at exit and skipped at the
+    // boundary: its exited line appears once, and nothing diverged. The
+    // interrupted ticket stayed checkpointed, its siblings finished, and the
+    // boundary snapshot is coherent with the settled state.
+    expect(
+      run.final.log.filter(
+        (line) => line === "ticket 01: exited 0, marker checkpoint",
+      ),
+    ).toHaveLength(1);
+    expect(settled.state.tickets["01"]).toBe("checkpoint");
+    expect(settled.state.tickets["02"]).toBe("done");
+    expect(settled.state.tickets["03"]).toBe("done");
+    expect(run.final.tickets).toEqual({
+      "01": "checkpoint",
+      "02": "done",
+      "03": "done",
+    });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+  }, 15000);
+
   it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
     const poolDir = makePool({
       tickets: [
