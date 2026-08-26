@@ -3,3 +3,4 @@ dist/
 .env
 .scratch/console/runs/
 .scratch/console/verify-*.ts
+.scratch/*/runs/
