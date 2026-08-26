@@ -523,13 +523,7 @@ async function driveLoop(session: Session): Promise<void> {
               session.state = applyUpdate(session.state, result.update);
               result.joinedAtExit = true;
               if (result.status === "checkpoint") {
-                raiseInterrupt(session, checkpointInterrupt(result.marker));
-                appendEvent(session.runsDir, result.marker.id, {
-                  at: new Date().toISOString(),
-                  attempt: result.plan.attempt,
-                  kind: "checkpoint",
-                  payload: {},
-                });
+                raiseCheckpoint(session, result.marker, result.plan.attempt);
               }
               emit("running");
             }
@@ -577,9 +571,9 @@ async function driveLoop(session: Session): Promise<void> {
       for (const { marker, status, logPath } of results) {
         if (status === "in-progress") {
           // The crash event and the marker update landed at attempt exit;
-          // the crash interrupt waits for the boundary. A checkpoint's
-          // interrupt was raised at exit, so the state join above stays the
-          // single writer of PoolState.
+          // only the crash interrupt waits for the boundary here. A
+          // checkpoint's interrupt was already raised at exit, so the
+          // at-exit path is the only writer of its interrupt.
           raiseInterrupt(session, {
             ticketId: marker.id,
             kind: "crash",
@@ -726,13 +720,11 @@ function rehydrate(session: Session): void {
       marker.status === "checkpoint" &&
       !session.state.interrupts.some((i) => i.ticketId === marker.id)
     ) {
-      raiseInterrupt(session, checkpointInterrupt(marker));
-      appendEvent(session.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt: lastAttempt(session.runsDir, marker.id),
-        kind: "checkpoint",
-        payload: {},
-      });
+      raiseCheckpoint(
+        session,
+        marker,
+        lastAttempt(session.runsDir, marker.id),
+      );
     }
   }
   const recovered: Record<string, Outcome> = {};
@@ -1564,6 +1556,24 @@ function checkpointInterrupt(marker: TicketMarker): Interrupt {
     kind: "checkpoint",
     body: extractBrief(marker.file),
   };
+}
+
+// Raise a checkpoint's interrupt and record its checkpoint event. Shared by
+// the at-exit path (attempt exit) and the recovery path (interrupts rebuilt
+// from markers on reload); the attempt is passed in so the at-exit caller can
+// use the exact attempt while the recovery caller reads it back from the log.
+function raiseCheckpoint(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+): void {
+  raiseInterrupt(session, checkpointInterrupt(marker));
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "checkpoint",
+    payload: {},
+  });
 }
 
 function extractBrief(issueFile: string): string {

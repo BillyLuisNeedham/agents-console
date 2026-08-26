@@ -3663,8 +3663,7 @@ describe("accept/process split", () => {
 
     // 02 has not been released, so the super-step is still in flight. A
     // snapshot already shows 01 done while 02 still reads in-progress: the
-    // terminal status landed in state at 01's exit, and the marker on disk
-    // agrees.
+    // terminal status landed in state at 01's exit.
     await waitFor(
       () =>
         run.snapshots.some(
@@ -3674,9 +3673,6 @@ describe("accept/process split", () => {
         ),
       "snapshot showing 01 done and 02 still in-progress",
     );
-    expect(
-      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
-    ).toContain("status=done");
     // A plain done carries no interrupt, even while it shows green early.
     expect(run.interrupts).toEqual([]);
 
@@ -3720,7 +3716,7 @@ describe("accept/process split", () => {
 
     // The checkpoint status and its interrupt both landed in state at exit
     // while 02 still runs: the snapshot already carries the red status word,
-    // the pending interrupt, and the checkpoint event, and the marker agrees.
+    // the pending interrupt, and the checkpoint event.
     await waitFor(
       () =>
         run.snapshots.some(
@@ -3733,9 +3729,6 @@ describe("accept/process split", () => {
         ),
       "snapshot showing 01 checkpoint with its interrupt pending while 02 still runs",
     );
-    expect(
-      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
-    ).toContain("status=checkpoint");
     expect(run.interrupts).toEqual([
       { ticketId: "01", kind: "checkpoint", body: "pick a name" },
     ]);

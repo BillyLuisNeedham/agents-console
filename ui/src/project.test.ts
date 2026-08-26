@@ -592,6 +592,44 @@ describe("checkpoint visible at attempt exit", () => {
       );
     }
   });
+
+  it("shows the queued answer's waiting state on the checkpointed card during the window", () => {
+    const view = projectPool({
+      ...windowSnapshot(),
+      state: {
+        ...windowSnapshot().state,
+        queuedAnswers: [{ ticketId: "01", kind: "checkpoint" }],
+      },
+    });
+    const card = view.cards.find((c) => c.id === ticketCardId("01"));
+    const sibling = view.cards.find((c) => c.id === ticketCardId("02"));
+    expect(card?.kind).toBe("ticket");
+    expect(sibling?.kind).toBe("ticket");
+    if (card?.kind === "ticket" && sibling?.kind === "ticket") {
+      expect(card.interrupt?.queued).toBe(true);
+      expect(card.interrupt?.kind).toBe("checkpoint");
+      expect(sibling.status).toBe("in-progress");
+    }
+  });
+
+  it("clears the dependent's blocked-by-checkpoint notice once the blocker resolves", () => {
+    const resolved = snapshot({
+      phase: "running",
+      state: {
+        tickets: [
+          ticket("01", { status: "done" }),
+          ticket("02", { status: "in-progress" }),
+          ticket("03", { blockedBy: ["01"] }),
+        ],
+      },
+    });
+    const view = projectPool(resolved);
+    const dependent = view.cards.find((c) => c.id === ticketCardId("03"));
+    expect(dependent?.kind).toBe("ticket");
+    if (dependent?.kind === "ticket") {
+      expect(dependent.blockedByCheckpoint).toEqual([]);
+    }
+  });
 });
 
 describe("review projection", () => {
