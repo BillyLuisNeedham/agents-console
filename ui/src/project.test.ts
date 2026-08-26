@@ -594,10 +594,11 @@ describe("checkpoint visible at attempt exit", () => {
   });
 
   it("shows the queued answer's waiting state on the checkpointed card during the window", () => {
+    const snap = windowSnapshot();
     const view = projectPool({
-      ...windowSnapshot(),
+      ...snap,
       state: {
-        ...windowSnapshot().state,
+        ...snap.state,
         queuedAnswers: [{ ticketId: "01", kind: "checkpoint" }],
       },
     });
