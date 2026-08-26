@@ -402,7 +402,8 @@ drivers_for() {
 # default is set once there, and an Issue only appears here when it differs.
 assign_for() {
   case "$1" in
-    *) echo "opencode kimi-for-coding-oauth/k3" ;;
+    03|05) echo "opencode kimi-for-coding-oauth/k3" ;;
+    *) echo "" ;;
   esac
 }
 

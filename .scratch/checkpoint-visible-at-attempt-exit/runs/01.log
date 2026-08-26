@@ -1,0 +1,227 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/checkpoint-visible-at-attempt-exit/issues/01-terminal-results-join-at-attempt-exit.md
+[0m→ [0mRead docs/specs/2026-08-26-checkpoint-visible-at-attempt-exit.md
+[0m→ [0mRead docs/adr/0004-accept-answers-immediately-process-at-boundary.md
+[0m
+[0m$ [0mls && ls engine 2>/dev/null; git log --oneline -8; git status --short
+bun.lock
+CONTEXT.md
+docs
+engine
+node_modules
+package.json
+README.md
+scripts
+tsconfig.json
+ui
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.test.ts
+events.ts
+fleet-cli.test.ts
+fleet-cli.ts
+fleet.test.ts
+fleet.ts
+pool.test.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+queued-answers.ts
+server.test.ts
+server.ts
+spawn.test.ts
+spawn.ts
+worktrees.ts
+a5ce25b checkpoint-at-exit: add the five-ticket queue with runner
+6964f71 docs: spec for checkpoint visible at attempt exit
+d06c70d resume-feedback: record the 09 final review verdict, approved
+48d2eb9 engine: reject an unnamed review reject at acceptance, not silently at processing
+ea66aaf resume-feedback: record the 07 code review verdict, one blocker for 08
+322eae7 resume-feedback: keep runner logs out of the tree
+e6794e6 ui: surface blocked-by-checkpoint on the dependent's card and Detail
+9f2a5a2 engine: record a crash at attempt exit and push a snapshot immediately
+ M .scratch/checkpoint-visible-at-attempt-exit/issues/01-terminal-results-join-at-attempt-exit.md
+?? .scratch/checkpoint-visible-at-attempt-exit/runs/
+?? .scratch/resume-feedback/runs/
+[0m
+[0m$ [0mgit show 9f2a5a2 --stat && wc -l engine/engine.ts engine/engine.test.ts
+commit 9f2a5a2bf25284bcd5f853de3e98a069aebdb7e0
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Wed Aug 26 01:23:25 2026 +0100
+
+    engine: record a crash at attempt exit and push a snapshot immediately
+    
+    The crash event and marker correction land in the ticket log the moment
+    the attempt exits, and a snapshot goes out on the SSE stream, so the
+    Console shows the crash within seconds instead of after the slowest
+    sibling's super-step. The crash interrupt is still raised at the
+    super-step boundary, keeping the state join the single writer of
+    PoolState.
+
+ .../issues/05-crash-recorded-at-attempt-exit.md    | 18 ++++--
+ engine/engine.test.ts                              | 70 ++++++++++++++++++++--
+ engine/engine.ts                                   | 34 +++++++----
+ 3 files changed, 103 insertions(+), 19 deletions(-)
+  1898 engine/engine.ts
+  3670 engine/engine.test.ts
+  5568 total
+[0m
+[0m$ [0mgit show 9f2a5a2 -- engine/engine.ts
+commit 9f2a5a2bf25284bcd5f853de3e98a069aebdb7e0
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Wed Aug 26 01:23:25 2026 +0100
+
+    engine: record a crash at attempt exit and push a snapshot immediately
+    
+    The crash event and marker correction land in the ticket log the moment
+    the attempt exits, and a snapshot goes out on the SSE stream, so the
+    Console shows the crash within seconds instead of after the slowest
+    sibling's super-step. The crash interrupt is still raised at the
+    super-step boundary, keeping the state join the single writer of
+    PoolState.
+
+diff --git a/engine/engine.ts b/engine/engine.ts
+index ef5544c..2f6fb27 100644
+--- a/engine/engine.ts
++++ b/engine/engine.ts
+@@ -493,6 +493,10 @@ async function driveLoop(session: Session): Promise<void> {
+                 });
+               });
+             }
++            // A crashed attempt was recorded at exit; push a snapshot now so
++            // the Console shows the crash within seconds, not when the
++            // slowest sibling's super-step ends.
++            if (result.status === "in-progress") emit("running");
+             return result;
+           }),
+         ),
+@@ -530,7 +534,7 @@ async function driveLoop(session: Session): Promise<void> {
+           );
+         }
+       }
+-      for (const { marker, status, logPath, exitCode } of results) {
++      for (const { marker, status, logPath } of results) {
+         if (status === "checkpoint") {
+           raiseInterrupt(session, checkpointInterrupt(marker));
+           appendEvent(session.runsDir, marker.id, {
+@@ -540,18 +544,15 @@ async function driveLoop(session: Session): Promise<void> {
+             payload: {},
+           });
+         } else if (status === "in-progress") {
++          // The crash event and the marker update landed at attempt exit;
++          // only the interrupt waits for the boundary, so the state join
++          // above stays the single writer of PoolState.
+           raiseInterrupt(session, {
+             ticketId: marker.id,
+             kind: "crash",
+-          body: logPath,
+-        });
+-        appendEvent(session.runsDir, marker.id, {
+-          at: new Date().toISOString(),
+-          attempt: lastAttempt(session.runsDir, marker.id),
+-          kind: "crash",
+-          payload: { code: exitCode },
+-        });
+-      }
++            body: logPath,
++          });
++        }
+     }
+       persist(session);
+       emit("running");
+@@ -1712,6 +1713,19 @@ async function runTicket(
+     kind: "exited",
+     payload: { code: exitCode, status },
+   });
++  // A crash is recorded the moment the attempt exits (readBack has already
++  // corrected the marker), not at the end of the super-step, so the ticket
++  // log stops masquerading a dead attempt as running work. Per-ticket event
++  // appends are concurrency-safe against siblings still in flight. The crash
++  // interrupt itself is still raised at the super-step boundary.
++  if (status === "in-progress") {
++    appendEvent(env.runsDir, marker.id, {
++      at: new Date().toISOString(),
++      attempt: plan.attempt,
++      kind: "crash",
++      payload: { code: exitCode },
++    });
++  }
+ 
+   return {
+     marker,
+[0m
+[0m$ [0mgrep -n "driveLoop\|function emit\|joinState\|function persist\|raiseInterrupt\|applyResults\|results\b" engine/engine.ts | head -50
+402:  driveLoop(session).catch(() => {});
+410:function emitSnapshot(session: Session, phase: RunPhase): void {
+421:async function driveLoop(session: Session): Promise<void> {
+483:      const results = await Promise.all(
+517:      for (const { update } of results) {
+547:      for (const { marker, status, logPath } of results) {
+549:          raiseInterrupt(session, checkpointInterrupt(marker));
+560:          raiseInterrupt(session, {
+580:  // raises the final Review interrupt. The dedupe in raiseInterrupt keeps it
+587:    raiseInterrupt(session, reviewInterrupt(session));
+706:      raiseInterrupt(session, checkpointInterrupt(marker));
+744:function persist(session: Session): void {
+1102:    raiseInterrupt(
+1126:    raiseInterrupt(
+1134:    raiseInterrupt(
+1447:function raiseInterrupt(session: Session, interrupt: Interrupt): void {
+[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=240, offset=380][0m
+[0m
+[0m$ [0mls .scratch/checkpoint-visible-at-attempt-exit/issues/ && head -6 .scratch/checkpoint-visible-at-attempt-exit/issues/*.md
+01-terminal-results-join-at-attempt-exit.md
+02-checkpoint-interrupt-raised-at-attempt-exit.md
+03-code-review.md
+04-fix-review-findings.md
+05-final-code-review.md
+==> .scratch/checkpoint-visible-at-attempt-exit/issues/01-terminal-results-join-at-attempt-exit.md <==
+<!-- state: id=01 blocked-by=none status=in-progress -->
+# 01: Terminal results join pool state at attempt exit
+
+**What to build:** When an attempt exits with a terminal result — `done` or `checkpoint` — that ticket's status lands in pool state and a snapshot is emitted immediately, without waiting for its super-step siblings. A ticket that finishes early shows its true status word on its card (green `done`, red `checkpoint`) while siblings still show `running`. The crash path already emits at exit; this ticket generalises the same treatment to all terminal results. The super-step boundary join becomes skip-if-present: applying the same terminal update twice is a no-op, and anything genuinely computed across results stays at the boundary. Reconnecting clients and state polls during the window see the truth, because the emitted snapshot itself carries it.
+
+**Blocked by:** None (can start immediately)
+
+==> .scratch/checkpoint-visible-at-attempt-exit/issues/02-checkpoint-interrupt-raised-at-attempt-exit.md <==
+<!-- state: id=02 blocked-by=01 status=ready -->
+# 02: Checkpoint interrupt raised at attempt exit
+
+**What to build:** A checkpoint's interrupt enters pool state when the attempt exits, not at the super-step boundary. The moment a ticket checkpoints, its card pulses red with the interrupt dot, its Detail offers the interrupt form, and the tab title and favicon turn red "needs input" — even while a sibling is still running. An answer given during that window is accepted immediately, shows the queued waiting state on the card, and is processed at the next super-step boundary per ADR-0004. Raising the interrupt is not processing an answer, so the ADR's accept/process split is untouched. Dependents of the checkpointed ticket keep showing their blocked-by-checkpoint notice during the window, as they do today.
+
+**Blocked by:** 01: Terminal results join pool state at attempt exit
+
+==> .scratch/checkpoint-visible-at-attempt-exit/issues/03-code-review.md <==
+<!-- state: id=03 blocked-by=01,02 status=ready -->
+# 03: Code review of the checkpoint-at-exit work
+
+**What to build:** A full review of everything tickets 01-02 landed, run through the code-review skill against the spec (`docs/specs/2026-08-26-checkpoint-visible-at-attempt-exit.md`) and ADR-0004. Check the work along both axes the skill provides: does it follow the repo's documented standards, and does it match what the spec and the tickets actually asked for. Verify each ticket's acceptance criteria genuinely hold, that the test suites pass, and that the settled semantics were honoured: siblings are never paused by an early checkpoint, the boundary join is idempotent after at-exit joins, answers during the window are queued and processed only at the boundary, and the queued-answer store stays out of PoolState. Append every finding to this Issue as a numbered list under a `## Findings` heading, each marked blocker or nit. An empty findings list is a valid, successful outcome.
+
+**Blocked by:** 01, 02
+
+==> .scratch/checkpoint-visible-at-attempt-exit/issues/04-fix-review-findings.md <==
+<!-- state: id=04 blocked-by=03 status=ready -->
+# 04: Fix the review findings
+
+**What to build:** Resolve every blocker finding ticket 03 recorded under its `## Findings` heading, working them in order. Each fix lands with a test that pins it at the appropriate existing seam (engine, or UI projection), following the spec's testing decisions. Nits may be fixed at the orchestrator's judgement or left, with the decision noted in this Issue. If ticket 03's verdict was clean (no blockers), this ticket is done immediately: note that in the Issue and set it done without further work.
+
+**Blocked by:** 03: Code review of the checkpoint-at-exit work
+
+==> .scratch/checkpoint-visible-at-attempt-exit/issues/05-final-code-review.md <==
+<!-- state: id=05 blocked-by=04 status=ready -->
+# 05: Final code review
+
+**What to build:** The closing review, run through the code-review skill over ticket 04's fixes (and the whole body of work, if 04 changed anything substantial). Confirm every blocker finding from ticket 03 is genuinely resolved and pinned by a test, no new blockers were introduced, and the suites still pass. Append the verdict to this Issue under a `## Verdict` heading. If new blockers appear, set this Issue to checkpoint with a brief describing them rather than fixing them yourself.
+
+**Blocked by:** 04: Fix the review findings
+[0m
+Terminated                 opencode run --command "$driver" "$rel
+
+${prompt#*'
+'}" --model "$model" --auto < /dev/null
