@@ -1,0 +1,1612 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+[0m→ [0mRead docs/specs/2026-08-25-resume-feedback-and-pool-drive-fixes.md
+[0m→ [0mRead docs/adr/0004-accept-answers-immediately-process-at-boundary.md
+[0m
+[0m$ [0mgit status && git log --oneline -5 && git branch --show-current
+On branch main
+Your branch is ahead of 'origin/main' by 6 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/resume-feedback/runs/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+464b572 engine: register the answer waiter before the idle processing kick
+e2a7954 resume-feedback: reset Issue 01 to ready for retry
+3bc6a43 resume-feedback: partial accept/process split from Issue 01 (deadlock known)
+be3a819 resume-feedback: add runner, AGENT.md, and review tail (07-09)
+8a975c5 resume-feedback: add the six-ticket queue
+main
+[0m
+[0m$ [0mls engine/ src/ 2>/dev/null; ls
+engine/:
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.test.ts
+events.ts
+fleet-cli.test.ts
+fleet-cli.ts
+fleet.test.ts
+fleet.ts
+pool.test.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+queued-answers.ts
+server.test.ts
+server.ts
+spawn.test.ts
+spawn.ts
+worktrees.ts
+bun.lock
+CONTEXT.md
+docs
+engine
+node_modules
+package.json
+README.md
+scripts
+tsconfig.json
+ui
+[0m
+[0m$ [0mgit diff 3bc6a43..464b572 --stat
+.../issues/01-accept-process-split.md              | 40 +++++++++++++++++-----
+ engine/engine.ts                                   | 39 +++++++++++++--------
+ engine/server.ts                                   |  7 +++-
+ 3 files changed, 61 insertions(+), 25 deletions(-)
+[0m
+[0m→ [0mRead engine/queued-answers.ts
+[0m→ [0mRead engine/engine.ts
+Now let me look at the server and existing tests.
+[0m→ [0mRead engine/server.ts
+[0m
+[0m$ [0mgrep -n "queued\|restart\|idempotent\|rehydrate" engine/engine.test.ts | head -50; echo ---; grep -n "queued\|restart\|idempotent\|202\|400" engine/server.test.ts | head -60
+1080:  it("resume-with-answer restarts the ticket and continues the pool", async () => {
+1349:  it("approve ends the run, and a restart comes up done without re-asking", async () => {
+1374:    const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
+1375:    expect(restarted.phase).toBe("done");
+1376:    expect(restarted.interrupts).toEqual([]);
+1754:  it("restores a pending interrupt across a restart and keeps it answerable", async () => {
+3102:      readFileSync(join(poolDir, "runs", "queued-answers.json"), "utf8"),
+3195:    // Acceptance was immediate: the answered events and the queued records
+3249:  it("writes the answered event and queued record at acceptance for a review approval", async () => {
+3283:  it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
+3295:    // The record lives in runs/queued-answers.json, not in the checkpoint
+3304:    expect(rows.at(-1)?.state ?? "").not.toContain("queued-answer");
+---
+171:    // The answer is acknowledged with 202 at acceptance; the snapshot it
+178:    expect(resumeRes.status).toBe(202);
+192:    expect(approveRes.status).toBe(202);
+[0m
+[0m$ [0msed -n 3050,3320p engine/engine.test.ts
+);
+    expect(existsSync(join(poolDir, "runs", "02.resolver.log"))).toBe(true);
+
+    // Rotated names agree with the attempt numbers in the events file.
+    const events = readFileSync(
+      join(poolDir, "runs", "02.events.jsonl"),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { attempt: number; kind: string });
+    expect(
+      events.filter((e) => e.kind === "spawned").map((e) => e.attempt),
+    ).toEqual([1, 3]);
+    expect(
+      events.filter((e) => e.kind === "resolver").map((e) => e.attempt),
+    ).toEqual([2, 4]);
+  }, 20000);
+  });
+});
+
+describe("accept/process split", () => {
+  interface EventLine {
+    at: string;
+    attempt: number;
+    kind: string;
+    payload: Record<string, unknown>;
+  }
+
+  function readEventsFile(poolDir: string, id: string): EventLine[] {
+    const raw = readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8");
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as EventLine);
+  }
+
+  interface QueuedAnswersFile {
+    nextSeq: number;
+    answers: {
+      seq: number;
+      ticketId: string;
+      kind: string;
+      approve?: boolean;
+      note?: string;
+      at: string;
+      processedAt: string | null;
+    }[];
+  }
+
+  function readQueuedAnswers(poolDir: string): QueuedAnswersFile {
+    return JSON.parse(
+      readFileSync(join(poolDir, "runs", "queued-answers.json"), "utf8"),
+    ) as QueuedAnswersFile;
+  }
+
+  async function waitFor(cond: () => boolean, what: string): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  // A stub harness whose blocked tickets hold their spawned script until the
+  // sentinel file appears, so a test can keep a super-step in flight while it
+  // answers an interrupt. Every other ticket takes the instant path.
+  function blockingHarness(
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
+    sentinel: string,
+  ): StubRig {
+    const poolLocal = tempDirs[tempDirs.length - 1];
+    const stubPath = join(poolLocal, "blocking-stub.sh");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"',
+        'if [ "$gate" = "block" ]; then',
+        '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+        "fi",
+        'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+        'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const spawned: Record<string, SpawnContext> = {};
+    const spawnOrder: string[] = [];
+    const counts: Record<string, number> = {};
+    const stub: HarnessCommand = (ctx) => {
+      spawned[ctx.id] = ctx;
+      spawnOrder.push(ctx.id);
+      const n = counts[ctx.id] ?? 0;
+      counts[ctx.id] = n + 1;
+      const b = behaviour[ctx.id] ?? {};
+      const statuses = b.statuses ?? (["done"] as const);
+      const status = statuses[Math.min(n, statuses.length - 1)];
+      return [
+        "bash",
+        stubPath,
+        ctx.issuePath,
+        status,
+        ctx.outcomePath,
+        b.block ? "block" : "-",
+        sentinel,
+      ];
+    };
+    return { harnesses: { stub }, spawned, spawnOrder };
+  }
+
+  it("accepts answers mid-super-step and drains them in submission order at the boundary", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+        { file: "04-d.md", marker: "<!-- state: id=04 blocked-by=03 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-04");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"] },
+        "02": { statuses: ["checkpoint", "done"] },
+        "03": { statuses: ["done"] },
+        "04": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["04"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01") &&
+        run.interrupts.some((i) => i.ticketId === "02"),
+      "ticket 04 spawned with interrupts pending for 01 and 02",
+    );
+
+    const first = run.resume("02", "answered first");
+    const second = run.resume("01", "answered second");
+
+    // Acceptance was immediate: the answered events and the queued records
+    // landed while ticket 04's attempt still held the super-step open.
+    expect(readEventsFile(poolDir, "02").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "checkpoint",
+      "answered",
+    ]);
+    expect(readEventsFile(poolDir, "02").at(-1)?.payload).toEqual({
+      kind: "checkpoint",
+    });
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers.map((a) => a.ticketId)).toEqual(["02", "01"]);
+    expect(queue.answers.map((a) => a.kind)).toEqual(["checkpoint", "checkpoint"]);
+    expect(queue.answers.every((a) => a.processedAt === null)).toBe(true);
+
+    // The answer path never spawns: both tickets still sit at one attempt,
+    // and the resume promises are still waiting on the boundary.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "spawned"),
+    ).toHaveLength(1);
+    expect(
+      readEventsFile(poolDir, "02").filter((e) => e.kind === "spawned"),
+    ).toHaveLength(1);
+    let firstResolved = false;
+    void first.then(() => {
+      firstResolved = true;
+    });
+    await Bun.sleep(50);
+    expect(firstResolved).toBe(false);
+
+    writeFileSync(sentinel, "go");
+    await first;
+    await second;
+
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01", "02", "03", "04", "01", "02"]);
+    const log = run.final.log;
+    const answeredIdx = (id: string) =>
+      log.findIndex((line) => line === `interrupt answered for ${id} (checkpoint): resumed`);
+    const exited04 = log.findIndex((line) => line.startsWith("ticket 04: exited"));
+    const step3 = log.findIndex((line) => line === "super-step 3: 01, 02");
+    // Both answers were processed after the in-flight super-step joined, in
+    // submission order, before the next super-step was scheduled.
+    expect(answeredIdx("02")).toBeGreaterThan(exited04);
+    expect(answeredIdx("02")).toBeLessThan(answeredIdx("01"));
+    expect(answeredIdx("01")).toBeLessThan(step3);
+    // The answered event precedes the attempt it unblocked in the ticket log.
+    const kinds01 = readEventsFile(poolDir, "01").map((e) => e.kind);
+    expect(kinds01.indexOf("answered")).toBeLessThan(kinds01.lastIndexOf("spawned"));
+    expect(readQueuedAnswers(poolDir).answers.every((a) => a.processedAt !== null)).toBe(true);
+  }, 15000);
+
+  it("writes the answered event and queued record at acceptance for a review approval", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    run.accept(REVIEW_TICKET_ID, "ship it", true);
+
+    expect(readEventsFile(poolDir, REVIEW_TICKET_ID).map((e) => e.kind)).toEqual([
+      "answered",
+    ]);
+    expect(readEventsFile(poolDir, REVIEW_TICKET_ID)[0]?.payload).toEqual({
+      kind: "review",
+    });
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers).toHaveLength(1);
+    expect(queue.answers[0]).toMatchObject({
+      ticketId: REVIEW_TICKET_ID,
+      kind: "review",
+      approve: true,
+      note: "ship it",
+    });
+
+    const done = await run.settled;
+    expect(done.phase).toBe("done");
+    expect(done.final.log).toContain("review approved: the run is complete (ship it)");
+  });
+
+  it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    run.accept("01", "carry on");
+
+    // The record lives in runs/queued-answers.json, not in the checkpoint
+    // database's PoolState rows.
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers.map((a) => a.ticketId)).toEqual(["01"]);
+    const db = new Database(join(poolDir, "console.db"));
+    const rows = db
+      .query("SELECT state FROM checkpoints ORDER BY seq DESC LIMIT 1")
+      .all() as { state: string }[];
+    db.close();
+    expect(rows.at(-1)?.state ?? "").not.toContain("queued-answer");
+
+    const resumed = await run.settled;
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(resumed.final.tickets["01"]).toBe("done");
+    expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
+  });
+});
+[0m
+Now let me look at the existing restart test and the server test flow for prior art.
+[0m$ [0msed -n 1740,1830p engine/engine.test.ts
+setMarker(poolDir, "01-a.md", "ready");
+    const rig = stubHarness({});
+    const second = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(second.phase).toBe("done");
+    expect(second.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(second.final.log).toContain(
+      "interrupt cleared for 01 (checkpoint): marker says ready",
+    );
+  });
+
+  it("restores a pending interrupt across a restart and keeps it answerable", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+        {
+          file: "03-c.md",
+          marker: "<!-- state: id=03 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    expect(first.final.tickets["03"]).toBe("done");
+    first.close();
+
+    const rig = stubHarness({ "01": { status: "done" } });
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("quiescent");
+    expect(second.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    expect(rig.spawnOrder).toEqual([]);
+
+    const resumed = await second.resume("01", "the name is Foo");
+    expect((await approveReview(resumed)).phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Resume note");
+    expect(issueText).toContain("the name is Foo");
+  });
+
+  it("resumes a killed engine mid-super-step without re-running done tickets", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    writeFileSync(
+      join(poolDir, "agent.sh"),
+      [
+        "#!/usr/bin/env bash",
+        'issue="$1"; id="$2"; outcome_path="$3"',
+        'if [ "$id" = "01" ]; then',
+        '  sed -i "1s/status=[a-z-]*/status=done/" "$issue"',
+        '  printf \'%s\' \'{"summary":"recovered-01","commitSha":"sha-01"}\' > "$outcome_path"',
+        "  exit 0",
+        "fi",
+        "sleep 60",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(poolDir, "fixture.ts"),
+      [
+        "const [enginePath, poolDir] = process.argv.slice(2);",
+        "const { runPool } = await import(enginePath);",
+[0m
+[0m$ [0msed -n 1,230p engine/server.test.ts
+/// <reference types="bun" />
+
+import { afterEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createPoolServer,
+  LOG_CHUNK_BYTES,
+  type PoolServer,
+  type PoolServerOptions,
+} from "./server.ts";
+import { readFleetEntries } from "./fleet.ts";
+import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+
+const servers: PoolServer[] = [];
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const server of servers.splice(0)) {
+    void server.close();
+  }
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+function makePool(
+  tickets: { file: string; marker: string }[],
+  config: Partial<PoolConfig> = {},
+): string {
+  const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+  tempDirs.push(poolDir);
+  return makePoolInto(poolDir, tickets, config);
+}
+
+/** Write a pool's issues and console.json into a directory the caller chose. */
+function makePoolInto(
+  poolDir: string,
+  tickets: { file: string; marker: string }[],
+  config: Partial<PoolConfig> = {},
+): string {
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  for (const ticket of tickets) {
+    writeFileSync(join(poolDir, "issues", ticket.file), `${ticket.marker}\n\n# body\n`);
+  }
+  writeFileSync(
+    join(poolDir, "console.json"),
+    JSON.stringify(
+      { defaults: { harness: "stub", model: "m" }, ...config } satisfies PoolConfig,
+      null,
+      2,
+    ),
+  );
+  return poolDir;
+}
+
+function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Record<string, HarnessCommand> {
+  const poolLocal = tempDirs[tempDirs.length - 1];
+  const stubPath = join(poolLocal, "stub-harness.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"',
+      'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+      'printf \'{"summary":"smoke","commitSha":null}\' > "$3"',
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  const counts: Record<string, number> = {};
+  const harness: HarnessCommand = (ctx) => {
+    const statuses = behaviour[ctx.id] ?? ["done"];
+    const n = counts[ctx.id] ?? 0;
+    counts[ctx.id] = n + 1;
+    const status = statuses[Math.min(n, statuses.length - 1)];
+    return ["bash", stubPath, ctx.issuePath, status, ctx.outcomePath];
+  };
+  return { stub: harness };
+}
+
+/** A temp registry path inside the pool dir, so tests never touch the real one. */
+function fleetRegistry(poolDir: string): string {
+  return join(poolDir, "fleet.json");
+}
+
+async function startServer(poolDir: string, harnesses: Record<string, HarnessCommand>): Promise<PoolServer> {
+  const server = createPoolServer({
+    poolDir,
+    port: 0,
+    harnesses,
+    distDir: "/nonexistent",
+    registryPath: fleetRegistry(poolDir),
+  });
+  servers.push(server);
+  return server;
+}
+
+describe("pool server", () => {
+  it("drives a pool to the review gate and serves the enriched state", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    await server.start();
+    const snapshot = await server.settled();
+    expect(snapshot.phase).toBe("quiescent");
+    expect(snapshot.state.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const statuses = Object.fromEntries(snapshot.state.tickets.map((t) => [t.id, t.status]));
+    expect(statuses).toEqual({ "01": "done", "02": "done" });
+    expect(snapshot.state.tickets.map((t) => t.blockedBy)).toEqual([[], ["01"]]);
+    expect(snapshot.state.tickets.map((t) => t.title)).toEqual(["body", "body"]);
+
+    // Approving the review is acknowledged immediately and ends the run once
+    // the answer is processed; the server stays up with the final state
+    // inspectable.
+    await server.answer(REVIEW_TICKET_ID, "approve");
+    const approved = await server.settled();
+    expect(approved.phase).toBe("done");
+    expect(approved.state.interrupts).toEqual([]);
+    expect(server.latest?.phase).toBe("done");
+  });
+
+  it("carries the pool's display name, the last two path segments, on the enriched snapshot", async () => {
+    const shapes: [string, string][] = [
+      ["ai-agent-graphs-fix/tickets", "ai-agent-graphs-fix/tickets"],
+      ["other-worktree/tickets", "other-worktree/tickets"],
+      ["repo/.scratch/tickets", ".scratch/tickets"],
+    ];
+    for (const [rel, expected] of shapes) {
+      const root = mkdtempSync(join(tmpdir(), "pool-name-"));
+      tempDirs.push(root);
+      const poolDir = makePoolInto(join(root, rel), [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ]);
+      const server = await startServer(poolDir, stubHarness({}));
+      const snapshot = await server.start();
+      expect(snapshot.poolName).toBe(expected);
+    }
+  });
+
+  it("serves get state, start, and resume over HTTP", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+
+    await server.start();
+    const first = await server.settled();
+    expect(first.phase).toBe("quiescent");
+    expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
+    expect(first.state.tickets[0]?.status).toBe("checkpoint");
+
+    const stateRes = await fetch(`${server.url}/api/state`);
+    const stateBody = (await stateRes.json()) as { snapshot: typeof first };
+    expect(stateBody.snapshot.phase).toBe("quiescent");
+
+    // The answer is acknowledged with 202 at acceptance; the snapshot it
+    // carries still shows the interrupt pending, because processing follows.
+    const resumeRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "resume", note: "go on" }),
+    });
+    expect(resumeRes.status).toBe(202);
+    const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
+    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("checkpoint");
+
+    const resumed = await server.settled();
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.state.tickets[0]?.status).toBe("done");
+    expect(resumed.state.interrupts[0]?.kind).toBe("review");
+
+    const approveRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+    });
+    expect(approveRes.status).toBe(202);
+    const approved = await server.settled();
+    expect(approved.phase).toBe("done");
+  });
+
+  it("streams the latest snapshot to an SSE client on connect", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+    await server.settled();
+    await server.answer(REVIEW_TICKET_ID, "approve");
+    await server.settled();
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const reader = res.body?.getReader();
+    expect(reader).toBeTruthy();
+    const decoder = new TextDecoder();
+    let data = "";
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && !data.includes('"phase"')) {
+      const { value, done } = await reader!.read();
+      if (done) break;
+      data += decoder.decode(value, { stream: true });
+    }
+    expect(data).toContain("event: snapshot");
+    expect(data).toContain('"phase":"done"');
+    reader!.cancel();
+  });
+
+  it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+[0m
+I have the full picture. Let me check engine.test.ts imports and helpers, then write the Issue notes before implementing.
+[0m$ [0msed -n 1,120p engine/engine.test.ts
+import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  REVIEW_TICKET_ID,
+  runPool,
+  startPool,
+  type HarnessCommand,
+  type PoolConfig,
+  type PoolRun,
+} from "./engine.ts";
+import type { SpawnContext } from "./spawn.ts";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+interface PoolSpec {
+  tickets: { file: string; marker: string; body?: string }[];
+  config?: PoolConfig;
+  agentMd?: string;
+}
+
+function makePool(spec: PoolSpec): string {
+  const poolDir = mkdtempSync(join(tmpdir(), "pool-"));
+  tempDirs.push(poolDir);
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  for (const ticket of spec.tickets) {
+    writeFileSync(
+      join(poolDir, "issues", ticket.file),
+      `${ticket.marker}\n\n${ticket.body ?? "# body"}\n`,
+    );
+  }
+  if (spec.config) {
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify(spec.config, null, 2),
+    );
+  }
+  if (spec.agentMd) {
+    writeFileSync(join(poolDir, "AGENT.md"), spec.agentMd);
+  }
+  return poolDir;
+}
+
+interface StubBehaviour {
+  status?: "done" | "checkpoint" | "ready" | "keep";
+  statuses?: ("done" | "checkpoint" | "ready" | "keep")[];
+  outcome?: { summary: string; commitSha: string | null } | null;
+  exitCode?: number;
+}
+
+interface StubRig {
+  harnesses: Record<string, HarnessCommand>;
+  spawned: Record<string, SpawnContext>;
+  spawnOrder: string[];
+}
+
+function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
+  const poolLocal = tempDirs[tempDirs.length - 1];
+  const stubPath = join(poolLocal, "stub-harness.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
+      'if [ "$status" != "keep" ]; then',
+      '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+      "fi",
+      'if [ -n "$outcome_json" ]; then',
+      '  printf \'%s\' "$outcome_json" > "$outcome_path"',
+      "fi",
+      'exit "$exit_code"',
+      "",
+    ].join("\n"),
+  );
+  const spawned: Record<string, SpawnContext> = {};
+  const spawnOrder: string[] = [];
+  const spawnCounts: Record<string, number> = {};
+  const stub: HarnessCommand = (ctx) => {
+    spawned[ctx.id] = ctx;
+    spawnOrder.push(ctx.id);
+    const n = spawnCounts[ctx.id] ?? 0;
+    spawnCounts[ctx.id] = n + 1;
+    const b = behaviour[ctx.id] ?? {};
+    const status = b.statuses
+      ? b.statuses[Math.min(n, b.statuses.length - 1)]
+      : (b.status ?? "done");
+    const outcome =
+      b.outcome === null
+        ? ""
+        : JSON.stringify(
+            b.outcome ?? {
+              summary: `summary-${ctx.id}`,
+              commitSha: `sha-${ctx.id}`,
+            },
+          );
+    return [
+      "bash",
+      stubPath,
+      ctx.issuePath,
+      status,
+      ctx.outcomePath,
+      outcome,
+      String(b.exitCode ?? 0),
+[0m
+The picture is clear. Writing my plan into the Issue first, then implementing.
+[0m← [0mEdit .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+@@ -10,4 +10,25 @@
+ - [ ] Killing the server with answers queued, then restarting, drains the queued answers automatically after rehydrate — each takes effect without being resubmitted
+ - [ ] A duplicate answer for the same ticket and interrupt returns 202 and writes no second `answered` event and no second queued record
+ - [ ] An answer for a ticket with no pending interrupt and no matching accepted answer returns 400 as today
+ - [ ] Engine seam tests cover restart-drain; server seam tests cover idempotent retry and the genuine 400; existing suites pass
++
++## Notes
++
++Findings before touching code (proven by reading, not yet by tests):
++
++- Restart-drain needs no engine change: `startPool` always calls `startDrive`,
++  and `driveLoop` runs `drainAnswers` at the first boundary before the
++  ready-tickets check, so records pending in `runs/queued-answers.json` are
++  drained after rehydrate. Rehydrate restores the pending interrupt from the
++  checkpoint, so processing finds it. The work is a test proving it.
++- Idempotency is NOT implemented: `acceptAnswer` always writes a second
++  `answered` event and record while the interrupt pends, and throws when no
++  interrupt pends even if a matching accepted answer exists.
++- `answerWaiters` is one waiter per seq; an idempotent retry returning the
++  same record would overwrite the first waiter and hang it. Needs a list.
++- Plan: dedupe in `acceptAnswer` (same ticket, same interrupt kind, same
++  approve payload -> return existing record, write nothing); no pending
++  interrupt but a matching accepted answer in the store -> return it;
++  otherwise 400 as today. `answer()` skips the waiter for already-processed
++  records. Server approve/reject guard passes through when no interrupt
++  pends and lets the engine decide (202 retry vs 400).
+
+[0m
+Now the store lookup method:
+[0m← [0mEdit engine/queued-answers.ts
+Index: /home/billy/repos/agent-console/engine/queued-answers.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/queued-answers.ts
++++ /home/billy/repos/agent-console/engine/queued-answers.ts
+@@ -67,8 +67,27 @@
+ pending(): QueuedAnswer[] {
+   return this.answers.filter((answer) => answer.processedAt === null);
+ }
+ 
++/**
++ * The most recent accepted answer for a ticket with the same payload shape
++ * (approve strict-equal, so a resume never matches a recorded approval).
++ * This is the idempotent-resume lookup: a retried answer finds its
++ * acceptance here and is acknowledged again rather than recorded twice.
++ */
++latestFor(
++  ticketId: string,
++  approve: boolean | undefined,
++): QueuedAnswer | null {
++  for (let i = this.answers.length - 1; i >= 0; i -= 1) {
++    const answer = this.answers[i]!;
++    if (answer.ticketId === ticketId && answer.approve === approve) {
++      return answer;
++    }
++  }
++  return null;
++}
++
+ markProcessed(seq: number): void {
+   const record = this.answers.find((answer) => answer.seq === seq);
+   if (!record || record.processedAt !== null) return;
+   record.processedAt = new Date().toISOString();
+
+[0m
+Now the engine changes: multi-waiter map, idempotent `acceptAnswer`, and the `answer()` handle path.
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -225,9 +225,9 @@
+ // boundary drain; idle it is processed immediately and a fresh drive kicks.
+ driving: boolean;
+ settledPhase: Exclude<RunPhase, "running"> | null;
+ settleWaiters: SettleWaiter[];
+-answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }>;
++answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }[]>;
+ handle: PoolRun;
+ onSnapshot?: (snapshot: PoolSnapshot) => void;
+ issueRunnerPath: string;
+ resolverAttempts: Map<string, { files: string[]; note: string }>;
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -309,13 +309,19 @@
+     record = acceptAnswer(session, ticketId, note, approve);
+   } catch (error) {
+     return Promise.reject(error);
+   }
++  // A retry of an answer that was already processed: acceptance recorded
++  // nothing new, so there is no drain to wait for.
++  if (record.processedAt !== null) return nextSettle(session);
+   // The waiter registers before the kick: an idle kick drains
+   // synchronously, and a drain that settles a waiter which does not exist
+-  // yet hangs the promise forever.
++  // yet hangs the promise forever. Several answers can share one queued
++  // record (an idempotent retry returns it), so each seq holds a list.
+   const processed = new Promise<void>((resolve, reject) => {
+-    session.answerWaiters.set(record.seq, { resolve, reject });
++    const waiters = session.answerWaiters.get(record.seq) ?? [];
++    waiters.push({ resolve, reject });
++    session.answerWaiters.set(record.seq, waiters);
+   });
+   kickProcessing(session);
+   return processed.then(() => nextSettle(session));
+ };
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -375,9 +375,11 @@
+     if (error) waiter.reject(error);
+     else waiter.resolve(session.handle);
+   }
+   if (error) {
+-    for (const [, waiter] of session.answerWaiters) waiter.reject(error);
++    for (const [, waiters] of session.answerWaiters) {
++      for (const waiter of waiters) waiter.reject(error);
++    }
+     session.answerWaiters.clear();
+   }
+ }
+ 
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -794,19 +794,19 @@
+ // record whose interrupt is gone) rejects its own waiter and is consumed; it
+ // never takes the drive down with it.
+ function drainAnswers(session: Session): void {
+   for (const record of session.answers.pending()) {
+-    const waiter = session.answerWaiters.get(record.seq);
++    const waiters = session.answerWaiters.get(record.seq) ?? [];
+     session.answerWaiters.delete(record.seq);
+     try {
+       processAnswer(session, record);
+     } catch (error) {
+       session.answers.markProcessed(record.seq);
+-      waiter?.reject(error);
++      for (const waiter of waiters) waiter.reject(error);
+       continue;
+     }
+     session.answers.markProcessed(record.seq);
+-    waiter?.resolve();
++    for (const waiter of waiters) waiter.resolve();
+   }
+ }
+ 
+ // Processing: apply one accepted answer to state and the markers. Everything
+
+[0m
+Now the idempotency in `acceptAnswer`:
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -737,8 +737,16 @@
+ // queued-answer record in its own persisted store. Acceptance never mutates
+ // state and never spawns an attempt, so it is safe mid-super-step. Processing
+ // is the caller's follow-up (kickProcessing), so a waiter can be registered
+ // between the two.
++//
++// Acceptance is idempotent so a client that timed out and retried is safe:
++// an answer matching one already queued (same ticket, same interrupt kind,
++// same payload) is acknowledged by returning the existing record, writing no
++// second event or record. An answer whose interrupt is already gone is
++// acknowledged the same way when the store holds its matching acceptance;
++// with no pending interrupt and no matching accepted answer it errors, as
++// before the split.
+ function acceptAnswer(
+   session: Session,
+   ticketId: string,
+   note: string | undefined,
+@@ -747,8 +755,10 @@
+   const interrupt = session.state.interrupts.find(
+     (i) => i.ticketId === ticketId,
+   );
+   if (!interrupt) {
++    const prior = session.answers.latestFor(ticketId, approve);
++    if (prior) return prior;
+     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+   }
+   if (interrupt.kind === "review" && approve === undefined) {
+     throw new Error(
+@@ -760,8 +770,17 @@
+       `answer: use approve() or reject() for the merge-approval interrupt ` +
+         `on ticket ${ticketId}`,
+     );
+   }
++  const duplicate = session.answers
++    .pending()
++    .find(
++      (a) =>
++        a.ticketId === ticketId &&
++        a.kind === interrupt.kind &&
++        a.approve === approve,
++    );
++  if (duplicate) return duplicate;
+   appendEvent(session.runsDir, ticketId, {
+     at: new Date().toISOString(),
+     attempt: lastAttempt(session.runsDir, ticketId),
+     kind: "answered",
+
+[0m
+Now the server guard: pass approve/reject through when no interrupt pends, so the engine can distinguish a retry (202) from a genuine 400.
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/agent-console/engine/server.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/server.ts
++++ /home/billy/repos/agent-console/engine/server.ts
+@@ -625,9 +625,12 @@
+ // it as a resume.
+ const kind = latest?.state.interrupts.find(
+   (i) => i.ticketId === ticketId,
+ )?.kind;
+-if (kind !== "review" && kind !== "merge-approval") {
++// No pending interrupt: this may be a retry of an answer already
++// accepted and processed, which must be acknowledged again. The
++// engine's queued-answer store decides (202 retry vs genuine 400).
++if (kind !== undefined && kind !== "review" && kind !== "merge-approval") {
+   throw new Error(
+     `answer: approve/reject needs the review gate (${REVIEW_TICKET_ID}) ` +
+       `or a merge-approval interrupt, got ${kind ?? "no interrupt"} ` +
+       `for ${ticketId}`,
+
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -5
+$ tsc --noEmit
+[0m
+Typecheck is clean. Now the tests. Checking helpers referenced by the accept/process split tests:
+[0m$ [0mgrep -n "stubConfig\b" engine/engine.test.ts | head -3; grep -n "^import\|from \"" engine/engine.test.ts | head; grep -n "REVIEW_TICKET_ID" engine/server.test.ts | head -3
+126:const stubConfig: PoolConfig = {
+133:  ...stubConfig,
+149:      config: stubConfig,
+1:import { afterEach, describe, expect, it } from "bun:test";
+2:import { Database } from "bun:sqlite";
+3:import {
+11:} from "node:fs";
+12:import { tmpdir } from "node:os";
+13:import { join } from "node:path";
+14:import {
+21:} from "./engine.ts";
+22:import type { SpawnContext } from "./spawn.ts";
+2245:        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+23:import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+130:    await server.answer(REVIEW_TICKET_ID, "approve");
+190:      body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -18,8 +18,10 @@
+   type HarnessCommand,
+   type PoolConfig,
+   type PoolRun,
+ } from "./engine.ts";
++import { appendEvent } from "./events.ts";
++import { QueuedAnswerStore } from "./queued-answers.ts";
+ import type { SpawnContext } from "./spawn.ts";
+ 
+ const tempDirs: string[] = [];
+ 
+
+[0m
+Now the two engine seam tests, appended to the accept/process split describe:
+[0m✗ [0mEdit engine/engine.test.ts failed
+[91m[1mError: [0mCould not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.
+I inverted the arguments. Redoing:
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -3281,8 +3281,112 @@
+   expect(done.phase).toBe("done");
+   expect(done.final.log).toContain("review approved: the run is complete (ship it)");
+ });
+ 
++it("drains queued answers left behind by a killed server after rehydrate", async () => {
++  const poolDir = makePool({
++    tickets: [
++      {
++        file: "01-a.md",
++        marker: "<!-- state: id=01 blocked-by=none status=ready -->",
++        body: "# 01\n\n## Brief\n\npick a name",
++      },
++      {
++        file: "02-b.md",
++        marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
++      },
++    ],
++    config: stubConfig,
++  });
++  const first = await runPool({
++    poolDir,
++    harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
++  });
++  expect(first.phase).toBe("quiescent");
++  first.close();
++
++  // The on-disk state a kill leaves behind when an answer was accepted but
++  // the process died before the drain: acceptance's exact writes (the
++  // answered event, then the queued record) with the interrupt still
++  // pending in the checkpoint.
++  appendEvent(join(poolDir, "runs"), "01", {
++    at: new Date().toISOString(),
++    attempt: 1,
++    kind: "answered",
++    payload: { kind: "checkpoint" },
++  });
++  new QueuedAnswerStore(join(poolDir, "runs")).enqueue({
++    ticketId: "01",
++    kind: "checkpoint",
++    note: "the name is Foo",
++    at: new Date().toISOString(),
++  });
++
++  const rig = stubHarness({ "01": { status: "done" } });
++  const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
++
++  // The queued answer took effect without resubmission: 01 resumed and
++  // finished, its dependent ran, and the run reached the review gate.
++  expect(restarted.phase).toBe("quiescent");
++  expect(restarted.interrupts.map((i) => i.kind)).toEqual(["review"]);
++  expect(rig.spawnOrder).toEqual(["01", "02"]);
++  const queue = readQueuedAnswers(poolDir);
++  expect(queue.answers).toHaveLength(1);
++  expect(queue.answers[0]?.processedAt).not.toBeNull();
++  // The only answered event is acceptance's own, written before the kill.
++  expect(
++    readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
++  ).toHaveLength(1);
++  const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
++  expect(issueText).toContain("## Resume note");
++  expect(issueText).toContain("the name is Foo");
++});
++
++it("acknowledges a duplicate answer without a second event or record, and both callers settle", async () => {
++  const poolDir = makePool({
++    tickets: [
++      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
++      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
++    ],
++    config: stubConfig,
++  });
++  const sentinel = join(poolDir, "release-02");
++  const rig = blockingHarness(
++    {
++      "01": { statuses: ["checkpoint", "done"] },
++      "02": { statuses: ["done"], block: true },
++    },
++    sentinel,
++  );
++
++  const run = startPool({ poolDir, harnesses: rig.harnesses });
++  await waitFor(
++    () =>
++      rig.spawned["02"] !== undefined &&
++      run.interrupts.some((i) => i.ticketId === "01"),
++    "ticket 02 spawned with the checkpoint interrupt pending for 01",
++  );
++
++  // The client answered, timed out waiting, and retried the same answer
++  // while the first was still queued behind the in-flight super-step.
++  const first = run.resume("01", "carry on");
++  const retry = run.resume("01", "carry on");
++
++  expect(
++    readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
++  ).toHaveLength(1);
++  expect(readQueuedAnswers(poolDir).answers).toHaveLength(1);
++
++  writeFileSync(sentinel, "go");
++  await first;
++  await retry;
++
++  expect(run.phase).toBe("quiescent");
++  expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
++  expect(run.final.tickets["01"]).toBe("done");
++  expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
++}, 15000);
++
+ it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {
+   const poolDir = makePool({
+     tickets: [
+       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts -t "accept/process split" 2>&1 | tail -20
+bun test v1.3.14 (0d9b296a)
+
+engine/engine.test.ts:
+3106 |   }
+3107 | 
+3108 |   async function waitFor(cond: () => boolean, what: string): Promise<void> {
+3109 |     const deadline = Date.now() + 5000;
+3110 |     while (!cond()) {
+3111 |       if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+                                                  ^
+error: timed out waiting for ticket 02 spawned with the checkpoint interrupt pending for 01
+      at waitFor (/home/billy/repos/agent-console/engine/engine.test.ts:3111:44)
+      at async <anonymous> (/home/billy/repos/agent-console/engine/engine.test.ts:3362:11)
+(fail) accept/process split > acknowledges a duplicate answer without a second event or record, and both callers settle [5011.28ms]
+
+ 4 pass
+ 64 filtered out
+ 1 fail
+ 36 expect() calls
+Ran 5 tests across 1 file. [5.18s]
+[0m
+The blocking ticket must run in a *later* super-step than the checkpointing one (the join awaits all tickets, so a same-step blocker delays the interrupt). Mirroring the Issue-01 test's ticket shape:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -3345,26 +3345,28 @@
+ const poolDir = makePool({
+   tickets: [
+     { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+     { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
++    { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+   ],
+   config: stubConfig,
+ });
+-const sentinel = join(poolDir, "release-02");
++const sentinel = join(poolDir, "release-03");
+ const rig = blockingHarness(
+   {
+     "01": { statuses: ["checkpoint", "done"] },
+-    "02": { statuses: ["done"], block: true },
++    "02": { statuses: ["done"] },
++    "03": { statuses: ["done"], block: true },
+   },
+   sentinel,
+ );
+ 
+ const run = startPool({ poolDir, harnesses: rig.harnesses });
+ await waitFor(
+   () =>
+-    rig.spawned["02"] !== undefined &&
++    rig.spawned["03"] !== undefined &&
+     run.interrupts.some((i) => i.ticketId === "01"),
+-  "ticket 02 spawned with the checkpoint interrupt pending for 01",
++  "ticket 03 spawned with the checkpoint interrupt pending for 01",
+ );
+ 
+ // The client answered, timed out waiting, and retried the same answer
+ // while the first was still queued behind the in-flight super-step.
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts -t "accept/process split" 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 5 pass
+ 64 filtered out
+ 0 fail
+ 42 expect() calls
+Ran 5 tests across 1 file. [208.00ms]
+[0m
+Engine seam green. Now the server seam test:
+[0m← [0mEdit engine/server.test.ts
+Index: /home/billy/repos/agent-console/engine/server.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/server.test.ts
++++ /home/billy/repos/agent-console/engine/server.test.ts
+@@ -193,8 +193,60 @@
+   const approved = await server.settled();
+   expect(approved.phase).toBe("done");
+ });
+ 
++it("acknowledges a retried answer with 202 and no duplicate; a stranger answer still 400s", async () => {
++  const poolDir = makePool([
++    { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
++    { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
++  ]);
++  const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
++  await server.start();
++  const first = await server.settled();
++  expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
++
++  const post = (body: unknown) =>
++    fetch(`${server.url}/api/resume`, {
++      method: "POST",
++      headers: { "content-type": "application/json" },
++      body: JSON.stringify(body),
++    });
++
++  const resumeRes = await post({ ticketId: "01", action: "resume", note: "go on" });
++  expect(resumeRes.status).toBe(202);
++  const resumed = await server.settled();
++  expect(resumed.state.tickets.find((t) => t.id === "01")?.status).toBe("done");
++  expect(resumed.state.interrupts[0]?.kind).toBe("review");
++
++  // The client timed out waiting and retried the same answer. The
++  // interrupt is already processed and gone, but the accepted answer is in
++  // the store, so the retry is acknowledged again rather than erroring.
++  const retryRes = await post({ ticketId: "01", action: "resume", note: "go on" });
++  expect(retryRes.status).toBe(202);
++
++  // No second answered event and no second queued record were written.
++  const events = readFileSync(join(poolDir, "runs", "01.events.jsonl"), "utf8")
++    .split("\n")
++    .filter(Boolean)
++    .map((line) => JSON.parse(line) as { kind: string });
++  expect(events.filter((e) => e.kind === "answered")).toHaveLength(1);
++  const queue = JSON.parse(
++    readFileSync(join(poolDir, "runs", "queued-answers.json"), "utf8"),
++  ) as { answers: unknown[] };
++  expect(queue.answers).toHaveLength(1);
++
++  // Approvals are idempotent the same way, once the review gate is down.
++  const approveRes = await post({ ticketId: REVIEW_TICKET_ID, action: "approve" });
++  expect(approveRes.status).toBe(202);
++  await server.settled();
++  const approveRetry = await post({ ticketId: REVIEW_TICKET_ID, action: "approve" });
++  expect(approveRetry.status).toBe(202);
++
++  // A ticket with no pending interrupt and no accepted answer still 400s.
++  const strangerRes = await post({ ticketId: "02", action: "resume" });
++  expect(strangerRes.status).toBe(400);
++});
++
+ it("streams the latest snapshot to an SSE client on connect", async () => {
+   const poolDir = makePool([
+     { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+   ]);
+
+[0m
+[0m$ [0mbun test engine/server.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 53 pass
+ 0 fail
+ 164 expect() calls
+Ran 53 tests across 1 file. [14.52s]
+[0m
+Full suite and typecheck:
+[0m$ [0mbun test 2>&1 | tail -6 && bun run typecheck 2>&1 | tail -3
+bun test v1.3.14 (0d9b296a)
+
+ 279 pass
+ 0 fail
+ 1030 expect() calls
+Ran 279 tests across 10 files. [17.93s]
+$ tsc --noEmit
+[0m
+All green: 279 tests pass, typecheck clean. Reviewing the diff before committing:
+[0m$ [0mgit diff --stat && git diff engine/engine.ts engine/queued-answers.ts engine/server.ts
+...ed-answers-survive-restart-idempotent-resume.md |  23 ++++-
+ engine/engine.test.ts                              | 108 +++++++++++++++++++++
+ engine/engine.ts                                   |  41 ++++++--
+ engine/queued-answers.ts                           |  19 ++++
+ engine/server.test.ts                              |  52 ++++++++++
+ engine/server.ts                                   |   5 +-
+ 6 files changed, 239 insertions(+), 9 deletions(-)
+diff --git a/engine/engine.ts b/engine/engine.ts
+index d91cbde..b677cf0 100644
+--- a/engine/engine.ts
++++ b/engine/engine.ts
+@@ -226,7 +226,7 @@ interface Session {
+   driving: boolean;
+   settledPhase: Exclude<RunPhase, "running"> | null;
+   settleWaiters: SettleWaiter[];
+-  answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }>;
++  answerWaiters: Map<number, { resolve: () => void; reject: (e: unknown) => void }[]>;
+   handle: PoolRun;
+   onSnapshot?: (snapshot: PoolSnapshot) => void;
+   issueRunnerPath: string;
+@@ -310,11 +310,17 @@ function makeHandle(session: Session): PoolRun {
+     } catch (error) {
+       return Promise.reject(error);
+     }
++    // A retry of an answer that was already processed: acceptance recorded
++    // nothing new, so there is no drain to wait for.
++    if (record.processedAt !== null) return nextSettle(session);
+     // The waiter registers before the kick: an idle kick drains
+     // synchronously, and a drain that settles a waiter which does not exist
+-    // yet hangs the promise forever.
++    // yet hangs the promise forever. Several answers can share one queued
++    // record (an idempotent retry returns it), so each seq holds a list.
+     const processed = new Promise<void>((resolve, reject) => {
+-      session.answerWaiters.set(record.seq, { resolve, reject });
++      const waiters = session.answerWaiters.get(record.seq) ?? [];
++      waiters.push({ resolve, reject });
++      session.answerWaiters.set(record.seq, waiters);
+     });
+     kickProcessing(session);
+     return processed.then(() => nextSettle(session));
+@@ -370,7 +376,9 @@ function settleDrive(
+     else waiter.resolve(session.handle);
+   }
+   if (error) {
+-    for (const [, waiter] of session.answerWaiters) waiter.reject(error);
++    for (const [, waiters] of session.answerWaiters) {
++      for (const waiter of waiters) waiter.reject(error);
++    }
+     session.answerWaiters.clear();
+   }
+ }
+@@ -730,6 +738,14 @@ function closeStore(session: Session): void {
+ // state and never spawns an attempt, so it is safe mid-super-step. Processing
+ // is the caller's follow-up (kickProcessing), so a waiter can be registered
+ // between the two.
++//
++// Acceptance is idempotent so a client that timed out and retried is safe:
++// an answer matching one already queued (same ticket, same interrupt kind,
++// same payload) is acknowledged by returning the existing record, writing no
++// second event or record. An answer whose interrupt is already gone is
++// acknowledged the same way when the store holds its matching acceptance;
++// with no pending interrupt and no matching accepted answer it errors, as
++// before the split.
+ function acceptAnswer(
+   session: Session,
+   ticketId: string,
+@@ -740,6 +756,8 @@ function acceptAnswer(
+     (i) => i.ticketId === ticketId,
+   );
+   if (!interrupt) {
++    const prior = session.answers.latestFor(ticketId, approve);
++    if (prior) return prior;
+     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+   }
+   if (interrupt.kind === "review" && approve === undefined) {
+@@ -753,6 +771,15 @@ function acceptAnswer(
+         `on ticket ${ticketId}`,
+     );
+   }
++  const duplicate = session.answers
++    .pending()
++    .find(
++      (a) =>
++        a.ticketId === ticketId &&
++        a.kind === interrupt.kind &&
++        a.approve === approve,
++    );
++  if (duplicate) return duplicate;
+   appendEvent(session.runsDir, ticketId, {
+     at: new Date().toISOString(),
+     attempt: lastAttempt(session.runsDir, ticketId),
+@@ -787,17 +814,17 @@ function kickProcessing(session: Session): void {
+ // never takes the drive down with it.
+ function drainAnswers(session: Session): void {
+   for (const record of session.answers.pending()) {
+-    const waiter = session.answerWaiters.get(record.seq);
++    const waiters = session.answerWaiters.get(record.seq) ?? [];
+     session.answerWaiters.delete(record.seq);
+     try {
+       processAnswer(session, record);
+     } catch (error) {
+       session.answers.markProcessed(record.seq);
+-      waiter?.reject(error);
++      for (const waiter of waiters) waiter.reject(error);
+       continue;
+     }
+     session.answers.markProcessed(record.seq);
+-    waiter?.resolve();
++    for (const waiter of waiters) waiter.resolve();
+   }
+ }
+ 
+diff --git a/engine/queued-answers.ts b/engine/queued-answers.ts
+index 08ff2f9..3edfca6 100644
+--- a/engine/queued-answers.ts
++++ b/engine/queued-answers.ts
+@@ -68,6 +68,25 @@ export class QueuedAnswerStore {
+     return this.answers.filter((answer) => answer.processedAt === null);
+   }
+ 
++  /**
++   * The most recent accepted answer for a ticket with the same payload shape
++   * (approve strict-equal, so a resume never matches a recorded approval).
++   * This is the idempotent-resume lookup: a retried answer finds its
++   * acceptance here and is acknowledged again rather than recorded twice.
++   */
++  latestFor(
++    ticketId: string,
++    approve: boolean | undefined,
++  ): QueuedAnswer | null {
++    for (let i = this.answers.length - 1; i >= 0; i -= 1) {
++      const answer = this.answers[i]!;
++      if (answer.ticketId === ticketId && answer.approve === approve) {
++        return answer;
++      }
++    }
++    return null;
++  }
++
+   markProcessed(seq: number): void {
+     const record = this.answers.find((answer) => answer.seq === seq);
+     if (!record || record.processedAt !== null) return;
+diff --git a/engine/server.ts b/engine/server.ts
+index 8a319f9..559d677 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -626,7 +626,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+       const kind = latest?.state.interrupts.find(
+         (i) => i.ticketId === ticketId,
+       )?.kind;
+-      if (kind !== "review" && kind !== "merge-approval") {
++      // No pending interrupt: this may be a retry of an answer already
++      // accepted and processed, which must be acknowledged again. The
++      // engine's queued-answer store decides (202 retry vs genuine 400).
++      if (kind !== undefined && kind !== "review" && kind !== "merge-approval") {
+         throw new Error(
+           `answer: approve/reject needs the review gate (${REVIEW_TICKET_ID}) ` +
+             `or a merge-approval interrupt, got ${kind ?? "no interrupt"} ` +
+[0m
+[0m← [0mEdit .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=02 blocked-by=01 status=in-progress -->
++<!-- state: id=02 blocked-by=01 status=done -->
+ # 02: Queued answers survive restart; resume is idempotent
+ 
+ **What to build:** A queued answer can never be silently lost or confusingly doubled. When the pool server restarts and rehydrates, it loads the queued-answer store and drains any unprocessed answers as part of recovery, with no manual redo. Answering an interrupt that already has a queued or accepted answer (same ticket, same interrupt identity) is idempotent: the request returns 202 again and no duplicate `answered` event or queued record is written — so a client that timed out and retried is safe. An answer for a ticket with no pending interrupt and no matching accepted answer still 400s, as today.
+ 
+
+[0m
+Diff is clean. Ticking the criteria and marking the Issue done:
+[0m← [0mEdit .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+@@ -6,12 +6,12 @@
+ **Blocked by:** 01: Accept/process split — answers acknowledged with 202, processed at the super-step boundary
+ 
+ **Status:** ready-for-agent
+ 
+-- [ ] Killing the server with answers queued, then restarting, drains the queued answers automatically after rehydrate — each takes effect without being resubmitted
+-- [ ] A duplicate answer for the same ticket and interrupt returns 202 and writes no second `answered` event and no second queued record
+-- [ ] An answer for a ticket with no pending interrupt and no matching accepted answer returns 400 as today
+-- [ ] Engine seam tests cover restart-drain; server seam tests cover idempotent retry and the genuine 400; existing suites pass
++- [x] Killing the server with answers queued, then restarting, drains the queued answers automatically after rehydrate — each takes effect without being resubmitted
++- [x] A duplicate answer for the same ticket and interrupt returns 202 and writes no second `answered` event and no second queued record
++- [x] An answer for a ticket with no pending interrupt and no matching accepted answer returns 400 as today
++- [x] Engine seam tests cover restart-drain; server seam tests cover idempotent retry and the genuine 400; existing suites pass
+ 
+ ## Notes
+ 
+ Findings before touching code (proven by reading, not yet by tests):
+
+[0m
+[0m← [0mEdit .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md
+@@ -31,4 +31,7 @@
+   interrupt but a matching accepted answer in the store -> return it;
+   otherwise 400 as today. `answer()` skips the waiter for already-processed
+   records. Server approve/reject guard passes through when no interrupt
+   pends and lets the engine decide (202 retry vs 400).
++
++Outcome: all four criteria met. `bun test` 279 pass, `bun run typecheck`
++clean. ui/ untouched, so no UI build was required.
+
+[0m
+[0m$ [0mgit add engine/engine.ts engine/queued-answers.ts engine/server.ts engine/engine.test.ts engine/server.test.ts .scratch/resume-feedback/issues/02-queued-answers-survive-restart-idempotent-resume.md && git commit -m "engine: make resume idempotent and drain queued answers after restart
+
+Acceptance now acknowledges a retry instead of doubling it: an answer
+matching one already queued (same ticket, interrupt kind, and payload)
+returns the existing record with no second answered event or queued
+record, and an answer whose interrupt was already processed is
+acknowledged from the store rather than erroring. Only a ticket with no
+pending interrupt and no matching accepted answer still 400s. Shared
+records hold a list of waiters so every retried caller settles, and the
+server's approve/reject guard defers to the engine when no interrupt
+pends. Restart-drain needed no code: the drive loop drains the persisted
+queue at the first boundary after rehydrate, now pinned by a test." && git log --oneline -2
+[main 82924fd] engine: make resume idempotent and drain queued answers after restart
+ 6 files changed, 246 insertions(+), 13 deletions(-)
+82924fd engine: make resume idempotent and drain queued answers after restart
+464b572 engine: register the answer waiter before the idle processing kick
+[0m
+Issue 02 done, committed as `82924fd`.
+
+- **Idempotent resume** (`engine/engine.ts:740`): `acceptAnswer` returns the existing record for a matching queued answer (same ticket, kind, payload), or for an already-processed answer whose interrupt is gone; genuine strangers still throw → 400.
+- **Restart-drain** needed no code: `driveLoop` drains the persisted store at the first boundary after rehydrate — now pinned by an engine test.
+- **Multi-waiter fix**: shared records hold a waiter list, so a retried `resume()` promise can't hang.
+- **Server** (`engine/server.ts:629`): approve/reject guard defers to the engine when no interrupt pends, so retried approvals get 202.
+- Tests: 2 engine seam (restart-drain, mid-flight duplicate) + 1 server seam (202 retry, no duplicate event/record, genuine 400, idempotent approve). Full suite 279 pass, typecheck clean.

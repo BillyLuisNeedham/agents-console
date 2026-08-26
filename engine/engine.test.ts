@@ -1166,6 +1166,44 @@ describe("interrupts", () => {
     }
   });
 
+  it("holds a dependent behind a checkpointed blocker without a deadlock, then schedules it after resume", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nneed a decision",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { statuses: ["checkpoint", "done"] },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Only done satisfies the edge: 02 never spawns while 01 sits at
+    // checkpoint, and a human-resumable pause is not a deadlock.
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(run.final.tickets).toEqual({ "01": "checkpoint", "02": "ready" });
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "need a decision" },
+    ]);
+    expect(run.phase).toBe("quiescent");
+
+    const resumed = await run.resume("01", "carry on");
+    const done = await approveReview(resumed);
+
+    expect(done.phase).toBe("done");
+    expect(done.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(rig.spawnOrder).toEqual(["01", "01", "02"]);
+  });
+
   it("appends the resume note to the Issue file", async () => {
     const poolDir = makePool({
       tickets: [

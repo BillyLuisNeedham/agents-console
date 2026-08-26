@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  checkpointNotice,
   clampDetailWidth,
   clampDrawersHeight,
   DETAIL_MAX_FRACTION,
@@ -408,6 +409,128 @@ describe("queued-answer waiting state", () => {
     expect(card?.kind).toBe("ticket");
     if (card?.kind === "ticket") {
       expect(card.interrupt?.queued).toBe(false);
+    }
+  });
+});
+
+describe("blocked-by-checkpoint notice", () => {
+  function blockedSnapshot(): PoolSnapshot {
+    return snapshot({
+      state: {
+        tickets: [
+          ticket("A", { status: "checkpoint" }),
+          ticket("B", { blockedBy: ["A"] }),
+          ticket("C", { blockedBy: ["B"] }),
+        ],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief A" }],
+      },
+    });
+  }
+
+  it("projects the notice onto the dependent's card, named by blocker", () => {
+    const view = projectPool(blockedSnapshot());
+    const dependent = view.cards.find((c) => c.id === "ticket:B");
+    expect(dependent?.kind).toBe("ticket");
+    if (dependent?.kind === "ticket") {
+      expect(dependent.blockedByCheckpoint).toEqual(["A"]);
+      expect(checkpointNotice(dependent.blockedByCheckpoint)).toBe(
+        "blocked by checkpoint on ticket A (waiting on you)",
+      );
+    }
+  });
+
+  it("does not project onto the checkpointed ticket itself or a transitively blocked ticket", () => {
+    const view = projectPool(blockedSnapshot());
+    const blocker = view.cards.find((c) => c.id === "ticket:A");
+    const transitive = view.cards.find((c) => c.id === "ticket:C");
+    expect(blocker?.kind).toBe("ticket");
+    expect(transitive?.kind).toBe("ticket");
+    if (blocker?.kind === "ticket") {
+      expect(blocker.blockedByCheckpoint).toEqual([]);
+    }
+    if (transitive?.kind === "ticket") {
+      // C's blocker B is merely ready, not checkpointed: no notice.
+      expect(transitive.blockedByCheckpoint).toEqual([]);
+    }
+  });
+
+  it("mirrors the notice in the dependent's Detail", () => {
+    const detail = projectDetail(blockedSnapshot(), "ticket:B");
+    expect(detail?.kind).toBe("ticket");
+    if (detail?.kind === "ticket") {
+      expect(detail.blockedByCheckpoint).toEqual(["A"]);
+      expect(checkpointNotice(detail.blockedByCheckpoint)).toBe(
+        "blocked by checkpoint on ticket A (waiting on you)",
+      );
+    }
+  });
+
+  it("names every checkpointed blocker when there are several", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("A", { status: "checkpoint" }),
+          ticket("B", { status: "checkpoint" }),
+          ticket("C", { blockedBy: ["A", "B"] }),
+        ],
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief A" },
+          { ticketId: "B", kind: "crash", body: "crashed" },
+        ],
+      },
+    });
+    const card = projectPool(snap).cards.find((c) => c.id === "ticket:C");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(checkpointNotice(card.blockedByCheckpoint)).toBe(
+        "blocked by checkpoint on tickets A, B (waiting on you)",
+      );
+    }
+  });
+
+  it("clears once the blocker completes and the dependent is schedulable", () => {
+    const cleared = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "done" }), ticket("B", { blockedBy: ["A"] })],
+      },
+    });
+    const card = projectPool(cleared).cards.find((c) => c.id === "ticket:B");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.blockedByCheckpoint).toEqual([]);
+    }
+  });
+
+  it("stays silent while the dependent is no longer waiting", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("A", { status: "checkpoint" }),
+          ticket("B", { blockedBy: ["A"], status: "in-progress" }),
+        ],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief A" }],
+      },
+    });
+    const card = projectPool(snap).cards.find((c) => c.id === "ticket:B");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.blockedByCheckpoint).toEqual([]);
+    }
+  });
+
+  it("needs the blocker's interrupt pending, not just its checkpoint status", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("A", { status: "checkpoint" }),
+          ticket("B", { blockedBy: ["A"] }),
+        ],
+      },
+    });
+    const card = projectPool(snap).cards.find((c) => c.id === "ticket:B");
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.blockedByCheckpoint).toEqual([]);
     }
   });
 });

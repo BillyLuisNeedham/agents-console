@@ -11,6 +11,7 @@
  */
 
 import {
+  checkpointNotice,
   clampDetailWidth,
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
@@ -468,6 +469,15 @@ export class Detail {
           : "no blockers",
       ),
     );
+    if (detail.blockedByCheckpoint.length > 0) {
+      panel.append(
+        h(
+          "div",
+          { class: "checkpoint-blocked" },
+          checkpointNotice(detail.blockedByCheckpoint),
+        ),
+      );
+    }
     if (body === undefined) {
       panel.append(
         error

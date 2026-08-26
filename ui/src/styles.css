@@ -455,6 +455,15 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* The blocked-by-checkpoint notice, on the card and in the Detail: the same
+   amber as the queued-answer waiting state, since both name a stall the
+   operator can clear. */
+.checkpoint-blocked {
+  color: var(--status-running);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
 .interrupt-check {
   display: flex;
   align-items: center;

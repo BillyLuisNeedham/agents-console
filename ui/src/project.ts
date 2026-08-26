@@ -398,6 +398,9 @@ export interface TicketCardView {
   ticketId: string;
   title: string;
   blockedBy: string[];
+  /** Blockers sitting at checkpoint with a pending interrupt: the stall is
+   *  the operator's to clear. Empty unless this ticket is still waiting. */
+  blockedByCheckpoint: string[];
   status: PoolStatus;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
@@ -521,6 +524,32 @@ export function projectPoolEdges(
   return edges;
 }
 
+/**
+ * The blockers holding this ticket at a checkpoint with a pending interrupt:
+ * the stall a human can clear, named so the card and Detail can surface it.
+ * A ticket only waits on its blockers while it is still ready, and a blocker
+ * only counts while its interrupt pends: once the checkpoint is answered and
+ * the blocker completes, the dependent schedules and the notice disappears.
+ * Visibility only: scheduling still requires done, and a checkpointed blocker
+ * is never a deadlock.
+ */
+function checkpointBlockers(ticket: PoolTicketState, state: PoolState): string[] {
+  if (ticket.status !== "ready") return [];
+  return ticket.blockedBy.filter((blockerId) => {
+    const blocker = state.tickets.find((t) => t.id === blockerId);
+    return (
+      blocker?.status === "checkpoint" &&
+      state.interrupts.some((i) => i.ticketId === blockerId)
+    );
+  });
+}
+
+/** The notice the card and Detail share for a checkpoint-blocked ticket. */
+export function checkpointNotice(blockers: string[]): string {
+  const noun = blockers.length === 1 ? "ticket" : "tickets";
+  return `blocked by checkpoint on ${noun} ${blockers.join(", ")} (waiting on you)`;
+}
+
 function toInterruptView(raw: PoolInterrupt | null, state: PoolState): InterruptView | null {
   if (!raw) return null;
   return {
@@ -544,6 +573,7 @@ function projectTicket(
     ticketId: ticket.id,
     title: ticket.title,
     blockedBy: ticket.blockedBy,
+    blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
@@ -666,6 +696,7 @@ export interface TicketDetailView {
   title: string;
   status: PoolStatus;
   blockedBy: string[];
+  blockedByCheckpoint: string[];
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
 }
@@ -690,6 +721,7 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
       title: card.title,
       status: card.status,
       blockedBy: card.blockedBy,
+      blockedByCheckpoint: card.blockedByCheckpoint,
       outcome: card.outcome,
       interrupt: card.interrupt,
     };

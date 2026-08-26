@@ -9,6 +9,7 @@
  */
 
 import {
+  checkpointNotice,
   edgePath,
   layoutStorageKey,
   mergeLayout,
@@ -308,6 +309,20 @@ export class Canvas {
         }),
       );
     }
+    const blockers =
+      card.blockedByCheckpoint.length > 0
+        ? h(
+            "div",
+            { class: "checkpoint-blocked" },
+            checkpointNotice(card.blockedByCheckpoint),
+          )
+        : h(
+            "div",
+            { class: "dim ticket-card-blocked" },
+            card.blockedBy.length > 0
+              ? `after ${card.blockedBy.join(", ")}`
+              : "no blockers",
+          );
     return h(
       "div",
       {
@@ -327,13 +342,7 @@ export class Canvas {
         "div",
         { class: "node-card-body" },
         h("div", { class: "card-text ticket-card-summary" }, card.title),
-        h(
-          "div",
-          { class: "dim ticket-card-blocked" },
-          card.blockedBy.length > 0
-            ? `after ${card.blockedBy.join(", ")}`
-            : "no blockers",
-        ),
+        blockers,
       ),
     );
   }

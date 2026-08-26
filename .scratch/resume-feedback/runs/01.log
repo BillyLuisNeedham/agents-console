@@ -1,0 +1,579 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/resume-feedback/issues/01-accept-process-split.md
+[0m→ [0mRead docs/adr/0004-accept-answers-immediately-process-at-boundary.md
+[0m
+[0m$ [0mgit status && git diff --stat
+On branch main
+Your branch is ahead of 'origin/main' by 5 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   .scratch/resume-feedback/issues/01-accept-process-split.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.scratch/resume-feedback/runs/
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ .scratch/resume-feedback/issues/01-accept-process-split.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+[0m
+The working tree is cleaner than the runner's brief suggested. Checking whether prior work was committed:
+[0m$ [0mgit log --oneline -8 && ls engine/ && ls .scratch/resume-feedback/
+e2a7954 resume-feedback: reset Issue 01 to ready for retry
+3bc6a43 resume-feedback: partial accept/process split from Issue 01 (deadlock known)
+be3a819 resume-feedback: add runner, AGENT.md, and review tail (07-09)
+8a975c5 resume-feedback: add the six-ticket queue
+0c21b68 docs: spec and ADR for resume feedback and pool-drive fixes
+6dfb23d console-pool: record the console-tab-identity pool's run
+ea445f7 ui: paint the favicon as a dot in the pool status color
+55c4e4e ui: lead the tab title with the pool status word
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.test.ts
+events.ts
+fleet-cli.test.ts
+fleet-cli.ts
+fleet.test.ts
+fleet.ts
+pool.test.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+queued-answers.ts
+server.test.ts
+server.ts
+spawn.test.ts
+spawn.ts
+worktrees.ts
+AGENT.md
+issues
+runs
+run.sh
+[0m
+[0m$ [0mgit show 3bc6a43 --stat
+commit 3bc6a43da41231548d7f737d77aa817a5e71620e
+Author: billy needham <billyluisneedham@duck.com>
+Date:   Tue Aug 25 22:54:17 2026 +0100
+
+    resume-feedback: partial accept/process split from Issue 01 (deadlock known)
+
+ .../issues/01-accept-process-split.md              |  81 +++++-
+ engine/engine.test.ts                              | 243 ++++++++++++++++
+ engine/engine.ts                                   | 308 ++++++++++++++++-----
+ engine/queued-answers.ts                           |  87 ++++++
+ engine/server.test.ts                              |  34 ++-
+ engine/server.ts                                   |  48 ++--
+ 6 files changed, 699 insertions(+), 102 deletions(-)
+[0m
+[0m→ [0mRead engine/queued-answers.ts
+[0m→ [0mRead engine/engine.ts
+Reading the rest of engine.ts and the test/server files:
+[0m→ [0mRead engine/server.ts
+[0m→ [0mRead engine/engine.ts[90m [offset=1558][0m
+[0m
+[0m$ [0mrg -n "runPool|startPool" --type ts -g '!*.test.ts' engine/ ui/src 2>/dev/null; echo ---; rg -ln "runPool" engine/
+engine/server.ts:26:  startPool,
+engine/server.ts:589:  // The engine handle exists from the first super-step: startPool returns it
+engine/server.ts:594:    currentRun = startPool({
+engine/engine.ts:128:// The live run handle. `startPool` returns it from the very first super-step,
+engine/engine.ts:236:export function startPool(options: RunOptions): PoolRun {
+engine/engine.ts:294:// runPool keeps the original await-to-settle contract: it resolves with the
+engine/engine.ts:296:// need the handle during the first drive (the server) use startPool.
+engine/engine.ts:297:export async function runPool(options: RunOptions): Promise<PoolRun> {
+engine/engine.ts:298:  return startPool(options).settled;
+---
+engine/engine.ts
+engine/engine.test.ts
+[0m
+Now let me look at the tests and check for other `runPool` callers:
+[0m→ [0mRead engine/engine.test.ts
+[0m→ [0mRead engine/engine.test.ts[90m [offset=1625][0m
+[0m→ [0mRead engine/engine.test.ts[90m [offset=3121][0m
+[0m
+[0m$ [0mrg -n "answered" engine/events.ts engine/server.test.ts | head -40
+engine/events.ts:29:  "answered",
+[0m
+[0m$ [0mgit diff 0c21b68..3bc6a43 -- engine/server.test.ts
+diff --git a/engine/server.test.ts b/engine/server.test.ts
+index cd9fc5f..6e0da84 100644
+--- a/engine/server.test.ts
++++ b/engine/server.test.ts
+@@ -115,7 +115,8 @@ describe("pool server", () => {
+     ]);
+     const server = await startServer(poolDir, stubHarness({}));
+ 
+-    const snapshot = await server.start();
++    await server.start();
++    const snapshot = await server.settled();
+     expect(snapshot.phase).toBe("quiescent");
+     expect(snapshot.state.interrupts.map((i) => i.kind)).toEqual(["review"]);
+     const statuses = Object.fromEntries(snapshot.state.tickets.map((t) => [t.id, t.status]));
+@@ -123,9 +124,11 @@ describe("pool server", () => {
+     expect(snapshot.state.tickets.map((t) => t.blockedBy)).toEqual([[], ["01"]]);
+     expect(snapshot.state.tickets.map((t) => t.title)).toEqual(["body", "body"]);
+ 
+-    // Approving the review ends the run; the server stays up with the final
+-    // state inspectable.
+-    const approved = await server.answer(REVIEW_TICKET_ID, "approve");
++    // Approving the review is acknowledged immediately and ends the run once
++    // the answer is processed; the server stays up with the final state
++    // inspectable.
++    await server.answer(REVIEW_TICKET_ID, "approve");
++    const approved = await server.settled();
+     expect(approved.phase).toBe("done");
+     expect(approved.state.interrupts).toEqual([]);
+     expect(server.latest?.phase).toBe("done");
+@@ -155,7 +158,8 @@ describe("pool server", () => {
+     ]);
+     const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+ 
+-    const first = await server.start();
++    await server.start();
++    const first = await server.settled();
+     expect(first.phase).toBe("quiescent");
+     expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
+     expect(first.state.tickets[0]?.status).toBe("checkpoint");
+@@ -164,23 +168,30 @@ describe("pool server", () => {
+     const stateBody = (await stateRes.json()) as { snapshot: typeof first };
+     expect(stateBody.snapshot.phase).toBe("quiescent");
+ 
++    // The answer is acknowledged with 202 at acceptance; the snapshot it
++    // carries still shows the interrupt pending, because processing follows.
+     const resumeRes = await fetch(`${server.url}/api/resume`, {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+       body: JSON.stringify({ ticketId: "01", action: "resume", note: "go on" }),
+     });
++    expect(resumeRes.status).toBe(202);
+     const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
+-    expect(resumeBody.snapshot.phase).toBe("quiescent");
+-    expect(resumeBody.snapshot.state.tickets[0]?.status).toBe("done");
+-    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("review");
++    expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("checkpoint");
++
++    const resumed = await server.settled();
++    expect(resumed.phase).toBe("quiescent");
++    expect(resumed.state.tickets[0]?.status).toBe("done");
++    expect(resumed.state.interrupts[0]?.kind).toBe("review");
+ 
+     const approveRes = await fetch(`${server.url}/api/resume`, {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+       body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+     });
+-    const approveBody = (await approveRes.json()) as { snapshot: typeof first };
+-    expect(approveBody.snapshot.phase).toBe("done");
++    expect(approveRes.status).toBe(202);
++    const approved = await server.settled();
++    expect(approved.phase).toBe("done");
+   });
+ 
+   it("streams the latest snapshot to an SSE client on connect", async () => {
+@@ -189,7 +200,9 @@ describe("pool server", () => {
+     ]);
+     const server = await startServer(poolDir, stubHarness({}));
+     await server.start();
++    await server.settled();
+     await server.answer(REVIEW_TICKET_ID, "approve");
++    await server.settled();
+ 
+     const res = await fetch(`${server.url}/api/stream`);
+     expect(res.status).toBe(200);
+@@ -264,6 +277,7 @@ describe("ticket events endpoint", () => {
+     const poolDir = makePool([{ file: "01-a.md", marker }]);
+     const server = await startServer(poolDir, stubHarness({}));
+     await server.start();
++    await server.settled();
+     await server.answer(REVIEW_TICKET_ID, "approve");
+ 
+     const res = await fetch(`${server.url}/api/events?ticket=01`);
+[0m
+The state is clear: partial work committed in 3bc6a43, with the known deadlock — the idle-path drain runs synchronously inside `acceptAnswer` before `answer()` registers its waiter, so the resume promise never settles. Fixing by splitting the processing kick out of acceptance and registering the waiter first:
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -309,11 +309,16 @@
+     record = acceptAnswer(session, ticketId, note, approve);
+   } catch (error) {
+     return Promise.reject(error);
+   }
+-  return new Promise<void>((resolve, reject) => {
++  // The waiter registers before the kick: an idle kick drains
++  // synchronously, and a drain that settles a waiter which does not exist
++  // yet hangs the promise forever.
++  const processed = new Promise<void>((resolve, reject) => {
+     session.answerWaiters.set(record.seq, { resolve, reject });
+-  }).then(() => nextSettle(session));
++  });
++  kickProcessing(session);
++  return processed.then(() => nextSettle(session));
+ };
+ const handle: PoolRun = {
+   get phase() {
+     return session.settledPhase!;
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -336,8 +336,9 @@
+ approve: (ticketId, note) => answer(ticketId, note, true),
+ reject: (ticketId, note) => answer(ticketId, note, false),
+ accept: (ticketId, note, approve) => {
+   acceptAnswer(session, ticketId, note, approve);
++  kickProcessing(session);
+ },
+ get settled() {
+   return nextSettle(session);
+ },
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -725,12 +725,12 @@
+ }
+ 
+ // Acceptance (ADR-0004): the answer is recorded and acknowledged, nothing
+ // else. The `answered` event lands in the ticket log first, then the
+-// queued-answer record in its own persisted store, and only then is
+-// processing scheduled: immediately when no drive is in flight (today's idle
+-// behaviour), otherwise at the next super-step boundary. Acceptance never
+-// mutates state and never spawns an attempt, so it is safe mid-super-step.
++// queued-answer record in its own persisted store. Acceptance never mutates
++// state and never spawns an attempt, so it is safe mid-super-step. Processing
++// is the caller's follow-up (kickProcessing), so a waiter can be registered
++// between the two.
+ function acceptAnswer(
+   session: Session,
+   ticketId: string,
+   note: string | undefined,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -765,20 +765,23 @@
+     ...(approve !== undefined ? { approve } : {}),
+     ...(note !== undefined ? { note } : {}),
+     at: new Date().toISOString(),
+   });
+-  // Idle: process immediately, as before the split, and kick the drive that
+-  // spawns whatever the answer made ready. In flight: the record waits for
+-  // the drive loop's boundary drain. Processing is synchronous, so an idle
+-  // acceptance returns with the answer already applied and the drive marked
+-  // in flight.
+-  if (!session.driving) {
+-    drainAnswers(session);
+-    if (!session.driving) startDrive(session);
+-  }
+   return record;
+ }
+ 
++// The processing kick, every answer path's second step. Idle: the drain
++// applies the answer right away (the behaviour before the split) and a fresh
++// drive starts, spawning whatever the answer made ready. In flight: the
++// queued record waits for the drive loop's boundary drain. The kick is
++// separate from acceptance so the answer path's waiter exists before an idle
++// drain can settle it.
++function kickProcessing(session: Session): void {
++  if (session.driving) return;
++  drainAnswers(session);
++  startDrive(session);
++}
++
+ // The boundary drain: every queued answer is applied in submission order.
+ // A answer that fails processing (a review reject naming no ticket, a stale
+ // record whose interrupt is gone) rejects its own waiter and is consumed; it
+ // never takes the drive down with it.
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -15
+bun test v1.3.14 (0d9b296a)
+
+ 67 pass
+ 0 fail
+ 428 expect() calls
+Ran 67 tests across 1 file. [3.10s]
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -10
+$ tsc --noEmit
+[0m
+[0m$ [0mbun test 2>&1 | tail -15
+179 |     const resumeBody = (await resumeRes.json()) as { snapshot: typeof first };
+180 |     expect(resumeBody.snapshot.state.interrupts[0]?.kind).toBe("checkpoint");
+                                                                ^
+error: expect(received).toBe(expected)
+
+Expected: "checkpoint"
+Received: undefined
+
+      at <anonymous> (/home/billy/repos/agent-console/engine/server.test.ts:180:59)
+(fail) pool server > serves get state, start, and resume over HTTP [13.54ms]
+
+ 275 pass
+ 1 fail
+ 1000 expect() calls
+Ran 276 tests across 10 files. [17.93s]
+[0m
+One server test fails: acceptance must return the snapshot as of acceptance (unchanged, since acceptance never mutates PoolState), but `answer()` reads `latest` after `run.accept`, and the idle kick's first `emit("running")` has already broadcast the post-processing state. Capturing the snapshot before the accept:
+[0m← [0mEdit engine/server.ts
+Index: /home/billy/repos/agent-console/engine/server.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/server.ts
++++ /home/billy/repos/agent-console/engine/server.ts
+@@ -633,14 +633,19 @@
+           `for ${ticketId}`,
+       );
+     }
+   }
++  // The snapshot at acceptance: acceptance never mutates PoolState, so it
++  // still shows the interrupt pending. Read before the accept, because an
++  // idle pool processes the answer synchronously inside it and the fresh
++  // drive's first emit would already carry the post-processing state.
++  const accepted = latest!;
+   run.accept(
+     ticketId,
+     note,
+     action === "approve" ? true : action === "reject" ? false : undefined,
+   );
+-  return latest!;
++  return accepted;
+ }
+ 
+ const settled = (): Promise<EnrichedSnapshot> => {
+   const run = currentRun;
+
+[0m
+[0m$ [0mbun test 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 276 pass
+ 0 fail
+ 1005 expect() calls
+Ran 276 tests across 10 files. [17.87s]
+[0m
+All 276 tests pass, typecheck clean. Reviewing the full diff before committing:
+[0m$ [0mgit diff engine/
+diff --git a/engine/engine.ts b/engine/engine.ts
+index 11616df..d91cbde 100644
+--- a/engine/engine.ts
++++ b/engine/engine.ts
+@@ -310,9 +310,14 @@ function makeHandle(session: Session): PoolRun {
+     } catch (error) {
+       return Promise.reject(error);
+     }
+-    return new Promise<void>((resolve, reject) => {
++    // The waiter registers before the kick: an idle kick drains
++    // synchronously, and a drain that settles a waiter which does not exist
++    // yet hangs the promise forever.
++    const processed = new Promise<void>((resolve, reject) => {
+       session.answerWaiters.set(record.seq, { resolve, reject });
+-    }).then(() => nextSettle(session));
++    });
++    kickProcessing(session);
++    return processed.then(() => nextSettle(session));
+   };
+   const handle: PoolRun = {
+     get phase() {
+@@ -332,6 +337,7 @@ function makeHandle(session: Session): PoolRun {
+     reject: (ticketId, note) => answer(ticketId, note, false),
+     accept: (ticketId, note, approve) => {
+       acceptAnswer(session, ticketId, note, approve);
++      kickProcessing(session);
+     },
+     get settled() {
+       return nextSettle(session);
+@@ -720,10 +726,10 @@ function closeStore(session: Session): void {
+ 
+ // Acceptance (ADR-0004): the answer is recorded and acknowledged, nothing
+ // else. The `answered` event lands in the ticket log first, then the
+-// queued-answer record in its own persisted store, and only then is
+-// processing scheduled: immediately when no drive is in flight (today's idle
+-// behaviour), otherwise at the next super-step boundary. Acceptance never
+-// mutates state and never spawns an attempt, so it is safe mid-super-step.
++// queued-answer record in its own persisted store. Acceptance never mutates
++// state and never spawns an attempt, so it is safe mid-super-step. Processing
++// is the caller's follow-up (kickProcessing), so a waiter can be registered
++// between the two.
+ function acceptAnswer(
+   session: Session,
+   ticketId: string,
+@@ -760,18 +766,21 @@ function acceptAnswer(
+     ...(note !== undefined ? { note } : {}),
+     at: new Date().toISOString(),
+   });
+-  // Idle: process immediately, as before the split, and kick the drive that
+-  // spawns whatever the answer made ready. In flight: the record waits for
+-  // the drive loop's boundary drain. Processing is synchronous, so an idle
+-  // acceptance returns with the answer already applied and the drive marked
+-  // in flight.
+-  if (!session.driving) {
+-    drainAnswers(session);
+-    if (!session.driving) startDrive(session);
+-  }
+   return record;
+ }
+ 
++// The processing kick, every answer path's second step. Idle: the drain
++// applies the answer right away (the behaviour before the split) and a fresh
++// drive starts, spawning whatever the answer made ready. In flight: the
++// queued record waits for the drive loop's boundary drain. The kick is
++// separate from acceptance so the answer path's waiter exists before an idle
++// drain can settle it.
++function kickProcessing(session: Session): void {
++  if (session.driving) return;
++  drainAnswers(session);
++  startDrive(session);
++}
++
+ // The boundary drain: every queued answer is applied in submission order.
+ // A answer that fails processing (a review reject naming no ticket, a stale
+ // record whose interrupt is gone) rejects its own waiter and is consumed; it
+diff --git a/engine/server.ts b/engine/server.ts
+index 085c1d4..8a319f9 100644
+--- a/engine/server.ts
++++ b/engine/server.ts
+@@ -634,12 +634,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
+         );
+       }
+     }
++    // The snapshot at acceptance: acceptance never mutates PoolState, so it
++    // still shows the interrupt pending. Read before the accept, because an
++    // idle pool processes the answer synchronously inside it and the fresh
++    // drive's first emit would already carry the post-processing state.
++    const accepted = latest!;
+     run.accept(
+       ticketId,
+       note,
+       action === "approve" ? true : action === "reject" ? false : undefined,
+     );
+-    return latest!;
++    return accepted;
+   }
+ 
+   const settled = (): Promise<EnrichedSnapshot> => {
+[0m
+Diff is minimal and correct. Updating the Issue: ticking criteria, adding a note, setting `status=done`:
+[0m← [0mEdit .scratch/resume-feedback/issues/01-accept-process-split.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+@@ -1,5 +1,5 @@
+-<!-- state: id=01 blocked-by=none status=in-progress -->
++<!-- state: id=01 blocked-by=none status=done -->
+ # 01: Accept/process split — answers acknowledged with 202, processed at the super-step boundary
+ 
+ **What to build:** Answering any interrupt (resume, approve, reject) becomes two moments. Acceptance is immediate and durable: the `answered` event is appended to the ticket log, a queued-answer record (ticket id, interrupt identity, payload, submission order) is written to a new persisted queued-answer store kept alongside the pool's run artifacts, and `POST /api/resume` returns 202 with the current snapshot — from the very first super-step, because starting a pool returns a live run handle immediately with the drive proceeding in the background (400 "pool not started" disappears entirely). Processing applies the answer and continues the drive: immediately when the pool is idle (today's behaviour), or drained in submission order at the next super-step boundary while a super-step is in flight. Only acceptance is ever immediate — an answered ticket's next attempt is always spawned by the drive, never by the answer path. Review interrupts gain the uniform `answered` event at acceptance; `review-reject` remains for the rejection outcome. The queued-answer store is deliberately separate from PoolState so the super-step join cannot clobber it (ADR-0004).
+ 
+
+[0m
+[0m← [0mEdit .scratch/resume-feedback/issues/01-accept-process-split.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+@@ -6,16 +6,16 @@
+ **Blocked by:** None (can start immediately)
+ 
+ **Status:** ready-for-agent
+ 
+-- [ ] `POST /api/resume` returns 202 promptly for every interrupt kind, including while a super-step is held open mid-flight and during the pool's initial drive — no hanging request, no "pool not started"
+-- [ ] The `answered` event (carrying the interrupt kind) appears in the ticket log at acceptance time, before any processing
+-- [ ] A queued-answer record is persisted to its own store at acceptance, separate from PoolState
+-- [ ] While a super-step is in flight, the queued answer is processed at the next super-step boundary; answers to multiple tickets process in submission order
+-- [ ] When the pool is idle, an answer is processed immediately, as today
+-- [ ] An answered ticket's next attempt is spawned only by the drive, never by the answer path
+-- [ ] Approve/reject answers write an `answered` event at acceptance like all other interrupt kinds
+-- [ ] Engine seam tests (stub harnesses, including a blocking stub that holds a super-step open) and server seam tests (real HTTP) cover all of the above; existing suites pass
++- [x] `POST /api/resume` returns 202 promptly for every interrupt kind, including while a super-step is held open mid-flight and during the pool's initial drive — no hanging request, no "pool not started"
++- [x] The `answered` event (carrying the interrupt kind) appears in the ticket log at acceptance time, before any processing
++- [x] A queued-answer record is persisted to its own store at acceptance, separate from PoolState
++- [x] While a super-step is in flight, the queued answer is processed at the next super-step boundary; answers to multiple tickets process in submission order
++- [x] When the pool is idle, an answer is processed immediately, as today
++- [x] An answered ticket's next attempt is spawned only by the drive, never by the answer path
++- [x] Approve/reject answers write an `answered` event at acceptance like all other interrupt kinds
++- [x] Engine seam tests (stub harnesses, including a blocking stub that holds a super-step open) and server seam tests (real HTTP) cover all of the above; existing suites pass
+ 
+ ## Notes
+ 
+ Design settled before writing code (proven against the source, not inferred):
+
+[0m
+[0m← [0mEdit .scratch/resume-feedback/issues/01-accept-process-split.md
+Index: /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+===================================================================
+--- /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
++++ /home/billy/repos/agent-console/.scratch/resume-feedback/issues/01-accept-process-split.md
+@@ -44,8 +44,30 @@
+   the blocking-stub tests use a blocker ticket in a following super-step.
+ 
+ ---
+ 
++## Notes, second agent
++
++Picked up after the first agent was stopped. Its partial work was already
++committed (3bc6a43); the working tree was clean apart from this Issue file.
++Two defects fixed on top, both proven by the test suite:
++
++- The deadlock the first agent found was real: `acceptAnswer` drained
++  synchronously on the idle path before `answer()` had registered its
++  waiter, so `resume()` never settled. Fix: acceptance and the processing
++  kick are now separate steps (`kickProcessing`), and `answer()` registers
++  the waiter between them.
++- The server's 202 carried `latest` read after the accept, but an idle
++  accept processes synchronously and the fresh drive's first emit had
++  already broadcast the post-processing state. The server now captures the
++  snapshot before the accept: acceptance never mutates PoolState, so that
++  snapshot still shows the interrupt pending, which is the truthful
++  acceptance-time view.
++
++`bun test` (276 pass) and `bun run typecheck` both green. UI untouched.
++
++---
++
+ ## Brief, written by the runner
+ 
+ The agent stopped without setting its own status, last seen as 'in-progress'. It crashed, ran out of context, or was killed. It had no chance to write a brief or to commit.
+ 
+
+[0m
+Committing:
+[0m$ [0mgit add engine/engine.ts engine/server.ts .scratch/resume-feedback/issues/01-accept-process-split.md && git commit -m "engine: register the answer waiter before the idle processing kick
+
+The accept/process split drained queued answers synchronously inside
+acceptance on the idle path, before the answer path had registered its
+waiter, so resume/approve/reject never settled. Acceptance and the
+processing kick are now separate steps with the waiter registered
+between them, and the server captures the acceptance-time snapshot
+before the accept so its 202 still shows the interrupt pending." && git log --oneline -3
+[main 464b572] engine: register the answer waiter before the idle processing kick
+ 3 files changed, 61 insertions(+), 25 deletions(-)
+464b572 engine: register the answer waiter before the idle processing kick
+e2a7954 resume-feedback: reset Issue 01 to ready for retry
+3bc6a43 resume-feedback: partial accept/process split from Issue 01 (deadlock known)
+[0m
+Issue 01 is `status=done`, committed as 464b572.
+
+The first agent's partial split (committed in 3bc6a43) had two defects, both fixed:
+- **Deadlock**: `acceptAnswer` drained synchronously on the idle path before `answer()` registered its waiter, so resume promises never settled. Acceptance and the processing kick are now separate (`kickProcessing` in engine/engine.ts:776), with the waiter registered between them.
+- **Stale 202 snapshot**: the server read `latest` after the accept, catching the fresh drive's first emit (post-processing). It now captures the snapshot before the accept (engine/server.ts:640), which still shows the interrupt pending.
+
+All 8 acceptance criteria verified by the existing engine seam tests (including the blocking-stub super-step test) and server HTTP tests: `bun test` 276 pass, `bun run typecheck` clean.

@@ -1,0 +1,1057 @@
+[0m
+> build · k3
+[0m
+[0m→ [0mRead /home/billy/.claude/commands/skills/engineering/implement/SKILL.md
+[0m→ [0mRead .scratch/resume-feedback/issues/04-spawn-contract-canonical-issue-agentmd-reread.md
+[0m→ [0mRead CONTEXT.md
+[0m→ [0mRead docs/specs/2026-08-25-resume-feedback-and-pool-drive-fixes.md
+[0m→ [0mRead docs/adr/0004-accept-answers-immediately-process-at-boundary.md
+[0m
+[0m$ [0mls /home/billy/repos/agent-console/.scratch/resume-feedback/issues/ && git -C /home/billy/repos/agent-console log --oneline -8 && git -C /home/billy/repos/agent-console status --short
+01-accept-process-split.md
+02-queued-answers-survive-restart-idempotent-resume.md
+03-queued-answer-waiting-state.md
+04-spawn-contract-canonical-issue-agentmd-reread.md
+05-crash-recorded-at-attempt-exit.md
+06-blocked-by-checkpoint-visibility.md
+07-code-review.md
+08-fix-review-findings.md
+09-final-code-review.md
+3cf9931 ui, engine: show the queued answer's waiting state in snapshots and the Console
+82924fd engine: make resume idempotent and drain queued answers after restart
+464b572 engine: register the answer waiter before the idle processing kick
+e2a7954 resume-feedback: reset Issue 01 to ready for retry
+3bc6a43 resume-feedback: partial accept/process split from Issue 01 (deadlock known)
+be3a819 resume-feedback: add runner, AGENT.md, and review tail (07-09)
+8a975c5 resume-feedback: add the six-ticket queue
+0c21b68 docs: spec and ADR for resume feedback and pool-drive fixes
+ M .scratch/resume-feedback/issues/04-spawn-contract-canonical-issue-agentmd-reread.md
+?? .scratch/resume-feedback/runs/
+[0m
+[0m$ [0mls /home/billy/repos/agent-console/engine/ /home/billy/repos/agent-console/
+/home/billy/repos/agent-console/:
+bun.lock
+CONTEXT.md
+docs
+engine
+node_modules
+package.json
+README.md
+scripts
+tsconfig.json
+ui
+
+/home/billy/repos/agent-console/engine/:
+checkpoints.ts
+engine.test.ts
+engine.ts
+events.test.ts
+events.ts
+fleet-cli.test.ts
+fleet-cli.ts
+fleet.test.ts
+fleet.ts
+pool.test.ts
+pool.ts
+ports.test.ts
+ports.ts
+prompt.ts
+queued-answers.ts
+server.test.ts
+server.ts
+spawn.test.ts
+spawn.ts
+worktrees.ts
+[0m
+[0m✱ [0mGrep "AGENT\.md|agentMd|agent_md"[90m in engine · 14 matches[0m
+[0m→ [0mRead engine/prompt.ts
+[0m→ [0mRead engine/spawn.ts
+[0m✱ [0mGrep "issuePath|issueRel|readBack|status=done|state:"[90m in engine · 100 matches[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=280, offset=1500][0m
+Now let me look at the tests and remaining engine areas.
+[0m→ [0mRead engine/spawn.test.ts
+[0m→ [0mRead engine/engine.ts[90m [limit=120, offset=200][0m
+[0m→ [0mRead engine/engine.ts[90m [limit=120, offset=420][0m
+[0m✱ [0mGrep "buildResolverPrompt|spawnToLog|readOptional"[90m in engine · 9 matches[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=80, offset=1100][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=120, offset=1][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=200, offset=120][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=220, offset=620][0m
+Let me look at the git-pool test setup and worktrees/merge handling.
+[0m✱ [0mGrep "function gitPool|git init|initGit|makeGitPool"[90m in engine · 15 matches[0m
+[0m→ [0mRead engine/worktrees.ts
+[0m✱ [0mGrep "mergeWithIssueAside"[90m in engine · 4 matches[0m
+[0m→ [0mRead engine/engine.ts[90m [limit=80, offset=900][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=180, offset=2044][0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=420, offset=2224][0m
+Now let me check the remaining pieces: cursor test, any `issueRel` references in tests, and the server test stub.
+[0m✱ [0mGrep "issueRel"[90m in . · 11 matches[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=60, offset=839][0m
+[0m✱ [0mGrep "commitIssue|COMMIT_ISSUE"[90m in engine · 4 matches[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=120, offset=2897][0m
+[0m✱ [0mGrep "worktree.*Issue|Issue.*worktree|canonical"[90m in docs · 4 matches[0m
+[0m
+[0m# [0mTodos
+[•] Engine: canonical Issue path in spawn ctx + read-back from main checkout
+[ ] Engine: re-read AGENT.md at every spawn (no session cache)
+[ ] Update spawn.test.ts and existing engine.test.ts assertions (prompt paths)
+[ ] Add engine seam tests: false-crash regression + AGENT.md mid-run edit
+[ ] Run bun test + bun run typecheck; tick criteria; commit; set status=done
+[0m
+No test uses `commitIssue: false`. Now let me check docs for spawn-contract descriptions and set up my task list.
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/agent-console/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.ts
++++ /home/billy/repos/agent-console/engine/spawn.ts
+@@ -1,8 +1,11 @@
+ export interface SpawnContext {
+   id: string;
++  // The canonical Issue file: the absolute main-checkout path. The driver
++  // line hands it to the agent for both reading and status updates, and
++  // read-back trusts the same file, so an attempt in a worktree updates the
++  // file of record rather than its context-only seed copy.
+   issuePath: string;
+-  issueRel: string;
+   body: string;
+   driver: string;
+   harness: string;
+   model: string;
+
+[0m
+Now the edits. First `spawn.ts`: drop `issueRel`, adapters use `issuePath` (the canonical main-checkout path).
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/agent-console/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.ts
++++ /home/billy/repos/agent-console/engine/spawn.ts
+@@ -28,9 +28,9 @@
+ // command, so the adapter assembles that line from the structured fields.
+ claude: (ctx) => [
+   "claude",
+   "-p",
+-  `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
++  `/${ctx.driver} ${ctx.issuePath}\n\n${ctx.body}`,
+   "--model",
+   ctx.model,
+   "--permission-mode",
+   "auto",
+@@ -56,9 +56,9 @@
+ // UNPROVEN: written from Cursor's CLI docs, not yet run on a real queue.
+ cursor: (ctx) => [
+   "agent",
+   "-p",
+-  `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
++  `/${ctx.driver} ${ctx.issuePath}\n\n${ctx.body}`,
+   "--model",
+   ctx.model,
+   "--force",
+   "--trust",
+
+[0m
+[0m← [0mEdit engine/spawn.ts
+Index: /home/billy/repos/agent-console/engine/spawn.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.ts
++++ /home/billy/repos/agent-console/engine/spawn.ts
+@@ -47,9 +47,9 @@
+   "opencode",
+   "run",
+   "--command",
+   ctx.driver,
+-  `${ctx.issueRel}\n\n${ctx.body}`,
++  `${ctx.issuePath}\n\n${ctx.body}`,
+   "--model",
+   ctx.model,
+   "--auto",
+ ],
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -212,9 +212,8 @@
+ interface Session {
+   poolDir: string;
+   issuesDir: string;
+   runsDir: string;
+-  agentMd: string;
+   cwd: string;
+   git: boolean;
+   harnesses: Record<string, HarnessCommand>;
+   assignments: Map<string, Assignment>;
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -245,9 +245,8 @@
+ mkdirSync(runsDir, { recursive: true });
+ 
+ const config = readConfig(poolDir);
+ const harnesses = { ...defaultHarnesses, ...options.harnesses };
+-const agentMd = readOptional(join(poolDir, "AGENT.md")) ?? "";
+ const cwd = repoRootOf(poolDir);
+ 
+ const assignments = new Map(
+   markers.map((marker) => [
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -258,9 +258,8 @@
+ const session: Session = {
+   poolDir,
+   issuesDir,
+   runsDir,
+-  agentMd,
+   cwd,
+   git: gitAvailable(cwd),
+   harnesses,
+   assignments,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1522,9 +1522,8 @@
+ interface TicketEnv {
+   poolDir: string;
+   runsDir: string;
+   issuesDir: string;
+-  agentMd: string;
+   harnesses: Record<string, HarnessCommand>;
+ }
+ 
+ interface TicketPlan {
+
+[0m
+Now `engine.ts`. First the Session/TicketEnv `agentMd` removal and fresh read:
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -479,9 +479,8 @@
+   {
+     poolDir: session.poolDir,
+     runsDir: session.runsDir,
+     issuesDir: session.issuesDir,
+-    agentMd: session.agentMd,
+     harnesses: session.harnesses,
+   },
+   plans.get(marker.id)!,
+ ).then((result) => {
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1678,11 +1678,15 @@
+   const outcome = snapshot.outcomes[id];
+   return outcome ? [{ id, outcome }] : [];
+ });
+ 
++// AGENT.md is read at every spawn, never cached on the session, so an
++// operator's mid-run edit lands in the very next attempt's prompt.
++const agentMd = readOptional(join(env.poolDir, "AGENT.md")) ?? "";
++
+ const prompt = buildPrompt({
+   chain,
+-  agentMd: env.agentMd,
++  agentMd,
+   roster: snapshot.config.roster ?? "",
+   upstream,
+   outcomePath,
+ });
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1671,9 +1671,8 @@
+ const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
+ const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
+ rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
+ const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+-const issueRel = relative(plan.cwd, plan.issuePath);
+ 
+ const upstream = marker.blockedBy.flatMap((id) => {
+   const outcome = snapshot.outcomes[id];
+   return outcome ? [{ id, outcome }] : [];
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1691,10 +1691,9 @@
+ });
+ 
+ const ctx: SpawnContext = {
+   id: marker.id,
+-  issuePath: plan.issuePath,
+-  issueRel,
++  issuePath: marker.file,
+   body: prompt,
+   driver,
+   harness: assignment.harness,
+   model: assignment.model,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1141,9 +1141,8 @@
+ });
+ const ctx: SpawnContext = {
+   id: marker.id,
+   issuePath: marker.file,
+-  issueRel: relative(session.cwd, marker.file),
+   body: prompt,
+   driver: RESOLVER_DRIVER,
+   harness: resolver.harness,
+   model: resolver.model,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1525,9 +1525,8 @@
+ }
+ 
+ interface TicketPlan {
+   cwd: string;
+-  issuePath: string;
+   worktree?: WorktreeInfo;
+   attempt: number;
+ }
+ 
+
+[0m
+Now `planTicket`, `TicketPlan`, and `readBack`:
+[0m✗ [0mEdit engine/engine.ts failed
+[91m[1mError: [0mCould not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1543,48 +1543,42 @@
+ // worktree branched from the same HEAD, so parallel harnesses never share a
+ // checkout. A ticket with a parked branch (checkpoint, crash or conflicted
+ // merge left it behind) always reuses its worktree, even alone, so it keeps
+ // the work it already did. Anything else runs in the main checkout. The main
+-// checkout's Issue file is the truth and is copied into the worktree at
+-// spawn, which is how a resume note reaches the agent.
++// checkout's Issue file is the single canonical copy: the spawn prompt hands
++// the agent its absolute path and read-back trusts it. The worktree gets a
++// seed copy as context only; the merge already discards worktree Issue
++// edits.
+ function planTicket(
+   session: Session,
+   marker: TicketMarker,
+   readyCount: number,
+   attempt: number,
+ ): TicketPlan {
+-  if (!session.git) return { cwd: session.cwd, issuePath: marker.file, attempt };
++  if (!session.git) return { cwd: session.cwd, attempt };
+   const parked = branchExists(session.cwd, marker.id);
+   if (readyCount < 2 && !parked) {
+-    return { cwd: session.cwd, issuePath: marker.file, attempt };
++    return { cwd: session.cwd, attempt };
+   }
+   const worktree = prepareWorktree(session.cwd, marker.id);
+-  const issuePath = join(worktree.path, relative(session.cwd, marker.file));
+-  mkdirSync(dirname(issuePath), { recursive: true });
+-  copyFileSync(marker.file, issuePath);
+-  return { cwd: worktree.path, issuePath, worktree, attempt };
++  const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
++  mkdirSync(dirname(seedCopy), { recursive: true });
++  copyFileSync(marker.file, seedCopy);
++  return { cwd: worktree.path, worktree, attempt };
+ }
+ 
+-// Marker read-back. Only done and checkpoint are real endings: the
+-// super-step wrote in-progress before the spawn, so an agent that exits
+-// leaving anything else (an untouched marker, or one it rewrote to ready)
+-// died mid-ticket. The marker goes to in-progress either way, so the crash
+-// interrupt holds the ticket out of the next super-step instead of
+-// re-spawning it forever. In a worktree the agent edited its own copy; a
+-// finished ticket's Issue content mirrors back to the main checkout so the
+-// dual-write and any Brief stay inspectable there.
+-function readBack(marker: TicketMarker, plan: TicketPlan): TicketStatus {
+-  if (!plan.worktree) {
+-    const status = readMarker(marker.file).status;
+-    if (status === "done" || status === "checkpoint") return status;
+-    if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
+-    return "in-progress";
+-  }
+-  const status = readMarker(plan.issuePath).status;
+-  if (status === "done" || status === "checkpoint") {
+-    copyFileSync(plan.issuePath, marker.file);
+-    return status;
+-  }
++// Marker read-back against the canonical main-checkout Issue file, the same
++// file the spawn prompt told the agent to update, so an attempt that
++// finishes done is always recognised as done. Only done and checkpoint are
++// real endings: the super-step wrote in-progress before the spawn, so an
++// agent that exits leaving anything else (an untouched marker, or one it
++// rewrote to ready) died mid-ticket. The marker goes to in-progress either
++// way, so the crash interrupt holds the ticket out of the next super-step
++// instead of re-spawning it forever.
++function readBack(marker: TicketMarker): TicketStatus {
++  const status = readMarker(marker.file).status;
++  if (status === "done" || status === "checkpoint") return status;
++  if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
+   return "in-progress";
+ }
+ 
+ // Merging one finished ticket's branch onto the pool's working branch.
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -1702,9 +1702,9 @@
+   payload: {},
+ });
+ const exitCode = await spawnToLog(argv, ctx);
+ 
+-const status = readBack(marker, plan);
++const status = readBack(marker);
+ const outcome = readOutcome(outcomePath);
+ appendEvent(env.runsDir, marker.id, {
+   at: new Date().toISOString(),
+   attempt: plan.attempt,
+
+[0m
+[0m← [0mEdit engine/engine.ts
+Index: /home/billy/repos/agent-console/engine/engine.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.ts
++++ /home/billy/repos/agent-console/engine/engine.ts
+@@ -909,12 +909,13 @@
+     ],
+   });
+ }
+ 
+-// The dual-write leaves the Issue file dirty on the working branch and git
+-// refuses a merge that would touch a dirty file, so the Issue steps aside
+-// for the merge and comes straight back: its content already matches the
+-// worktree copy, whether or not the agent committed it.
++// The dual-write and the agent's own edits to the canonical Issue file leave
++// it dirty on the working branch and git refuses a merge that would touch a
++// dirty file, so the Issue steps aside for the merge and comes straight
++// back: its content is the file of record and never travels through the
++// ticket's branch.
+ function mergeWithIssueAside(
+   session: Session,
+   marker: TicketMarker,
+   branch: string,
+
+[0m
+[0m← [0mEdit engine/spawn.test.ts
+Index: /home/billy/repos/agent-console/engine/spawn.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.test.ts
++++ /home/billy/repos/agent-console/engine/spawn.test.ts
+@@ -4,9 +4,8 @@
+ function context(overrides?: Partial<SpawnContext>): SpawnContext {
+   return {
+     id: "01",
+     issuePath: "/tmp/pool/issues/01-a.md",
+-    issueRel: "issues/01-a.md",
+     body: "Standing instructions for this job:\n\nDo the thing.",
+     driver: "implement",
+     harness: "claude",
+     model: "claude-test",
+
+[0m
+[0m← [0mEdit engine/spawn.test.ts
+Index: /home/billy/repos/agent-console/engine/spawn.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.test.ts
++++ /home/billy/repos/agent-console/engine/spawn.test.ts
+@@ -20,9 +20,9 @@
+ it("builds the claude argv from the driver, issue reference, and body fields", () => {
+   expect(defaultHarnesses.claude(context())).toEqual([
+     "claude",
+     "-p",
+-    "/implement issues/01-a.md\n\n" +
++    "/implement /tmp/pool/issues/01-a.md\n\n" +
+       "Standing instructions for this job:\n\nDo the thing.",
+     "--model",
+     "claude-test",
+     "--permission-mode",
+
+[0m
+[0m← [0mEdit engine/spawn.test.ts
+Index: /home/billy/repos/agent-console/engine/spawn.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.test.ts
++++ /home/billy/repos/agent-console/engine/spawn.test.ts
+@@ -43,9 +43,9 @@
+ "opencode",
+ "run",
+ "--command",
+ "implement",
+-"issues/01-a.md\n\n" +
++"/tmp/pool/issues/01-a.md\n\n" +
+   "Standing instructions for this job:\n\nDo the thing.",
+ "--model",
+ "claude-test",
+ "--auto",
+
+[0m
+Engine edits done. Now update `spawn.test.ts`:
+[0m← [0mEdit engine/spawn.test.ts
+Index: /home/billy/repos/agent-console/engine/spawn.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/spawn.test.ts
++++ /home/billy/repos/agent-console/engine/spawn.test.ts
+@@ -58,9 +58,9 @@
+ it("builds the cursor argv from the fields (unproven line, carried over from run.sh)", () => {
+   expect(defaultHarnesses.cursor(context())).toEqual([
+     "agent",
+     "-p",
+-    "/implement issues/01-a.md\n\n" +
++    "/implement /tmp/pool/issues/01-a.md\n\n" +
+       "Standing instructions for this job:\n\nDo the thing.",
+     "--model",
+     "claude-test",
+     "--force",
+
+[0m
+Now `engine.test.ts` — the fake-CLI prompt-path assertions:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -786,9 +786,13 @@
+ 
+ expect(run!.phase).toBe("done");
+ const argv = recordedArgs(fake.recordDir);
+ expect(argv[0]).toBe("-p");
+-expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
++expect(argv[1]).toMatch(
++  new RegExp(
++    `^/implement ${join(poolDir, "issues", "01-a.md").replaceAll("/", "\\/")}\\n`,
++  ),
++);
+ expect(argv[1]).toContain("Standing instructions for this job:");
+ expect(argv.slice(2)).toEqual([
+   "--model",
+   "claude-test",
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -786,13 +786,13 @@
+ 
+ expect(run!.phase).toBe("done");
+ const argv = recordedArgs(fake.recordDir);
+ expect(argv[0]).toBe("-p");
+-expect(argv[1]).toMatch(
+-  new RegExp(
+-    `^/implement ${join(poolDir, "issues", "01-a.md").replaceAll("/", "\\/")}\\n`,
++expect(
++  argv[1].startsWith(
++    `/implement ${join(poolDir, "issues", "01-a.md")}\n`,
+   ),
+-);
++).toBe(true);
+ expect(argv[1]).toContain("Standing instructions for this job:");
+ expect(argv.slice(2)).toEqual([
+   "--model",
+   "claude-test",
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -822,9 +822,11 @@
+ const argv = recordedArgs(fake.recordDir);
+ expect(argv[0]).toBe("run");
+ expect(argv[1]).toBe("--command");
+ expect(argv[2]).toBe("implement");
+-expect(argv[3]).toMatch(/^issues\/01-a\.md\n/);
++expect(
++  argv[3].startsWith(`${join(poolDir, "issues", "01-a.md")}\n`),
++).toBe(true);
+ expect(argv[3]).toContain("Standing instructions for this job:");
+ expect(argv[3]).not.toContain("/implement");
+ expect(argv.slice(4)).toEqual(["--model", "opencode-test", "--auto"]);
+ expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
+
+[0m
+That regex is awkward — simpler with startsWith:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -843,9 +843,13 @@
+ 
+ expect(run!.phase).toBe("done");
+ const argv = recordedArgs(fake.recordDir);
+ expect(argv[0]).toBe("-p");
+-expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
++expect(
++  argv[1].startsWith(
++    `/implement ${join(poolDir, "issues", "01-a.md")}\n`,
++  ),
++).toBe(true);
+ expect(argv.slice(2)).toEqual([
+   "--model",
+   "cursor-test",
+   "--force",
+
+[0m
+Now the gitStubHarness: under the new contract the Issue is never committed from the worktree (it lives outside it). Remove the dead `git add "$issue"` machinery:
+[0m→ [0mRead engine/engine.test.ts[90m [limit=30, offset=2015][0m
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2035,9 +2035,8 @@
+ workFile?: string;
+ workLine?: string;
+ overwrite?: boolean;
+ commitMsg?: string;
+-commitIssue?: boolean;
+ leaveFile?: string;
+ touch?: string;
+ waitFor?: string;
+ waitMerged?: string;
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2083,9 +2083,9 @@
+ [
+   "#!/usr/bin/env bash",
+   "set -uo pipefail",
+   'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+-  'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
++  'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
+   'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+   'source "$plan"',
+   'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+   'if [ -n "$WAIT_FOR" ]; then',
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2117,11 +2117,13 @@
+ '  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
+ '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
+ '  git add "$WORK_FILE"; staged=1',
+ "fi",
++// The Issue of record is the canonical main-checkout file the
++// engine hands over as ctx.issuePath; it is edited in place and
++// never committed from the worktree.
+ 'if [ "$status" != "keep" ]; then',
+ '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+-'  if [ -n "$COMMIT_ISSUE" ]; then git add "$issue"; staged=1; fi',
+ "fi",
+ 'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
+ 'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
+ 'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
+
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2159,9 +2159,8 @@
+ if (b.workFile) lines.push(`WORK_FILE=${quote(b.workFile)}`);
+ if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);
+ if (b.overwrite) lines.push('OVERWRITE="1"');
+ if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);
+-if (b.commitIssue === false) lines.push('COMMIT_ISSUE=""');
+ if (b.leaveFile) lines.push(`LEAVE_FILE=${quote(b.leaveFile)}`);
+ if (b.touch) lines.push(`TOUCH=${quote(b.touch)}`);
+ if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
+ if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
+
+[0m
+[0m→ [0mRead engine/engine.test.ts[90m [limit=100, offset=1925][0m
+Now add the two new engine seam tests. First the AGENT.md re-read test in the "glued prompt" describe:
+[0m
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -655,8 +655,42 @@
+   // harness that assembles its own invocation.
+   expect(body).not.toContain("/implement");
+ });
+ 
++it("re-reads AGENT.md at every spawn, so a mid-run edit reaches the next attempt", async () => {
++  const poolDir = makePool({
++    tickets: [
++      {
++        file: "01-a.md",
++        marker: "<!-- state: id=01 blocked-by=none status=ready -->",
++      },
++      {
++        file: "02-b.md",
++        marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
++      },
++    ],
++    config: stubConfig,
++    agentMd: "version one instructions",
++  });
++  const rig = stubHarness({});
++  const harnesses = {
++    stub: (ctx: SpawnContext) => {
++      // 01's prompt is already built when its argv is assembled, so this
++      // edit can only reach 02's spawn if AGENT.md is read fresh then.
++      if (ctx.id === "01") {
++        writeFileSync(join(poolDir, "AGENT.md"), "version two instructions");
++      }
++      return rig.harnesses.stub(ctx);
++    },
++  };
++
++  await runPool({ poolDir, harnesses });
++
++  expect(rig.spawned["01"].body).toContain("version one instructions");
++  expect(rig.spawned["02"].body).toContain("version two instructions");
++  expect(rig.spawned["02"].body).not.toContain("version one instructions");
++});
++
+ it("spawns with stdin closed and writes a per-ticket log to runs/", async () => {
+   const poolDir = makePool({
+     tickets: [
+       {
+
+[0m
+Now the canonical-Issue / false-crash regression test in the "worktrees" describe:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2338,8 +2338,54 @@
+     );
+   }
+ }, 15000);
+ 
++it("hands the agent the canonical main-checkout Issue path and recognises its done, merging the attempt", async () => {
++  // The old contract's false crash: an attempt in a worktree sets done in
++  // the main-checkout Issue file (the file the prompt names) while its
++  // worktree seed copy stays untouched. Read-back used to trust the seed
++  // copy, reporting a crash and skipping the merge; now both sides name
++  // the same file, so the attempt is done and merged.
++  const { poolDir, git } = makeGitPool({
++    tickets: [readyTicket("01"), readyTicket("02")],
++    config: stubConfig,
++  });
++  const rig = gitStubHarness(poolDir, {
++    "01": { workFile: "one.txt", commitMsg: "work-01" },
++    "02": { workFile: "two.txt", commitMsg: "work-02" },
++  });
++
++  const run = await approveReview(
++    await runPool({ poolDir, harnesses: rig.harnesses }),
++  );
++
++  expect(run.phase).toBe("done");
++  expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
++  expect(run.interrupts).toEqual([]);
++  for (const id of ["01", "02"]) {
++    // The spawn context names the canonical Issue file: the absolute
++    // main-checkout path, not the worktree's context-only seed copy.
++    expect(rig.spawned[id].issuePath).toBe(
++      join(poolDir, "issues", `${id}-t.md`),
++    );
++    expect(rig.spawned[id].cwd).toBe(
++      join(poolDir, ".git", "pool-worktrees", id),
++    );
++    // The stub edited exactly that file: the marker on disk is done.
++    expect(markerLine(poolDir, `${id}-t.md`)).toContain("status=done");
++    // And the merge was not skipped: the branch landed on the working
++    // branch and the ticket log records it.
++    const events = readFileSync(
++      join(poolDir, "runs", `${id}.events.jsonl`),
++      "utf8",
++    );
++    expect(events).toContain('"kind":"merged"');
++  }
++  const subjects = git(["log", "--format=%s"]).stdout.toString();
++  expect(subjects).toContain("work-01");
++  expect(subjects).toContain("work-02");
++}, 15000);
++
+ it("merges finished branches in completion order and never rebases a running ticket", async () => {
+   const { poolDir, head, git } = makeGitPool({
+     tickets: [readyTicket("01"), readyTicket("02")],
+     config: stubConfig,
+
+[0m
+[0m$ [0mbun run typecheck 2>&1 | tail -5
+$ tsc --noEmit
+[0m
+[0m$ [0mbun test engine/spawn.test.ts 2>&1 | tail -8
+bun test v1.3.14 (0d9b296a)
+
+ 4 pass
+ 0 fail
+ 5 expect() calls
+Ran 4 tests across 1 file. [11.00ms]
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -40
+bun test v1.3.14 (0d9b296a)
+
+engine/engine.test.ts:
+138 | 
+139 | // Every fully-done pool stops at the final Review interrupt; a test that
+140 | // wants a finished run approves it through the same answer path the UI uses.
+141 | async function approveReview(run: PoolRun): Promise<PoolRun> {
+142 |   const review = run.interrupts.find((i) => i.kind === "review");
+143 |   expect(review).toBeTruthy();
+                       ^
+error: expect(received).toBeTruthy()
+
+Received: undefined
+
+      at approveReview (/home/billy/repos/agent-console/engine/engine.test.ts:143:18)
+      at <anonymous> (/home/billy/repos/agent-console/engine/engine.test.ts:2322:19)
+(fail) worktrees > spawns with PWD set to the worktree cwd so opencode roots in the worktree, not the server's checkout [68.38ms]
+
+ 71 pass
+ 1 fail
+ 460 expect() calls
+Ran 72 tests across 1 file. [3.30s]
+[0m
+[0m$ [0mbun test engine/engine.test.ts -t "spawns with PWD set to the worktree cwd" 2>&1 | tail -30
+bun test v1.3.14 (0d9b296a)
+
+engine/engine.test.ts:
+138 | 
+139 | // Every fully-done pool stops at the final Review interrupt; a test that
+140 | // wants a finished run approves it through the same answer path the UI uses.
+141 | async function approveReview(run: PoolRun): Promise<PoolRun> {
+142 |   const review = run.interrupts.find((i) => i.kind === "review");
+143 |   expect(review).toBeTruthy();
+                       ^
+error: expect(received).toBeTruthy()
+
+Received: undefined
+
+      at approveReview (/home/billy/repos/agent-console/engine/engine.test.ts:143:18)
+      at <anonymous> (/home/billy/repos/agent-console/engine/engine.test.ts:2322:19)
+(fail) worktrees > spawns with PWD set to the worktree cwd so opencode roots in the worktree, not the server's checkout [71.98ms]
+
+ 0 pass
+ 71 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [93.00ms]
+[0m
+[0m$ [0mmkdir -p /tmp/opencode/debug && cat > /tmp/opencode/debug/repro.ts <<'EOF'
+import { mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runPool } from "/home/billy/repos/agent-console/engine/engine.ts";
+
+const poolDir = mkdtempSync(join(tmpdir(), "pool-debug-"));
+mkdirSync(join(poolDir, "issues"), { recursive: true });
+for (const id of ["01", "02"]) {
+  writeFileSync(join(poolDir, "issues", `${id}-t.md`), `<!-- state: id=${id} blocked-by=none status=ready -->\n\n# body\n`);
+}
+writeFileSync(join(poolDir, "console.json"), JSON.stringify({ defaults: { harness: "opencode", model: "opencode-test" } }));
+const git = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: poolDir, stdout: "pipe", stderr: "pipe" });
+git(["init", "-q", "-b", "main"]); git(["config", "user.email", "pool@test"]); git(["config", "user.name", "pool"]); git(["add", "-A"]); git(["commit", "-qm", "init"]);
+
+const binDir = join(poolDir, "bin"); const recordDir = join(poolDir, "rec");
+mkdirSync(binDir, { recursive: true }); mkdirSync(recordDir, { recursive: true });
+writeFileSync(join(binDir, "opencode"), [
+  "#!/usr/bin/env bun",
+  'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+  'import { join } from "node:path";',
+  'const commandArgs = process.argv[process.argv.indexOf("--command") + 2];',
+  'const issueRel = commandArgs.split("\\n")[0];',
+  'const id = issueRel.split("/").at(-1)!.split("-")[0];',
+  'const issue = join(process.cwd(), issueRel);',
+  'const recordDir = process.env.PWD_RECORD_DIR;',
+  'mkdirSync(recordDir, { recursive: true });',
+  'writeFileSync(join(recordDir, `pwd.${id}`), process.env.PWD ?? "");',
+  'writeFileSync(issue, readFileSync(issue, "utf8").replace(/status=[a-z-]*/, "status=done"));',
+  "console.log(`fake opencode ran in ${process.env.PWD}`);",
+  "",
+].join("\n"));
+chmodSync(join(binDir, "opencode"), 0o755);
+process.env.PATH = `${binDir}:${process.env.PATH}`;
+process.env.PWD_RECORD_DIR = recordDir;
+
+const run = await runPool({ poolDir });
+console.log("phase:", run.phase);
+console.log("tickets:", JSON.stringify(run.final.tickets));
+console.log("interrupts:", JSON.stringify(run.interrupts));
+console.log("log:", JSON.stringify(run.final.log, null, 2));
+console.log("poolDir:", poolDir);
+for (const id of ["01", "02"]) {
+  console.log(id, "marker:", readFileSync(join(poolDir, "issues", `${id}-t.md`), "utf8").split("\n")[0]);
+  try { console.log(id, "log tail:", readFileSync(join(poolDir, "runs", `${id}.log`), "utf8").slice(-300)); } catch {}
+}
+EOF
+bun /tmp/opencode/debug/repro.ts
+phase: quiescent
+tickets: {"01":"in-progress","02":"in-progress"}
+interrupts: [{"ticketId":"01","kind":"crash","body":"/tmp/pool-debug-4BIJoE/runs/01.log"},{"ticketId":"02","kind":"crash","body":"/tmp/pool-debug-4BIJoE/runs/02.log"}]
+log: [
+  "super-step 1: 01, 02",
+  "ticket 01: exited 1, marker in-progress, no outcome recorded",
+  "ticket 02: exited 1, marker in-progress, no outcome recorded",
+  "interrupt raised for 01 (crash)",
+  "interrupt raised for 02 (crash)",
+  "pool quiescent: interrupts pending for 01, 02"
+]
+poolDir: /tmp/pool-debug-4BIJoE
+01 marker: <!-- state: id=01 blocked-by=none status=in-progress -->
+01 log tail: l-debug-4BIJoE/.git/pool-worktrees/01/tmp/pool-debug-4BIJoE/issues/01-t.md'
+    path: "/tmp/pool-debug-4BIJoE/.git/pool-worktrees/01/tmp/pool-debug-4BIJoE/issues/01-t.md",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at /tmp/pool-debug-4BIJoE/bin/opencode:11:22
+
+Bun v1.3.14 (Linux x64)
+
+02 marker: <!-- state: id=02 blocked-by=none status=in-progress -->
+02 log tail: l-debug-4BIJoE/.git/pool-worktrees/02/tmp/pool-debug-4BIJoE/issues/02-t.md'
+    path: "/tmp/pool-debug-4BIJoE/.git/pool-worktrees/02/tmp/pool-debug-4BIJoE/issues/02-t.md",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at /tmp/pool-debug-4BIJoE/bin/opencode:11:22
+
+Bun v1.3.14 (Linux x64)
+[0m
+`join` doesn't reset on absolute paths — the fake needs `resolve`. Fixing the fake in the test:
+[0m← [0mEdit engine/engine.test.ts
+Index: /home/billy/repos/agent-console/engine/engine.test.ts
+===================================================================
+--- /home/billy/repos/agent-console/engine/engine.test.ts
++++ /home/billy/repos/agent-console/engine/engine.test.ts
+@@ -2288,13 +2288,15 @@
+ join(binDir, "opencode"),
+ [
+   "#!/usr/bin/env bun",
+   'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
+-  'import { join } from "node:path";',
++  'import { join, resolve } from "node:path";',
+   'const commandArgs = process.argv[process.argv.indexOf("--command") + 2];',
+-  'const issueRel = commandArgs.split("\\n")[0];',
+-  'const id = issueRel.split("/").at(-1)!.split("-")[0];',
+-  'const issue = join(process.cwd(), issueRel);',
++  'const issueRef = commandArgs.split("\\n")[0];',
++  'const id = issueRef.split("/").at(-1)!.split("-")[0];',
++  // The prompt names the canonical Issue file by its absolute
++  // main-checkout path; resolve keeps it absolute from any cwd.
++  'const issue = resolve(process.cwd(), issueRef);',
+   'const recordDir = process.env.PWD_RECORD_DIR;',
+   'mkdirSync(recordDir, { recursive: true });',
+   'writeFileSync(join(recordDir, `pwd.${id}`), process.env.PWD ?? "");',
+   'writeFileSync(issue, readFileSync(issue, "utf8").replace(/status=[a-z-]*/, "status=done"));',
+
+[0m
+[0m$ [0mbun test engine/engine.test.ts 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 72 pass
+ 0 fail
+ 465 expect() calls
+Ran 72 tests across 1 file. [3.37s]
+[0m
+[0m$ [0mbun test 2>&1 | tail -6
+bun test v1.3.14 (0d9b296a)
+
+ 288 pass
+ 0 fail
+ 1077 expect() calls
+Ran 288 tests across 10 files. [18.14s]
+[0m
+[0m← [0mWrite .scratch/resume-feedback/issues/04-spawn-contract-canonical-issue-agentmd-reread.md
+Wrote file successfully.
+[0m
+All 288 tests pass, typecheck clean. UI untouched so no UI build needed. Updating the Issue file:
+[0m$ [0mgit status --short && git diff --stat
+M .scratch/resume-feedback/issues/04-spawn-contract-canonical-issue-agentmd-reread.md
+ M engine/engine.test.ts
+ M engine/engine.ts
+ M engine/spawn.test.ts
+ M engine/spawn.ts
+?? .scratch/resume-feedback/runs/
+ ...pawn-contract-canonical-issue-agentmd-reread.md |  21 ++--
+ engine/engine.test.ts                              | 114 +++++++++++++++++++--
+ engine/engine.ts                                   |  82 +++++++--------
+ engine/spawn.test.ts                               |   7 +-
+ engine/spawn.ts                                    |  11 +-
+ 5 files changed, 164 insertions(+), 71 deletions(-)
+[0m
+[0m$ [0mgit add engine/engine.ts engine/spawn.ts engine/engine.test.ts engine/spawn.test.ts .scratch/resume-feedback/issues/04-spawn-contract-canonical-issue-agentmd-reread.md && git commit -m "engine: spawn and read-back both name the canonical main-checkout Issue file, and AGENT.md is re-read per spawn" && git log --oneline -2
+[main e7667bd] engine: spawn and read-back both name the canonical main-checkout Issue file, and AGENT.md is re-read per spawn
+ 5 files changed, 164 insertions(+), 71 deletions(-)
+e7667bd engine: spawn and read-back both name the canonical main-checkout Issue file, and AGENT.md is re-read per spawn
+3cf9931 ui, engine: show the queued answer's waiting state in snapshots and the Console
+[0m
+[0m# [0mTodos
+[✓] Engine: canonical Issue path in spawn ctx + read-back from main checkout
+[✓] Engine: re-read AGENT.md at every spawn (no session cache)
+[✓] Update spawn.test.ts and existing engine.test.ts assertions (prompt paths)
+[✓] Add engine seam tests: false-crash regression + AGENT.md mid-run edit
+[✓] Run bun test + bun run typecheck; tick criteria; commit; set status=done
+[0m
+Issue 04 done, committed as `e7667bd`.
+
+What changed:
+- **Spawn contract**: `SpawnContext.issueRel` removed; harness adapters build the driver line from `ctx.issuePath`, which the engine always sets to the absolute main-checkout Issue file (`engine/spawn.ts`, `engine/engine.ts:1690`). The worktree seed copy remains, context only.
+- **Read-back**: `readBack` now reads the main-checkout marker for every attempt and no longer mirrors the worktree copy (`engine/engine.ts:1582`), ending the false-crash/skipped-merge pair.
+- **AGENT.md**: `Session.agentMd`/`TicketEnv.agentMd` deleted; `runTicket` re-reads the file at every spawn (`engine/engine.ts:1693`).
+- **Tests**: new seam tests for the false-crash regression (done recognised and merged) and the mid-run AGENT.md edit; fake-CLI assertions moved to the absolute path. `bun test` 288 pass, `tsc --noEmit` clean.
+
+Issue file set to `status=done` with all criteria ticked and a Notes section recording the decisions.
