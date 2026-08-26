@@ -3207,9 +3207,11 @@ describe("accept/process split", () => {
 
   // A stub harness whose blocked tickets hold their spawned script until the
   // sentinel file appears, so a test can keep a super-step in flight while it
-  // answers an interrupt. Every other ticket takes the instant path.
+  // answers an interrupt. Every other ticket takes the instant path. A ticket
+  // can also fail: exitCode leaves the marker at the given status and exits
+  // non-zero.
   function blockingHarness(
-    behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number }>,
     sentinel: string,
   ): StubRig {
     const poolLocal = tempDirs[tempDirs.length - 1];
@@ -3219,13 +3221,13 @@ describe("accept/process split", () => {
       [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"',
+        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"; exit_code="$6"',
         'if [ "$gate" = "block" ]; then',
         '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
         "fi",
         'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
         'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
-        "exit 0",
+        'exit "$exit_code"',
         "",
       ].join("\n"),
     );
@@ -3248,6 +3250,7 @@ describe("accept/process split", () => {
         ctx.outcomePath,
         b.block ? "block" : "-",
         sentinel,
+        String(b.exitCode ?? 0),
       ];
     };
     return { harnesses: { stub }, spawned, spawnOrder };
@@ -3523,6 +3526,65 @@ describe("accept/process split", () => {
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
     expect(run.final.tickets["01"]).toBe("done");
     expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
+  }, 15000);
+
+  it("records a crash at attempt exit, before a slow sibling's super-step ends", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-02");
+    const rig = blockingHarness(
+      {
+        // 01 fails fast and leaves its marker rewritten to ready; 02 holds
+        // the super-step open until the sentinel lands.
+        "01": { statuses: ["ready"], exitCode: 3 },
+        "02": { statuses: ["done"], block: true },
+      },
+      sentinel,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
+    const snapshotsBefore = run.snapshots.length;
+
+    // The crash is recorded the moment 01's attempt exits: the event lands in
+    // the ticket log and the marker is corrected while 02 still holds the
+    // super-step open, and a snapshot pushes the crash to the Console.
+    await waitFor(
+      () => readEventsFile(poolDir, "01").some((e) => e.kind === "crash"),
+      "crash event for ticket 01",
+    );
+    expect(readEventsFile(poolDir, "01").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+    ]);
+    expect(readEventsFile(poolDir, "01").at(-1)?.payload).toEqual({ code: 3 });
+    expect(
+      readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
+    ).toContain("status=in-progress");
+    await waitFor(
+      () => run.snapshots.length > snapshotsBefore,
+      "snapshot emitted at crash recording",
+    );
+    // The interrupt itself still waits for the super-step boundary.
+    expect(run.interrupts).toEqual([]);
+
+    writeFileSync(sentinel, "go");
+    await run.settled;
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+    expect(run.interrupts[0]?.ticketId).toBe("01");
+    // Recorded once, at exit; the boundary raises the interrupt only.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "crash"),
+    ).toHaveLength(1);
   }, 15000);
 
   it("records the queued answer in its own store, separate from the PoolState checkpoints", async () => {

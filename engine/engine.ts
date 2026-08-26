@@ -493,6 +493,10 @@ async function driveLoop(session: Session): Promise<void> {
                 });
               });
             }
+            // A crashed attempt was recorded at exit; push a snapshot now so
+            // the Console shows the crash within seconds, not when the
+            // slowest sibling's super-step ends.
+            if (result.status === "in-progress") emit("running");
             return result;
           }),
         ),
@@ -530,7 +534,7 @@ async function driveLoop(session: Session): Promise<void> {
           );
         }
       }
-      for (const { marker, status, logPath, exitCode } of results) {
+      for (const { marker, status, logPath } of results) {
         if (status === "checkpoint") {
           raiseInterrupt(session, checkpointInterrupt(marker));
           appendEvent(session.runsDir, marker.id, {
@@ -540,18 +544,15 @@ async function driveLoop(session: Session): Promise<void> {
             payload: {},
           });
         } else if (status === "in-progress") {
+          // The crash event and the marker update landed at attempt exit;
+          // only the interrupt waits for the boundary, so the state join
+          // above stays the single writer of PoolState.
           raiseInterrupt(session, {
             ticketId: marker.id,
             kind: "crash",
-          body: logPath,
-        });
-        appendEvent(session.runsDir, marker.id, {
-          at: new Date().toISOString(),
-          attempt: lastAttempt(session.runsDir, marker.id),
-          kind: "crash",
-          payload: { code: exitCode },
-        });
-      }
+            body: logPath,
+          });
+        }
     }
       persist(session);
       emit("running");
@@ -1712,6 +1713,19 @@ async function runTicket(
     kind: "exited",
     payload: { code: exitCode, status },
   });
+  // A crash is recorded the moment the attempt exits (readBack has already
+  // corrected the marker), not at the end of the super-step, so the ticket
+  // log stops masquerading a dead attempt as running work. Per-ticket event
+  // appends are concurrency-safe against siblings still in flight. The crash
+  // interrupt itself is still raised at the super-step boundary.
+  if (status === "in-progress") {
+    appendEvent(env.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: plan.attempt,
+      kind: "crash",
+      payload: { code: exitCode },
+    });
+  }
 
   return {
     marker,
