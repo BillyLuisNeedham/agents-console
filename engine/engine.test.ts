@@ -656,6 +656,40 @@ describe("glued prompt", () => {
     expect(body).not.toContain("/implement");
   });
 
+  it("re-reads AGENT.md at every spawn, so a mid-run edit reaches the next attempt", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+      agentMd: "version one instructions",
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        // 01's prompt is already built when its argv is assembled, so this
+        // edit can only reach 02's spawn if AGENT.md is read fresh then.
+        if (ctx.id === "01") {
+          writeFileSync(join(poolDir, "AGENT.md"), "version two instructions");
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    await runPool({ poolDir, harnesses });
+
+    expect(rig.spawned["01"].body).toContain("version one instructions");
+    expect(rig.spawned["02"].body).toContain("version two instructions");
+    expect(rig.spawned["02"].body).not.toContain("version one instructions");
+  });
+
   it("spawns with stdin closed and writes a per-ticket log to runs/", async () => {
     const poolDir = makePool({
       tickets: [
@@ -787,7 +821,11 @@ describe("harness CLIs", () => {
     expect(run!.phase).toBe("done");
     const argv = recordedArgs(fake.recordDir);
     expect(argv[0]).toBe("-p");
-    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
+    expect(
+      argv[1].startsWith(
+        `/implement ${join(poolDir, "issues", "01-a.md")}\n`,
+      ),
+    ).toBe(true);
     expect(argv[1]).toContain("Standing instructions for this job:");
     expect(argv.slice(2)).toEqual([
       "--model",
@@ -819,7 +857,9 @@ describe("harness CLIs", () => {
     expect(argv[0]).toBe("run");
     expect(argv[1]).toBe("--command");
     expect(argv[2]).toBe("implement");
-    expect(argv[3]).toMatch(/^issues\/01-a\.md\n/);
+    expect(
+      argv[3].startsWith(`${join(poolDir, "issues", "01-a.md")}\n`),
+    ).toBe(true);
     expect(argv[3]).toContain("Standing instructions for this job:");
     expect(argv[3]).not.toContain("/implement");
     expect(argv.slice(4)).toEqual(["--model", "opencode-test", "--auto"]);
@@ -838,7 +878,11 @@ describe("harness CLIs", () => {
     expect(run!.phase).toBe("done");
     const argv = recordedArgs(fake.recordDir);
     expect(argv[0]).toBe("-p");
-    expect(argv[1]).toMatch(/^\/implement issues\/01-a\.md\n/);
+    expect(
+      argv[1].startsWith(
+        `/implement ${join(poolDir, "issues", "01-a.md")}\n`,
+      ),
+    ).toBe(true);
     expect(argv.slice(2)).toEqual([
       "--model",
       "cursor-test",
@@ -2026,7 +2070,6 @@ describe("worktrees", () => {
     workLine?: string;
     overwrite?: boolean;
     commitMsg?: string;
-    commitIssue?: boolean;
     leaveFile?: string;
     touch?: string;
     waitFor?: string;
@@ -2075,7 +2118,7 @@ describe("worktrees", () => {
         "#!/usr/bin/env bash",
         "set -uo pipefail",
         'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
-        'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""; COMMIT_ISSUE="1"',
+        'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
         'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
         'source "$plan"',
         'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
@@ -2109,9 +2152,11 @@ describe("worktrees", () => {
         '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
         '  git add "$WORK_FILE"; staged=1',
         "fi",
+        // The Issue of record is the canonical main-checkout file the
+        // engine hands over as ctx.issuePath; it is edited in place and
+        // never committed from the worktree.
         'if [ "$status" != "keep" ]; then',
         '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
-        '  if [ -n "$COMMIT_ISSUE" ]; then git add "$issue"; staged=1; fi',
         "fi",
         'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
         'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
@@ -2149,7 +2194,6 @@ describe("worktrees", () => {
       if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);
       if (b.overwrite) lines.push('OVERWRITE="1"');
       if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);
-      if (b.commitIssue === false) lines.push('COMMIT_ISSUE=""');
       if (b.leaveFile) lines.push(`LEAVE_FILE=${quote(b.leaveFile)}`);
       if (b.touch) lines.push(`TOUCH=${quote(b.touch)}`);
       if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
@@ -2245,11 +2289,13 @@ describe("worktrees", () => {
       [
         "#!/usr/bin/env bun",
         'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
-        'import { join } from "node:path";',
+        'import { join, resolve } from "node:path";',
         'const commandArgs = process.argv[process.argv.indexOf("--command") + 2];',
-        'const issueRel = commandArgs.split("\\n")[0];',
-        'const id = issueRel.split("/").at(-1)!.split("-")[0];',
-        'const issue = join(process.cwd(), issueRel);',
+        'const issueRef = commandArgs.split("\\n")[0];',
+        'const id = issueRef.split("/").at(-1)!.split("-")[0];',
+        // The prompt names the canonical Issue file by its absolute
+        // main-checkout path; resolve keeps it absolute from any cwd.
+        'const issue = resolve(process.cwd(), issueRef);',
         'const recordDir = process.env.PWD_RECORD_DIR;',
         'mkdirSync(recordDir, { recursive: true });',
         'writeFileSync(join(recordDir, `pwd.${id}`), process.env.PWD ?? "");',
@@ -2293,6 +2339,52 @@ describe("worktrees", () => {
         process.env.PWD,
       );
     }
+  }, 15000);
+
+  it("hands the agent the canonical main-checkout Issue path and recognises its done, merging the attempt", async () => {
+    // The old contract's false crash: an attempt in a worktree sets done in
+    // the main-checkout Issue file (the file the prompt names) while its
+    // worktree seed copy stays untouched. Read-back used to trust the seed
+    // copy, reporting a crash and skipping the merge; now both sides name
+    // the same file, so the attempt is done and merged.
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "one.txt", commitMsg: "work-01" },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts).toEqual([]);
+    for (const id of ["01", "02"]) {
+      // The spawn context names the canonical Issue file: the absolute
+      // main-checkout path, not the worktree's context-only seed copy.
+      expect(rig.spawned[id].issuePath).toBe(
+        join(poolDir, "issues", `${id}-t.md`),
+      );
+      expect(rig.spawned[id].cwd).toBe(
+        join(poolDir, ".git", "pool-worktrees", id),
+      );
+      // The stub edited exactly that file: the marker on disk is done.
+      expect(markerLine(poolDir, `${id}-t.md`)).toContain("status=done");
+      // And the merge was not skipped: the branch landed on the working
+      // branch and the ticket log records it.
+      const events = readFileSync(
+        join(poolDir, "runs", `${id}.events.jsonl`),
+        "utf8",
+      );
+      expect(events).toContain('"kind":"merged"');
+    }
+    const subjects = git(["log", "--format=%s"]).stdout.toString();
+    expect(subjects).toContain("work-01");
+    expect(subjects).toContain("work-02");
   }, 15000);
 
   it("merges finished branches in completion order and never rebases a running ticket", async () => {

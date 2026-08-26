@@ -213,7 +213,6 @@ interface Session {
   poolDir: string;
   issuesDir: string;
   runsDir: string;
-  agentMd: string;
   cwd: string;
   git: boolean;
   harnesses: Record<string, HarnessCommand>;
@@ -247,7 +246,6 @@ export function startPool(options: RunOptions): PoolRun {
 
   const config = readConfig(poolDir);
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
-  const agentMd = readOptional(join(poolDir, "AGENT.md")) ?? "";
   const cwd = repoRootOf(poolDir);
 
   const assignments = new Map(
@@ -261,7 +259,6 @@ export function startPool(options: RunOptions): PoolRun {
     poolDir,
     issuesDir,
     runsDir,
-    agentMd,
     cwd,
     git: gitAvailable(cwd),
     harnesses,
@@ -483,7 +480,6 @@ async function driveLoop(session: Session): Promise<void> {
               poolDir: session.poolDir,
               runsDir: session.runsDir,
               issuesDir: session.issuesDir,
-              agentMd: session.agentMd,
               harnesses: session.harnesses,
             },
             plans.get(marker.id)!,
@@ -914,10 +910,11 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   });
 }
 
-// The dual-write leaves the Issue file dirty on the working branch and git
-// refuses a merge that would touch a dirty file, so the Issue steps aside
-// for the merge and comes straight back: its content already matches the
-// worktree copy, whether or not the agent committed it.
+// The dual-write and the agent's own edits to the canonical Issue file leave
+// it dirty on the working branch and git refuses a merge that would touch a
+// dirty file, so the Issue steps aside for the merge and comes straight
+// back: its content is the file of record and never travels through the
+// ticket's branch.
 function mergeWithIssueAside(
   session: Session,
   marker: TicketMarker,
@@ -1146,7 +1143,6 @@ async function runResolver(
   const ctx: SpawnContext = {
     id: marker.id,
     issuePath: marker.file,
-    issueRel: relative(session.cwd, marker.file),
     body: prompt,
     driver: RESOLVER_DRIVER,
     harness: resolver.harness,
@@ -1526,13 +1522,11 @@ interface TicketEnv {
   poolDir: string;
   runsDir: string;
   issuesDir: string;
-  agentMd: string;
   harnesses: Record<string, HarnessCommand>;
 }
 
 interface TicketPlan {
   cwd: string;
-  issuePath: string;
   worktree?: WorktreeInfo;
   attempt: number;
 }
@@ -1551,46 +1545,40 @@ interface TicketResult {
 // checkout. A ticket with a parked branch (checkpoint, crash or conflicted
 // merge left it behind) always reuses its worktree, even alone, so it keeps
 // the work it already did. Anything else runs in the main checkout. The main
-// checkout's Issue file is the truth and is copied into the worktree at
-// spawn, which is how a resume note reaches the agent.
+// checkout's Issue file is the single canonical copy: the spawn prompt hands
+// the agent its absolute path and read-back trusts it. The worktree gets a
+// seed copy as context only; the merge already discards worktree Issue
+// edits.
 function planTicket(
   session: Session,
   marker: TicketMarker,
   readyCount: number,
   attempt: number,
 ): TicketPlan {
-  if (!session.git) return { cwd: session.cwd, issuePath: marker.file, attempt };
+  if (!session.git) return { cwd: session.cwd, attempt };
   const parked = branchExists(session.cwd, marker.id);
   if (readyCount < 2 && !parked) {
-    return { cwd: session.cwd, issuePath: marker.file, attempt };
+    return { cwd: session.cwd, attempt };
   }
   const worktree = prepareWorktree(session.cwd, marker.id);
-  const issuePath = join(worktree.path, relative(session.cwd, marker.file));
-  mkdirSync(dirname(issuePath), { recursive: true });
-  copyFileSync(marker.file, issuePath);
-  return { cwd: worktree.path, issuePath, worktree, attempt };
+  const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
+  mkdirSync(dirname(seedCopy), { recursive: true });
+  copyFileSync(marker.file, seedCopy);
+  return { cwd: worktree.path, worktree, attempt };
 }
 
-// Marker read-back. Only done and checkpoint are real endings: the
-// super-step wrote in-progress before the spawn, so an agent that exits
-// leaving anything else (an untouched marker, or one it rewrote to ready)
-// died mid-ticket. The marker goes to in-progress either way, so the crash
-// interrupt holds the ticket out of the next super-step instead of
-// re-spawning it forever. In a worktree the agent edited its own copy; a
-// finished ticket's Issue content mirrors back to the main checkout so the
-// dual-write and any Brief stay inspectable there.
-function readBack(marker: TicketMarker, plan: TicketPlan): TicketStatus {
-  if (!plan.worktree) {
-    const status = readMarker(marker.file).status;
-    if (status === "done" || status === "checkpoint") return status;
-    if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
-    return "in-progress";
-  }
-  const status = readMarker(plan.issuePath).status;
-  if (status === "done" || status === "checkpoint") {
-    copyFileSync(plan.issuePath, marker.file);
-    return status;
-  }
+// Marker read-back against the canonical main-checkout Issue file, the same
+// file the spawn prompt told the agent to update, so an attempt that
+// finishes done is always recognised as done. Only done and checkpoint are
+// real endings: the super-step wrote in-progress before the spawn, so an
+// agent that exits leaving anything else (an untouched marker, or one it
+// rewrote to ready) died mid-ticket. The marker goes to in-progress either
+// way, so the crash interrupt holds the ticket out of the next super-step
+// instead of re-spawning it forever.
+function readBack(marker: TicketMarker): TicketStatus {
+  const status = readMarker(marker.file).status;
+  if (status === "done" || status === "checkpoint") return status;
+  if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
   return "in-progress";
 }
 
@@ -1677,16 +1665,19 @@ async function runTicket(
   const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
   rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
-  const issueRel = relative(plan.cwd, plan.issuePath);
 
   const upstream = marker.blockedBy.flatMap((id) => {
     const outcome = snapshot.outcomes[id];
     return outcome ? [{ id, outcome }] : [];
   });
 
+  // AGENT.md is read at every spawn, never cached on the session, so an
+  // operator's mid-run edit lands in the very next attempt's prompt.
+  const agentMd = readOptional(join(env.poolDir, "AGENT.md")) ?? "";
+
   const prompt = buildPrompt({
     chain,
-    agentMd: env.agentMd,
+    agentMd,
     roster: snapshot.config.roster ?? "",
     upstream,
     outcomePath,
@@ -1694,8 +1685,7 @@ async function runTicket(
 
   const ctx: SpawnContext = {
     id: marker.id,
-    issuePath: plan.issuePath,
-    issueRel,
+    issuePath: marker.file,
     body: prompt,
     driver,
     harness: assignment.harness,
@@ -1714,7 +1704,7 @@ async function runTicket(
   });
   const exitCode = await spawnToLog(argv, ctx);
 
-  const status = readBack(marker, plan);
+  const status = readBack(marker);
   const outcome = readOutcome(outcomePath);
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),

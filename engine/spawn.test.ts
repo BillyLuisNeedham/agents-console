@@ -5,7 +5,6 @@ function context(overrides?: Partial<SpawnContext>): SpawnContext {
   return {
     id: "01",
     issuePath: "/tmp/pool/issues/01-a.md",
-    issueRel: "issues/01-a.md",
     body: "Standing instructions for this job:\n\nDo the thing.",
     driver: "implement",
     harness: "claude",
@@ -22,7 +21,7 @@ describe("defaultHarnesses", () => {
     expect(defaultHarnesses.claude(context())).toEqual([
       "claude",
       "-p",
-      "/implement issues/01-a.md\n\n" +
+      "/implement /tmp/pool/issues/01-a.md\n\n" +
         "Standing instructions for this job:\n\nDo the thing.",
       "--model",
       "claude-test",
@@ -45,7 +44,7 @@ describe("defaultHarnesses", () => {
       "run",
       "--command",
       "implement",
-      "issues/01-a.md\n\n" +
+      "/tmp/pool/issues/01-a.md\n\n" +
         "Standing instructions for this job:\n\nDo the thing.",
       "--model",
       "claude-test",
@@ -60,7 +59,7 @@ describe("defaultHarnesses", () => {
     expect(defaultHarnesses.cursor(context())).toEqual([
       "agent",
       "-p",
-      "/implement issues/01-a.md\n\n" +
+      "/implement /tmp/pool/issues/01-a.md\n\n" +
         "Standing instructions for this job:\n\nDo the thing.",
       "--model",
       "claude-test",

@@ -1,7 +1,10 @@
 export interface SpawnContext {
   id: string;
+  // The canonical Issue file: the absolute main-checkout path. The driver
+  // line hands it to the agent for both reading and status updates, and
+  // read-back trusts the same file, so an attempt in a worktree updates the
+  // file of record rather than its context-only seed copy.
   issuePath: string;
-  issueRel: string;
   body: string;
   driver: string;
   harness: string;
@@ -26,7 +29,7 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
   claude: (ctx) => [
     "claude",
     "-p",
-    `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
+    `/${ctx.driver} ${ctx.issuePath}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--permission-mode",
@@ -45,7 +48,7 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     "run",
     "--command",
     ctx.driver,
-    `${ctx.issueRel}\n\n${ctx.body}`,
+    `${ctx.issuePath}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--auto",
@@ -54,7 +57,7 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
   cursor: (ctx) => [
     "agent",
     "-p",
-    `/${ctx.driver} ${ctx.issueRel}\n\n${ctx.body}`,
+    `/${ctx.driver} ${ctx.issuePath}\n\n${ctx.body}`,
     "--model",
     ctx.model,
     "--force",
