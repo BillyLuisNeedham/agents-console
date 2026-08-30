@@ -72,9 +72,8 @@ function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Reco
     [
       "#!/usr/bin/env bash",
       "set -uo pipefail",
-      'issue="$1"; status="$2"',
-      'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
-      'printf \'{"summary":"smoke","commitSha":null}\' > "$3"',
+      'status="$1"',
+      'printf \'{"status":"%s","summary":"smoke","commitSha":null}\' "$status" > "$2"',
       "exit 0",
       "",
     ].join("\n"),
@@ -85,7 +84,7 @@ function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Reco
     const n = counts[ctx.id] ?? 0;
     counts[ctx.id] = n + 1;
     const status = statuses[Math.min(n, statuses.length - 1)];
-    return ["bash", stubPath, ctx.issuePath, status, ctx.outcomePath];
+    return ["bash", stubPath, status, ctx.outcomePath];
   };
   return { stub: harness };
 }
@@ -104,12 +103,11 @@ function blockingHarness(
     [
       "#!/usr/bin/env bash",
       "set -uo pipefail",
-      'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"',
+      'status="$1"; outcome_path="$2"; gate="$3"; sentinel="$4"',
       'if [ "$gate" = "block" ]; then',
       '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
       "fi",
-      'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
-      'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
+      'printf \'{"status":"%s","summary":"smoke","commitSha":null}\' "$status" > "$outcome_path"',
       "exit 0",
       "",
     ].join("\n"),
@@ -124,7 +122,6 @@ function blockingHarness(
     return [
       "bash",
       stubPath,
-      ctx.issuePath,
       status,
       ctx.outcomePath,
       b.block ? "block" : "-",

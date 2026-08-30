@@ -51,9 +51,18 @@ import {
 
 export type { HarnessCommand } from "./spawn.ts";
 
+// The attempt's result, written by the agent as JSON at the outcome path its
+// prompt names and read by the engine at attempt exit. `status` is the
+// attempt's ending: the engine, not the agent, writes it to the canonical
+// Issue's line-1 marker (ADR-0005). Marker statuses written by the agent are
+// not honored anywhere.
+export type OutcomeStatus = "done" | "checkpoint";
+
 export interface Outcome {
+  status: OutcomeStatus;
   summary: string;
   commitSha: string | null;
+  brief?: string;
 }
 
 interface TicketAssignment {
@@ -730,10 +739,10 @@ function rehydrate(session: Session): void {
   const recovered: Record<string, Outcome> = {};
   for (const marker of session.markers) {
     if (marker.status !== "done") continue;
-    const outcome = readOutcome(
+    const read = readOutcomeResult(
       join(session.runsDir, `${marker.id}.outcome.json`),
     );
-    if (outcome) recovered[marker.id] = outcome;
+    if (read.ok) recovered[marker.id] = read.outcome;
   }
   if (Object.keys(recovered).length > 0) {
     session.state = applyUpdate(session.state, { outcomes: recovered });
@@ -1617,9 +1626,9 @@ interface TicketResult {
 // merge left it behind) always reuses its worktree, even alone, so it keeps
 // the work it already did. Anything else runs in the main checkout. The main
 // checkout's Issue file is the single canonical copy: the spawn prompt hands
-// the agent its absolute path and read-back trusts it. The worktree gets a
-// seed copy as context only; the merge already discards worktree Issue
-// edits.
+// the agent its absolute path for reading and notes, and the engine writes
+// the final status to it at attempt exit. The worktree gets a seed copy as
+// context only; the merge already discards worktree Issue edits.
 function planTicket(
   session: Session,
   marker: TicketMarker,
@@ -1638,19 +1647,39 @@ function planTicket(
   return { cwd: worktree.path, worktree, attempt };
 }
 
-// Marker read-back against the canonical main-checkout Issue file, the same
-// file the spawn prompt told the agent to update, so an attempt that
-// finishes done is always recognised as done. Only done and checkpoint are
-// real endings: the super-step wrote in-progress before the spawn, so an
-// agent that exits leaving anything else (an untouched marker, or one it
-// rewrote to ready) died mid-ticket. The marker goes to in-progress either
-// way, so the crash interrupt holds the ticket out of the next super-step
-// instead of re-spawning it forever.
-function readBack(marker: TicketMarker): TicketStatus {
-  const status = readMarker(marker.file).status;
-  if (status === "done" || status === "checkpoint") return status;
-  if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
-  return "in-progress";
+// The engine owns the final status write (ADR-0005): the attempt's outcome
+// JSON is the only ending signal, and anything that is not exit code 0 with a
+// valid outcome is a crash. The crash reason distinguishes the classes in the
+// ticket log: a dead harness, an agent that never wrote its outcome, an
+// outcome that does not parse, and an outcome whose status is invalid.
+type OutcomeResult =
+  | { ok: true; outcome: Outcome }
+  | { ok: false; reason: string };
+
+function readOutcomeResult(path: string): OutcomeResult {
+  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { ok: false, reason: "outcome is not parseable JSON" };
+  }
+  const outcome = parsed as Partial<Outcome> | null;
+  if (outcome?.status !== "done" && outcome?.status !== "checkpoint") {
+    return { ok: false, reason: "outcome's status is not done or checkpoint" };
+  }
+  if (typeof outcome.summary !== "string") {
+    return { ok: false, reason: "outcome has no summary string" };
+  }
+  return {
+    ok: true,
+    outcome: {
+      status: outcome.status,
+      summary: outcome.summary,
+      commitSha: typeof outcome.commitSha === "string" ? outcome.commitSha : null,
+      ...(typeof outcome.brief === "string" ? { brief: outcome.brief } : {}),
+    },
+  };
 }
 
 // Merging one finished ticket's branch onto the pool's working branch.
@@ -1775,25 +1804,42 @@ async function runTicket(
   });
   const exitCode = await spawnToLog(argv, ctx);
 
-  const status = readBack(marker);
-  const outcome = readOutcome(outcomePath);
+  // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
+  // with a valid outcome the engine writes the final status to the canonical
+  // Issue's marker itself; a marker the agent rewrote is never honored.
+  const outcome = readOutcomeResult(outcomePath);
+  let status: TicketStatus = "in-progress";
+  let crashReason: string | null = null;
+  if (exitCode !== 0) {
+    crashReason = `harness exited ${exitCode}`;
+  } else if (!outcome.ok) {
+    crashReason = outcome.reason;
+  } else {
+    status = outcome.outcome.status;
+    writeMarkerStatus(marker.file, status);
+  }
+  if (crashReason !== null && readMarker(marker.file).status !== "in-progress") {
+    writeMarkerStatus(marker.file, "in-progress");
+  }
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "exited",
     payload: { code: exitCode, status },
   });
-  // A crash is recorded the moment the attempt exits (readBack has already
-  // corrected the marker), not at the end of the super-step, so the ticket
-  // log stops masquerading a dead attempt as running work. Per-ticket event
-  // appends are concurrency-safe against siblings still in flight. The crash
-  // interrupt itself is still raised at the super-step boundary.
-  if (status === "in-progress") {
+  // A crash is recorded the moment the attempt exits (the marker has already
+  // been corrected), not at the end of the super-step, so the ticket log
+  // stops masquerading a dead attempt as running work. The payload carries
+  // the exit code and the reason, so the log distinguishes a dead harness
+  // from an agent that never wrote its outcome. Per-ticket event appends are
+  // concurrency-safe against siblings still in flight. The crash interrupt
+  // itself is still raised at the super-step boundary.
+  if (crashReason !== null) {
     appendEvent(env.runsDir, marker.id, {
       at: new Date().toISOString(),
       attempt: plan.attempt,
       kind: "crash",
-      payload: { code: exitCode },
+      payload: { code: exitCode, reason: crashReason },
     });
   }
 
@@ -1808,9 +1854,9 @@ async function runTicket(
       tickets: { [marker.id]: status },
       log: [
         `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
-          (outcome ? "" : ", no outcome recorded"),
+          (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
-      ...(outcome ? { outcomes: { [marker.id]: outcome } } : {}),
+      ...(outcome.ok ? { outcomes: { [marker.id]: outcome.outcome } } : {}),
     },
   };
 }
@@ -1856,20 +1902,6 @@ async function spawnToLog(
     );
   });
   return exitCode;
-}
-
-function readOutcome(path: string): Outcome | null {
-  if (!existsSync(path)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed?.summary !== "string") return null;
-    return {
-      summary: parsed.summary,
-      commitSha: typeof parsed.commitSha === "string" ? parsed.commitSha : null,
-    };
-  } catch {
-    return null;
-  }
 }
 
 function resolveAssignment(
