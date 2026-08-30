@@ -69,6 +69,7 @@ interface StubBehaviour {
   statuses?: ("done" | "checkpoint" | "ready" | "keep" | "marker-done")[];
   outcome?: { summary: string; commitSha: string | null } | null;
   outcomeRaw?: string;
+  brief?: string;
   exitCode?: number;
   exitCodes?: number[];
 }
@@ -121,6 +122,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
                 summary: `summary-${ctx.id}`,
                 commitSha: `sha-${ctx.id}`,
               }),
+              ...(b.brief !== undefined ? { brief: b.brief } : {}),
             });
     const exitCode = b.exitCodes
       ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
@@ -1010,7 +1012,12 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness({
+      "01": {
+        status: "checkpoint",
+        brief: "1. did the first half\n2. human must pick a name",
+      },
+    });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -1209,7 +1216,7 @@ describe("interrupts", () => {
       config: stubConfig,
     });
     const rig = stubHarness({
-      "01": { statuses: ["checkpoint", "done"] },
+      "01": { statuses: ["checkpoint", "done"], brief: "need a decision" },
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
@@ -1522,6 +1529,126 @@ describe("outcome contract", () => {
     expect(run.interrupts[0]?.kind).toBe("crash");
     expect(rig.spawnOrder).toEqual(["01"]);
     expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
+  it("writes the checkpoint marker itself when the outcome says checkpoint", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({
+      "01": { status: "checkpoint", brief: "pick a name" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The stub never touched the Issue; the checkpoint on disk is the
+    // engine's write from the outcome JSON, and the interrupt was raised.
+    expect(run.phase).toBe("quiescent");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=checkpoint");
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    const kinds = readEvents(poolDir, "01").map((e) => e.kind);
+    expect(kinds).toEqual(["scheduled", "spawned", "exited", "checkpoint"]);
+    expect(readEvents(poolDir, "01")[2]?.payload).toEqual({
+      code: 0,
+      status: "checkpoint",
+    });
+  });
+
+  it("appends the outcome's brief as the Issue's Brief section, replacing a stale one", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nstale brief from an earlier attempt",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { status: "checkpoint", brief: "fresh brief" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The interrupt's body comes from the section the engine just landed,
+    // never from a Brief an earlier attempt left behind.
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "fresh brief" },
+    ]);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Brief\n\nfresh brief");
+    expect(issueText).not.toContain("stale brief from an earlier attempt");
+    expect(
+      issueText.split("\n").filter((line) => line.startsWith("## Brief")),
+    ).toHaveLength(1);
+  });
+
+  it("lands a placeholder Brief section when a checkpoint outcome has no brief", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The pause was signalled, so it is not a crash: the interrupt stands
+    // and its body is the engine's placeholder.
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("wrote no brief");
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Brief, written by the engine");
+  });
+
+  it("replaces a stale Brief with the placeholder when a later checkpoint has no brief", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nstale brief from an earlier attempt",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The Brief section always mirrors the latest attempt: a stale brief
+    // never masquerades as the current one.
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("wrote no brief");
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).not.toContain("stale brief from an earlier attempt");
+    expect(
+      issueText.split("\n").filter((line) => line.startsWith("## Brief")),
+    ).toHaveLength(1);
+  });
+
+  it("re-raises the checkpoint interrupt from the engine-written Brief after a restart", async () => {
+    const poolDir = oneTicket();
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({
+        "01": { status: "checkpoint", brief: "pick a name" },
+      }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // Killed before the boundary persist: no stored checkpoint survives,
+    // but the marker and the Brief the engine landed are on disk, so
+    // rehydration re-raises the interrupt from the Issue unchanged.
+    rmSync(join(poolDir, "console.db"), { force: true });
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(second.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
   });
 });
 
@@ -1998,7 +2125,9 @@ describe("durability", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness({
+        "01": { status: "checkpoint", brief: "pick a name" },
+      }).harnesses,
     });
     expect(first.phase).toBe("quiescent");
     expect(first.final.tickets["03"]).toBe("done");
@@ -2750,7 +2879,10 @@ describe("worktrees", () => {
       {
         ticketId: "01",
         kind: "checkpoint",
-        body: "(no Brief section in the Issue file)",
+        body:
+          "The agent signalled a checkpoint but wrote no brief, so what " +
+          "the attempt completed is only in the ticket log. Answer the " +
+          "interrupt to point the next attempt.",
       },
     ]);
     // The checkpoint parked 01's worktree with its partial work; 02 merged
@@ -3389,7 +3521,7 @@ describe("accept/process split", () => {
   // can also fail: exitCode exits non-zero, and a status that is not done or
   // checkpoint writes no outcome at all.
   function blockingHarness(
-    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number }>,
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number; brief?: string }>,
     sentinel: string,
   ): StubRig {
     const poolLocal = tempDirs[tempDirs.length - 1];
@@ -3399,12 +3531,12 @@ describe("accept/process split", () => {
       [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"; exit_code="$6"',
+        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"; exit_code="$6"; outcome_json="$7"',
         'if [ "$gate" = "block" ]; then',
         '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
         "fi",
-        'if [ "$status" = "done" ] || [ "$status" = "checkpoint" ]; then',
-        '  printf \'{"status":"%s","summary":"smoke","commitSha":null}\' "$status" > "$outcome_path"',
+        'if [ -n "$outcome_json" ]; then',
+        '  printf \'%s\' "$outcome_json" > "$outcome_path"',
         "fi",
         'exit "$exit_code"',
         "",
@@ -3421,6 +3553,15 @@ describe("accept/process split", () => {
       const b = behaviour[ctx.id] ?? {};
       const statuses = b.statuses ?? (["done"] as const);
       const status = statuses[Math.min(n, statuses.length - 1)];
+      const outcome =
+        status === "done" || status === "checkpoint"
+          ? JSON.stringify({
+              status,
+              summary: "smoke",
+              commitSha: null,
+              ...(b.brief !== undefined ? { brief: b.brief } : {}),
+            })
+          : "";
       return [
         "bash",
         stubPath,
@@ -3430,6 +3571,7 @@ describe("accept/process split", () => {
         b.block ? "block" : "-",
         sentinel,
         String(b.exitCode ?? 0),
+        outcome,
       ];
     };
     return { harnesses: { stub }, spawned, spawnOrder };
@@ -3835,7 +3977,7 @@ describe("accept/process split", () => {
     const rig = blockingHarness(
       {
         // 01 checkpoints fast; 02 holds the super-step open until the sentinel.
-        "01": { statuses: ["checkpoint", "done"] },
+        "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
         "02": { statuses: ["done"], block: true },
       },
       sentinel,
@@ -3897,7 +4039,7 @@ describe("accept/process split", () => {
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
       {
-        "01": { statuses: ["checkpoint", "done"] },
+        "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
         "02": { statuses: ["done"], block: true },
       },
       sentinel,

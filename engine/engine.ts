@@ -7,6 +7,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { once } from "node:events";
 import { homedir } from "node:os";
@@ -640,8 +641,10 @@ async function driveLoop(session: Session): Promise<void> {
   settleDrive(session, phase, null);
 }
 
+const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
+
 const ENGINE_RESET_NOTE =
-  "\n---\n\n## Brief, written by the engine\n\n" +
+  `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
   "The engine process stopped while this ticket was in-progress (killed, " +
   "crashed, or the machine restarted), so the work is part done at best " +
   "and the agent left no brief. The ticket is back to ready; read the " +
@@ -1585,13 +1588,66 @@ function raiseCheckpoint(
   });
 }
 
+// "## Brief" and "## Brief, written by the engine" both head a Brief
+// section; "## Briefing" would not be one.
+const BRIEF_HEADING = /^## Brief(?![a-zA-Z])/;
+
 function extractBrief(issueFile: string): string {
   const lines = readFileSync(issueFile, "utf8").split("\n");
-  const start = lines.findIndex((line) => line.startsWith("## Brief"));
+  const start = lines.findIndex((line) => BRIEF_HEADING.test(line));
   if (start === -1) return "(no Brief section in the Issue file)";
   const rest = lines.slice(start + 1);
   const end = rest.findIndex((line) => line.startsWith("## "));
   return (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+}
+
+const ENGINE_CHECKPOINT_PLACEHOLDER =
+  "The agent signalled a checkpoint but wrote no brief, so what the " +
+  "attempt completed is only in the ticket log. Answer the interrupt to " +
+  "point the next attempt.";
+
+// On a checkpoint the Brief travels in the outcome JSON (ADR-0005) and the
+// engine lands it in the canonical Issue, so the interrupt raised at exit
+// and its re-raise after a restart both read it from the one place. Every
+// checkpoint replaces the Brief section outright: the section always
+// mirrors the latest attempt, so a stale brief can never masquerade as the
+// current one, and extractBrief reads the first. A checkpoint without a
+// brief gets the engine's placeholder in its place: the pause was
+// intentional, so it is never a crash, and the interrupt still has a body.
+function landCheckpointBrief(
+  issueFile: string,
+  brief: string | undefined,
+): void {
+  const trimmed = brief?.trim() ?? "";
+  const stripped = stripBriefSections(readFileSync(issueFile, "utf8")).replace(
+    /\n+$/,
+    "",
+  );
+  const section = trimmed
+    ? `## Brief\n\n${trimmed}`
+    : `${ENGINE_BRIEF_HEADING}\n\n${ENGINE_CHECKPOINT_PLACEHOLDER}`;
+  writeFileSync(issueFile, `${stripped}\n\n---\n\n${section}\n`);
+}
+
+// Remove every Brief section (heading to the next "## " heading or the end
+// of the file), plus the "---" separator an engine append put before it, so
+// a re-landed Brief does not pile up behind a stale one.
+function stripBriefSections(text: string): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of text.split("\n")) {
+    if (BRIEF_HEADING.test(line)) {
+      skipping = true;
+      while (kept.length > 0 && kept[kept.length - 1].trim() === "") {
+        kept.pop();
+      }
+      if (kept[kept.length - 1]?.trim() === "---") kept.pop();
+      continue;
+    }
+    if (skipping && line.startsWith("## ")) skipping = false;
+    if (!skipping) kept.push(line);
+  }
+  return kept.join("\n");
 }
 
 interface TicketEnv {
@@ -1817,6 +1873,11 @@ async function runTicket(
   } else {
     status = outcome.outcome.status;
     writeMarkerStatus(marker.file, status);
+    if (status === "checkpoint") {
+      // Before the return: the drive loop raises the checkpoint's interrupt
+      // from the Issue's Brief section the moment this attempt exits.
+      landCheckpointBrief(marker.file, outcome.outcome.brief);
+    }
   }
   if (crashReason !== null && readMarker(marker.file).status !== "in-progress") {
     writeMarkerStatus(marker.file, "in-progress");
