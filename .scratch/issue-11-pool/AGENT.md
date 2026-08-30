@@ -28,17 +28,25 @@ Line 1 of your Issue file is a state marker:
 <!-- state: id=NN blocked-by=.. status=.. -->
 ```
 
-The runner set your Issue to `status=in-progress` before starting you. **Finish by setting it to
-exactly one of `status=done` or `status=checkpoint`.** Leave the rest of that line as it is.
+The runner set your Issue to `status=in-progress` before starting you. **You never edit that
+line. The engine owns the final status write.** Finish by recording your outcome as JSON at the
+outcome path your prompt names:
 
-If you exit without setting it, the runner treats that as a failure and halts.
+```
+{"status": "done" or "checkpoint", "summary": "what you did, in a sentence or two", "commitSha": "the sha of your commit, or null"}
+```
 
-### Set `status=done` when
+On a checkpoint, add `"brief": "what the human has to do next"`. The engine reads this file at
+your exit and writes the final status to the Issue itself.
+
+If you exit without an outcome status, the runner treats that as a crash and halts.
+
+### Record `"status": "done"` when
 
 Every acceptance criterion in the Issue is ticked and genuinely true. Not "mostly". If one criterion
 cannot be met, the Issue is a `checkpoint`, not `done`.
 
-### Set `status=checkpoint` when
+### Record `"status": "checkpoint"` when
 
 - it needs a device, an emulator, or a live backend
 - it needs a write to an external system, or contact with anyone outside the codebase
@@ -46,13 +54,14 @@ cannot be met, the Issue is a `checkpoint`, not `done`.
 - you would have to guess at something material to proceed
 - the build or the test suite fails for a reason the Issue does not cover
 
-Then **append a `## Brief` section to the bottom of the Issue** saying:
+The checkpoint's `"brief"` says:
 
 1. what you completed, precisely
 2. what the human has to do
 3. what should happen after they have done it
 
-Keep the brief decision-ready. It is the report, not the raw work.
+Keep the brief decision-ready. It is the report, not the raw work. The engine lands it into the
+Issue as the `## Brief` section.
 
 ## Write into the Issue, not only at the end
 
