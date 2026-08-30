@@ -77,6 +77,10 @@ _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channe
 One run of a ticket by a harness, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects.
 _Avoid_: run (that's the whole thread), execution, job
 
+**Outcome**:
+The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by `docs/specs/2026-08-30-engine-owns-final-status.md`, closing issue #18.
+_Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
+
 **Ticket log**:
 The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.
 _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
