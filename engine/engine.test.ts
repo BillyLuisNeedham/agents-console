@@ -656,6 +656,31 @@ describe("glued prompt", () => {
     expect(body).not.toContain("/implement");
   });
 
+  it("names the canonical Issue file by its absolute path and forbids relative-path edits", async () => {
+    // The false-crash regression: an agent told to edit the Issue by a
+    // repo-relative path lands status=done in the worktree's seed copy
+    // instead of the canonical main-checkout file. The prompt must name the
+    // absolute path and say plainly that relative-path edits (and any copy
+    // inside the working directory) are wrong.
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const body = rig.spawned["01"].body;
+    expect(body).toContain(join(poolDir, "issues", "01-a.md"));
+    expect(body).toContain("Never edit it by a repo-relative path");
+    expect(body).toContain("that copy is context only");
+  });
+
   it("re-reads AGENT.md at every spawn, so a mid-run edit reaches the next attempt", async () => {
     const poolDir = makePool({
       tickets: [
@@ -2115,7 +2140,13 @@ describe("durability", () => {
 // observed (HEAD, branch, cwd) for the assertions.
 describe("worktrees", () => {
   interface GitStubBehaviour {
-    status?: "done" | "checkpoint" | "keep";
+    status?: "done" | "checkpoint" | "ready" | "keep";
+    // Edit the worktree's seed copy by its repo-relative path instead of the
+    // canonical main-checkout file the engine hands over as ctx.issuePath.
+    editWorktreeCopy?: boolean;
+    // Extra content appended to the Issue file the stub edits, so a test can
+    // verify the agent's own edits survive an adoption.
+    issueNote?: string;
     outcome?: { summary: string; commitSha: string | null } | null;
     exitCode?: number;
     workFile?: string;
@@ -2172,6 +2203,7 @@ describe("worktrees", () => {
         'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
         'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
         'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+        'EDIT_WORKTREE_COPY=""; ISSUE_NOTE=""',
         'source "$plan"',
         'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
         'if [ -n "$WAIT_FOR" ]; then',
@@ -2206,10 +2238,17 @@ describe("worktrees", () => {
         "fi",
         // The Issue of record is the canonical main-checkout file the
         // engine hands over as ctx.issuePath; it is edited in place and
-        // never committed from the worktree.
+        // never committed from the worktree. A stub can instead replay the
+        // reported bug: edit the worktree's seed copy by its repo-relative
+        // path (issues/<name> from the worktree root), leaving the
+        // canonical file untouched.
+        'if [ -n "$EDIT_WORKTREE_COPY" ]; then',
+        '  issue="issues/$(basename "$issue")"',
+        "fi",
         'if [ "$status" != "keep" ]; then',
         '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
         "fi",
+        'if [ -n "$ISSUE_NOTE" ]; then printf \'\\n%s\\n\' "$ISSUE_NOTE" >> "$issue"; fi',
         'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
         'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
         'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
@@ -2252,6 +2291,8 @@ describe("worktrees", () => {
       if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
       if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
       if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
+      if (b.editWorktreeCopy) lines.push('EDIT_WORKTREE_COPY="1"');
+      if (b.issueNote) lines.push(`ISSUE_NOTE=${quote(b.issueNote)}`);
       writeFileSync(planPath, lines.join("\n") + "\n");
       return [
         "bash",
@@ -2437,6 +2478,93 @@ describe("worktrees", () => {
     const subjects = git(["log", "--format=%s"]).stdout.toString();
     expect(subjects).toContain("work-01");
     expect(subjects).toContain("work-02");
+  }, 15000);
+
+  it("adopts a done written only to the worktree's seed copy and merges the attempt", async () => {
+    // The reported false crash: an attempt in a worktree edits its Issue
+    // file by a repo-relative path, so status=done lands in the worktree's
+    // seed copy while the canonical main-checkout file stays in-progress.
+    // Read-back now consults the worktree copy and adopts it wholesale, so
+    // the attempt is done, no crash is recorded, and the agent's own Issue
+    // edits survive into the canonical file.
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        editWorktreeCopy: true,
+        issueNote: "- [x] acceptance criteria one met",
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts).toEqual([]);
+    // No crash event for the completed attempt, and the branch was merged.
+    const events = readFileSync(
+      join(poolDir, "runs", "01.events.jsonl"),
+      "utf8",
+    );
+    expect(events).not.toContain('"kind":"crash"');
+    expect(events).toContain('"kind":"merged"');
+    // The canonical Issue file adopted the worktree copy wholesale: done,
+    // with the agent's extra edit carried over.
+    const canonical = readFileSync(
+      join(poolDir, "issues", "01-t.md"),
+      "utf8",
+    );
+    expect(canonical).toContain("status=done");
+    expect(canonical).toContain("- [x] acceptance criteria one met");
+    // And the merged branch landed the ticket's work on the working branch.
+    const subjects = git(["log", "--format=%s"]).stdout.toString();
+    expect(subjects).toContain("work-01");
+  }, 15000);
+
+  it("still crashes when the worktree copy is also non-terminal", async () => {
+    // The worktree's seed copy is the only file the agent touched, and it
+    // rewrote that copy to a non-terminal status (ready): read-back must not
+    // adopt it, and the attempt is a crash exactly as before.
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        editWorktreeCopy: true,
+        status: "ready",
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.final.tickets).toEqual({ "01": "in-progress", "02": "done" });
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "crash",
+        body: join(poolDir, "runs", "01.log"),
+      },
+    ]);
+    // The canonical marker was corrected to in-progress, holding the ticket
+    // out of the next super-step instead of re-spawning it forever.
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    const events = readFileSync(
+      join(poolDir, "runs", "01.events.jsonl"),
+      "utf8",
+    );
+    expect(events).toContain('"kind":"crash"');
   }, 15000);
 
   it("merges finished branches in completion order and never rebases a running ticket", async () => {

@@ -1595,6 +1595,11 @@ interface TicketEnv {
 interface TicketPlan {
   cwd: string;
   worktree?: WorktreeInfo;
+  // The worktree's seed copy of the Issue file, when the ticket ran in a
+  // worktree. Read-back consults it when the canonical marker is not
+  // terminal, so an agent that edited the copy by a repo-relative path is
+  // still recognised as done or checkpoint instead of a false crash.
+  worktreeIssuePath?: string;
   attempt: number;
 }
 
@@ -1618,8 +1623,9 @@ interface TicketResult {
 // the work it already did. Anything else runs in the main checkout. The main
 // checkout's Issue file is the single canonical copy: the spawn prompt hands
 // the agent its absolute path and read-back trusts it. The worktree gets a
-// seed copy as context only; the merge already discards worktree Issue
-// edits.
+// seed copy as context only, but an agent that edits that copy by a
+// repo-relative path is still recognised: read-back adopts a terminal status
+// written there wholesale, so the work survives into the canonical file.
 function planTicket(
   session: Session,
   marker: TicketMarker,
@@ -1635,7 +1641,12 @@ function planTicket(
   const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
   mkdirSync(dirname(seedCopy), { recursive: true });
   copyFileSync(marker.file, seedCopy);
-  return { cwd: worktree.path, worktree, attempt };
+  return {
+    cwd: worktree.path,
+    worktree,
+    worktreeIssuePath: seedCopy,
+    attempt,
+  };
 }
 
 // Marker read-back against the canonical main-checkout Issue file, the same
@@ -1643,12 +1654,32 @@ function planTicket(
 // finishes done is always recognised as done. Only done and checkpoint are
 // real endings: the super-step wrote in-progress before the spawn, so an
 // agent that exits leaving anything else (an untouched marker, or one it
-// rewrote to ready) died mid-ticket. The marker goes to in-progress either
-// way, so the crash interrupt holds the ticket out of the next super-step
-// instead of re-spawning it forever.
-function readBack(marker: TicketMarker): TicketStatus {
+// rewrote to ready) died mid-ticket. A worktree attempt may instead have
+// edited its seed copy by a repo-relative path, leaving the canonical file
+// untouched; when the canonical marker is not terminal the worktree copy is
+// consulted and a terminal status there is adopted wholesale, so the agent's
+// own Issue edits (acceptance checkmarks, progress notes) survive into the
+// canonical file. The marker goes to in-progress either way, so the crash
+// interrupt holds the ticket out of the next super-step instead of
+// re-spawning it forever.
+function readBack(
+  marker: TicketMarker,
+  worktreeIssuePath?: string,
+): TicketStatus {
   const status = readMarker(marker.file).status;
   if (status === "done" || status === "checkpoint") return status;
+  // The canonical marker is not terminal and the attempt ran in a worktree:
+  // the agent may have written its terminal status to the seed copy by a
+  // repo-relative path. Adopt the whole copy, not just the status line, so
+  // the agent's other edits to the Issue survive. A non-terminal worktree
+  // copy falls through to the crash path below.
+  if (worktreeIssuePath && existsSync(worktreeIssuePath)) {
+    const worktreeStatus = readMarker(worktreeIssuePath).status;
+    if (worktreeStatus === "done" || worktreeStatus === "checkpoint") {
+      copyFileSync(worktreeIssuePath, marker.file);
+      return worktreeStatus;
+    }
+  }
   if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
   return "in-progress";
 }
@@ -1752,6 +1783,7 @@ async function runTicket(
     roster: snapshot.config.roster ?? "",
     upstream,
     outcomePath,
+    issuePath: marker.file,
   });
 
   const ctx: SpawnContext = {
@@ -1775,7 +1807,7 @@ async function runTicket(
   });
   const exitCode = await spawnToLog(argv, ctx);
 
-  const status = readBack(marker);
+  const status = readBack(marker, plan.worktreeIssuePath);
   const outcome = readOutcome(outcomePath);
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),

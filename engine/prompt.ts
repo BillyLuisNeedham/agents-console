@@ -37,17 +37,27 @@ interface PromptParts {
   roster: string;
   upstream: { id: string; outcome: Outcome }[];
   outcomePath: string;
+  issuePath: string;
 }
 
-// The prompt body: the standing instructions, chain, roster, upstream
-// outcomes, and the outcome-writing instruction. The driver invocation line is
-// no longer part of this string; each harness adapter assembles its own from
-// the structured driver and issue-reference fields it receives.
+// The prompt body: the standing instructions (the pool's AGENT.md plus the
+// Issue-file location rule), chain, roster, upstream outcomes, and the
+// outcome-writing instruction. The driver invocation line is no longer part
+// of this string; each harness adapter assembles its own from the structured
+// driver and issue-reference fields it receives.
 export function buildPrompt(parts: PromptParts): string {
   const sections: string[] = [
     "Standing instructions for this job:",
     "",
     parts.agentMd.trim() || "_(no AGENT.md in the pool directory)_",
+    "",
+    "---",
+    "",
+    `The Issue file for this ticket lives outside this job's working ` +
+      `directory, at the absolute path ${parts.issuePath}. Every status edit ` +
+      "must target that exact absolute path. Never edit it by a repo-relative " +
+      "path, and never edit any copy of it that may exist inside the working " +
+      "directory: that copy is context only.",
   ];
   if (parts.chain.length > 0) {
     sections.push(
