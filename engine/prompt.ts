@@ -90,8 +90,12 @@ export function buildPrompt(parts: PromptParts): string {
     "---",
     "",
     "When you finish, record your outcome as JSON at " +
-      `${parts.outcomePath}: {"summary": "what you did, in a sentence or ` +
-      'two", "commitSha": "the sha of your commit, or null"}.',
+      `${parts.outcomePath}: {"status": "done" or "checkpoint", ` +
+      '"summary": "what you did, in a sentence or two", "commitSha": "the ' +
+      'sha of your commit, or null"}. On a checkpoint, add "brief": "what ' +
+      'the human has to do next". The engine reads this file at your exit ' +
+      "and writes the final status to the Issue itself. Never edit the " +
+      "Issue's line-1 status marker; the engine owns that write.",
   );
   return sections.join("\n");
 }

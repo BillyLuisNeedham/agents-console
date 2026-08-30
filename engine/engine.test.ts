@@ -667,6 +667,10 @@ describe("glued prompt", () => {
     expect(body).toContain("The subagent roster for this job");
     expect(body).toContain("deepseek: general-purpose subagent");
     expect(body).toContain("outcome.json");
+    // The outcome instruction teaches the new contract: a required status,
+    // and the engine, not the agent, owning the Issue's status write.
+    expect(body).toContain('"status": "done" or "checkpoint"');
+    expect(body).toContain("Never edit the Issue's line-1 status marker");
     // The driver invocation line belongs to the adapters now; the body the
     // engine passes carries it nowhere, so a prompt change cannot break a
     // harness that assembles its own invocation.
