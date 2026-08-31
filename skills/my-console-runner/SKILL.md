@@ -4,12 +4,14 @@ description: Point the Console at an existing ticket pool: detect, interview, wr
 disable-model-invocation: true
 ---
 
-Issues already exist. This skill connects them to the Console.
+Tickets already exist. This skill connects them to the Console.
+
+The pool's ticket directory is called `issues/` on disk — a legacy name; prose says ticket.
 
 It is the sibling of `my-issue-runner`: same detection, same interview, same pool on disk. Where
 my-issue-runner writes `run.sh`, this skill writes `console.json` and `AGENT.md` into the pool
 directory, then starts the Console server bound to that pool and opens the browser. **Never write
-Issues here.** An empty or markerless pool is a reason to stop and say so, not a reason to invent
+tickets here.** An empty or markerless pool is a reason to stop and say so, not a reason to invent
 tickets.
 
 The engine is one versioned copy per machine, its location read from the `engine=` line in
@@ -35,7 +37,7 @@ straight to step 5. A re-interview runs steps 1 to 4 and overwrites both files.
 
 Look these up. Asking for them wastes a question:
 
-- how many Issues sit in the pool's `issues/` directory, and whether every one carries a line 1
+- how many tickets sit in the pool's `issues/` directory, and whether every one carries a line 1
   state marker
 - the `blocked-by` edges already written
 - the repository's language and test framework
@@ -47,20 +49,20 @@ Look these up. Asking for them wastes a question:
 - which of `claude`, `opencode` and `agent` are on PATH
 
 Report all nine back in one short brief and get it confirmed. If the pool has no `issues/`
-directory, no Issues in it, or any Issue without a state marker, say which and stop: the human
+directory, no tickets in it, or any ticket without a state marker, say which and stop: the human
 fixes the pool, or `to-tickets` writes it again. If the worktree is dirty, recommend committing
 before launch: tickets commit to the current branch, and an unattended agent can sweep unrelated
-changes into a commit that says it is the work of an Issue.
+changes into a commit that says it is the work of a ticket.
 
 ## 2. Ask
 
 Seven questions, each with your recommendation attached:
 
-1. Which skill or skills drive each Issue, and whether that differs per Issue
+1. Which skill or skills drive each ticket, and whether that differs per ticket
 2. The default harness and model. If `~/.issue-runner` already exists, read it, confirm it, and
    skip this question. If it does not, ask once and write it: two lines, `harness=..` and
    `model=..`
-3. Whether any Issue should run on a different harness or model than the default, and which
+3. Whether any ticket should run on a different harness or model than the default, and which
 4. The subagent roster, and a model for each
 5. Whether a reviewer exists, and what authority it has
 6. What counts as a checkpoint on this job specifically
@@ -69,11 +71,11 @@ Seven questions, each with your recommendation attached:
    becomes the `port` key in `console.json`; `auto` (or next free) writes no key.
 
 Recommend the orchestrator's own model for every subagent unless there is a reason to go smaller.
-Delegating a skill to a cheaper model moves the substance of an Issue onto that model, which is
+Delegating a skill to a cheaper model moves the substance of a ticket onto that model, which is
 the thing the runner exists to avoid.
 
 If a reviewer is wanted, recommend it check acceptance criteria only and never code quality, and
-that a failure buy the orchestrator one fix attempt before the Issue becomes a checkpoint carrying
+that a failure buy the orchestrator one fix attempt before the ticket becomes a checkpoint carrying
 the disagreement in its brief. That bounds a weaker model's power to strand good work.
 
 The merge resolver is config, not a question. Recommend the default harness for it, say
@@ -84,7 +86,7 @@ is agreed as the `resolver` key.
 
 For each skill named in answer 1, read its frontmatter. A skill carrying
 `disable-model-invocation: true` can only be reached from the prompt, which is the one slot that
-counts as the human typing, so **at most one such skill per Issue and it must be first**. Two is a
+counts as the human typing, so **at most one such skill per ticket and it must be first**. Two is a
 clash: name both, say which is blocked, and ask again.
 
 In your own library `implement`, `triage`, `to-tickets`, `wayfinder` and
@@ -92,16 +94,19 @@ In your own library `implement`, `triage`, `to-tickets`, `wayfinder` and
 `research`, `prototype`, `fits-the-codebase` and `resolving-merge-conflicts` do not.
 
 Later skills in a chain run as subagents told to invoke them. That path is designed but unproven,
-so put the weight of an Issue on the first driver rather than the tail of a chain.
+so put the weight of a ticket on the first driver rather than the tail of a chain.
 
 Then check reachability per harness. The first driver goes in the prompt, so it must resolve as a
-command on whatever harness the Issue is assigned:
+command on whatever harness the ticket is assigned:
 
 - `claude` reaches every linked skill. Nothing to check.
 - `opencode` only sees the stubs in `~/.config/opencode/command/`. If the driver's stub is
-  missing, run `~/.claude/commands/scripts/link-opencode-commands.sh` before generating.
+  missing, run `~/.claude/commands/scripts/link-opencode-commands.sh` — the skills repo's linker,
+  the right tool because the drivers (`implement`, `triage`, etc.) live in the skills repo —
+  before generating.
 - `cursor` only sees real copies in `~/.cursor/skills/`. If the driver's copy is missing, run
-  `~/.claude/commands/scripts/link-skills.sh` before generating.
+  `~/.claude/commands/scripts/link-skills.sh` — also the skills repo's linker, for the same
+  drivers that live there — before generating.
 
 Every harness named in the config must also be on PATH, from the detection brief. The engine fails
 fast on an unknown harness at run start; getting it right here means the first super-step does not
@@ -128,8 +133,8 @@ Write `console.json` into the pool directory. All seven answers land here as dat
 
 - `defaults` holds answer 2 and the common case of answer 1. `drivers` is a space-separated chain:
   the first name is the driver, the rest run as the chain behind it.
-- `assign` holds one entry per Issue that differs from the defaults, from answers 1 and 3. Omit
-  Issues that use the defaults.
+- `assign` holds one entry per ticket that differs from the defaults, from answers 1 and 3. Omit
+  tickets that use the defaults.
 - `roster` is the roster as plain words for the prompt, from answer 4. `agents` is the same roster
   as a JSON string for claude's `--agents` flag. Keep the two in step.
 - `resolver` is the merge resolver harness, or `none`. The engine falls back to the
@@ -151,7 +156,7 @@ Below the marker:
 - commit prefix: the one detection found
 - this job's constraints: the reviewer authority and the checkpoint definition as rules, plus any
   environment quirks detection surfaced
-- which Issues are expected to stop: from the checkpoint definition, so a checkpoint on those
+- which tickets are expected to stop: from the checkpoint definition, so a checkpoint on those
   reads as correct rather than as a failure
 
 ## 5. Launch

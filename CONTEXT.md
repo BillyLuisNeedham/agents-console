@@ -53,6 +53,7 @@ _Avoid_: message (that's a chat turn), handoff (the old file/skill), decision li
 **Ticket**:
 One unit of implement work. It has an id and the ids of tickets that must finish before it may run.
 _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
+On disk the pool's ticket directory is still called `issues/`, and the skill `my-issue-runner` keeps its name — legacy names for the same concept; prose says ticket.
 
 **Review**:
 The final human judgment of finished ticket work, after implement tickets have run.
