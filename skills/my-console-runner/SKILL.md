@@ -56,7 +56,26 @@ changes into a commit that says it is the work of a ticket.
 
 ## 2. Ask
 
-Seven questions, each with your recommendation attached:
+Q0 comes first, and only when Setups exist. Look in `~/.agent-graphs/setups/`. If the
+directory is missing or empty, Q0 does not appear and the interview below runs exactly as
+before. If Setups exist, open by listing them by name with a "none" option and ask which
+to start from. A Setup file that does not parse as JSON, or that lacks any of the six
+behavioural keys, is malformed: report it by name, leave it off the list, and carry on. A
+bad Setup is never fatal.
+
+"None" runs the interview un-prefilled. Choosing a Setup prefills it: the Setup's values
+become the recommendations on the questions they answer (`defaults` for questions 1 and
+2, `roster` and `agents` for question 4, `reviewer` for question 5, `checkpoint` for
+question 6, `resolver` for the resolver config), and every one of those questions is
+still asked and confirmed with the operator exactly as today. A Setup is a starting
+point, never a silent override. Question 2's `~/.issue-runner` skip still applies; when
+that file and the chosen Setup disagree, name the disagreement and ask rather than skip.
+
+What a Setup cannot answer is always asked fresh: the per-ticket overrides of question 3,
+the port probe of question 7, the expected stops, and the AGENT.md pool prose. Those pin
+one pool and no Setup carries them.
+
+Seven questions follow Q0, each with your recommendation attached:
 
 1. Which skill or skills drive each ticket, and whether that differs per ticket
 2. The default harness and model. If `~/.issue-runner` already exists, read it, confirm it, and
