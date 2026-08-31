@@ -18,6 +18,13 @@ Point the skill at a pool: `/my-console-runner <path-to-pool>`. It checks the po
 questions, writes the two files, starts the server and opens your browser. Run it again on a
 configured pool to relaunch without the questions.
 
+After it writes the two files it asks "Save this Setup as...?" Give it a name and the
+behavioural answers (harness, model, drivers, roster, resolver, reviewer, checkpoint) are saved
+as a Setup: one JSON file under `~/.agent-graphs/setups/`, named for you to recognise later.
+The port and the per-ticket assignments are never saved; they belong to the one pool. Decline,
+or give an empty name, and nothing is saved. Saving over a name that already exists asks for
+confirmation first. Setups are plain files: inspect, edit or delete them by hand.
+
 ## How it stops
 
 The pool runs until something needs you. Then it waits. A ticket's checkpoint, a merge that needs

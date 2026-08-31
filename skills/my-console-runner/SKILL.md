@@ -31,7 +31,7 @@ deadlock, the final Review. Answering an interrupt resumes the pool.
 
 If the pool directory already holds `console.json` and `AGENT.md`, say so, show the config's
 defaults and assignments, and ask one question: relaunch as-is, or re-interview. A relaunch goes
-straight to step 5. A re-interview runs steps 1 to 4 and overwrites both files.
+straight to step 6. A re-interview runs steps 1 to 5 and overwrites both files.
 
 ## 1. Detect
 
@@ -141,7 +141,7 @@ Write `console.json` into the pool directory. All seven answers land here as dat
   `~/.issue-runner` default when the key is absent, but write it explicitly so the pool's config
   says what it does.
 - `port` records the port answer when it is a concrete number. Omit it for `auto`. What each
-  does at launch is in step 5.
+  does at launch is in step 6.
 - `reviewer` and `checkpoint` record answers 5 and 6. The engine does not read them; the agents
   do, through `AGENT.md`. Write both places from the one answer.
 
@@ -159,7 +159,39 @@ Below the marker:
 - which tickets are expected to stop: from the checkpoint definition, so a checkpoint on those
   reads as correct rather than as a failure
 
-## 5. Launch
+## 5. Save the Setup
+
+The config just written holds two slices. The behavioural slice (harness, model, drivers,
+roster, agents, resolver, reviewer, checkpoint) barely changes from pool to pool; the
+pool-specific slice (`port`, `assign`, the AGENT.md prose) is regenerated every time. A **Setup**
+is the behavioural slice, saved as one JSON file so the next pool can start from it. Call it a
+Setup, never a profile or a template.
+
+Ask one question: "Save this Setup as...?", with no recommendation either way. A decline or an
+empty name writes nothing and the skill moves on to launch as before. A name is slugified
+(lowercase, spaces and underscores to hyphens, anything outside `[a-z0-9-]` stripped) and the
+Setup is written to `~/.agent-graphs/setups/<slug>.json`, creating the directory if it is
+missing. The file holds exactly the six behavioural keys, copied verbatim from the
+`console.json` just written:
+
+```json
+{
+  "defaults": { "harness": "opencode", "model": "kimi-for-coding-oauth/k3", "drivers": "implement" },
+  "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent...",
+  "agents": "{\"deepseek\": {\"description\": \"general-purpose subagent\", \"model\": \"...\"}}",
+  "resolver": "opencode",
+  "reviewer": "a reviewer checks acceptance criteria only; a failure buys one fix attempt",
+  "checkpoint": "a device, an external write, an undecided decision, or a material guess"
+}
+```
+
+Never `port`, never `assign`: those pin one pool and would clobber the next. `roster` and
+`agents` are copied together from the one interview answer, so the pair stays in step in the
+saved file exactly as it does in the pool config. If `<slug>.json` already exists, name the
+existing Setup and ask for confirmation before replacing it; a decline leaves the file
+untouched and saves nothing.
+
+## 6. Launch
 
 One action, in order:
 
