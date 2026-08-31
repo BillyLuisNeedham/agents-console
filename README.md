@@ -12,6 +12,13 @@ the domain model and vocabulary.
 - `docs/adr/`: architecture decision records
 - `CONTEXT.md`: the domain glossary
 
+## Skills
+
+The repo's agent skills live in `skills/`. `scripts/link-skills.sh` links them
+into the local agent harnesses — symlinks into `~/.claude/skills` and
+`~/.agents/skills`, real copies into `~/.cursor/skills`, and OpenCode command
+stubs. Run it once after cloning and again after adding or removing a skill.
+
 ## Pools
 
 A pool is the set of tickets one Console run works, identified by its directory
