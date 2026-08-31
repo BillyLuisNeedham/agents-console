@@ -1,1 +1,0 @@
-{"summary": "Retired the ticket card inline expansion and routed every card click to selection, so any card opens the right-hand Detail panel where its interrupt is answered; removed the card interrupt form and dead CSS, extended selection/projection tests, and verified the full suite, typecheck, and build clean.", "commitSha": "3a365371d0b40920bd14ad7cf517211bfbd0e671"}

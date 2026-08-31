@@ -1,4 +1,0 @@
-{
-  "summary": "Issue 16 done: engine appends per-ticket lifecycle events to runs/<id>.events.jsonl at every lifecycle point (attempts shared between implement and resolver runs), the server serves them via GET /api/events with reconstructed attempt rows for pre-feature pools, and the ticket Detail renders the attempt timeline with the running attempt marked. All suites (69 engine + 56 UI tests), both typechecks, and the UI build pass; committed on pool/16 as ae6f99f.",
-  "commitSha": "ae6f99f"
-}
