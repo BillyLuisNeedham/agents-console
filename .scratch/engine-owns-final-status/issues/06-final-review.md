@@ -1,4 +1,4 @@
-<!-- state: id=06 blocked-by=02 04 05 status=checkpoint -->
+<!-- state: id=06 blocked-by=02 04 05 status=done -->
 
 # 06 — Final review of the branch
 
@@ -73,3 +73,16 @@ those unless you disagree.
 After you have decided: if fix-now, a small follow-up ticket (one line plus one contract test)
 closes it and the branch is ready for its PR; if accept, note it in ADR-0005 or the spec's Further
 Notes and open the PR. Either way the branch is otherwise ready to land.
+## Resume note
+
+lets fix now. create another ticket to implement then a further ticket after that for another review, the implement ticket should have the same setup as the other implement tickets and the code-review ticket should be setup the same as this one
+
+## Notes (resume)
+
+- Human decided fix-now on the Brief's one material finding. Created ticket 07 (delete the outcome
+  file at spawn, plus contract test, plus a check of the resolver outcome path for the same hole)
+  set up like the other implement tickets, and ticket 08 (second full review) set up like this one,
+  with console.json assigning 08 the same code-review driver. Both are `status=ready`; 07 blocks 08.
+- Record-keeping note: issue files 01, 02 and 05 are on disk but untracked on this branch (inference:
+  their ticket commits did not add them). Left as found; add them to the PR if you want the full
+  pool record on the branch.
