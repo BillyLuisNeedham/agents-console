@@ -1,5 +1,0 @@
-{"at":"2026-08-22T09:58:56.321Z","attempt":1,"kind":"scheduled","payload":{}}
-{"at":"2026-08-22T09:58:56.370Z","attempt":1,"kind":"spawned","payload":{}}
-{"at":"2026-08-22T10:37:26.717Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"in-progress"}}
-{"at":"2026-08-22T10:37:26.718Z","attempt":1,"kind":"crash","payload":{"code":0}}
-{"at":"2026-08-22T10:52:40.432Z","attempt":1,"kind":"answered","payload":{"kind":"crash"}}

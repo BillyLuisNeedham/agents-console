@@ -7,6 +7,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { once } from "node:events";
 import { homedir } from "node:os";
@@ -51,9 +52,18 @@ import {
 
 export type { HarnessCommand } from "./spawn.ts";
 
+// The attempt's result, written by the agent as JSON at the outcome path its
+// prompt names and read by the engine at attempt exit. `status` is the
+// attempt's ending: the engine, not the agent, writes it to the canonical
+// Issue's line-1 marker (ADR-0005). Marker statuses written by the agent are
+// not honored anywhere.
+export type OutcomeStatus = "done" | "checkpoint";
+
 export interface Outcome {
+  status: OutcomeStatus;
   summary: string;
   commitSha: string | null;
+  brief?: string;
 }
 
 interface TicketAssignment {
@@ -631,8 +641,10 @@ async function driveLoop(session: Session): Promise<void> {
   settleDrive(session, phase, null);
 }
 
+const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
+
 const ENGINE_RESET_NOTE =
-  "\n---\n\n## Brief, written by the engine\n\n" +
+  `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
   "The engine process stopped while this ticket was in-progress (killed, " +
   "crashed, or the machine restarted), so the work is part done at best " +
   "and the agent left no brief. The ticket is back to ready; read the " +
@@ -730,10 +742,10 @@ function rehydrate(session: Session): void {
   const recovered: Record<string, Outcome> = {};
   for (const marker of session.markers) {
     if (marker.status !== "done") continue;
-    const outcome = readOutcome(
+    const read = readOutcomeResult(
       join(session.runsDir, `${marker.id}.outcome.json`),
     );
-    if (outcome) recovered[marker.id] = outcome;
+    if (read.ok) recovered[marker.id] = read.outcome;
   }
   if (Object.keys(recovered).length > 0) {
     session.state = applyUpdate(session.state, { outcomes: recovered });
@@ -1161,6 +1173,9 @@ async function runResolver(
   result: MergeResult,
 ): Promise<ResolverAttempt> {
   const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
+  // As in runTicket: the resolver starts with no outcome, so a stale file
+  // from a previous resolver run can never pass for this run's result.
+  rmSync(outcomePath, { force: true });
   const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
   rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
   appendEvent(session.runsDir, marker.id, {
@@ -1576,13 +1591,66 @@ function raiseCheckpoint(
   });
 }
 
+// "## Brief" and "## Brief, written by the engine" both head a Brief
+// section; "## Briefing" would not be one.
+const BRIEF_HEADING = /^## Brief(?![a-zA-Z])/;
+
 function extractBrief(issueFile: string): string {
   const lines = readFileSync(issueFile, "utf8").split("\n");
-  const start = lines.findIndex((line) => line.startsWith("## Brief"));
+  const start = lines.findIndex((line) => BRIEF_HEADING.test(line));
   if (start === -1) return "(no Brief section in the Issue file)";
   const rest = lines.slice(start + 1);
   const end = rest.findIndex((line) => line.startsWith("## "));
   return (end === -1 ? rest : rest.slice(0, end)).join("\n").trim();
+}
+
+const ENGINE_CHECKPOINT_PLACEHOLDER =
+  "The agent signalled a checkpoint but wrote no brief, so what the " +
+  "attempt completed is only in the ticket log. Answer the interrupt to " +
+  "point the next attempt.";
+
+// On a checkpoint the Brief travels in the outcome JSON (ADR-0005) and the
+// engine lands it in the canonical Issue, so the interrupt raised at exit
+// and its re-raise after a restart both read it from the one place. Every
+// checkpoint replaces the Brief section outright: the section always
+// mirrors the latest attempt, so a stale brief can never masquerade as the
+// current one, and extractBrief reads the first. A checkpoint without a
+// brief gets the engine's placeholder in its place: the pause was
+// intentional, so it is never a crash, and the interrupt still has a body.
+function landCheckpointBrief(
+  issueFile: string,
+  brief: string | undefined,
+): void {
+  const trimmed = brief?.trim() ?? "";
+  const stripped = stripBriefSections(readFileSync(issueFile, "utf8")).replace(
+    /\n+$/,
+    "",
+  );
+  const section = trimmed
+    ? `## Brief\n\n${trimmed}`
+    : `${ENGINE_BRIEF_HEADING}\n\n${ENGINE_CHECKPOINT_PLACEHOLDER}`;
+  writeFileSync(issueFile, `${stripped}\n\n---\n\n${section}\n`);
+}
+
+// Remove every Brief section (heading to the next "## " heading or the end
+// of the file), plus the "---" separator an engine append put before it, so
+// a re-landed Brief does not pile up behind a stale one.
+function stripBriefSections(text: string): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of text.split("\n")) {
+    if (BRIEF_HEADING.test(line)) {
+      skipping = true;
+      while (kept.length > 0 && kept[kept.length - 1].trim() === "") {
+        kept.pop();
+      }
+      if (kept[kept.length - 1]?.trim() === "---") kept.pop();
+      continue;
+    }
+    if (skipping && line.startsWith("## ")) skipping = false;
+    if (!skipping) kept.push(line);
+  }
+  return kept.join("\n");
 }
 
 interface TicketEnv {
@@ -1617,9 +1685,9 @@ interface TicketResult {
 // merge left it behind) always reuses its worktree, even alone, so it keeps
 // the work it already did. Anything else runs in the main checkout. The main
 // checkout's Issue file is the single canonical copy: the spawn prompt hands
-// the agent its absolute path and read-back trusts it. The worktree gets a
-// seed copy as context only; the merge already discards worktree Issue
-// edits.
+// the agent its absolute path for reading and notes, and the engine writes
+// the final status to it at attempt exit. The worktree gets a seed copy as
+// context only; the merge already discards worktree Issue edits.
 function planTicket(
   session: Session,
   marker: TicketMarker,
@@ -1638,19 +1706,39 @@ function planTicket(
   return { cwd: worktree.path, worktree, attempt };
 }
 
-// Marker read-back against the canonical main-checkout Issue file, the same
-// file the spawn prompt told the agent to update, so an attempt that
-// finishes done is always recognised as done. Only done and checkpoint are
-// real endings: the super-step wrote in-progress before the spawn, so an
-// agent that exits leaving anything else (an untouched marker, or one it
-// rewrote to ready) died mid-ticket. The marker goes to in-progress either
-// way, so the crash interrupt holds the ticket out of the next super-step
-// instead of re-spawning it forever.
-function readBack(marker: TicketMarker): TicketStatus {
-  const status = readMarker(marker.file).status;
-  if (status === "done" || status === "checkpoint") return status;
-  if (status !== "in-progress") writeMarkerStatus(marker.file, "in-progress");
-  return "in-progress";
+// The engine owns the final status write (ADR-0005): the attempt's outcome
+// JSON is the only ending signal, and anything that is not exit code 0 with a
+// valid outcome is a crash. The crash reason distinguishes the classes in the
+// ticket log: a dead harness, an agent that never wrote its outcome, an
+// outcome that does not parse, and an outcome whose status is invalid.
+type OutcomeResult =
+  | { ok: true; outcome: Outcome }
+  | { ok: false; reason: string };
+
+function readOutcomeResult(path: string): OutcomeResult {
+  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { ok: false, reason: "outcome is not parseable JSON" };
+  }
+  const outcome = parsed as Partial<Outcome> | null;
+  if (outcome?.status !== "done" && outcome?.status !== "checkpoint") {
+    return { ok: false, reason: "outcome's status is not done or checkpoint" };
+  }
+  if (typeof outcome.summary !== "string") {
+    return { ok: false, reason: "outcome has no summary string" };
+  }
+  return {
+    ok: true,
+    outcome: {
+      status: outcome.status,
+      summary: outcome.summary,
+      commitSha: typeof outcome.commitSha === "string" ? outcome.commitSha : null,
+      ...(typeof outcome.brief === "string" ? { brief: outcome.brief } : {}),
+    },
+  };
 }
 
 // Merging one finished ticket's branch onto the pool's working branch.
@@ -1736,6 +1824,9 @@ async function runTicket(
   const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
   rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+  // Every attempt starts with no outcome: a file a previous attempt left
+  // behind would be read as this attempt's result, honoring a stale status.
+  rmSync(outcomePath, { force: true });
 
   const upstream = marker.blockedBy.flatMap((id) => {
     const outcome = snapshot.outcomes[id];
@@ -1775,25 +1866,47 @@ async function runTicket(
   });
   const exitCode = await spawnToLog(argv, ctx);
 
-  const status = readBack(marker);
-  const outcome = readOutcome(outcomePath);
+  // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
+  // with a valid outcome the engine writes the final status to the canonical
+  // Issue's marker itself; a marker the agent rewrote is never honored.
+  const outcome = readOutcomeResult(outcomePath);
+  let status: TicketStatus = "in-progress";
+  let crashReason: string | null = null;
+  if (exitCode !== 0) {
+    crashReason = `harness exited ${exitCode}`;
+  } else if (!outcome.ok) {
+    crashReason = outcome.reason;
+  } else {
+    status = outcome.outcome.status;
+    writeMarkerStatus(marker.file, status);
+    if (status === "checkpoint") {
+      // Before the return: the drive loop raises the checkpoint's interrupt
+      // from the Issue's Brief section the moment this attempt exits.
+      landCheckpointBrief(marker.file, outcome.outcome.brief);
+    }
+  }
+  if (crashReason !== null && readMarker(marker.file).status !== "in-progress") {
+    writeMarkerStatus(marker.file, "in-progress");
+  }
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "exited",
     payload: { code: exitCode, status },
   });
-  // A crash is recorded the moment the attempt exits (readBack has already
-  // corrected the marker), not at the end of the super-step, so the ticket
-  // log stops masquerading a dead attempt as running work. Per-ticket event
-  // appends are concurrency-safe against siblings still in flight. The crash
-  // interrupt itself is still raised at the super-step boundary.
-  if (status === "in-progress") {
+  // A crash is recorded the moment the attempt exits (the marker has already
+  // been corrected), not at the end of the super-step, so the ticket log
+  // stops masquerading a dead attempt as running work. The payload carries
+  // the exit code and the reason, so the log distinguishes a dead harness
+  // from an agent that never wrote its outcome. Per-ticket event appends are
+  // concurrency-safe against siblings still in flight. The crash interrupt
+  // itself is still raised at the super-step boundary.
+  if (crashReason !== null) {
     appendEvent(env.runsDir, marker.id, {
       at: new Date().toISOString(),
       attempt: plan.attempt,
       kind: "crash",
-      payload: { code: exitCode },
+      payload: { code: exitCode, reason: crashReason },
     });
   }
 
@@ -1808,9 +1921,9 @@ async function runTicket(
       tickets: { [marker.id]: status },
       log: [
         `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
-          (outcome ? "" : ", no outcome recorded"),
+          (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
-      ...(outcome ? { outcomes: { [marker.id]: outcome } } : {}),
+      ...(outcome.ok ? { outcomes: { [marker.id]: outcome.outcome } } : {}),
     },
   };
 }
@@ -1856,20 +1969,6 @@ async function spawnToLog(
     );
   });
   return exitCode;
-}
-
-function readOutcome(path: string): Outcome | null {
-  if (!existsSync(path)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed?.summary !== "string") return null;
-    return {
-      summary: parsed.summary,
-      commitSha: typeof parsed.commitSha === "string" ? parsed.commitSha : null,
-    };
-  } catch {
-    return null;
-  }
 }
 
 function resolveAssignment(

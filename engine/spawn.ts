@@ -1,9 +1,10 @@
 export interface SpawnContext {
   id: string;
   // The canonical Issue file: the absolute main-checkout path. The driver
-  // line hands it to the agent for both reading and status updates, and
-  // read-back trusts the same file, so an attempt in a worktree updates the
-  // file of record rather than its context-only seed copy.
+  // line hands it to the agent for reading the spec and for ticking
+  // acceptance criteria and appending notes; it is not a status channel.
+  // The engine writes the final status to this file itself, from the
+  // attempt's outcome JSON (ADR-0005).
   issuePath: string;
   body: string;
   driver: string;

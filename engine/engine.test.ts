@@ -59,11 +59,19 @@ function makePool(spec: PoolSpec): string {
   return poolDir;
 }
 
+// The fake agent contract (ADR-0005): the stub signals its ending through the
+// outcome JSON it writes, never by editing the Issue marker. "done" and
+// "checkpoint" land in the outcome's status field; "keep" writes no outcome
+// (crash material); "ready" and "marker-done" sed the marker without writing
+// an outcome, the old protocol's misbehaviours the clean break must ignore.
 interface StubBehaviour {
-  status?: "done" | "checkpoint" | "ready" | "keep";
-  statuses?: ("done" | "checkpoint" | "ready" | "keep")[];
+  status?: "done" | "checkpoint" | "ready" | "keep" | "marker-done";
+  statuses?: ("done" | "checkpoint" | "ready" | "keep" | "marker-done")[];
   outcome?: { summary: string; commitSha: string | null } | null;
+  outcomeRaw?: string;
+  brief?: string;
   exitCode?: number;
+  exitCodes?: number[];
 }
 
 interface StubRig {
@@ -81,8 +89,8 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       "#!/usr/bin/env bash",
       "set -uo pipefail",
       'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
-      'if [ "$status" != "keep" ]; then',
-      '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+      'if [ "$status" = "ready" ] || [ "$status" = "marker-done" ]; then',
+      '  sed -i "1s/status=[a-z-]*/status=${status#marker-}/" "$issue"',
       "fi",
       'if [ -n "$outcome_json" ]; then',
       '  printf \'%s\' "$outcome_json" > "$outcome_path"',
@@ -104,14 +112,21 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       ? b.statuses[Math.min(n, b.statuses.length - 1)]
       : (b.status ?? "done");
     const outcome =
-      b.outcome === null
-        ? ""
-        : JSON.stringify(
-            b.outcome ?? {
-              summary: `summary-${ctx.id}`,
-              commitSha: `sha-${ctx.id}`,
-            },
-          );
+      b.outcomeRaw !== undefined
+        ? b.outcomeRaw
+        : b.outcome === null || status === "keep" || status === "ready" || status === "marker-done"
+          ? ""
+          : JSON.stringify({
+              status,
+              ...(b.outcome ?? {
+                summary: `summary-${ctx.id}`,
+                commitSha: `sha-${ctx.id}`,
+              }),
+              ...(b.brief !== undefined ? { brief: b.brief } : {}),
+            });
+    const exitCode = b.exitCodes
+      ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
+      : (b.exitCode ?? 0);
     return [
       "bash",
       stubPath,
@@ -119,7 +134,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       status,
       ctx.outcomePath,
       outcome,
-      String(b.exitCode ?? 0),
+      String(exitCode),
     ];
   };
   return { harnesses: { stub }, spawned, spawnOrder };
@@ -345,8 +360,8 @@ describe("ticket events", () => {
       "spawned",
       "exited",
     ]);
-    // The exited event carries the exit code and the marker status the
-    // harness left behind.
+    // The exited event carries the exit code and the status from the
+    // attempt's outcome JSON.
     const exited = events.filter((e) => e.kind === "exited");
     expect(exited[0].payload).toEqual({ code: 0, status: "checkpoint" });
     expect(exited[1].payload).toEqual({ code: 0, status: "done" });
@@ -372,7 +387,7 @@ describe("ticket events", () => {
       config: stubConfig,
     });
     const rig = stubHarness({
-      "01": { statuses: ["keep", "done"], exitCode: 3 },
+      "01": { statuses: ["keep", "done"], exitCodes: [3, 0] },
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
@@ -385,7 +400,10 @@ describe("ticket events", () => {
       "exited",
       "crash",
     ]);
-    expect(crash.at(-1)?.payload).toEqual({ code: 3 });
+    expect(crash.at(-1)?.payload).toEqual({
+      code: 3,
+      reason: "harness exited 3",
+    });
 
     const resumed = await run.resume("01");
     expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -515,9 +533,9 @@ describe("attempt log rotation", () => {
       [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        'issue="$1"; status="$2"; stamp="$3"',
+        'status="$1"; stamp="$2"; outcome_path="$3"',
         'echo "attempt-output-$stamp"',
-        'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
+        'printf \'{"status":"%s","summary":"s","commitSha":null}\' "$status" > "$outcome_path"',
         "exit 0",
         "",
       ].join("\n"),
@@ -527,7 +545,7 @@ describe("attempt log rotation", () => {
     const harness: HarnessCommand = (ctx) => {
       spawn += 1;
       const status = spawn === 1 ? "checkpoint" : "done";
-      return ["bash", script, ctx.issuePath, status, String(spawn)];
+      return ["bash", script, status, String(spawn), ctx.outcomePath];
     };
 
     const run = await runPool({ poolDir, harnesses: { stub: harness } });
@@ -569,6 +587,7 @@ describe("channels", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(run.final.outcomes["01"]).toEqual({
+      status: "done",
       summary: "built the schema",
       commitSha: "abc123",
     });
@@ -650,6 +669,10 @@ describe("glued prompt", () => {
     expect(body).toContain("The subagent roster for this job");
     expect(body).toContain("deepseek: general-purpose subagent");
     expect(body).toContain("outcome.json");
+    // The outcome instruction teaches the new contract: a required status,
+    // and the engine, not the agent, owning the Issue's status write.
+    expect(body).toContain('"status": "done" or "checkpoint"');
+    expect(body).toContain("Never edit the Issue's line-1 status marker");
     // The driver invocation line belongs to the adapters now; the body the
     // engine passes carries it nowhere, so a prompt change cannot break a
     // harness that assembles its own invocation.
@@ -714,9 +737,9 @@ describe("harness CLIs", () => {
   // engine resolves the console.json harness name to a binary and launches
   // it in the shape run.sh proved. Each fake records its argv one argument
   // per file (argv.0, argv.1, ...) so assertions see exact strings, newline-
-  // carrying prompts included. The fake learns which Issue to mark done from
-  // an env var, never by parsing the prompt, so no test depends on the
-  // prompt's first line as a format.
+  // carrying prompts included. The fake learns where to write its outcome
+  // JSON from an env var, never by parsing the prompt, so no test depends on
+  // the prompt's format.
 
   interface FakeCli {
     binDir: string;
@@ -726,7 +749,7 @@ describe("harness CLIs", () => {
   function fakeCli(
     poolDir: string,
     binary: string,
-    opts: { setDone?: boolean; exitCode?: number } = {},
+    opts: { writeOutcome?: boolean; exitCode?: number } = {},
   ): FakeCli {
     const binDir = join(poolDir, "bin");
     const recordDir = join(poolDir, "record");
@@ -747,8 +770,10 @@ describe("harness CLIs", () => {
         "elif [ $((SECONDS - start)) -ge 2 ]; then stdin=open",
         "else stdin=eof; fi",
         'printf \'%s\' "$stdin" > "$out/stdin"',
-        ...(opts.setDone ?? true
-          ? ['sed -i "1s/status=[a-z-]*/status=done/" "$FAKE_ISSUE_REL"']
+        ...(opts.writeOutcome ?? true
+          ? [
+              'printf \'{"status":"done","summary":"fake","commitSha":null}\' > "$FAKE_OUTCOME_REL"',
+            ]
           : []),
         `echo "fake ${binary} ran"`,
         `exit ${opts.exitCode ?? 0}`,
@@ -775,18 +800,18 @@ describe("harness CLIs", () => {
   ): Promise<void> {
     const originalPath = process.env.PATH;
     const originalRecord = process.env.FAKE_RECORD_DIR;
-    const originalIssue = process.env.FAKE_ISSUE_REL;
+    const originalOutcome = process.env.FAKE_OUTCOME_REL;
     process.env.PATH = `${fake.binDir}:${originalPath}`;
     process.env.FAKE_RECORD_DIR = fake.recordDir;
-    process.env.FAKE_ISSUE_REL = "issues/01-a.md";
+    process.env.FAKE_OUTCOME_REL = "runs/01.outcome.json";
     try {
       await fn();
     } finally {
       process.env.PATH = originalPath;
       if (originalRecord === undefined) delete process.env.FAKE_RECORD_DIR;
       else process.env.FAKE_RECORD_DIR = originalRecord;
-      if (originalIssue === undefined) delete process.env.FAKE_ISSUE_REL;
-      else process.env.FAKE_ISSUE_REL = originalIssue;
+      if (originalOutcome === undefined) delete process.env.FAKE_OUTCOME_REL;
+      else process.env.FAKE_OUTCOME_REL = originalOutcome;
     }
   }
 
@@ -894,7 +919,7 @@ describe("harness CLIs", () => {
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
   });
 
-  it("drives status from the marker a spawned CLI leaves behind, done or untouched alike", async () => {
+  it("drives status from the outcome JSON a spawned CLI writes, done or absent alike", async () => {
     const doneDir = oneTicketPool("claude", "claude-test");
     const doneFake = fakeCli(doneDir, "claude");
     let run: Awaited<ReturnType<typeof runPool>>;
@@ -903,10 +928,13 @@ describe("harness CLIs", () => {
     });
     expect(run!.phase).toBe("done");
     expect(run!.final.tickets["01"]).toBe("done");
+    // The fake never touched the Issue: the engine wrote the done marker
+    // itself from the outcome.
+    expect(markerLine(doneDir, "01-a.md")).toContain("status=done");
 
     const crashDir = oneTicketPool("claude", "claude-test");
     const crashFake = fakeCli(crashDir, "claude", {
-      setDone: false,
+      writeOutcome: false,
       exitCode: 1,
     });
     await withFakePath(crashFake, async () => {
@@ -984,7 +1012,12 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness({
+      "01": {
+        status: "checkpoint",
+        brief: "1. did the first half\n2. human must pick a name",
+      },
+    });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -1002,7 +1035,7 @@ describe("interrupts", () => {
     expect(run.snapshots.at(-1)?.state.interrupts).toHaveLength(1);
   });
 
-  it("raises a crash interrupt carrying the log path when no status is set", async () => {
+  it("raises a crash interrupt carrying the log path when the attempt writes no outcome", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -1037,9 +1070,10 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    // The harness exits having set its own marker back to ready: a crash
-    // with extra steps. Without the read-back mapping this re-spawns
-    // forever and never reaches a human.
+    // The harness exits having set its own marker back to ready and written
+    // no outcome: a crash with extra steps. The agent-written marker is
+    // ignored (the clean break), so this re-spawns nothing and reaches a
+    // human.
     const rig = stubHarness({ "01": { status: "ready", exitCode: 0 } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
@@ -1182,7 +1216,7 @@ describe("interrupts", () => {
       config: stubConfig,
     });
     const rig = stubHarness({
-      "01": { statuses: ["checkpoint", "done"] },
+      "01": { statuses: ["checkpoint", "done"], brief: "need a decision" },
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
@@ -1394,6 +1428,251 @@ describe("interrupts", () => {
     expect(done.final.log).toContain(
       "interrupt answered for 01 (crash): resumed",
     );
+  });
+});
+
+describe("outcome contract", () => {
+  // The agent's only result channel is the outcome JSON (ADR-0005); the
+  // engine owns the marker. These tests assert externally visible behavior
+  // only: the marker on disk, the ticket-log events, and the interrupt.
+
+  const oneTicket = (): string =>
+    makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+  function readEvents(poolDir: string, id: string) {
+    return readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string; payload: Record<string, unknown> });
+  }
+
+  it("writes the done marker itself when the outcome says done", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({});
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    // The stub never touched the Issue; the done on disk is the engine's
+    // write from the outcome JSON.
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
+  });
+
+  it("records a crash when the agent writes no outcome", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({ "01": { status: "keep" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("crash");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 0,
+      reason: "no outcome written",
+    });
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
+  it("never honors a stale outcome a previous attempt left behind", async () => {
+    const poolDir = oneTicket();
+    // Attempt 1 checkpoints with a valid outcome; the resume re-runs the
+    // ticket and attempt 2 exits 0 writing nothing. The spawn-side delete
+    // means the stale checkpoint file is gone, so this is a crash, not a
+    // re-raised checkpoint carrying the old brief.
+    const rig = stubHarness({
+      "01": { statuses: ["checkpoint", "keep"], brief: "pick a name" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+
+    const resumed = await run.resume("01", "go with the first");
+
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.interrupts[0]?.kind).toBe("crash");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 0,
+      reason: "no outcome written",
+    });
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
+  it("records a crash when the outcome is not parseable", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({ "01": { outcomeRaw: "not json" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 0,
+      reason: "outcome is not parseable JSON",
+    });
+  });
+
+  it("records a crash when the outcome's status is invalid", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({
+      "01": { outcomeRaw: '{"status":"dnoe","summary":"x","commitSha":null}' },
+    });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 0,
+      reason: "outcome's status is not done or checkpoint",
+    });
+  });
+
+  it("records a crash for a valid done outcome with a non-zero exit", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({ "01": { status: "done", exitCode: 1 } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("crash");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 1,
+      reason: "harness exited 1",
+    });
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
+  it("ignores a done marker the agent wrote directly and never re-spawns", async () => {
+    const poolDir = oneTicket();
+    // The old protocol's slip: the agent seds the marker to done but writes
+    // no outcome. The clean break ignores the marker, records the crash, and
+    // corrects the marker back to in-progress.
+    const rig = stubHarness({ "01": { status: "marker-done" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("crash");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
+  it("writes the checkpoint marker itself when the outcome says checkpoint", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({
+      "01": { status: "checkpoint", brief: "pick a name" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The stub never touched the Issue; the checkpoint on disk is the
+    // engine's write from the outcome JSON, and the interrupt was raised.
+    expect(run.phase).toBe("quiescent");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=checkpoint");
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    const kinds = readEvents(poolDir, "01").map((e) => e.kind);
+    expect(kinds).toEqual(["scheduled", "spawned", "exited", "checkpoint"]);
+    expect(readEvents(poolDir, "01")[2]?.payload).toEqual({
+      code: 0,
+      status: "checkpoint",
+    });
+  });
+
+  it("appends the outcome's brief as the Issue's Brief section, replacing a stale one", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nstale brief from an earlier attempt",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { status: "checkpoint", brief: "fresh brief" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The interrupt's body comes from the section the engine just landed,
+    // never from a Brief an earlier attempt left behind.
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "fresh brief" },
+    ]);
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Brief\n\nfresh brief");
+    expect(issueText).not.toContain("stale brief from an earlier attempt");
+    expect(
+      issueText.split("\n").filter((line) => line.startsWith("## Brief")),
+    ).toHaveLength(1);
+  });
+
+  it("lands a placeholder Brief section when a checkpoint outcome has no brief", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The pause was signalled, so it is not a crash: the interrupt stands
+    // and its body is the engine's placeholder.
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("wrote no brief");
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Brief, written by the engine");
+  });
+
+  it("replaces a stale Brief with the placeholder when a later checkpoint has no brief", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\nstale brief from an earlier attempt",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { status: "checkpoint" } });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The Brief section always mirrors the latest attempt: a stale brief
+    // never masquerades as the current one.
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("wrote no brief");
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).not.toContain("stale brief from an earlier attempt");
+    expect(
+      issueText.split("\n").filter((line) => line.startsWith("## Brief")),
+    ).toHaveLength(1);
+  });
+
+  it("re-raises the checkpoint interrupt from the engine-written Brief after a restart", async () => {
+    const poolDir = oneTicket();
+    const first = await runPool({
+      poolDir,
+      harnesses: stubHarness({
+        "01": { status: "checkpoint", brief: "pick a name" },
+      }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // Killed before the boundary persist: no stored checkpoint survives,
+    // but the marker and the Brief the engine landed are on disk, so
+    // rehydration re-raises the interrupt from the Issue unchanged.
+    rmSync(join(poolDir, "console.db"), { force: true });
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(second.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
   });
 });
 
@@ -1870,7 +2149,9 @@ describe("durability", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness({
+        "01": { status: "checkpoint", brief: "pick a name" },
+      }).harnesses,
     });
     expect(first.phase).toBe("quiescent");
     expect(first.final.tickets["03"]).toBe("done");
@@ -1913,8 +2194,7 @@ describe("durability", () => {
         "#!/usr/bin/env bash",
         'issue="$1"; id="$2"; outcome_path="$3"',
         'if [ "$id" = "01" ]; then',
-        '  sed -i "1s/status=[a-z-]*/status=done/" "$issue"',
-        '  printf \'%s\' \'{"summary":"recovered-01","commitSha":"sha-01"}\' > "$outcome_path"',
+        '  printf \'%s\' \'{"status":"done","summary":"recovered-01","commitSha":"sha-01"}\' > "$outcome_path"',
         "  exit 0",
         "fi",
         "sleep 60",
@@ -1970,6 +2250,7 @@ describe("durability", () => {
     // 01 finished before the kill but no checkpoint landed; its outcome
     // file on disk still wins over the (absent) checkpoint.
     expect(run.final.outcomes["01"]).toEqual({
+      status: "done",
       summary: "recovered-01",
       commitSha: "sha-01",
     });
@@ -2204,14 +2485,11 @@ describe("worktrees", () => {
         '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
         '  git add "$WORK_FILE"; staged=1',
         "fi",
-        // The Issue of record is the canonical main-checkout file the
-        // engine hands over as ctx.issuePath; it is edited in place and
-        // never committed from the worktree.
-        'if [ "$status" != "keep" ]; then',
-        '  sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
-        "fi",
         'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
         'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
+        // The outcome JSON is the ending signal (ADR-0005): the stub writes
+        // it to the outcome path the engine handed over, and the engine
+        // writes the canonical Issue's marker itself.
         'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
         'exit "$exit_code"',
         "",
@@ -2231,14 +2509,15 @@ describe("worktrees", () => {
         : entry;
       const status = b.status ?? "done";
       const outcome =
-        b.outcome === null
+        b.outcome === null || status === "keep"
           ? ""
-          : JSON.stringify(
-              b.outcome ?? {
+          : JSON.stringify({
+              status,
+              ...(b.outcome ?? {
                 summary: `summary-${ctx.id}`,
                 commitSha: `sha-${ctx.id}`,
-              },
-            );
+              }),
+            });
       const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
       const quote = (value: string) => JSON.stringify(value);
       const lines = [`MAIN_REPO=${quote(poolDir)}`];
@@ -2340,18 +2619,19 @@ describe("worktrees", () => {
       join(binDir, "opencode"),
       [
         "#!/usr/bin/env bun",
-        'import { mkdirSync, readFileSync, writeFileSync } from "node:fs";',
-        'import { join, resolve } from "node:path";',
+        'import { mkdirSync, writeFileSync } from "node:fs";',
+        'import { dirname, join, resolve } from "node:path";',
         'const commandArgs = process.argv[process.argv.indexOf("--command") + 2];',
         'const issueRef = commandArgs.split("\\n")[0];',
         'const id = issueRef.split("/").at(-1)!.split("-")[0];',
         // The prompt names the canonical Issue file by its absolute
-        // main-checkout path; resolve keeps it absolute from any cwd.
+        // main-checkout path; the outcome file sits beside it under runs/.
         'const issue = resolve(process.cwd(), issueRef);',
+        'const outcome = join(dirname(dirname(issue)), "runs", `${id}.outcome.json`);',
         'const recordDir = process.env.PWD_RECORD_DIR;',
         'mkdirSync(recordDir, { recursive: true });',
         'writeFileSync(join(recordDir, `pwd.${id}`), process.env.PWD ?? "");',
-        'writeFileSync(issue, readFileSync(issue, "utf8").replace(/status=[a-z-]*/, "status=done"));',
+        'writeFileSync(outcome, JSON.stringify({ status: "done", summary: "fake", commitSha: null }));',
         "console.log(`fake opencode ran in ${process.env.PWD}`);",
         "",
       ].join("\n"),
@@ -2394,11 +2674,10 @@ describe("worktrees", () => {
   }, 15000);
 
   it("hands the agent the canonical main-checkout Issue path and recognises its done, merging the attempt", async () => {
-    // The old contract's false crash: an attempt in a worktree sets done in
-    // the main-checkout Issue file (the file the prompt names) while its
-    // worktree seed copy stays untouched. Read-back used to trust the seed
-    // copy, reporting a crash and skipping the merge; now both sides name
-    // the same file, so the attempt is done and merged.
+    // The old contract's false crash is deleted: the attempt signals done
+    // through its outcome JSON and the engine writes the canonical Issue's
+    // marker itself, so a worktree-relative slip by the agent can no longer
+    // strand the status and skip the merge.
     const { poolDir, git } = makeGitPool({
       tickets: [readyTicket("01"), readyTicket("02")],
       config: stubConfig,
@@ -2424,7 +2703,7 @@ describe("worktrees", () => {
       expect(rig.spawned[id].cwd).toBe(
         join(poolDir, ".git", "pool-worktrees", id),
       );
-      // The stub edited exactly that file: the marker on disk is done.
+      // The engine wrote the marker on exactly that file: done on disk.
       expect(markerLine(poolDir, `${id}-t.md`)).toContain("status=done");
       // And the merge was not skipped: the branch landed on the working
       // branch and the ticket log records it.
@@ -2624,7 +2903,10 @@ describe("worktrees", () => {
       {
         ticketId: "01",
         kind: "checkpoint",
-        body: "(no Brief section in the Issue file)",
+        body:
+          "The agent signalled a checkpoint but wrote no brief, so what " +
+          "the attempt completed is only in the ticket log. Answer the " +
+          "interrupt to point the next attempt.",
       },
     ]);
     // The checkpoint parked 01's worktree with its partial work; 02 merged
@@ -3260,10 +3542,10 @@ describe("accept/process split", () => {
   // A stub harness whose blocked tickets hold their spawned script until the
   // sentinel file appears, so a test can keep a super-step in flight while it
   // answers an interrupt. Every other ticket takes the instant path. A ticket
-  // can also fail: exitCode leaves the marker at the given status and exits
-  // non-zero.
+  // can also fail: exitCode exits non-zero, and a status that is not done or
+  // checkpoint writes no outcome at all.
   function blockingHarness(
-    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number }>,
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number; brief?: string }>,
     sentinel: string,
   ): StubRig {
     const poolLocal = tempDirs[tempDirs.length - 1];
@@ -3273,12 +3555,13 @@ describe("accept/process split", () => {
       [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"; exit_code="$6"',
+        'issue="$1"; status="$2"; outcome_path="$3"; gate="$4"; sentinel="$5"; exit_code="$6"; outcome_json="$7"',
         'if [ "$gate" = "block" ]; then',
         '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
         "fi",
-        'sed -i "1s/status=[a-z-]*/status=$status/" "$issue"',
-        'printf \'{"summary":"smoke","commitSha":null}\' > "$outcome_path"',
+        'if [ -n "$outcome_json" ]; then',
+        '  printf \'%s\' "$outcome_json" > "$outcome_path"',
+        "fi",
         'exit "$exit_code"',
         "",
       ].join("\n"),
@@ -3294,6 +3577,15 @@ describe("accept/process split", () => {
       const b = behaviour[ctx.id] ?? {};
       const statuses = b.statuses ?? (["done"] as const);
       const status = statuses[Math.min(n, statuses.length - 1)];
+      const outcome =
+        status === "done" || status === "checkpoint"
+          ? JSON.stringify({
+              status,
+              summary: "smoke",
+              commitSha: null,
+              ...(b.brief !== undefined ? { brief: b.brief } : {}),
+            })
+          : "";
       return [
         "bash",
         stubPath,
@@ -3303,6 +3595,7 @@ describe("accept/process split", () => {
         b.block ? "block" : "-",
         sentinel,
         String(b.exitCode ?? 0),
+        outcome,
       ];
     };
     return { harnesses: { stub }, spawned, spawnOrder };
@@ -3591,8 +3884,8 @@ describe("accept/process split", () => {
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
       {
-        // 01 fails fast and leaves its marker rewritten to ready; 02 holds
-        // the super-step open until the sentinel lands.
+        // 01 fails fast without writing an outcome; 02 holds the super-step
+        // open until the sentinel lands.
         "01": { statuses: ["ready"], exitCode: 3 },
         "02": { statuses: ["done"], block: true },
       },
@@ -3616,7 +3909,10 @@ describe("accept/process split", () => {
       "exited",
       "crash",
     ]);
-    expect(readEventsFile(poolDir, "01").at(-1)?.payload).toEqual({ code: 3 });
+    expect(readEventsFile(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 3,
+      reason: "harness exited 3",
+    });
     expect(
       readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
     ).toContain("status=in-progress");
@@ -3705,7 +4001,7 @@ describe("accept/process split", () => {
     const rig = blockingHarness(
       {
         // 01 checkpoints fast; 02 holds the super-step open until the sentinel.
-        "01": { statuses: ["checkpoint", "done"] },
+        "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
         "02": { statuses: ["done"], block: true },
       },
       sentinel,
@@ -3767,7 +4063,7 @@ describe("accept/process split", () => {
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
       {
-        "01": { statuses: ["checkpoint", "done"] },
+        "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
         "02": { statuses: ["done"], block: true },
       },
       sentinel,
