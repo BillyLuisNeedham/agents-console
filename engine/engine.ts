@@ -1173,6 +1173,9 @@ async function runResolver(
   result: MergeResult,
 ): Promise<ResolverAttempt> {
   const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
+  // As in runTicket: the resolver starts with no outcome, so a stale file
+  // from a previous resolver run can never pass for this run's result.
+  rmSync(outcomePath, { force: true });
   const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
   rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
   appendEvent(session.runsDir, marker.id, {
@@ -1821,6 +1824,9 @@ async function runTicket(
   const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
   rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+  // Every attempt starts with no outcome: a file a previous attempt left
+  // behind would be read as this attempt's result, honoring a stale status.
+  rmSync(outcomePath, { force: true });
 
   const upstream = marker.blockedBy.flatMap((id) => {
     const outcome = snapshot.outcomes[id];

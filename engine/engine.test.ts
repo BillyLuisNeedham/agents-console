@@ -1481,6 +1481,30 @@ describe("outcome contract", () => {
     expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
   });
 
+  it("never honors a stale outcome a previous attempt left behind", async () => {
+    const poolDir = oneTicket();
+    // Attempt 1 checkpoints with a valid outcome; the resume re-runs the
+    // ticket and attempt 2 exits 0 writing nothing. The spawn-side delete
+    // means the stale checkpoint file is gone, so this is a crash, not a
+    // re-raised checkpoint carrying the old brief.
+    const rig = stubHarness({
+      "01": { statuses: ["checkpoint", "keep"], brief: "pick a name" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+
+    const resumed = await run.resume("01", "go with the first");
+
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.interrupts[0]?.kind).toBe("crash");
+    expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
+      code: 0,
+      reason: "no outcome written",
+    });
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
+  });
+
   it("records a crash when the outcome is not parseable", async () => {
     const poolDir = oneTicket();
     const rig = stubHarness({ "01": { outcomeRaw: "not json" } });
