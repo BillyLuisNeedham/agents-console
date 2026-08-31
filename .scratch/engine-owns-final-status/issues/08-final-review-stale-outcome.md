@@ -1,4 +1,4 @@
-<!-- state: id=08 blocked-by=07 status=in-progress -->
+<!-- state: id=08 blocked-by=07 status=done -->
 
 # 08 — Final review of the stale-outcome fix
 
