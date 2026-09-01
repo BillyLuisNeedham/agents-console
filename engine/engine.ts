@@ -70,6 +70,7 @@ interface TicketAssignment {
   harness?: string;
   model?: string;
   drivers?: string;
+  verify?: number;
 }
 
 export interface PoolConfig {
@@ -212,6 +213,7 @@ interface Assignment {
   harness: string;
   model: string;
   drivers: string;
+  verify?: number;
 }
 
 interface SettleWaiter {
@@ -1971,7 +1973,7 @@ async function spawnToLog(
   return exitCode;
 }
 
-function resolveAssignment(
+export function resolveAssignment(
   marker: TicketMarker,
   config: PoolConfig,
   harnesses: Record<string, HarnessCommand>,
@@ -1999,7 +2001,17 @@ function resolveAssignment(
         `Known: ${Object.keys(harnesses).sort().join(", ")}`,
     );
   }
-  return { harness, model, drivers };
+  let verify: number | undefined;
+  if (assign.verify != null) {
+    if (!Number.isInteger(assign.verify) || assign.verify < 1) {
+      throw new Error(
+        `pool config: ticket ${marker.id} has invalid verify ` +
+          `${JSON.stringify(assign.verify)} (must be an integer >= 1)`,
+      );
+    }
+    verify = assign.verify;
+  }
+  return { harness, model, drivers, verify };
 }
 
 /**

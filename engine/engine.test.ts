@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   REVIEW_TICKET_ID,
+  resolveAssignment,
   runPool,
   startPool,
   type HarnessCommand,
@@ -20,6 +21,7 @@ import {
   type PoolRun,
 } from "./engine.ts";
 import { appendEvent } from "./events.ts";
+import { loadPoolMarkers } from "./pool.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import type { SpawnContext } from "./spawn.ts";
 
@@ -189,6 +191,142 @@ describe("pool loading", () => {
     await expect(
       runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
     ).rejects.toThrow(/no harness/);
+  });
+});
+
+describe("verify assignment", () => {
+  const ready01 = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("resolves verify: 1 and verify: 3 onto the ticket's assignment", () => {
+    for (const n of [1, 3]) {
+      const config: PoolConfig = {
+        ...stubConfig,
+        assign: { "01": { verify: n } },
+      };
+      const poolDir = makePool({
+        tickets: [{ file: "01-a.md", marker: ready01 }],
+        config,
+      });
+      const [marker] = loadPoolMarkers(join(poolDir, "issues"));
+      const assignment = resolveAssignment(
+        marker,
+        config,
+        stubHarness({}).harnesses,
+      );
+      expect(assignment.verify).toBe(n);
+    }
+  });
+
+  it("resolves no verify when the assign block omits the key", () => {
+    const config: PoolConfig = { ...stubConfig };
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready01 }],
+      config,
+    });
+    const [marker] = loadPoolMarkers(join(poolDir, "issues"));
+    const assignment = resolveAssignment(
+      marker,
+      config,
+      stubHarness({}).harnesses,
+    );
+    expect(assignment.verify).toBeUndefined();
+  });
+
+  it("runs a pool with no verify key exactly as today", async () => {
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready01 }],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done" });
+    expect(Object.keys(rig.spawned)).toEqual(["01"]);
+  });
+
+  it("rejects invalid verify values at pool load, naming the ticket", async () => {
+    for (const verify of [0, -1, 2.5, "3", true, {}]) {
+      const config = JSON.parse(
+        JSON.stringify({ ...stubConfig, assign: { "01": { verify } } }),
+      ) as PoolConfig;
+      const poolDir = makePool({
+        tickets: [{ file: "01-a.md", marker: ready01 }],
+        config,
+      });
+      await expect(
+        runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+      ).rejects.toThrow(/pool config: ticket 01 has invalid verify/);
+    }
+  });
+
+  it("treats verify: null as absent, like the other assign keys", () => {
+    const config = JSON.parse(
+      JSON.stringify({ ...stubConfig, assign: { "01": { verify: null } } }),
+    ) as PoolConfig;
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready01 }],
+      config,
+    });
+    const [marker] = loadPoolMarkers(join(poolDir, "issues"));
+    const assignment = resolveAssignment(
+      marker,
+      config,
+      stubHarness({}).harnesses,
+    );
+    expect(assignment.verify).toBeUndefined();
+  });
+
+  it("ignores verify in pool-level defaults, activation is per ticket", () => {
+    const config = JSON.parse(
+      JSON.stringify({
+        ...stubConfig,
+        defaults: { ...stubConfig.defaults, verify: 3 },
+      }),
+    ) as PoolConfig;
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready01 }],
+      config,
+    });
+    const [marker] = loadPoolMarkers(join(poolDir, "issues"));
+    const assignment = resolveAssignment(
+      marker,
+      config,
+      stubHarness({}).harnesses,
+    );
+    expect(assignment.verify).toBeUndefined();
+  });
+
+  it("ignores unknown assign keys, with and without verify", async () => {
+    const withMystery = {
+      ...stubConfig,
+      assign: { "01": { mystery: "x" } },
+    } as PoolConfig;
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready01 }],
+      config: withMystery,
+    });
+    const [marker] = loadPoolMarkers(join(poolDir, "issues"));
+    const rig = stubHarness({});
+
+    expect(
+      resolveAssignment(marker, withMystery, rig.harnesses).verify,
+    ).toBeUndefined();
+
+    const withBoth = {
+      ...stubConfig,
+      assign: { "01": { mystery: "x", verify: 2 } },
+    } as PoolConfig;
+    expect(resolveAssignment(marker, withBoth, rig.harnesses).verify).toBe(2);
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+    expect(run.phase).toBe("done");
+    expect(Object.keys(rig.spawned)).toEqual(["01"]);
   });
 });
 
