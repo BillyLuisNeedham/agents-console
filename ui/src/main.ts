@@ -369,4 +369,16 @@ async function boot(): Promise<void> {
   });
 }
 
-void boot();
+// Prototype gate (dev only): `?variant=` hands the page to the throwaway
+// bulk-resume prototype (src/prototype/), which drives the real canvas from
+// a fixture instead of booting against a live pool. Vite replaces
+// import.meta.env.DEV with false in production builds, so a stray merge can
+// never ship the branch.
+const prototypeVariant = new URLSearchParams(window.location.search).get("variant");
+if (import.meta.env.DEV && prototypeVariant) {
+  void import("./prototype/bulk-resume").then((m) => {
+    m.mountPrototype(root, prototypeVariant);
+  });
+} else {
+  void boot();
+}
