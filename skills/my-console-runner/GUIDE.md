@@ -14,9 +14,25 @@ one pool, edit that pool's `console.json`. To change one ticket, edit its entry 
 
 ## How to start
 
-Point the skill at a pool: `/my-console-runner <path-to-pool>`. It checks the pool, asks seven
-questions, writes the two files, starts the server and opens your browser. Run it again on a
-configured pool to relaunch without the questions.
+Point the skill at a pool: `/my-console-runner <path-to-pool>`. It checks the pool, asks
+its questions, writes the two files, starts the server and opens your browser. Run it
+again on a configured pool to relaunch without the questions.
+
+If you have saved Setups, the interview opens with Q0: it lists them by name, with a
+"none" option, and asks which one to start from. Choosing a Setup prefills the
+behavioural answers (drivers, harness and model, roster, resolver, reviewer, checkpoint)
+and you still confirm each one. A Setup is a starting point, never a silent override.
+Choose "none", or have no saved Setups, and the interview runs as before. The port, the
+per-ticket assignments, the expected stops and the AGENT.md prose are always asked fresh;
+no Setup carries them. A Setup file that is malformed is reported by name and skipped, and
+the interview carries on.
+
+After it writes the two files it asks "Save this Setup as...?" Give it a name and the
+behavioural answers (harness, model, drivers, roster, resolver, reviewer, checkpoint) are saved
+as a Setup: one JSON file under `~/.agent-graphs/setups/`, named for you to recognise later.
+The port and the per-ticket assignments are never saved; they belong to the one pool. Decline,
+or give an empty name, and nothing is saved. Saving over a name that already exists asks for
+confirmation first. Setups are plain files: inspect, edit or delete them by hand.
 
 ## How it stops
 
