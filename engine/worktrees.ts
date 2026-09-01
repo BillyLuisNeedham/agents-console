@@ -48,8 +48,14 @@ export function commitMerge(worktree: WorktreeInfo): GitProbe {
   return git(worktree.path, ["commit", "-qm", `merge ${worktree.branch} by resolver`]);
 }
 
-export function branchFor(ticketId: string): string {
-  return `pool/${ticketId}`;
+// The solo branch keeps the well-known name; a verify fan-out's attempt
+// branches suffix the attempt number. Dotted rather than slashed, so an
+// attempt branch never collides with a parked solo branch: git forbids
+// refs where one is a prefix path of the other.
+export function branchFor(ticketId: string, attempt?: number): string {
+  return attempt === undefined
+    ? `pool/${ticketId}`
+    : `pool/${ticketId}.attempt-${attempt}`;
 }
 
 // Worktrees live inside the common git dir so they never appear in a
@@ -72,30 +78,45 @@ function gitCommonDir(repoRoot: string): string {
   return dir;
 }
 
-export function worktreePathFor(repoRoot: string, ticketId: string): string {
-  return join(gitCommonDir(repoRoot), "pool-worktrees", ticketId);
+export function worktreePathFor(
+  repoRoot: string,
+  ticketId: string,
+  attempt?: number,
+): string {
+  return join(
+    gitCommonDir(repoRoot),
+    "pool-worktrees",
+    attempt === undefined ? ticketId : `${ticketId}.attempt-${attempt}`,
+  );
 }
 
-export function branchExists(repoRoot: string, ticketId: string): boolean {
-  return refExists(repoRoot, branchFor(ticketId));
+export function branchExists(
+  repoRoot: string,
+  ticketId: string,
+  attempt?: number,
+): boolean {
+  return refExists(repoRoot, branchFor(ticketId, attempt));
 }
 
 // A parked branch or worktree (left by a checkpoint, a crash or a conflict)
 // is reused, so the ticket keeps the work it already did; the base is never
-// moved under it. Fresh tickets branch from HEAD.
+// moved under it. Fresh tickets branch from HEAD. An attempt number names a
+// verify fan-out's per-attempt branch and worktree; attempt numbers never
+// repeat for a ticket, so an attempt worktree is always created fresh.
 export function prepareWorktree(
   repoRoot: string,
   ticketId: string,
+  attempt?: number,
 ): WorktreeInfo {
-  const branch = branchFor(ticketId);
-  const path = worktreePathFor(repoRoot, ticketId);
+  const branch = branchFor(ticketId, attempt);
+  const path = worktreePathFor(repoRoot, ticketId, attempt);
   git(repoRoot, ["worktree", "prune"]);
   const registered = git(repoRoot, ["worktree", "list", "--porcelain"])
     .out.split("\n")
     .includes(`worktree ${path}`);
   if (!registered) {
     mkdirSync(dirname(path), { recursive: true });
-    const add = branchExists(repoRoot, ticketId)
+    const add = branchExists(repoRoot, ticketId, attempt)
       ? git(repoRoot, ["worktree", "add", path, branch])
       : git(repoRoot, ["worktree", "add", path, "-b", branch, "HEAD"]);
     if (!add.ok) {

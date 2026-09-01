@@ -66,6 +66,15 @@ export interface Outcome {
   brief?: string;
 }
 
+// One attempt's outcome file name. The solo path keeps the well-known name;
+// a verify fan-out writes per attempt, so N parallel outcomes never collide
+// and each grader can bind to one attempt's file (ticket 03).
+function outcomeFileName(ticketId: string, attempt: number | null): string {
+  return attempt === null
+    ? `${ticketId}.outcome.json`
+    : `${ticketId}.attempt-${attempt}.outcome.json`;
+}
+
 interface TicketAssignment {
   harness?: string;
   model?: string;
@@ -445,12 +454,34 @@ async function driveLoop(session: Session): Promise<void> {
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
       session.superStep += 1;
-      const scheduledAttempts = new Map(
-        ready.map((marker) => [
-          marker.id,
-          nextAttempt(session.runsDir, marker.id),
-        ]),
-      );
+      // Every attempt this super-step spawns is numbered before any spawn,
+      // so a verify fan-out cannot race the events counter: attempts run
+      // base..base+N-1 off one nextAttempt read per ticket.
+      const planned = ready.flatMap((marker) => {
+        const verify = session.assignments.get(marker.id)!.verify;
+        if (verify != null) {
+          // A verify ticket's attempts write attempt-numbered logs, but a
+          // pre-verify solo attempt's well-known log must still rotate
+          // before the fan-out spawns, so the history survives.
+          rotateAttemptLog(
+            session.runsDir,
+            marker.id,
+            join(session.runsDir, attemptLogName(marker.id, null, false)),
+            "spawned",
+          );
+        }
+        const base = nextAttempt(session.runsDir, marker.id);
+        return Array.from({ length: verify ?? 1 }, (_, i) => ({
+          marker,
+          plan: planTicket(
+            session,
+            marker,
+            ready.length,
+            base + i,
+            verify != null,
+          ),
+        }));
+      });
       session.state = applyUpdate(session.state, {
         tickets: Object.fromEntries(
           ready.map((marker) => [marker.id, "in-progress" as const]),
@@ -460,28 +491,16 @@ async function driveLoop(session: Session): Promise<void> {
         ],
       });
       writeMarkers(session);
-      for (const marker of ready) {
+      for (const { marker, plan } of planned) {
         appendEvent(session.runsDir, marker.id, {
           at: new Date().toISOString(),
-          attempt: scheduledAttempts.get(marker.id)!,
+          attempt: plan.attempt,
           kind: "scheduled",
           payload: {},
         });
       }
       emit("running");
       const snapshot = session.state;
-
-      const plans = new Map(
-        ready.map((marker) => [
-          marker.id,
-          planTicket(
-            session,
-            marker,
-            ready.length,
-            scheduledAttempts.get(marker.id)!,
-          ),
-        ]),
-      );
 
       // Merges land in completion order: each ticket's merge chains onto a
       // serialized queue the moment the ticket finishes, while its siblings
@@ -493,7 +512,7 @@ async function driveLoop(session: Session): Promise<void> {
       }[] = [];
       let mergeQueue: Promise<void> = Promise.resolve();
       const results = await Promise.all(
-        ready.map((marker) =>
+        planned.map(({ marker, plan }) =>
           runTicket(
             marker,
             snapshot,
@@ -504,8 +523,19 @@ async function driveLoop(session: Session): Promise<void> {
               issuesDir: session.issuesDir,
               harnesses: session.harnesses,
             },
-            plans.get(marker.id)!,
+            plan,
           ).then((result) => {
+            if (plan.verify) {
+              // A verify candidate never merges and never writes the
+              // ticket's status, at its exit or before its siblings exit:
+              // the fan-out proceeds only once every attempt has exited
+              // (grading and selection are later tickets). Only the pool
+              // log moves, so the Console sees each attempt's exit live.
+              session.state = applyUpdate(session.state, result.update);
+              result.joinedAtExit = true;
+              emit("running");
+              return result;
+            }
             if (result.plan.worktree && result.status === "done") {
               mergeQueue = mergeQueue.then(() => {
                 merges.push({
@@ -592,6 +622,24 @@ async function driveLoop(session: Session): Promise<void> {
             body: logPath,
           });
         }
+      }
+      // The fan-out is complete once every attempt has exited; this line is
+      // the gate's record. Nothing has merged and no status was written: the
+      // ticket stays in-progress for grading (ticket 03) to take over.
+      for (const marker of ready) {
+        if (session.assignments.get(marker.id)!.verify == null) continue;
+        const attempts = results.filter((r) => r.marker.id === marker.id);
+        const tally = (status: TicketStatus) =>
+          attempts.filter((r) => r.status === status).length;
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${marker.id}: verify fan-out complete: ` +
+              `${attempts.length} attempts exited ` +
+              `(${tally("done")} done, ${tally("checkpoint")} checkpoint, ` +
+              `${tally("in-progress")} crash); no merge and no status ` +
+              "write until grading",
+          ],
+        });
       }
       persist(session);
       emit("running");
@@ -745,7 +793,7 @@ function rehydrate(session: Session): void {
   for (const marker of session.markers) {
     if (marker.status !== "done") continue;
     const read = readOutcomeResult(
-      join(session.runsDir, `${marker.id}.outcome.json`),
+      join(session.runsDir, outcomeFileName(marker.id, null)),
     );
     if (read.ok) recovered[marker.id] = read.outcome;
   }
@@ -1453,7 +1501,7 @@ function rejectReview(
     if (named.includes(marker.id)) {
       appendFileSync(marker.file, `\n## Review note\n\n${note?.trim() ?? ""}\n`);
     }
-    rmSync(join(session.runsDir, `${marker.id}.outcome.json`), {
+    rmSync(join(session.runsDir, outcomeFileName(marker.id, null)), {
       force: true,
     });
   }
@@ -1666,6 +1714,9 @@ interface TicketPlan {
   cwd: string;
   worktree?: WorktreeInfo;
   attempt: number;
+  // True when the attempt is one candidate of a verify fan-out: it runs on
+  // its own attempt branch and its exit never writes the ticket's status.
+  verify: boolean;
 }
 
 interface TicketResult {
@@ -1681,11 +1732,14 @@ interface TicketResult {
   joinedAtExit: boolean;
 }
 
-// Where a ticket runs. A multi-ticket super-step gives every ticket its own
+// Where an attempt runs. A multi-ticket super-step gives every ticket its own
 // worktree branched from the same HEAD, so parallel harnesses never share a
 // checkout. A ticket with a parked branch (checkpoint, crash or conflicted
 // merge left it behind) always reuses its worktree, even alone, so it keeps
-// the work it already did. Anything else runs in the main checkout. The main
+// the work it already did. A verify attempt always gets its own attempt
+// branch and worktree, even alone in its round: grading diffs the attempt's
+// commit and selection merges one attempt's branch, so a candidate never
+// shares the main checkout. Anything else runs in the main checkout. The main
 // checkout's Issue file is the single canonical copy: the spawn prompt hands
 // the agent its absolute path for reading and notes, and the engine writes
 // the final status to it at attempt exit. The worktree gets a seed copy as
@@ -1695,17 +1749,25 @@ function planTicket(
   marker: TicketMarker,
   readyCount: number,
   attempt: number,
+  verify: boolean,
 ): TicketPlan {
-  if (!session.git) return { cwd: session.cwd, attempt };
-  const parked = branchExists(session.cwd, marker.id);
-  if (readyCount < 2 && !parked) {
-    return { cwd: session.cwd, attempt };
+  if (!session.git) return { cwd: session.cwd, attempt, verify };
+  if (
+    !verify &&
+    readyCount < 2 &&
+    !branchExists(session.cwd, marker.id)
+  ) {
+    return { cwd: session.cwd, attempt, verify };
   }
-  const worktree = prepareWorktree(session.cwd, marker.id);
+  const worktree = prepareWorktree(
+    session.cwd,
+    marker.id,
+    verify ? attempt : undefined,
+  );
   const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
   mkdirSync(dirname(seedCopy), { recursive: true });
   copyFileSync(marker.file, seedCopy);
-  return { cwd: worktree.path, worktree, attempt };
+  return { cwd: worktree.path, worktree, attempt, verify };
 }
 
 // The engine owns the final status write (ADR-0005): the attempt's outcome
@@ -1823,9 +1885,19 @@ async function runTicket(
   plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
-  const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
-  rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
-  const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+  // A verify attempt writes its attempt-numbered log directly: N parallel
+  // attempts cannot share the well-known path, and the number is known at
+  // scheduling time. A solo attempt keeps the well-known path plus rotation.
+  const logPath = plan.verify
+    ? join(env.runsDir, attemptLogName(marker.id, plan.attempt, false))
+    : join(env.runsDir, attemptLogName(marker.id, null, false));
+  if (!plan.verify) {
+    rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
+  }
+  const outcomePath = join(
+    env.runsDir,
+    outcomeFileName(marker.id, plan.verify ? plan.attempt : null),
+  );
   // Every attempt starts with no outcome: a file a previous attempt left
   // behind would be read as this attempt's result, honoring a stale status.
   rmSync(outcomePath, { force: true });
@@ -1870,7 +1942,10 @@ async function runTicket(
 
   // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
   // with a valid outcome the engine writes the final status to the canonical
-  // Issue's marker itself; a marker the agent rewrote is never honored.
+  // Issue's marker itself; a marker the agent rewrote is never honored. A
+  // verify candidate writes no status anywhere at its exit: the ticket is
+  // in-progress until the whole fan-out has exited, and grading decides what
+  // happens after (tickets 03 and 04).
   const outcome = readOutcomeResult(outcomePath);
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
@@ -1880,14 +1955,20 @@ async function runTicket(
     crashReason = outcome.reason;
   } else {
     status = outcome.outcome.status;
-    writeMarkerStatus(marker.file, status);
-    if (status === "checkpoint") {
-      // Before the return: the drive loop raises the checkpoint's interrupt
-      // from the Issue's Brief section the moment this attempt exits.
-      landCheckpointBrief(marker.file, outcome.outcome.brief);
+    if (!plan.verify) {
+      writeMarkerStatus(marker.file, status);
+      if (status === "checkpoint") {
+        // Before the return: the drive loop raises the checkpoint's interrupt
+        // from the Issue's Brief section the moment this attempt exits.
+        landCheckpointBrief(marker.file, outcome.outcome.brief);
+      }
     }
   }
-  if (crashReason !== null && readMarker(marker.file).status !== "in-progress") {
+  if (
+    crashReason !== null &&
+    !plan.verify &&
+    readMarker(marker.file).status !== "in-progress"
+  ) {
     writeMarkerStatus(marker.file, "in-progress");
   }
   appendEvent(env.runsDir, marker.id, {
@@ -1920,12 +2001,22 @@ async function runTicket(
     plan,
     joinedAtExit: false,
     update: {
-      tickets: { [marker.id]: status },
+      // A verify candidate moves only the pool log: the tickets and outcomes
+      // channels are keyed by ticket id, and N attempts of one ticket would
+      // clobber each other there and write a status the fan-out must not
+      // write. The events file and the per-attempt files are the record.
+      ...(plan.verify ? {} : { tickets: { [marker.id]: status } }),
       log: [
-        `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
-          (crashReason !== null ? `, crash: ${crashReason}` : ""),
+        plan.verify
+          ? `ticket ${marker.id}: attempt ${plan.attempt} exited ${exitCode} ` +
+            `(${status})` +
+            (crashReason !== null ? `, crash: ${crashReason}` : "")
+          : `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
+            (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
-      ...(outcome.ok ? { outcomes: { [marker.id]: outcome.outcome } } : {}),
+      ...(outcome.ok && !plan.verify
+        ? { outcomes: { [marker.id]: outcome.outcome } }
+        : {}),
     },
   };
 }

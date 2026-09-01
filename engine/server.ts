@@ -193,10 +193,13 @@ function stripAnsi(text: string): string {
 /**
  * The ticket's attempts as log sources, in attempt order. Event-based tickets
  * (an events file exists) derive implement/resolver attempts from the events:
- * the latest of each kind holds its well-known path, older attempts their
- * rotated attempt-numbered name (both named by the events module's contract).
- * A pre-feature ticket (no events file) uses the reconstructed attempt rows,
- * each with the log file it was built from.
+ * the latest of each kind holds its well-known path while that file exists,
+ * older attempts their rotated attempt-numbered name (both named by the
+ * events module's contract). A verify fan-out's attempts write
+ * attempt-numbered logs directly and the well-known name never appears, so
+ * the current attempt falls back to its own number. A pre-feature ticket (no
+ * events file) uses the reconstructed attempt rows, each with the log file it
+ * was built from.
  */
 function listAttemptLogs(
   runsDir: string,
@@ -208,6 +211,8 @@ function listAttemptLogs(
     const resolvers = events.filter((e) => e.kind === "resolver");
     const maxSpawned = spawned.reduce((m, e) => Math.max(m, e.attempt), 0);
     const maxResolver = resolvers.reduce((m, e) => Math.max(m, e.attempt), 0);
+    const hasWellKnownLog = (resolver: boolean): boolean =>
+      existsSync(join(runsDir, attemptLogName(ticketId, null, resolver)));
     const byAttempt = new Map<number, LogAttemptInfo>();
     for (const event of spawned) {
       const current = event.attempt === maxSpawned;
@@ -215,7 +220,11 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "implement",
         current,
-        logFile: attemptLogName(ticketId, current ? null : event.attempt, false),
+        logFile: attemptLogName(
+          ticketId,
+          current && hasWellKnownLog(false) ? null : event.attempt,
+          false,
+        ),
       });
     }
     for (const event of resolvers) {
@@ -224,7 +233,11 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "resolver",
         current,
-        logFile: attemptLogName(ticketId, current ? null : event.attempt, true),
+        logFile: attemptLogName(
+          ticketId,
+          current && hasWellKnownLog(true) ? null : event.attempt,
+          true,
+        ),
       });
     }
     return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);

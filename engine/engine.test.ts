@@ -80,6 +80,9 @@ interface StubRig {
   harnesses: Record<string, HarnessCommand>;
   spawned: Record<string, SpawnContext>;
   spawnOrder: string[];
+  // Every spawn context in spawn order, attempts included: a verify fan-out
+  // spawns one ticket id several times, which the keyed map cannot hold.
+  spawnList: SpawnContext[];
 }
 
 function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
@@ -103,10 +106,12 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
   );
   const spawned: Record<string, SpawnContext> = {};
   const spawnOrder: string[] = [];
+  const spawnList: SpawnContext[] = [];
   const spawnCounts: Record<string, number> = {};
   const stub: HarnessCommand = (ctx) => {
     spawned[ctx.id] = ctx;
     spawnOrder.push(ctx.id);
+    spawnList.push(ctx);
     const n = spawnCounts[ctx.id] ?? 0;
     spawnCounts[ctx.id] = n + 1;
     const b = behaviour[ctx.id] ?? {};
@@ -139,7 +144,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       String(exitCode),
     ];
   };
-  return { harnesses: { stub }, spawned, spawnOrder };
+  return { harnesses: { stub }, spawned, spawnOrder, spawnList };
 }
 
 const stubConfig: PoolConfig = {
@@ -160,6 +165,161 @@ async function approveReview(run: PoolRun): Promise<PoolRun> {
   expect(review).toBeTruthy();
   return run.approve(review!.ticketId);
 }
+
+interface GitStubBehaviour {
+  status?: "done" | "checkpoint" | "keep";
+  outcome?: { summary: string; commitSha: string | null } | null;
+  exitCode?: number;
+  workFile?: string;
+  workLine?: string;
+  overwrite?: boolean;
+  commitMsg?: string;
+  leaveFile?: string;
+  touch?: string;
+  waitFor?: string;
+  waitMerged?: string;
+  recordDir?: string;
+  expectFile?: string;
+}
+
+interface GitPool {
+  poolDir: string;
+  head: string;
+  git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
+}
+
+function makeGitPool(spec: PoolSpec, seed: Record<string, string> = {}): GitPool {
+  const poolDir = makePool(spec);
+  for (const [path, content] of Object.entries(seed)) {
+    writeFileSync(join(poolDir, path), content);
+  }
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", ...args], {
+      cwd: poolDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "user.email", "pool@test"]);
+  git(["config", "user.name", "pool"]);
+  git(["add", "-A"]);
+  git(["commit", "-qm", "init"]);
+  const head = git(["rev-parse", "HEAD"]).stdout.toString().trim();
+  return { poolDir, head, git };
+}
+
+function gitStubHarness(
+  poolDir: string,
+  behaviour: Record<string, GitStubBehaviour | GitStubBehaviour[]>,
+): StubRig {
+  const stubPath = join(poolDir, "git-stub.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
+      'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
+      'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+      'source "$plan"',
+      'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
+      'if [ -n "$WAIT_FOR" ]; then',
+      "  for _ in $(seq 1 100); do",
+      '    [ -e "$WAIT_FOR" ] && break',
+      "    sleep 0.05",
+      "  done",
+      '  [ -e "$WAIT_FOR" ] || exit 42',
+      "fi",
+      'if [ -n "$WAIT_MERGED" ]; then',
+      "  for _ in $(seq 1 100); do",
+      '    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
+      '    case "$log" in *"$WAIT_MERGED"*) break;; esac',
+      "    sleep 0.05",
+      "  done",
+      '  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
+      '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
+      "fi",
+      'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+      'if [ -n "$RECORD_DIR" ]; then',
+      '  mkdir -p "$RECORD_DIR"',
+      '  git rev-parse HEAD > "$RECORD_DIR/head"',
+      '  git branch --show-current > "$RECORD_DIR/branch"',
+      '  pwd > "$RECORD_DIR/cwd"',
+      "fi",
+      "staged=0",
+      'if [ -n "$WORK_FILE" ]; then',
+      '  mkdir -p "$(dirname "$WORK_FILE")"',
+      '  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
+      '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
+      '  git add "$WORK_FILE"; staged=1',
+      "fi",
+      'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
+      'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
+      // The outcome JSON is the ending signal (ADR-0005): the stub writes
+      // it to the outcome path the engine handed over, and the engine
+      // writes the canonical Issue's marker itself.
+      'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
+      'exit "$exit_code"',
+      "",
+    ].join("\n"),
+  );
+  const spawned: Record<string, SpawnContext> = {};
+  const spawnOrder: string[] = [];
+  const spawnList: SpawnContext[] = [];
+  const spawnCounts: Record<string, number> = {};
+  const stub: HarnessCommand = (ctx) => {
+    spawned[ctx.id] = ctx;
+    spawnOrder.push(ctx.id);
+    spawnList.push(ctx);
+    const n = spawnCounts[ctx.id] ?? 0;
+    spawnCounts[ctx.id] = n + 1;
+    const entry = behaviour[ctx.id] ?? {};
+    const b = Array.isArray(entry)
+      ? entry[Math.min(n, entry.length - 1)]
+      : entry;
+    const status = b.status ?? "done";
+    const outcome =
+      b.outcome === null || status === "keep"
+        ? ""
+        : JSON.stringify({
+            status,
+            ...(b.outcome ?? {
+              summary: `summary-${ctx.id}`,
+              commitSha: `sha-${ctx.id}`,
+            }),
+          });
+    const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
+    const quote = (value: string) => JSON.stringify(value);
+    const lines = [`MAIN_REPO=${quote(poolDir)}`];
+    if (b.workFile) lines.push(`WORK_FILE=${quote(b.workFile)}`);
+    if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);
+    if (b.overwrite) lines.push('OVERWRITE="1"');
+    if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);
+    if (b.leaveFile) lines.push(`LEAVE_FILE=${quote(b.leaveFile)}`);
+    if (b.touch) lines.push(`TOUCH=${quote(b.touch)}`);
+    if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
+    if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
+    if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
+    if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
+    writeFileSync(planPath, lines.join("\n") + "\n");
+    return [
+      "bash",
+      stubPath,
+      ctx.issuePath,
+      status,
+      ctx.outcomePath,
+      outcome,
+      String(b.exitCode ?? 0),
+      planPath,
+    ];
+  };
+  return { harnesses: { stub }, spawned, spawnOrder, spawnList };
+}
+
+const readyTicket = (id: string, blockedBy = "none") => ({
+  file: `${id}-t.md`,
+  marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
+});
 
 describe("pool loading", () => {
   it("rejects a pool with a missing line-1 marker", async () => {
@@ -328,6 +488,385 @@ describe("verify assignment", () => {
     expect(run.phase).toBe("done");
     expect(Object.keys(rig.spawned)).toEqual(["01"]);
   });
+});
+
+describe("verify fan-out", () => {
+  const verifyConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    assign: { "01": { verify: n } },
+  });
+
+  function readEventLines(poolDir: string, id: string) {
+    return readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as {
+        at: string;
+        attempt: number;
+        kind: string;
+        payload: Record<string, unknown>;
+      });
+  }
+
+  it("fans a verify: 3 ticket out to three same-round attempts, each on its own branch", async () => {
+    const { poolDir, head, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      // A three-way rendezvous: each attempt waits for the next one to
+      // start, so a serial engine times the wait out and crashes instead
+      // of passing.
+      "01": [
+        {
+          workFile: "cand-1.txt",
+          commitMsg: "cand-1",
+          touch: join(poolDir, "started-1"),
+          waitFor: join(poolDir, "started-3"),
+          recordDir: join(poolDir, "rec-1"),
+        },
+        {
+          workFile: "cand-2.txt",
+          commitMsg: "cand-2",
+          touch: join(poolDir, "started-2"),
+          waitFor: join(poolDir, "started-1"),
+          recordDir: join(poolDir, "rec-2"),
+        },
+        {
+          workFile: "cand-3.txt",
+          commitMsg: "cand-3",
+          touch: join(poolDir, "started-3"),
+          waitFor: join(poolDir, "started-2"),
+          recordDir: join(poolDir, "rec-3"),
+        },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The fan-out is this ticket's whole deliverable: the verify ticket
+    // does not proceed, so no merge, no status write, and no Review.
+    expect(run.phase).toBe("stalled");
+    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(run.final.log.some((line) =>
+      line.startsWith("ticket 01: verify fan-out complete: 3 attempts exited " +
+        "(3 done, 0 checkpoint, 0 crash)"),
+    )).toBe(true);
+
+    // Three attempts spawned in one scheduling round, each on its own
+    // attempt branch cut from the same HEAD.
+    expect(rig.spawnOrder).toEqual(["01", "01", "01"]);
+    expect(rig.spawnList.map((c) => c.outcomePath)).toEqual(
+      [1, 2, 3].map((i) =>
+        join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
+      ),
+    );
+    for (let i = 1; i <= 3; i++) {
+      const rec = join(poolDir, `rec-${i}`);
+      expect(readFileSync(join(rec, "branch"), "utf8").trim()).toBe(
+        `pool/01.attempt-${i}`,
+      );
+      expect(readFileSync(join(rec, "head"), "utf8").trim()).toBe(head);
+      expect(readFileSync(join(rec, "cwd"), "utf8").trim()).toBe(
+        join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`),
+      );
+      expect(rig.spawnList[i - 1].cwd).toBe(
+        join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`),
+      );
+    }
+
+    // Each attempt wrote its own Outcome, and nothing merged: the
+    // candidates sit on their branches, the working branch untouched.
+    for (let i = 1; i <= 3; i++) {
+      const outcome = JSON.parse(
+        readFileSync(
+          join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
+          "utf8",
+        ),
+      );
+      expect(outcome.status).toBe("done");
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .toBe(0);
+      expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
+    }
+    expect(run.final.outcomes).toEqual({});
+
+    // The ticket log records each attempt as a distinct attempt. Exits
+    // append in completion order, so the contract is per attempt: each
+    // attempt reads scheduled, spawned, exited in order, and every attempt
+    // was scheduled before the first spawn (one scheduling round).
+    const events = readEventLines(poolDir, "01");
+    expect(events.map((e) => e.attempt).sort()).toEqual([
+      1, 1, 1, 2, 2, 2, 3, 3, 3,
+    ]);
+    for (const attempt of [1, 2, 3]) {
+      expect(
+        events.filter((e) => e.attempt === attempt).map((e) => e.kind),
+      ).toEqual(["scheduled", "spawned", "exited"]);
+    }
+    const firstSpawn = events.findIndex((e) => e.kind === "spawned");
+    expect(
+      Math.max(
+        ...events.map((e, i) => (e.kind === "scheduled" ? i : -1)),
+      ),
+    ).toBeLessThan(firstSpawn);
+
+    // No partial progress: an attempt's exit is visible in the log while
+    // the ticket is still in-progress, and no merge ever lands.
+    const exitedEarly = run.snapshots.filter((s) =>
+      s.state.log.some((line) => line.includes("attempt 1 exited")),
+    );
+    expect(exitedEarly.length).toBeGreaterThan(0);
+    expect(
+      exitedEarly.every((s) => s.state.tickets["01"] === "in-progress"),
+    ).toBe(true);
+  }, 15000);
+
+  it("treats verify: 1 as one candidate on its own branch, not a solo merge", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "cand.txt", commitMsg: "cand" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("stalled");
+    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .toBe(0);
+    expect(existsSync(join(poolDir, "cand.txt"))).toBe(false);
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(poolDir, "runs", "01.attempt-1.outcome.json"),
+          "utf8",
+        ),
+      ).status,
+    ).toBe("done");
+  }, 15000);
+
+  it("runs a ticket without verify exactly one attempt, as today, beside a fan-out", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+        { workFile: "cand-3.txt", commitMsg: "cand-3" },
+      ],
+      "02": { workFile: "plain.txt", commitMsg: "plain" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Ticket 02 has no verify key: one attempt, merged, done.
+    expect(run.final.tickets["02"]).toBe("done");
+    expect(markerLine(poolDir, "02-t.md")).toContain("status=done");
+    expect(rig.spawnOrder.filter((id) => id === "02")).toHaveLength(1);
+    expect(existsSync(join(poolDir, "plain.txt"))).toBe(true);
+    expect(
+      readEventLines(poolDir, "02").map((e) => e.kind),
+    ).toEqual(["scheduled", "spawned", "exited", "merged"]);
+
+    // Ticket 01 fanned out and proceeds not at all.
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(rig.spawnOrder.filter((id) => id === "01")).toHaveLength(3);
+    for (let i = 1; i <= 3; i++) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .toBe(0);
+    }
+    expect(run.phase).toBe("stalled");
+  }, 15000);
+
+  it("keeps a crashed attempt's siblings running and records today's crash semantics", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      // Attempt 1 touches its crash marker, then blocks until a sibling
+      // has actually started before exiting non-zero with no outcome: a
+      // serial engine times the wait out (exit 42) and fails the code-3
+      // assertion below.
+      "01": [
+        {
+          touch: join(poolDir, "crashed-1"),
+          waitFor: join(poolDir, "started-2"),
+          status: "keep",
+          exitCode: 3,
+        },
+        {
+          touch: join(poolDir, "started-2"),
+          workFile: "cand-2.txt",
+          commitMsg: "cand-2",
+        },
+        {
+          // Attempt 3 does no work until the crash marker exists, so an
+          // engine that stops the round at the crash fails the done
+          // assertions below.
+          waitFor: join(poolDir, "crashed-1"),
+          workFile: "cand-3.txt",
+          commitMsg: "cand-3",
+        },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Today's crash semantics: one crash interrupt for the ticket, its
+    // body pointing at the crashed attempt's log.
+    expect(run.phase).toBe("quiescent");
+    const crashes = run.interrupts.filter((i) => i.kind === "crash");
+    expect(crashes).toHaveLength(1);
+    expect(crashes[0].ticketId).toBe("01");
+    expect(crashes[0].body).toBe(join(poolDir, "runs", "01.attempt-1.log"));
+
+    const events = readEventLines(poolDir, "01");
+    const crashEvent = events.find((e) => e.kind === "crash");
+    expect(crashEvent?.attempt).toBe(1);
+    expect(crashEvent?.payload).toEqual({ code: 3, reason: "harness exited 3" });
+
+    // The siblings survived the crash and sit on their branches as
+    // candidates, outcomes written; the ticket wrote no status anywhere.
+    for (const i of [2, 3]) {
+      const exit = events.find((e) => e.kind === "exited" && e.attempt === i);
+      expect(exit?.payload).toEqual({ code: 0, status: "done" });
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .toBe(0);
+      expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
+            "utf8",
+          ),
+        ).status,
+      ).toBe("done");
+    }
+    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+  }, 15000);
+
+  it("records a checkpoint outcome from one candidate without proceeding", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { status: "checkpoint", outcome: { summary: "paused-1", commitSha: null } },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The candidate's ending is recorded, but the fan-out gate holds: no
+    // checkpoint interrupt, no Brief landing, no status write. How a
+    // partial checkpoint interacts with grading is tickets 03 and 05's to
+    // settle; this pins the gate.
+    expect(run.phase).toBe("stalled");
+    expect(run.interrupts).toEqual([]);
+    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(markerLine(poolDir, "01-t.md")).not.toContain("Brief");
+    const events = readEventLines(poolDir, "01");
+    const exit1 = events.find((e) => e.kind === "exited" && e.attempt === 1);
+    expect(exit1?.payload).toEqual({ code: 0, status: "checkpoint" });
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(poolDir, "runs", "01.attempt-1.outcome.json"),
+          "utf8",
+        ),
+      ).status,
+    ).toBe("checkpoint");
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .toBe(0);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+  }, 15000);
+
+  it("rotates a pre-verify solo attempt's well-known log before the fan-out", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    // A well-known log left behind by a solo attempt of a pre-verify era.
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(join(poolDir, "runs", "01.log"), "solo era\n");
+    const rig = gitStubHarness(poolDir, { "01": [{}, {}] });
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The old log rotated to its attempt name; the fan-out's attempts
+    // wrote their own numbered logs and never touched the well-known one.
+    expect(readFileSync(join(poolDir, "runs", "01.attempt-0.log"), "utf8"))
+      .toBe("solo era\n");
+    expect(existsSync(join(poolDir, "runs", "01.log"))).toBe(false);
+    for (const i of [1, 2]) {
+      expect(existsSync(join(poolDir, "runs", `01.attempt-${i}.log`))).toBe(
+        true,
+      );
+    }
+  }, 15000);
+
+  it("re-fans-out with continued attempt numbers after a crash resume", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: verifyConfig(2),
+    });
+    const rig = stubHarness({
+      "01": { statuses: ["keep", "done"], exitCodes: [7, 0] },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+
+    // The existing resume path resets the ticket to ready; the next
+    // scheduling round fans out again, numbering on from the first round.
+    const resumed = await run.resume("01");
+    expect(resumed.phase).toBe("stalled");
+    expect(resumed.interrupts).toEqual([]);
+    expect(resumed.final.tickets).toEqual({ "01": "in-progress" });
+
+    const events = readEventLines(poolDir, "01");
+    for (const attempt of [1, 2, 3, 4]) {
+      expect(
+        events.filter((e) => e.attempt === attempt).map((e) => e.kind),
+      ).toEqual(
+        attempt === 1
+          ? ["scheduled", "spawned", "exited", "crash"]
+          : attempt === 2
+            ? // The resume's answered event carries the latest attempt.
+              ["scheduled", "spawned", "exited", "answered"]
+            : ["scheduled", "spawned", "exited"],
+      );
+    }
+    expect(existsSync(join(poolDir, "runs", "01.attempt-1.outcome.json")))
+      .toBe(false);
+    for (const i of [2, 3, 4]) {
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
+            "utf8",
+          ),
+        ).status,
+      ).toBe("done");
+    }
+  }, 15000);
 });
 
 describe("super-steps", () => {
@@ -2533,162 +3072,6 @@ describe("durability", () => {
 // its checkout: write and commit files, wait on siblings, and record what it
 // observed (HEAD, branch, cwd) for the assertions.
 describe("worktrees", () => {
-  interface GitStubBehaviour {
-    status?: "done" | "checkpoint" | "keep";
-    outcome?: { summary: string; commitSha: string | null } | null;
-    exitCode?: number;
-    workFile?: string;
-    workLine?: string;
-    overwrite?: boolean;
-    commitMsg?: string;
-    leaveFile?: string;
-    touch?: string;
-    waitFor?: string;
-    waitMerged?: string;
-    recordDir?: string;
-    expectFile?: string;
-  }
-
-  interface GitPool {
-    poolDir: string;
-    head: string;
-    git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
-  }
-
-  function makeGitPool(
-    spec: PoolSpec,
-    seed: Record<string, string> = {},
-  ): GitPool {
-    const poolDir = makePool(spec);
-    for (const [path, content] of Object.entries(seed)) {
-      writeFileSync(join(poolDir, path), content);
-    }
-    const git = (args: string[]) =>
-      Bun.spawnSync(["git", ...args], {
-        cwd: poolDir,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-    git(["init", "-q", "-b", "main"]);
-    git(["config", "user.email", "pool@test"]);
-    git(["config", "user.name", "pool"]);
-    git(["add", "-A"]);
-    git(["commit", "-qm", "init"]);
-    const head = git(["rev-parse", "HEAD"]).stdout.toString().trim();
-    return { poolDir, head, git };
-  }
-
-  function gitStubHarness(
-    poolDir: string,
-    behaviour: Record<string, GitStubBehaviour | GitStubBehaviour[]>,
-  ): StubRig {
-    const stubPath = join(poolDir, "git-stub.sh");
-    writeFileSync(
-      stubPath,
-      [
-        "#!/usr/bin/env bash",
-        "set -uo pipefail",
-        'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
-        'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
-        'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
-        'source "$plan"',
-        'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
-        'if [ -n "$WAIT_FOR" ]; then',
-        "  for _ in $(seq 1 100); do",
-        '    [ -e "$WAIT_FOR" ] && break',
-        "    sleep 0.05",
-        "  done",
-        '  [ -e "$WAIT_FOR" ] || exit 42',
-        "fi",
-        'if [ -n "$WAIT_MERGED" ]; then',
-        "  for _ in $(seq 1 100); do",
-        '    log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
-        '    case "$log" in *"$WAIT_MERGED"*) break;; esac',
-        "    sleep 0.05",
-        "  done",
-        '  log="$(git -C "$MAIN_REPO" log --format=%s 2>/dev/null)"',
-        '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
-        "fi",
-        'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
-        'if [ -n "$RECORD_DIR" ]; then',
-        '  mkdir -p "$RECORD_DIR"',
-        '  git rev-parse HEAD > "$RECORD_DIR/head"',
-        '  git branch --show-current > "$RECORD_DIR/branch"',
-        '  pwd > "$RECORD_DIR/cwd"',
-        "fi",
-        "staged=0",
-        'if [ -n "$WORK_FILE" ]; then',
-        '  mkdir -p "$(dirname "$WORK_FILE")"',
-        '  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
-        '  else printf \'%s\\n\' "${WORK_LINE:-work}" >> "$WORK_FILE"; fi',
-        '  git add "$WORK_FILE"; staged=1',
-        "fi",
-        'if [ -n "$LEAVE_FILE" ]; then printf "partial\\n" > "$LEAVE_FILE"; fi',
-        'if [ "$staged" = "1" ]; then git commit -qm "${COMMIT_MSG:-ticket}"; fi',
-        // The outcome JSON is the ending signal (ADR-0005): the stub writes
-        // it to the outcome path the engine handed over, and the engine
-        // writes the canonical Issue's marker itself.
-        'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
-        'exit "$exit_code"',
-        "",
-      ].join("\n"),
-    );
-    const spawned: Record<string, SpawnContext> = {};
-    const spawnOrder: string[] = [];
-    const spawnCounts: Record<string, number> = {};
-    const stub: HarnessCommand = (ctx) => {
-      spawned[ctx.id] = ctx;
-      spawnOrder.push(ctx.id);
-      const n = spawnCounts[ctx.id] ?? 0;
-      spawnCounts[ctx.id] = n + 1;
-      const entry = behaviour[ctx.id] ?? {};
-      const b = Array.isArray(entry)
-        ? entry[Math.min(n, entry.length - 1)]
-        : entry;
-      const status = b.status ?? "done";
-      const outcome =
-        b.outcome === null || status === "keep"
-          ? ""
-          : JSON.stringify({
-              status,
-              ...(b.outcome ?? {
-                summary: `summary-${ctx.id}`,
-                commitSha: `sha-${ctx.id}`,
-              }),
-            });
-      const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
-      const quote = (value: string) => JSON.stringify(value);
-      const lines = [`MAIN_REPO=${quote(poolDir)}`];
-      if (b.workFile) lines.push(`WORK_FILE=${quote(b.workFile)}`);
-      if (b.workLine) lines.push(`WORK_LINE=${quote(b.workLine)}`);
-      if (b.overwrite) lines.push('OVERWRITE="1"');
-      if (b.commitMsg) lines.push(`COMMIT_MSG=${quote(b.commitMsg)}`);
-      if (b.leaveFile) lines.push(`LEAVE_FILE=${quote(b.leaveFile)}`);
-      if (b.touch) lines.push(`TOUCH=${quote(b.touch)}`);
-      if (b.waitFor) lines.push(`WAIT_FOR=${quote(b.waitFor)}`);
-      if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
-      if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
-      if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
-      writeFileSync(planPath, lines.join("\n") + "\n");
-      return [
-        "bash",
-        stubPath,
-        ctx.issuePath,
-        status,
-        ctx.outcomePath,
-        outcome,
-        String(b.exitCode ?? 0),
-        planPath,
-      ];
-    };
-    return { harnesses: { stub }, spawned, spawnOrder };
-  }
-
-  const readyTicket = (id: string, blockedBy = "none") => ({
-    file: `${id}-t.md`,
-    marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
-  });
-
   it("runs a multi-ticket super-step concurrently, each in its own worktree branched from the same HEAD", async () => {
     const { poolDir, head, git } = makeGitPool({
       tickets: [readyTicket("01"), readyTicket("02")],
@@ -3706,10 +4089,12 @@ describe("accept/process split", () => {
     );
     const spawned: Record<string, SpawnContext> = {};
     const spawnOrder: string[] = [];
+    const spawnList: SpawnContext[] = [];
     const counts: Record<string, number> = {};
     const stub: HarnessCommand = (ctx) => {
       spawned[ctx.id] = ctx;
       spawnOrder.push(ctx.id);
+      spawnList.push(ctx);
       const n = counts[ctx.id] ?? 0;
       counts[ctx.id] = n + 1;
       const b = behaviour[ctx.id] ?? {};
@@ -3736,7 +4121,7 @@ describe("accept/process split", () => {
         outcome,
       ];
     };
-    return { harnesses: { stub }, spawned, spawnOrder };
+    return { harnesses: { stub }, spawned, spawnOrder, spawnList };
   }
 
   it("accepts answers mid-super-step and drains them in submission order at the boundary", async () => {

@@ -894,6 +894,42 @@ describe("ticket log endpoint", () => {
     expect(thirdBody.content).toBe("third\n");
   });
 
+  it("serves a verify fan-out's current attempt through its attempt-numbered log", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // A verify fan-out: three attempts, none ever holding the well-known
+    // log path.
+    writeFileSync(
+      join(runsDir, "01.events.jsonl"),
+      [
+        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 2, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "exited", payload: {} }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
+    writeFileSync(join(runsDir, "01.attempt-2.log"), "second\n");
+    writeFileSync(join(runsDir, "01.attempt-3.log"), "third\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      attempts: { attempt: number; kind: string; logFile: string; current: boolean }[];
+    };
+    // The current attempt reads its own attempt-numbered log: the pane must
+    // not serve an empty file for a fan-out's live attempt.
+    expect(body.content).toBe("third\n");
+    expect(body.attempts).toEqual([
+      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", current: false },
+      { attempt: 2, kind: "implement", logFile: "01.attempt-2.log", current: false },
+      { attempt: 3, kind: "implement", logFile: "01.attempt-3.log", current: true },
+    ]);
+  });
+
   it("defaults to the latest attempt when none is named", async () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
