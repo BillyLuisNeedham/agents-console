@@ -89,3 +89,21 @@ _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
 **Queued answer**:
 An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)
+
+## Verification
+
+**Verify**:
+Optional per-ticket machinery that checks whether finished Attempt work actually satisfies its ticket, instead of trusting the agent's done-claim. A ticket opts in by setting `verify: N` in its assign block — N parallel Attempts, one grader ticket per Attempt, then Selection. Absent the key, the ticket runs exactly as it always has. The pool's `verify` skill, written beside AGENT.md at Console setup, holds the grading instructions a grader agent follows.
+_Avoid_: verifier node, judge (a judge is a model, not this machinery)
+
+**Grade**:
+One grader's assessment of one Attempt: a score (0–10), a verdict (pass or flag), and short reasons. The grader is itself a ticket — an ordinary assignment, so its harness and model are chosen through the normal assign machinery. The grade lands in the graded Attempt's record, visible in the ticket's Detail. With `verify: 1`, a failing Grade becomes the Brief of a checkpoint interrupt.
+_Avoid_: rating, review (Review is the human's final judgment)
+
+**Selection**:
+The engine's pick of the best graded Attempt among a ticket's N candidates. A margin of ≥2 points takes the winner outright; a tighter spread spawns one head-to-head ticket comparing the top two side by side (the way the paper's pairwise comparisons work). Losers' branches are discarded; their logs and grades stay. A pool may set `selection: human` to raise an interrupt and let the human pick instead.
+_Avoid_: tournament, ranking
+
+**verify: N**:
+The per-ticket assign key that activates verification. N is both the number of parallel Attempts and the number of grader tickets. The key's absence — not a zero, not a false — means the ticket runs ungraded, exactly as before.
+_Avoid_: takes, retries
