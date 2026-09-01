@@ -373,9 +373,12 @@ async function boot(): Promise<void> {
 // bulk-resume prototype (src/prototype/), which drives the real canvas from
 // a fixture instead of booting against a live pool. Vite replaces
 // import.meta.env.DEV with false in production builds, so a stray merge can
-// never ship the branch.
-const prototypeVariant = new URLSearchParams(window.location.search).get("variant");
-if (import.meta.env.DEV && prototypeVariant) {
+// never ship the branch. The bare dev server has no pool API to boot
+// against, so no param defaults to the prototype; `?variant=live` forces the
+// real boot (e.g. behind a manually wired proxy).
+const variantParam = new URLSearchParams(window.location.search).get("variant");
+const prototypeVariant = import.meta.env.DEV ? (variantParam ?? "A") : null;
+if (prototypeVariant && prototypeVariant !== "live") {
   void import("./prototype/bulk-resume").then((m) => {
     m.mountPrototype(root, prototypeVariant);
   });
