@@ -83,7 +83,7 @@ One run of a ticket by a harness, from spawn to exit. A ticket accumulates attem
 _Avoid_: run (that's the whole thread), execution, job
 
 **Outcome**:
-The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by `docs/specs/2026-08-30-engine-owns-final-status.md`, closing issue #18.
+The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Ticket log**:
