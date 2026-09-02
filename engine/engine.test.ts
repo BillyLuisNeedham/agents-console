@@ -301,6 +301,70 @@ describe("super-steps", () => {
   });
 });
 
+// The spawn pump grace: a harness child that exits while a grandchild still
+// holds its stdout pipe would park the drive forever on an EOF that never
+// comes. The teardown bound turns the parked wait into a bounded drain, and
+// the drive proceeds to the next super-step.
+describe("spawn pump teardown", () => {
+  it("returns from a child whose grandchild holds its stdout pipe and runs the next super-step", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const holderPath = join(poolDir, "pipe-holder.sh");
+    writeFileSync(
+      holderPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome_path="$1"',
+        // The grandchild inherits the harness's stdout, writes one line
+        // inside the grace window, then outlives the run on purpose: an
+        // unbounded pump would park on its open pipe and blow the time
+        // bound below.
+        "bash -c 'sleep 0.3; echo late-output-from-grandchild; sleep 30' &",
+        'printf \'%s\' \'{"status":"done","summary":"held the pipe","commitSha":"sha-01"}\' > "$outcome_path"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const rig = stubHarness({});
+    const harnesses: Record<string, HarnessCommand> = {
+      stub: (ctx) =>
+        ctx.id === "01"
+          ? ["bash", holderPath, ctx.outcomePath]
+          : rig.harnesses.stub(ctx),
+    };
+
+    const started = Date.now();
+    const first = await runPool({ poolDir, harnesses });
+    // The bounded grace, not the grandchild's patience, returns the spawn:
+    // an unbounded pump would sit on the still-open pipe for the 30s the
+    // grandchild lives.
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    const run = await approveReview(first);
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.final.log).toContain("super-step 2: 02");
+    // The grandchild's line landed inside the grace window, so the attempt
+    // log still captured it.
+    expect(readFileSync(join(poolDir, "runs", "01.log"), "utf8")).toContain(
+      "late-output-from-grandchild",
+    );
+  }, 15000);
+});
+
 describe("ticket events", () => {
   interface EventLine {
     at: string;
@@ -3273,6 +3337,73 @@ describe("worktrees", () => {
     ]);
     expect(after.at(-1)?.attempt).toBe(2);
     expect(after.at(-1)?.kind).toBe("merged");
+  }, 15000);
+
+  it("tears down a resolver spawn whose grandchild holds its pipe, still capturing late output", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    // The resolver reproduces the conflict, stages a resolution, and holds
+    // its stdout pipe open with a grandchild that outlives it: one line
+    // lands inside the grace window, then the grandchild exits by itself.
+    const holderPath = join(poolDir, "pipe-holder-resolver.sh");
+    writeFileSync(
+      holderPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome="$1"; worktree="$2"',
+        "bash -c 'sleep 0.3; echo resolver-late-output-from-grandchild; sleep 30' &",
+        'git -C "$worktree" merge main >/dev/null 2>&1 || true',
+        'printf \'%s\\n\' "resolved-by-resolver" > "$worktree/shared.txt"',
+        'git -C "$worktree" add shared.txt',
+        'printf \'%s\' \'{"resolved": true, "note": "staged by the pipe holder"}\' > "$outcome"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const harnesses: Record<string, HarnessCommand> = {
+      ...rig.harnesses,
+      "resolver-stub": (ctx) => ["bash", holderPath, ctx.outcomePath, ctx.cwd],
+    };
+
+    // The comment above the ticket-spawn test's grandchild applies here too:
+    // the grandchild outlives the run, so only the bounded grace gets the
+    // resolver spawn back.
+    const started = Date.now();
+    const first = await runPool({ poolDir, harnesses });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const approval = first.interrupts.find((i) => i.kind === "merge-approval");
+    expect(approval).toBeTruthy();
+    expect(approval!.body).toContain("staged by the pipe holder");
+
+    const done = await approveReview(await first.approve("02"));
+    expect(done.phase).toBe("done");
+
+    // The resolver's log captured the grandchild's line that landed inside
+    // the grace window, and the drive did not park on the open pipe.
+    expect(
+      readFileSync(join(poolDir, "runs", "02.resolver.log"), "utf8"),
+    ).toContain("resolver-late-output-from-grandchild");
   }, 15000);
 
   it("spawns the resolver on a conflict, raises an approval interrupt, and approve commits the merge and continues", async () => {

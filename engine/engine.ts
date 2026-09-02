@@ -1999,6 +1999,13 @@ async function runTicket(
   };
 }
 
+// Once the harness child has exited, its stdout/stderr pumps get this long to
+// drain whatever is still in flight before the streams are torn down. A
+// grandchild that inherits the child's pipe and outlives it holds the write
+// end open, so EOF never arrives and an unbounded pump would park the drive
+// forever on a child that is already gone.
+const SPAWN_PUMP_GRACE_MS = 2_000;
+
 async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
@@ -2022,15 +2029,38 @@ async function spawnToLog(
   // is still running, and a crash log reads in the order the output
   // happened.
   const log = createWriteStream(ctx.logPath);
-  const pump = async (stream: ReadableStream<Uint8Array>) => {
-    for await (const chunk of stream) {
-      if (!log.write(chunk)) {
-        await once(log, "drain");
+  const exited = proc.exited;
+  // Each pump reads through an explicit reader so the child-exit grace can
+  // cancel the read from outside: the for-await loop used before locks the
+  // stream against exactly that teardown. A pump that drains before the
+  // grace expires (the normal case: the pipe closes with the child) clears
+  // its own timer, so clean spawns are untouched by the bound.
+  const pump = (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader();
+    const reading = (async () => {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        if (!log.write(value)) {
+          await once(log, "drain");
+        }
       }
-    }
+    })();
+    void exited
+      .then(() => {
+        const timer = setTimeout(() => {
+          void reader.cancel().catch(() => {});
+        }, SPAWN_PUMP_GRACE_MS);
+        void reading.then(
+          () => clearTimeout(timer),
+          () => clearTimeout(timer),
+        );
+      })
+      .catch(() => {});
+    return reading;
   };
   const [exitCode] = await Promise.all([
-    proc.exited,
+    exited,
     pump(proc.stdout),
     pump(proc.stderr),
   ]);
