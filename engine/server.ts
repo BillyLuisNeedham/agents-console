@@ -408,6 +408,45 @@ function readTicketEvents(
 }
 
 // ---------------------------------------------------------------------------
+// Grades endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * One ticket's latest grade, as the card summaries show it: the score and
+ * verdict with the graded attempt's number. Derived at read time from the
+ * same events files the Detail's timeline reads, so a card and the Detail
+ * never disagree. Reasons stay in the events payload; the card is a summary.
+ */
+export interface TicketGradeSummary {
+  attempt: number;
+  score: number;
+  verdict: string;
+}
+
+// The latest well-formed graded event per ticket, keyed by ticket id. Tickets
+// with no grade are absent, so the UI renders no grade UI for them. A graded
+// event whose payload is malformed is skipped the way the events reader skips
+// a torn line: it can never have come from the engine's write path.
+function readPoolGrades(
+  poolDir: string,
+  meta: TicketMarker[],
+): Record<string, TicketGradeSummary> {
+  const runsDir = join(poolDir, "runs");
+  const grades: Record<string, TicketGradeSummary> = {};
+  for (const marker of meta) {
+    const graded = readEvents(runsDir, marker.id).filter(
+      (event) => event.kind === "graded",
+    );
+    const last = graded.at(-1);
+    if (!last) continue;
+    const { score, verdict } = last.payload;
+    if (typeof score !== "number" || typeof verdict !== "string") continue;
+    grades[marker.id] = { attempt: last.attempt, score, verdict };
+  }
+  return grades;
+}
+
+// ---------------------------------------------------------------------------
 // Ticket body endpoint
 // ---------------------------------------------------------------------------
 
@@ -728,6 +767,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
           return Response.json(readTicketEvents(poolDir, ticketId, meta));
+        }
+
+        if (pathname === "/api/grades") {
+          return Response.json({ grades: readPoolGrades(poolDir, meta) });
         }
 
         if (pathname === "/api/log") {

@@ -404,8 +404,18 @@ export interface TicketCardView {
   status: PoolStatus;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
+  /** The ticket's latest grade, for the card summary. Null when ungraded:
+   *  no grade UI renders at all, so there is no empty state. */
+  grade: GradeView | null;
   x: number;
   y: number;
+}
+
+/** One ticket's latest grade as the grades endpoint serves it. */
+export interface GradeView {
+  attempt: number;
+  score: number;
+  verdict: string;
 }
 
 export interface UtilityCardView {
@@ -574,6 +584,7 @@ function projectTicket(
   ticket: PoolTicketState,
   state: PoolState,
   pos: Point,
+  grade: GradeView | null,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
   return {
@@ -586,6 +597,7 @@ function projectTicket(
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
+    grade,
     x: pos.x,
     y: pos.y,
   };
@@ -610,12 +622,22 @@ function projectUtility(
   };
 }
 
-export function projectPool(snapshot: PoolSnapshot): PoolView {
+export function projectPool(
+  snapshot: PoolSnapshot,
+  grades: Record<string, GradeView> = {},
+): PoolView {
   const tickets = snapshot.state.tickets;
   const positions = layoutPool(tickets);
   const cards: PoolCardView[] = [
     projectUtility(START_CARD_ID, "start", snapshot.state, positions[START_CARD_ID]),
-    ...tickets.map((ticket) => projectTicket(ticket, snapshot.state, positions[ticketCardId(ticket.id)])),
+    ...tickets.map((ticket) =>
+      projectTicket(
+        ticket,
+        snapshot.state,
+        positions[ticketCardId(ticket.id)],
+        grades[ticket.id] ?? null,
+      ),
+    ),
     projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),
   ];
   return {

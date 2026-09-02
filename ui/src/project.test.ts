@@ -155,6 +155,32 @@ describe("projectPoolEdges", () => {
 });
 
 describe("projectPool", () => {
+  it("carries each ticket's latest grade, and null for ungraded tickets", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A"), ticket("B")],
+      },
+    });
+    const view = projectPool(snap, {
+      A: { attempt: 2, score: 7, verdict: "pass" },
+    });
+    const a = view.cards.find((c) => c.id === "ticket:A");
+    const b = view.cards.find((c) => c.id === "ticket:B");
+    expect(a?.kind === "ticket" && a.grade).toEqual({
+      attempt: 2,
+      score: 7,
+      verdict: "pass",
+    });
+    expect(b?.kind === "ticket" && b.grade).toBe(null);
+  });
+
+  it("renders no grade when no grades map is passed", () => {
+    const snap = snapshot({ state: { tickets: [ticket("A")] } });
+    const view = projectPool(snap);
+    const a = view.cards.find((c) => c.id === "ticket:A");
+    expect(a?.kind === "ticket" && a.grade).toBe(null);
+  });
+
   it("renders start, each ticket, and review as cards with statuses and edges", () => {
     const snap = snapshot({
       seq: 3,

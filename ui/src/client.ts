@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
+import type { GradeView, PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -73,6 +73,19 @@ export class PoolClient {
     );
     if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
     return res.json();
+  }
+
+  /**
+   * The latest grade per ticket, keyed by ticket id, for the card summaries.
+   * Derived server-side from the same events files the Detail's timeline
+   * reads. Tickets without a grade are absent. Fetched on the snapshot
+   * cadence, like the selected ticket's events.
+   */
+  async getGrades(): Promise<Record<string, GradeView>> {
+    const res = await fetch(`${this.base}/api/grades`);
+    if (!res.ok) throw new Error(`pool grades failed: ${res.status}`);
+    const body = await res.json();
+    return body?.grades ?? {};
   }
 
   /**

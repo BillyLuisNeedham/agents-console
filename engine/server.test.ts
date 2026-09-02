@@ -20,6 +20,7 @@ import {
   type PoolServerOptions,
 } from "./server.ts";
 import { readFleetEntries } from "./fleet.ts";
+import { appendEvent } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
 const servers: PoolServer[] = [];
@@ -608,6 +609,58 @@ describe("ticket events endpoint", () => {
     const body = (await res.json()) as { spec: string };
     expect(body.spec).toContain("what to build");
     expect(body.spec).not.toContain("Ticket body");
+  });
+});
+
+describe("grades endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("serves each ticket's latest grade, skipping tickets without one", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+    ]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 4, verdict: "flag", reasons: "first" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 8, verdict: "pass", reasons: "second" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      grades: Record<string, { attempt: number; score: number; verdict: string }>;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 2, score: 8, verdict: "pass" },
+    });
+  });
+
+  it("skips a graded event whose payload is malformed", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: "eight" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as { grades: Record<string, unknown> };
+    expect(body.grades).toEqual({});
   });
 });
 
