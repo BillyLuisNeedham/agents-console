@@ -62,6 +62,8 @@ export interface Handlers {
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
+  /** The Needs input tray toggled its collapsed flag; re-render. */
+  onToggleTrayCollapse: () => void;
 }
 
 /**
@@ -112,6 +114,7 @@ export class ConsoleView {
       this.needsInput.render(model.needsInput, {
         onAnswer: handlers.onAnswer,
         onSelect: (cardId) => this.selectNode(cardId),
+        onToggle: handlers.onToggleTrayCollapse,
       }),
     );
     root.replaceChildren(

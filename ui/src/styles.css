@@ -1251,36 +1251,75 @@ body {
 /* ------------------------------------------------------ needs input tray */
 
 /* The Needs input tray: a fixed overlay on the left listing every ticket
-   with an unresolved Interrupt, the operator's work queue. Hidden entirely
-   at zero pending. It overlays the canvas and the drawers but sits under a
-   fullscreen Detail, which is a deliberate whole-window act. */
-.needs-input-tray {
+   with an unresolved Interrupt, the operator's work queue. Collapsible to
+   a badge carrying the count; tray and badge hide entirely at zero pending.
+   It overlays the canvas and the drawers but sits under a fullscreen
+   Detail, which is a deliberate whole-window act. Tray and badge share the
+   anchor chrome and the header typography below. */
+.needs-input-tray,
+.needs-input-badge {
   position: fixed;
   top: 60px;
   left: 0;
-  width: 300px;
-  max-height: calc(100vh - 160px);
-  overflow-y: auto;
+  z-index: 20;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-left: none;
   border-radius: 0 8px 8px 0;
   box-shadow: 4px 4px 24px rgba(0, 0, 0, 0.5);
-  z-index: 20;
+}
+
+.needs-input-tray {
+  width: 300px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.needs-input-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.needs-input-head,
+.needs-input-badge {
+  font-family: var(--mono);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-dim);
+}
+
+.needs-input-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* The header's collapse button: the tray folds to its badge, drafts kept. */
+.needs-input-collapse {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.needs-input-collapse:hover {
+  color: var(--text);
+}
+
+/* The collapsed tray: one badge carrying the count, waiting rows included,
+   click to expand. */
+.needs-input-badge {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.needs-input-badge:hover {
+  color: var(--text);
 }
 
 .needs-input-row {
@@ -1289,6 +1328,25 @@ body {
   gap: 8px;
   padding: 6px 4px;
   border-top: 1px solid var(--border);
+}
+
+/* The answered-and-waiting row: the same moment as the Detail's queued
+   interrupt box, greyed in place until the boundary drains it. The ticket id
+   stays clickable; selecting the card is navigation, not an answer. */
+.needs-input-row-waiting {
+  opacity: 0.6;
+}
+
+.needs-input-row-waiting .needs-input-kind {
+  color: var(--text-dim);
+}
+
+.needs-input-waiting {
+  color: var(--status-running);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .needs-input-id {

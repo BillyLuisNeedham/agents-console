@@ -295,6 +295,10 @@ function render(): void {
           render();
         });
     },
+    onToggleTrayCollapse: () => {
+      // The tray holds the collapsed flag; this re-render just picks it up.
+      render();
+    },
   });
 }
 

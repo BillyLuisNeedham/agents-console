@@ -458,6 +458,27 @@ describe("projectNeedsInput", () => {
     expect(rows[1].interrupt.queued).toBe(false);
   });
 
+  it("drops a waiting row when the boundary snapshot drains the queued answer", () => {
+    const waiting = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
+        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+      },
+    });
+    expect(projectNeedsInput(waiting)).toHaveLength(1);
+    // The boundary applies the queued answer: the interrupt and its queued
+    // record both drop, and the waiting row goes with them.
+    const drained = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [],
+        queuedAnswers: [],
+      },
+    });
+    expect(projectNeedsInput(drained)).toEqual([]);
+  });
+
   it("projects the review card's interrupt as a row that selects the review card", () => {
     const snap = snapshot({
       state: {
