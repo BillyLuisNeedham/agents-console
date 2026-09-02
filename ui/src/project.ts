@@ -786,6 +786,29 @@ export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
   return rows;
 }
 
+/**
+ * True when a row's interrupt form is the single-action resume shape the
+ * tray's bulk action covers: the resume kinds (checkpoint, crash, deadlock,
+ * merge-conflict) and an unknown kind's plain resume fallback. Review and
+ * merge-approval rows carry two actions and are answered individually.
+ */
+export function isResumeKindRow(row: NeedsInputRow): boolean {
+  return (
+    row.interrupt.form.actions.length === 1 &&
+    row.interrupt.form.actions[0].action === "resume"
+  );
+}
+
+/**
+ * The rows the tray's "resume all" fires: the open (not yet
+ * answered-and-waiting) resume-kind rows, in row order. Rows whose answer is
+ * already queued, and rows the operator answers individually (review and
+ * merge-approval), stay out of the bulk fire and out of its count.
+ */
+export function bulkResumeRows(rows: NeedsInputRow[]): NeedsInputRow[] {
+  return rows.filter((row) => !row.interrupt.queued && isResumeKindRow(row));
+}
+
 // ---------------------------------------------------------------------------
 // Detail tab default
 // ---------------------------------------------------------------------------

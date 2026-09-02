@@ -87,8 +87,15 @@ const logPane = new LogPane({
 
 // The per-session view state: selection, dragged card positions, panel
 // width, drawer height, and note drafts, owned by the canvas, detail, and
-// drawers modules and composed here once for the session.
-const consoleView = new ConsoleView();
+// drawers modules and composed here once for the session. The tray's answer
+// seam resolves on accept and rejects on failure so the tray marks its own
+// row; the Detail keeps its fire-and-forget onAnswer below with the global
+// banner.
+const consoleView = new ConsoleView({
+  onAnswer: (ticketId, action, note) =>
+    client.answer(ticketId, action, note).then(setSnapshot),
+  onChange: () => render(),
+});
 
 // Ticket bodies for the Spec tab: fetched once per ticket on first selection
 // and held for the session; a 404 caches null so a known-missing body is
@@ -294,10 +301,6 @@ function render(): void {
           state.error = `answer failed: ${err instanceof Error ? err.message : String(err)}`;
           render();
         });
-    },
-    onToggleTrayCollapse: () => {
-      // The tray holds the collapsed flag; this re-render just picks it up.
-      render();
     },
   });
 }

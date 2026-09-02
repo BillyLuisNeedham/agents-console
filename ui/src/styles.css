@@ -1383,6 +1383,40 @@ body {
   flex-wrap: wrap;
 }
 
+/* The header's right group: the bulk action and the collapse toggle share
+   the end of the head line. */
+.needs-input-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The header's bulk action: fires every open resume-kind row at once, each
+   with its own note. The head's uppercase label styles would otherwise
+   inherit into the button. */
+.needs-input-resume-all {
+  flex-shrink: 0;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* A row's failed answer, inline under the row: the Console's per-row failure
+   surface. The retry refires that row's action with its note; the message
+   rides the retry button's tooltip. */
+.needs-input-row-failed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  margin-top: -4px;
+  font-size: 11px;
+  color: var(--interrupt);
+}
+
+.needs-input-retry {
+  padding: 1px 8px;
+}
+
 /* ------------------------------------------------------- flow highlight */
 
 /* The selection and its one-hop flow neighbourhood. Placed last so a

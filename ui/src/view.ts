@@ -26,7 +26,7 @@ import { restoreLogScroll } from "./log-pane";
 import { Canvas } from "./canvas";
 import { Detail } from "./detail";
 import { Drawers } from "./drawers";
-import { NeedsInputTray } from "./needs-input";
+import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
 
 export interface AppModel {
@@ -62,15 +62,15 @@ export interface Handlers {
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
-  /** The Needs input tray toggled its collapsed flag; re-render. */
-  onToggleTrayCollapse: () => void;
 }
 
 /**
  * The per-session view state: one instance created by the bootstrap, holding
  * the selection plus the three sub-views with their own state, so a session's
  * dragged positions, panel width, drawer height, and note drafts survive the
- * full-DOM rebuild on every snapshot.
+ * full-DOM rebuild on every snapshot. The tray's answer seam and re-render
+ * trigger are wired here once, the LogPane way: async IO plus change
+ * notification belong to the module, not the render pass.
  */
 export class ConsoleView {
   private readonly canvas = new Canvas({
@@ -80,13 +80,17 @@ export class ConsoleView {
     onClose: () => this.closeDetail(),
   });
   private readonly drawers = new Drawers();
-  private readonly needsInput = new NeedsInputTray();
+  private readonly needsInput: NeedsInputTray;
   // The selection survives the rebuild (snapshots never close the panel or
   // lose the selection); its one-hop flow neighbourhood is recomputed from
   // the model's edges on every render, so a live snapshot re-derives the
   // highlight instead of stripping it.
   private selectedNodeId: string | null = null;
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
+
+  constructor(options: NeedsInputOptions) {
+    this.needsInput = new NeedsInputTray(options);
+  }
 
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
     this.canvas.cancelDrag();
@@ -97,6 +101,7 @@ export class ConsoleView {
     const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
     this.detail.pruneDrafts(pendingInterrupts);
     this.needsInput.pruneDrafts(pendingInterrupts);
+    this.needsInput.pruneFailures(pendingInterrupts);
     const noteFocus = this.detail.captureNoteFocus();
     const trayFocus = this.needsInput.captureNoteFocus();
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
@@ -112,9 +117,7 @@ export class ConsoleView {
       model.detail ? this.detail.renderHandle() : null,
       this.detail.render(model, handlers),
       this.needsInput.render(model.needsInput, {
-        onAnswer: handlers.onAnswer,
         onSelect: (cardId) => this.selectNode(cardId),
-        onToggle: handlers.onToggleTrayCollapse,
       }),
     );
     root.replaceChildren(

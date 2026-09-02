@@ -5,6 +5,7 @@ import {
   checkpointNotice,
   clampDetailWidth,
   clampDrawersHeight,
+  bulkResumeRows,
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
   DRAWER_MAX_VH,
@@ -513,6 +514,48 @@ describe("projectNeedsInput", () => {
 
   it("is empty with no pending interrupts", () => {
     expect(projectNeedsInput(snapshot())).toEqual([]);
+  });
+});
+
+describe("bulkResumeRows", () => {
+  it("keeps only the open resume-kind rows, in row order", () => {
+    const snap = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [
+          ticket("A", { status: "checkpoint" }),
+          ticket("B"),
+          ticket("C"),
+          ticket("D"),
+        ],
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief" },
+          { ticketId: "B", kind: "merge-approval", body: "resolution" },
+          { ticketId: "C", kind: "crash", body: "log path" },
+          { ticketId: "D", kind: "harness-gone", body: "?" },
+        ],
+        queuedAnswers: [{ ticketId: "C", kind: "crash" }],
+      },
+    });
+    const rows = projectNeedsInput(snap);
+    // The review row answers individually, the queued crash row already
+    // stands answered, and the unknown kind falls back to a plain resume
+    // form, so it bulk-fires with the checkpoint.
+    expect(bulkResumeRows(rows).map((r) => r.ticketId)).toEqual(["A", "D"]);
+  });
+
+  it("is empty when every row is queued or answered individually", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A"), ticket("B")],
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief" },
+          { ticketId: "B", kind: "review", body: "final review" },
+        ],
+        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+      },
+    });
+    expect(bulkResumeRows(projectNeedsInput(snap))).toEqual([]);
   });
 });
 
