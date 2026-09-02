@@ -178,6 +178,19 @@ Below the marker:
 - which tickets are expected to stop: from the checkpoint definition, so a checkpoint on those
   reads as correct rather than as a failure
 
+Then write the pool's `verify` skill beside `AGENT.md`: copy
+[`verify.template.md`](verify.template.md) into the pool directory as `verify.md`, verbatim,
+nothing to fill in. It seeds the grading instructions a grader agent follows when a ticket opts
+into verification: does the work match the ticket, do the outputs match the agent's claims, are
+there error signals in the log, with terminal output trusted over the agent's self-assessment.
+
+No question is asked about any of this. Activation is the per-ticket `verify: N` key, set on that
+ticket's entry under `assign` in `console.json`: N parallel attempts and N grader tickets, then
+selection. Absent the key a ticket runs exactly as it does today, so writing the skill is harmless
+for pools that never set it. The interview never asks for the key; set it by editing `console.json`
+when a ticket is wanted verified. If `verify.md` already sits beside `AGENT.md`, name it and leave
+it alone: a re-interview must not clobber criteria tuned by hand.
+
 ## 5. Save the Setup
 
 The config just written holds two slices. The behavioural slice (harness, model, drivers,

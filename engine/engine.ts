@@ -29,7 +29,7 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
-import { buildPrompt, buildResolverPrompt } from "./prompt.ts";
+import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
   type HarnessCommand,
@@ -39,7 +39,9 @@ import {
   branchExists,
   branchFor,
   commitMerge,
+  attemptBranches,
   currentBranch,
+  discardWorktree,
   git,
   gitAvailable,
   mergeBranch,
@@ -66,10 +68,20 @@ export interface Outcome {
   brief?: string;
 }
 
+// One attempt's outcome file name. The solo path keeps the well-known name;
+// a verify fan-out writes per attempt, so N parallel outcomes never collide
+// and each grader can bind to one attempt's file (ticket 03).
+function outcomeFileName(ticketId: string, attempt: number | null): string {
+  return attempt === null
+    ? `${ticketId}.outcome.json`
+    : `${ticketId}.attempt-${attempt}.outcome.json`;
+}
+
 interface TicketAssignment {
   harness?: string;
   model?: string;
   drivers?: string;
+  verify?: number;
 }
 
 export interface PoolConfig {
@@ -79,6 +91,9 @@ export interface PoolConfig {
   agents?: string;
   resolver?: string;
   port?: number;
+  // Who picks the winner of a verify fan-out: the engine's arithmetic rule
+  // (default) or the human, via a selection interrupt carrying the grades.
+  selection?: "auto" | "human";
 }
 
 export type InterruptKind =
@@ -87,7 +102,8 @@ export type InterruptKind =
   | "deadlock"
   | "merge-conflict"
   | "merge-approval"
-  | "review";
+  | "review"
+  | "selection";
 
 // The final Review interrupt is not a ticket's: it belongs to the run, and it
 // carries this id so the Console can hang it on the review utility card (the
@@ -98,6 +114,11 @@ interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
+  // A selection interrupt's candidate attempt numbers, riding so the answer
+  // is validated against the exact fan-out the grades came from, including
+  // after a restart (a superseded round's graded attempts would otherwise
+  // pass for candidates).
+  candidates?: number[];
 }
 
 interface PoolState {
@@ -203,6 +224,13 @@ function readyTickets(
 ): TicketMarker[] {
   return markers.filter(
     (marker) =>
+      // Grader tickets and the head-to-head ticket are engine-run (they are
+      // spawned at the grading or selection point of their build ticket's
+      // fan-out, which the ready set can never express, since the build
+      // ticket stays in-progress until selection). Excluding them here keeps
+      // a stray ready engine card from ever being scheduled as an ordinary
+      // implement ticket.
+      !engineTicketBuildId(marker.id) &&
       tickets[marker.id] === "ready" &&
       marker.blockedBy.every((id) => tickets[id] === "done"),
   );
@@ -212,6 +240,7 @@ interface Assignment {
   harness: string;
   model: string;
   drivers: string;
+  verify?: number;
 }
 
 interface SettleWaiter {
@@ -260,12 +289,30 @@ export function startPool(options: RunOptions): PoolRun {
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const cwd = repoRootOf(poolDir);
 
-  const assignments = new Map(
-    markers.map((marker) => [
+  // Two passes: ordinary tickets resolve first, then engine-run tickets
+  // (grader ids and the head-to-head id the engine writes) resolve from their
+  // build ticket's assignment, so a stale engine card on disk never fails
+  // pool start and an engine-run judge inherits its builder with zero new
+  // config.
+  const assignments = new Map<string, Assignment>();
+  for (const marker of markers) {
+    if (engineTicketBuildId(marker.id)) continue;
+    assignments.set(
       marker.id,
       resolveAssignment(marker, config, harnesses),
-    ]),
-  );
+    );
+  }
+  for (const marker of markers) {
+    if (assignments.has(marker.id)) continue;
+    const buildId = engineTicketBuildId(marker.id)!;
+    const build = assignments.get(buildId);
+    assignments.set(
+      marker.id,
+      build
+        ? resolveEngineTicketAssignment(config, marker, build, harnesses)
+        : resolveAssignment(marker, config, harnesses),
+    );
+  }
 
   const session: Session = {
     poolDir,
@@ -443,12 +490,34 @@ async function driveLoop(session: Session): Promise<void> {
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
       session.superStep += 1;
-      const scheduledAttempts = new Map(
-        ready.map((marker) => [
-          marker.id,
-          nextAttempt(session.runsDir, marker.id),
-        ]),
-      );
+      // Every attempt this super-step spawns is numbered before any spawn,
+      // so a verify fan-out cannot race the events counter: attempts run
+      // base..base+N-1 off one nextAttempt read per ticket.
+      const planned = ready.flatMap((marker) => {
+        const verify = session.assignments.get(marker.id)!.verify;
+        if (verify != null) {
+          // A verify ticket's attempts write attempt-numbered logs, but a
+          // pre-verify solo attempt's well-known log must still rotate
+          // before the fan-out spawns, so the history survives.
+          rotateAttemptLog(
+            session.runsDir,
+            marker.id,
+            join(session.runsDir, attemptLogName(marker.id, null, false)),
+            "spawned",
+          );
+        }
+        const base = nextAttempt(session.runsDir, marker.id);
+        return Array.from({ length: verify ?? 1 }, (_, i) => ({
+          marker,
+          plan: planTicket(
+            session,
+            marker,
+            ready.length,
+            base + i,
+            verify != null,
+          ),
+        }));
+      });
       session.state = applyUpdate(session.state, {
         tickets: Object.fromEntries(
           ready.map((marker) => [marker.id, "in-progress" as const]),
@@ -458,28 +527,16 @@ async function driveLoop(session: Session): Promise<void> {
         ],
       });
       writeMarkers(session);
-      for (const marker of ready) {
+      for (const { marker, plan } of planned) {
         appendEvent(session.runsDir, marker.id, {
           at: new Date().toISOString(),
-          attempt: scheduledAttempts.get(marker.id)!,
+          attempt: plan.attempt,
           kind: "scheduled",
           payload: {},
         });
       }
       emit("running");
       const snapshot = session.state;
-
-      const plans = new Map(
-        ready.map((marker) => [
-          marker.id,
-          planTicket(
-            session,
-            marker,
-            ready.length,
-            scheduledAttempts.get(marker.id)!,
-          ),
-        ]),
-      );
 
       // Merges land in completion order: each ticket's merge chains onto a
       // serialized queue the moment the ticket finishes, while its siblings
@@ -491,7 +548,7 @@ async function driveLoop(session: Session): Promise<void> {
       }[] = [];
       let mergeQueue: Promise<void> = Promise.resolve();
       const results = await Promise.all(
-        ready.map((marker) =>
+        planned.map(({ marker, plan }) =>
           runTicket(
             marker,
             snapshot,
@@ -502,8 +559,19 @@ async function driveLoop(session: Session): Promise<void> {
               issuesDir: session.issuesDir,
               harnesses: session.harnesses,
             },
-            plans.get(marker.id)!,
+            plan,
           ).then((result) => {
+            if (plan.verify) {
+              // A verify candidate never merges and never writes the
+              // ticket's status, at its exit or before its siblings exit:
+              // the fan-out proceeds only once every attempt has exited
+              // (grading and selection are later tickets). Only the pool
+              // log moves, so the Console sees each attempt's exit live.
+              session.state = applyUpdate(session.state, result.update);
+              result.joinedAtExit = true;
+              emit("running");
+              return result;
+            }
             if (result.plan.worktree && result.status === "done") {
               mergeQueue = mergeQueue.then(() => {
                 merges.push({
@@ -589,6 +657,74 @@ async function driveLoop(session: Session): Promise<void> {
             kind: "crash",
             body: logPath,
           });
+        }
+      }
+      // The fan-out is complete once every attempt has exited; this line is
+      // the gate's record. Nothing has merged and no status was written: the
+      // ticket stays in-progress for grading (ticket 03) to take over.
+      for (const marker of ready) {
+        if (session.assignments.get(marker.id)!.verify == null) continue;
+        const attempts = results.filter((r) => r.marker.id === marker.id);
+        const tally = (status: TicketStatus) =>
+          attempts.filter((r) => r.status === status).length;
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${marker.id}: verify fan-out complete: ` +
+              `${attempts.length} attempts exited ` +
+              `(${tally("done")} done, ${tally("checkpoint")} checkpoint, ` +
+              `${tally("in-progress")} crash); no merge and no status ` +
+              "write until grading",
+          ],
+        });
+      }
+      // Grading (ticket 03): once every attempt of a verify ticket has
+      // exited, the engine writes one grader ticket per attempt into the
+      // pool and runs them through the ordinary assign machinery. Grader
+      // tickets are real tickets on disk with the build ticket as their
+      // blocker, but they are never scheduled by the ready set: the build
+      // ticket stays in-progress until selection has chosen a winner, so
+      // the engine runs the graders itself here, the way it runs the merge
+      // resolver, and writes their statuses itself.
+      for (const marker of ready) {
+        const assignment = session.assignments.get(marker.id)!;
+        if (assignment.verify == null) continue;
+        const attempts = results
+          .filter((r) => r.marker.id === marker.id)
+          .map((r) => r.plan.attempt)
+          .sort((a, b) => a - b);
+        const grades = await runGraders(session, marker, attempts, emit);
+        // Lone-attempt resolution (ticket 05): with one attempt and one
+        // grade there is nothing to select between, so the grade decides
+        // at the ticket: flag → checkpoint, pass → done.
+        if (assignment.verify === 1 && attempts.length === 1) {
+          resolveLoneAttempt(
+            session,
+            marker,
+            results.find((r) => r.marker.id === marker.id)!,
+            grades.get(attempts[0]) ?? null,
+            emit,
+          );
+          continue;
+        }
+        // Winner selection (ticket 04): with more than one graded candidate
+        // and every attempt done, the engine picks the best and merges only
+        // that attempt's branch. A round with a crashed or paused attempt
+        // grades but decides nothing: the crash or checkpoint interrupt owns
+        // the ticket and the re-round after the human answers selects
+        // afresh. A grader without a usable grade is equally undecided
+        // (ticket 07's re-spawn supplies it). With the pool's selection set
+        // to human (ticket 08), the same completed fan-out raises the
+        // selection interrupt instead and the answer picks the winner.
+        const round = results.filter((r) => r.marker.id === marker.id);
+        if (
+          round.every((r) => r.status === "done") &&
+          attempts.every((attempt) => grades.has(attempt))
+        ) {
+          if (selectionMode(session.state.config) === "human") {
+            raiseSelectionInterrupt(session, marker, attempts, grades, emit);
+          } else {
+            await selectAndMergeWinner(session, marker, attempts, grades, emit);
+          }
         }
       }
       persist(session);
@@ -743,7 +879,7 @@ function rehydrate(session: Session): void {
   for (const marker of session.markers) {
     if (marker.status !== "done") continue;
     const read = readOutcomeResult(
-      join(session.runsDir, `${marker.id}.outcome.json`),
+      join(session.runsDir, outcomeFileName(marker.id, null)),
     );
     if (read.ok) recovered[marker.id] = read.outcome;
   }
@@ -835,6 +971,14 @@ function acceptAnswer(
     const named = namedReviewTickets(session.markers, note);
     if (named.length === 0) throw new Error(reviewRejectUnnamedError(session.markers));
   }
+  // A selection answer that names no candidate fails the same way: rejected
+  // at the seam with the valid attempts named, nothing queued, nothing merged.
+  if (interrupt.kind === "selection") {
+    const named = parseSelectionAnswer(note);
+    if (named === null || !interrupt.candidates?.includes(named)) {
+      throw new Error(selectionAnswerError(interrupt, note));
+    }
+  }
   appendEvent(session.runsDir, ticketId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, ticketId),
@@ -905,12 +1049,15 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   }
   session.markers = loadPoolMarkers(session.issuesDir);
   for (const m of session.markers) {
-    if (!session.assignments.has(m.id)) {
-      session.assignments.set(
-        m.id,
-        resolveAssignment(m, session.state.config, session.harnesses),
-      );
-    }
+    if (session.assignments.has(m.id)) continue;
+    const buildId = engineTicketBuildId(m.id);
+    const build = buildId ? session.assignments.get(buildId) : undefined;
+    session.assignments.set(
+      m.id,
+      build
+        ? resolveEngineTicketAssignment(session.state.config, m, build, session.harnesses)
+        : resolveAssignment(m, session.state.config, session.harnesses),
+    );
   }
   if (interrupt.kind === "review") {
     if (record.approve) {
@@ -936,6 +1083,10 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     } else {
       rejectMerge(session, marker, interrupt, record.note);
     }
+    return;
+  }
+  if (interrupt.kind === "selection") {
+    processSelectionAnswer(session, marker, interrupt, record.note);
     return;
   }
   if (marker.status !== "done") {
@@ -1338,6 +1489,1342 @@ function rejectMerge(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Grading (ticket 03): engine-run grader tickets
+// ---------------------------------------------------------------------------
+
+// The grader's driver name, under the same contract as the resolver's: a real
+// harness invokes it as a command stub, so a pool that grades on real
+// harnesses needs a `verify` command written where the harness looks for
+// commands. The grading instructions travel in the prompt body regardless;
+// the fakes in the engine suite never see the driver name.
+const GRADER_DRIVER = "verify";
+
+// The head-to-head judge's driver name, same contract as the grader's
+// (ticket 06).
+const HEAD_TO_HEAD_DRIVER = "head-to-head";
+
+// One grader's assessment of one attempt (the Grade in CONTEXT.md): the
+// score, the verdict, and short reasons, carried in the grader's Outcome
+// JSON under a `grade` key and copied by the engine into the graded
+// attempt's record.
+interface Grade {
+  score: number;
+  verdict: "pass" | "flag";
+  reasons: string;
+}
+
+// The attempt log handed to a grader is capped at roughly 20k tokens, at the
+// usual ~4 characters per token.
+const GRADER_TRIM_CHARS = 80_000;
+
+// Grader ticket ids are the engine's own convention: `<build>-grader-<N>`,
+// N one-based positions in the build ticket's fan-out, deterministic so a
+// re-round rewrites the same file (rebinding it to the round's new attempt)
+// and a console.json assign entry can name a grader before it exists. A
+// human ticket literally named like this would be mistaken for a grader; the
+// convention is engine-owned, so pools do not write such ids.
+function graderIdFor(buildId: string, index: number): string {
+  return `${buildId}-grader-${index}`;
+}
+
+function parseGraderId(id: string): { buildId: string; attempt: number } | null {
+  const match = /^(.+)-grader-(\d+)$/.exec(id);
+  if (!match) return null;
+  return { buildId: match[1], attempt: Number(match[2]) };
+}
+
+// The head-to-head ticket id is the engine's convention too: exactly one per
+// build ticket, `<build>-head-to-head`, deterministic so a re-round rewrites
+// the same file (rebinding it to the round's top two) and a console.json
+// assign entry can name it before it exists. Same engine-owned convention
+// note as the grader ids: pools do not write such ids (ticket 06).
+function headToHeadIdFor(buildId: string): string {
+  return `${buildId}-head-to-head`;
+}
+
+function parseHeadToHeadId(id: string): string | null {
+  return id.endsWith("-head-to-head")
+    ? id.slice(0, -"-head-to-head".length)
+    : null;
+}
+
+// The build ticket behind an engine-written ticket id, grader or head-to-head;
+// null for an ordinary ticket the pool's own directory defines.
+function engineTicketBuildId(id: string): string | null {
+  return parseGraderId(id)?.buildId ?? parseHeadToHeadId(id);
+}
+
+// An engine-run ticket's harness and model resolve through the ordinary
+// assign machinery (this covers grader tickets and the head-to-head ticket):
+// an assign entry for the ticket's own id overrides field-wise, and what it
+// does not override comes from the build ticket's resolved assignment rather
+// than the pool defaults, so an engine-run judge can be a different agent
+// than its builder with zero new config. The drivers are meaningless (the
+// prompt is engine-built) and an engine-run judge is never itself a verify
+// ticket, so neither carries over. An unknown harness fails fast with the
+// same error a ticket's would, instead of an opaque crash mid-judgment.
+function resolveEngineTicketAssignment(
+  config: PoolConfig,
+  ticketMarker: TicketMarker,
+  build: Assignment,
+  harnesses: Record<string, HarnessCommand>,
+): Assignment {
+  const assign = config.assign?.[ticketMarker.id] ?? {};
+  const harness = assign.harness ?? build.harness;
+  if (!harnesses[harness]) {
+    throw new Error(
+      `pool config: ticket ${ticketMarker.id} names unknown harness ` +
+        `'${harness}'. Known: ${Object.keys(harnesses).sort().join(", ")}`,
+    );
+  }
+  return {
+    harness,
+    model: assign.model ?? build.model,
+    drivers: build.drivers,
+  };
+}
+
+// The grader's outcome: the standard contract plus a validated grade.
+// Anything that is not a valid grade is unusable rather than a low score or
+// a silent pass, so a broken grader can never decide the build ticket's
+// fate (the re-spawn that follows is ticket 07's machinery). A checkpoint
+// outcome is unusable too: the grader's contract is one done outcome
+// carrying its grade, and the engine never honors a grader's pause.
+function readGraderResult(
+  path: string,
+): { ok: true; outcome: Outcome; grade: Grade } | { ok: false; reason: string } {
+  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
+  let parsed: {
+    grade?: { score?: unknown; verdict?: unknown; reasons?: unknown };
+  };
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { ok: false, reason: "outcome is not parseable JSON" };
+  }
+  // The standard outcome validation, run against the one parse this reader
+  // already holds.
+  const base = validateOutcome(parsed);
+  if (!base.ok) return base;
+  if (base.outcome.status !== "done") {
+    return { ok: false, reason: "grader outcome is a checkpoint, not a grade" };
+  }
+  const grade = parsed?.grade;
+  if (typeof grade !== "object" || grade === null) {
+    return { ok: false, reason: "outcome carries no grade object" };
+  }
+  if (
+    typeof grade.score !== "number" ||
+    !Number.isFinite(grade.score) ||
+    grade.score < 0 ||
+    grade.score > 10
+  ) {
+    return { ok: false, reason: "grade has no score in 0..10" };
+  }
+  if (grade.verdict !== "pass" && grade.verdict !== "flag") {
+    return { ok: false, reason: "grade verdict is not pass or flag" };
+  }
+  if (typeof grade.reasons !== "string") {
+    return { ok: false, reason: "grade has no reasons string" };
+  }
+  return {
+    ok: true,
+    outcome: base.outcome,
+    grade: { score: grade.score, verdict: grade.verdict, reasons: grade.reasons },
+  };
+}
+
+// The attempt log's tail, capped at about 20k tokens, so a huge log cannot
+// blow the grader's window. A trimmed copy opens with a notice naming the
+// cut, so the grader can say in its reasons that the log it saw was
+// trimmed; a log within the budget passes through whole.
+function trimTail(text: string): string {
+  if (text.length <= GRADER_TRIM_CHARS) return text;
+  let tail = text.slice(-GRADER_TRIM_CHARS);
+  const newline = tail.indexOf("\n");
+  if (newline > -1 && newline < tail.length - 1) tail = tail.slice(newline + 1);
+  return (
+    `[log trimmed to the last ~20k tokens; ${tail.length} of ` +
+    `${text.length} characters shown]\n${tail}`
+  );
+}
+
+// The attempt's work as a diff: the attempt branch against the commit it was
+// cut from, so sibling merges onto the working branch during the fan-out
+// never leak into one attempt's grade.
+function attemptDiff(
+  session: Session,
+  buildId: string,
+  attempt: number,
+): string {
+  if (!session.git) return "(no diff: the pool does not run in git)\n";
+  const branch = branchFor(buildId, attempt);
+  if (!branchExists(session.cwd, buildId, attempt)) {
+    return `(no diff: no attempt branch ${branch})\n`;
+  }
+  const base = git(session.cwd, ["merge-base", "HEAD", branch]);
+  if (!base.ok) {
+    return "(no diff: no common ancestor with the attempt branch)\n";
+  }
+  const diff = git(session.cwd, ["diff", `${base.out}..${branch}`]);
+  if (!diff.ok) return "(no diff: git diff failed)\n";
+  return diff.out;
+}
+
+// The grader ticket file: a real ticket in the pool's directory, with the
+// ordinary blocking edge from its build ticket, so it renders as a node card
+// and its assignment is editable like any ticket's. The engine rewrites it
+// every time the build's fan-out completes, so a re-round after a resume
+// rebinds the same card to the round's new attempt instead of grading a
+// stale one; the superseded round's grade stays on the build ticket's
+// events, keyed by the attempt it graded.
+function writeGraderTicket(
+  session: Session,
+  build: TicketMarker,
+  index: number,
+  attempt: number,
+): void {
+  const gid = graderIdFor(build.id, index);
+  const outcomePath = join(session.runsDir, outcomeFileName(build.id, attempt));
+  const diffPath = join(session.runsDir, `${gid}.diff.patch`);
+  const logPath = join(session.runsDir, `${gid}.trim.log`);
+  const body =
+    `<!-- state: id=${gid} blocked-by=${build.id} status=ready -->
+
+# ${gid}: grade attempt ${attempt} of ticket ${build.id}
+
+**Grader for:** ticket ${build.id}, attempt ${attempt}.
+
+**Bound artifacts:** ticket file \`${build.file}\`; outcome \`${outcomePath}\`; diff \`${diffPath}\`; trimmed log \`${logPath}\`.
+
+The engine wrote this ticket when every attempt of ticket ${build.id} had ` +
+    `exited, and runs it through the pool's ordinary assign machinery: an ` +
+    "`assign` entry for this id in console.json overrides the build " +
+    `ticket's harness and model. Its prompt is the pool's verify skill ` +
+    `parameterized with the artifacts above, and the grade travels in this ` +
+    `ticket's outcome JSON. Graders write no status, raise no interrupts, ` +
+    `and merge nothing.
+`;
+  writeFileSync(join(session.issuesDir, `${gid}.md`), body);
+}
+
+// Grading one verify ticket's exited fan-out: write the grader tickets,
+// then run them all through their resolved assignments. Each grader's exit
+// applies its own state update and emits, the way a verify attempt's exit
+// does, so the Console watches the grades land while a slow grader runs.
+// A grader whose run produced no usable grade is re-spawned for the same
+// attempt (ticket 07): re-spawn rounds follow the initial one, in parallel
+// per round, until every grader has graded or the bound is exhausted and a
+// crash interrupt hands the build ticket to the human. Returns the usable
+// grades by attempt number; a grader that never graded leaves its attempt
+// unmapped (the lone-attempt resolution and the selection must never decide
+// on a grade that does not exist).
+async function runGraders(
+  session: Session,
+  build: TicketMarker,
+  attempts: number[],
+  emit: (phase: RunPhase) => void,
+): Promise<Map<number, Grade>> {
+  for (const [index, attempt] of attempts.entries()) {
+    writeGraderTicket(session, build, index + 1, attempt);
+  }
+  session.markers = loadPoolMarkers(session.issuesDir);
+  const buildAssignment = session.assignments.get(build.id)!;
+  let pending: PendingGrader[] = attempts.map((attempt, index) => {
+    const marker = session.markers.find(
+      (m) => m.id === graderIdFor(build.id, index + 1),
+    )!;
+    const assignment = resolveEngineTicketAssignment(
+      session.state.config,
+      marker,
+      buildAssignment,
+      session.harnesses,
+    );
+    session.assignments.set(marker.id, assignment);
+    return { marker, assignment, attempt, lastReason: "" };
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${build.id}: grading ${attempts.length} ` +
+        `attempt${attempts.length === 1 ? "" : "s"} with grader tickets ` +
+        pending.map((g) => g.marker.id).join(", "),
+    ],
+  });
+  for (const { marker } of pending) {
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: nextAttempt(session.runsDir, marker.id),
+      kind: "scheduled",
+      payload: {},
+    });
+    session.state = applyUpdate(session.state, {
+      tickets: { [marker.id]: "in-progress" as const },
+    });
+    writeMarkerStatus(marker.file, "in-progress");
+    marker.status = "in-progress";
+  }
+  emit("running");
+  const grades = new Map<number, Grade>();
+  for (let round = 0; ; round++) {
+    const results = await Promise.all(
+      pending.map((g) =>
+        runGrader(session, build, g.marker, g.attempt, g.assignment, emit),
+      ),
+    );
+    const stillPending: PendingGrader[] = [];
+    for (const [i, g] of pending.entries()) {
+      const result = results[i]!;
+      if (result.ok) grades.set(g.attempt, result.grade);
+      else stillPending.push({ ...g, lastReason: result.reason });
+    }
+    pending = stillPending;
+    if (pending.length === 0) return grades;
+    if (round >= GRADER_RESPAWN_LIMIT) {
+      raiseGraderExhausted(session, build, pending, emit);
+      return grades;
+    }
+    const respawn = round + 1;
+    pending = pending.map(({ marker, attempt, lastReason }) => {
+      // The re-spawn resolves its assignment fresh, so an operator's
+      // mid-run edit to console.json lands on the very next grader run.
+      const assignment = resolveEngineTicketAssignment(
+        session.state.config,
+        marker,
+        buildAssignment,
+        session.harnesses,
+      );
+      session.assignments.set(marker.id, assignment);
+      // The re-spawn marker and the schedule it opens share one attempt
+      // number: they are one lifecycle moment, and the fresh run's spawned
+      // event reads its attempt back from here.
+      const attemptNo = nextAttempt(session.runsDir, marker.id);
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: attemptNo,
+        kind: "grader-respawn",
+        payload: {
+          build: build.id,
+          gradedAttempt: attempt,
+          reason: lastReason,
+          respawn,
+        },
+      });
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: attemptNo,
+        kind: "scheduled",
+        payload: {},
+      });
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${build.id}: re-spawning grader ${marker.id} for attempt ` +
+            `${attempt} (respawn ${respawn} of ${GRADER_RESPAWN_LIMIT})`,
+        ],
+      });
+      return { marker, assignment, attempt, lastReason };
+    });
+    emit("running");
+  }
+}
+
+// One grader awaiting a usable grade, carried across re-spawn rounds with
+// the reason its last run failed (the re-spawn event and the exhaustion
+// interrupt both name it).
+interface PendingGrader {
+  marker: TicketMarker;
+  assignment: Assignment;
+  attempt: number;
+  lastReason: string;
+}
+
+// One grader run's ending: a usable grade, or the reason the run decided
+// nothing (a dead harness, an unparseable outcome, a pause). The reason is
+// the same string the crash event and the pool log carry, and it rides the
+// re-spawn event so the ticket log shows why the fresh run exists.
+type GraderRun = { ok: true; grade: Grade } | { ok: false; reason: string };
+
+// The re-spawn bound: a crashed grader is re-spawned at most this many times
+// per fan-out round before the engine gives up on it. It stands in for the
+// crash-retry an ordinary ticket's human drives (crash interrupt, resume):
+// two automatic re-spawns absorb a transient harness failure, while a
+// systematically broken grader stops the run instead of looping forever.
+// The bound is per round: the fresh fan-out a resume starts grants it anew.
+const GRADER_RESPAWN_LIMIT = 2;
+
+// Every re-spawn also crashed: stop retrying and raise a crash interrupt on
+// the build ticket, so the broken grader surfaces to the human. The build
+// ticket's marker keeps the in-progress the fan-out gave it; answering the
+// interrupt with resume sends the ticket through a fresh fan-out round,
+// whose grader cards are rewritten and whose bound starts over.
+function raiseGraderExhausted(
+  session: Session,
+  build: TicketMarker,
+  exhausted: PendingGrader[],
+  emit: (phase: RunPhase) => void,
+): void {
+  const runs = GRADER_RESPAWN_LIMIT + 1;
+  raiseInterrupt(session, {
+    ticketId: build.id,
+    kind: "crash",
+    body: exhausted
+      .map(
+        ({ marker, attempt, lastReason }) =>
+          `grader ${marker.id} gave no usable grade for attempt ${attempt} ` +
+          `after ${runs} runs (last crash: ${lastReason}); grader log: ` +
+          join(session.runsDir, attemptLogName(marker.id, null, false)),
+      )
+      .join("\n"),
+  });
+  session.state = applyUpdate(session.state, {
+    log: exhausted.map(
+      ({ marker, attempt }) =>
+        `ticket ${build.id}: grader ${marker.id} gave no usable grade for ` +
+        `attempt ${attempt} after ${runs} runs; crash interrupt raised for ` +
+        "the build ticket",
+    ),
+  });
+  emit("running");
+}
+
+async function runGrader(
+  session: Session,
+  build: TicketMarker,
+  grader: TicketMarker,
+  attempt: number,
+  assignment: Assignment,
+  emit: (phase: RunPhase) => void,
+): Promise<GraderRun> {
+  const gid = grader.id;
+  const runsDir = session.runsDir;
+  // As in runTicket: the grader starts with no outcome, so a stale file
+  // from a previous grading round can never pass for this round's result.
+  const graderOutcomePath = join(runsDir, outcomeFileName(gid, null));
+  rmSync(graderOutcomePath, { force: true });
+  const logPath = join(runsDir, attemptLogName(gid, null, false));
+  rotateAttemptLog(runsDir, gid, logPath, "spawned");
+  const attemptOutcomePath = join(runsDir, outcomeFileName(build.id, attempt));
+  const diffPath = join(runsDir, `${gid}.diff.patch`);
+  const trimPath = join(runsDir, `${gid}.trim.log`);
+  writeFileSync(diffPath, attemptDiff(session, build.id, attempt));
+  writeFileSync(
+    trimPath,
+    trimTail(
+      readOptional(join(runsDir, attemptLogName(build.id, attempt, false))) ??
+        "(no attempt log was recorded)\n",
+    ),
+  );
+  // Read fresh at every grading round, like AGENT.md at every spawn: an
+  // operator's mid-run edit lands in the very next grader's prompt.
+  const skill = readOptional(join(session.poolDir, "verify.md"));
+  const prompt = buildGraderPrompt({
+    buildId: build.id,
+    attempt,
+    skill,
+    ticketPath: build.file,
+    outcomePath: attemptOutcomePath,
+    diffPath,
+    logPath: trimPath,
+    graderOutcomePath,
+  });
+  const ctx: SpawnContext = {
+    id: gid,
+    issuePath: grader.file,
+    body: prompt,
+    driver: GRADER_DRIVER,
+    harness: assignment.harness,
+    model: assignment.model,
+    agents: session.state.config.agents,
+    logPath,
+    outcomePath: graderOutcomePath,
+    cwd: session.cwd,
+  };
+  const argv = session.harnesses[assignment.harness](ctx);
+  appendEvent(runsDir, gid, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, gid),
+    kind: "spawned",
+    payload: {},
+  });
+  const exitCode = await spawnToLog(argv, ctx);
+  const result = readGraderResult(graderOutcomePath);
+  if (exitCode !== 0) {
+    const reason = `harness exited ${exitCode}`;
+    recordGraderFailure(session, build, grader, attempt, exitCode, reason, emit);
+    return { ok: false, reason };
+  }
+  if (!result.ok) {
+    recordGraderFailure(session, build, grader, attempt, exitCode, result.reason, emit);
+    return { ok: false, reason: result.reason };
+  }
+  // A usable grade: the engine writes the grader's done status (ADR-0005:
+  // the engine owns every status write) and copies the grade into the
+  // graded attempt's record, a graded event on the build ticket's file.
+  writeMarkerStatus(grader.file, "done");
+  grader.status = "done";
+  appendEvent(runsDir, gid, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, gid),
+    kind: "exited",
+    payload: { code: exitCode, status: "done" },
+  });
+  appendEvent(runsDir, build.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "graded",
+    payload: {
+      score: result.grade.score,
+      verdict: result.grade.verdict,
+      reasons: result.grade.reasons,
+    },
+  });
+  session.state = applyUpdate(session.state, {
+    tickets: { [gid]: "done" },
+    outcomes: { [gid]: result.outcome },
+    log: [
+      `ticket ${build.id}: attempt ${attempt} graded: score ` +
+        `${result.grade.score}, verdict ${result.grade.verdict} ` +
+        `(grader ${gid})`,
+    ],
+  });
+  emit("running");
+  return { ok: true, grade: result.grade };
+}
+
+// A grader that exited non-zero or wrote no parseable grade decides nothing:
+// the crash lands on the grader ticket, its marker stays in-progress, and
+// the build ticket is untouched. The re-spawn rounds that follow, and the
+// bound that stops them, are runGraders' (ticket 07).
+function recordGraderFailure(
+  session: Session,
+  build: TicketMarker,
+  grader: TicketMarker,
+  attempt: number,
+  exitCode: number,
+  reason: string,
+  emit: (phase: RunPhase) => void,
+): void {
+  appendEvent(session.runsDir, grader.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, grader.id),
+    kind: "exited",
+    payload: { code: exitCode, status: "in-progress" },
+  });
+  appendEvent(session.runsDir, grader.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, grader.id),
+    kind: "crash",
+    payload: { code: exitCode, reason },
+  });
+  // Whatever marker status the grader agent wrote for itself, the engine
+  // owns the write: a grader without a usable grade is never done.
+  if (readMarker(grader.file).status !== "in-progress") {
+    writeMarkerStatus(grader.file, "in-progress");
+  }
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${build.id}: grader ${grader.id} produced no usable grade ` +
+        `for attempt ${attempt}: ${reason}`,
+    ],
+  });
+  emit("running");
+}
+
+// Lone-attempt resolution (ticket 05): a verify: 1 ticket's grade decides at
+// the ticket instead of at Review, the earliest payoff of verification. A
+// flag verdict raises the checkpoint interrupt whose Brief is the grader's
+// complaint; a pass verdict marks the ticket done exactly as an unverified
+// ticket is today: the attempt branch merges through the existing merge path
+// and the engine writes the done status (ADR-0005). An attempt that paused or
+// crashed made no done-claim for the grade to verify: the agent's own
+// checkpoint takes today's checkpoint path, a crash stays with its crash
+// interrupt, and a missing grade leaves the ticket untouched for the grader
+// re-spawn (ticket 07). Selection for verify: N with N > 1 is not this
+// function's business (ticket 04).
+function resolveLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  result: TicketResult,
+  grade: Grade | null,
+  emit: (phase: RunPhase) => void,
+): void {
+  const attempt = result.plan.attempt;
+  // A crashed attempt decided nothing; the crash interrupt raised at the
+  // boundary owns the ticket and a resume re-runs it.
+  if (result.status === "in-progress") return;
+  const outcome = readOutcomeResult(
+    join(session.runsDir, outcomeFileName(marker.id, attempt)),
+  );
+  if (result.status === "checkpoint") {
+    // The attempt paused, so there is no done-claim and the agent's own
+    // brief travels, exactly as an unverified ticket's checkpoint does
+    // today; the grade lands as context only and never overrides a pause.
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      outcome.ok ? outcome.outcome.brief : undefined,
+      `ticket ${marker.id}: attempt ${attempt} checkpointed; its grade is ` +
+        "context only and the attempt's own brief travels",
+      emit,
+    );
+    if (outcome.ok) {
+      session.state = applyUpdate(session.state, {
+        outcomes: { [marker.id]: outcome.outcome },
+      });
+    }
+    return;
+  }
+  if (!grade) return;
+  if (grade.verdict === "flag") {
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      gradeComplaint(grade),
+      `ticket ${marker.id}: attempt ${attempt}'s grade was flagged; ` +
+        "checkpoint raised with the grader's complaint as the Brief",
+      emit,
+    );
+    return;
+  }
+  completeLoneAttempt(session, marker, result, outcome, emit);
+}
+
+// The engine-side checkpoint for a lone attempt: the engine writes the
+// checkpoint status itself (ADR-0005), lands the Brief in the canonical
+// Issue, and raises the interrupt through the same path an attempt's own
+// checkpoint uses, so the resume flow and the re-raise after a restart are
+// the existing ones.
+function checkpointLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  brief: string | undefined,
+  logLine: string,
+  emit: (phase: RunPhase) => void,
+): void {
+  writeMarkerStatus(marker.file, "checkpoint");
+  marker.status = "checkpoint";
+  landCheckpointBrief(marker.file, brief);
+  raiseCheckpoint(session, marker, attempt);
+  session.state = applyUpdate(session.state, {
+    tickets: { [marker.id]: "checkpoint" },
+    log: [logLine],
+  });
+  emit("running");
+}
+
+// The pass verdict: the ticket is done exactly as an unverified ticket is
+// today. The attempt's branch merges through the existing merge path (the
+// same mergeTicket the drive loop calls for a solo merge), the merged event
+// lands on the ticket's log, and the attempt's outcome becomes the ticket's
+// outcome for downstream prompts.
+function completeLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  result: TicketResult,
+  outcome: OutcomeResult,
+  emit: (phase: RunPhase) => void,
+): void {
+  const attempt = result.plan.attempt;
+  const update: PoolUpdate = {
+    log: [
+      `ticket ${marker.id}: attempt ${attempt} passed grading; ticket done`,
+    ],
+  };
+  if (session.git) {
+    const worktree = result.plan.worktree ?? {
+      path: worktreePathFor(session.cwd, marker.id, attempt),
+      branch: branchFor(marker.id, attempt),
+    };
+    const merge = mergeTicket(session, marker, worktree);
+    if (!merge.ok) {
+      // The conflict machinery re-attempts the solo branch on resume, and a
+      // lone attempt has none, so the conflict surfaces as a checkpoint
+      // instead: the Brief names the conflicted files and the parked
+      // attempt branch, and resume re-runs the ticket from the moved HEAD.
+      checkpointLoneAttempt(
+        session,
+        marker,
+        attempt,
+        mergeConflictComplaint(marker.id, attempt, merge),
+        `ticket ${marker.id}: attempt ${attempt} passed grading but its ` +
+          "merge conflicted; checkpoint raised for the human",
+        emit,
+      );
+      return;
+    }
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "merged",
+      payload: {},
+    });
+    update.log = [
+      `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
+        `${branchFor(marker.id, attempt)} onto the working branch`,
+    ];
+  }
+  writeMarkerStatus(marker.file, "done");
+  marker.status = "done";
+  if (outcome.ok) {
+    update.outcomes = { [marker.id]: outcome.outcome };
+  }
+  session.state = applyUpdate(session.state, {
+    tickets: { [marker.id]: "done" },
+    ...update,
+  });
+  emit("running");
+}
+
+// The checkpoint Brief for a flagged lone attempt: the grade's verdict and
+// reasons, so the human reads the grader's complaint without opening the log.
+function gradeComplaint(grade: Grade): string {
+  return (
+    `The attempt claimed done, but its grader flagged the work: ` +
+    `score ${grade.score}/10, verdict ${grade.verdict}.\n\n` +
+    `${grade.reasons.trim()}\n\n` +
+    "Answering resume resets the ticket to ready; the next round runs a " +
+    "fresh attempt and grades it again."
+  );
+}
+
+// The checkpoint Brief for a lone attempt whose passing merge conflicted.
+function mergeConflictComplaint(
+  buildId: string,
+  attempt: number,
+  result: MergeResult,
+): string {
+  const branch = branchFor(buildId, attempt);
+  const files =
+    result.conflicted.length > 0
+      ? result.conflicted.join(", ")
+      : "(no unmerged paths listed)";
+  return (
+    `The attempt passed grading, but merging ${branch} onto the working ` +
+    `branch conflicted: ${files}. The work is parked on ${branch} and the ` +
+    "working branch was left clean. Resolve the conflict by hand, or " +
+    "answer resume to re-run the ticket from the current HEAD."
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Selection (ticket 04): the engine picks the best graded attempt
+// ---------------------------------------------------------------------------
+
+// One selection of one verify fan-out: which attempt won, at what score, by
+// what margin over the runner-up (null when there is only one candidate),
+// and under which rule: outright when the margin clears two points, the
+// deterministic fallback otherwise, until the head-to-head ticket takes the
+// tight band over.
+interface Selection {
+  attempt: number;
+  score: number;
+  margin: number | null;
+  rule: "outright" | "fallback";
+}
+
+// The total order the spec fixes: highest score wins, an exact tie goes to
+// the earlier attempt. Nothing else breaks it, so the same grades always
+// select the same attempt.
+function selectWinner(
+  candidates: { attempt: number; grade: Grade }[],
+): Selection {
+  const ranked = [...candidates].sort(
+    (a, b) => b.grade.score - a.grade.score || a.attempt - b.attempt,
+  );
+  const winner = ranked[0];
+  const margin =
+    ranked.length > 1 ? winner.grade.score - ranked[1].grade.score : null;
+  return {
+    attempt: winner.attempt,
+    score: winner.grade.score,
+    margin,
+    rule: margin === null || margin >= 2 ? "outright" : "fallback",
+  };
+}
+
+// Selecting and merging the winner of a completed, fully graded fan-out:
+// every attempt exited done and every grader returned a usable grade. A
+// margin of two points or more takes the top score outright; a tighter
+// spread calls the head-to-head ticket (ticket 06), whose pick decides
+// between the top two, falling back to the deterministic order on a tie or
+// an unusable outcome. Completing the selection (the shared tail below)
+// does the rest.
+async function selectAndMergeWinner(
+  session: Session,
+  marker: TicketMarker,
+  attempts: number[],
+  grades: Map<number, Grade>,
+  emit: (phase: RunPhase) => void,
+): Promise<void> {
+  const ranked = attempts
+    .map((attempt) => ({ attempt, grade: grades.get(attempt)! }))
+    .sort((a, b) => b.grade.score - a.grade.score || a.attempt - b.attempt);
+  const selection = selectWinner(ranked);
+  let picked: {
+    attempt: number;
+    score: number | null;
+    margin: number | null;
+    rule: "outright" | "fallback" | "human" | "head-to-head";
+  } = selection;
+  let why =
+    `selected attempt ${selection.attempt} (score ${selection.score}` +
+    (selection.margin === null ? "" : `, margin ${selection.margin}`) +
+    `): ${
+      selection.rule === "outright"
+        ? "takes it outright"
+        : "below the outright margin; highest score, then earlier attempt"
+    }`;
+  if (selection.rule === "fallback") {
+    // The tight band (ticket 06): separate grading calls are uncalibrated,
+    // so the engine does not trust a one-point spread on its own. One
+    // head-to-head ticket sees the top two side by side and names the
+    // winner; a tie or an unusable outcome leaves the deterministic order
+    // standing.
+    const verdict = await runHeadToHead(
+      session,
+      marker,
+      ranked[0],
+      ranked[1],
+      emit,
+    );
+    if (verdict.kind === "pick") {
+      picked = {
+        attempt: verdict.attempt,
+        score: grades.get(verdict.attempt)!.score,
+        margin: Math.abs(ranked[0].grade.score - ranked[1].grade.score),
+        rule: "head-to-head",
+      };
+      why =
+        `selected attempt ${picked.attempt} (score ${picked.score}, ` +
+        `margin ${picked.margin}): the head-to-head ticket ` +
+        `${headToHeadIdFor(marker.id)} picked it`;
+    } else {
+      why =
+        `selected attempt ${selection.attempt} (score ${selection.score}, ` +
+        `margin ${selection.margin}): ` +
+        (verdict.kind === "tie"
+          ? `the head-to-head ticket ${headToHeadIdFor(marker.id)} ` +
+            "could not separate them; "
+          : `the head-to-head ticket ${headToHeadIdFor(marker.id)} gave ` +
+            `no usable pick (${verdict.reason}); `) +
+        "highest score, then earlier attempt";
+    }
+  }
+  // A superseded head-to-head card closes with the selection: a review
+  // reject resets its marker to ready with its build ticket's, and a
+  // re-round whose grades then decide outright never rewrites it, so
+  // without this the run could never pass Review's all-done check.
+  if (selection.rule === "outright") {
+    closeSupersededHeadToHead(session, marker.id);
+  }
+  completeSelection(
+    session,
+    marker,
+    picked.attempt,
+    { score: picked.score, margin: picked.margin, rule: picked.rule },
+    why,
+    emit,
+  );
+}
+
+// The pool's selection mode: auto unless the config says human. The key's
+// absence is the default, exactly as the spec fixes it.
+function selectionMode(config: PoolConfig): "auto" | "human" {
+  return config.selection === "human" ? "human" : "auto";
+}
+
+// The selection point with the human as judge (ticket 08): the interrupt
+// carries every candidate's grade, and the answer names the attempt whose
+// branch merges. The ticket stays in-progress with every attempt branch
+// parked; the candidates ride on the interrupt so the answer is validated
+// against the exact fan-out the grades came from, restarts included (a
+// superseded round's graded attempts would otherwise pass for candidates).
+function raiseSelectionInterrupt(
+  session: Session,
+  marker: TicketMarker,
+  attempts: number[],
+  grades: Map<number, Grade>,
+  emit: (phase: RunPhase) => void,
+): void {
+  raiseInterrupt(session, {
+    ticketId: marker.id,
+    kind: "selection",
+    body: selectionInterruptBody(attempts, grades),
+    candidates: attempts,
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${marker.id}: selection interrupt raised with ` +
+        `${attempts.length} candidates' grades (selection: human)`,
+    ],
+  });
+  emit("running");
+}
+
+// The selection interrupt's body: one line per candidate with its score,
+// verdict and the grader's reasons, so the human judges over the same
+// artifacts the auto rule would.
+function selectionInterruptBody(
+  attempts: number[],
+  grades: Map<number, Grade>,
+): string {
+  return (
+    `verify fan-out complete: ${attempts.length} graded attempts, and the ` +
+    "pool's selection is yours.\n\n" +
+    attempts
+      .map((attempt) => {
+        const grade = grades.get(attempt)!;
+        return (
+          `- attempt ${attempt}: score ${grade.score}/10, ` +
+          `verdict ${grade.verdict}\n` +
+          `  ${grade.reasons.trim().replaceAll("\n", "\n  ")}`
+        );
+      })
+      .join("\n") +
+    "\n\nAnswer with the number of the attempt to merge; the rest are " +
+    "discarded with their logs, outcomes and grades kept."
+  );
+}
+
+// The answer's attempt number: the first integer in the note, so "2",
+// "attempt 2" and "merge attempt-2 please" all name attempt 2.
+function parseSelectionAnswer(note: string | undefined): number | null {
+  const match = /(\d+)/.exec(note?.trim() ?? "");
+  return match ? Number(match[1]) : null;
+}
+
+function selectionAnswerError(
+  interrupt: Interrupt,
+  note: string | undefined,
+): string {
+  return (
+    `selection answer must name one of the candidate attempts ` +
+    `(${(interrupt.candidates ?? []).join(", ")}); got ${JSON.stringify(note ?? "")}`
+  );
+}
+
+// Processing a selection answer (ticket 08): the note names the winning
+// attempt, the engine merges that attempt's branch through the existing
+// merge path and completes the selection exactly as the auto rule would.
+// An answer naming no candidate is rejected here too, not merged (the
+// acceptance-time check guards the live caller; this one guards a record
+// accepted before the check existed).
+function processSelectionAnswer(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  note: string | undefined,
+): void {
+  const attempt = parseSelectionAnswer(note);
+  if (attempt === null || !interrupt.candidates?.includes(attempt)) {
+    throw new Error(selectionAnswerError(interrupt, note));
+  }
+  // The selection interrupt has served its purpose; the merge or the
+  // checkpoint it leads to owns the ticket from here.
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `interrupt answered for ${marker.id} (selection): attempt ` +
+        `${attempt} to merge`,
+    ],
+  });
+  completeSelection(
+    session,
+    marker,
+    attempt,
+    { score: null, margin: null, rule: "human" },
+    `human selected attempt ${attempt}`,
+    () => {},
+  );
+}
+
+// Completing a selection, however it was made: the selected event records
+// which attempt won and under which rule, the winner's branch merges through
+// the existing merge path (the same mergeTicket a solo merge uses), the
+// engine writes the done status (ADR-0005), and every other attempt branch
+// of the ticket, this round's losers and any superseded round's alike, is
+// discarded. The losers' logs, outcomes and grades live in runs/ and the
+// ticket's events, which no discard touches. A conflicted merge parks the
+// winner's branch and checkpoints for the human, the way a lone attempt's
+// conflicted merge does: the conflict machinery re-attempts the well-known
+// solo branch, which a selected attempt does not have.
+function completeSelection(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  picked: {
+    score: number | null;
+    margin: number | null;
+    rule: "outright" | "fallback" | "human" | "head-to-head";
+  },
+  why: string,
+  emit: (phase: RunPhase) => void,
+): void {
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "selected",
+    payload: picked,
+  });
+  session.state = applyUpdate(session.state, {
+    log: [`ticket ${marker.id}: ${why}`],
+  });
+  let mergedNote = "";
+  if (session.git) {
+    const worktree = {
+      path: worktreePathFor(session.cwd, marker.id, attempt),
+      branch: branchFor(marker.id, attempt),
+    };
+    const merge = mergeTicket(session, marker, worktree);
+    if (!merge.ok) {
+      discardLosers(session, marker.id, attempt);
+      checkpointLoneAttempt(
+        session,
+        marker,
+        attempt,
+        mergeConflictComplaint(marker.id, attempt, merge),
+        `ticket ${marker.id}: attempt ${attempt} selected but its merge ` +
+          "conflicted; checkpoint raised for the human",
+        emit,
+      );
+      return;
+    }
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "merged",
+      payload: {},
+    });
+    mergedNote = ` merged ${branchFor(marker.id, attempt)} onto the working branch`;
+  } else {
+    mergedNote =
+      " (the pool does not run in git; the selected work is already in the checkout)";
+  }
+  writeMarkerStatus(marker.file, "done");
+  marker.status = "done";
+  const discarded = discardLosers(session, marker.id, attempt);
+  const update: PoolUpdate = {
+    tickets: { [marker.id]: "done" },
+    log: [
+      `ticket ${marker.id}: attempt ${attempt} selected` +
+        mergedNote +
+        (discarded.length > 0
+          ? `; discarded losing attempts ${discarded.join(", ")} ` +
+            "(their logs, outcomes and grades are kept)"
+          : ""),
+    ],
+  };
+  // The winner's outcome becomes the ticket's, the way a solo done attempt's
+  // does, so downstream prompts read what was actually selected.
+  const outcome = readOutcomeResult(
+    join(session.runsDir, outcomeFileName(marker.id, attempt)),
+  );
+  if (outcome.ok) update.outcomes = { [marker.id]: outcome.outcome };
+  session.state = applyUpdate(session.state, update);
+  emit("running");
+}
+
+// Every attempt branch of the build ticket except the winner's goes: this
+// round's losers and any superseded round's alike. Returns the attempt
+// numbers discarded, so the pool log can name them.
+function discardLosers(
+  session: Session,
+  buildId: string,
+  keep: number,
+): number[] {
+  if (!session.git) return [];
+  const losers = attemptBranches(session.cwd, buildId).filter((a) => a !== keep);
+  for (const attempt of losers) {
+    discardWorktree(session.cwd, {
+      path: worktreePathFor(session.cwd, buildId, attempt),
+      branch: branchFor(buildId, attempt),
+    });
+  }
+  return losers;
+}
+
+// ---------------------------------------------------------------------------
+// Head-to-head (ticket 06): one compare ticket for a tight grade spread
+// ---------------------------------------------------------------------------
+
+// One side of the comparison: the attempt, the grade it received, and the
+// artifact paths the head-to-head ticket binds.
+interface HeadToHeadSide {
+  attempt: number;
+  grade: Grade;
+  outcomePath: string;
+  diffPath: string;
+  logPath: string;
+}
+
+// What the head-to-head run decided: the attempt it picked, a declared tie,
+// or the reason it decided nothing (a dead harness, an unparseable outcome,
+// a pause). A tie and an unusable outcome lead to the same deterministic
+// fallback; the reason only tells the log which one fired.
+type HeadToHeadVerdict =
+  | { kind: "pick"; attempt: number; outcome: Outcome }
+  | { kind: "tie"; outcome: Outcome }
+  | { kind: "unusable"; reason: string };
+
+// The head-to-head's outcome: the standard contract plus a `winner` naming
+// exactly one of the two candidate attempt numbers, or the string "tie" when
+// the judge genuinely cannot separate them. Anything else is unusable rather
+// than a guess: the deterministic fallback owns the decision then.
+function readHeadToHeadVerdict(
+  path: string,
+  candidates: [number, number],
+): HeadToHeadVerdict {
+  if (!existsSync(path)) return { kind: "unusable", reason: "no outcome written" };
+  let parsed: { winner?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { kind: "unusable", reason: "outcome is not parseable JSON" };
+  }
+  const base = validateOutcome(parsed);
+  if (!base.ok) return { kind: "unusable", reason: base.reason };
+  if (base.outcome.status !== "done") {
+    return {
+      kind: "unusable",
+      reason: "head-to-head outcome is a checkpoint, not a pick",
+    };
+  }
+  if (parsed?.winner === "tie") return { kind: "tie", outcome: base.outcome };
+  const winner = parsed?.winner;
+  const pick =
+    typeof winner === "number" && Number.isInteger(winner)
+      ? winner
+      : typeof winner === "string" && /^\d+$/.test(winner)
+        ? Number(winner)
+        : null;
+  if (pick === null || !candidates.includes(pick)) {
+    return {
+      kind: "unusable",
+      reason: "outcome names no winner among the two attempts",
+    };
+  }
+  return { kind: "pick", attempt: pick, outcome: base.outcome };
+}
+
+// The head-to-head ticket file: a real ticket in the pool's directory with
+// the ordinary blocking edge from its build ticket, so it renders as a node
+// card and its assignment is editable like any ticket's. The engine rewrites
+// it every time the tight band is reached, rebinding the same card to the
+// round's top two instead of accumulating one per round.
+function writeHeadToHeadTicket(
+  session: Session,
+  build: TicketMarker,
+  sides: [HeadToHeadSide, HeadToHeadSide],
+): void {
+  const h2hId = headToHeadIdFor(build.id);
+  const [top, runnerUp] = sides;
+  const bind = (label: string, s: HeadToHeadSide): string =>
+    `${label} attempt ${s.attempt} (graded ${s.grade.score}/10): outcome ` +
+    `\`${s.outcomePath}\`; diff \`${s.diffPath}\`; trimmed log \`${s.logPath}\``;
+  const body =
+    `<!-- state: id=${h2hId} blocked-by=${build.id} status=ready -->\n\n` +
+    `# ${h2hId}: pick between attempts ${top.attempt} and ` +
+    `${runnerUp.attempt} of ticket ${build.id}\n\n` +
+    `**Head-to-head for:** ticket ${build.id}. Attempts ${top.attempt} and ` +
+    `${runnerUp.attempt} graded ${top.grade.score} and ` +
+    `${runnerUp.grade.score}, inside the two-point outright margin, so the ` +
+    "pairwise call decides.\n\n" +
+    `**Bound artifacts:** ticket file \`${build.file}\`; ` +
+    `${bind("first", top)}; ${bind("second", runnerUp)}.\n\n` +
+    `The engine wrote this ticket when selection found the top two grades ` +
+    "too close to call from separate graders, and runs it through the " +
+    "pool's ordinary assign machinery: an `assign` entry for this id in " +
+    "console.json overrides the build ticket's harness and model. Its " +
+    "prompt lays both attempts' artifacts side by side, and its outcome " +
+    'JSON carries `"winner"`, the number of the attempt it picks, or ' +
+    '`"tie"`. It writes no status, raises no interrupts, and merges ' +
+    "nothing.\n";
+  writeFileSync(join(session.issuesDir, `${h2hId}.md`), body);
+}
+
+// Running the head-to-head for a tight spread: write the compare ticket,
+// resolve its assignment through the ordinary machinery, spawn it, and read
+// the pick. Unlike a grader there is no re-spawn: an unusable outcome falls
+// back to the deterministic order by contract, so a dead judge can never
+// stall the run. The card still closes done either way (the engine owns the
+// status write): its lifecycle is over once its outcome has been consumed,
+// and an open card would hold Review's all-done check shut forever.
+async function runHeadToHead(
+  session: Session,
+  build: TicketMarker,
+  top: { attempt: number; grade: Grade },
+  runnerUp: { attempt: number; grade: Grade },
+  emit: (phase: RunPhase) => void,
+): Promise<HeadToHeadVerdict> {
+  const h2hId = headToHeadIdFor(build.id);
+  const runsDir = session.runsDir;
+  const sides = [top, runnerUp].map((side): HeadToHeadSide => {
+    const attempt = side.attempt;
+    return {
+      attempt,
+      grade: side.grade,
+      outcomePath: join(runsDir, outcomeFileName(build.id, attempt)),
+      diffPath: join(runsDir, `${h2hId}.attempt-${attempt}.diff.patch`),
+      logPath: join(runsDir, `${h2hId}.attempt-${attempt}.trim.log`),
+    };
+  });
+  writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
+  session.markers = loadPoolMarkers(session.issuesDir);
+  const h2h = session.markers.find((m) => m.id === h2hId)!;
+  const assignment = resolveEngineTicketAssignment(
+    session.state.config,
+    h2h,
+    session.assignments.get(build.id)!,
+    session.harnesses,
+  );
+  session.assignments.set(h2hId, assignment);
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: nextAttempt(runsDir, h2hId),
+    kind: "scheduled",
+    payload: {},
+  });
+  session.state = applyUpdate(session.state, {
+    tickets: { [h2hId]: "in-progress" as const },
+    log: [
+      `ticket ${build.id}: margin ` +
+        `${top.grade.score - runnerUp.grade.score} is below the outright ` +
+        `band; spawning head-to-head ${h2hId} between attempts ` +
+        `${top.attempt} and ${runnerUp.attempt}`,
+    ],
+  });
+  writeMarkerStatus(h2h.file, "in-progress");
+  h2h.status = "in-progress";
+  emit("running");
+  // As in runGrader: the judge starts with no outcome, so a stale file from
+  // a previous round can never pass for this round's pick.
+  const h2hOutcomePath = join(runsDir, outcomeFileName(h2hId, null));
+  rmSync(h2hOutcomePath, { force: true });
+  const logPath = join(runsDir, attemptLogName(h2hId, null, false));
+  rotateAttemptLog(runsDir, h2hId, logPath, "spawned");
+  for (const side of sides) {
+    writeFileSync(side.diffPath, attemptDiff(session, build.id, side.attempt));
+    writeFileSync(
+      side.logPath,
+      trimTail(
+        readOptional(
+          join(runsDir, attemptLogName(build.id, side.attempt, false)),
+        ) ?? "(no attempt log was recorded)\n",
+      ),
+    );
+  }
+  // Read fresh at every run, like the verify skill at every grader spawn: an
+  // operator's mid-run edit lands in the very next judge's prompt.
+  const skill = readOptional(join(session.poolDir, "verify.md"));
+  const parts = (s: HeadToHeadSide) => ({
+    attempt: s.attempt,
+    outcomePath: s.outcomePath,
+    diffPath: s.diffPath,
+    logPath: s.logPath,
+    score: s.grade.score,
+    verdict: s.grade.verdict,
+    reasons: s.grade.reasons,
+  });
+  const prompt = buildHeadToHeadPrompt({
+    buildId: build.id,
+    ticketPath: build.file,
+    skill,
+    top: parts(sides[0]),
+    runnerUp: parts(sides[1]),
+    outcomePath: h2hOutcomePath,
+  });
+  const ctx: SpawnContext = {
+    id: h2hId,
+    issuePath: h2h.file,
+    body: prompt,
+    driver: HEAD_TO_HEAD_DRIVER,
+    harness: assignment.harness,
+    model: assignment.model,
+    agents: session.state.config.agents,
+    logPath,
+    outcomePath: h2hOutcomePath,
+    cwd: session.cwd,
+  };
+  const argv = session.harnesses[assignment.harness](ctx);
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, h2hId),
+    kind: "spawned",
+    payload: {},
+  });
+  const exitCode = await spawnToLog(argv, ctx);
+  let verdict = readHeadToHeadVerdict(h2hOutcomePath, [
+    top.attempt,
+    runnerUp.attempt,
+  ]);
+  if (exitCode !== 0) {
+    verdict = { kind: "unusable", reason: `harness exited ${exitCode}` };
+  }
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, h2hId),
+    kind: "exited",
+    payload: {
+      code: exitCode,
+      status: verdict.kind === "unusable" ? "in-progress" : "done",
+    },
+  });
+  if (verdict.kind === "unusable") {
+    appendEvent(runsDir, h2hId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(runsDir, h2hId),
+      kind: "crash",
+      payload: { code: exitCode, reason: verdict.reason },
+    });
+  }
+  writeMarkerStatus(h2h.file, "done");
+  h2h.status = "done";
+  const update: PoolUpdate = {
+    tickets: { [h2hId]: "done" as const },
+    log: [
+      verdict.kind === "pick"
+        ? `ticket ${build.id}: head-to-head ${h2hId} picked attempt ` +
+          `${verdict.attempt}`
+        : verdict.kind === "tie"
+          ? `ticket ${build.id}: head-to-head ${h2hId} tied`
+          : `ticket ${build.id}: head-to-head ${h2hId} gave no usable ` +
+            `pick: ${verdict.reason}`,
+    ],
+  };
+  if (verdict.kind !== "unusable") {
+    update.outcomes = { [h2hId]: verdict.outcome };
+  }
+  session.state = applyUpdate(session.state, update);
+  emit("running");
+  return verdict;
+}
+
+// Closing a superseded head-to-head card: a review reject resets its marker
+// to ready along with its build ticket's, and an engine crash mid-judge
+// leaves it behind for rehydrate to reset; a re-round whose grades then
+// decide outright never rewrites the card, so without this the run could
+// never pass Review's all-done check. The engine owns the write, and the
+// card's own ticket log already holds the round it judged.
+function closeSupersededHeadToHead(session: Session, buildId: string): void {
+  const h2hId = headToHeadIdFor(buildId);
+  const file = join(session.issuesDir, `${h2hId}.md`);
+  if (!existsSync(file)) return;
+  if (readMarker(file).status === "done") return;
+  writeMarkerStatus(file, "done");
+  const marker = session.markers.find((m) => m.id === h2hId);
+  if (marker) marker.status = "done";
+  session.state = applyUpdate(session.state, {
+    tickets: { [h2hId]: "done" as const },
+    log: [
+      `ticket ${buildId}: closed superseded head-to-head card ${h2hId} ` +
+        "(this round's selection did not need it)",
+    ],
+  });
+}
+
 // The final Review: the run's closing gate, raised once every ticket is done
 // and no other interrupt is pending. The body is the run's outcome list, so
 // the judgment happens over what actually happened, not a ticket count.
@@ -1451,7 +2938,7 @@ function rejectReview(
     if (named.includes(marker.id)) {
       appendFileSync(marker.file, `\n## Review note\n\n${note?.trim() ?? ""}\n`);
     }
-    rmSync(join(session.runsDir, `${marker.id}.outcome.json`), {
+    rmSync(join(session.runsDir, outcomeFileName(marker.id, null)), {
       force: true,
     });
   }
@@ -1664,6 +3151,9 @@ interface TicketPlan {
   cwd: string;
   worktree?: WorktreeInfo;
   attempt: number;
+  // True when the attempt is one candidate of a verify fan-out: it runs on
+  // its own attempt branch and its exit never writes the ticket's status.
+  verify: boolean;
 }
 
 interface TicketResult {
@@ -1679,11 +3169,14 @@ interface TicketResult {
   joinedAtExit: boolean;
 }
 
-// Where a ticket runs. A multi-ticket super-step gives every ticket its own
+// Where an attempt runs. A multi-ticket super-step gives every ticket its own
 // worktree branched from the same HEAD, so parallel harnesses never share a
 // checkout. A ticket with a parked branch (checkpoint, crash or conflicted
 // merge left it behind) always reuses its worktree, even alone, so it keeps
-// the work it already did. Anything else runs in the main checkout. The main
+// the work it already did. A verify attempt always gets its own attempt
+// branch and worktree, even alone in its round: grading diffs the attempt's
+// commit and selection merges one attempt's branch, so a candidate never
+// shares the main checkout. Anything else runs in the main checkout. The main
 // checkout's Issue file is the single canonical copy: the spawn prompt hands
 // the agent its absolute path for reading and notes, and the engine writes
 // the final status to it at attempt exit. The worktree gets a seed copy as
@@ -1693,17 +3186,25 @@ function planTicket(
   marker: TicketMarker,
   readyCount: number,
   attempt: number,
+  verify: boolean,
 ): TicketPlan {
-  if (!session.git) return { cwd: session.cwd, attempt };
-  const parked = branchExists(session.cwd, marker.id);
-  if (readyCount < 2 && !parked) {
-    return { cwd: session.cwd, attempt };
+  if (!session.git) return { cwd: session.cwd, attempt, verify };
+  if (
+    !verify &&
+    readyCount < 2 &&
+    !branchExists(session.cwd, marker.id)
+  ) {
+    return { cwd: session.cwd, attempt, verify };
   }
-  const worktree = prepareWorktree(session.cwd, marker.id);
+  const worktree = prepareWorktree(
+    session.cwd,
+    marker.id,
+    verify ? attempt : undefined,
+  );
   const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
   mkdirSync(dirname(seedCopy), { recursive: true });
   copyFileSync(marker.file, seedCopy);
-  return { cwd: worktree.path, worktree, attempt };
+  return { cwd: worktree.path, worktree, attempt, verify };
 }
 
 // The engine owns the final status write (ADR-0005): the attempt's outcome
@@ -1723,6 +3224,12 @@ function readOutcomeResult(path: string): OutcomeResult {
   } catch {
     return { ok: false, reason: "outcome is not parseable JSON" };
   }
+  return validateOutcome(parsed);
+}
+
+// The outcome contract's validator, shared by the attempt reader and the
+// grader reader so the two can never disagree about what a valid outcome is.
+function validateOutcome(parsed: unknown): OutcomeResult {
   const outcome = parsed as Partial<Outcome> | null;
   if (outcome?.status !== "done" && outcome?.status !== "checkpoint") {
     return { ok: false, reason: "outcome's status is not done or checkpoint" };
@@ -1821,9 +3328,19 @@ async function runTicket(
   plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
-  const logPath = join(env.runsDir, attemptLogName(marker.id, null, false));
-  rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
-  const outcomePath = join(env.runsDir, `${marker.id}.outcome.json`);
+  // A verify attempt writes its attempt-numbered log directly: N parallel
+  // attempts cannot share the well-known path, and the number is known at
+  // scheduling time. A solo attempt keeps the well-known path plus rotation.
+  const logPath = plan.verify
+    ? join(env.runsDir, attemptLogName(marker.id, plan.attempt, false))
+    : join(env.runsDir, attemptLogName(marker.id, null, false));
+  if (!plan.verify) {
+    rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
+  }
+  const outcomePath = join(
+    env.runsDir,
+    outcomeFileName(marker.id, plan.verify ? plan.attempt : null),
+  );
   // Every attempt starts with no outcome: a file a previous attempt left
   // behind would be read as this attempt's result, honoring a stale status.
   rmSync(outcomePath, { force: true });
@@ -1868,7 +3385,10 @@ async function runTicket(
 
   // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
   // with a valid outcome the engine writes the final status to the canonical
-  // Issue's marker itself; a marker the agent rewrote is never honored.
+  // Issue's marker itself; a marker the agent rewrote is never honored. A
+  // verify candidate writes no status anywhere at its exit: the ticket is
+  // in-progress until the whole fan-out has exited, and grading decides what
+  // happens after (tickets 03 and 04).
   const outcome = readOutcomeResult(outcomePath);
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
@@ -1878,14 +3398,20 @@ async function runTicket(
     crashReason = outcome.reason;
   } else {
     status = outcome.outcome.status;
-    writeMarkerStatus(marker.file, status);
-    if (status === "checkpoint") {
-      // Before the return: the drive loop raises the checkpoint's interrupt
-      // from the Issue's Brief section the moment this attempt exits.
-      landCheckpointBrief(marker.file, outcome.outcome.brief);
+    if (!plan.verify) {
+      writeMarkerStatus(marker.file, status);
+      if (status === "checkpoint") {
+        // Before the return: the drive loop raises the checkpoint's interrupt
+        // from the Issue's Brief section the moment this attempt exits.
+        landCheckpointBrief(marker.file, outcome.outcome.brief);
+      }
     }
   }
-  if (crashReason !== null && readMarker(marker.file).status !== "in-progress") {
+  if (
+    crashReason !== null &&
+    !plan.verify &&
+    readMarker(marker.file).status !== "in-progress"
+  ) {
     writeMarkerStatus(marker.file, "in-progress");
   }
   appendEvent(env.runsDir, marker.id, {
@@ -1918,12 +3444,22 @@ async function runTicket(
     plan,
     joinedAtExit: false,
     update: {
-      tickets: { [marker.id]: status },
+      // A verify candidate moves only the pool log: the tickets and outcomes
+      // channels are keyed by ticket id, and N attempts of one ticket would
+      // clobber each other there and write a status the fan-out must not
+      // write. The events file and the per-attempt files are the record.
+      ...(plan.verify ? {} : { tickets: { [marker.id]: status } }),
       log: [
-        `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
-          (crashReason !== null ? `, crash: ${crashReason}` : ""),
+        plan.verify
+          ? `ticket ${marker.id}: attempt ${plan.attempt} exited ${exitCode} ` +
+            `(${status})` +
+            (crashReason !== null ? `, crash: ${crashReason}` : "")
+          : `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
+            (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
-      ...(outcome.ok ? { outcomes: { [marker.id]: outcome.outcome } } : {}),
+      ...(outcome.ok && !plan.verify
+        ? { outcomes: { [marker.id]: outcome.outcome } }
+        : {}),
     },
   };
 }
@@ -1971,7 +3507,7 @@ async function spawnToLog(
   return exitCode;
 }
 
-function resolveAssignment(
+export function resolveAssignment(
   marker: TicketMarker,
   config: PoolConfig,
   harnesses: Record<string, HarnessCommand>,
@@ -1999,7 +3535,17 @@ function resolveAssignment(
         `Known: ${Object.keys(harnesses).sort().join(", ")}`,
     );
   }
-  return { harness, model, drivers };
+  let verify: number | undefined;
+  if (assign.verify != null) {
+    if (!Number.isInteger(assign.verify) || assign.verify < 1) {
+      throw new Error(
+        `pool config: ticket ${marker.id} has invalid verify ` +
+          `${JSON.stringify(assign.verify)} (must be an integer >= 1)`,
+      );
+    }
+    verify = assign.verify;
+  }
+  return { harness, model, drivers, verify };
 }
 
 /**
@@ -2013,6 +3559,13 @@ export function readConfig(poolDir: string): PoolConfig {
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`pool config: ${join(poolDir, "console.json")} must be a JSON object`);
+  }
+  if (
+    parsed.selection !== undefined &&
+    parsed.selection !== "auto" &&
+    parsed.selection !== "human"
+  ) {
+    throw new Error(`pool config: selection must be "auto" or "human"`);
   }
   return parsed as PoolConfig;
 }

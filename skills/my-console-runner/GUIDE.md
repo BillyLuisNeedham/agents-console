@@ -4,13 +4,15 @@ For the human. Written in Simplified Technical English.
 
 ## What you get
 
-Two files in your pool directory. `console.json` holds your interview answers as data: the default
+Three files in your pool directory. `console.json` holds your interview answers as data: the default
 harness and model, per-ticket overrides, the subagent roster, the merge resolver, the pool port,
-the reviewer and what counts as a checkpoint. `AGENT.md` tells each agent what the job is. The
-Console server reads both when it starts.
+the reviewer and what counts as a checkpoint. `AGENT.md` tells each agent what the job is. `verify.md`
+holds the grading instructions a grader agent follows when a ticket opts into verification. The
+Console server reads the first two when it starts.
 
 To change the default harness or model for every pool, edit `~/.issue-runner`. To change them for
-one pool, edit that pool's `console.json`. To change one ticket, edit its entry under `assign`.
+one pool, edit that pool's `console.json`. To change one ticket, edit its entry under `assign`. To
+have one ticket verified, set `verify: N` on its entry under `assign`.
 
 ## How to start
 
