@@ -89,3 +89,7 @@ _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
 **Queued answer**:
 An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)
+
+**Needs input**:
+The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
+_Avoid_: action items, task list, notification center
