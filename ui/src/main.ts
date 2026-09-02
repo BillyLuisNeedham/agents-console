@@ -15,6 +15,7 @@ import {
   projectDetail,
   projectDetailTabs,
   projectLogPane,
+  projectNeedsInput,
   projectPool,
   projectTimeline,
   selectLogAttempt,
@@ -250,6 +251,7 @@ function model(): AppModel {
           logIsCurrent ? logPane.state.error : null,
         )
       : null,
+    needsInput: state.snapshot ? projectNeedsInput(state.snapshot) : [],
   };
 }
 

@@ -1248,6 +1248,83 @@ body {
   color: var(--text-dim);
 }
 
+/* ------------------------------------------------------ needs input tray */
+
+/* The Needs input tray: a fixed overlay on the left listing every ticket
+   with an unresolved Interrupt, the operator's work queue. Hidden entirely
+   at zero pending. It overlays the canvas and the drawers but sits under a
+   fullscreen Detail, which is a deliberate whole-window act. */
+.needs-input-tray {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  width: 300px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  box-shadow: 4px 4px 24px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.needs-input-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.needs-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.needs-input-id {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0;
+  text-align: left;
+  flex-shrink: 0;
+}
+
+.needs-input-id:hover {
+  text-decoration: underline;
+}
+
+.needs-input-kind {
+  font-size: 11px;
+  color: var(--interrupt);
+  white-space: nowrap;
+}
+
+.needs-input-note {
+  flex: 1;
+  min-width: 0;
+}
+
+.needs-input-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 /* ------------------------------------------------------- flow highlight */
 
 /* The selection and its one-hop flow neighbourhood. Placed last so a

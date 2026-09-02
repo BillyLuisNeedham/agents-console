@@ -735,6 +735,58 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
 }
 
 // ---------------------------------------------------------------------------
+// Needs input tray
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the Needs input tray: a pending Interrupt with the card it
+ * selects, projected in card order. `ticketId` is who the interrupt is
+ * raised against (the answer and note-draft key); `label` is what the row
+ * shows (the ticket id, or the utility card's label for the final Review).
+ */
+export interface NeedsInputRow {
+  cardId: string;
+  ticketId: string;
+  label: string;
+  /** The ticket's title; null for a utility row. */
+  title: string | null;
+  interrupt: InterruptView;
+}
+
+/**
+ * The Needs input tray's rows: one per card holding an unresolved Interrupt,
+ * in card order, so the tray and the canvas agree. Each interrupt carries
+ * its form (the shared interrupt-form config, unknown kinds falling back to
+ * a plain resume form) and its queued flag, exactly as the cards project it.
+ * A pure projection of the snapshot: no new data source, the tray reads what
+ * the cards read.
+ */
+export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
+  const rows: NeedsInputRow[] = [];
+  for (const card of projectPool(snapshot).cards) {
+    if (!card.interrupt) continue;
+    rows.push(
+      card.kind === "ticket"
+        ? {
+            cardId: card.id,
+            ticketId: card.ticketId,
+            label: card.ticketId,
+            title: card.title,
+            interrupt: card.interrupt,
+          }
+        : {
+            cardId: card.id,
+            ticketId: card.interrupt.ticketId,
+            label: card.label,
+            title: null,
+            interrupt: card.interrupt,
+          },
+    );
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
 // Detail tab default
 // ---------------------------------------------------------------------------
 

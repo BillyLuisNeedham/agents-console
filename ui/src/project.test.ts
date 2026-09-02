@@ -31,6 +31,7 @@ import {
   projectDetailTabs,
   projectLog,
   projectLogPane,
+  projectNeedsInput,
   projectPool,
   projectPoolEdges,
   projectTimeline,
@@ -410,6 +411,87 @@ describe("queued-answer waiting state", () => {
     if (card?.kind === "ticket") {
       expect(card.interrupt?.queued).toBe(false);
     }
+  });
+});
+
+describe("projectNeedsInput", () => {
+  it("lists one row per interrupted card in card order, with kinds and forms", () => {
+    const snap = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "checkpoint" }), ticket("B")],
+        interrupts: [
+          { ticketId: "B", kind: "merge-approval", body: "resolution" },
+          { ticketId: "A", kind: "checkpoint", body: "brief" },
+        ],
+      },
+    });
+    const rows = projectNeedsInput(snap);
+    // Card order, not interrupt order: the tray and the canvas agree.
+    expect(rows.map((r) => r.cardId)).toEqual(["ticket:A", "ticket:B"]);
+    expect(rows.map((r) => r.ticketId)).toEqual(["A", "B"]);
+    expect(rows.map((r) => r.label)).toEqual(["A", "B"]);
+    expect(rows.map((r) => r.title)).toEqual(["ticket A", "ticket B"]);
+    expect(rows[0].interrupt.kind).toBe("checkpoint");
+    expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume"]);
+    expect(rows[1].interrupt.kind).toBe("merge-approval");
+    expect(rows[1].interrupt.form.actions.map((a) => a.action)).toEqual([
+      "approve",
+      "reject",
+    ]);
+  });
+
+  it("lists an answered interrupt too, with its queued flag set", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A"), ticket("B")],
+        interrupts: [
+          { ticketId: "A", kind: "crash", body: "log path" },
+          { ticketId: "B", kind: "checkpoint", body: "brief" },
+        ],
+        queuedAnswers: [{ ticketId: "A", kind: "crash" }],
+      },
+    });
+    const rows = projectNeedsInput(snap);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].interrupt.queued).toBe(true);
+    expect(rows[1].interrupt.queued).toBe(false);
+  });
+
+  it("projects the review card's interrupt as a row that selects the review card", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "final review" }],
+      },
+    });
+    const rows = projectNeedsInput(snap);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].cardId).toBe(REVIEW_CARD_ID);
+    expect(rows[0].ticketId).toBe(REVIEW_CARD_ID);
+    expect(rows[0].label).toBe("review");
+    expect(rows[0].title).toBeNull();
+    expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual([
+      "approve",
+      "reject",
+    ]);
+  });
+
+  it("falls back to a plain resume row for an unknown interrupt kind", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [{ ticketId: "A", kind: "harness-gone", body: "?" }],
+      },
+    });
+    const rows = projectNeedsInput(snap);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].interrupt.form.title).toBe("harness-gone");
+    expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume"]);
+  });
+
+  it("is empty with no pending interrupts", () => {
+    expect(projectNeedsInput(snapshot())).toEqual([]);
   });
 });
 

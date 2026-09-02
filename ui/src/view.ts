@@ -16,6 +16,7 @@ import {
   type DetailView,
   type InterruptAction,
   type LogPaneView,
+  type NeedsInputRow,
   type PoolCardView,
   type PoolPhase,
   type TimelineView,
@@ -25,6 +26,7 @@ import { restoreLogScroll } from "./log-pane";
 import { Canvas } from "./canvas";
 import { Detail } from "./detail";
 import { Drawers } from "./drawers";
+import { NeedsInputTray } from "./needs-input";
 import { h } from "./dom";
 
 export interface AppModel {
@@ -48,6 +50,8 @@ export interface AppModel {
   detailBodyError: string | null;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
+  /** The Needs input tray's rows: every card holding an unresolved interrupt. */
+  needsInput: NeedsInputRow[];
 }
 
 export interface Handlers {
@@ -74,6 +78,7 @@ export class ConsoleView {
     onClose: () => this.closeDetail(),
   });
   private readonly drawers = new Drawers();
+  private readonly needsInput = new NeedsInputTray();
   // The selection survives the rebuild (snapshots never close the panel or
   // lose the selection); its one-hop flow neighbourhood is recomputed from
   // the model's edges on every render, so a live snapshot re-derives the
@@ -87,11 +92,11 @@ export class ConsoleView {
     this.detail.cancelDrag();
     this.onSelectNode = handlers.onSelectNode;
     this.canvas.sync(model.cards);
-    const pendingInterrupts = new Set(
-      model.cards.flatMap((card) => (card.interrupt ? [card.interrupt.ticketId] : [])),
-    );
+    const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
     this.detail.pruneDrafts(pendingInterrupts);
+    this.needsInput.pruneDrafts(pendingInterrupts);
     const noteFocus = this.detail.captureNoteFocus();
+    const trayFocus = this.needsInput.captureNoteFocus();
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
     const selection = {
       selectedId: this.selectedNodeId,
@@ -104,6 +109,10 @@ export class ConsoleView {
       this.canvas.render(model, selection),
       model.detail ? this.detail.renderHandle() : null,
       this.detail.render(model, handlers),
+      this.needsInput.render(model.needsInput, {
+        onAnswer: handlers.onAnswer,
+        onSelect: (cardId) => this.selectNode(cardId),
+      }),
     );
     root.replaceChildren(
       h("div", { class: "shell" }, content, this.drawers.render(model, handlers)),
@@ -118,6 +127,7 @@ export class ConsoleView {
         : null;
     restoreLogScroll(logPaneKey);
     this.detail.restoreNoteFocus(root, noteFocus);
+    this.needsInput.restoreNoteFocus(root, trayFocus);
     const world = root.querySelector(".canvas-world");
     const viewport = root.querySelector(".canvas-viewport");
     if (world instanceof HTMLElement && viewport instanceof HTMLElement) {
