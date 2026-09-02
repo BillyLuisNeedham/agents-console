@@ -72,6 +72,7 @@ interface StubBehaviour {
   outcome?: { summary: string; commitSha: string | null } | null;
   outcomeRaw?: string;
   brief?: string;
+  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
   exitCode?: number;
   exitCodes?: number[];
 }
@@ -114,7 +115,12 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
     spawnList.push(ctx);
     const n = spawnCounts[ctx.id] ?? 0;
     spawnCounts[ctx.id] = n + 1;
-    const b = behaviour[ctx.id] ?? {};
+    // A grader id the engine wrote gets a default passing grade, so tests
+    // that do not care about grading still flow through it.
+    const b = behaviour[ctx.id] ??
+      (/-grader-\d+$/.test(ctx.id)
+        ? { grade: { score: 8, verdict: "pass", reasons: "default grade" } }
+        : {});
     const status = b.statuses
       ? b.statuses[Math.min(n, b.statuses.length - 1)]
       : (b.status ?? "done");
@@ -130,6 +136,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
                 commitSha: `sha-${ctx.id}`,
               }),
               ...(b.brief !== undefined ? { brief: b.brief } : {}),
+              ...(b.grade !== undefined ? { grade: b.grade } : {}),
             });
     const exitCode = b.exitCodes
       ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
@@ -169,6 +176,8 @@ async function approveReview(run: PoolRun): Promise<PoolRun> {
 interface GitStubBehaviour {
   status?: "done" | "checkpoint" | "keep";
   outcome?: { summary: string; commitSha: string | null } | null;
+  outcomeRaw?: string;
+  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
   exitCode?: number;
   workFile?: string;
   workLine?: string;
@@ -180,6 +189,7 @@ interface GitStubBehaviour {
   waitMerged?: string;
   recordDir?: string;
   expectFile?: string;
+  noiseFile?: string;
 }
 
 interface GitPool {
@@ -220,7 +230,7 @@ function gitStubHarness(
       "set -uo pipefail",
       'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
       'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
-      'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""',
+      'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""; NOISE_FILE=""',
       'source "$plan"',
       'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
       'if [ -n "$WAIT_FOR" ]; then',
@@ -240,6 +250,7 @@ function gitStubHarness(
       '  case "$log" in *"$WAIT_MERGED"*) ;; *) exit 42;; esac',
       "fi",
       'if [ -n "$EXPECT_FILE" ] && [ ! -e "$EXPECT_FILE" ]; then exit 43; fi',
+      'if [ -n "$NOISE_FILE" ]; then cat "$NOISE_FILE"; fi',
       'if [ -n "$RECORD_DIR" ]; then',
       '  mkdir -p "$RECORD_DIR"',
       '  git rev-parse HEAD > "$RECORD_DIR/head"',
@@ -273,21 +284,29 @@ function gitStubHarness(
     spawnList.push(ctx);
     const n = spawnCounts[ctx.id] ?? 0;
     spawnCounts[ctx.id] = n + 1;
-    const entry = behaviour[ctx.id] ?? {};
+    const entry = behaviour[ctx.id] ??
+      // A grader id the engine wrote gets a default passing grade, so tests
+      // that do not care about grading still flow through it.
+      (/-grader-\d+$/.test(ctx.id)
+        ? { grade: { score: 8, verdict: "pass", reasons: "default grade" } }
+        : {});
     const b = Array.isArray(entry)
       ? entry[Math.min(n, entry.length - 1)]
       : entry;
     const status = b.status ?? "done";
     const outcome =
-      b.outcome === null || status === "keep"
-        ? ""
-        : JSON.stringify({
-            status,
-            ...(b.outcome ?? {
-              summary: `summary-${ctx.id}`,
-              commitSha: `sha-${ctx.id}`,
-            }),
-          });
+      b.outcomeRaw !== undefined
+        ? b.outcomeRaw
+        : b.outcome === null || status === "keep"
+          ? ""
+          : JSON.stringify({
+              status,
+              ...(b.outcome ?? {
+                summary: `summary-${ctx.id}`,
+                commitSha: `sha-${ctx.id}`,
+              }),
+              ...(b.grade !== undefined ? { grade: b.grade } : {}),
+            });
     const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
     const quote = (value: string) => JSON.stringify(value);
     const lines = [`MAIN_REPO=${quote(poolDir)}`];
@@ -301,6 +320,7 @@ function gitStubHarness(
     if (b.waitMerged) lines.push(`WAIT_MERGED=${quote(b.waitMerged)}`);
     if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
     if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
+    if (b.noiseFile) lines.push(`NOISE_FILE=${quote(b.noiseFile)}`);
     writeFileSync(planPath, lines.join("\n") + "\n");
     return [
       "bash",
@@ -320,6 +340,18 @@ const readyTicket = (id: string, blockedBy = "none") => ({
   file: `${id}-t.md`,
   marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
 });
+
+function readEventLines(poolDir: string, id: string) {
+  return readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      at: string;
+      attempt: number;
+      kind: string;
+      payload: Record<string, unknown>;
+    });
+}
 
 describe("pool loading", () => {
   it("rejects a pool with a missing line-1 marker", async () => {
@@ -496,18 +528,6 @@ describe("verify fan-out", () => {
     assign: { "01": { verify: n } },
   });
 
-  function readEventLines(poolDir: string, id: string) {
-    return readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as {
-        at: string;
-        attempt: number;
-        kind: string;
-        payload: Record<string, unknown>;
-      });
-  }
-
   it("fans a verify: 3 ticket out to three same-round attempts, each on its own branch", async () => {
     const { poolDir, head, git } = makeGitPool({
       tickets: [readyTicket("01")],
@@ -544,10 +564,15 @@ describe("verify fan-out", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // The fan-out is this ticket's whole deliverable: the verify ticket
-    // does not proceed, so no merge, no status write, and no Review.
+    // Grading (ticket 03) runs after the fan-out, but the gate still holds
+    // for the build ticket: no merge, no status write, and no Review.
     expect(run.phase).toBe("stalled");
-    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+      "01-grader-3": "done",
+    });
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
     expect(run.final.log.some((line) =>
       line.startsWith("ticket 01: verify fan-out complete: 3 attempts exited " +
@@ -555,13 +580,23 @@ describe("verify fan-out", () => {
     )).toBe(true);
 
     // Three attempts spawned in one scheduling round, each on its own
-    // attempt branch cut from the same HEAD.
-    expect(rig.spawnOrder).toEqual(["01", "01", "01"]);
-    expect(rig.spawnList.map((c) => c.outcomePath)).toEqual(
-      [1, 2, 3].map((i) =>
+    // attempt branch cut from the same HEAD, then one grader per attempt.
+    expect(rig.spawnOrder).toEqual([
+      "01",
+      "01",
+      "01",
+      "01-grader-1",
+      "01-grader-2",
+      "01-grader-3",
+    ]);
+    expect(rig.spawnList.map((c) => c.outcomePath)).toEqual([
+      ...[1, 2, 3].map((i) =>
         join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
       ),
-    );
+      ...[1, 2, 3].map((i) =>
+        join(poolDir, "runs", `01-grader-${i}.outcome.json`),
+      ),
+    ]);
     for (let i = 1; i <= 3; i++) {
       const rec = join(poolDir, `rec-${i}`);
       expect(readFileSync(join(rec, "branch"), "utf8").trim()).toBe(
@@ -590,20 +625,25 @@ describe("verify fan-out", () => {
         .toBe(0);
       expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
     }
-    expect(run.final.outcomes).toEqual({});
+    expect(Object.keys(run.final.outcomes).sort()).toEqual([
+      "01-grader-1",
+      "01-grader-2",
+      "01-grader-3",
+    ]);
 
-    // The ticket log records each attempt as a distinct attempt. Exits
-    // append in completion order, so the contract is per attempt: each
-    // attempt reads scheduled, spawned, exited in order, and every attempt
-    // was scheduled before the first spawn (one scheduling round).
+    // The ticket log records each attempt as a distinct attempt, and the
+    // engine lands each grader's grade on its attempt. Exits append in
+    // completion order, so the contract is per attempt: each attempt reads
+    // scheduled, spawned, exited, graded in order, and every attempt was
+    // scheduled before the first spawn (one scheduling round).
     const events = readEventLines(poolDir, "01");
     expect(events.map((e) => e.attempt).sort()).toEqual([
-      1, 1, 1, 2, 2, 2, 3, 3, 3,
+      1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
     ]);
     for (const attempt of [1, 2, 3]) {
       expect(
         events.filter((e) => e.attempt === attempt).map((e) => e.kind),
-      ).toEqual(["scheduled", "spawned", "exited"]);
+      ).toEqual(["scheduled", "spawned", "exited", "graded"]);
     }
     const firstSpawn = events.findIndex((e) => e.kind === "spawned");
     expect(
@@ -635,9 +675,12 @@ describe("verify fan-out", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(run.phase).toBe("stalled");
-    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+    });
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
-    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(rig.spawnOrder).toEqual(["01", "01-grader-1"]);
     expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
       .toBe(0);
     expect(existsSync(join(poolDir, "cand.txt"))).toBe(false);
@@ -751,7 +794,12 @@ describe("verify fan-out", () => {
         ).status,
       ).toBe("done");
     }
-    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+      "01-grader-3": "done",
+    });
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
   }, 15000);
 
@@ -771,11 +819,15 @@ describe("verify fan-out", () => {
 
     // The candidate's ending is recorded, but the fan-out gate holds: no
     // checkpoint interrupt, no Brief landing, no status write. How a
-    // partial checkpoint interacts with grading is tickets 03 and 05's to
-    // settle; this pins the gate.
+    // partial checkpoint interacts with the grade is ticket 05's to settle;
+    // this pins the gate through grading.
     expect(run.phase).toBe("stalled");
     expect(run.interrupts).toEqual([]);
-    expect(run.final.tickets).toEqual({ "01": "in-progress" });
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+    });
     expect(markerLine(poolDir, "01-t.md")).not.toContain("Brief");
     const events = readEventLines(poolDir, "01");
     const exit1 = events.find((e) => e.kind === "exited" && e.attempt === 1);
@@ -836,10 +888,16 @@ describe("verify fan-out", () => {
 
     // The existing resume path resets the ticket to ready; the next
     // scheduling round fans out again, numbering on from the first round.
+    // The grader cards are round-stable: the same ids are rewritten and
+    // rebound to the round's new attempts, not accumulated per attempt.
     const resumed = await run.resume("01");
     expect(resumed.phase).toBe("stalled");
     expect(resumed.interrupts).toEqual([]);
-    expect(resumed.final.tickets).toEqual({ "01": "in-progress" });
+    expect(resumed.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+    });
 
     const events = readEventLines(poolDir, "01");
     for (const attempt of [1, 2, 3, 4]) {
@@ -847,12 +905,19 @@ describe("verify fan-out", () => {
         events.filter((e) => e.attempt === attempt).map((e) => e.kind),
       ).toEqual(
         attempt === 1
-          ? ["scheduled", "spawned", "exited", "crash"]
+          ? ["scheduled", "spawned", "exited", "crash", "graded"]
           : attempt === 2
             ? // The resume's answered event carries the latest attempt.
-              ["scheduled", "spawned", "exited", "answered"]
-            : ["scheduled", "spawned", "exited"],
+              ["scheduled", "spawned", "exited", "graded", "answered"]
+            : ["scheduled", "spawned", "exited", "graded"],
       );
+    }
+    // Each grader card ran once per round: two spawns, its own attempt
+    // counter numbering on across the rewrite.
+    for (const gid of ["01-grader-1", "01-grader-2"]) {
+      expect(
+        readEventLines(poolDir, gid).map((e) => e.attempt),
+      ).toEqual([1, 1, 1, 2, 2, 2]);
     }
     expect(existsSync(join(poolDir, "runs", "01.attempt-1.outcome.json")))
       .toBe(false);
@@ -866,6 +931,415 @@ describe("verify fan-out", () => {
         ).status,
       ).toBe("done");
     }
+  }, 15000);
+});
+
+describe("verify grading", () => {
+  const verifyConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    assign: { "01": { verify: n } },
+  });
+
+  it("writes one grader ticket per attempt with the build ticket as its blocker", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // One grader ticket file per attempt, on disk with the ordinary
+    // blocking edge, run to done by the engine.
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(true);
+    expect(markerLine(poolDir, "01-grader-1.md")).toContain(
+      "id=01-grader-1 blocked-by=01 status=done",
+    );
+    expect(markerLine(poolDir, "01-grader-2.md")).toContain(
+      "id=01-grader-2 blocked-by=01 status=done",
+    );
+    expect(
+      readFileSync(join(poolDir, "issues", "01-grader-1.md"), "utf8"),
+    ).toContain("attempt 1 of ticket 01");
+
+    // Without a pool verify skill the grader prompt says so and grades on
+    // the engine's own instructions instead.
+    expect(
+      rig.spawnList.find((c) => c.id === "01-grader-1")!.body,
+    ).toContain("(the pool has no verify skill");
+
+    // The build ticket's gate still holds through grading: no merge, no
+    // status write, and the graders never entered a super-step.
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+    });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
+    expect(
+      run.final.log.filter((line) => line.startsWith("super-step")),
+    ).toEqual(["super-step 1: 01"]);
+    expect(run.final.log).toContain(
+      "ticket 01: grading 2 attempts with grader tickets " +
+        "01-grader-1, 01-grader-2",
+    );
+    expect(
+      readEventLines(poolDir, "01-grader-1").map((e) => e.kind),
+    ).toEqual(["scheduled", "spawned", "exited"]);
+  }, 15000);
+
+  it("binds each grader to its own attempt's artifacts and parameterizes the pool's verify skill", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    writeFileSync(
+      join(poolDir, "verify.md"),
+      "# verify: grade one attempt\n\n" +
+        "POOL-SKILL-MARKER: grade on the three criteria only.\n",
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const grader1 = rig.spawnList.find((c) => c.id === "01-grader-1")!;
+    const grader2 = rig.spawnList.find((c) => c.id === "01-grader-2")!;
+
+    // The pool's verify skill travels in the prompt verbatim, and the
+    // engine's glue names the bound attempt's four artifact paths.
+    for (const ctx of [grader1, grader2]) {
+      expect(ctx.body).toContain(
+        "POOL-SKILL-MARKER: grade on the three criteria only.",
+      );
+      expect(ctx.body).toContain(
+        "Trust terminal output over the agent's self-assessment.",
+      );
+      expect(ctx.body).toContain(join(poolDir, "issues", "01-t.md"));
+      expect(ctx.cwd).toBe(poolDir);
+    }
+    expect(grader1.body).toContain("attempt 1 of ticket 01");
+    expect(grader1.body).toContain(
+      join(poolDir, "runs", "01.attempt-1.outcome.json"),
+    );
+    expect(grader1.body).not.toContain(
+      join(poolDir, "runs", "01.attempt-2.outcome.json"),
+    );
+    expect(grader1.body).toContain("01-grader-1.diff.patch");
+    expect(grader1.body).toContain("01-grader-1.trim.log");
+    expect(grader2.body).toContain("attempt 2 of ticket 01");
+    expect(grader2.body).toContain(
+      join(poolDir, "runs", "01.attempt-2.outcome.json"),
+    );
+
+    // The grader writes its own outcome to the path the engine handed it.
+    expect(grader1.outcomePath).toBe(
+      join(poolDir, "runs", "01-grader-1.outcome.json"),
+    );
+    expect(grader1.issuePath).toBe(join(poolDir, "issues", "01-grader-1.md"));
+
+    // The diff file holds exactly the bound attempt's work: attempt 1's
+    // diff knows cand-1 and not cand-2, and the other way round.
+    const diff1 = readFileSync(
+      join(poolDir, "runs", "01-grader-1.diff.patch"),
+      "utf8",
+    );
+    expect(diff1).toContain("cand-1");
+    expect(diff1).not.toContain("cand-2");
+    const diff2 = readFileSync(
+      join(poolDir, "runs", "01-grader-2.diff.patch"),
+      "utf8",
+    );
+    expect(diff2).toContain("cand-2");
+    expect(diff2).not.toContain("cand-1");
+  }, 15000);
+
+  it("lands each grade in the graded attempt's record", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+        { workFile: "cand-3.txt", commitMsg: "cand-3" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "solid work" },
+      },
+      "01-grader-2": {
+        grade: { score: 3, verdict: "flag", reasons: "tests missing" },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // A graded event per attempt on the build ticket's file, carrying
+    // score, verdict, and reasons (events land in grader completion order,
+    // so the comparison sorts by attempt).
+    const graded = readEventLines(poolDir, "01")
+      .filter((e) => e.kind === "graded")
+      .sort((a, b) => a.attempt - b.attempt);
+    expect(graded.map((e) => [e.attempt, e.payload])).toEqual([
+      [1, { score: 9, verdict: "pass", reasons: "solid work" }],
+      [2, { score: 3, verdict: "flag", reasons: "tests missing" }],
+      [3, { score: 8, verdict: "pass", reasons: "default grade" }],
+    ]);
+    expect(run.final.log).toContain(
+      "ticket 01: attempt 1 graded: score 9, verdict pass (grader 01-grader-1)",
+    );
+    expect(run.final.log).toContain(
+      "ticket 01: attempt 2 graded: score 3, verdict flag (grader 01-grader-2)",
+    );
+    expect(markerLine(poolDir, "01-grader-2.md")).toContain("status=done");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+  }, 15000);
+
+  it("resolves a grader's harness and model through assign, overridable per grader", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "stub", model: "stub-model" },
+        assign: {
+          "01": { verify: 2, harness: "stub", model: "build-model" },
+          // Harness-only override: the model still comes from the build.
+          "01-grader-2": { harness: "other" },
+        },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    const others: SpawnContext[] = [];
+    const otherScript = join(poolDir, "other-harness.sh");
+    writeFileSync(
+      otherScript,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; outcome_path="$2"',
+        'printf \'%s\' \'{"status":"done","summary":"other-grader",' +
+          '"commitSha":null,"grade":{"score":6,"verdict":"pass",' +
+          '"reasons":"ok"}}\' > "$outcome_path"',
+        "",
+      ].join("\n"),
+    );
+    const other: HarnessCommand = (ctx) => {
+      others.push(ctx);
+      return ["bash", otherScript, ctx.issuePath, ctx.outcomePath];
+    };
+
+    await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, other },
+    });
+
+    // What the grader's assign entry does not override comes from the build
+    // ticket, not the pool defaults.
+    const grader1 = rig.spawnList.find((c) => c.id === "01-grader-1")!;
+    expect(grader1.harness).toBe("stub");
+    expect(grader1.model).toBe("build-model");
+    expect(others[0].id).toBe("01-grader-2");
+    expect(others[0].harness).toBe("other");
+    expect(others[0].model).toBe("build-model");
+    // The override ran and its grade landed.
+    expect(markerLine(poolDir, "01-grader-2.md")).toContain("status=done");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "graded" && e.attempt === 2)
+        ?.payload,
+    ).toEqual({ score: 6, verdict: "pass", reasons: "ok" });
+  }, 15000);
+
+  it("treats an unusable grade as a grader crash, never as a grade", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+        { workFile: "cand-3.txt", commitMsg: "cand-3" },
+      ],
+      // A valid outcome with no grade object at all.
+      "01-grader-1": {
+        outcomeRaw: '{"status":"done","summary":"no grade","commitSha":null}',
+      },
+      // A grader that died.
+      "01-grader-2": { exitCode: 9 },
+      // A grader that paused instead of grading; even with a grade in the
+      // outcome, a checkpoint is not a usable grade.
+      "01-grader-3": {
+        status: "checkpoint",
+        grade: { score: 10, verdict: "pass", reasons: "perfect" },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // No grade was recorded anywhere, no interrupt was raised (the re-spawn
+    // bound is ticket 07's), and the build ticket is untouched.
+    expect(run.phase).toBe("stalled");
+    expect(run.interrupts).toEqual([]);
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
+    ).toEqual([]);
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+
+    const g1 = readEventLines(poolDir, "01-grader-1");
+    expect(g1.find((e) => e.kind === "exited")?.payload).toEqual({
+      code: 0,
+      status: "in-progress",
+    });
+    expect(g1.find((e) => e.kind === "crash")?.payload).toEqual({
+      code: 0,
+      reason: "outcome carries no grade object",
+    });
+    expect(markerLine(poolDir, "01-grader-1.md")).toContain(
+      "status=in-progress",
+    );
+    const g2 = readEventLines(poolDir, "01-grader-2");
+    expect(g2.find((e) => e.kind === "crash")?.payload).toEqual({
+      code: 9,
+      reason: "harness exited 9",
+    });
+    const g3 = readEventLines(poolDir, "01-grader-3");
+    expect(g3.find((e) => e.kind === "crash")?.payload).toEqual({
+      code: 0,
+      reason: "grader outcome is a checkpoint, not a grade",
+    });
+    expect(markerLine(poolDir, "01-grader-3.md")).toContain(
+      "status=in-progress",
+    );
+    expect(run.final.log).toContain(
+      "ticket 01: grader 01-grader-1 produced no usable grade for " +
+        "attempt 1: outcome carries no grade object",
+    );
+    expect(run.final.log).toContain(
+      "ticket 01: grader 01-grader-2 produced no usable grade for " +
+        "attempt 2: harness exited 9",
+    );
+  }, 15000);
+
+  it("does not honor a grader's own status write", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: verifyConfig(1),
+    });
+    // The grader seds its own marker to done and writes no grade: the
+    // engine owns the write and records a crash instead. Also pins grading
+    // in a pool that does not run in git.
+    const rig = stubHarness({
+      "01-grader-1": { status: "marker-done" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(markerLine(poolDir, "01-grader-1.md")).toContain(
+      "status=in-progress",
+    );
+    expect(
+      readEventLines(poolDir, "01-grader-1").find((e) => e.kind === "crash")
+        ?.payload,
+    ).toEqual({ code: 0, reason: "no outcome written" });
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
+    ).toEqual([]);
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "in-progress",
+    });
+  }, 15000);
+
+  it("trims a huge attempt log to its tail and says so", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const noise = join(poolDir, "noise.txt");
+    const lines: string[] = [];
+    for (let i = 0; i < 9000; i++) lines.push(`noise line ${i} padding padding`);
+    writeFileSync(noise, lines.join("\n") + "\nTAILMARKER-end\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { noiseFile: noise, workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const rawLog = readFileSync(
+      join(poolDir, "runs", "01.attempt-1.log"),
+      "utf8",
+    );
+    expect(rawLog.length).toBeGreaterThan(80_000);
+    const trim1 = readFileSync(
+      join(poolDir, "runs", "01-grader-1.trim.log"),
+      "utf8",
+    );
+    expect(trim1.startsWith("[log trimmed to the last ~20k tokens;")).toBe(
+      true,
+    );
+    expect(trim1.length).toBeLessThan(80_200);
+    expect(trim1.trimEnd().endsWith("TAILMARKER-end")).toBe(true);
+    // A log within the budget passes through whole, no trim notice.
+    expect(
+      readFileSync(join(poolDir, "runs", "01-grader-2.trim.log"), "utf8"),
+    ).toBe("");
+    // The grader's prompt names the trimmed copy.
+    expect(
+      rig.spawnList.find((c) => c.id === "01-grader-1")!.body,
+    ).toContain("01-grader-1.trim.log");
+  }, 15000);
+
+  it("resolves a stale grader ticket from its build ticket's assignment at pool start", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      // No pool defaults: the build ticket carries its own assignment.
+      config: {
+        assign: { "01": { verify: 2, harness: "stub", model: "build-model" } },
+      },
+    });
+    // A grader ticket file left on disk by a previous run.
+    writeFileSync(
+      join(poolDir, "issues", "01-grader-1.md"),
+      "<!-- state: id=01-grader-1 blocked-by=01 status=ready -->\n\n# 01-grader-1\n",
+    );
+    const rig = gitStubHarness(poolDir, { "01": [{}, {}] });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Pool start resolved the stale grader from its build ticket, and the
+    // round's fan-out rewrote and ran both graders to done.
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+    });
+    const grader1 = rig.spawnList.find((c) => c.id === "01-grader-1")!;
+    expect(grader1.harness).toBe("stub");
+    expect(grader1.model).toBe("build-model");
   }, 15000);
 });
 

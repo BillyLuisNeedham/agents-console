@@ -31,6 +31,60 @@ export function buildResolverPrompt(parts: ResolverPromptParts): string {
   ].join("\n");
 }
 
+interface GraderPromptParts {
+  buildId: string;
+  attempt: number;
+  /** The pool's verify skill, or null when the pool has none. */
+  skill: string | null;
+  ticketPath: string;
+  outcomePath: string;
+  diffPath: string;
+  logPath: string;
+  graderOutcomePath: string;
+}
+
+// The grader's prompt: the pool's verify skill parameterized with the bound
+// attempt's artifact paths, then the grade contract. The skill is prose the
+// engine never parses; the glue around it (paths, trust rule, outcome shape)
+// is engine-owned so a pool whose skill drifted still grades to the contract.
+export function buildGraderPrompt(parts: GraderPromptParts): string {
+  const sections: string[] = [
+    `You are a grader. One attempt is bound to you: attempt ` +
+      `${parts.attempt} of ticket ${parts.buildId}. Grade that attempt ` +
+      "against the ticket, judge the artifacts, and put the grade in your " +
+      "outcome JSON. The engine owns every status write; you write none.",
+    "",
+    "---",
+    "",
+    parts.skill?.trim() ||
+      "_(the pool has no verify skill: no verify.md beside AGENT.md, so " +
+        "grade on the criteria below and say so in your reasons)_",
+    "",
+    "---",
+    "",
+    "The bound attempt's artifacts, in the order the skill reads them:",
+    "",
+    `1. The ticket file: ${parts.ticketPath}`,
+    `2. The attempt's Outcome JSON: ${parts.outcomePath}`,
+    `3. The diff at the attempt's commit: ${parts.diffPath}`,
+    `4. The attempt log, trimmed to its last ~20k tokens when huge: ` +
+      parts.logPath,
+    "",
+    "Trust terminal output over the agent's self-assessment.",
+    "",
+    "---",
+    "",
+    "When you finish, record your outcome as JSON at " +
+      `${parts.graderOutcomePath}: {"status": "done", "summary": "what you ` +
+      'graded, in a sentence or two", "commitSha": null, "grade": ' +
+      '{"score": 0-10, "verdict": "pass" or "flag", "reasons": "one to ' +
+      'three short sentences naming the evidence"}}. ' +
+      "You write no status, raise no interrupts, and merge nothing: the " +
+      "grade in this file is your only output.",
+  ];
+  return sections.join("\n");
+}
+
 interface PromptParts {
   chain: string[];
   agentMd: string;
