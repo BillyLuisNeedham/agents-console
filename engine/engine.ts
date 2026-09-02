@@ -438,7 +438,9 @@ async function driveLoop(session: Session): Promise<void> {
       // The super-step boundary: answers accepted while the previous
       // super-step was in flight are applied now, in submission order, after
       // that super-step's join and persistence and before this one's
-      // scheduling. Processing never spawns; the scheduling below does.
+      // scheduling. Processing never spawns; the scheduling below does. The
+      // drain persists the answered state itself, so a resume is on disk
+      // before this super-step schedules, not only at its closing persist.
       drainAnswers(session);
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
@@ -872,7 +874,11 @@ function kickProcessing(session: Session): void {
 // The boundary drain: every queued answer is applied in submission order.
 // A answer that fails processing (a review reject naming no ticket, a stale
 // record whose interrupt is gone) rejects its own waiter and is consumed; it
-// never takes the drive down with it.
+// never takes the drive down with it. A processed answer persists the
+// resulting state itself, before its record is marked processed and before
+// the next super-step is scheduled, so the answer's state change is durable
+// from the moment it is processed and never rests in memory only across a
+// super-step.
 function drainAnswers(session: Session): void {
   for (const record of session.answers.pending()) {
     const waiters = session.answerWaiters.get(record.seq) ?? [];
@@ -884,6 +890,13 @@ function drainAnswers(session: Session): void {
       for (const waiter of waiters) waiter.reject(error);
       continue;
     }
+    // The persist precedes markProcessed, so a record marked processed
+    // implies its state change is already on disk. A kill between the two
+    // leaves the record pending: a restart replays it onto the rehydrated
+    // state, where it either re-applies or stale-consumes. A persist failure
+    // leaves the record pending the same way and propagates like any other
+    // persist failure; the retry policy lives at the persist seam.
+    persist(session);
     session.answers.markProcessed(record.seq);
     for (const waiter of waiters) waiter.resolve();
   }
