@@ -461,10 +461,14 @@ function readPoolGrades(
       events.filter((event) => event.kind === "selected").at(-1)?.attempt ??
       events.filter((event) => event.kind === "merged").at(-1)?.attempt ??
       null;
+    // A named winner whose own grade is malformed serves nothing: falling
+    // back to another attempt's grade would put a loser's numbers on the
+    // card while the Detail's badge marks the winner.
     const pick =
-      (winner !== null
+      winner !== null
         ? graded.filter((event) => event.attempt === winner).at(-1)
-        : undefined) ?? last;
+        : last;
+    if (!pick) continue;
     grades[marker.id] = {
       attempt: pick.attempt,
       score: pick.payload.score as number,

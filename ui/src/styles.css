@@ -1096,8 +1096,8 @@ body {
   letter-spacing: 0.04em;
 }
 
-/* A verified ticket's winning attempt: the engine merges only the selected
-   attempt, so merged-on-a-graded-ticket is the winner. The badge reads in
+/* A verified ticket's winning attempt: the attempt the grades endpoint's
+   winner names (ADR 0007: one derivation, server-side). The badge reads in
    the done green; the flagged verdict keeps the interrupt red it carries
    everywhere else. */
 .timeline-winner {
