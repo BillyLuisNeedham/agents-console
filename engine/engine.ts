@@ -29,7 +29,7 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
-import { buildGraderPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
+import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
   type HarnessCommand,
@@ -224,12 +224,13 @@ function readyTickets(
 ): TicketMarker[] {
   return markers.filter(
     (marker) =>
-      // Grader tickets are engine-run (they are spawned the moment their
-      // build ticket's fan-out completes, which the ready set can never
-      // express, since the build ticket stays in-progress until selection).
-      // Excluding them here keeps a stray ready grader from ever being
-      // scheduled as an ordinary implement ticket.
-      !parseGraderId(marker.id) &&
+      // Grader tickets and the head-to-head ticket are engine-run (they are
+      // spawned at the grading or selection point of their build ticket's
+      // fan-out, which the ready set can never express, since the build
+      // ticket stays in-progress until selection). Excluding them here keeps
+      // a stray ready engine card from ever being scheduled as an ordinary
+      // implement ticket.
+      !engineTicketBuildId(marker.id) &&
       tickets[marker.id] === "ready" &&
       marker.blockedBy.every((id) => tickets[id] === "done"),
   );
@@ -288,13 +289,14 @@ export function startPool(options: RunOptions): PoolRun {
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const cwd = repoRootOf(poolDir);
 
-  // Two passes: ordinary tickets resolve first, then grader tickets (ids the
-  // engine writes, `<build>-grader-<attempt>`) resolve from their build
-  // ticket's assignment, so a stale grader file on disk never fails pool
-  // start and a grader inherits its builder with zero new config.
+  // Two passes: ordinary tickets resolve first, then engine-run tickets
+  // (grader ids and the head-to-head id the engine writes) resolve from their
+  // build ticket's assignment, so a stale engine card on disk never fails
+  // pool start and an engine-run judge inherits its builder with zero new
+  // config.
   const assignments = new Map<string, Assignment>();
   for (const marker of markers) {
-    if (parseGraderId(marker.id)) continue;
+    if (engineTicketBuildId(marker.id)) continue;
     assignments.set(
       marker.id,
       resolveAssignment(marker, config, harnesses),
@@ -302,12 +304,12 @@ export function startPool(options: RunOptions): PoolRun {
   }
   for (const marker of markers) {
     if (assignments.has(marker.id)) continue;
-    const grader = parseGraderId(marker.id)!;
-    const build = assignments.get(grader.buildId);
+    const buildId = engineTicketBuildId(marker.id)!;
+    const build = assignments.get(buildId);
     assignments.set(
       marker.id,
       build
-        ? resolveGraderAssignment(config, marker, build, harnesses)
+        ? resolveEngineTicketAssignment(config, marker, build, harnesses)
         : resolveAssignment(marker, config, harnesses),
     );
   }
@@ -721,7 +723,7 @@ async function driveLoop(session: Session): Promise<void> {
           if (selectionMode(session.state.config) === "human") {
             raiseSelectionInterrupt(session, marker, attempts, grades, emit);
           } else {
-            selectAndMergeWinner(session, marker, attempts, grades, emit);
+            await selectAndMergeWinner(session, marker, attempts, grades, emit);
           }
         }
       }
@@ -1048,14 +1050,12 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   session.markers = loadPoolMarkers(session.issuesDir);
   for (const m of session.markers) {
     if (session.assignments.has(m.id)) continue;
-    const grader = parseGraderId(m.id);
-    const build = grader
-      ? session.assignments.get(grader.buildId)
-      : undefined;
+    const buildId = engineTicketBuildId(m.id);
+    const build = buildId ? session.assignments.get(buildId) : undefined;
     session.assignments.set(
       m.id,
       build
-        ? resolveGraderAssignment(session.state.config, m, build, session.harnesses)
+        ? resolveEngineTicketAssignment(session.state.config, m, build, session.harnesses)
         : resolveAssignment(m, session.state.config, session.harnesses),
     );
   }
@@ -1500,6 +1500,10 @@ function rejectMerge(
 // the fakes in the engine suite never see the driver name.
 const GRADER_DRIVER = "verify";
 
+// The head-to-head judge's driver name, same contract as the grader's
+// (ticket 06).
+const HEAD_TO_HEAD_DRIVER = "head-to-head";
+
 // One grader's assessment of one attempt (the Grade in CONTEXT.md): the
 // score, the verdict, and short reasons, carried in the grader's Outcome
 // JSON under a `grade` key and copied by the engine into the graded
@@ -1530,25 +1534,47 @@ function parseGraderId(id: string): { buildId: string; attempt: number } | null 
   return { buildId: match[1], attempt: Number(match[2]) };
 }
 
-// A grader's harness and model resolve through the ordinary assign machinery:
-// an assign entry for the grader's own id overrides field-wise, and what it
+// The head-to-head ticket id is the engine's convention too: exactly one per
+// build ticket, `<build>-head-to-head`, deterministic so a re-round rewrites
+// the same file (rebinding it to the round's top two) and a console.json
+// assign entry can name it before it exists. Same engine-owned convention
+// note as the grader ids: pools do not write such ids (ticket 06).
+function headToHeadIdFor(buildId: string): string {
+  return `${buildId}-head-to-head`;
+}
+
+function parseHeadToHeadId(id: string): string | null {
+  return id.endsWith("-head-to-head")
+    ? id.slice(0, -"-head-to-head".length)
+    : null;
+}
+
+// The build ticket behind an engine-written ticket id, grader or head-to-head;
+// null for an ordinary ticket the pool's own directory defines.
+function engineTicketBuildId(id: string): string | null {
+  return parseGraderId(id)?.buildId ?? parseHeadToHeadId(id);
+}
+
+// An engine-run ticket's harness and model resolve through the ordinary
+// assign machinery (this covers grader tickets and the head-to-head ticket):
+// an assign entry for the ticket's own id overrides field-wise, and what it
 // does not override comes from the build ticket's resolved assignment rather
-// than the pool defaults, so a grader can be a different agent than its
-// builder with zero new config. The grader's drivers are meaningless (the
-// prompt is the pool's verify skill) and a grader is never itself a verify
+// than the pool defaults, so an engine-run judge can be a different agent
+// than its builder with zero new config. The drivers are meaningless (the
+// prompt is engine-built) and an engine-run judge is never itself a verify
 // ticket, so neither carries over. An unknown harness fails fast with the
-// same error a ticket's would, instead of an opaque crash mid-grading.
-function resolveGraderAssignment(
+// same error a ticket's would, instead of an opaque crash mid-judgment.
+function resolveEngineTicketAssignment(
   config: PoolConfig,
-  graderMarker: TicketMarker,
+  ticketMarker: TicketMarker,
   build: Assignment,
   harnesses: Record<string, HarnessCommand>,
 ): Assignment {
-  const assign = config.assign?.[graderMarker.id] ?? {};
+  const assign = config.assign?.[ticketMarker.id] ?? {};
   const harness = assign.harness ?? build.harness;
   if (!harnesses[harness]) {
     throw new Error(
-      `pool config: ticket ${graderMarker.id} names unknown harness ` +
+      `pool config: ticket ${ticketMarker.id} names unknown harness ` +
         `'${harness}'. Known: ${Object.keys(harnesses).sort().join(", ")}`,
     );
   }
@@ -1709,7 +1735,7 @@ async function runGraders(
     const marker = session.markers.find(
       (m) => m.id === graderIdFor(build.id, index + 1),
     )!;
-    const assignment = resolveGraderAssignment(
+    const assignment = resolveEngineTicketAssignment(
       session.state.config,
       marker,
       buildAssignment,
@@ -1762,7 +1788,7 @@ async function runGraders(
     pending = pending.map(({ marker, attempt, lastReason }) => {
       // The re-spawn resolves its assignment fresh, so an operator's
       // mid-run edit to console.json lands on the very next grader run.
-      const assignment = resolveGraderAssignment(
+      const assignment = resolveEngineTicketAssignment(
         session.state.config,
         marker,
         buildAssignment,
@@ -2220,31 +2246,86 @@ function selectWinner(
 }
 
 // Selecting and merging the winner of a completed, fully graded fan-out:
-// every attempt exited done and every grader returned a usable grade. The
-// arithmetic rule picks the attempt; completing the selection (the shared
-// tail below) does the rest.
-function selectAndMergeWinner(
+// every attempt exited done and every grader returned a usable grade. A
+// margin of two points or more takes the top score outright; a tighter
+// spread calls the head-to-head ticket (ticket 06), whose pick decides
+// between the top two, falling back to the deterministic order on a tie or
+// an unusable outcome. Completing the selection (the shared tail below)
+// does the rest.
+async function selectAndMergeWinner(
   session: Session,
   marker: TicketMarker,
   attempts: number[],
   grades: Map<number, Grade>,
   emit: (phase: RunPhase) => void,
-): void {
-  const selection = selectWinner(
-    attempts.map((attempt) => ({ attempt, grade: grades.get(attempt)! })),
-  );
+): Promise<void> {
+  const ranked = attempts
+    .map((attempt) => ({ attempt, grade: grades.get(attempt)! }))
+    .sort((a, b) => b.grade.score - a.grade.score || a.attempt - b.attempt);
+  const selection = selectWinner(ranked);
+  let picked: {
+    attempt: number;
+    score: number | null;
+    margin: number | null;
+    rule: "outright" | "fallback" | "human" | "head-to-head";
+  } = selection;
+  let why =
+    `selected attempt ${selection.attempt} (score ${selection.score}` +
+    (selection.margin === null ? "" : `, margin ${selection.margin}`) +
+    `): ${
+      selection.rule === "outright"
+        ? "takes it outright"
+        : "below the outright margin; highest score, then earlier attempt"
+    }`;
+  if (selection.rule === "fallback") {
+    // The tight band (ticket 06): separate grading calls are uncalibrated,
+    // so the engine does not trust a one-point spread on its own. One
+    // head-to-head ticket sees the top two side by side and names the
+    // winner; a tie or an unusable outcome leaves the deterministic order
+    // standing.
+    const verdict = await runHeadToHead(
+      session,
+      marker,
+      ranked[0],
+      ranked[1],
+      emit,
+    );
+    if (verdict.kind === "pick") {
+      picked = {
+        attempt: verdict.attempt,
+        score: grades.get(verdict.attempt)!.score,
+        margin: Math.abs(ranked[0].grade.score - ranked[1].grade.score),
+        rule: "head-to-head",
+      };
+      why =
+        `selected attempt ${picked.attempt} (score ${picked.score}, ` +
+        `margin ${picked.margin}): the head-to-head ticket ` +
+        `${headToHeadIdFor(marker.id)} picked it`;
+    } else {
+      why =
+        `selected attempt ${selection.attempt} (score ${selection.score}, ` +
+        `margin ${selection.margin}): ` +
+        (verdict.kind === "tie"
+          ? `the head-to-head ticket ${headToHeadIdFor(marker.id)} ` +
+            "could not separate them; "
+          : `the head-to-head ticket ${headToHeadIdFor(marker.id)} gave ` +
+            `no usable pick (${verdict.reason}); `) +
+        "highest score, then earlier attempt";
+    }
+  }
+  // A superseded head-to-head card closes with the selection: a review
+  // reject resets its marker to ready with its build ticket's, and a
+  // re-round whose grades then decide outright never rewrites it, so
+  // without this the run could never pass Review's all-done check.
+  if (selection.rule === "outright") {
+    closeSupersededHeadToHead(session, marker.id);
+  }
   completeSelection(
     session,
     marker,
-    selection.attempt,
-    { score: selection.score, margin: selection.margin, rule: selection.rule },
-    `selected attempt ${selection.attempt} (score ${selection.score}` +
-      (selection.margin === null ? "" : `, margin ${selection.margin}`) +
-      `): ${
-        selection.rule === "outright"
-          ? "takes it outright"
-          : "below the outright margin; highest score, then earlier attempt"
-      }`,
+    picked.attempt,
+    { score: picked.score, margin: picked.margin, rule: picked.rule },
+    why,
     emit,
   );
 }
@@ -2377,7 +2458,7 @@ function completeSelection(
   picked: {
     score: number | null;
     margin: number | null;
-    rule: "outright" | "fallback" | "human";
+    rule: "outright" | "fallback" | "human" | "head-to-head";
   },
   why: string,
   emit: (phase: RunPhase) => void,
@@ -2463,6 +2544,285 @@ function discardLosers(
     });
   }
   return losers;
+}
+
+// ---------------------------------------------------------------------------
+// Head-to-head (ticket 06): one compare ticket for a tight grade spread
+// ---------------------------------------------------------------------------
+
+// One side of the comparison: the attempt, the grade it received, and the
+// artifact paths the head-to-head ticket binds.
+interface HeadToHeadSide {
+  attempt: number;
+  grade: Grade;
+  outcomePath: string;
+  diffPath: string;
+  logPath: string;
+}
+
+// What the head-to-head run decided: the attempt it picked, a declared tie,
+// or the reason it decided nothing (a dead harness, an unparseable outcome,
+// a pause). A tie and an unusable outcome lead to the same deterministic
+// fallback; the reason only tells the log which one fired.
+type HeadToHeadVerdict =
+  | { kind: "pick"; attempt: number; outcome: Outcome }
+  | { kind: "tie"; outcome: Outcome }
+  | { kind: "unusable"; reason: string };
+
+// The head-to-head's outcome: the standard contract plus a `winner` naming
+// exactly one of the two candidate attempt numbers, or the string "tie" when
+// the judge genuinely cannot separate them. Anything else is unusable rather
+// than a guess: the deterministic fallback owns the decision then.
+function readHeadToHeadVerdict(
+  path: string,
+  candidates: [number, number],
+): HeadToHeadVerdict {
+  if (!existsSync(path)) return { kind: "unusable", reason: "no outcome written" };
+  let parsed: { winner?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { kind: "unusable", reason: "outcome is not parseable JSON" };
+  }
+  const base = validateOutcome(parsed);
+  if (!base.ok) return { kind: "unusable", reason: base.reason };
+  if (base.outcome.status !== "done") {
+    return {
+      kind: "unusable",
+      reason: "head-to-head outcome is a checkpoint, not a pick",
+    };
+  }
+  if (parsed?.winner === "tie") return { kind: "tie", outcome: base.outcome };
+  const winner = parsed?.winner;
+  const pick =
+    typeof winner === "number" && Number.isInteger(winner)
+      ? winner
+      : typeof winner === "string" && /^\d+$/.test(winner)
+        ? Number(winner)
+        : null;
+  if (pick === null || !candidates.includes(pick)) {
+    return {
+      kind: "unusable",
+      reason: "outcome names no winner among the two attempts",
+    };
+  }
+  return { kind: "pick", attempt: pick, outcome: base.outcome };
+}
+
+// The head-to-head ticket file: a real ticket in the pool's directory with
+// the ordinary blocking edge from its build ticket, so it renders as a node
+// card and its assignment is editable like any ticket's. The engine rewrites
+// it every time the tight band is reached, rebinding the same card to the
+// round's top two instead of accumulating one per round.
+function writeHeadToHeadTicket(
+  session: Session,
+  build: TicketMarker,
+  sides: [HeadToHeadSide, HeadToHeadSide],
+): void {
+  const h2hId = headToHeadIdFor(build.id);
+  const [top, runnerUp] = sides;
+  const bind = (label: string, s: HeadToHeadSide): string =>
+    `${label} attempt ${s.attempt} (graded ${s.grade.score}/10): outcome ` +
+    `\`${s.outcomePath}\`; diff \`${s.diffPath}\`; trimmed log \`${s.logPath}\``;
+  const body =
+    `<!-- state: id=${h2hId} blocked-by=${build.id} status=ready -->\n\n` +
+    `# ${h2hId}: pick between attempts ${top.attempt} and ` +
+    `${runnerUp.attempt} of ticket ${build.id}\n\n` +
+    `**Head-to-head for:** ticket ${build.id}. Attempts ${top.attempt} and ` +
+    `${runnerUp.attempt} graded ${top.grade.score} and ` +
+    `${runnerUp.grade.score}, inside the two-point outright margin, so the ` +
+    "pairwise call decides.\n\n" +
+    `**Bound artifacts:** ticket file \`${build.file}\`; ` +
+    `${bind("first", top)}; ${bind("second", runnerUp)}.\n\n` +
+    `The engine wrote this ticket when selection found the top two grades ` +
+    "too close to call from separate graders, and runs it through the " +
+    "pool's ordinary assign machinery: an `assign` entry for this id in " +
+    "console.json overrides the build ticket's harness and model. Its " +
+    "prompt lays both attempts' artifacts side by side, and its outcome " +
+    'JSON carries `"winner"`, the number of the attempt it picks, or ' +
+    '`"tie"`. It writes no status, raises no interrupts, and merges ' +
+    "nothing.\n";
+  writeFileSync(join(session.issuesDir, `${h2hId}.md`), body);
+}
+
+// Running the head-to-head for a tight spread: write the compare ticket,
+// resolve its assignment through the ordinary machinery, spawn it, and read
+// the pick. Unlike a grader there is no re-spawn: an unusable outcome falls
+// back to the deterministic order by contract, so a dead judge can never
+// stall the run. The card still closes done either way (the engine owns the
+// status write): its lifecycle is over once its outcome has been consumed,
+// and an open card would hold Review's all-done check shut forever.
+async function runHeadToHead(
+  session: Session,
+  build: TicketMarker,
+  top: { attempt: number; grade: Grade },
+  runnerUp: { attempt: number; grade: Grade },
+  emit: (phase: RunPhase) => void,
+): Promise<HeadToHeadVerdict> {
+  const h2hId = headToHeadIdFor(build.id);
+  const runsDir = session.runsDir;
+  const sides = [top, runnerUp].map((side): HeadToHeadSide => {
+    const attempt = side.attempt;
+    return {
+      attempt,
+      grade: side.grade,
+      outcomePath: join(runsDir, outcomeFileName(build.id, attempt)),
+      diffPath: join(runsDir, `${h2hId}.attempt-${attempt}.diff.patch`),
+      logPath: join(runsDir, `${h2hId}.attempt-${attempt}.trim.log`),
+    };
+  });
+  writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
+  session.markers = loadPoolMarkers(session.issuesDir);
+  const h2h = session.markers.find((m) => m.id === h2hId)!;
+  const assignment = resolveEngineTicketAssignment(
+    session.state.config,
+    h2h,
+    session.assignments.get(build.id)!,
+    session.harnesses,
+  );
+  session.assignments.set(h2hId, assignment);
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: nextAttempt(runsDir, h2hId),
+    kind: "scheduled",
+    payload: {},
+  });
+  session.state = applyUpdate(session.state, {
+    tickets: { [h2hId]: "in-progress" as const },
+    log: [
+      `ticket ${build.id}: margin ` +
+        `${top.grade.score - runnerUp.grade.score} is below the outright ` +
+        `band; spawning head-to-head ${h2hId} between attempts ` +
+        `${top.attempt} and ${runnerUp.attempt}`,
+    ],
+  });
+  writeMarkerStatus(h2h.file, "in-progress");
+  h2h.status = "in-progress";
+  emit("running");
+  // As in runGrader: the judge starts with no outcome, so a stale file from
+  // a previous round can never pass for this round's pick.
+  const h2hOutcomePath = join(runsDir, outcomeFileName(h2hId, null));
+  rmSync(h2hOutcomePath, { force: true });
+  const logPath = join(runsDir, attemptLogName(h2hId, null, false));
+  rotateAttemptLog(runsDir, h2hId, logPath, "spawned");
+  for (const side of sides) {
+    writeFileSync(side.diffPath, attemptDiff(session, build.id, side.attempt));
+    writeFileSync(
+      side.logPath,
+      trimTail(
+        readOptional(
+          join(runsDir, attemptLogName(build.id, side.attempt, false)),
+        ) ?? "(no attempt log was recorded)\n",
+      ),
+    );
+  }
+  // Read fresh at every run, like the verify skill at every grader spawn: an
+  // operator's mid-run edit lands in the very next judge's prompt.
+  const skill = readOptional(join(session.poolDir, "verify.md"));
+  const parts = (s: HeadToHeadSide) => ({
+    attempt: s.attempt,
+    outcomePath: s.outcomePath,
+    diffPath: s.diffPath,
+    logPath: s.logPath,
+    score: s.grade.score,
+    verdict: s.grade.verdict,
+    reasons: s.grade.reasons,
+  });
+  const prompt = buildHeadToHeadPrompt({
+    buildId: build.id,
+    ticketPath: build.file,
+    skill,
+    top: parts(sides[0]),
+    runnerUp: parts(sides[1]),
+    outcomePath: h2hOutcomePath,
+  });
+  const ctx: SpawnContext = {
+    id: h2hId,
+    issuePath: h2h.file,
+    body: prompt,
+    driver: HEAD_TO_HEAD_DRIVER,
+    harness: assignment.harness,
+    model: assignment.model,
+    agents: session.state.config.agents,
+    logPath,
+    outcomePath: h2hOutcomePath,
+    cwd: session.cwd,
+  };
+  const argv = session.harnesses[assignment.harness](ctx);
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, h2hId),
+    kind: "spawned",
+    payload: {},
+  });
+  const exitCode = await spawnToLog(argv, ctx);
+  let verdict = readHeadToHeadVerdict(h2hOutcomePath, [
+    top.attempt,
+    runnerUp.attempt,
+  ]);
+  if (exitCode !== 0) {
+    verdict = { kind: "unusable", reason: `harness exited ${exitCode}` };
+  }
+  appendEvent(runsDir, h2hId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(runsDir, h2hId),
+    kind: "exited",
+    payload: {
+      code: exitCode,
+      status: verdict.kind === "unusable" ? "in-progress" : "done",
+    },
+  });
+  if (verdict.kind === "unusable") {
+    appendEvent(runsDir, h2hId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(runsDir, h2hId),
+      kind: "crash",
+      payload: { code: exitCode, reason: verdict.reason },
+    });
+  }
+  writeMarkerStatus(h2h.file, "done");
+  h2h.status = "done";
+  const update: PoolUpdate = {
+    tickets: { [h2hId]: "done" as const },
+    log: [
+      verdict.kind === "pick"
+        ? `ticket ${build.id}: head-to-head ${h2hId} picked attempt ` +
+          `${verdict.attempt}`
+        : verdict.kind === "tie"
+          ? `ticket ${build.id}: head-to-head ${h2hId} tied`
+          : `ticket ${build.id}: head-to-head ${h2hId} gave no usable ` +
+            `pick: ${verdict.reason}`,
+    ],
+  };
+  if (verdict.kind !== "unusable") {
+    update.outcomes = { [h2hId]: verdict.outcome };
+  }
+  session.state = applyUpdate(session.state, update);
+  emit("running");
+  return verdict;
+}
+
+// Closing a superseded head-to-head card: a review reject resets its marker
+// to ready along with its build ticket's, and an engine crash mid-judge
+// leaves it behind for rehydrate to reset; a re-round whose grades then
+// decide outright never rewrites the card, so without this the run could
+// never pass Review's all-done check. The engine owns the write, and the
+// card's own ticket log already holds the round it judged.
+function closeSupersededHeadToHead(session: Session, buildId: string): void {
+  const h2hId = headToHeadIdFor(buildId);
+  const file = join(session.issuesDir, `${h2hId}.md`);
+  if (!existsSync(file)) return;
+  if (readMarker(file).status === "done") return;
+  writeMarkerStatus(file, "done");
+  const marker = session.markers.find((m) => m.id === h2hId);
+  if (marker) marker.status = "done";
+  session.state = applyUpdate(session.state, {
+    tickets: { [h2hId]: "done" as const },
+    log: [
+      `ticket ${buildId}: closed superseded head-to-head card ${h2hId} ` +
+        "(this round's selection did not need it)",
+    ],
+  });
 }
 
 // The final Review: the run's closing gate, raised once every ticket is done

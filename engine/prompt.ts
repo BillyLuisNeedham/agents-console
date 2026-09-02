@@ -85,6 +85,88 @@ export function buildGraderPrompt(parts: GraderPromptParts): string {
   return sections.join("\n");
 }
 
+interface HeadToHeadSideParts {
+  attempt: number;
+  outcomePath: string;
+  diffPath: string;
+  logPath: string;
+  score: number;
+  verdict: string;
+  reasons: string;
+}
+
+interface HeadToHeadPromptParts {
+  buildId: string;
+  ticketPath: string;
+  /** The pool's verify skill, or null when the pool has none. */
+  skill: string | null;
+  top: HeadToHeadSideParts;
+  runnerUp: HeadToHeadSideParts;
+  outcomePath: string;
+}
+
+// The head-to-head judge's prompt: the pool's verify skill as the criteria
+// both sides are judged against, then each attempt's artifacts side by side
+// with the grade it received, then the pick contract. The glue (paths, trust
+// rule, pick shape) is engine-owned, so a pool whose skill drifted still
+// picks to the contract.
+export function buildHeadToHeadPrompt(parts: HeadToHeadPromptParts): string {
+  const side = (label: string, s: HeadToHeadSideParts): string[] => [
+    `${label}: attempt ${s.attempt}, graded ${s.score}/10 ` +
+      `(${s.verdict}: ${s.reasons.trim()})`,
+    "",
+    `1. The attempt's Outcome JSON: ${s.outcomePath}`,
+    `2. The diff at the attempt's commit: ${s.diffPath}`,
+    `3. The attempt log, trimmed to its last ~20k tokens when huge: ` +
+      s.logPath,
+  ];
+  const sections: string[] = [
+    `You are the head-to-head judge. Two attempts of ticket ` +
+      `${parts.buildId} finished with grades too close to call from ` +
+      "separate graders: their scores sit within two points of each " +
+      "other, and separate grading calls do not calibrate against each " +
+      "other. Compare the two attempts side by side, pick the better one, " +
+      "and put the pick in your outcome JSON. The engine owns every " +
+      "status write; you write none.",
+    "",
+    "---",
+    "",
+    parts.skill?.trim() ||
+      "_(the pool has no verify skill: no verify.md beside AGENT.md, so " +
+        "judge both sides on the criteria below and say so in your " +
+        "summary)_",
+    "",
+    "---",
+    "",
+    "Both attempts worked the same ticket:",
+    "",
+    `The ticket file: ${parts.ticketPath}`,
+    "",
+    "The first attempt's artifacts:",
+    "",
+    ...side("First", parts.top),
+    "",
+    "The second attempt's artifacts:",
+    "",
+    ...side("Second", parts.runnerUp),
+    "",
+    "Trust terminal output over the agents' self-assessments.",
+    "",
+    "---",
+    "",
+    "When you finish, record your outcome as JSON at " +
+      `${parts.outcomePath}: {"status": "done", "summary": "why your pick ` +
+      'wins, in a sentence or two", "commitSha": null, "winner": ' +
+      "<attempt number>}. The winner is the number of the better attempt, " +
+      `exactly one of ${parts.top.attempt} or ${parts.runnerUp.attempt}. ` +
+      'If you genuinely cannot separate them, write "winner": "tie" ' +
+      "instead; the engine then falls back to the higher score, then the " +
+      "earlier attempt. You write no status, raise no interrupts, and " +
+      "merge nothing: the pick in this file is your only output.",
+  ];
+  return sections.join("\n");
+}
+
 interface PromptParts {
   chain: string[];
   agentMd: string;

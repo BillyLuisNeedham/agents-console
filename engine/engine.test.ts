@@ -73,6 +73,7 @@ interface StubBehaviour {
   outcomeRaw?: string;
   brief?: string;
   grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
+  winner?: number | string;
   exitCode?: number;
   exitCodes?: number[];
 }
@@ -137,6 +138,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
               }),
               ...(b.brief !== undefined ? { brief: b.brief } : {}),
               ...(b.grade !== undefined ? { grade: b.grade } : {}),
+              ...(b.winner !== undefined ? { winner: b.winner } : {}),
             });
     const exitCode = b.exitCodes
       ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
@@ -178,6 +180,7 @@ interface GitStubBehaviour {
   outcome?: { summary: string; commitSha: string | null } | null;
   outcomeRaw?: string;
   grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
+  winner?: number | string;
   exitCode?: number;
   workFile?: string;
   workLine?: string;
@@ -306,6 +309,7 @@ function gitStubHarness(
                 commitSha: `sha-${ctx.id}`,
               }),
               ...(b.grade !== undefined ? { grade: b.grade } : {}),
+              ...(b.winner !== undefined ? { winner: b.winner } : {}),
             });
     const planPath = join(poolDir, `plan-${ctx.id}-${n}.sh`);
     const quote = (value: string) => JSON.stringify(value);
@@ -565,14 +569,16 @@ describe("verify fan-out", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     // Grading (ticket 03) runs after the fan-out, and selection (ticket 04)
-    // then closes the ticket out: the default grades tie at 8, so the
-    // earlier attempt wins and merges, and the pool waits on Review.
+    // then closes the ticket out: the default grades tie at 8, the
+    // head-to-head gives no pick, so the earlier attempt wins on the
+    // deterministic order and merges, and the pool waits on Review.
     expect(run.phase).toBe("quiescent");
     expect(run.final.tickets).toEqual({
       "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
       "01-grader-3": "done",
+      "01-head-to-head": "done",
     });
     expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
     expect(run.final.log.some((line) =>
@@ -589,6 +595,7 @@ describe("verify fan-out", () => {
       "01-grader-1",
       "01-grader-2",
       "01-grader-3",
+      "01-head-to-head",
     ]);
     expect(rig.spawnList.map((c) => c.outcomePath)).toEqual([
       ...[1, 2, 3].map((i) =>
@@ -597,6 +604,7 @@ describe("verify fan-out", () => {
       ...[1, 2, 3].map((i) =>
         join(poolDir, "runs", `01-grader-${i}.outcome.json`),
       ),
+      join(poolDir, "runs", "01-head-to-head.outcome.json"),
     ]);
     for (let i = 1; i <= 3; i++) {
       const rec = join(poolDir, `rec-${i}`);
@@ -912,6 +920,7 @@ describe("verify fan-out", () => {
       "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
+      "01-head-to-head": "done",
     });
 
     const events = readEventLines(poolDir, "01");
@@ -992,11 +1001,13 @@ describe("verify grading", () => {
     ).toContain("(the pool has no verify skill");
 
     // The graders never entered a super-step, and selection (ticket 04)
-    // then merged the tied-at-8 winner, the earlier attempt.
+    // then merged the tied-at-8 winner, the earlier attempt, after the
+    // head-to-head gave no pick.
     expect(run.final.tickets).toEqual({
       "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
+      "01-head-to-head": "done",
     });
     expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
@@ -1538,11 +1549,13 @@ describe("verify grading", () => {
 
     // Pool start resolved the stale grader from its build ticket, the
     // round's fan-out rewrote and ran both graders to done, and selection
-    // (ticket 04) then merged the tied-at-8 winner, the earlier attempt.
+    // (ticket 04) then merged the tied-at-8 winner, the earlier attempt,
+    // after the head-to-head gave no pick.
     expect(run.final.tickets).toEqual({
       "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
+      "01-head-to-head": "done",
     });
     const grader1 = rig.spawnList.find((c) => c.id === "01-grader-1")!;
     expect(grader1.harness).toBe("stub");
@@ -1819,6 +1832,10 @@ describe("verify selection", () => {
     const selected = events.find((e) => e.kind === "selected");
     expect(selected?.attempt).toBe(1);
     expect(selected?.payload).toEqual({ score: 9, margin: 2, rule: "outright" });
+    expect(rig.spawned["01-head-to-head"]).toBeUndefined();
+    expect(existsSync(join(poolDir, "issues", "01-head-to-head.md"))).toBe(
+      false,
+    );
 
     // Only the winner's branch merged, through the existing merge path.
     expect(
@@ -1887,14 +1904,28 @@ describe("verify selection", () => {
       "01": [attemptWork(1), attemptWork(2)],
       "01-grader-1": grade(7),
       "01-grader-2": grade(7),
+      "01-head-to-head": { winner: "tie" },
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
+    // An exact tie sits inside the outright band, so the head-to-head runs;
+    // it too cannot separate them, and the deterministic order sends the
+    // earlier attempt through.
     const events = readEventLines(poolDir, "01");
     const selected = events.find((e) => e.kind === "selected");
     expect(selected?.attempt).toBe(1);
     expect(selected?.payload).toEqual({ score: 7, margin: 0, rule: "fallback" });
+    expect(rig.spawned["01-head-to-head"]).toBeDefined();
+    expect(
+      rig.spawnList.filter((c) => c.id === "01-head-to-head"),
+    ).toHaveLength(1);
+    expect(markerLine(poolDir, "01-head-to-head.md")).toContain(
+      "id=01-head-to-head blocked-by=01 status=done",
+    );
+    expect(
+      readEventLines(poolDir, "01-head-to-head").map((e) => e.kind),
+    ).toEqual(["scheduled", "spawned", "exited"]);
     expect(
       events.filter((e) => e.kind === "merged").map((e) => e.attempt),
     ).toEqual([1]);
@@ -1902,10 +1933,13 @@ describe("verify selection", () => {
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
     expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
       .not.toBe(0);
+    expect(run.final.log).toContain(
+      "ticket 01: head-to-head 01-head-to-head tied",
+    );
     expect(run.phase).toBe("quiescent");
   }, 15000);
 
-  it("falls back deterministically when the top two sit inside the margin", async () => {
+  it("falls back when the head-to-head gives no usable pick", async () => {
     const { poolDir, git } = makeGitPool({
       tickets: [readyTicket("01")],
       config: verifyConfig(2),
@@ -1914,17 +1948,36 @@ describe("verify selection", () => {
       "01": [attemptWork(1), attemptWork(2)],
       "01-grader-1": grade(9),
       "01-grader-2": grade(8),
+      // The judge writes no winner at all: an unusable pick decides
+      // nothing, and the deterministic order owns the ticket.
+      "01-head-to-head": { exitCode: 0 },
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // A margin of 1 is below the outright bound; until the head-to-head
-    // ticket exists the deterministic order decides, and exactly one
-    // winner merges.
+    // A margin of 1 is below the outright bound; the head-to-head ran but
+    // named no winner among the two attempts, so exactly one winner merges
+    // by the deterministic order.
     const events = readEventLines(poolDir, "01");
     const selected = events.find((e) => e.kind === "selected");
     expect(selected?.attempt).toBe(1);
     expect(selected?.payload).toEqual({ score: 9, margin: 1, rule: "fallback" });
+    expect(rig.spawned["01-head-to-head"]).toBeDefined();
+    // The card still closes: the judge's lifecycle is over once its
+    // outcome has been consumed, and an open card would hold Review shut.
+    expect(markerLine(poolDir, "01-head-to-head.md")).toContain("status=done");
+    expect(
+      readEventLines(poolDir, "01-head-to-head").find(
+        (e) => e.kind === "crash",
+      )?.payload,
+    ).toEqual({
+      code: 0,
+      reason: "outcome names no winner among the two attempts",
+    });
+    expect(run.final.log).toContain(
+      "ticket 01: head-to-head 01-head-to-head gave no usable pick: " +
+        "outcome names no winner among the two attempts",
+    );
     expect(events.filter((e) => e.kind === "merged")).toHaveLength(1);
     expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
       .not.toBe(0);
@@ -1959,6 +2012,204 @@ describe("verify selection", () => {
     expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
       .toBe(0);
     expect(run.phase).toBe("stalled");
+  }, 15000);
+
+  it("spawns one head-to-head for a tight spread and merges its pick", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2), attemptWork(3)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+      "01-grader-3": grade(5),
+      // The pairwise call disagrees with the raw scores: the runner-up
+      // wins the head-to-head.
+      "01-head-to-head": { winner: 2 },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    // The top two grades sit one point apart: exactly one head-to-head
+    // ticket, an ordinary ticket on disk with the build ticket as its
+    // blocker, and nothing else was spawned for the compare.
+    expect(
+      rig.spawnList.filter((c) => c.id === "01-head-to-head"),
+    ).toHaveLength(1);
+    expect(markerLine(poolDir, "01-head-to-head.md")).toContain(
+      "id=01-head-to-head blocked-by=01 status=done",
+    );
+
+    // The judge saw both top attempts side by side: each side's outcome,
+    // diff and trimmed log, and never the third attempt's artifacts.
+    const h2h = rig.spawned["01-head-to-head"];
+    expect(h2h.body).toContain("attempt 1");
+    expect(h2h.body).toContain("attempt 2");
+    expect(h2h.body).toContain(
+      join(poolDir, "runs", "01.attempt-1.outcome.json"),
+    );
+    expect(h2h.body).toContain(
+      join(poolDir, "runs", "01.attempt-2.outcome.json"),
+    );
+    expect(h2h.body).not.toContain(
+      join(poolDir, "runs", "01.attempt-3.outcome.json"),
+    );
+    expect(h2h.body).toContain("01-head-to-head.attempt-1.diff.patch");
+    expect(h2h.body).toContain("01-head-to-head.attempt-2.diff.patch");
+    expect(h2h.outcomePath).toBe(
+      join(poolDir, "runs", "01-head-to-head.outcome.json"),
+    );
+    // Each bound diff holds exactly its side's work.
+    const diff1 = readFileSync(
+      join(poolDir, "runs", "01-head-to-head.attempt-1.diff.patch"),
+      "utf8",
+    );
+    expect(diff1).toContain("cand-1");
+    expect(diff1).not.toContain("cand-2");
+    const diff2 = readFileSync(
+      join(poolDir, "runs", "01-head-to-head.attempt-2.diff.patch"),
+      "utf8",
+    );
+    expect(diff2).toContain("cand-2");
+    expect(diff2).not.toContain("cand-1");
+
+    // The pick decides: the selected event records the head-to-head rule,
+    // and attempt 2's branch merges through the existing merge path while
+    // every loser's branch goes.
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(2);
+    expect(selected?.payload).toEqual({
+      score: 8,
+      margin: 1,
+      rule: "head-to-head",
+    });
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([2]);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
+    expect(existsSync(join(poolDir, "cand-3.txt"))).toBe(false);
+    for (const i of [1, 2, 3]) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .not.toBe(0);
+    }
+
+    // The pool log narrates the spawn and the pick, the judge's outcome
+    // landed, and the pool closed out through Review.
+    expect(run.final.log).toContain(
+      "ticket 01: margin 1 is below the outright band; spawning head-to-head " +
+        "01-head-to-head between attempts 1 and 2",
+    );
+    expect(run.final.log).toContain(
+      "ticket 01: head-to-head 01-head-to-head picked attempt 2",
+    );
+    expect(run.final.outcomes["01-head-to-head"]?.summary).toBe(
+      "summary-01-head-to-head",
+    );
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+      "01-grader-3": "done",
+      "01-head-to-head": "done",
+    });
+    // The judge is an ordinary assignment: with no assign entry of its own
+    // it inherits the build ticket's model.
+    expect(h2h.model).toBe("stub-model");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+  }, 15000);
+
+  it("resolves the head-to-head through the ordinary assign machinery", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "stub", model: "stub-model" },
+        assign: {
+          "01": { verify: 2, harness: "stub", model: "build-model" },
+          // Model-only override: the harness still comes from the build.
+          "01-head-to-head": { model: "h2h-model" },
+        },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+      "01-head-to-head": { winner: 1 },
+    });
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const h2h = rig.spawned["01-head-to-head"];
+    expect(h2h.model).toBe("h2h-model");
+    expect(h2h.harness).toBe("stub");
+  }, 15000);
+
+  it("falls back to the higher raw score when the head-to-head ties", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(8),
+      "01-grader-2": grade(9),
+      "01-head-to-head": { winner: "tie" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The earlier attempt holds the lower score, so the tie's fallback
+    // exercises the higher-raw-score clause, not the earlier-attempt one.
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(2);
+    expect(selected?.payload).toEqual({ score: 9, margin: 1, rule: "fallback" });
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([2]);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .not.toBe(0);
+    expect(run.phase).toBe("quiescent");
+  }, 15000);
+
+  it("closes a superseded head-to-head card left ready by an earlier round", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    // A head-to-head card a previous round left behind, reset to ready by a
+    // review reject of its build ticket; this round's grades decide
+    // outright, so nothing rewrites it and the engine closes it instead.
+    writeFileSync(
+      join(poolDir, "issues", "01-head-to-head.md"),
+      "<!-- state: id=01-head-to-head blocked-by=01 status=ready -->\n\n" +
+        "# 01-head-to-head\n",
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(5),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The stale card never ran and never entered a super-step, but the
+    // selection closed it done: an open engine card would hold Review's
+    // all-done check shut forever.
+    expect(rig.spawned["01-head-to-head"]).toBeUndefined();
+    expect(markerLine(poolDir, "01-head-to-head.md")).toContain("status=done");
+    expect(run.final.tickets["01-head-to-head"]).toBe("done");
+    expect(run.final.log).toContain(
+      "ticket 01: closed superseded head-to-head card 01-head-to-head " +
+        "(this round's selection did not need it)",
+    );
+    expect(run.phase).toBe("quiescent");
   }, 15000);
 });
 
