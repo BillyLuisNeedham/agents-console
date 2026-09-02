@@ -252,11 +252,12 @@ const INTERRUPT_KINDS = [
   "deadlock",
   "merge-conflict",
   "merge-approval",
+  "selection",
   "review",
 ];
 
 describe("interruptForm", () => {
-  it("gives all six interrupt kinds a renderable, answerable form", () => {
+  it("gives all seven interrupt kinds a renderable, answerable form", () => {
     for (const kind of INTERRUPT_KINDS) {
       const form = interruptForm({ ticketId: "A", kind, body: "body" });
       expect(form.title.length).toBeGreaterThan(0);
@@ -271,6 +272,7 @@ describe("interruptForm", () => {
     expect(actions("crash")).toEqual(["resume"]);
     expect(actions("deadlock")).toEqual(["resume"]);
     expect(actions("merge-conflict")).toEqual(["resume"]);
+    expect(actions("selection")).toEqual(["resume"]);
     expect(actions("merge-approval")).toEqual(["approve", "reject"]);
     expect(actions("review")).toEqual(["approve", "reject"]);
   });
@@ -288,6 +290,7 @@ describe("interruptForm", () => {
       deadlock: "deadlock",
       "merge-conflict": "merge conflict",
       "merge-approval": "merge approval",
+      selection: "human selection",
       review: "review",
     });
   });

@@ -1853,9 +1853,12 @@ describe("verify selection", () => {
         ).status,
       ).toBe("done");
     }
+    // The graders run in parallel, so the graded events land in completion
+    // order; the pairs are compared sorted by attempt.
     expect(
       events
         .filter((e) => e.kind === "graded")
+        .sort((a, b) => a.attempt - b.attempt)
         .map((e) => [e.attempt, e.payload.score]),
     ).toEqual([
       [1, 9],
@@ -1957,6 +1960,228 @@ describe("verify selection", () => {
       .toBe(0);
     expect(run.phase).toBe("stalled");
   }, 15000);
+});
+
+describe("verify human selection", () => {
+  const humanConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    selection: "human",
+    assign: { "01": { verify: n } },
+  });
+  const grade = (score: number, reasons = `scored ${score}`) => ({
+    grade: { score, verdict: "pass" as const, reasons },
+  });
+  const attemptWork = (n: number) => ({
+    workFile: `cand-${n}.txt`,
+    commitMsg: `cand-${n}`,
+  });
+
+  it("keeps the absent key automatic: selection without any interrupt", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 2 } } },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The engine selects on its own: the winner merges in the same
+    // super-step and the only interrupt the pool ever raises is Review.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const events = readEventLines(poolDir, "01");
+    expect(events.find((e) => e.kind === "selected")?.attempt).toBe(1);
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .not.toBe(0);
+  }, 15000);
+
+  it("raises the selection interrupt with every grade when selection is human", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: humanConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9, "crisp edges and honest tests"),
+      "01-grader-2": grade(8, "works but the tests are thin"),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The interrupt carries both candidates' grades and the grader's
+    // reasons; nothing has merged and the ticket waits, in-progress, for
+    // the human.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.interrupts[0]?.kind).toBe("selection");
+    expect(run.interrupts[0]?.body).toContain("attempt 1: score 9/10");
+    expect(run.interrupts[0]?.body).toContain("attempt 2: score 8/10");
+    expect(run.interrupts[0]?.body).toContain("crisp edges and honest tests");
+    expect(run.interrupts[0]?.body).toContain("works but the tests are thin");
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    const events = readEventLines(poolDir, "01");
+    expect(events.some((e) => e.kind === "selected")).toBe(false);
+    expect(events.some((e) => e.kind === "merged")).toBe(false);
+    for (const i of [1, 2]) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .toBe(0);
+    }
+  }, 15000);
+
+  it("merges the attempt the answer names and discards the rest", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: humanConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const finished = await approveReview(await run.resume("01", "attempt 2"));
+
+    // The human's pick, not the top score: the selected event records the
+    // rule, the named attempt's branch merged, the other is gone.
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(2);
+    expect(selected?.payload).toEqual({ score: null, margin: null, rule: "human" });
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([2]);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
+    for (const i of [1, 2]) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .not.toBe(0);
+    }
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(finished.phase).toBe("done");
+    expect(finished.final.outcomes["01"]?.summary).toBe("summary-01");
+  }, 15000);
+
+  it("rejects an answer naming no candidate with a clear error, merging nothing", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: humanConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // An unknown attempt, then a note with no number at all: both fail with
+    // the valid attempts named, and neither leaves a mark.
+    await expect(run.resume("01", "9")).rejects.toThrow(
+      /candidate attempts \(1, 2\); got "9"/,
+    );
+    await expect(run.resume("01", "you pick")).rejects.toThrow(
+      /candidate attempts \(1, 2\); got "you pick"/,
+    );
+    expect(readEventLines(poolDir, "01").some((e) => e.kind === "merged"))
+      .toBe(false);
+    for (const i of [1, 2]) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .toBe(0);
+    }
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["selection"]);
+
+    // A valid answer after the rejections goes straight through.
+    const finished = await approveReview(await run.resume("01", "attempt 1"));
+    expect(finished.phase).toBe("done");
+    expect(
+      readEventLines(poolDir, "01")
+        .filter((e) => e.kind === "merged")
+        .map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .not.toBe(0);
+  }, 15000);
+
+  it("keeps the selection interrupt pending and answerable across a restart", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: humanConfig(2),
+    });
+    const firstRig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+    });
+    const first = await runPool({ poolDir, harnesses: firstRig.harnesses });
+    expect(first.phase).toBe("quiescent");
+    expect(first.interrupts.map((i) => i.kind)).toEqual(["selection"]);
+    const body = first.interrupts[0]?.body;
+    first.close();
+
+    // A restart brings the interrupt back exactly as it was, spawns
+    // nothing, and the answer still merges.
+    const rig = gitStubHarness(poolDir, {});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(second.phase).toBe("quiescent");
+    expect(second.interrupts).toHaveLength(1);
+    expect(second.interrupts[0]?.kind).toBe("selection");
+    expect(second.interrupts[0]?.body).toBe(body);
+    expect(rig.spawnOrder).toEqual([]);
+
+    const finished = await approveReview(await second.resume("01", "1"));
+    expect(finished.phase).toBe("done");
+    expect(
+      readEventLines(poolDir, "01")
+        .filter((e) => e.kind === "merged")
+        .map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+  }, 15000);
+
+  it("leaves a verify: 1 ticket's grade-decides path alone under selection: human", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: humanConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": attemptWork(1),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // One candidate is no selection: the pass verdict completes the ticket
+    // the way ticket 05 built it, with no interrupt and no selected event.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const events = readEventLines(poolDir, "01");
+    expect(events.some((e) => e.kind === "selected")).toBe(false);
+    expect(events.some((e) => e.kind === "merged")).toEqual(true);
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+  }, 15000);
+
+  it("rejects an invalid selection value at pool load", async () => {
+    const config = JSON.parse(
+      JSON.stringify({ ...stubConfig, selection: "maybe" }),
+    ) as PoolConfig;
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config,
+    });
+    await expect(
+      runPool({ poolDir, harnesses: gitStubHarness(poolDir, {}).harnesses }),
+    ).rejects.toThrow(/selection must be "auto" or "human"/);
+  });
 });
 
 describe("super-steps", () => {

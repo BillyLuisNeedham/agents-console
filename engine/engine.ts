@@ -91,6 +91,9 @@ export interface PoolConfig {
   agents?: string;
   resolver?: string;
   port?: number;
+  // Who picks the winner of a verify fan-out: the engine's arithmetic rule
+  // (default) or the human, via a selection interrupt carrying the grades.
+  selection?: "auto" | "human";
 }
 
 export type InterruptKind =
@@ -99,7 +102,8 @@ export type InterruptKind =
   | "deadlock"
   | "merge-conflict"
   | "merge-approval"
-  | "review";
+  | "review"
+  | "selection";
 
 // The final Review interrupt is not a ticket's: it belongs to the run, and it
 // carries this id so the Console can hang it on the review utility card (the
@@ -110,6 +114,11 @@ interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
+  // A selection interrupt's candidate attempt numbers, riding so the answer
+  // is validated against the exact fan-out the grades came from, including
+  // after a restart (a superseded round's graded attempts would otherwise
+  // pass for candidates).
+  candidates?: number[];
 }
 
 interface PoolState {
@@ -701,13 +710,19 @@ async function driveLoop(session: Session): Promise<void> {
         // grades but decides nothing: the crash or checkpoint interrupt owns
         // the ticket and the re-round after the human answers selects
         // afresh. A grader without a usable grade is equally undecided
-        // (ticket 07's re-spawn supplies it).
+        // (ticket 07's re-spawn supplies it). With the pool's selection set
+        // to human (ticket 08), the same completed fan-out raises the
+        // selection interrupt instead and the answer picks the winner.
         const round = results.filter((r) => r.marker.id === marker.id);
         if (
           round.every((r) => r.status === "done") &&
           attempts.every((attempt) => grades.has(attempt))
         ) {
-          selectAndMergeWinner(session, marker, attempts, grades, round, emit);
+          if (selectionMode(session.state.config) === "human") {
+            raiseSelectionInterrupt(session, marker, attempts, grades, emit);
+          } else {
+            selectAndMergeWinner(session, marker, attempts, grades, emit);
+          }
         }
       }
       persist(session);
@@ -954,6 +969,14 @@ function acceptAnswer(
     const named = namedReviewTickets(session.markers, note);
     if (named.length === 0) throw new Error(reviewRejectUnnamedError(session.markers));
   }
+  // A selection answer that names no candidate fails the same way: rejected
+  // at the seam with the valid attempts named, nothing queued, nothing merged.
+  if (interrupt.kind === "selection") {
+    const named = parseSelectionAnswer(note);
+    if (named === null || !interrupt.candidates?.includes(named)) {
+      throw new Error(selectionAnswerError(interrupt, note));
+    }
+  }
   appendEvent(session.runsDir, ticketId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, ticketId),
@@ -1060,6 +1083,10 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     } else {
       rejectMerge(session, marker, interrupt, record.note);
     }
+    return;
+  }
+  if (interrupt.kind === "selection") {
+    processSelectionAnswer(session, marker, interrupt, record.note);
     return;
   }
   if (marker.status !== "done") {
@@ -2194,84 +2221,214 @@ function selectWinner(
 
 // Selecting and merging the winner of a completed, fully graded fan-out:
 // every attempt exited done and every grader returned a usable grade. The
-// selected event and the pool log record why this attempt won, the winner's
-// branch merges through the existing merge path (the same mergeTicket a
-// solo merge uses), the engine writes the done status (ADR-0005), and every
-// other attempt branch of the ticket, this round's losers and any
-// superseded round's alike, is discarded. The losers' logs, outcomes and
-// grades live in runs/ and the ticket's events, which no discard touches.
+// arithmetic rule picks the attempt; completing the selection (the shared
+// tail below) does the rest.
 function selectAndMergeWinner(
   session: Session,
   marker: TicketMarker,
   attempts: number[],
   grades: Map<number, Grade>,
-  round: TicketResult[],
   emit: (phase: RunPhase) => void,
 ): void {
   const selection = selectWinner(
     attempts.map((attempt) => ({ attempt, grade: grades.get(attempt)! })),
   );
-  appendEvent(session.runsDir, marker.id, {
-    at: new Date().toISOString(),
-    attempt: selection.attempt,
-    kind: "selected",
-    payload: {
-      score: selection.score,
-      margin: selection.margin,
-      rule: selection.rule,
-    },
+  completeSelection(
+    session,
+    marker,
+    selection.attempt,
+    { score: selection.score, margin: selection.margin, rule: selection.rule },
+    `selected attempt ${selection.attempt} (score ${selection.score}` +
+      (selection.margin === null ? "" : `, margin ${selection.margin}`) +
+      `): ${
+        selection.rule === "outright"
+          ? "takes it outright"
+          : "below the outright margin; highest score, then earlier attempt"
+      }`,
+    emit,
+  );
+}
+
+// The pool's selection mode: auto unless the config says human. The key's
+// absence is the default, exactly as the spec fixes it.
+function selectionMode(config: PoolConfig): "auto" | "human" {
+  return config.selection === "human" ? "human" : "auto";
+}
+
+// The selection point with the human as judge (ticket 08): the interrupt
+// carries every candidate's grade, and the answer names the attempt whose
+// branch merges. The ticket stays in-progress with every attempt branch
+// parked; the candidates ride on the interrupt so the answer is validated
+// against the exact fan-out the grades came from, restarts included (a
+// superseded round's graded attempts would otherwise pass for candidates).
+function raiseSelectionInterrupt(
+  session: Session,
+  marker: TicketMarker,
+  attempts: number[],
+  grades: Map<number, Grade>,
+  emit: (phase: RunPhase) => void,
+): void {
+  raiseInterrupt(session, {
+    ticketId: marker.id,
+    kind: "selection",
+    body: selectionInterruptBody(attempts, grades),
+    candidates: attempts,
   });
   session.state = applyUpdate(session.state, {
     log: [
-      `ticket ${marker.id}: selected attempt ${selection.attempt} ` +
-        `(score ${selection.score}` +
-        (selection.margin === null ? "" : `, margin ${selection.margin}`) +
-        `): ${
-          selection.rule === "outright"
-            ? "takes it outright"
-            : "below the outright margin; highest score, then earlier attempt"
-        }`,
+      `ticket ${marker.id}: selection interrupt raised with ` +
+        `${attempts.length} candidates' grades (selection: human)`,
     ],
   });
-  const winner = round.find((r) => r.plan.attempt === selection.attempt)!;
-  // The winner's branch merges exactly as a solo attempt's does. A conflict
-  // parks the winner's branch and checkpoints for the human, the way a lone
-  // attempt's conflicted merge does: the conflict machinery re-attempts the
-  // well-known solo branch, which a selected attempt does not have.
+  emit("running");
+}
+
+// The selection interrupt's body: one line per candidate with its score,
+// verdict and the grader's reasons, so the human judges over the same
+// artifacts the auto rule would.
+function selectionInterruptBody(
+  attempts: number[],
+  grades: Map<number, Grade>,
+): string {
+  return (
+    `verify fan-out complete: ${attempts.length} graded attempts, and the ` +
+    "pool's selection is yours.\n\n" +
+    attempts
+      .map((attempt) => {
+        const grade = grades.get(attempt)!;
+        return (
+          `- attempt ${attempt}: score ${grade.score}/10, ` +
+          `verdict ${grade.verdict}\n` +
+          `  ${grade.reasons.trim().replaceAll("\n", "\n  ")}`
+        );
+      })
+      .join("\n") +
+    "\n\nAnswer with the number of the attempt to merge; the rest are " +
+    "discarded with their logs, outcomes and grades kept."
+  );
+}
+
+// The answer's attempt number: the first integer in the note, so "2",
+// "attempt 2" and "merge attempt-2 please" all name attempt 2.
+function parseSelectionAnswer(note: string | undefined): number | null {
+  const match = /(\d+)/.exec(note?.trim() ?? "");
+  return match ? Number(match[1]) : null;
+}
+
+function selectionAnswerError(
+  interrupt: Interrupt,
+  note: string | undefined,
+): string {
+  return (
+    `selection answer must name one of the candidate attempts ` +
+    `(${(interrupt.candidates ?? []).join(", ")}); got ${JSON.stringify(note ?? "")}`
+  );
+}
+
+// Processing a selection answer (ticket 08): the note names the winning
+// attempt, the engine merges that attempt's branch through the existing
+// merge path and completes the selection exactly as the auto rule would.
+// An answer naming no candidate is rejected here too, not merged (the
+// acceptance-time check guards the live caller; this one guards a record
+// accepted before the check existed).
+function processSelectionAnswer(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  note: string | undefined,
+): void {
+  const attempt = parseSelectionAnswer(note);
+  if (attempt === null || !interrupt.candidates?.includes(attempt)) {
+    throw new Error(selectionAnswerError(interrupt, note));
+  }
+  // The selection interrupt has served its purpose; the merge or the
+  // checkpoint it leads to owns the ticket from here.
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `interrupt answered for ${marker.id} (selection): attempt ` +
+        `${attempt} to merge`,
+    ],
+  });
+  completeSelection(
+    session,
+    marker,
+    attempt,
+    { score: null, margin: null, rule: "human" },
+    `human selected attempt ${attempt}`,
+    () => {},
+  );
+}
+
+// Completing a selection, however it was made: the selected event records
+// which attempt won and under which rule, the winner's branch merges through
+// the existing merge path (the same mergeTicket a solo merge uses), the
+// engine writes the done status (ADR-0005), and every other attempt branch
+// of the ticket, this round's losers and any superseded round's alike, is
+// discarded. The losers' logs, outcomes and grades live in runs/ and the
+// ticket's events, which no discard touches. A conflicted merge parks the
+// winner's branch and checkpoints for the human, the way a lone attempt's
+// conflicted merge does: the conflict machinery re-attempts the well-known
+// solo branch, which a selected attempt does not have.
+function completeSelection(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  picked: {
+    score: number | null;
+    margin: number | null;
+    rule: "outright" | "fallback" | "human";
+  },
+  why: string,
+  emit: (phase: RunPhase) => void,
+): void {
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "selected",
+    payload: picked,
+  });
+  session.state = applyUpdate(session.state, {
+    log: [`ticket ${marker.id}: ${why}`],
+  });
   let mergedNote = "";
-  if (winner.plan.worktree) {
-    const merge = mergeTicket(session, marker, winner.plan.worktree);
+  if (session.git) {
+    const worktree = {
+      path: worktreePathFor(session.cwd, marker.id, attempt),
+      branch: branchFor(marker.id, attempt),
+    };
+    const merge = mergeTicket(session, marker, worktree);
     if (!merge.ok) {
-      discardLosers(session, marker.id, selection.attempt);
+      discardLosers(session, marker.id, attempt);
       checkpointLoneAttempt(
         session,
         marker,
-        selection.attempt,
-        mergeConflictComplaint(marker.id, selection.attempt, merge),
-        `ticket ${marker.id}: selected attempt ${selection.attempt} but its ` +
-          "merge conflicted; checkpoint raised for the human",
+        attempt,
+        mergeConflictComplaint(marker.id, attempt, merge),
+        `ticket ${marker.id}: attempt ${attempt} selected but its merge ` +
+          "conflicted; checkpoint raised for the human",
         emit,
       );
       return;
     }
     appendEvent(session.runsDir, marker.id, {
       at: new Date().toISOString(),
-      attempt: selection.attempt,
+      attempt,
       kind: "merged",
       payload: {},
     });
-    mergedNote = ` merged ${branchFor(marker.id, selection.attempt)} onto the working branch`;
+    mergedNote = ` merged ${branchFor(marker.id, attempt)} onto the working branch`;
   } else {
     mergedNote =
       " (the pool does not run in git; the selected work is already in the checkout)";
   }
   writeMarkerStatus(marker.file, "done");
   marker.status = "done";
-  const discarded = discardLosers(session, marker.id, selection.attempt);
+  const discarded = discardLosers(session, marker.id, attempt);
   const update: PoolUpdate = {
     tickets: { [marker.id]: "done" },
     log: [
-      `ticket ${marker.id}: attempt ${selection.attempt} selected` +
+      `ticket ${marker.id}: attempt ${attempt} selected` +
         mergedNote +
         (discarded.length > 0
           ? `; discarded losing attempts ${discarded.join(", ")} ` +
@@ -2282,7 +2439,7 @@ function selectAndMergeWinner(
   // The winner's outcome becomes the ticket's, the way a solo done attempt's
   // does, so downstream prompts read what was actually selected.
   const outcome = readOutcomeResult(
-    join(session.runsDir, outcomeFileName(marker.id, selection.attempt)),
+    join(session.runsDir, outcomeFileName(marker.id, attempt)),
   );
   if (outcome.ok) update.outcomes = { [marker.id]: outcome.outcome };
   session.state = applyUpdate(session.state, update);
@@ -3042,6 +3199,13 @@ export function readConfig(poolDir: string): PoolConfig {
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`pool config: ${join(poolDir, "console.json")} must be a JSON object`);
+  }
+  if (
+    parsed.selection !== undefined &&
+    parsed.selection !== "auto" &&
+    parsed.selection !== "human"
+  ) {
+    throw new Error(`pool config: selection must be "auto" or "human"`);
   }
   return parsed as PoolConfig;
 }

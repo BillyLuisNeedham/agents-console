@@ -72,6 +72,11 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
   deadlock: { title: "deadlock", actions: [RESUME] },
   "merge-conflict": { title: "merge conflict", actions: [RESUME] },
   "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
+  selection: {
+    title: "human selection",
+    actions: [RESUME],
+    notePlaceholder: "the winning attempt's number",
+  },
   review: {
     title: "review",
     actions: [APPROVE, REJECT],
@@ -81,7 +86,7 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
 };
 
 /**
- * The form for an interrupt. The engine's six kinds all render; an unknown
+ * The form for an interrupt. The engine's seven kinds all render; an unknown
  * kind falls back to a plain resume form so a newer engine never renders an
  * unanswerable interrupt.
  */
