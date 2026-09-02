@@ -663,7 +663,7 @@ describe("verify fan-out", () => {
     ).toBe(true);
   }, 15000);
 
-  it("treats verify: 1 as one candidate on its own branch, not a solo merge", async () => {
+  it("marks a verify: 1 ticket done on a passing grade, merging its attempt branch", async () => {
     const { poolDir, git } = makeGitPool({
       tickets: [readyTicket("01")],
       config: verifyConfig(1),
@@ -672,26 +672,29 @@ describe("verify fan-out", () => {
       "01": { workFile: "cand.txt", commitMsg: "cand" },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
 
-    expect(run.phase).toBe("stalled");
-    expect(run.final.tickets).toEqual({
-      "01": "in-progress",
-      "01-grader-1": "done",
-    });
-    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    // The lone attempt passed grading: the ticket is done exactly as an
+    // unverified ticket is today, through the existing merge path, with
+    // the engine writing the status and the attempt's outcome downstream.
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "01-grader-1": "done" });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
     expect(rig.spawnOrder).toEqual(["01", "01-grader-1"]);
+    expect(existsSync(join(poolDir, "cand.txt"))).toBe(true);
+    expect(run.final.outcomes["01"]?.summary).toBe("summary-01");
+    expect(readEventLines(poolDir, "01").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "graded",
+      "merged",
+    ]);
+    // The merged attempt branch is cleaned up like any merged branch.
     expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
-      .toBe(0);
-    expect(existsSync(join(poolDir, "cand.txt"))).toBe(false);
-    expect(
-      JSON.parse(
-        readFileSync(
-          join(poolDir, "runs", "01.attempt-1.outcome.json"),
-          "utf8",
-        ),
-      ).status,
-    ).toBe("done");
+      .not.toBe(0);
   }, 15000);
 
   it("runs a ticket without verify exactly one attempt, as today, beside a fan-out", async () => {
@@ -1340,6 +1343,239 @@ describe("verify grading", () => {
     const grader1 = rig.spawnList.find((c) => c.id === "01-grader-1")!;
     expect(grader1.harness).toBe("stub");
     expect(grader1.model).toBe("build-model");
+  }, 15000);
+});
+
+describe("lone attempt resolution", () => {
+  const verifyConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    assign: { "01": { verify: n } },
+  });
+
+  it("raises a checkpoint interrupt carrying the grader's complaint on a flag verdict", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "cand.txt", commitMsg: "cand" },
+      "01-grader-1": {
+        grade: {
+          score: 3,
+          verdict: "flag",
+          reasons: "the claimed tests do not exist",
+        },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The bad done-claim is caught at the ticket: the interrupt's Brief is
+    // the grade's verdict and reasons, not the agent's summary.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.interrupts[0]?.ticketId).toBe("01");
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("score 3/10");
+    expect(run.interrupts[0]?.body).toContain("verdict flag");
+    expect(run.interrupts[0]?.body).toContain(
+      "the claimed tests do not exist",
+    );
+    expect(run.interrupts[0]?.body).not.toContain("summary-01");
+
+    // The engine wrote the checkpoint status; the attempt's work is parked
+    // on its branch and nothing merged.
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+    const issueText = readFileSync(join(poolDir, "issues", "01-t.md"), "utf8");
+    expect(issueText).toContain("## Brief");
+    expect(issueText).toContain("the claimed tests do not exist");
+    expect(existsSync(join(poolDir, "cand.txt"))).toBe(false);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .toBe(0);
+
+    // The grader's grade landed before the resolution, and the grader card
+    // itself is done: the engine writes every status.
+    expect(readEventLines(poolDir, "01").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "graded",
+      "checkpoint",
+    ]);
+    expect(markerLine(poolDir, "01-grader-1.md")).toContain("status=done");
+  }, 15000);
+
+  it("re-raises the complaint Brief from the Issue after a restart", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const first = await runPool({
+      poolDir,
+      harnesses: gitStubHarness(poolDir, {
+        "01-grader-1": {
+          grade: { score: 2, verdict: "flag", reasons: "work is incomplete" },
+        },
+      }).harnesses,
+    });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // Killed before the boundary persist: the marker and the Brief the
+    // engine landed are on disk, so rehydration re-raises the interrupt
+    // from the Issue unchanged, like any checkpoint Brief.
+    rmSync(join(poolDir, "console.db"), { force: true });
+    const rig = gitStubHarness(poolDir, {});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(second.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual([]);
+    expect(second.interrupts).toHaveLength(1);
+    expect(second.interrupts[0]?.kind).toBe("checkpoint");
+    expect(second.interrupts[0]?.body).toContain("work is incomplete");
+  }, 15000);
+
+  it("resumes a flagged lone attempt to ready and runs it to done on the next round", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": [
+        { grade: { score: 2, verdict: "flag", reasons: "wrong file" } },
+        { grade: { score: 9, verdict: "pass", reasons: "solid" } },
+      ],
+    });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(first.phase).toBe("quiescent");
+    expect(first.interrupts[0]?.kind).toBe("checkpoint");
+
+    // The existing checkpoint-resume path: the note lands on the Issue and
+    // the ticket re-fans-out with continued attempt numbers.
+    const resumed = await first.resume("01", "write the right file");
+    const done = await approveReview(resumed);
+    expect(done.phase).toBe("done");
+    expect(done.final.tickets).toEqual({
+      "01": "done",
+      "01-grader-1": "done",
+    });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(
+      readFileSync(join(poolDir, "issues", "01-t.md"), "utf8"),
+    ).toContain("## Resume note");
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
+
+    const events = readEventLines(poolDir, "01");
+    expect(events.map((e) => [e.attempt, e.kind])).toEqual([
+      [1, "scheduled"],
+      [1, "spawned"],
+      [1, "exited"],
+      [1, "graded"],
+      [1, "checkpoint"],
+      [1, "answered"],
+      [2, "scheduled"],
+      [2, "spawned"],
+      [2, "exited"],
+      [2, "graded"],
+      [2, "merged"],
+    ]);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .not.toBe(0);
+  }, 15000);
+
+  it("resolves nothing for a crashed lone attempt, even with a passing grade", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = stubHarness({
+      "01": { status: "keep", exitCode: 4 },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The crash interrupt is up and the grade of the debris decides
+    // nothing: the ticket stays in-progress for the crash-resume path.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+    expect(run.final.tickets).toEqual({
+      "01": "in-progress",
+      "01-grader-1": "done",
+    });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+  }, 15000);
+
+  it("lets an attempt's own checkpoint win over its grade", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = stubHarness({
+      "01": { status: "checkpoint", brief: "waiting on the API name" },
+      "01-grader-1": {
+        grade: { score: 0, verdict: "flag", reasons: "incomplete" },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // A pause made no done-claim for the grade to verify: the agent's own
+    // brief travels and the grade lands as context only.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "waiting on the API name" },
+    ]);
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "graded")?.payload,
+    ).toEqual({ score: 0, verdict: "flag", reasons: "incomplete" });
+    expect(run.final.outcomes["01"]?.summary).toBe("summary-01");
+  }, 15000);
+
+  it("raises a checkpoint with the conflict in the Brief when the passing merge conflicts", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: {
+        defaults: { harness: "stub", model: "stub-model" },
+        assign: { "01": { verify: 1 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "cand.txt",
+        workLine: "attempt",
+        overwrite: true,
+        commitMsg: "attempt",
+      },
+      "02": {
+        workFile: "cand.txt",
+        workLine: "plain",
+        overwrite: true,
+        commitMsg: "plain",
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The ticket-02 merge moved the working branch while the attempt was
+    // in flight, so the passing attempt's merge conflicts. The conflict
+    // machinery re-attempts the solo branch on resume and a lone attempt
+    // has none, so the checkpoint's Brief carries the conflict instead.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    expect(run.interrupts[0]?.body).toContain("cand.txt");
+    expect(run.interrupts[0]?.body).toContain("pool/01.attempt-1");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+    expect(readFileSync(join(poolDir, "cand.txt"), "utf8")).toBe("plain\n");
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .toBe(0);
   }, 15000);
 });
 

@@ -673,12 +673,25 @@ async function driveLoop(session: Session): Promise<void> {
       // the engine runs the graders itself here, the way it runs the merge
       // resolver, and writes their statuses itself.
       for (const marker of ready) {
-        if (session.assignments.get(marker.id)!.verify == null) continue;
+        const assignment = session.assignments.get(marker.id)!;
+        if (assignment.verify == null) continue;
         const attempts = results
           .filter((r) => r.marker.id === marker.id)
           .map((r) => r.plan.attempt)
           .sort((a, b) => a - b);
-        await runGraders(session, marker, attempts, emit);
+        const grades = await runGraders(session, marker, attempts, emit);
+        // Lone-attempt resolution (ticket 05): with one attempt and one
+        // grade there is nothing to select between, so the grade decides
+        // at the ticket: flag → checkpoint, pass → done.
+        if (assignment.verify === 1 && attempts.length === 1) {
+          resolveLoneAttempt(
+            session,
+            marker,
+            results.find((r) => r.marker.id === marker.id)!,
+            grades.get(attempts[0]) ?? null,
+            emit,
+          );
+        }
       }
       persist(session);
       emit("running");
@@ -1630,12 +1643,15 @@ The engine wrote this ticket when every attempt of ticket ${build.id} had ` +
 // then run them all through their resolved assignments. Each grader's exit
 // applies its own state update and emits, the way a verify attempt's exit
 // does, so the Console watches the grades land while a slow grader runs.
+// Returns the usable grades by attempt number; a grader that produced none
+// leaves its attempt unmapped (ticket 07's re-spawn, and the lone-attempt
+// resolution that must never decide on a grade that does not exist).
 async function runGraders(
   session: Session,
   build: TicketMarker,
   attempts: number[],
   emit: (phase: RunPhase) => void,
-): Promise<void> {
+): Promise<Map<number, Grade>> {
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
@@ -1674,11 +1690,17 @@ async function runGraders(
     marker.status = "in-progress";
   }
   emit("running");
+  const grades = new Map<number, Grade>();
   await Promise.all(
     graders.map(({ marker, assignment, attempt }) =>
-      runGrader(session, build, marker, attempt, assignment, emit),
+      runGrader(session, build, marker, attempt, assignment, emit).then(
+        (grade) => {
+          if (grade) grades.set(attempt, grade);
+        },
+      ),
     ),
   );
+  return grades;
 }
 
 async function runGrader(
@@ -1688,7 +1710,7 @@ async function runGrader(
   attempt: number,
   assignment: Assignment,
   emit: (phase: RunPhase) => void,
-): Promise<void> {
+): Promise<Grade | null> {
   const gid = grader.id;
   const runsDir = session.runsDir;
   // As in runTicket: the grader starts with no outcome, so a stale file
@@ -1752,11 +1774,11 @@ async function runGrader(
       `harness exited ${exitCode}`,
       emit,
     );
-    return;
+    return null;
   }
   if (!result.ok) {
     recordGraderFailure(session, build, grader, attempt, exitCode, result.reason, emit);
-    return;
+    return null;
   }
   // A usable grade: the engine writes the grader's done status (ADR-0005:
   // the engine owns every status write) and copies the grade into the
@@ -1789,6 +1811,7 @@ async function runGrader(
     ],
   });
   emit("running");
+  return result.grade;
 }
 
 // A grader that exited non-zero or wrote no parseable grade decides nothing:
@@ -1828,6 +1851,185 @@ function recordGraderFailure(
     ],
   });
   emit("running");
+}
+
+// Lone-attempt resolution (ticket 05): a verify: 1 ticket's grade decides at
+// the ticket instead of at Review, the earliest payoff of verification. A
+// flag verdict raises the checkpoint interrupt whose Brief is the grader's
+// complaint; a pass verdict marks the ticket done exactly as an unverified
+// ticket is today: the attempt branch merges through the existing merge path
+// and the engine writes the done status (ADR-0005). An attempt that paused or
+// crashed made no done-claim for the grade to verify: the agent's own
+// checkpoint takes today's checkpoint path, a crash stays with its crash
+// interrupt, and a missing grade leaves the ticket untouched for the grader
+// re-spawn (ticket 07). Selection for verify: N with N > 1 is not this
+// function's business (ticket 04).
+function resolveLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  result: TicketResult,
+  grade: Grade | null,
+  emit: (phase: RunPhase) => void,
+): void {
+  const attempt = result.plan.attempt;
+  // A crashed attempt decided nothing; the crash interrupt raised at the
+  // boundary owns the ticket and a resume re-runs it.
+  if (result.status === "in-progress") return;
+  const outcome = readOutcomeResult(
+    join(session.runsDir, outcomeFileName(marker.id, attempt)),
+  );
+  if (result.status === "checkpoint") {
+    // The attempt paused, so there is no done-claim and the agent's own
+    // brief travels, exactly as an unverified ticket's checkpoint does
+    // today; the grade lands as context only and never overrides a pause.
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      outcome.ok ? outcome.outcome.brief : undefined,
+      `ticket ${marker.id}: attempt ${attempt} checkpointed; its grade is ` +
+        "context only and the attempt's own brief travels",
+      emit,
+    );
+    if (outcome.ok) {
+      session.state = applyUpdate(session.state, {
+        outcomes: { [marker.id]: outcome.outcome },
+      });
+    }
+    return;
+  }
+  if (!grade) return;
+  if (grade.verdict === "flag") {
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      gradeComplaint(grade),
+      `ticket ${marker.id}: attempt ${attempt}'s grade was flagged; ` +
+        "checkpoint raised with the grader's complaint as the Brief",
+      emit,
+    );
+    return;
+  }
+  completeLoneAttempt(session, marker, result, outcome, emit);
+}
+
+// The engine-side checkpoint for a lone attempt: the engine writes the
+// checkpoint status itself (ADR-0005), lands the Brief in the canonical
+// Issue, and raises the interrupt through the same path an attempt's own
+// checkpoint uses, so the resume flow and the re-raise after a restart are
+// the existing ones.
+function checkpointLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  brief: string | undefined,
+  logLine: string,
+  emit: (phase: RunPhase) => void,
+): void {
+  writeMarkerStatus(marker.file, "checkpoint");
+  marker.status = "checkpoint";
+  landCheckpointBrief(marker.file, brief);
+  raiseCheckpoint(session, marker, attempt);
+  session.state = applyUpdate(session.state, {
+    tickets: { [marker.id]: "checkpoint" },
+    log: [logLine],
+  });
+  emit("running");
+}
+
+// The pass verdict: the ticket is done exactly as an unverified ticket is
+// today. The attempt's branch merges through the existing merge path (the
+// same mergeTicket the drive loop calls for a solo merge), the merged event
+// lands on the ticket's log, and the attempt's outcome becomes the ticket's
+// outcome for downstream prompts.
+function completeLoneAttempt(
+  session: Session,
+  marker: TicketMarker,
+  result: TicketResult,
+  outcome: OutcomeResult,
+  emit: (phase: RunPhase) => void,
+): void {
+  const attempt = result.plan.attempt;
+  const update: PoolUpdate = {
+    log: [
+      `ticket ${marker.id}: attempt ${attempt} passed grading; ticket done`,
+    ],
+  };
+  if (session.git) {
+    const worktree = result.plan.worktree ?? {
+      path: worktreePathFor(session.cwd, marker.id, attempt),
+      branch: branchFor(marker.id, attempt),
+    };
+    const merge = mergeTicket(session, marker, worktree);
+    if (!merge.ok) {
+      // The conflict machinery re-attempts the solo branch on resume, and a
+      // lone attempt has none, so the conflict surfaces as a checkpoint
+      // instead: the Brief names the conflicted files and the parked
+      // attempt branch, and resume re-runs the ticket from the moved HEAD.
+      checkpointLoneAttempt(
+        session,
+        marker,
+        attempt,
+        mergeConflictComplaint(marker.id, attempt, merge),
+        `ticket ${marker.id}: attempt ${attempt} passed grading but its ` +
+          "merge conflicted; checkpoint raised for the human",
+        emit,
+      );
+      return;
+    }
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "merged",
+      payload: {},
+    });
+    update.log = [
+      `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
+        `${branchFor(marker.id, attempt)} onto the working branch`,
+    ];
+  }
+  writeMarkerStatus(marker.file, "done");
+  marker.status = "done";
+  if (outcome.ok) {
+    update.outcomes = { [marker.id]: outcome.outcome };
+  }
+  session.state = applyUpdate(session.state, {
+    tickets: { [marker.id]: "done" },
+    ...update,
+  });
+  emit("running");
+}
+
+// The checkpoint Brief for a flagged lone attempt: the grade's verdict and
+// reasons, so the human reads the grader's complaint without opening the log.
+function gradeComplaint(grade: Grade): string {
+  return (
+    `The attempt claimed done, but its grader flagged the work: ` +
+    `score ${grade.score}/10, verdict ${grade.verdict}.\n\n` +
+    `${grade.reasons.trim()}\n\n` +
+    "Answering resume resets the ticket to ready; the next round runs a " +
+    "fresh attempt and grades it again."
+  );
+}
+
+// The checkpoint Brief for a lone attempt whose passing merge conflicted.
+function mergeConflictComplaint(
+  buildId: string,
+  attempt: number,
+  result: MergeResult,
+): string {
+  const branch = branchFor(buildId, attempt);
+  const files =
+    result.conflicted.length > 0
+      ? result.conflicted.join(", ")
+      : "(no unmerged paths listed)";
+  return (
+    `The attempt passed grading, but merging ${branch} onto the working ` +
+    `branch conflicted: ${files}. The work is parked on ${branch} and the ` +
+    "working branch was left clean. Resolve the conflict by hand, or " +
+    "answer resume to re-run the ticket from the current HEAD."
+  );
 }
 
 // The final Review: the run's closing gate, raised once every ticket is done
