@@ -88,3 +88,7 @@ _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
 **Queued answer**:
 An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)
+
+**Dead drive**:
+A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran, so no terminal phase is ever emitted.
+_Avoid_: stuck, frozen, hung pool
