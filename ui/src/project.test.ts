@@ -863,6 +863,7 @@ describe("phaseLabel", () => {
     expect(phaseLabel("quiescent")).toBe("waiting on you");
     expect(phaseLabel("done")).toBe("done");
     expect(phaseLabel("stalled")).toBe("stalled");
+    expect(phaseLabel("dead")).toBe("dead");
   });
 });
 
@@ -944,6 +945,18 @@ describe("poolStatus", () => {
       word: "idle",
       color: "#8b949e",
     });
+  });
+
+  it("dead in red as the terminal state, outranking pending interrupts", () => {
+    expect(poolStatus(snapshot({ phase: "dead" }))).toEqual({
+      word: "dead",
+      color: "#f85149",
+    });
+    const snap = snapshot({
+      phase: "dead",
+      state: { interrupts: [{ ticketId: "a", kind: "checkpoint", body: "" }] },
+    });
+    expect(poolStatus(snap)).toEqual({ word: "dead", color: "#f85149" });
   });
 });
 

@@ -183,6 +183,31 @@ describe("pool server", () => {
     expect(server.latest?.phase).toBe("done");
   });
 
+  it("carries the terminal dead phase on the snapshot when the drive dies", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    // A harness command naming a binary that does not exist kills the drive
+    // inside the first super-step (Bun.spawn throws). The pool's config
+    // points its default harness ("stub") at it.
+    const server = await startServer(poolDir, {
+      stub: () => ["definitely-not-a-real-harness-binary"],
+    });
+
+    await server.start();
+    // Registered before the spawn's rejection can settle the drive: the
+    // settle microtask queues behind this call's synchronous continuation.
+    await expect(server.settled()).rejects.toThrow(/Executable not found/);
+
+    // The dead phase is on the enriched snapshot the Console receives, with
+    // the pool log line beside it: a dead pool can no longer masquerade as a
+    // live one.
+    expect(server.latest?.phase).toBe("dead");
+    expect(
+      server.latest?.state.log.some((line) => line.startsWith("pool dead:")),
+    ).toBe(true);
+  });
+
   it("carries the pool's display name, the last two path segments, on the enriched snapshot", async () => {
     const shapes: [string, string][] = [
       ["ai-agent-graphs-fix/tickets", "ai-agent-graphs-fix/tickets"],

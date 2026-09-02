@@ -96,7 +96,7 @@ export interface PoolTicketState {
   status: PoolStatus;
 }
 
-export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
+export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
 
 interface PoolState {
   tickets: PoolTicketState[];
@@ -648,6 +648,8 @@ export function phaseLabel(phase: PoolPhase): string {
       return "done";
     case "stalled":
       return "stalled";
+    case "dead":
+      return "dead";
   }
 }
 
@@ -657,25 +659,31 @@ export interface PoolTabStatus {
 }
 
 /** The tab status colors, from the Console palette. The favicon's boot dot
- *  consumes the idle color before any snapshot lands. */
+ *  consumes the idle color before any snapshot lands. Dead shares the alarm
+ *  red with needs input: its word carries the difference. */
 export const POOL_TAB_COLORS = {
   needsInput: "#f85149",
   running: "#d29922",
   complete: "#3fb950",
   idle: "#8b949e",
+  dead: "#f85149",
 } as const;
 
 /**
- * The pool's at-a-glance status for the browser tab, worst-first: a pending
- * interrupt with no queued answer or a stalled phase needs input; otherwise a
- * running phase is running, a done phase is complete, and anything else is
- * idle. An interrupt whose answer is already queued waits on the engine, not
- * the operator, so it stays out of needs input. Quiescent always carries a
- * pending interrupt, so it lands on needs input without a rule of its own.
- * Colors come from the Console palette; the tab title and the favicon both
- * consume this value.
+ * The pool's at-a-glance status for the browser tab, worst-first: a dead
+ * phase is terminal and outranks everything (no answer can reach a dead
+ * drive, so needs input would mislead); then a pending interrupt with no
+ * queued answer or a stalled phase needs input; otherwise a running phase is
+ * running, a done phase is complete, and anything else is idle. An interrupt
+ * whose answer is already queued waits on the engine, not the operator, so
+ * it stays out of needs input. Quiescent always carries a pending interrupt,
+ * so it lands on needs input without a rule of its own. Colors come from the
+ * Console palette; the tab title and the favicon both consume this value.
  */
 export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
+  if (snapshot.phase === "dead") {
+    return { word: "dead", color: POOL_TAB_COLORS.dead };
+  }
   const unanswered = snapshot.state.interrupts.some(
     (interrupt) => !isAnswerQueued(snapshot.state.queuedAnswers, interrupt),
   );

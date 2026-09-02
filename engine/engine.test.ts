@@ -1130,10 +1130,11 @@ describe("persist failures", () => {
 
     expect(rig.spawnOrder).toEqual(["01", "02"]);
     expect(run.phase).toBe("done");
-    // Five healthy persists in a run to done (two boundaries, the review
-    // gate, and two finals) plus the one failed boundary attempt that the
-    // retry recovered.
-    expect(store.writeAttempts).toBe(6);
+    // Six healthy persists in a run to done: the failed boundary's retry,
+    // the second boundary, the review gate, the first drive's final, the
+    // answered-review drain persist, and the finished run's final. Plus the
+    // one failed boundary attempt that the retry recovered.
+    expect(store.writeAttempts).toBe(7);
     const rows = checkpointRows(poolDir);
     expect(rows.length).toBeGreaterThan(0);
     expect(JSON.parse(rows[0].state).tickets).toEqual({
@@ -1215,6 +1216,111 @@ describe("persist failures", () => {
     const second = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(rig.spawnOrder).toEqual(["01", "02"]);
     expect((await approveReview(second)).phase).toBe("done");
+  });
+
+  it("never reports dead for a persist failure the retry seam handles", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
+
+    // The persistence interrupt is the outcome, exactly as ticket 01 left it:
+    // the run settles quiescent and no dead phase, dead error log, or pool
+    // dead line may appear.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.some((i) => i.kind === "persistence")).toBe(true);
+    expect(run.snapshots.map((s) => s.phase)).not.toContain("dead");
+    expect(run.final.log.some((line) => line.startsWith("pool dead"))).toBe(
+      false,
+    );
+    expect(existsSync(join(poolDir, "runs", "errors.jsonl"))).toBe(false);
+  });
+});
+
+describe("dead drives report themselves", () => {
+  // A harness command naming a binary that does not exist: Bun.spawn throws
+  // "Executable not found in $PATH" from inside the super-step, which is a
+  // genuine drive-killing error no catch along the way handles. The pool's
+  // config points its default harness ("stub") at it.
+  const killingHarnesses: Record<string, HarnessCommand> = {
+    stub: () => ["definitely-not-a-real-harness-binary"],
+  };
+
+  it("reports a drive-killing error through the shared mechanism: durable error log, pool log, and the terminal dead phase", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const run = startPool({ poolDir, harnesses: killingHarnesses });
+    // Registered synchronously, before the spawn's rejection can settle the
+    // drive: nextSettle only reports a past error through its waiters.
+    const settled = run.settled;
+
+    await expect(settled).rejects.toThrow(/Executable not found/);
+
+    // The terminal dead phase, emitted before the waiters were settled.
+    expect(run.phase).toBe("dead");
+    const phases = run.snapshots.map((s) => s.phase);
+    expect(phases.at(-1)).toBe("dead");
+    // Everything before the death is an ordinary running snapshot; the dead
+    // phase is the only terminal one the run ever emitted.
+    expect(phases.slice(0, -1).every((p) => p === "running")).toBe(true);
+
+    // The durable JSONL error log in the pool's runs directory: one line,
+    // naming the error, with a timestamp.
+    const errorsPath = join(poolDir, "runs", "errors.jsonl");
+    expect(existsSync(errorsPath)).toBe(true);
+    const lines = readFileSync(errorsPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]) as { at: string; error: string };
+    expect(typeof entry.at).toBe("string");
+    expect(entry.error).toContain("definitely-not-a-real-harness-binary");
+
+    // The same error in the pool log, the Console log drawer's channel.
+    expect(run.final.log.at(-1)).toContain("pool dead:");
+    expect(run.final.log.at(-1)).toContain(
+      "definitely-not-a-real-harness-binary",
+    );
+  });
+
+  it("leaves restart-from-disk working after a dead drive", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const dead = startPool({ poolDir, harnesses: killingHarnesses });
+    await expect(dead.settled).rejects.toThrow(/Executable not found/);
+
+    // The escape hatch still works: a fresh run on the same pool directory
+    // rehydrates from the markers on disk (the dead attempt had marked the
+    // ticket in-progress, so restart resets it to ready) and runs to done.
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect((await approveReview(second)).phase).toBe("done");
+    // The dead drive's error log survives the restart.
+    expect(existsSync(join(poolDir, "runs", "errors.jsonl"))).toBe(true);
   });
 });
 
