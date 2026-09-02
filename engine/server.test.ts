@@ -646,6 +646,72 @@ describe("grades endpoint", () => {
     });
   });
 
+  it("serves the selected attempt's grade when graders append out of order", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 9, verdict: "pass", reasons: "winner" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 5, verdict: "flag", reasons: "loser, graded last" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T12:00:00.000Z",
+      attempt: 1,
+      kind: "selected",
+      payload: { score: 9, margin: 4, rule: "outright" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as {
+      grades: Record<string, { attempt: number; score: number; verdict: string }>;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 1, score: 9, verdict: "pass" },
+    });
+  });
+
+  it("serves the merged attempt's grade when there is no selected event", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 7, verdict: "pass", reasons: "winner" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 3, verdict: "flag", reasons: "loser, graded last" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T12:00:00.000Z",
+      attempt: 1,
+      kind: "merged",
+      payload: {},
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as {
+      grades: Record<string, { attempt: number; score: number; verdict: string }>;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 1, score: 7, verdict: "pass" },
+    });
+  });
+
   it("skips a graded event whose payload is malformed", async () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");

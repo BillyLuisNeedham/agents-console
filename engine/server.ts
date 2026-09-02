@@ -423,10 +423,15 @@ export interface TicketGradeSummary {
   verdict: string;
 }
 
-// The latest well-formed graded event per ticket, keyed by ticket id. Tickets
-// with no grade are absent, so the UI renders no grade UI for them. A graded
-// event whose payload is malformed is skipped the way the events reader skips
-// a torn line: it can never have come from the engine's write path.
+// The winning attempt's latest well-formed grade per ticket, keyed by ticket
+// id; before a selection has landed, the latest graded event stands in.
+// Parallel graders append in completion order, so the last graded line in the
+// file can be a loser's grade: when a selected event (or, on a ticket graded
+// before the selection machinery, a merged event) names the winner, that
+// attempt's grade is what the card shows, matching the Detail's winner badge.
+// Tickets with no grade are absent, so the UI renders no grade UI for them. A
+// graded event whose payload is malformed is skipped the way the events reader
+// skips a torn line: it can never have come from the engine's write path.
 function readPoolGrades(
   poolDir: string,
   meta: TicketMarker[],
@@ -434,14 +439,27 @@ function readPoolGrades(
   const runsDir = join(poolDir, "runs");
   const grades: Record<string, TicketGradeSummary> = {};
   for (const marker of meta) {
-    const graded = readEvents(runsDir, marker.id).filter(
-      (event) => event.kind === "graded",
+    const events = readEvents(runsDir, marker.id);
+    const graded = events.filter(
+      (event) =>
+        event.kind === "graded" &&
+        typeof event.payload.score === "number" &&
+        typeof event.payload.verdict === "string",
     );
     const last = graded.at(-1);
     if (!last) continue;
-    const { score, verdict } = last.payload;
-    if (typeof score !== "number" || typeof verdict !== "string") continue;
-    grades[marker.id] = { attempt: last.attempt, score, verdict };
+    const winner =
+      events.filter((event) => event.kind === "selected").at(-1)?.attempt ??
+      events.filter((event) => event.kind === "merged").at(-1)?.attempt;
+    const pick =
+      (winner !== undefined
+        ? graded.filter((event) => event.attempt === winner).at(-1)
+        : undefined) ?? last;
+    grades[marker.id] = {
+      attempt: pick.attempt,
+      score: pick.payload.score as number,
+      verdict: pick.payload.verdict as string,
+    };
   }
   return grades;
 }
