@@ -20,7 +20,10 @@ import {
   nextAttempt,
   type TicketEventKind,
 } from "./events.ts";
-import { CheckpointStore } from "./checkpoints.ts";
+import {
+  type CheckpointStore,
+  SqliteCheckpointStore,
+} from "./checkpoints.ts";
 import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   loadPoolMarkers,
@@ -87,12 +90,19 @@ export type InterruptKind =
   | "deadlock"
   | "merge-conflict"
   | "merge-approval"
+  | "persistence"
   | "review";
 
 // The final Review interrupt is not a ticket's: it belongs to the run, and it
 // carries this id so the Console can hang it on the review utility card (the
 // projection's REVIEW_CARD_ID is the same string by contract).
 export const REVIEW_TICKET_ID = "REVIEW";
+
+// The persistence interrupt is run-level too: it belongs to no ticket, and it
+// is raised when the checkpoint store keeps failing at a boundary. Answering
+// it retries persistence and continues the run; the store never closes while
+// it waits.
+export const PERSISTENCE_TICKET_ID = "PERSISTENCE";
 
 interface Interrupt {
   ticketId: string;
@@ -138,6 +148,10 @@ interface RunOptions {
   harnesses?: Record<string, HarnessCommand>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath?: string;
+  // The checkpoint store seam: tests substitute a store whose write throws
+  // on demand to prove a persist failure retries, then interrupts, and never
+  // closes the store. Defaults to the real sqlite store.
+  store?: CheckpointStore;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -285,7 +299,7 @@ export function startPool(options: RunOptions): PoolRun {
       reviewApproved: false,
     },
     snapshots: [],
-    store: new CheckpointStore(poolDir),
+    store: options.store ?? new SqliteCheckpointStore(poolDir),
     storeOpen: true,
     superStep: 0,
     answers: new QueuedAnswerStore(runsDir),
@@ -591,7 +605,12 @@ async function driveLoop(session: Session): Promise<void> {
           });
         }
       }
-      persist(session);
+      // The boundary persist: a failed write retries with backoff, and the
+      // drive carries on once a write lands. If retries are exhausted the
+      // persistence interrupt is raised and the loop stops scheduling, the
+      // store still open: the closing gate below settles quiescent and the
+      // run waits for a human instead of dying (issue #26).
+      if (!(await persistWithRetry(session))) break;
       emit("running");
     }
   } catch (error) {
@@ -612,7 +631,7 @@ async function driveLoop(session: Session): Promise<void> {
     !session.state.reviewApproved
   ) {
     raiseInterrupt(session, reviewInterrupt(session));
-    persist(session);
+    await persistWithRetry(session);
   }
   let phase: Exclude<RunPhase, "running">;
   if (session.state.interrupts.length > 0) {
@@ -635,7 +654,10 @@ async function driveLoop(session: Session): Promise<void> {
           : `pool stalled: ${pending.join(", ")} cannot run`,
     ],
   });
-  persist(session);
+  // The final persist decides the store's fate: if it still fails after
+  // retries the run waits quiescent for a human, the store open, instead of
+  // closing it or reporting a phase the pending interrupt contradicts.
+  if (!(await persistWithRetry(session))) phase = "quiescent";
   emit(phase);
   if (phase !== "quiescent") closeStore(session);
   settleDrive(session, phase, null);
@@ -771,6 +793,42 @@ function writeMarkers(session: Session): void {
 function persist(session: Session): void {
   writeMarkers(session);
   session.store.write(session.state);
+}
+
+// A persist failure retries with a short backoff a small bounded number of
+// times: on success the drive continues normally, and on exhaustion the pool
+// raises the run-level persistence interrupt and waits for a human with the
+// store still open. A persist failure never closes the checkpoint store and
+// never reaches the drive loop's fatal catch, so a transient database hiccup
+// mid-run can no longer kill the drive the way issue #26's stall did.
+const PERSIST_RETRY_BACKOFF_MS = [50, 100, 200];
+
+async function persistWithRetry(session: Session): Promise<boolean> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      persist(session);
+      return true;
+    } catch (error) {
+      if (attempt >= PERSIST_RETRY_BACKOFF_MS.length) {
+        raiseInterrupt(session, persistenceInterrupt(error));
+        return false;
+      }
+      await Bun.sleep(PERSIST_RETRY_BACKOFF_MS[attempt]);
+    }
+  }
+}
+
+function persistenceInterrupt(error: unknown): Interrupt {
+  return {
+    ticketId: PERSISTENCE_TICKET_ID,
+    kind: "persistence",
+    body:
+      "persistence is failing: the checkpoint store failed to write after " +
+      `${PERSIST_RETRY_BACKOFF_MS.length + 1} attempts with backoff.\n` +
+      `last error: ${error instanceof Error ? error.message : String(error)}\n` +
+      "the store remains open. answer this interrupt once the store is " +
+      "healthy to retry persistence and continue the run.",
+  };
 }
 
 function closeStore(session: Session): void {
@@ -918,6 +976,19 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     } else {
       rejectReview(session, interrupt, record.note);
     }
+    return;
+  }
+  // The persistence interrupt belongs to the run, not a ticket: answering it
+  // only clears it, and the resumed drive's next boundary write is the
+  // retry. There is no Issue file to find for it.
+  if (interrupt.kind === "persistence") {
+    session.state = applyUpdate(session.state, {
+      interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+      log: [
+        `interrupt answered for ${PERSISTENCE_TICKET_ID} (persistence): ` +
+          "the drive retries the checkpoint write",
+      ],
+    });
     return;
   }
   const marker = session.markers.find((m) => m.id === record.ticketId);

@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
   runPool,
   startPool,
@@ -19,6 +20,7 @@ import {
   type PoolConfig,
   type PoolRun,
 } from "./engine.ts";
+import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
 import { appendEvent } from "./events.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import type { SpawnContext } from "./spawn.ts";
@@ -991,6 +993,160 @@ describe("checkpoints", () => {
     expect(terminal.log.at(-1)).toBe("pool done: every ticket reached done");
     expect(terminal.reviewApproved).toBe(true);
     expect(run.snapshots.at(-1)?.phase).toBe("done");
+  });
+});
+
+describe("persist failures", () => {
+  // The substitutable-store seam: a real sqlite store wrapped in one whose
+  // write fails on demand. The wrapper counts every write attempt (failed or
+  // not) and every close, so a test can see the retries and prove a persist
+  // failure never closed the store.
+  class FlakyStore implements CheckpointStore {
+    writeAttempts = 0;
+    closeCalls = 0;
+    private inner: CheckpointStore;
+    constructor(
+      poolDir: string,
+      public failWritesLeft: number,
+    ) {
+      this.inner = new SqliteCheckpointStore(poolDir);
+    }
+    write(state: unknown): void {
+      this.writeAttempts += 1;
+      if (this.failWritesLeft > 0) {
+        this.failWritesLeft -= 1;
+        throw new Error("db is down");
+      }
+      this.inner.write(state);
+    }
+    latest(): unknown | null {
+      return this.inner.latest();
+    }
+    close(): void {
+      this.closeCalls += 1;
+      this.inner.close();
+    }
+  }
+
+  function checkpointRows(poolDir: string): { state: string }[] {
+    const db = new Database(join(poolDir, "console.db"), { readonly: true });
+    const rows = db
+      .query("SELECT state FROM checkpoints ORDER BY seq")
+      .all() as { state: string }[];
+    db.close();
+    return rows;
+  }
+
+  it("retries a failed boundary persist and recovers: the next ticket is scheduled and the row lands", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    // The first write attempt throws; the retry lands the row and the run
+    // carries on as if nothing happened.
+    const store = new FlakyStore(poolDir, 1);
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses, store }),
+    );
+
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(run.phase).toBe("done");
+    // Five healthy persists in a run to done (two boundaries, the review
+    // gate, and two finals) plus the one failed boundary attempt that the
+    // retry recovered.
+    expect(store.writeAttempts).toBe(6);
+    const rows = checkpointRows(poolDir);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(JSON.parse(rows[0].state).tickets).toEqual({
+      "01": "done",
+      "02": "ready",
+    });
+  });
+
+  it("raises the persistence interrupt when the store keeps failing, and the store remains open", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.interrupts[0].ticketId).toBe(PERSISTENCE_TICKET_ID);
+    expect(run.interrupts[0].kind).toBe("persistence");
+    expect(run.interrupts[0].body).toContain("persistence is failing");
+    expect(run.interrupts[0].body).toContain("db is down");
+    // Ticket 01 ran; the failing boundary stopped any further scheduling.
+    expect(rig.spawnOrder).toEqual(["01"]);
+    // Bounded retries, not a forever loop: the boundary persist and the
+    // final settle each make four write attempts (1 + 3 backoff retries).
+    expect(store.writeAttempts).toBe(8);
+    // A persist failure never closes the checkpoint store.
+    expect(store.closeCalls).toBe(0);
+    expect(checkpointRows(poolDir)).toHaveLength(0);
+
+    // Once the store is healthy again, answering the interrupt continues
+    // the run: the next boundary write lands and the pool reaches Review.
+    store.failWritesLeft = 0;
+    const resumed = await run.resume(PERSISTENCE_TICKET_ID);
+    expect((await approveReview(resumed)).phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(checkpointRows(poolDir).length).toBeGreaterThan(0);
+  });
+
+  it("resumes cleanly from disk after a restart when the store kept failing", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses, store });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // The markers were written before the store write failed, so disk says
+    // 01 done: restart-from-disk is the escape hatch, and 01 never re-runs.
+    expect(markerStatuses(poolDir, ["01-a.md", "02-b.md"])).toEqual({
+      "01": "done",
+      "02": "ready",
+    });
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect((await approveReview(second)).phase).toBe("done");
   });
 });
 
