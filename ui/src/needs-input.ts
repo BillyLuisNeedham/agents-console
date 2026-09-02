@@ -102,15 +102,17 @@ export class NeedsInputTray {
 
   /** Drop drafts whose interrupt resolved (or whose ticket left the pool). */
   pruneDrafts(pendingTicketIds: ReadonlySet<string>): void {
-    for (const id of [...this.drafts.keys()]) {
-      if (!pendingTicketIds.has(id)) this.drafts.delete(id);
-    }
+    this.prune(this.drafts, pendingTicketIds);
   }
 
   /** Drop failure marks whose row resolved (or whose ticket left the pool). */
   pruneFailures(pendingTicketIds: ReadonlySet<string>): void {
-    for (const id of [...this.failures.keys()]) {
-      if (!pendingTicketIds.has(id)) this.failures.delete(id);
+    this.prune(this.failures, pendingTicketIds);
+  }
+
+  private prune<V>(map: Map<string, V>, pendingTicketIds: ReadonlySet<string>): void {
+    for (const id of [...map.keys()]) {
+      if (!pendingTicketIds.has(id)) map.delete(id);
     }
   }
 
@@ -228,7 +230,7 @@ export class NeedsInputTray {
             {
               class: "btn btn-primary needs-input-resume-all",
               disabled: bulk.length === 0,
-            title: "resume every open resume row with its note; review and merge-approval rows answer individually",
+              title: "resume every open resume row with its note; review and merge-approval rows answer individually",
               onclick: () => {
                 void this.resumeAll(rows);
               },
