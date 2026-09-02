@@ -162,7 +162,7 @@ describe("projectPool", () => {
       },
     });
     const view = projectPool(snap, {
-      A: { attempt: 2, score: 7, verdict: "pass" },
+      A: { attempt: 2, score: 7, verdict: "pass", winner: 2 },
     });
     const a = view.cards.find((c) => c.id === "ticket:A");
     const b = view.cards.find((c) => c.id === "ticket:B");
@@ -170,6 +170,7 @@ describe("projectPool", () => {
       attempt: 2,
       score: 7,
       verdict: "pass",
+      winner: 2,
     });
     expect(b?.kind === "ticket" && b.grade).toBe(null);
   });
@@ -756,6 +757,15 @@ describe("projectDetail", () => {
   it("returns null for a card not in the pool", () => {
     expect(projectDetail(snapshot(), "ticket:zzz")).toBeNull();
   });
+
+  it("carries the grades endpoint's winner for the timeline's badge", () => {
+    const snap = snapshot({ state: { tickets: [ticket("A"), ticket("B")] } });
+    const grades = { A: { attempt: 2, score: 9, verdict: "pass", winner: 2 } };
+    const a = projectDetail(snap, "ticket:A", grades);
+    const b = projectDetail(snap, "ticket:B", grades);
+    expect(a?.kind === "ticket" && a.winner).toBe(2);
+    expect(b?.kind === "ticket" && b.winner).toBe(null);
+  });
 });
 
 describe("projectDetailTab", () => {
@@ -773,6 +783,7 @@ describe("projectDetailTab", () => {
       blockedByCheckpoint: [],
       outcome: null,
       interrupt,
+      winner: null,
     };
   }
 
@@ -830,6 +841,7 @@ describe("projectDetailTabs", () => {
       blockedByCheckpoint: [],
       outcome: null,
       interrupt,
+      winner: null,
     };
   }
 

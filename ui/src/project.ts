@@ -421,6 +421,9 @@ export interface GradeView {
   attempt: number;
   score: number;
   verdict: string;
+  /** The attempt Selection named (merged attempt on pre-selection tickets);
+   *  null until either event lands. Derived once, server-side. */
+  winner: number | null;
 }
 
 export interface UtilityCardView {
@@ -731,6 +734,10 @@ export interface TicketDetailView {
   blockedByCheckpoint: string[];
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
+  /** The winning attempt's number from the grades endpoint, for the
+   *  timeline's winner badge. Null when the ticket is ungraded or no
+   *  selection has landed: no badge renders. */
+  winner: number | null;
 }
 
 interface UtilityDetailView {
@@ -743,8 +750,12 @@ interface UtilityDetailView {
 export type DetailView = TicketDetailView | UtilityDetailView;
 
 /** The Detail for a selected card, or null when the card is not in the pool. */
-export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailView | null {
-  const card = projectPool(snapshot).cards.find((c) => c.id === cardId);
+export function projectDetail(
+  snapshot: PoolSnapshot,
+  cardId: string,
+  grades: Record<string, GradeView> = {},
+): DetailView | null {
+  const card = projectPool(snapshot, grades).cards.find((c) => c.id === cardId);
   if (!card) return null;
   if (card.kind === "ticket") {
     return {
@@ -756,6 +767,7 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
       blockedByCheckpoint: card.blockedByCheckpoint,
       outcome: card.outcome,
       interrupt: card.interrupt,
+      winner: card.grade?.winner ?? null,
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };

@@ -223,7 +223,7 @@ function model(): AppModel {
   const view = state.snapshot ? projectPool(state.snapshot, grades) : null;
   const detail =
     state.snapshot && state.selectedId
-      ? projectDetail(state.snapshot, state.selectedId)
+      ? projectDetail(state.snapshot, state.selectedId, grades)
       : null;
   const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
   const isCurrent =

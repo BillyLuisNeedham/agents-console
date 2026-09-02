@@ -413,14 +413,20 @@ function readTicketEvents(
 
 /**
  * One ticket's latest grade, as the card summaries show it: the score and
- * verdict with the graded attempt's number. Derived at read time from the
- * same events files the Detail's timeline reads, so a card and the Detail
- * never disagree. Reasons stay in the events payload; the card is a summary.
+ * verdict with the graded attempt's number, plus the winning attempt's
+ * number once Selection has named one. Derived at read time from the same
+ * events files the Detail's timeline reads, so a card and the Detail never
+ * disagree. Reasons stay in the events payload; the card is a summary.
  */
 export interface TicketGradeSummary {
   attempt: number;
   score: number;
   verdict: string;
+  /** The attempt Selection named, or the merged attempt on a ticket graded
+   *  before the selection machinery. Null until either event lands. The
+   *  Detail's winner badge reads this field, so both surfaces share the one
+   *  derivation. */
+  winner: number | null;
 }
 
 // The winning attempt's latest well-formed grade per ticket, keyed by ticket
@@ -428,10 +434,12 @@ export interface TicketGradeSummary {
 // Parallel graders append in completion order, so the last graded line in the
 // file can be a loser's grade: when a selected event (or, on a ticket graded
 // before the selection machinery, a merged event) names the winner, that
-// attempt's grade is what the card shows, matching the Detail's winner badge.
-// Tickets with no grade are absent, so the UI renders no grade UI for them. A
-// graded event whose payload is malformed is skipped the way the events reader
-// skips a torn line: it can never have come from the engine's write path.
+// attempt's grade is what the card shows. The selected event lands before the
+// merge, and a conflicted merge checkpoints with no merged event at all, so
+// selected is the source of truth and merged only the fallback. Tickets with
+// no grade are absent, so the UI renders no grade UI for them. A graded event
+// whose payload is malformed is skipped the way the events reader skips a
+// torn line: it can never have come from the engine's write path.
 function readPoolGrades(
   poolDir: string,
   meta: TicketMarker[],
@@ -444,21 +452,24 @@ function readPoolGrades(
       (event) =>
         event.kind === "graded" &&
         typeof event.payload.score === "number" &&
-        typeof event.payload.verdict === "string",
+        typeof event.payload.verdict === "string" &&
+        typeof event.payload.reasons === "string",
     );
     const last = graded.at(-1);
     if (!last) continue;
     const winner =
       events.filter((event) => event.kind === "selected").at(-1)?.attempt ??
-      events.filter((event) => event.kind === "merged").at(-1)?.attempt;
+      events.filter((event) => event.kind === "merged").at(-1)?.attempt ??
+      null;
     const pick =
-      (winner !== undefined
+      (winner !== null
         ? graded.filter((event) => event.attempt === winner).at(-1)
         : undefined) ?? last;
     grades[marker.id] = {
       attempt: pick.attempt,
       score: pick.payload.score as number,
       verdict: pick.payload.verdict as string,
+      winner,
     };
   }
   return grades;

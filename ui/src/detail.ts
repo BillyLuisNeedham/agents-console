@@ -280,6 +280,7 @@ export class Detail {
     timeline: TimelineView,
     logPane: LogPaneView | null,
     handlers: DetailHandlers,
+    winnerAttempt: number | null,
   ): HTMLElement {
     const body = h("div", { class: "timeline" });
     body.append(h("div", { class: "dim" }, "timeline"));
@@ -296,19 +297,17 @@ export class Detail {
         ),
       );
     }
-    const hasGrades = timeline.attempts.some((attempt) =>
-      attempt.events.some((event) => event.kind === "graded"),
-    );
     for (const attempt of timeline.attempts) {
       const selected = logPane?.selectedAttempt === attempt.number;
-      // A graded ticket's winner is the attempt whose branch merged: the
-      // engine merges only the selected attempt (the selection machinery is
-      // what lands the merged event), so the merged attempt on a ticket with
-      // grades is the winner and the graded-but-unmerged ones are not. On a
-      // ticket with no grades the badge would be noise, so it stays off.
+      // The winner badge reads the grades endpoint's winner, the one
+      // derivation both surfaces share: the attempt the selected event named
+      // (merged only stands in for tickets graded before the selection
+      // machinery). Keying on the merged event here would leave the badge
+      // off for the whole window between selection and merge, and forever
+      // on a conflicted merge that checkpoints, while the card already shows
+      // the winner's grade. Null means ungraded or unselected: no badge.
       const winner =
-        hasGrades &&
-        attempt.events.some((event) => event.kind === "merged");
+        winnerAttempt !== null && attempt.number === winnerAttempt;
       const row = h(
         "div",
         {
@@ -534,7 +533,13 @@ export class Detail {
     }
     if (timeline) {
       panel.append(
-        this.renderTimelineSection(detail.ticketId, timeline, logPane, handlers),
+        this.renderTimelineSection(
+          detail.ticketId,
+          timeline,
+          logPane,
+          handlers,
+          detail.winner,
+        ),
       );
     }
     if (logPane && !logPane.neverRun) {
@@ -687,14 +692,19 @@ function formatEventTime(iso: string): string {
   return date.toLocaleTimeString([], { hour12: false });
 }
 
-/** The graded event's payload as a grade, or null when a field is missing or
- *  mistyped. The engine writes all three fields, so a null here means a torn
- *  or foreign line, and the timeline falls back to the plain event row. */
-function gradeFromPayload(payload: Record<string, unknown>): {
+/** A grade as the timeline shows it under its attempt's graded event: the
+ *  full payload, reasons included. The card's GradeView is the summary
+ *  shape; this is the record. */
+interface GradeDetail {
   score: number;
   verdict: string;
   reasons: string;
-} | null {
+}
+
+/** The graded event's payload as a grade, or null when a field is missing or
+ *  mistyped. The engine writes all three fields, so a null here means a torn
+ *  or foreign line, and the timeline falls back to the plain event row. */
+function gradeFromPayload(payload: Record<string, unknown>): GradeDetail | null {
   const { score, verdict, reasons } = payload;
   if (
     typeof score !== "number" ||
@@ -709,11 +719,7 @@ function gradeFromPayload(payload: Record<string, unknown>): {
 // One grade under its attempt's graded event: the score and verdict on one
 // line, the grader's reasons below. This is the "why the winner won" record,
 // read from the same append-only events file after the run has ended.
-function renderGrade(grade: {
-  score: number;
-  verdict: string;
-  reasons: string;
-}): HTMLElement {
+function renderGrade(grade: GradeDetail): HTMLElement {
   return h(
     "div",
     { class: "timeline-grade" },
