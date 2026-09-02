@@ -564,16 +564,17 @@ describe("verify fan-out", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // Grading (ticket 03) runs after the fan-out, but the gate still holds
-    // for the build ticket: no merge, no status write, and no Review.
-    expect(run.phase).toBe("stalled");
+    // Grading (ticket 03) runs after the fan-out, and selection (ticket 04)
+    // then closes the ticket out: the default grades tie at 8, so the
+    // earlier attempt wins and merges, and the pool waits on Review.
+    expect(run.phase).toBe("quiescent");
     expect(run.final.tickets).toEqual({
-      "01": "in-progress",
+      "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
       "01-grader-3": "done",
     });
-    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
     expect(run.final.log.some((line) =>
       line.startsWith("ticket 01: verify fan-out complete: 3 attempts exited " +
         "(3 done, 0 checkpoint, 0 crash)"),
@@ -611,8 +612,8 @@ describe("verify fan-out", () => {
       );
     }
 
-    // Each attempt wrote its own Outcome, and nothing merged: the
-    // candidates sit on their branches, the working branch untouched.
+    // Each attempt wrote its own Outcome. Selection then merged attempt 1
+    // (the tie's earlier attempt) and discarded the losers.
     for (let i = 1; i <= 3; i++) {
       const outcome = JSON.parse(
         readFileSync(
@@ -622,10 +623,11 @@ describe("verify fan-out", () => {
       );
       expect(outcome.status).toBe("done");
       expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
-        .toBe(0);
-      expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
+        .not.toBe(0);
+      expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(i === 1);
     }
     expect(Object.keys(run.final.outcomes).sort()).toEqual([
+      "01",
       "01-grader-1",
       "01-grader-2",
       "01-grader-3",
@@ -634,16 +636,21 @@ describe("verify fan-out", () => {
     // The ticket log records each attempt as a distinct attempt, and the
     // engine lands each grader's grade on its attempt. Exits append in
     // completion order, so the contract is per attempt: each attempt reads
-    // scheduled, spawned, exited, graded in order, and every attempt was
-    // scheduled before the first spawn (one scheduling round).
+    // scheduled, spawned, exited, graded in order (the winner's record
+    // continues with selected and merged), and every attempt was scheduled
+    // before the first spawn (one scheduling round).
     const events = readEventLines(poolDir, "01");
     expect(events.map((e) => e.attempt).sort()).toEqual([
-      1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+      1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
     ]);
     for (const attempt of [1, 2, 3]) {
       expect(
         events.filter((e) => e.attempt === attempt).map((e) => e.kind),
-      ).toEqual(["scheduled", "spawned", "exited", "graded"]);
+      ).toEqual(
+        attempt === 1
+          ? ["scheduled", "spawned", "exited", "graded", "selected", "merged"]
+          : ["scheduled", "spawned", "exited", "graded"],
+      );
     }
     const firstSpawn = events.findIndex((e) => e.kind === "spawned");
     expect(
@@ -653,14 +660,13 @@ describe("verify fan-out", () => {
     ).toBeLessThan(firstSpawn);
 
     // No partial progress: an attempt's exit is visible in the log while
-    // the ticket is still in-progress, and no merge ever lands.
+    // the ticket is still in-progress. Later snapshots carry selection
+    // (ticket 04) and show the ticket done.
     const exitedEarly = run.snapshots.filter((s) =>
       s.state.log.some((line) => line.includes("attempt 1 exited")),
     );
     expect(exitedEarly.length).toBeGreaterThan(0);
-    expect(
-      exitedEarly.every((s) => s.state.tickets["01"] === "in-progress"),
-    ).toBe(true);
+    expect(exitedEarly[0].state.tickets["01"]).toBe("in-progress");
   }, 15000);
 
   it("marks a verify: 1 ticket done on a passing grade, merging its attempt branch", async () => {
@@ -722,14 +728,17 @@ describe("verify fan-out", () => {
       readEventLines(poolDir, "02").map((e) => e.kind),
     ).toEqual(["scheduled", "spawned", "exited", "merged"]);
 
-    // Ticket 01 fanned out and proceeds not at all.
-    expect(run.final.tickets["01"]).toBe("in-progress");
+    // Ticket 01 fanned out, graded, and selection (ticket 04) merged its
+    // tied-at-8 winner, the earlier attempt, discarding the other branches.
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
     expect(rig.spawnOrder.filter((id) => id === "01")).toHaveLength(3);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
     for (let i = 1; i <= 3; i++) {
       expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
-        .toBe(0);
+        .not.toBe(0);
     }
-    expect(run.phase).toBe("stalled");
+    expect(run.phase).toBe("quiescent");
   }, 15000);
 
   it("keeps a crashed attempt's siblings running and records today's crash semantics", async () => {
@@ -894,10 +903,13 @@ describe("verify fan-out", () => {
     // The grader cards are round-stable: the same ids are rewritten and
     // rebound to the round's new attempts, not accumulated per attempt.
     const resumed = await run.resume("01");
-    expect(resumed.phase).toBe("stalled");
-    expect(resumed.interrupts).toEqual([]);
+    // The re-round's attempts both exited done and graded, so selection
+    // (ticket 04) picks the re-round's earlier attempt and closes the
+    // ticket; without git there is no branch to merge, so no merged event.
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
     expect(resumed.final.tickets).toEqual({
-      "01": "in-progress",
+      "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
     });
@@ -912,7 +924,9 @@ describe("verify fan-out", () => {
           : attempt === 2
             ? // The resume's answered event carries the latest attempt.
               ["scheduled", "spawned", "exited", "graded", "answered"]
-            : ["scheduled", "spawned", "exited", "graded"],
+            : attempt === 3
+              ? ["scheduled", "spawned", "exited", "graded", "selected"]
+              : ["scheduled", "spawned", "exited", "graded"],
       );
     }
     // Each grader card ran once per round: two spawns, its own attempt
@@ -977,15 +991,16 @@ describe("verify grading", () => {
       rig.spawnList.find((c) => c.id === "01-grader-1")!.body,
     ).toContain("(the pool has no verify skill");
 
-    // The build ticket's gate still holds through grading: no merge, no
-    // status write, and the graders never entered a super-step.
+    // The graders never entered a super-step, and selection (ticket 04)
+    // then merged the tied-at-8 winner, the earlier attempt.
     expect(run.final.tickets).toEqual({
-      "01": "in-progress",
+      "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
     });
-    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
-    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
     expect(
       run.final.log.filter((line) => line.startsWith("super-step")),
     ).toEqual(["super-step 1: 01"]);
@@ -1107,7 +1122,12 @@ describe("verify grading", () => {
       "ticket 01: attempt 2 graded: score 3, verdict flag (grader 01-grader-2)",
     );
     expect(markerLine(poolDir, "01-grader-2.md")).toContain("status=done");
-    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    // Selection (ticket 04) then took attempt 1: margin 1 over attempt 3 is
+    // below the outright bound, so the deterministic order decided.
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "selected")?.payload,
+    ).toEqual({ score: 9, margin: 1, rule: "fallback" });
   }, 15000);
 
   it("resolves a grader's harness and model through assign, overridable per grader", async () => {
@@ -1333,10 +1353,11 @@ describe("verify grading", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // Pool start resolved the stale grader from its build ticket, and the
-    // round's fan-out rewrote and ran both graders to done.
+    // Pool start resolved the stale grader from its build ticket, the
+    // round's fan-out rewrote and ran both graders to done, and selection
+    // (ticket 04) then merged the tied-at-8 winner, the earlier attempt.
     expect(run.final.tickets).toEqual({
-      "01": "in-progress",
+      "01": "done",
       "01-grader-1": "done",
       "01-grader-2": "done",
     });
@@ -1576,6 +1597,182 @@ describe("lone attempt resolution", () => {
     expect(readFileSync(join(poolDir, "cand.txt"), "utf8")).toBe("plain\n");
     expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
       .toBe(0);
+  }, 15000);
+});
+
+describe("verify selection", () => {
+  const verifyConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    assign: { "01": { verify: n } },
+  });
+  const grade = (score: number) => ({
+    grade: { score, verdict: "pass" as const, reasons: `scored ${score}` },
+  });
+  const attemptWork = (n: number) => ({
+    workFile: `cand-${n}.txt`,
+    commitMsg: `cand-${n}`,
+  });
+
+  it("takes an outright winner: highest score merges, losers' branches go, artifacts stay", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(3),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2), attemptWork(3)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(5),
+      "01-grader-3": grade(7),
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    // The top two grades spread by exactly 2: the winner is taken outright,
+    // with no further judgment invoked. No head-to-head or human interrupt
+    // exists to invoke, and the pool runs clean through Review to done.
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(1);
+    expect(selected?.payload).toEqual({ score: 9, margin: 2, rule: "outright" });
+
+    // Only the winner's branch merged, through the existing merge path.
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+    expect(existsSync(join(poolDir, "cand-3.txt"))).toBe(false);
+
+    // Every attempt branch is gone: the winner's after its merge, the
+    // losers' discarded unmerged.
+    for (const i of [1, 2, 3]) {
+      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+        .not.toBe(0);
+      expect(
+        existsSync(join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`)),
+      ).toBe(false);
+    }
+
+    // The losers' artifacts survive the discard: attempt logs and outcomes
+    // on disk, grades still readable from the ticket log.
+    for (const i of [2, 3]) {
+      expect(existsSync(join(poolDir, "runs", `01.attempt-${i}.log`))).toBe(
+        true,
+      );
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(poolDir, "runs", `01.attempt-${i}.outcome.json`),
+            "utf8",
+          ),
+        ).status,
+      ).toBe("done");
+    }
+    expect(
+      events
+        .filter((e) => e.kind === "graded")
+        .map((e) => [e.attempt, e.payload.score]),
+    ).toEqual([
+      [1, 9],
+      [2, 5],
+      [3, 7],
+    ]);
+
+    // The engine wrote the done status; the winner's outcome became the
+    // ticket's, and the pool closed out through Review.
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+      "01-grader-3": "done",
+    });
+    expect(run.final.outcomes["01"]?.summary).toBe("summary-01");
+  }, 15000);
+
+  it("resolves an exact tie to the earlier attempt", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(7),
+      "01-grader-2": grade(7),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(1);
+    expect(selected?.payload).toEqual({ score: 7, margin: 0, rule: "fallback" });
+    expect(
+      events.filter((e) => e.kind === "merged").map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .not.toBe(0);
+    expect(run.phase).toBe("quiescent");
+  }, 15000);
+
+  it("falls back deterministically when the top two sit inside the margin", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // A margin of 1 is below the outright bound; until the head-to-head
+    // ticket exists the deterministic order decides, and exactly one
+    // winner merges.
+    const events = readEventLines(poolDir, "01");
+    const selected = events.find((e) => e.kind === "selected");
+    expect(selected?.attempt).toBe(1);
+    expect(selected?.payload).toEqual({ score: 9, margin: 1, rule: "fallback" });
+    expect(events.filter((e) => e.kind === "merged")).toHaveLength(1);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+      .not.toBe(0);
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .not.toBe(0);
+    expect(run.phase).toBe("quiescent");
+  }, 15000);
+
+  it("decides nothing while a round holds a paused candidate", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { status: "checkpoint", outcome: { summary: "paused-1", commitSha: null } },
+        attemptWork(2),
+      ],
+      "01-grader-2": grade(9),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Attempt 1 paused, so its round is not all done and selection never
+    // runs, no matter how good the surviving candidate's grade is: the
+    // ticket stays in-progress and its branch stays a candidate.
+    const events = readEventLines(poolDir, "01");
+    expect(events.some((e) => e.kind === "selected")).toBe(false);
+    expect(events.some((e) => e.kind === "merged")).toBe(false);
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+      .toBe(0);
+    expect(run.phase).toBe("stalled");
   }, 15000);
 });
 

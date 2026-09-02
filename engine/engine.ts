@@ -39,7 +39,9 @@ import {
   branchExists,
   branchFor,
   commitMerge,
+  attemptBranches,
   currentBranch,
+  discardWorktree,
   git,
   gitAvailable,
   mergeBranch,
@@ -691,6 +693,21 @@ async function driveLoop(session: Session): Promise<void> {
             grades.get(attempts[0]) ?? null,
             emit,
           );
+          continue;
+        }
+        // Winner selection (ticket 04): with more than one graded candidate
+        // and every attempt done, the engine picks the best and merges only
+        // that attempt's branch. A round with a crashed or paused attempt
+        // grades but decides nothing: the crash or checkpoint interrupt owns
+        // the ticket and the re-round after the human answers selects
+        // afresh. A grader without a usable grade is equally undecided
+        // (ticket 07's re-spawn supplies it).
+        const round = results.filter((r) => r.marker.id === marker.id);
+        if (
+          round.every((r) => r.status === "done") &&
+          attempts.every((attempt) => grades.has(attempt))
+        ) {
+          selectAndMergeWinner(session, marker, attempts, grades, round, emit);
         }
       }
       persist(session);
@@ -2030,6 +2047,158 @@ function mergeConflictComplaint(
     "working branch was left clean. Resolve the conflict by hand, or " +
     "answer resume to re-run the ticket from the current HEAD."
   );
+}
+
+// ---------------------------------------------------------------------------
+// Selection (ticket 04): the engine picks the best graded attempt
+// ---------------------------------------------------------------------------
+
+// One selection of one verify fan-out: which attempt won, at what score, by
+// what margin over the runner-up (null when there is only one candidate),
+// and under which rule: outright when the margin clears two points, the
+// deterministic fallback otherwise, until the head-to-head ticket takes the
+// tight band over.
+interface Selection {
+  attempt: number;
+  score: number;
+  margin: number | null;
+  rule: "outright" | "fallback";
+}
+
+// The total order the spec fixes: highest score wins, an exact tie goes to
+// the earlier attempt. Nothing else breaks it, so the same grades always
+// select the same attempt.
+function selectWinner(
+  candidates: { attempt: number; grade: Grade }[],
+): Selection {
+  const ranked = [...candidates].sort(
+    (a, b) => b.grade.score - a.grade.score || a.attempt - b.attempt,
+  );
+  const winner = ranked[0];
+  const margin =
+    ranked.length > 1 ? winner.grade.score - ranked[1].grade.score : null;
+  return {
+    attempt: winner.attempt,
+    score: winner.grade.score,
+    margin,
+    rule: margin === null || margin >= 2 ? "outright" : "fallback",
+  };
+}
+
+// Selecting and merging the winner of a completed, fully graded fan-out:
+// every attempt exited done and every grader returned a usable grade. The
+// selected event and the pool log record why this attempt won, the winner's
+// branch merges through the existing merge path (the same mergeTicket a
+// solo merge uses), the engine writes the done status (ADR-0005), and every
+// other attempt branch of the ticket, this round's losers and any
+// superseded round's alike, is discarded. The losers' logs, outcomes and
+// grades live in runs/ and the ticket's events, which no discard touches.
+function selectAndMergeWinner(
+  session: Session,
+  marker: TicketMarker,
+  attempts: number[],
+  grades: Map<number, Grade>,
+  round: TicketResult[],
+  emit: (phase: RunPhase) => void,
+): void {
+  const selection = selectWinner(
+    attempts.map((attempt) => ({ attempt, grade: grades.get(attempt)! })),
+  );
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: selection.attempt,
+    kind: "selected",
+    payload: {
+      score: selection.score,
+      margin: selection.margin,
+      rule: selection.rule,
+    },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${marker.id}: selected attempt ${selection.attempt} ` +
+        `(score ${selection.score}` +
+        (selection.margin === null ? "" : `, margin ${selection.margin}`) +
+        `): ${
+          selection.rule === "outright"
+            ? "takes it outright"
+            : "below the outright margin; highest score, then earlier attempt"
+        }`,
+    ],
+  });
+  const winner = round.find((r) => r.plan.attempt === selection.attempt)!;
+  // The winner's branch merges exactly as a solo attempt's does. A conflict
+  // parks the winner's branch and checkpoints for the human, the way a lone
+  // attempt's conflicted merge does: the conflict machinery re-attempts the
+  // well-known solo branch, which a selected attempt does not have.
+  let mergedNote = "";
+  if (winner.plan.worktree) {
+    const merge = mergeTicket(session, marker, winner.plan.worktree);
+    if (!merge.ok) {
+      discardLosers(session, marker.id, selection.attempt);
+      checkpointLoneAttempt(
+        session,
+        marker,
+        selection.attempt,
+        mergeConflictComplaint(marker.id, selection.attempt, merge),
+        `ticket ${marker.id}: selected attempt ${selection.attempt} but its ` +
+          "merge conflicted; checkpoint raised for the human",
+        emit,
+      );
+      return;
+    }
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: selection.attempt,
+      kind: "merged",
+      payload: {},
+    });
+    mergedNote = ` merged ${branchFor(marker.id, selection.attempt)} onto the working branch`;
+  } else {
+    mergedNote =
+      " (the pool does not run in git; the selected work is already in the checkout)";
+  }
+  writeMarkerStatus(marker.file, "done");
+  marker.status = "done";
+  const discarded = discardLosers(session, marker.id, selection.attempt);
+  const update: PoolUpdate = {
+    tickets: { [marker.id]: "done" },
+    log: [
+      `ticket ${marker.id}: attempt ${selection.attempt} selected` +
+        mergedNote +
+        (discarded.length > 0
+          ? `; discarded losing attempts ${discarded.join(", ")} ` +
+            "(their logs, outcomes and grades are kept)"
+          : ""),
+    ],
+  };
+  // The winner's outcome becomes the ticket's, the way a solo done attempt's
+  // does, so downstream prompts read what was actually selected.
+  const outcome = readOutcomeResult(
+    join(session.runsDir, outcomeFileName(marker.id, selection.attempt)),
+  );
+  if (outcome.ok) update.outcomes = { [marker.id]: outcome.outcome };
+  session.state = applyUpdate(session.state, update);
+  emit("running");
+}
+
+// Every attempt branch of the build ticket except the winner's goes: this
+// round's losers and any superseded round's alike. Returns the attempt
+// numbers discarded, so the pool log can name them.
+function discardLosers(
+  session: Session,
+  buildId: string,
+  keep: number,
+): number[] {
+  if (!session.git) return [];
+  const losers = attemptBranches(session.cwd, buildId).filter((a) => a !== keep);
+  for (const attempt of losers) {
+    discardWorktree(session.cwd, {
+      path: worktreePathFor(session.cwd, buildId, attempt),
+      branch: branchFor(buildId, attempt),
+    });
+  }
+  return losers;
 }
 
 // The final Review: the run's closing gate, raised once every ticket is done

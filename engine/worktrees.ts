@@ -159,3 +159,31 @@ export function mergeBranch(repoRoot: string, branch: string): MergeResult {
   }
   return { ok: false, conflicted, detail: merge.err || merge.out };
 }
+
+// The attempt branches a verify ticket currently has on disk: every
+// pool/<id>.attempt-N ref, numbered. Selection keeps the winner's branch and
+// discards the rest, so a superseded round's branches are cleaned up with
+// the round that beat them.
+export function attemptBranches(repoRoot: string, ticketId: string): number[] {
+  const prefix = `refs/heads/pool/${ticketId}.attempt-`;
+  return git(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/heads/pool/${ticketId}.attempt-*`,
+  ])
+    .out.split("\n")
+    .filter((ref) => ref.startsWith(prefix))
+    .map((ref) => Number(ref.slice(prefix.length)))
+    .filter((n) => Number.isInteger(n));
+}
+
+// Discards a losing verify attempt's branch and worktree. The branch never
+// merged, so unlike removeWorktree the deletion is forced: -d would refuse
+// an unmerged branch. Anything uncommitted in the worktree is debris by the
+// same reading that lets removeWorktree force it. Missing pieces (a pruned
+// worktree, a branch a human already removed) probe as failures and are left
+// alone.
+export function discardWorktree(repoRoot: string, info: WorktreeInfo): void {
+  git(repoRoot, ["worktree", "remove", "--force", info.path]);
+  git(repoRoot, ["branch", "-D", info.branch]);
+}
