@@ -27,6 +27,7 @@ const EVENT_KINDS = [
   "resolver",
   "graded",
   "selected",
+  "grader-respawn",
   "checkpoint",
   "crash",
   "deadlock",

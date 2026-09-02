@@ -1660,9 +1660,13 @@ The engine wrote this ticket when every attempt of ticket ${build.id} had ` +
 // then run them all through their resolved assignments. Each grader's exit
 // applies its own state update and emits, the way a verify attempt's exit
 // does, so the Console watches the grades land while a slow grader runs.
-// Returns the usable grades by attempt number; a grader that produced none
-// leaves its attempt unmapped (ticket 07's re-spawn, and the lone-attempt
-// resolution that must never decide on a grade that does not exist).
+// A grader whose run produced no usable grade is re-spawned for the same
+// attempt (ticket 07): re-spawn rounds follow the initial one, in parallel
+// per round, until every grader has graded or the bound is exhausted and a
+// crash interrupt hands the build ticket to the human. Returns the usable
+// grades by attempt number; a grader that never graded leaves its attempt
+// unmapped (the lone-attempt resolution and the selection must never decide
+// on a grade that does not exist).
 async function runGraders(
   session: Session,
   build: TicketMarker,
@@ -1673,27 +1677,28 @@ async function runGraders(
     writeGraderTicket(session, build, index + 1, attempt);
   }
   session.markers = loadPoolMarkers(session.issuesDir);
-  const graders = attempts.map((attempt, index) => {
+  const buildAssignment = session.assignments.get(build.id)!;
+  let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
       (m) => m.id === graderIdFor(build.id, index + 1),
     )!;
     const assignment = resolveGraderAssignment(
       session.state.config,
       marker,
-      session.assignments.get(build.id)!,
+      buildAssignment,
       session.harnesses,
     );
     session.assignments.set(marker.id, assignment);
-    return { marker, assignment, attempt };
+    return { marker, assignment, attempt, lastReason: "" };
   });
   session.state = applyUpdate(session.state, {
     log: [
       `ticket ${build.id}: grading ${attempts.length} ` +
         `attempt${attempts.length === 1 ? "" : "s"} with grader tickets ` +
-        graders.map((g) => g.marker.id).join(", "),
+        pending.map((g) => g.marker.id).join(", "),
     ],
   });
-  for (const { marker } of graders) {
+  for (const { marker } of pending) {
     appendEvent(session.runsDir, marker.id, {
       at: new Date().toISOString(),
       attempt: nextAttempt(session.runsDir, marker.id),
@@ -1708,16 +1713,125 @@ async function runGraders(
   }
   emit("running");
   const grades = new Map<number, Grade>();
-  await Promise.all(
-    graders.map(({ marker, assignment, attempt }) =>
-      runGrader(session, build, marker, attempt, assignment, emit).then(
-        (grade) => {
-          if (grade) grades.set(attempt, grade);
-        },
+  for (let round = 0; ; round++) {
+    const results = await Promise.all(
+      pending.map((g) =>
+        runGrader(session, build, g.marker, g.attempt, g.assignment, emit),
       ),
+    );
+    const stillPending: PendingGrader[] = [];
+    for (const [i, g] of pending.entries()) {
+      const result = results[i]!;
+      if (result.ok) grades.set(g.attempt, result.grade);
+      else stillPending.push({ ...g, lastReason: result.reason });
+    }
+    pending = stillPending;
+    if (pending.length === 0) return grades;
+    if (round >= GRADER_RESPAWN_LIMIT) {
+      raiseGraderExhausted(session, build, pending, emit);
+      return grades;
+    }
+    const respawn = round + 1;
+    pending = pending.map(({ marker, attempt, lastReason }) => {
+      // The re-spawn resolves its assignment fresh, so an operator's
+      // mid-run edit to console.json lands on the very next grader run.
+      const assignment = resolveGraderAssignment(
+        session.state.config,
+        marker,
+        buildAssignment,
+        session.harnesses,
+      );
+      session.assignments.set(marker.id, assignment);
+      // The re-spawn marker and the schedule it opens share one attempt
+      // number: they are one lifecycle moment, and the fresh run's spawned
+      // event reads its attempt back from here.
+      const attemptNo = nextAttempt(session.runsDir, marker.id);
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: attemptNo,
+        kind: "grader-respawn",
+        payload: {
+          build: build.id,
+          gradedAttempt: attempt,
+          reason: lastReason,
+          respawn,
+        },
+      });
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: attemptNo,
+        kind: "scheduled",
+        payload: {},
+      });
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${build.id}: re-spawning grader ${marker.id} for attempt ` +
+            `${attempt} (respawn ${respawn} of ${GRADER_RESPAWN_LIMIT})`,
+        ],
+      });
+      return { marker, assignment, attempt, lastReason };
+    });
+    emit("running");
+  }
+}
+
+// One grader awaiting a usable grade, carried across re-spawn rounds with
+// the reason its last run failed (the re-spawn event and the exhaustion
+// interrupt both name it).
+interface PendingGrader {
+  marker: TicketMarker;
+  assignment: Assignment;
+  attempt: number;
+  lastReason: string;
+}
+
+// One grader run's ending: a usable grade, or the reason the run decided
+// nothing (a dead harness, an unparseable outcome, a pause). The reason is
+// the same string the crash event and the pool log carry, and it rides the
+// re-spawn event so the ticket log shows why the fresh run exists.
+type GraderRun = { ok: true; grade: Grade } | { ok: false; reason: string };
+
+// The re-spawn bound: a crashed grader is re-spawned at most this many times
+// per fan-out round before the engine gives up on it. It stands in for the
+// crash-retry an ordinary ticket's human drives (crash interrupt, resume):
+// two automatic re-spawns absorb a transient harness failure, while a
+// systematically broken grader stops the run instead of looping forever.
+// The bound is per round: the fresh fan-out a resume starts grants it anew.
+const GRADER_RESPAWN_LIMIT = 2;
+
+// Every re-spawn also crashed: stop retrying and raise a crash interrupt on
+// the build ticket, so the broken grader surfaces to the human. The build
+// ticket's marker keeps the in-progress the fan-out gave it; answering the
+// interrupt with resume sends the ticket through a fresh fan-out round,
+// whose grader cards are rewritten and whose bound starts over.
+function raiseGraderExhausted(
+  session: Session,
+  build: TicketMarker,
+  exhausted: PendingGrader[],
+  emit: (phase: RunPhase) => void,
+): void {
+  const runs = GRADER_RESPAWN_LIMIT + 1;
+  raiseInterrupt(session, {
+    ticketId: build.id,
+    kind: "crash",
+    body: exhausted
+      .map(
+        ({ marker, attempt, lastReason }) =>
+          `grader ${marker.id} gave no usable grade for attempt ${attempt} ` +
+          `after ${runs} runs (last crash: ${lastReason}); grader log: ` +
+          join(session.runsDir, attemptLogName(marker.id, null, false)),
+      )
+      .join("\n"),
+  });
+  session.state = applyUpdate(session.state, {
+    log: exhausted.map(
+      ({ marker, attempt }) =>
+        `ticket ${build.id}: grader ${marker.id} gave no usable grade for ` +
+        `attempt ${attempt} after ${runs} runs; crash interrupt raised for ` +
+        "the build ticket",
     ),
-  );
-  return grades;
+  });
+  emit("running");
 }
 
 async function runGrader(
@@ -1727,7 +1841,7 @@ async function runGrader(
   attempt: number,
   assignment: Assignment,
   emit: (phase: RunPhase) => void,
-): Promise<Grade | null> {
+): Promise<GraderRun> {
   const gid = grader.id;
   const runsDir = session.runsDir;
   // As in runTicket: the grader starts with no outcome, so a stale file
@@ -1782,20 +1896,13 @@ async function runGrader(
   const exitCode = await spawnToLog(argv, ctx);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    recordGraderFailure(
-      session,
-      build,
-      grader,
-      attempt,
-      exitCode,
-      `harness exited ${exitCode}`,
-      emit,
-    );
-    return null;
+    const reason = `harness exited ${exitCode}`;
+    recordGraderFailure(session, build, grader, attempt, exitCode, reason, emit);
+    return { ok: false, reason };
   }
   if (!result.ok) {
     recordGraderFailure(session, build, grader, attempt, exitCode, result.reason, emit);
-    return null;
+    return { ok: false, reason: result.reason };
   }
   // A usable grade: the engine writes the grader's done status (ADR-0005:
   // the engine owns every status write) and copies the grade into the
@@ -1828,13 +1935,13 @@ async function runGrader(
     ],
   });
   emit("running");
-  return result.grade;
+  return { ok: true, grade: result.grade };
 }
 
 // A grader that exited non-zero or wrote no parseable grade decides nothing:
 // the crash lands on the grader ticket, its marker stays in-progress, and
-// the build ticket is untouched. Re-spawning the grader, and the bound that
-// stops the retries, is ticket 07's machinery.
+// the build ticket is untouched. The re-spawn rounds that follow, and the
+// bound that stops them, are runGraders' (ticket 07).
 function recordGraderFailure(
   session: Session,
   build: TicketMarker,

@@ -1188,26 +1188,113 @@ describe("verify grading", () => {
     ).toEqual({ score: 6, verdict: "pass", reasons: "ok" });
   }, 15000);
 
-  it("treats an unusable grade as a grader crash, never as a grade", async () => {
+  it("re-spawns a grader that produced no usable grade and lands the eventual grade", async () => {
     const { poolDir } = makeGitPool({
       tickets: [readyTicket("01")],
-      config: verifyConfig(3),
+      config: verifyConfig(2),
     });
     const rig = gitStubHarness(poolDir, {
       "01": [
         { workFile: "cand-1.txt", commitMsg: "cand-1" },
         { workFile: "cand-2.txt", commitMsg: "cand-2" },
-        { workFile: "cand-3.txt", commitMsg: "cand-3" },
       ],
-      // A valid outcome with no grade object at all.
-      "01-grader-1": {
-        outcomeRaw: '{"status":"done","summary":"no grade","commitSha":null}',
-      },
-      // A grader that died.
-      "01-grader-2": { exitCode: 9 },
-      // A grader that paused instead of grading; even with a grade in the
+      // Grader 1 dies on its first run, then grades on the re-spawn.
+      "01-grader-1": [
+        { exitCode: 9 },
+        { grade: { score: 7, verdict: "pass", reasons: "second try" } },
+      ],
+      // Grader 2 writes a usable outcome with no grade object on its first
+      // run, then grades: an unparseable grade is a crash, never a grade.
+      "01-grader-2": [
+        { outcomeRaw: '{"status":"done","summary":"no grade","commitSha":null}' },
+        { grade: { score: 4, verdict: "flag", reasons: "weak work" } },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // Both graders ended done after one re-spawn each, and both grades
+    // landed on their attempts; selection (ticket 04) then took attempt 1
+    // (7 against 4, a 3-point margin) outright and the pool waits on
+    // Review.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "01-grader-1": "done",
+      "01-grader-2": "done",
+    });
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+    const graded = readEventLines(poolDir, "01").filter(
+      (e) => e.kind === "graded",
+    );
+    expect(graded.find((e) => e.attempt === 1)?.payload).toEqual({
+      score: 7,
+      verdict: "pass",
+      reasons: "second try",
+    });
+    expect(graded.find((e) => e.attempt === 2)?.payload).toEqual({
+      score: 4,
+      verdict: "flag",
+      reasons: "weak work",
+    });
+
+    // Each grader ran twice: the crashed run and the re-spawn. The sibling
+    // of a crashing grader is unaffected: grader 2's grade landed even
+    // though grader 1 died first.
+    expect(rig.spawnList.filter((c) => c.id === "01-grader-1")).toHaveLength(2);
+    expect(rig.spawnList.filter((c) => c.id === "01-grader-2")).toHaveLength(2);
+
+    // The grader's ticket log shows the crash and the re-spawn: the crash
+    // closes attempt 1, the grader-respawn event opens attempt 2, and the
+    // re-spawn names why it happened.
+    const g1 = readEventLines(poolDir, "01-grader-1");
+    expect(
+      g1.filter((e) => e.attempt === 1).map((e) => e.kind),
+    ).toEqual(["scheduled", "spawned", "exited", "crash"]);
+    expect(
+      g1.filter((e) => e.attempt === 2).map((e) => e.kind),
+    ).toEqual(["grader-respawn", "scheduled", "spawned", "exited"]);
+    expect(g1.find((e) => e.kind === "grader-respawn")?.payload).toEqual({
+      build: "01",
+      gradedAttempt: 1,
+      reason: "harness exited 9",
+      respawn: 1,
+    });
+    const g2 = readEventLines(poolDir, "01-grader-2");
+    expect(
+      g2.filter((e) => e.attempt === 1).map((e) => e.kind),
+    ).toEqual(["scheduled", "spawned", "exited", "crash"]);
+    expect(
+      g2.find((e) => e.kind === "crash")?.payload,
+    ).toEqual({
+      code: 0,
+      reason: "outcome carries no grade object",
+    });
+
+    // The pool log narrates each re-spawn.
+    expect(run.final.log).toContain(
+      "ticket 01: re-spawning grader 01-grader-1 for attempt 1 " +
+        "(respawn 1 of 2)",
+    );
+    expect(run.final.log).toContain(
+      "ticket 01: re-spawning grader 01-grader-2 for attempt 2 " +
+        "(respawn 1 of 2)",
+    );
+  }, 15000);
+
+  it("treats a grader's checkpoint outcome as an unusable grade and logs the crash", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "cand.txt", commitMsg: "cand" },
+      // A grader that pauses instead of grading; even with a grade in the
       // outcome, a checkpoint is not a usable grade.
-      "01-grader-3": {
+      "01-grader-1": {
         status: "checkpoint",
         grade: { score: 10, verdict: "pass", reasons: "perfect" },
       },
@@ -1215,48 +1302,144 @@ describe("verify grading", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // No grade was recorded anywhere, no interrupt was raised (the re-spawn
-    // bound is ticket 07's), and the build ticket is untouched.
-    expect(run.phase).toBe("stalled");
-    expect(run.interrupts).toEqual([]);
+    expect(run.phase).toBe("quiescent");
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
+    ).toEqual([]);
+    expect(
+      readEventLines(poolDir, "01-grader-1").find((e) => e.kind === "crash")
+        ?.payload,
+    ).toEqual({
+      code: 0,
+      reason: "grader outcome is a checkpoint, not a grade",
+    });
+    expect(run.final.log).toContain(
+      "ticket 01: grader 01-grader-1 produced no usable grade for " +
+        "attempt 1: grader outcome is a checkpoint, not a grade",
+    );
+  }, 15000);
+
+  it("bounds grader re-spawns and raises a crash interrupt on the build ticket", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "cand.txt", commitMsg: "cand" },
+      // A systematically broken grader: every run exits non-zero.
+      "01-grader-1": { exitCode: 9 },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The original run plus the bound of two re-spawns, then the engine
+    // stops retrying and hands the broken grader to the human as a crash
+    // interrupt on the build ticket.
+    expect(rig.spawnList.filter((c) => c.id === "01-grader-1")).toHaveLength(3);
+    expect(run.phase).toBe("quiescent");
+    const crashes = run.interrupts.filter((i) => i.kind === "crash");
+    expect(crashes).toHaveLength(1);
+    expect(crashes[0].ticketId).toBe("01");
+    expect(crashes[0].body).toContain("01-grader-1");
+    expect(crashes[0].body).toContain("harness exited 9");
+    expect(crashes[0].body).toContain(join(poolDir, "runs", "01-grader-1.log"));
+
+    // The build ticket never passed or failed on a grader's bad day: no
+    // grade anywhere, no status write, and the grader is still open.
     expect(
       readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
     ).toEqual([]);
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
-
-    const g1 = readEventLines(poolDir, "01-grader-1");
-    expect(g1.find((e) => e.kind === "exited")?.payload).toEqual({
-      code: 0,
-      status: "in-progress",
-    });
-    expect(g1.find((e) => e.kind === "crash")?.payload).toEqual({
-      code: 0,
-      reason: "outcome carries no grade object",
-    });
     expect(markerLine(poolDir, "01-grader-1.md")).toContain(
       "status=in-progress",
     );
-    const g2 = readEventLines(poolDir, "01-grader-2");
-    expect(g2.find((e) => e.kind === "crash")?.payload).toEqual({
-      code: 9,
-      reason: "harness exited 9",
+
+    // The grader's ticket log shows all three runs, each ending in a crash,
+    // with a grader-respawn event before the second and third.
+    expect(readEventLines(poolDir, "01-grader-1").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "grader-respawn",
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "grader-respawn",
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+    ]);
+  }, 15000);
+
+  it("grades the re-fan-out after a grader-exhaustion crash resume", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: verifyConfig(1),
     });
-    const g3 = readEventLines(poolDir, "01-grader-3");
-    expect(g3.find((e) => e.kind === "crash")?.payload).toEqual({
-      code: 0,
-      reason: "grader outcome is a checkpoint, not a grade",
+    const rig = stubHarness({
+      // Runs 1-3 crash the grader; run 4, after the human resumed the build
+      // ticket and the engine re-fanned-out, grades.
+      "01-grader-1": {
+        exitCodes: [9, 9, 9, 0],
+        grade: { score: 6, verdict: "pass", reasons: "recovered" },
+      },
     });
-    expect(markerLine(poolDir, "01-grader-3.md")).toContain(
-      "status=in-progress",
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+
+    // The existing resume path resets the build ticket to ready; the next
+    // scheduling round fans out again and the grader card runs afresh. The
+    // recovered grade passes, so the lone attempt resolves to done (ticket
+    // 05) and the pool waits on Review.
+    const resumed = await run.resume("01");
+    expect(resumed.phase).toBe("quiescent");
+    expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(resumed.final.tickets).toEqual({
+      "01": "done",
+      "01-grader-1": "done",
+    });
+    const graded = readEventLines(poolDir, "01").filter(
+      (e) => e.kind === "graded",
     );
-    expect(run.final.log).toContain(
-      "ticket 01: grader 01-grader-1 produced no usable grade for " +
-        "attempt 1: outcome carries no grade object",
-    );
-    expect(run.final.log).toContain(
-      "ticket 01: grader 01-grader-2 produced no usable grade for " +
-        "attempt 2: harness exited 9",
-    );
+    expect(graded.map((e) => e.attempt)).toEqual([2]);
+    expect(graded[0].payload).toEqual({
+      score: 6,
+      verdict: "pass",
+      reasons: "recovered",
+    });
+    // The grader ran four times: three crashes in round one, one grade in
+    // round two. The fresh round's run carries no grader-respawn event:
+    // the human's resume, not a crash, started it.
+    expect(rig.spawnList.filter((c) => c.id === "01-grader-1")).toHaveLength(4);
+    expect(readEventLines(poolDir, "01-grader-1").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "grader-respawn",
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "grader-respawn",
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
   }, 15000);
 
   it("does not honor a grader's own status write", async () => {
