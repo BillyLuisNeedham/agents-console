@@ -193,10 +193,13 @@ function stripAnsi(text: string): string {
 /**
  * The ticket's attempts as log sources, in attempt order. Event-based tickets
  * (an events file exists) derive implement/resolver attempts from the events:
- * the latest of each kind holds its well-known path, older attempts their
- * rotated attempt-numbered name (both named by the events module's contract).
- * A pre-feature ticket (no events file) uses the reconstructed attempt rows,
- * each with the log file it was built from.
+ * the latest of each kind holds its well-known path while that file exists,
+ * older attempts their rotated attempt-numbered name (both named by the
+ * events module's contract). A verify fan-out's attempts write
+ * attempt-numbered logs directly and the well-known name never appears, so
+ * the current attempt falls back to its own number. A pre-feature ticket (no
+ * events file) uses the reconstructed attempt rows, each with the log file it
+ * was built from.
  */
 function listAttemptLogs(
   runsDir: string,
@@ -208,6 +211,8 @@ function listAttemptLogs(
     const resolvers = events.filter((e) => e.kind === "resolver");
     const maxSpawned = spawned.reduce((m, e) => Math.max(m, e.attempt), 0);
     const maxResolver = resolvers.reduce((m, e) => Math.max(m, e.attempt), 0);
+    const hasWellKnownLog = (resolver: boolean): boolean =>
+      existsSync(join(runsDir, attemptLogName(ticketId, null, resolver)));
     const byAttempt = new Map<number, LogAttemptInfo>();
     for (const event of spawned) {
       const current = event.attempt === maxSpawned;
@@ -215,7 +220,11 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "implement",
         current,
-        logFile: attemptLogName(ticketId, current ? null : event.attempt, false),
+        logFile: attemptLogName(
+          ticketId,
+          current && hasWellKnownLog(false) ? null : event.attempt,
+          false,
+        ),
       });
     }
     for (const event of resolvers) {
@@ -224,7 +233,11 @@ function listAttemptLogs(
         attempt: event.attempt,
         kind: "resolver",
         current,
-        logFile: attemptLogName(ticketId, current ? null : event.attempt, true),
+        logFile: attemptLogName(
+          ticketId,
+          current && hasWellKnownLog(true) ? null : event.attempt,
+          true,
+        ),
       });
     }
     return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
@@ -392,6 +405,78 @@ function readTicketEvents(
     reconstructed: true,
     spec,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Grades endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * One ticket's latest grade, as the card summaries show it: the score and
+ * verdict with the graded attempt's number, plus the winning attempt's
+ * number once Selection has named one. Derived at read time from the same
+ * events files the Detail's timeline reads, so a card and the Detail never
+ * disagree. Reasons stay in the events payload; the card is a summary.
+ */
+export interface TicketGradeSummary {
+  attempt: number;
+  score: number;
+  verdict: string;
+  /** The attempt Selection named, or the merged attempt on a ticket graded
+   *  before the selection machinery. Null until either event lands. The
+   *  Detail's winner badge reads this field, so both surfaces share the one
+   *  derivation. */
+  winner: number | null;
+}
+
+// The winning attempt's latest well-formed grade per ticket, keyed by ticket
+// id; before a selection has landed, the latest graded event stands in.
+// Parallel graders append in completion order, so the last graded line in the
+// file can be a loser's grade: when a selected event (or, on a ticket graded
+// before the selection machinery, a merged event) names the winner, that
+// attempt's grade is what the card shows. The selected event lands before the
+// merge, and a conflicted merge checkpoints with no merged event at all, so
+// selected is the source of truth and merged only the fallback. Tickets with
+// no grade are absent, so the UI renders no grade UI for them. A graded event
+// whose payload is malformed is skipped the way the events reader skips a
+// torn line: it can never have come from the engine's write path.
+function readPoolGrades(
+  poolDir: string,
+  meta: TicketMarker[],
+): Record<string, TicketGradeSummary> {
+  const runsDir = join(poolDir, "runs");
+  const grades: Record<string, TicketGradeSummary> = {};
+  for (const marker of meta) {
+    const events = readEvents(runsDir, marker.id);
+    const graded = events.filter(
+      (event) =>
+        event.kind === "graded" &&
+        typeof event.payload.score === "number" &&
+        typeof event.payload.verdict === "string" &&
+        typeof event.payload.reasons === "string",
+    );
+    const last = graded.at(-1);
+    if (!last) continue;
+    const winner =
+      events.filter((event) => event.kind === "selected").at(-1)?.attempt ??
+      events.filter((event) => event.kind === "merged").at(-1)?.attempt ??
+      null;
+    // A named winner whose own grade is malformed serves nothing: falling
+    // back to another attempt's grade would put a loser's numbers on the
+    // card while the Detail's badge marks the winner.
+    const pick =
+      winner !== null
+        ? graded.filter((event) => event.attempt === winner).at(-1)
+        : last;
+    if (!pick) continue;
+    grades[marker.id] = {
+      attempt: pick.attempt,
+      score: pick.payload.score as number,
+      verdict: pick.payload.verdict as string,
+      winner,
+    };
+  }
+  return grades;
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +800,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
           return Response.json(readTicketEvents(poolDir, ticketId, meta));
+        }
+
+        if (pathname === "/api/grades") {
+          return Response.json({ grades: readPoolGrades(poolDir, meta) });
         }
 
         if (pathname === "/api/log") {

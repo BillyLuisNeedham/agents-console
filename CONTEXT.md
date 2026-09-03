@@ -53,6 +53,7 @@ _Avoid_: message (that's a chat turn), handoff (the old file/skill), decision li
 **Ticket**:
 One unit of implement work. It has an id and the ids of tickets that must finish before it may run.
 _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
+On disk the pool's ticket directory is still called `issues/`, and the skill `my-issue-runner` keeps its name — legacy names for the same concept; prose says ticket.
 
 **Review**:
 The final human judgment of finished ticket work, after implement tickets have run.
@@ -69,6 +70,10 @@ _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
 **Fleet**:
 The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
 
+**Setup**:
+A named, machine-local bundle of a pool's behavioural config — harness, model, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
+_Avoid_: profile, template
+
 **Detail**:
 The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
@@ -78,7 +83,7 @@ One run of a ticket by a harness, from spawn to exit. A ticket accumulates attem
 _Avoid_: run (that's the whole thread), execution, job
 
 **Outcome**:
-The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by `docs/specs/2026-08-30-engine-owns-final-status.md`, closing issue #18.
+The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Ticket log**:
@@ -90,5 +95,28 @@ An interrupt answer the Console has accepted and acknowledged but not yet proces
 _Avoid_: pending answer (that's the interrupt, not the answer)
 
 **Dead drive**:
-A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran; since ADR-0006 a reported death emits the terminal dead phase, and a death that emits nothing is lying.
+A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran; since ADR-0008 a reported death emits the terminal dead phase, and a death that emits nothing is lying.
 _Avoid_: stuck, frozen, hung pool
+
+## Verification
+
+**Verify**:
+Optional per-ticket machinery that checks whether finished Attempt work actually satisfies its ticket, instead of trusting the agent's done-claim. A ticket opts in by setting `verify: N` in its assign block — N parallel Attempts, one grader ticket per Attempt, then Selection. Absent the key, the ticket runs exactly as it always has. The pool's `verify` skill, written beside AGENT.md at Console setup, holds the grading instructions a grader agent follows.
+_Avoid_: verifier node, judge (a judge is a model, not this machinery)
+
+**Grade**:
+One grader's assessment of one Attempt: a score (0–10), a verdict (pass or flag), and short reasons. The grader is itself a ticket — an ordinary assignment, so its harness and model are chosen through the normal assign machinery. The grade lands in the graded Attempt's record, visible in the ticket's Detail. With `verify: 1`, a failing Grade becomes the Brief of a checkpoint interrupt.
+_Avoid_: rating, review (Review is the human's final judgment)
+
+**Selection**:
+The engine's pick of the best graded Attempt among a ticket's N candidates. A margin of ≥2 points takes the winner outright; a tighter spread spawns one head-to-head ticket comparing the top two side by side (the way the paper's pairwise comparisons work). Losers' branches are discarded; their logs and grades stay. A pool may set `selection: human` to raise an interrupt and let the human pick instead.
+_Avoid_: tournament, ranking
+
+**Winner**:
+The Attempt Selection named, recorded as the `selected` event on the ticket's log. The Winner is the winner from the moment that event lands — before and independent of its branch merging, so a conflicted merge sitting at a checkpoint changes nothing about which Attempt won. On a ticket graded before the selection machinery, the merged Attempt stands in. Derived exactly once, server-side, in the grades endpoint; every UI surface reads it from there.
+_Avoid_: merged attempt (that's the fallback, not the definition)
+
+**verify: N**:
+The per-ticket assign key that activates verification. N is both the number of parallel Attempts and the number of grader tickets. The key's absence — not a zero, not a false — means the ticket runs ungraded, exactly as before.
+_Avoid_: takes, retries
+

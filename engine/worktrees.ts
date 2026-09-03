@@ -48,8 +48,14 @@ export function commitMerge(worktree: WorktreeInfo): GitProbe {
   return git(worktree.path, ["commit", "-qm", `merge ${worktree.branch} by resolver`]);
 }
 
-export function branchFor(ticketId: string): string {
-  return `pool/${ticketId}`;
+// The solo branch keeps the well-known name; a verify fan-out's attempt
+// branches suffix the attempt number. Dotted rather than slashed, so an
+// attempt branch never collides with a parked solo branch: git forbids
+// refs where one is a prefix path of the other.
+export function branchFor(ticketId: string, attempt?: number): string {
+  return attempt === undefined
+    ? `pool/${ticketId}`
+    : `pool/${ticketId}.attempt-${attempt}`;
 }
 
 // Worktrees live inside the common git dir so they never appear in a
@@ -72,30 +78,45 @@ function gitCommonDir(repoRoot: string): string {
   return dir;
 }
 
-export function worktreePathFor(repoRoot: string, ticketId: string): string {
-  return join(gitCommonDir(repoRoot), "pool-worktrees", ticketId);
+export function worktreePathFor(
+  repoRoot: string,
+  ticketId: string,
+  attempt?: number,
+): string {
+  return join(
+    gitCommonDir(repoRoot),
+    "pool-worktrees",
+    attempt === undefined ? ticketId : `${ticketId}.attempt-${attempt}`,
+  );
 }
 
-export function branchExists(repoRoot: string, ticketId: string): boolean {
-  return refExists(repoRoot, branchFor(ticketId));
+export function branchExists(
+  repoRoot: string,
+  ticketId: string,
+  attempt?: number,
+): boolean {
+  return refExists(repoRoot, branchFor(ticketId, attempt));
 }
 
 // A parked branch or worktree (left by a checkpoint, a crash or a conflict)
 // is reused, so the ticket keeps the work it already did; the base is never
-// moved under it. Fresh tickets branch from HEAD.
+// moved under it. Fresh tickets branch from HEAD. An attempt number names a
+// verify fan-out's per-attempt branch and worktree; attempt numbers never
+// repeat for a ticket, so an attempt worktree is always created fresh.
 export function prepareWorktree(
   repoRoot: string,
   ticketId: string,
+  attempt?: number,
 ): WorktreeInfo {
-  const branch = branchFor(ticketId);
-  const path = worktreePathFor(repoRoot, ticketId);
+  const branch = branchFor(ticketId, attempt);
+  const path = worktreePathFor(repoRoot, ticketId, attempt);
   git(repoRoot, ["worktree", "prune"]);
   const registered = git(repoRoot, ["worktree", "list", "--porcelain"])
     .out.split("\n")
     .includes(`worktree ${path}`);
   if (!registered) {
     mkdirSync(dirname(path), { recursive: true });
-    const add = branchExists(repoRoot, ticketId)
+    const add = branchExists(repoRoot, ticketId, attempt)
       ? git(repoRoot, ["worktree", "add", path, branch])
       : git(repoRoot, ["worktree", "add", path, "-b", branch, "HEAD"]);
     if (!add.ok) {
@@ -137,4 +158,32 @@ export function mergeBranch(repoRoot: string, branch: string): MergeResult {
     git(repoRoot, ["merge", "--abort"]);
   }
   return { ok: false, conflicted, detail: merge.err || merge.out };
+}
+
+// The attempt branches a verify ticket currently has on disk: every
+// pool/<id>.attempt-N ref, numbered. Selection keeps the winner's branch and
+// discards the rest, so a superseded round's branches are cleaned up with
+// the round that beat them.
+export function attemptBranches(repoRoot: string, ticketId: string): number[] {
+  const prefix = `refs/heads/pool/${ticketId}.attempt-`;
+  return git(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/heads/pool/${ticketId}.attempt-*`,
+  ])
+    .out.split("\n")
+    .filter((ref) => ref.startsWith(prefix))
+    .map((ref) => Number(ref.slice(prefix.length)))
+    .filter((n) => Number.isInteger(n));
+}
+
+// Discards a losing verify attempt's branch and worktree. The branch never
+// merged, so unlike removeWorktree the deletion is forced: -d would refuse
+// an unmerged branch. Anything uncommitted in the worktree is debris by the
+// same reading that lets removeWorktree force it. Missing pieces (a pruned
+// worktree, a branch a human already removed) probe as failures and are left
+// alone.
+export function discardWorktree(repoRoot: string, info: WorktreeInfo): void {
+  git(repoRoot, ["worktree", "remove", "--force", info.path]);
+  git(repoRoot, ["branch", "-D", info.branch]);
 }

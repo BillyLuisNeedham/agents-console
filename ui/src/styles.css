@@ -554,6 +554,22 @@ body {
   font-size: 12px;
 }
 
+/* The verified ticket's grade on its card: a one-line summary of what the
+   Detail's timeline shows per attempt. Absent entirely for ungraded tickets,
+   so there is no empty state. */
+.ticket-card-grade {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ticket-card-grade.grade-pass {
+  color: var(--status-done);
+}
+
+.ticket-card-grade.grade-flag {
+  color: var(--interrupt);
+}
+
 .card-channels {
   display: flex;
   flex-direction: column;
@@ -1078,6 +1094,49 @@ body {
   color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/* A verified ticket's winning attempt: the attempt the grades endpoint's
+   winner names (ADR 0007: one derivation, server-side). The badge reads in
+   the done green; the flagged verdict keeps the interrupt red it carries
+   everywhere else. */
+.timeline-winner {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--status-done);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.timeline-attempt-winner {
+  border-color: var(--status-done);
+}
+
+.timeline-grade {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 4px 8px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+  font-size: 11px;
+}
+
+.timeline-grade-score {
+  font-weight: 700;
+}
+
+.timeline-grade-score.grade-pass {
+  color: var(--status-done);
+}
+
+.timeline-grade-score.grade-flag {
+  color: var(--interrupt);
+}
+
+.timeline-grade-reasons {
+  color: var(--text-dim);
+  white-space: pre-wrap;
 }
 
 /* --------------------------------------------------------- raw log pane */

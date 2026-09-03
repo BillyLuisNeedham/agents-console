@@ -20,6 +20,7 @@ import {
   type PoolServerOptions,
 } from "./server.ts";
 import { readFleetEntries } from "./fleet.ts";
+import { appendEvent } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
 const servers: PoolServer[] = [];
@@ -636,6 +637,179 @@ describe("ticket events endpoint", () => {
   });
 });
 
+describe("grades endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("serves each ticket's latest grade, skipping tickets without one", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+    ]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 4, verdict: "flag", reasons: "first" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 8, verdict: "pass", reasons: "second" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      grades: Record<
+        string,
+        { attempt: number; score: number; verdict: string; winner: number | null }
+      >;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 2, score: 8, verdict: "pass", winner: null },
+    });
+  });
+
+  it("names the selected attempt as winner while its merge is still pending", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 9, verdict: "pass", reasons: "winner" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 5, verdict: "flag", reasons: "loser, graded last" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T12:00:00.000Z",
+      attempt: 1,
+      kind: "selected",
+      payload: { score: 9, margin: 4, rule: "outright" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as {
+      grades: Record<
+        string,
+        { attempt: number; score: number; verdict: string; winner: number | null }
+      >;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 1, score: 9, verdict: "pass", winner: 1 },
+    });
+  });
+
+  it("serves nothing when the selected winner's own grade is malformed", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 9, verdict: "pass" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 5, verdict: "flag", reasons: "loser" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T12:00:00.000Z",
+      attempt: 1,
+      kind: "selected",
+      payload: { score: 9, margin: 4, rule: "outright" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as { grades: Record<string, unknown> };
+    expect(body.grades).toEqual({});
+  });
+
+  it("serves the merged attempt's grade when there is no selected event", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 7, verdict: "pass", reasons: "winner" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T11:00:00.000Z",
+      attempt: 2,
+      kind: "graded",
+      payload: { score: 3, verdict: "flag", reasons: "loser, graded last" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T12:00:00.000Z",
+      attempt: 1,
+      kind: "merged",
+      payload: {},
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as {
+      grades: Record<
+        string,
+        { attempt: number; score: number; verdict: string; winner: number | null }
+      >;
+    };
+    expect(body.grades).toEqual({
+      "01": { attempt: 1, score: 7, verdict: "pass", winner: 1 },
+    });
+  });
+
+  it("serves no grade for a graded event without reasons", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: 8, verdict: "pass" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as { grades: Record<string, unknown> };
+    expect(body.grades).toEqual({});
+  });
+
+  it("skips a graded event whose payload is malformed", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-02T10:00:00.000Z",
+      attempt: 1,
+      kind: "graded",
+      payload: { score: "eight" },
+    });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/grades`);
+    const body = (await res.json()) as { grades: Record<string, unknown> };
+    expect(body.grades).toEqual({});
+  });
+});
+
 describe("ticket body endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
@@ -917,6 +1091,42 @@ describe("ticket log endpoint", () => {
     const third = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
     const thirdBody = (await third.json()) as { content: string };
     expect(thirdBody.content).toBe("third\n");
+  });
+
+  it("serves a verify fan-out's current attempt through its attempt-numbered log", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // A verify fan-out: three attempts, none ever holding the well-known
+    // log path.
+    writeFileSync(
+      join(runsDir, "01.events.jsonl"),
+      [
+        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 2, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 3, kind: "exited", payload: {} }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
+    writeFileSync(join(runsDir, "01.attempt-2.log"), "second\n");
+    writeFileSync(join(runsDir, "01.attempt-3.log"), "third\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      attempts: { attempt: number; kind: string; logFile: string; current: boolean }[];
+    };
+    // The current attempt reads its own attempt-numbered log: the pane must
+    // not serve an empty file for a fan-out's live attempt.
+    expect(body.content).toBe("third\n");
+    expect(body.attempts).toEqual([
+      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", current: false },
+      { attempt: 2, kind: "implement", logFile: "01.attempt-2.log", current: false },
+      { attempt: 3, kind: "implement", logFile: "01.attempt-3.log", current: true },
+    ]);
   });
 
   it("defaults to the latest attempt when none is named", async () => {

@@ -18,6 +18,7 @@ import {
   projectPool,
   projectTimeline,
   selectLogAttempt,
+  type GradeView,
   type PoolSnapshot,
   type TabOverride,
   type TicketEventsResponse,
@@ -89,6 +90,26 @@ const logPane = new LogPane({
 // drawers modules and composed here once for the session.
 const consoleView = new ConsoleView();
 
+// The latest grade per ticket, for the card summaries. Module scope so a
+// full-DOM rebuild never drops it; refetched on the snapshot cadence like the
+// selected ticket's events. Absent until the first fetch lands: the cards
+// render no grade UI until then, which is the no-grade state anyway.
+let grades: Record<string, GradeView> = {};
+
+function refreshGrades(): void {
+  client
+    .getGrades()
+    .then((next) => {
+      if (JSON.stringify(next) === JSON.stringify(grades)) return;
+      grades = next;
+      render();
+    })
+    .catch(() => {
+      // A failed grades fetch leaves the last good summaries in place; the
+      // next snapshot's cadence retries.
+    });
+}
+
 // Ticket bodies for the Spec tab: fetched once per ticket on first selection
 // and held for the session; a 404 caches null so a known-missing body is
 // never refetched. Module scope so a full-DOM rebuild never drops them.
@@ -134,13 +155,13 @@ function ensureTicketBody(ticketId: string): void {
 
 function selectedTicket(snapshot: PoolSnapshot, selectedId: string | null): string | null {
   if (!selectedId) return null;
-  const card = projectPool(snapshot).cards.find((c) => c.id === selectedId);
+  const card = projectPool(snapshot, grades).cards.find((c) => c.id === selectedId);
   return card?.kind === "ticket" ? card.ticketId : null;
 }
 
 function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
   const card = state.snapshot
-    ? projectPool(state.snapshot).cards.find(
+    ? projectPool(state.snapshot, grades).cards.find(
         (c) => c.kind === "ticket" && c.ticketId === ticketId,
       )
     : undefined;
@@ -199,10 +220,10 @@ async function loadTimeline(): Promise<void> {
 }
 
 function model(): AppModel {
-  const view = state.snapshot ? projectPool(state.snapshot) : null;
+  const view = state.snapshot ? projectPool(state.snapshot, grades) : null;
   const detail =
     state.snapshot && state.selectedId
-      ? projectDetail(state.snapshot, state.selectedId)
+      ? projectDetail(state.snapshot, state.selectedId, grades)
       : null;
   const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
   const isCurrent =
@@ -309,6 +330,7 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   if (state.snapshot && state.selectedId) {
     void loadTimeline();
   }
+  refreshGrades();
   render();
 }
 

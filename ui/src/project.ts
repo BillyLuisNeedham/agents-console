@@ -72,6 +72,11 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
   deadlock: { title: "deadlock", actions: [RESUME] },
   "merge-conflict": { title: "merge conflict", actions: [RESUME] },
   "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
+  selection: {
+    title: "human selection",
+    actions: [RESUME],
+    notePlaceholder: "the winning attempt's number",
+  },
   review: {
     title: "review",
     actions: [APPROVE, REJECT],
@@ -81,7 +86,7 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
 };
 
 /**
- * The form for an interrupt. The engine's six kinds all render; an unknown
+ * The form for an interrupt. The engine's seven kinds all render; an unknown
  * kind falls back to a plain resume form so a newer engine never renders an
  * unanswerable interrupt.
  */
@@ -404,8 +409,21 @@ export interface TicketCardView {
   status: PoolStatus;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
+  /** The ticket's latest grade, for the card summary. Null when ungraded:
+   *  no grade UI renders at all, so there is no empty state. */
+  grade: GradeView | null;
   x: number;
   y: number;
+}
+
+/** One ticket's latest grade as the grades endpoint serves it. */
+export interface GradeView {
+  attempt: number;
+  score: number;
+  verdict: string;
+  /** The attempt Selection named (merged attempt on pre-selection tickets);
+   *  null until either event lands. Derived once, server-side. */
+  winner: number | null;
 }
 
 export interface UtilityCardView {
@@ -574,6 +592,7 @@ function projectTicket(
   ticket: PoolTicketState,
   state: PoolState,
   pos: Point,
+  grade: GradeView | null,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
   return {
@@ -586,6 +605,7 @@ function projectTicket(
     status: ticket.status,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
+    grade,
     x: pos.x,
     y: pos.y,
   };
@@ -610,12 +630,22 @@ function projectUtility(
   };
 }
 
-export function projectPool(snapshot: PoolSnapshot): PoolView {
+export function projectPool(
+  snapshot: PoolSnapshot,
+  grades: Record<string, GradeView> = {},
+): PoolView {
   const tickets = snapshot.state.tickets;
   const positions = layoutPool(tickets);
   const cards: PoolCardView[] = [
     projectUtility(START_CARD_ID, "start", snapshot.state, positions[START_CARD_ID]),
-    ...tickets.map((ticket) => projectTicket(ticket, snapshot.state, positions[ticketCardId(ticket.id)])),
+    ...tickets.map((ticket) =>
+      projectTicket(
+        ticket,
+        snapshot.state,
+        positions[ticketCardId(ticket.id)],
+        grades[ticket.id] ?? null,
+      ),
+    ),
     projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),
   ];
   return {
@@ -712,6 +742,10 @@ export interface TicketDetailView {
   blockedByCheckpoint: string[];
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
+  /** The winning attempt's number from the grades endpoint, for the
+   *  timeline's winner badge. Null when the ticket is ungraded or no
+   *  selection has landed: no badge renders. */
+  winner: number | null;
 }
 
 interface UtilityDetailView {
@@ -724,8 +758,12 @@ interface UtilityDetailView {
 export type DetailView = TicketDetailView | UtilityDetailView;
 
 /** The Detail for a selected card, or null when the card is not in the pool. */
-export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailView | null {
-  const card = projectPool(snapshot).cards.find((c) => c.id === cardId);
+export function projectDetail(
+  snapshot: PoolSnapshot,
+  cardId: string,
+  grades: Record<string, GradeView> = {},
+): DetailView | null {
+  const card = projectPool(snapshot, grades).cards.find((c) => c.id === cardId);
   if (!card) return null;
   if (card.kind === "ticket") {
     return {
@@ -737,6 +775,7 @@ export function projectDetail(snapshot: PoolSnapshot, cardId: string): DetailVie
       blockedByCheckpoint: card.blockedByCheckpoint,
       outcome: card.outcome,
       interrupt: card.interrupt,
+      winner: card.grade?.winner ?? null,
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
