@@ -962,7 +962,7 @@ function rehydrate(session: Session): void {
 
 // Markers dual-write: every checkpoint write is preceded by bringing the
 // line-1 markers on disk into agreement with state, so the pool directory is
-// always inspectable by run.sh and the markers stay the shared truth.
+// always inspectable and the markers stay the shared truth.
 function writeMarkers(session: Session): void {
   for (const marker of session.markers) {
     const status = session.state.tickets[marker.id];
