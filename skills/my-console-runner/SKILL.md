@@ -299,7 +299,7 @@ Leave these alone rather than rediscovering them:
 - A merge conflict spawns the resolver agent; its resolution comes to the human as an approval
   interrupt, and rejecting hands the conflicted state over with the attempt noted.
 - Line-1 markers are dual-written alongside the sqlite checkpoint and are the truth on conflict,
-  so the pool on disk is always inspectable and `run.sh` agrees with the Console.
+  so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
 
 ---
