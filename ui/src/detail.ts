@@ -280,6 +280,7 @@ export class Detail {
     timeline: TimelineView,
     logPane: LogPaneView | null,
     handlers: DetailHandlers,
+    winnerAttempt: number | null,
   ): HTMLElement {
     const body = h("div", { class: "timeline" });
     body.append(h("div", { class: "dim" }, "timeline"));
@@ -298,13 +299,23 @@ export class Detail {
     }
     for (const attempt of timeline.attempts) {
       const selected = logPane?.selectedAttempt === attempt.number;
+      // The winner badge reads the grades endpoint's winner, the one
+      // derivation both surfaces share: the attempt the selected event named
+      // (merged only stands in for tickets graded before the selection
+      // machinery). Keying on the merged event here would leave the badge
+      // off for the whole window between selection and merge, and forever
+      // on a conflicted merge that checkpoints, while the card already shows
+      // the winner's grade. Null means ungraded or unselected: no badge.
+      const winner =
+        winnerAttempt !== null && attempt.number === winnerAttempt;
       const row = h(
         "div",
         {
           class:
             "timeline-attempt" +
             (attempt.running ? " timeline-attempt-running" : "") +
-            (selected ? " timeline-attempt-selected" : ""),
+            (selected ? " timeline-attempt-selected" : "") +
+            (winner ? " timeline-attempt-winner" : ""),
           role: "button",
           title: "show this attempt's raw log",
           onclick: () => handlers.onSelectAttempt(ticketId, attempt.number),
@@ -321,6 +332,7 @@ export class Detail {
             ? h("span", { class: "timeline-running" }, "running")
             : null,
           selected ? h("span", { class: "timeline-selected" }, "showing") : null,
+          winner ? h("span", { class: "timeline-winner" }, "winner") : null,
           attempt.reconstructed ? h("span", { class: "dim" }, "reconstructed") : null,
         ),
       );
@@ -336,6 +348,10 @@ export class Detail {
               h("span", { class: "dim timeline-event-at" }, formatEventTime(event.at)),
             ),
           );
+          if (event.kind === "graded") {
+            const grade = gradeFromPayload(event.payload);
+            if (grade) row.append(renderGrade(grade));
+          }
         }
       }
       body.append(row);
@@ -517,7 +533,13 @@ export class Detail {
     }
     if (timeline) {
       panel.append(
-        this.renderTimelineSection(detail.ticketId, timeline, logPane, handlers),
+        this.renderTimelineSection(
+          detail.ticketId,
+          timeline,
+          logPane,
+          handlers,
+          detail.winner,
+        ),
       );
     }
     if (logPane && !logPane.neverRun) {
@@ -668,4 +690,44 @@ function formatEventTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString([], { hour12: false });
+}
+
+/** A grade as the timeline shows it under its attempt's graded event: the
+ *  full payload, reasons included. The card's GradeView is the summary
+ *  shape; this is the record. */
+interface GradeDetail {
+  score: number;
+  verdict: string;
+  reasons: string;
+}
+
+/** The graded event's payload as a grade, or null when a field is missing or
+ *  mistyped. The engine writes all three fields, so a null here means a torn
+ *  or foreign line, and the timeline falls back to the plain event row. */
+function gradeFromPayload(payload: Record<string, unknown>): GradeDetail | null {
+  const { score, verdict, reasons } = payload;
+  if (
+    typeof score !== "number" ||
+    typeof verdict !== "string" ||
+    typeof reasons !== "string"
+  ) {
+    return null;
+  }
+  return { score, verdict, reasons };
+}
+
+// One grade under its attempt's graded event: the score and verdict on one
+// line, the grader's reasons below. This is the "why the winner won" record,
+// read from the same append-only events file after the run has ended.
+function renderGrade(grade: GradeDetail): HTMLElement {
+  return h(
+    "div",
+    { class: "timeline-grade" },
+    h(
+      "span",
+      { class: `timeline-grade-score grade-${grade.verdict}` },
+      `${grade.score}/10 ${grade.verdict}`,
+    ),
+    h("span", { class: "timeline-grade-reasons" }, grade.reasons),
+  );
 }

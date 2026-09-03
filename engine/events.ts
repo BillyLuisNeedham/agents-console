@@ -9,7 +9,10 @@
  * Attempt numbers are per ticket and shared by implement and resolver runs:
  * every spawn of a harness for a ticket increments that ticket's attempt
  * counter, so a resolver run after a conflicted implement attempt is the next
- * attempt.
+ * attempt. A verify attempt's grade is recorded on the build ticket's file
+ * (the graded attempt's number), appended by the engine when the attempt's
+ * grader ticket finishes. The selection's winner is recorded the same way,
+ * as a selected event on the build ticket's file.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -22,6 +25,9 @@ const EVENT_KINDS = [
   "merged",
   "merge-conflict",
   "resolver",
+  "graded",
+  "selected",
+  "grader-respawn",
   "checkpoint",
   "crash",
   "deadlock",

@@ -294,9 +294,9 @@ export class Canvas {
     return this.nodePos.get(card.id) ?? { x: card.x, y: card.y };
   }
 
-  // A card is a summary: status, title, blockers, and an interrupt dot. A
-  // click selects it and opens the Detail, where the ticket is read and its
-  // interrupt answered.
+  // A card is a summary: status, title, blockers, an optional grade line for
+  // verified tickets, and an interrupt dot. A click selects it and opens the
+  // Detail, where the ticket is read and its interrupt answered.
   private renderTicketCard(
     card: TicketCardView,
     selection: CanvasSelection,
@@ -349,6 +349,16 @@ export class Canvas {
         { class: "node-card-body" },
         h("div", { class: "card-text ticket-card-summary" }, card.title),
         blockers,
+        card.grade
+          ? h(
+              "div",
+              {
+                class: `ticket-card-grade grade-${card.grade.verdict}`,
+                title: `attempt ${card.grade.attempt} graded ${card.grade.score}/10, verdict ${card.grade.verdict}`,
+              },
+              `grade ${card.grade.score}/10 · ${card.grade.verdict}`,
+            )
+          : null,
       ),
     );
   }
