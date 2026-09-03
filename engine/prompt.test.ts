@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { SPAWN_BODY_MIN_CHARS } from "./engine.ts";
 import { buildHeadToHeadPrompt, buildPrompt } from "./prompt.ts";
 
 function prompt(): string {
@@ -28,6 +29,54 @@ describe("buildPrompt outcome instruction", () => {
     const body = prompt();
     expect(body).toContain("Never edit the Issue's line-1 status marker");
     expect(body).toContain("the engine owns that write");
+  });
+});
+
+describe("buildPrompt spawn teaching", () => {
+  it("documents the spawn key's shape and the engine-assigned ids", () => {
+    const body = prompt();
+    expect(body).toContain('optional "spawn" array');
+    expect(body).toContain('"title"');
+    expect(body).toContain('"body"');
+    expect(body).toContain('"blockedBy"');
+    expect(body).toContain("<parent>-spawn-N");
+    expect(body).toContain("07-spawn-1");
+  });
+
+  it("names the same body floor the engine's validator enforces", () => {
+    expect(prompt()).toContain(
+      `at least ${SPAWN_BODY_MIN_CHARS} characters of intent`,
+    );
+  });
+
+  it("documents the drop rules, the caps, and that a drop never fails the attempt", () => {
+    const body = prompt();
+    expect(body).toContain("Thin or out-of-pool proposals are dropped");
+    expect(body).toContain("recorded in the ticket log");
+    expect(body).toContain("never costs your attempt its result");
+    expect(body).toContain("5 proposals honored per attempt");
+    expect(body).toContain("20 per run");
+  });
+
+  it("states the standing rule: agents propose, the engine writes pool state", () => {
+    const body = prompt();
+    expect(body).toContain("proposed, never written");
+    expect(body).toContain("You never write pool state");
+    expect(body).toContain("You propose; the engine writes.");
+  });
+
+  it("renders identically for an attempt whose ticket was itself spawned", () => {
+    const spawned = buildPrompt({
+      chain: [],
+      agentMd: "Do the thing.",
+      roster: "",
+      upstream: [],
+      outcomePath: "/tmp/pool/runs/01-spawn-1.outcome.json",
+    });
+    expect(spawned).toContain("/tmp/pool/runs/01-spawn-1.outcome.json");
+    expect(spawned).toBe(
+      prompt().replace("/01.outcome.json", "/01-spawn-1.outcome.json"),
+    );
   });
 });
 

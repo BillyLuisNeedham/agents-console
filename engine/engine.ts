@@ -3253,8 +3253,9 @@ function readOutcomeResult(path: string): OutcomeResult {
 
 // A proposal's body must carry enough intent for a fresh agent to work from;
 // anything thinner is a note, not a ticket. The prompt teaching names the
-// same floor so the two cannot drift apart silently.
-const SPAWN_BODY_MIN_CHARS = 20;
+// same floor so the two cannot drift apart silently; prompt.test.ts pins the
+// match against this exported constant.
+export const SPAWN_BODY_MIN_CHARS = 20;
 
 // Per-proposal spawn validation (ADR-0008): the well-formed entries come back
 // as proposals, the malformed ones as rejections carrying their index and a
