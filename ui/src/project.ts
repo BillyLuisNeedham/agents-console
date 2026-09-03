@@ -175,6 +175,24 @@ export interface TicketLogResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket activity wire type (served by /api/activity)
+// ---------------------------------------------------------------------------
+
+export interface TicketActivityResponse {
+  ticket: string;
+  running: boolean;
+  lastEventAt: string | null;
+  worktree: string | null;
+  branch: string | null;
+  diff: {
+    added: number;
+    removed: number;
+    files: { path: string; added: number; removed: number }[];
+  } | null;
+  log: { size: number; mtime: string | null } | null;
+}
+
+// ---------------------------------------------------------------------------
 // Timeline view model
 // ---------------------------------------------------------------------------
 

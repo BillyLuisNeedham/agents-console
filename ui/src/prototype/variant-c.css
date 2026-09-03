@@ -1,0 +1,125 @@
+.protoC-feed {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.protoC-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.protoC-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.protoC-ticket {
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.protoC-last {
+  margin-left: auto;
+  color: var(--text);
+}
+
+.protoC-stale {
+  color: var(--status-running);
+}
+
+.protoC-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.protoC-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.protoC-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.protoC-counts {
+  flex: none;
+  white-space: nowrap;
+}
+
+.protoC-add {
+  color: var(--status-done);
+}
+
+.protoC-rem {
+  color: var(--interrupt);
+}
+
+.protoC-bar {
+  flex: 1;
+  display: flex;
+  height: 3px;
+  min-width: 20px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.protoC-bar-add {
+  background: var(--status-done);
+}
+
+.protoC-bar-rem {
+  background: var(--interrupt);
+}
+
+.protoC-events {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+}
+
+.protoC-event {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.protoC-event-idle .protoC-text {
+  font-style: italic;
+}
+
+.protoC-time {
+  flex: none;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
+.protoC-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}

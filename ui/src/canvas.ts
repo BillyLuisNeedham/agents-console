@@ -341,6 +341,7 @@ export class Canvas {
             : "") +
           this.flowClass(card.id, selection),
         "data-node-id": card.id,
+        "data-ticket-id": card.ticketId,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
       },
       head,

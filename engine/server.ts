@@ -51,6 +51,7 @@ import {
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
+import { git } from "./worktrees.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
@@ -179,6 +180,22 @@ interface TicketLogResponse {
   nextOffset: number;
   totalSize: number;
   attempts: LogAttemptInfo[];
+}
+
+interface ActivityDiffFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+interface TicketActivityResponse {
+  ticket: string;
+  running: boolean;
+  lastEventAt: string | null;
+  worktree: string | null;
+  branch: string | null;
+  diff: { added: number; removed: number; files: ActivityDiffFile[] } | null;
+  log: { size: number; mtime: string | null } | null;
 }
 
 // ANSI escape sequences: CSI (colors, cursor movement) and OSC (title, hyperlinks)
@@ -405,6 +422,112 @@ function readTicketEvents(
     reconstructed: true,
     spec,
   };
+}
+
+const UNTRACKED_MAX_BYTES = 256 * 1024;
+const UNTRACKED_MAX_FILES = 100;
+
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  let lines = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\n") lines++;
+  }
+  return text.endsWith("\n") ? lines : lines + 1;
+}
+
+function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
+  try {
+    const numstat = git(cwd, ["diff", "--numstat", "HEAD"]);
+    const status = git(cwd, ["status", "--porcelain"]);
+    if (!numstat.ok || !status.ok) return null;
+    const files = new Map<string, ActivityDiffFile>();
+    for (const line of numstat.out.split("\n")) {
+      if (!line.trim()) continue;
+      const [added, removed, ...rest] = line.split("\t");
+      const path = rest.join("\t");
+      if (!path) continue;
+      files.set(path, {
+        path,
+        added: added === "-" ? 0 : Number(added) || 0,
+        removed: removed === "-" ? 0 : Number(removed) || 0,
+      });
+    }
+    let untracked = 0;
+    for (const line of status.out.split("\n")) {
+      if (!line.startsWith("?? ")) continue;
+      if (untracked >= UNTRACKED_MAX_FILES) break;
+      untracked += 1;
+      let path = line.slice(3);
+      if (path.startsWith('"') && path.endsWith('"')) {
+        path = path.slice(1, -1);
+      }
+      try {
+        const full = join(cwd, path);
+        const stat = statSync(full);
+        if (!stat.isFile() || stat.size >= UNTRACKED_MAX_BYTES) continue;
+        const added = countLines(readFileSync(full, "utf8"));
+        const existing = files.get(path);
+        if (existing) existing.added += added;
+        else files.set(path, { path, added, removed: 0 });
+      } catch {
+        continue;
+      }
+    }
+    const list = [...files.values()];
+    return {
+      added: list.reduce((sum, f) => sum + f.added, 0),
+      removed: list.reduce((sum, f) => sum + f.removed, 0),
+      files: list,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readTicketActivity(
+  poolDir: string,
+  ticketId: string,
+): TicketActivityResponse {
+  const runsDir = join(poolDir, "runs");
+  const events = readEvents(runsDir, ticketId);
+  let worktree: string | null = null;
+  let branch: string | null = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind !== "spawned" && event.kind !== "resolver") continue;
+    if (typeof event.payload?.cwd === "string") {
+      worktree = event.payload.cwd;
+      branch =
+        typeof event.payload.branch === "string" ? event.payload.branch : null;
+      break;
+    }
+  }
+  const latestSpawn = [...events].reverse().find((e) => e.kind === "spawned");
+  const running =
+    latestSpawn !== undefined &&
+    !events.some(
+      (e) =>
+        e.attempt === latestSpawn.attempt &&
+        (e.kind === "exited" || e.kind === "crash"),
+    );
+  const lastEventAt = events.length > 0 ? events[events.length - 1].at : null;
+  const diff =
+    worktree !== null && existsSync(worktree)
+      ? computeActivityDiff(worktree)
+      : null;
+  const attempts = listAttemptLogs(runsDir, ticketId);
+  const current = attempts[attempts.length - 1];
+  let log: TicketActivityResponse["log"] = null;
+  if (current) {
+    try {
+      const stat = statSync(join(runsDir, current.logFile));
+      log = { size: stat.size, mtime: stat.mtime.toISOString() };
+    } catch {
+      log = null;
+    }
+  }
+  return { ticket: ticketId, running, lastEventAt, worktree, branch, diff, log };
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +958,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const range = await readLogRange(join(runsDir, logFile), offset, end);
           return Response.json({ ...range, attempts });
+        }
+
+        if (pathname === "/api/activity") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          if (!ticketIds.has(ticketId)) {
+            return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+          }
+          return Response.json(readTicketActivity(poolDir, ticketId));
         }
 
         if (pathname === "/api/ticket") {

@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { GradeView, PoolSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
+import type { GradeView, PoolSnapshot, TicketActivityResponse, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -72,6 +72,14 @@ export class PoolClient {
       `${this.base}/api/events?ticket=${encodeURIComponent(ticketId)}`,
     );
     if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
+    return res.json();
+  }
+
+  async getActivity(ticketId: string): Promise<TicketActivityResponse> {
+    const res = await fetch(
+      `${this.base}/api/activity?ticket=${encodeURIComponent(ticketId)}`,
+    );
+    if (!res.ok) throw new Error(`ticket activity failed: ${res.status}`);
     return res.json();
   }
 
