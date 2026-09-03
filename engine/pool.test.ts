@@ -58,3 +58,62 @@ describe("issue file metadata", () => {
     expect(markers.map((m) => m.blockedBy)).toEqual([[], ["01"]]);
   });
 });
+
+describe("spawn namespace reservation", () => {
+  function poolWithFiles(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "pool-test-"));
+    tempDirs.push(dir);
+    for (const [name, contents] of Object.entries(files)) {
+      writeFileSync(join(dir, name), contents);
+    }
+    return dir;
+  }
+
+  const parent = `${marker}\n\n# Parent\n\nbody\n`;
+
+  it("parses spawned-by on an engine-written spawn ticket", () => {
+    const file = tempFile(
+      "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->\n\n# Spawned\n\nbody\n",
+    );
+    const loaded = readMarker(file);
+    expect(loaded.spawnedBy).toBe("01");
+  });
+
+  it("loads an engine-written spawn ticket whose parent is in the pool", () => {
+    const dir = poolWithFiles({
+      "01-a.md": parent,
+      "01-spawn-1.md":
+        "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->\n\n# Spawned\n\nbody\n",
+    });
+    const markers = loadPoolMarkers(dir);
+    expect(markers.map((m) => m.id)).toEqual(["01", "01-spawn-1"]);
+    expect(markers[1].spawnedBy).toBe("01");
+  });
+
+  it("rejects a hand-written ticket in the reserved namespace", () => {
+    const dir = poolWithFiles({
+      "01-a.md": parent,
+      "01-spawn-9.md": "<!-- state: id=01-spawn-9 blocked-by=none status=ready -->\n\n# Hand-written\n\nbody\n",
+    });
+    expect(() => loadPoolMarkers(dir)).toThrow(/reserved/);
+  });
+
+  it("rejects a spawn ticket whose spawned-by does not match its id's parent", () => {
+    const dir = poolWithFiles({
+      "01-a.md": parent,
+      "02-b.md": "<!-- state: id=02 blocked-by=none status=ready -->\n\n# Other\n\nbody\n",
+      "01-spawn-1.md":
+        "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=02 -->\n\n# Mismatched\n\nbody\n",
+    });
+    expect(() => loadPoolMarkers(dir)).toThrow(/reserved/);
+  });
+
+  it("rejects a spawn ticket whose parent has left the pool", () => {
+    const dir = poolWithFiles({
+      "02-b.md": "<!-- state: id=02 blocked-by=none status=ready -->\n\n# Other\n\nbody\n",
+      "01-spawn-1.md":
+        "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->\n\n# Orphan\n\nbody\n",
+    });
+    expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket/);
+  });
+});

@@ -182,6 +182,7 @@ interface GitStubBehaviour {
   status?: "done" | "checkpoint" | "keep";
   outcome?: { summary: string; commitSha: string | null } | null;
   outcomeRaw?: string;
+  spawn?: unknown;
   grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
   winner?: number | string;
   exitCode?: number;
@@ -311,6 +312,7 @@ function gitStubHarness(
                 summary: `summary-${ctx.id}`,
                 commitSha: `sha-${ctx.id}`,
               }),
+              ...(b.spawn !== undefined ? { spawn: b.spawn } : {}),
               ...(b.grade !== undefined ? { grade: b.grade } : {}),
               ...(b.winner !== undefined ? { winner: b.winner } : {}),
             });
@@ -4026,6 +4028,10 @@ describe("outcome spawn schema", () => {
         reason: "proposal's blockedBy is not a list of strings",
       },
       {
+        entry: { title: "T", body: goodBody, blockedBy: ["  "] },
+        reason: "proposal's blockedBy is not a list of strings",
+      },
+      {
         entry: { title: "T", body: goodBody, blockedBy: null },
         reason: "proposal's blockedBy is not a list of strings",
       },
@@ -4148,6 +4154,486 @@ describe("outcome spawn schema", () => {
     ]);
     expect(markerLine(poolDir, "01-a.md")).toContain("status=checkpoint");
   });
+});
+
+describe("spawn adoption", () => {
+  // ADR-0008: the engine writes accepted proposals into the pool at the
+  // super-step boundary as ordinary tickets, reloads markers and resolves
+  // assignments, and the drive loop schedules them like any other ticket.
+  // The behaviour is observable: ticket files on disk, events on the
+  // proposing ticket's log, and the scheduled set.
+
+  const goodBody = "A body long enough to stand as a ticket.";
+  const proposal = (title: string, blockedBy?: string[]) => ({
+    title,
+    body: goodBody,
+    ...(blockedBy ? { blockedBy } : {}),
+  });
+
+  it("writes valid proposals as ordinary tickets and schedules them once their blockers finish", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [proposal("After two", ["02"]), proposal("Anytime")] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(true);
+    // The engine assigned the ids and the markers: the ordinary blocking
+    // edge, engine-owned ready status, and the spawned-by provenance.
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain(
+      "id=01-spawn-1 blocked-by=02",
+    );
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("spawned-by=01");
+    expect(markerLine(poolDir, "01-spawn-2.md")).toContain(
+      "id=01-spawn-2 blocked-by=none",
+    );
+    expect(readFileSync(join(poolDir, "issues", "01-spawn-1.md"), "utf8"))
+      .toContain("# 01-spawn-1: After two");
+    // Both ran as ordinary tickets: scheduled, spawned, exited, done.
+    expect(readEventLines(poolDir, "01-spawn-1").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(readEventLines(poolDir, "01-spawn-2").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "02": "done",
+      "01-spawn-1": "done",
+      "01-spawn-2": "done",
+    });
+  });
+
+  it("holds a proposal blocked by an in-flight ticket until the blocker finishes", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [proposal("After two", ["02"])] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // The adopted ticket was ready in the snapshots while its blocker ran,
+    // scheduled in its own super-step only after that blocker finished.
+    expect(
+      run.snapshots.some((s) => s.state.tickets["01-spawn-1"] === "ready"),
+    ).toBe(true);
+    expect(run.final.log).toContain("super-step 1: 01");
+    expect(run.final.log).toContain("super-step 2: 02");
+    expect(run.final.log).toContain("super-step 3: 01-spawn-1");
+  });
+
+  it("drops a proposal whose blockedBy names an unknown ticket, with the reason on the ticket log", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [proposal("Ghost", ["99"])] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    // The attempt's own done stands; the proposal is gone with its reason.
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    const rejected = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawn-rejected",
+    );
+    expect(rejected?.payload).toMatchObject({
+      title: "Ghost",
+      reason: "blockedBy names tickets outside the pool: 99",
+    });
+    expect(run.final.log).toContain(
+      "ticket 01: spawn proposal 'Ghost' rejected: " +
+        "blockedBy names tickets outside the pool: 99",
+    );
+  });
+
+  it("drops a thin-body proposal with the reason on the ticket log", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [{ title: "Thin", body: "too thin" }] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    const rejected = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawn-rejected",
+    );
+    expect(rejected?.payload).toMatchObject({
+      index: 0,
+      reason: "proposal body is missing or thin (needs 20+ characters)",
+    });
+  });
+
+  it("honors the per-attempt cap of five and logs the truncation", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": {
+        spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`Number ${n}`)),
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    for (const n of [1, 2, 3, 4, 5]) {
+      expect(existsSync(join(poolDir, "issues", `01-spawn-${n}.md`))).toBe(
+        true,
+      );
+    }
+    expect(existsSync(join(poolDir, "issues", "01-spawn-6.md"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-7.md"))).toBe(false);
+    const adopted = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawn-adopted",
+    );
+    expect(adopted?.payload).toEqual({
+      adopted: [
+        "01-spawn-1",
+        "01-spawn-2",
+        "01-spawn-3",
+        "01-spawn-4",
+        "01-spawn-5",
+      ],
+      truncated: 2,
+    });
+    expect(
+      run.final.log.some(
+        (line) =>
+          line.startsWith("ticket 01: adopted spawn tickets") &&
+          line.includes("2 proposals truncated at the caps"),
+      ),
+    ).toBe(true);
+  }, 15000);
+
+  it("honors the per-run cap of twenty across attempts and logs the truncation", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        readyTicket("02"),
+        readyTicket("03"),
+        readyTicket("04"),
+        readyTicket("05"),
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
+      "02": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
+      "03": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
+      "04": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
+      "05": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // Twenty files land, five per parent for whichever four parents reached
+    // the boundary first; the fifth finds no room left in the run cap.
+    const spawnFiles = Array.from({ length: 25 }, (_, i) => {
+      const parent = `0${(i % 5) + 1}`;
+      const n = Math.floor(i / 5) + 1;
+      return `issues/${parent}-spawn-${n}.md`;
+    }).filter((file) => existsSync(join(poolDir, file)));
+    expect(spawnFiles).toHaveLength(20);
+    // The attempts run in parallel, so which parent truncated is racy; that
+    // exactly one did, with all seven proposals dropped, is not.
+    const adoptEvents = ["01", "02", "03", "04", "05"].flatMap((id) =>
+      readEventLines(poolDir, id)
+        .filter((e) => e.kind === "spawn-adopted")
+        .map((e) => e.payload as { adopted: string[]; truncated: number }),
+    );
+    expect(adoptEvents).toHaveLength(5);
+    expect(adoptEvents.filter((p) => p.adopted.length === 5)).toHaveLength(4);
+    expect(adoptEvents.filter((p) => p.adopted.length === 0)).toEqual([
+      { adopted: [], truncated: 7 },
+    ]);
+    expect(
+      run.final.log.some((line) => line.includes("truncated at the caps")),
+    ).toBe(true);
+  }, 15000);
+
+  it("lets a spawned ticket's own attempt spawn further tickets", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { spawn: [proposal("Child")] },
+      "01-spawn-1": { spawn: [proposal("Grandchild")] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1-spawn-1.md"))).toBe(
+      true,
+    );
+    expect(markerLine(poolDir, "01-spawn-1-spawn-1.md")).toContain(
+      "id=01-spawn-1-spawn-1 blocked-by=none",
+    );
+    expect(markerLine(poolDir, "01-spawn-1-spawn-1.md")).toContain(
+      "spawned-by=01-spawn-1",
+    );
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "01-spawn-1": "done",
+      "01-spawn-1-spawn-1": "done",
+    });
+  });
+
+  it("ignores a grader's spawn and adopts the passing attempt's own proposals", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 1 } } },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "cand-1.txt",
+        commitMsg: "cand-1",
+        spawn: [proposal("From the attempt")],
+      },
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "fine" },
+        spawn: [proposal("From the grader")],
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // Grader outcomes are engine-consumed: a spawn key from one is ignored.
+    expect(existsSync(join(poolDir, "issues", "01-grader-1-spawn-1.md"))).toBe(
+      false,
+    );
+    // The attempt's outcome became the ticket's, and its proposal adopted.
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("spawned-by=01");
+    expect(run.final.tickets["01-spawn-1"]).toBe("done");
+  }, 15000);
+
+  it("ignores a spawn key on the head-to-head outcome", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 2 } } },
+    });
+    const grade = (score: number) => ({
+      grade: { score, verdict: "pass" as const, reasons: `scored ${score}` },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        {
+          workFile: "cand-1.txt",
+          commitMsg: "cand-1",
+          spawn: [proposal("From the winner")],
+        },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": grade(8),
+      "01-grader-2": grade(7),
+      "01-head-to-head": { winner: 1, spawn: [proposal("From the judge")] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    const selected = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "selected",
+    );
+    expect(selected?.attempt).toBe(1);
+    expect(existsSync(join(poolDir, "issues", "01-head-to-head-spawn-1.md")))
+      .toBe(false);
+    expect(run.final.tickets["01"]).toBe("done");
+    // The winner's outcome became the ticket's, and its proposal adopted.
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("spawned-by=01");
+  }, 15000);
+
+  it("does not adopt a crashed attempt's proposals", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { exitCode: 3, spawn: [proposal("From a crash")] },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The crash owns the ticket; proposals from work that never landed die
+    // with it, and a resume re-runs the attempt instead.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+  });
+
+  it("does not report done while a freshly spawned ready ticket still runs", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({ "01": { spawn: [proposal("The real end")] } });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    // A premature done would have stopped the drive before the adopted
+    // ticket ever scheduled; its own full lifecycle is the proof it did not.
+    expect(run.phase).toBe("done");
+    expect(run.final.log).toContain("super-step 1: 01");
+    expect(run.final.log).toContain("super-step 2: 01-spawn-1");
+    expect(readEventLines(poolDir, "01-spawn-1").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+    ]);
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("status=done");
+  });
+
+  it("rejects a hand-written ticket in the reserved namespace at pool start", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        {
+          file: "01-spawn-9.md",
+          marker: "<!-- state: id=01-spawn-9 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    await expect(
+      runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+    ).rejects.toThrow(/reserved/);
+  });
+
+  it("restarts over adopted tickets, inheriting the parent's assignment", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        {
+          file: "01-spawn-1.md",
+          marker:
+            "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->",
+          body: "# 01-spawn-1: Adopted earlier\n\nAlready on disk.\n",
+        },
+      ],
+      // No defaults: the spawned id resolves only through its parent.
+      config: { assign: { "01": { harness: "stub", model: "stub-model" } } },
+    });
+    const rig = stubHarness({});
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawned["01-spawn-1"]).toBeDefined();
+    expect(run.final.tickets).toEqual({
+      "01": "done",
+      "01-spawn-1": "done",
+    });
+  });
+
+  it("adopts a checkpoint attempt's proposals while the run pauses on the interrupt", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": {
+        status: "checkpoint",
+        brief: "pick a name",
+        spawn: [proposal("While paused")],
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    // The proposal was adopted and ran to done; the parent still holds the
+    // run at its checkpoint.
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("status=done");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+  });
+
+  it("grades a spawned ticket whose assign sets verify", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: {
+        ...stubConfig,
+        assign: { "01-spawn-1": { verify: 1 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { spawn: [proposal("Graded child")] },
+      "01-spawn-1": { workFile: "child.txt", commitMsg: "child" },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // The spawned ticket ran as a verify fan-out: one grader ticket, written
+    // and engine-run like any other, then the lone-attempt pass completed it.
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1-grader-1.md"))).toBe(
+      true,
+    );
+    expect(markerLine(poolDir, "01-spawn-1-grader-1.md")).toContain(
+      "status=done",
+    );
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("status=done");
+    expect(
+      readEventLines(poolDir, "01-spawn-1").some((e) => e.kind === "graded"),
+    ).toBe(true);
+  }, 15000);
 });
 
 describe("final review", () => {

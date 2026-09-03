@@ -24,6 +24,7 @@ import { CheckpointStore } from "./checkpoints.ts";
 import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   loadPoolMarkers,
+  parseSpawnId,
   readMarker,
   writeMarkerStatus,
   type TicketMarker,
@@ -77,6 +78,20 @@ export interface SpawnRejection {
   // Absent when the spawn key itself is malformed rather than one entry.
   index?: number;
   reason: string;
+}
+
+// Caps (ADR-0008): at most 5 proposals honored per attempt and 20 per run.
+// Overflow truncates and logs (the adoption event carries the count), never
+// an error. Engine constants by spec; no config surface.
+const SPAWN_MAX_PER_ATTEMPT = 5;
+const SPAWN_MAX_PER_RUN = 20;
+
+// One attempt's surviving proposals, buffered between the moment an outcome
+// becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
+// selection's winner) and the boundary that adopts them.
+interface PendingSpawn {
+  parentId: string;
+  proposals: SpawnProposal[];
 }
 
 export interface Outcome {
@@ -300,6 +315,12 @@ interface Session {
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
   resolverAttempts: Map<string, { files: string[]; note: string }>;
+  // Spawn proposals awaiting the boundary (ADR-0008), pushed where an outcome
+  // becomes the ticket's and drained by adoptSpawnProposals.
+  pendingSpawns: PendingSpawn[];
+  // Spawn tickets adopted so far this run, bounding the per-run cap. Seeded
+  // from the markers at start, so a resumed run continues the same count.
+  spawnedThisRun: number;
 }
 
 export function startPool(options: RunOptions): PoolRun {
@@ -313,30 +334,12 @@ export function startPool(options: RunOptions): PoolRun {
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const cwd = repoRootOf(poolDir);
 
-  // Two passes: ordinary tickets resolve first, then engine-run tickets
-  // (grader ids and the head-to-head id the engine writes) resolve from their
-  // build ticket's assignment, so a stale engine card on disk never fails
-  // pool start and an engine-run judge inherits its builder with zero new
-  // config.
+  // Assignment resolution for every marker on disk: ordinary tickets resolve
+  // from the config, engine-written ones (grader, head-to-head, spawned)
+  // inherit from the ticket they belong to, and spawn chains resolve however
+  // deep they nest.
   const assignments = new Map<string, Assignment>();
-  for (const marker of markers) {
-    if (engineTicketBuildId(marker.id)) continue;
-    assignments.set(
-      marker.id,
-      resolveAssignment(marker, config, harnesses),
-    );
-  }
-  for (const marker of markers) {
-    if (assignments.has(marker.id)) continue;
-    const buildId = engineTicketBuildId(marker.id)!;
-    const build = assignments.get(buildId);
-    assignments.set(
-      marker.id,
-      build
-        ? resolveEngineTicketAssignment(config, marker, build, harnesses)
-        : resolveAssignment(marker, config, harnesses),
-    );
-  }
+  resolveUnseenAssignments(markers, assignments, config, harnesses);
 
   const session: Session = {
     poolDir,
@@ -368,6 +371,8 @@ export function startPool(options: RunOptions): PoolRun {
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     resolverAttempts: new Map(),
+    pendingSpawns: [],
+    spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
   };
 
   rehydrate(session);
@@ -511,6 +516,12 @@ async function driveLoop(session: Session): Promise<void> {
       // that super-step's join and persistence and before this one's
       // scheduling. Processing never spawns; the scheduling below does.
       drainAnswers(session);
+      // Spawn adoption (ADR-0008) rides the same boundary: proposals
+      // established by the previous super-step's outcomes, or by the answer
+      // drain just now, are written into the pool here, before the ready
+      // check below, so adopted tickets schedule like any other and a pool
+      // whose last outcome spawns never reports itself done early.
+      adoptSpawnProposals(session);
       const ready = readyTickets(session.markers, session.state.tickets);
       if (ready.length === 0) break;
       session.superStep += 1;
@@ -585,6 +596,15 @@ async function driveLoop(session: Session): Promise<void> {
             },
             plan,
           ).then((result) => {
+            // The attempt's surviving proposals ride to the boundary's
+            // adoption buffer (ADR-0008). A verify candidate carries none:
+            // its proposals ride or die with selection.
+            if (result.spawnProposals && result.spawnProposals.length > 0) {
+              session.pendingSpawns.push({
+                parentId: marker.id,
+                proposals: result.spawnProposals,
+              });
+            }
             if (plan.verify) {
               // A verify candidate never merges and never writes the
               // ticket's status, at its exit or before its siblings exit:
@@ -1072,17 +1092,12 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
   session.markers = loadPoolMarkers(session.issuesDir);
-  for (const m of session.markers) {
-    if (session.assignments.has(m.id)) continue;
-    const buildId = engineTicketBuildId(m.id);
-    const build = buildId ? session.assignments.get(buildId) : undefined;
-    session.assignments.set(
-      m.id,
-      build
-        ? resolveEngineTicketAssignment(session.state.config, m, build, session.harnesses)
-        : resolveAssignment(m, session.state.config, session.harnesses),
-    );
-  }
+  resolveUnseenAssignments(
+    session.markers,
+    session.assignments,
+    session.state.config,
+    session.harnesses,
+  );
   if (interrupt.kind === "review") {
     if (record.approve) {
       approveReview(session, interrupt, record.note);
@@ -1609,6 +1624,105 @@ function resolveEngineTicketAssignment(
   };
 }
 
+// A spawned ticket's assignment (ADR-0008): the ordinary assign machinery
+// with the proposing ticket standing in for the pool defaults. An assign
+// entry for the spawned id overrides field-wise, everything else inherits
+// the parent, so a discovery chain runs on its parent's harness with zero
+// new config. verify is honored like any ordinary ticket's (a spawned
+// ticket is ordinary in every way): an operator may set verify on a spawned
+// id before it schedules.
+function resolveSpawnedTicketAssignment(
+  config: PoolConfig,
+  marker: TicketMarker,
+  parent: Assignment,
+  harnesses: Record<string, HarnessCommand>,
+): Assignment {
+  const assign = config.assign?.[marker.id] ?? {};
+  const harness = assign.harness ?? parent.harness;
+  if (!harnesses[harness]) {
+    throw new Error(
+      `pool config: ticket ${marker.id} names unknown harness ` +
+        `'${harness}'. Known: ${Object.keys(harnesses).sort().join(", ")}`,
+    );
+  }
+  let verify: number | undefined;
+  if (assign.verify != null) {
+    if (!Number.isInteger(assign.verify) || assign.verify < 1) {
+      throw new Error(
+        `pool config: ticket ${marker.id} has invalid verify ` +
+          `${JSON.stringify(assign.verify)} (must be an integer >= 1)`,
+      );
+    }
+    verify = assign.verify;
+  }
+  return {
+    harness,
+    model: assign.model ?? parent.model,
+    drivers: assign.drivers ?? parent.drivers,
+    verify,
+  };
+}
+
+// Resolution for marker ids the assignment map does not know yet: ordinary
+// tickets resolve from the config; grader and head-to-head ids resolve from
+// their build ticket's assignment (a stale engine card on disk never fails
+// pool start, and an engine-run judge inherits its builder with zero new
+// config); spawned ids resolve from their spawned-by parent, iterating until
+// the map stops growing so a spawn chain (01-spawn-1-spawn-1) resolves
+// however deep it nests. loadPoolMarkers guarantees a spawned id's parent
+// exists, so only a forged spawned-by cycle can leave an id unresolved, and
+// that fails here with a clear error instead of an undefined crash later.
+function resolveUnseenAssignments(
+  markers: TicketMarker[],
+  assignments: Map<string, Assignment>,
+  config: PoolConfig,
+  harnesses: Record<string, HarnessCommand>,
+): void {
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const marker of markers) {
+      if (assignments.has(marker.id)) continue;
+      const graderBuild = engineTicketBuildId(marker.id);
+      if (graderBuild) {
+        const build = assignments.get(graderBuild);
+        // The build not resolved yet is not the build absent: a grader whose
+        // build ticket is in the pool waits for a later sweep and inherits
+        // from it, whatever the file order; only a stale card whose build is
+        // gone from the pool resolves as an ordinary ticket, as before.
+        if (!build && markers.some((m) => m.id === graderBuild)) continue;
+        assignments.set(
+          marker.id,
+          build
+            ? resolveEngineTicketAssignment(config, marker, build, harnesses)
+            : resolveAssignment(marker, config, harnesses),
+        );
+        progressed = true;
+        continue;
+      }
+      if (marker.spawnedBy) {
+        const parent = assignments.get(marker.spawnedBy);
+        if (!parent) continue;
+        assignments.set(
+          marker.id,
+          resolveSpawnedTicketAssignment(config, marker, parent, harnesses),
+        );
+        progressed = true;
+        continue;
+      }
+      assignments.set(marker.id, resolveAssignment(marker, config, harnesses));
+      progressed = true;
+    }
+  }
+  const unresolved = markers.filter((m) => !assignments.has(m.id));
+  if (unresolved.length > 0) {
+    throw new Error(
+      `pool load: cannot resolve assignments for ` +
+        `${unresolved.map((m) => m.id).join(", ")} (a spawned-by cycle?)`,
+    );
+  }
+}
+
 // The grader's outcome: the standard contract plus a validated grade.
 // Anything that is not a valid grade is unusable rather than a low score or
 // a silent pass, so a broken grader can never decide the build ticket's
@@ -2096,6 +2210,12 @@ function resolveLoneAttempt(
       session.state = applyUpdate(session.state, {
         outcomes: { [marker.id]: outcome.outcome },
       });
+      if (outcome.outcome.spawn?.length) {
+        session.pendingSpawns.push({
+          parentId: marker.id,
+          proposals: outcome.outcome.spawn,
+        });
+      }
     }
     return;
   }
@@ -2194,6 +2314,12 @@ function completeLoneAttempt(
   marker.status = "done";
   if (outcome.ok) {
     update.outcomes = { [marker.id]: outcome.outcome };
+    if (outcome.outcome.spawn?.length) {
+      session.pendingSpawns.push({
+        parentId: marker.id,
+        proposals: outcome.outcome.spawn,
+      });
+    }
   }
   session.state = applyUpdate(session.state, {
     tickets: { [marker.id]: "done" },
@@ -2542,11 +2668,20 @@ function completeSelection(
     ],
   };
   // The winner's outcome becomes the ticket's, the way a solo done attempt's
-  // does, so downstream prompts read what was actually selected.
+  // does, so downstream prompts read what was actually selected. Its spawn
+  // proposals ride to the boundary's adoption buffer with it.
   const outcome = readOutcomeResult(
     join(session.runsDir, outcomeFileName(marker.id, attempt)),
   );
-  if (outcome.ok) update.outcomes = { [marker.id]: outcome.outcome };
+  if (outcome.ok) {
+    update.outcomes = { [marker.id]: outcome.outcome };
+    if (outcome.outcome.spawn?.length) {
+      session.pendingSpawns.push({
+        parentId: marker.id,
+        proposals: outcome.outcome.spawn,
+      });
+    }
+  }
   session.state = applyUpdate(session.state, update);
   emit("running");
 }
@@ -3191,6 +3326,10 @@ interface TicketResult {
   // attempt exit (a terminal done/checkpoint); the boundary join skips it so
   // the same update is never applied twice.
   joinedAtExit: boolean;
+  // The attempt's schema-valid spawn proposals (ADR-0008), riding to the
+  // boundary's adoption buffer. A verify candidate carries none: its
+  // proposals ride or die with selection.
+  spawnProposals?: SpawnProposal[];
 }
 
 // Where an attempt runs. A multi-ticket super-step gives every ticket its own
@@ -3296,7 +3435,8 @@ function validateSpawnProposals(
     const blockedBy = proposal.blockedBy;
     if (
       blockedBy !== undefined &&
-      (!Array.isArray(blockedBy) || blockedBy.some((id) => typeof id !== "string"))
+      (!Array.isArray(blockedBy) ||
+        blockedBy.some((id) => typeof id !== "string" || id.trim() === ""))
     ) {
       rejections.push({
         index,
@@ -3339,6 +3479,158 @@ export function validateOutcome(parsed: unknown): OutcomeResult {
       ? { spawnRejections: spawn.rejections }
       : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Spawn adoption (ADR-0008): the engine writes proposed tickets at the
+// super-step boundary
+// ---------------------------------------------------------------------------
+
+// The spawned ticket file: an ordinary ticket with the engine-assigned id,
+// the ordinary blocking edge, and spawned-by naming the ticket whose attempt
+// proposed it. The marker field is what loadPoolMarkers requires for the
+// reserved namespace; the body line is the provenance the Detail shows.
+function writeSpawnTicket(
+  session: Session,
+  parentId: string,
+  id: string,
+  proposal: SpawnProposal,
+): void {
+  const blockedBy =
+    proposal.blockedBy && proposal.blockedBy.length > 0
+      ? proposal.blockedBy.join(",")
+      : "none";
+  const body =
+    `<!-- state: id=${id} blocked-by=${blockedBy} status=ready spawned-by=${parentId} -->\n\n` +
+    `# ${id}: ${proposal.title.trim()}\n\n` +
+    `**Spawned by** ticket ${parentId} (ADR-0008): the engine wrote this ` +
+    "ticket at the super-step boundary from the attempt's Outcome proposal, " +
+    "engine-assigned id included. It is ordinary from here on: it " +
+    "schedules, verifies, and may itself spawn, and the operator can edit " +
+    "or kill it before it schedules.\n\n" +
+    `${proposal.body.trim()}\n`;
+  writeFileSync(join(session.issuesDir, `${id}.md`), body);
+}
+
+// The highest spawn number already adopted per parent, so a parent whose
+// attempts propose across the whole run numbers continuously. Derived from
+// the markers on every adoption, so a restart continues the same sequence.
+function spawnCounters(markers: TicketMarker[]): Map<string, number> {
+  const counters = new Map<string, number>();
+  for (const marker of markers) {
+    const spawn = parseSpawnId(marker.id);
+    if (!spawn) continue;
+    counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
+  }
+  return counters;
+}
+
+// The boundary's spawn adoption (ADR-0008): every buffered proposal is
+// validated against the pool as the boundary found it, the accepted ones are
+// written as ordinary ticket files, and the pool's markers and assignments
+// reload so the drive loop schedules them like any other ticket. Validation
+// is per proposal, never per attempt: a dropped proposal logs its reason on
+// the proposing ticket's log (a spawn-rejected event) and the attempt's own
+// result stands. The caps bound the blast radius (5 per attempt, 20 per
+// run): overflow truncates and logs, never fails. Writing the files is the
+// commit point; a crash after them but before the reload leaves the adopted
+// tickets in the pool for the next start, ids stable.
+function adoptSpawnProposals(session: Session): void {
+  if (session.pendingSpawns.length === 0) return;
+  const pending = session.pendingSpawns.splice(0);
+  // Membership validates against the markers as the boundary found them, so
+  // a proposal naming another proposal's future id drops as unknown: the
+  // agent never proposes ids and cannot know one.
+  const knownIds = new Set(session.markers.map((m) => m.id));
+  const counters = spawnCounters(session.markers);
+  const log: string[] = [];
+  let wrote = false;
+
+  for (const { parentId, proposals } of pending) {
+    const accepted: SpawnProposal[] = [];
+    for (const proposal of proposals) {
+      const unknown = (proposal.blockedBy ?? []).filter(
+        (id) => !knownIds.has(id),
+      );
+      if (unknown.length > 0) {
+        const reason =
+          `blockedBy names tickets outside the pool: ${unknown.join(", ")}`;
+        appendEvent(session.runsDir, parentId, {
+          at: new Date().toISOString(),
+          attempt: lastAttempt(session.runsDir, parentId),
+          kind: "spawn-rejected",
+          payload: { title: proposal.title, reason },
+        });
+        log.push(
+          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
+            `rejected: ${reason}`,
+        );
+        continue;
+      }
+      accepted.push(proposal);
+    }
+    // The per-attempt cap honors the first five survivors; the per-run cap
+    // truncates whatever the run has no room left for.
+    let truncated = 0;
+    let honored = accepted.slice(0, SPAWN_MAX_PER_ATTEMPT);
+    truncated += accepted.length - honored.length;
+    const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
+    if (honored.length > room) {
+      truncated += honored.length - room;
+      honored = honored.slice(0, room);
+    }
+    const adopted: string[] = [];
+    for (const proposal of honored) {
+      const n = (counters.get(parentId) ?? 0) + 1;
+      counters.set(parentId, n);
+      const id = `${parentId}-spawn-${n}`;
+      writeSpawnTicket(session, parentId, id, proposal);
+      adopted.push(id);
+      session.spawnedThisRun += 1;
+    }
+    if (adopted.length > 0 || truncated > 0) {
+      appendEvent(session.runsDir, parentId, {
+        at: new Date().toISOString(),
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-adopted",
+        payload: { adopted, truncated },
+      });
+    }
+    if (adopted.length > 0) {
+      wrote = true;
+      log.push(
+        `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
+          (truncated > 0
+            ? `; ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
+              "truncated at the caps (5 per attempt, 20 per run)"
+            : ""),
+      );
+    } else if (truncated > 0) {
+      log.push(
+        `ticket ${parentId}: ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
+          "truncated at the caps (5 per attempt, 20 per run)",
+      );
+    }
+  }
+
+  if (log.length > 0) {
+    session.state = applyUpdate(session.state, { log });
+  }
+  if (!wrote) return;
+  // The adopted files join the pool the way answer processing brings a
+  // hand-written ticket in: markers reload, unseen ids resolve their
+  // assignments (parent inheritance), and the tickets channel folds them in
+  // at their on-disk statuses.
+  session.markers = loadPoolMarkers(session.issuesDir);
+  resolveUnseenAssignments(
+    session.markers,
+    session.assignments,
+    session.state.config,
+    session.harnesses,
+  );
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
+  });
 }
 
 // Merging one finished ticket's branch onto the pool's working branch.
@@ -3483,6 +3775,20 @@ async function runTicket(
   // in-progress until the whole fan-out has exited, and grading decides what
   // happens after (tickets 03 and 04).
   const outcome = readOutcomeResult(outcomePath);
+  // Malformed spawn entries were dropped per proposal at validation
+  // (ADR-0008); each reason lands on the ticket's log here, at the exit that
+  // produced it, for verify candidates and solo attempts alike.
+  for (const rejection of outcome.ok ? (outcome.spawnRejections ?? []) : []) {
+    appendEvent(env.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: plan.attempt,
+      kind: "spawn-rejected",
+      payload: {
+        reason: rejection.reason,
+        ...(rejection.index !== undefined ? { index: rejection.index } : {}),
+      },
+    });
+  }
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
@@ -3536,6 +3842,10 @@ async function runTicket(
     exitCode,
     plan,
     joinedAtExit: false,
+    spawnProposals:
+      outcome.ok && !plan.verify && crashReason === null
+        ? (outcome.outcome.spawn ?? [])
+        : undefined,
     update: {
       // A verify candidate moves only the pool log: the tickets and outcomes
       // channels are keyed by ticket id, and N attempts of one ticket would
