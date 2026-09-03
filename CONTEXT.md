@@ -98,6 +98,10 @@ _Avoid_: pending answer (that's the interrupt, not the answer)
 A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran; since ADR-0008 a reported death emits the terminal dead phase, and a death that emits nothing is lying.
 _Avoid_: stuck, frozen, hung pool
 
+**Needs input**:
+The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
+_Avoid_: action items, task list, notification center
+
 ## Verification
 
 **Verify**:
