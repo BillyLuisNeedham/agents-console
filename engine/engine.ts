@@ -61,11 +61,35 @@ export type { HarnessCommand } from "./spawn.ts";
 // not honored anywhere.
 export type OutcomeStatus = "done" | "checkpoint";
 
+// One follow-up ticket an attempt proposes in its Outcome's optional spawn
+// array (ADR-0008). The agent never proposes an id, a status or a marker:
+// the engine assigns the id, writes the ticket file and owns the marker.
+export interface SpawnProposal {
+  title: string;
+  body: string;
+  blockedBy?: string[];
+}
+
+// One spawn entry the schema rejected: where it sat in the array and why.
+// Rejection is per proposal (ADR-0008): a malformed proposal never fails the
+// attempt, it is dropped and the reason is logged.
+export interface SpawnRejection {
+  // Absent when the spawn key itself is malformed rather than one entry.
+  index?: number;
+  reason: string;
+}
+
 export interface Outcome {
   status: OutcomeStatus;
   summary: string;
   commitSha: string | null;
   brief?: string;
+  // Follow-up ticket proposals (ADR-0008): the agent proposes in its Outcome,
+  // the engine writes the pool at the super-step boundary. Three states:
+  // absent, the attempt proposed nothing, exactly as before this key existed;
+  // present and empty, the key was there and nothing survived schema
+  // validation; populated, the well-formed proposals riding to the boundary.
+  spawn?: SpawnProposal[];
 }
 
 // One attempt's outcome file name. The solo path keeps the well-known name;
@@ -3212,8 +3236,8 @@ function planTicket(
 // valid outcome is a crash. The crash reason distinguishes the classes in the
 // ticket log: a dead harness, an agent that never wrote its outcome, an
 // outcome that does not parse, and an outcome whose status is invalid.
-type OutcomeResult =
-  | { ok: true; outcome: Outcome }
+export type OutcomeResult =
+  | { ok: true; outcome: Outcome; spawnRejections?: SpawnRejection[] }
   | { ok: false; reason: string };
 
 function readOutcomeResult(path: string): OutcomeResult {
@@ -3227,9 +3251,72 @@ function readOutcomeResult(path: string): OutcomeResult {
   return validateOutcome(parsed);
 }
 
+// A proposal's body must carry enough intent for a fresh agent to work from;
+// anything thinner is a note, not a ticket. The prompt teaching names the
+// same floor so the two cannot drift apart silently.
+const SPAWN_BODY_MIN_CHARS = 20;
+
+// Per-proposal spawn validation (ADR-0008): the well-formed entries come back
+// as proposals, the malformed ones as rejections carrying their index and a
+// reason. The outcome itself stays valid either way; the boundary decides
+// what gets adopted and what gets logged.
+function validateSpawnProposals(
+  raw: unknown,
+): { proposals: SpawnProposal[]; rejections: SpawnRejection[] } {
+  if (raw === undefined) return { proposals: [], rejections: [] };
+  if (!Array.isArray(raw)) {
+    return {
+      proposals: [],
+      rejections: [{ reason: "spawn is not an array" }],
+    };
+  }
+  const proposals: SpawnProposal[] = [];
+  const rejections: SpawnRejection[] = [];
+  raw.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      rejections.push({ index, reason: "spawn entry is not an object" });
+      return;
+    }
+    const proposal = entry as Record<string, unknown>;
+    if (typeof proposal.title !== "string" || proposal.title.trim() === "") {
+      rejections.push({ index, reason: "proposal has no title" });
+      return;
+    }
+    if (
+      typeof proposal.body !== "string" ||
+      proposal.body.trim().length < SPAWN_BODY_MIN_CHARS
+    ) {
+      rejections.push({
+        index,
+        reason: `proposal body is missing or thin (needs ${SPAWN_BODY_MIN_CHARS}+ characters)`,
+      });
+      return;
+    }
+    const blockedBy = proposal.blockedBy;
+    if (
+      blockedBy !== undefined &&
+      (!Array.isArray(blockedBy) || blockedBy.some((id) => typeof id !== "string"))
+    ) {
+      rejections.push({
+        index,
+        reason: "proposal's blockedBy is not a list of strings",
+      });
+      return;
+    }
+    proposals.push({
+      title: proposal.title,
+      body: proposal.body,
+      ...(blockedBy !== undefined ? { blockedBy } : {}),
+    });
+  });
+  return { proposals, rejections };
+}
+
 // The outcome contract's validator, shared by the attempt reader and the
 // grader reader so the two can never disagree about what a valid outcome is.
-function validateOutcome(parsed: unknown): OutcomeResult {
+// Spawn proposals are validated per proposal (ADR-0008): malformed entries
+// come back as spawnRejections and the attempt's own status stands.
+export function validateOutcome(parsed: unknown): OutcomeResult {
   const outcome = parsed as Partial<Outcome> | null;
   if (outcome?.status !== "done" && outcome?.status !== "checkpoint") {
     return { ok: false, reason: "outcome's status is not done or checkpoint" };
@@ -3237,6 +3324,7 @@ function validateOutcome(parsed: unknown): OutcomeResult {
   if (typeof outcome.summary !== "string") {
     return { ok: false, reason: "outcome has no summary string" };
   }
+  const spawn = validateSpawnProposals(outcome.spawn);
   return {
     ok: true,
     outcome: {
@@ -3244,7 +3332,11 @@ function validateOutcome(parsed: unknown): OutcomeResult {
       summary: outcome.summary,
       commitSha: typeof outcome.commitSha === "string" ? outcome.commitSha : null,
       ...(typeof outcome.brief === "string" ? { brief: outcome.brief } : {}),
+      ...(outcome.spawn !== undefined ? { spawn: spawn.proposals } : {}),
     },
+    ...(spawn.rejections.length > 0
+      ? { spawnRejections: spawn.rejections }
+      : {}),
   };
 }
 

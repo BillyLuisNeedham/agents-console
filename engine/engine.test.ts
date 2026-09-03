@@ -16,6 +16,7 @@ import {
   resolveAssignment,
   runPool,
   startPool,
+  validateOutcome,
   type HarnessCommand,
   type PoolConfig,
   type PoolRun,
@@ -72,6 +73,7 @@ interface StubBehaviour {
   outcome?: { summary: string; commitSha: string | null } | null;
   outcomeRaw?: string;
   brief?: string;
+  spawn?: unknown;
   grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
   winner?: number | string;
   exitCode?: number;
@@ -137,6 +139,7 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
                 commitSha: `sha-${ctx.id}`,
               }),
               ...(b.brief !== undefined ? { brief: b.brief } : {}),
+              ...(b.spawn !== undefined ? { spawn: b.spawn } : {}),
               ...(b.grade !== undefined ? { grade: b.grade } : {}),
               ...(b.winner !== undefined ? { winner: b.winner } : {}),
             });
@@ -3916,6 +3919,234 @@ describe("outcome contract", () => {
     expect(second.interrupts).toEqual([
       { ticketId: "01", kind: "checkpoint", body: "pick a name" },
     ]);
+  });
+});
+
+describe("outcome spawn schema", () => {
+  // ADR-0008: an Outcome may carry an optional spawn array of follow-up
+  // ticket proposals. Validation is per proposal, never per attempt: a
+  // malformed entry is rejected with a reason while the attempt's own
+  // done/checkpoint stands, so the schema tests go through the exported
+  // validateOutcome and the behaviour tests through the stub harness.
+
+  const oneTicket = (): string =>
+    makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+  const goodBody = "A body long enough to stand as a ticket.";
+
+  function okOutcome(result: ReturnType<typeof validateOutcome>) {
+    if (!result.ok) {
+      throw new Error(`expected a valid outcome, got: ${result.reason}`);
+    }
+    return result;
+  }
+
+  it("accepts a spawn array and preserves each proposal's shape", () => {
+    const spawn = [
+      {
+        title: "Follow up",
+        body: goodBody,
+        blockedBy: ["02"],
+      },
+      {
+        title: "No blockers",
+        body: goodBody,
+        blockedBy: [],
+      },
+      {
+        title: "Blockers omitted",
+        body: goodBody,
+      },
+    ];
+
+    const result = okOutcome(
+      validateOutcome({ status: "done", summary: "s", commitSha: "abc", spawn }),
+    );
+
+    expect(result.outcome.spawn).toEqual(spawn);
+    expect(result.spawnRejections).toBeUndefined();
+    const [, , omitted] = result.outcome.spawn ?? [];
+    expect(Object.keys(omitted ?? {})).toEqual(["title", "body"]);
+  });
+
+  it("keeps an empty spawn array without rejections", () => {
+    const result = okOutcome(
+      validateOutcome({ status: "done", summary: "s", commitSha: null, spawn: [] }),
+    );
+
+    expect(result.outcome.spawn).toEqual([]);
+    expect(result.spawnRejections).toBeUndefined();
+  });
+
+  it("rejects a spawn key that is not an array", () => {
+    const result = okOutcome(
+      validateOutcome({ status: "done", summary: "s", commitSha: null, spawn: "yes" }),
+    );
+
+    expect(result.outcome.spawn).toEqual([]);
+    expect(result.spawnRejections).toEqual([{ reason: "spawn is not an array" }]);
+  });
+
+  it("rejects a malformed spawn entry per proposal with a clear reason", () => {
+    const cases: { entry: unknown; reason: string }[] = [
+      {
+        entry: { body: goodBody },
+        reason: "proposal has no title",
+      },
+      {
+        entry: { title: "   ", body: goodBody },
+        reason: "proposal has no title",
+      },
+      {
+        entry: { title: "No body" },
+        reason: "proposal body is missing or thin (needs 20+ characters)",
+      },
+      {
+        entry: { title: "No body", body: "   " },
+        reason: "proposal body is missing or thin (needs 20+ characters)",
+      },
+      {
+        entry: { title: "Thin", body: "too thin" },
+        reason: "proposal body is missing or thin (needs 20+ characters)",
+      },
+      {
+        entry: { title: "T", body: goodBody, blockedBy: "02" },
+        reason: "proposal's blockedBy is not a list of strings",
+      },
+      {
+        entry: { title: "T", body: goodBody, blockedBy: [1] },
+        reason: "proposal's blockedBy is not a list of strings",
+      },
+      {
+        entry: { title: "T", body: goodBody, blockedBy: null },
+        reason: "proposal's blockedBy is not a list of strings",
+      },
+      {
+        entry: 42,
+        reason: "spawn entry is not an object",
+      },
+      {
+        entry: null,
+        reason: "spawn entry is not an object",
+      },
+      {
+        entry: ["x"],
+        reason: "spawn entry is not an object",
+      },
+    ];
+
+    for (const { entry, reason } of cases) {
+      const result = okOutcome(
+        validateOutcome({ status: "done", summary: "s", commitSha: null, spawn: [entry] }),
+      );
+
+      expect(result.outcome.spawn).toEqual([]);
+      expect(result.spawnRejections).toEqual([{ index: 0, reason }]);
+    }
+  });
+
+  it("keeps the well-formed entries around a malformed one, naming the bad index", () => {
+    const good = { title: "Follow up", body: goodBody };
+
+    const result = okOutcome(
+      validateOutcome({
+        status: "done",
+        summary: "s",
+        commitSha: null,
+        spawn: [good, { title: "Thin" }, good],
+      }),
+    );
+
+    expect(result.outcome.spawn).toEqual([good, good]);
+    expect(result.spawnRejections).toEqual([
+      { index: 1, reason: "proposal body is missing or thin (needs 20+ characters)" },
+    ]);
+  });
+
+  it("passes an outcome with no spawn key byte-for-byte as today", () => {
+    const done = okOutcome(
+      validateOutcome({ status: "done", summary: "s", commitSha: null }),
+    );
+
+    expect(done.outcome).toEqual({ status: "done", summary: "s", commitSha: null });
+    expect("spawn" in done.outcome).toBe(false);
+    expect(done.spawnRejections).toBeUndefined();
+
+    const checkpoint = okOutcome(
+      validateOutcome({ status: "checkpoint", summary: "s", brief: "b" }),
+    );
+
+    expect(checkpoint.outcome).toEqual({
+      status: "checkpoint",
+      summary: "s",
+      commitSha: null,
+      brief: "b",
+    });
+    expect("spawn" in checkpoint.outcome).toBe(false);
+  });
+
+  it("carries a valid spawn array through a done attempt untouched", async () => {
+    const poolDir = oneTicket();
+    const spawn = [
+      { title: "Follow up", body: goodBody, blockedBy: ["02"] },
+    ];
+    const rig = stubHarness({ "01": { spawn } });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
+    expect(run.final.outcomes["01"]).toEqual({
+      status: "done",
+      summary: "summary-01",
+      commitSha: "sha-01",
+      spawn,
+    });
+  });
+
+  it("keeps a done attempt's result when one spawn entry is malformed", async () => {
+    const poolDir = oneTicket();
+    const good = { title: "Follow up", body: goodBody };
+    const rig = stubHarness({ "01": { spawn: [good, { title: "Thin" }] } });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
+    const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited");
+    expect(exited?.payload).toEqual({ code: 0, status: "done" });
+    expect(run.final.outcomes["01"]?.spawn).toEqual([good]);
+  });
+
+  it("raises the checkpoint interrupt unchanged when a checkpoint outcome carries spawn", async () => {
+    const poolDir = oneTicket();
+    const rig = stubHarness({
+      "01": {
+        status: "checkpoint",
+        brief: "pick a name",
+        spawn: [{ title: "Follow up", body: goodBody }],
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toEqual([
+      { ticketId: "01", kind: "checkpoint", body: "pick a name" },
+    ]);
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=checkpoint");
   });
 });
 
