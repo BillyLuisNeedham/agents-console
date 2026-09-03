@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 
-export class CheckpointStore {
+// The checkpoint store seam (spec no-silent-dead-drives): the pool takes any
+// object with this shape at start, so a test can substitute a store whose
+// write throws on demand. The drive treats a failed write as recoverable,
+// never as a reason to close the store.
+export interface CheckpointStore {
+  write(state: unknown): void;
+  latest(): unknown | null;
+  close(): void;
+}
+
+export class SqliteCheckpointStore implements CheckpointStore {
   private db: Database;
 
   constructor(poolDir: string) {
