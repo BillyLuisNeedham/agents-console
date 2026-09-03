@@ -705,9 +705,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       poolDir,
       harnesses,
       onSnapshot: (snapshot) => {
-      refreshMeta();
-      broadcast(enrich(snapshot, meta, poolName));
-    },
+        refreshMeta();
+        broadcast(enrich(snapshot, meta, poolName));
+      },
     });
     return latest!;
   }
