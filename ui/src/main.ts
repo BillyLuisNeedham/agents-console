@@ -15,6 +15,7 @@ import {
   projectDetail,
   projectDetailTabs,
   projectLogPane,
+  projectNeedsInput,
   projectPool,
   projectTimeline,
   selectLogAttempt,
@@ -87,8 +88,15 @@ const logPane = new LogPane({
 
 // The per-session view state: selection, dragged card positions, panel
 // width, drawer height, and note drafts, owned by the canvas, detail, and
-// drawers modules and composed here once for the session.
-const consoleView = new ConsoleView();
+// drawers modules and composed here once for the session. The tray's answer
+// seam resolves on accept and rejects on failure so the tray marks its own
+// row; the Detail keeps its fire-and-forget onAnswer below with the global
+// banner.
+const consoleView = new ConsoleView({
+  onAnswer: (ticketId, action, note) =>
+    client.answer(ticketId, action, note).then(setSnapshot),
+  onChange: () => render(),
+});
 
 // The latest grade per ticket, for the card summaries. Module scope so a
 // full-DOM rebuild never drops it; refetched on the snapshot cadence like the
@@ -271,6 +279,7 @@ function model(): AppModel {
           logIsCurrent ? logPane.state.error : null,
         )
       : null,
+    needsInput: state.snapshot ? projectNeedsInput(state.snapshot) : [],
   };
 }
 

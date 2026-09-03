@@ -774,6 +774,81 @@ export function projectDetail(
 }
 
 // ---------------------------------------------------------------------------
+// Needs input tray
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the Needs input tray: a pending Interrupt with the card it
+ * selects, projected in card order. `ticketId` is who the interrupt is
+ * raised against (the answer and note-draft key); `label` is what the row
+ * shows (the ticket id, or the utility card's label for the final Review).
+ */
+export interface NeedsInputRow {
+  cardId: string;
+  ticketId: string;
+  label: string;
+  /** The ticket's title; null for a utility row. */
+  title: string | null;
+  interrupt: InterruptView;
+}
+
+/**
+ * The Needs input tray's rows: one per card holding an unresolved Interrupt,
+ * in card order, so the tray and the canvas agree. Each interrupt carries
+ * its form (the shared interrupt-form config, unknown kinds falling back to
+ * a plain resume form) and its queued flag, exactly as the cards project it.
+ * A pure projection of the snapshot: no new data source, the tray reads what
+ * the cards read.
+ */
+export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
+  const rows: NeedsInputRow[] = [];
+  for (const card of projectPool(snapshot).cards) {
+    if (!card.interrupt) continue;
+    rows.push(
+      card.kind === "ticket"
+        ? {
+            cardId: card.id,
+            ticketId: card.ticketId,
+            label: card.ticketId,
+            title: card.title,
+            interrupt: card.interrupt,
+          }
+        : {
+            cardId: card.id,
+            ticketId: card.interrupt.ticketId,
+            label: card.label,
+            title: null,
+            interrupt: card.interrupt,
+          },
+    );
+  }
+  return rows;
+}
+
+/**
+ * True when a row's interrupt form is the single-action resume shape the
+ * tray's bulk action covers: the resume kinds (checkpoint, crash, deadlock,
+ * merge-conflict) and an unknown kind's plain resume fallback. Review and
+ * merge-approval rows carry two actions and are answered individually.
+ */
+export function isResumeKindRow(row: NeedsInputRow): boolean {
+  return (
+    row.interrupt.form.actions.length === 1 &&
+    row.interrupt.form.actions[0].action === "resume"
+  );
+}
+
+/**
+ * The rows the tray's "resume all" fires: the open (not yet
+ * answered-and-waiting) resume-kind rows, in row order. Rows whose answer is
+ * already queued, and rows the operator answers individually (review and
+ * merge-approval), stay out of the bulk fire and out of its count.
+ */
+export function bulkResumeRows(rows: NeedsInputRow[]): NeedsInputRow[] {
+  return rows.filter((row) => !row.interrupt.queued && isResumeKindRow(row));
+}
+
+// ---------------------------------------------------------------------------
 // Detail tab default
 // ---------------------------------------------------------------------------
 
