@@ -280,18 +280,34 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   };
 }
 
-function readyTickets(
-  markers: TicketMarker[],
-  tickets: PoolState["tickets"],
+// The ready set's one home (ticket 01, the seam ADR-0012's merge hold stands
+// on): the single entry point every scheduling flow computes its spawn set
+// through. A flow proposes the tickets it intends to spawn and spawns only
+// what the entry point hands back. The main scheduling loop proposes the
+// pool's markers and schedules the ready set that returns: ordinary tickets
+// whose marker is ready and whose blockers are all done. Grader tickets and
+// the head-to-head ticket are engine-run (they are spawned at the grading or
+// selection point of their build ticket's fan-out, which the ready rule can
+// never express, since the build ticket stays in-progress until selection),
+// so a pool-wide proposal never schedules them as ordinary implement
+// tickets, however stale and ready their card. The verify flow proposes the
+// grader tickets a round is about to run, and the selection run proposes the
+// head-to-head ticket it is about to spawn; those proposals are all engine
+// ids, already cleared by their own flow's context, so the entry point hands
+// them back untouched. The merge hold (ticket 02) is the one rule that
+// governs every proposal alike, and this function is the only place it will
+// live.
+function readySet(
+  session: Session,
+  candidates: TicketMarker[],
 ): TicketMarker[] {
-  return markers.filter(
+  // An engine-run flow's proposal is all judges, cleared where proposed.
+  if (candidates.every((marker) => engineTicketBuildId(marker.id))) {
+    return candidates;
+  }
+  const tickets = session.state.tickets;
+  return candidates.filter(
     (marker) =>
-      // Grader tickets and the head-to-head ticket are engine-run (they are
-      // spawned at the grading or selection point of their build ticket's
-      // fan-out, which the ready set can never express, since the build
-      // ticket stays in-progress until selection). Excluding them here keeps
-      // a stray ready engine card from ever being scheduled as an ordinary
-      // implement ticket.
       !engineTicketBuildId(marker.id) &&
       tickets[marker.id] === "ready" &&
       marker.blockedBy.every((id) => tickets[id] === "done"),
@@ -592,7 +608,11 @@ async function driveLoop(session: Session): Promise<void> {
     // check below, so adopted tickets schedule like any other and a pool
     // whose last outcome spawns never reports itself done early.
     adoptSpawnProposals(session);
-    const ready = readyTickets(session.markers, session.state.tickets);
+    // The super-step's spawn set routes through the one entry point
+    // (ticket 01): the loop schedules the ready set it hands back, and
+    // ADR-0012's merge hold (ticket 02) is the one rule that can withhold
+    // it.
+    const ready = readySet(session, session.markers);
     if (ready.length === 0) break;
     session.superStep += 1;
     // Every attempt this super-step spawns is numbered before any spawn,
@@ -795,10 +815,12 @@ async function driveLoop(session: Session): Promise<void> {
     // exited, the engine writes one grader ticket per attempt into the
     // pool and runs them through the ordinary assign machinery. Grader
     // tickets are real tickets on disk with the build ticket as their
-    // blocker, but they are never scheduled by the ready set: the build
-    // ticket stays in-progress until selection has chosen a winner, so
-    // the engine runs the graders itself here, the way it runs the merge
-    // resolver, and writes their statuses itself.
+    // blocker, but the main loop never schedules them from the ready set:
+    // the build ticket stays in-progress until selection has chosen a
+    // winner, so the engine runs the graders itself here, the way it runs
+    // the merge resolver, and writes their statuses itself. Their spawn
+    // set still routes through the one entry point (ticket 01), so the
+    // merge hold (ticket 02) pauses it with everything else.
     for (const marker of ready) {
       const assignment = session.assignments.get(marker.id)!;
       if (assignment.verify == null) continue;
@@ -2022,6 +2044,14 @@ async function runGraders(
     session.assignments.set(marker.id, assignment);
     return { marker, assignment, attempt, lastReason: "" };
   });
+  // The verify flow's spawn set routes through the one entry point
+  // (ticket 01): the round runs the graders the entry point hands back, and
+  // ADR-0012's merge hold (ticket 02) is the one rule that can withhold
+  // them. Today a cleared judge proposal always comes back whole.
+  const spawnable = readySet(session, pending.map((g) => g.marker));
+  pending = pending.filter((g) =>
+    spawnable.some((m) => m.id === g.marker.id),
+  );
   session.state = applyUpdate(session.state, {
     log: [
       `ticket ${build.id}: grading ${attempts.length} ` +
@@ -2063,45 +2093,52 @@ async function runGraders(
       return grades;
     }
     const respawn = round + 1;
-    pending = pending.map(({ marker, attempt, lastReason }) => {
-      // The re-spawn resolves its assignment fresh, so an operator's
-      // mid-run edit to console.json lands on the very next grader run.
-      const assignment = resolveEngineTicketAssignment(
-        session.state.config,
-        marker,
-        buildAssignment,
-        session.harnesses,
-      );
-      session.assignments.set(marker.id, assignment);
-      // The re-spawn marker and the schedule it opens share one attempt
-      // number: they are one lifecycle moment, and the fresh run's spawned
-      // event reads its attempt back from here.
-      const attemptNo = nextAttempt(session.runsDir, marker.id);
-      appendEvent(session.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt: attemptNo,
-        kind: "grader-respawn",
-        payload: {
-          build: build.id,
-          gradedAttempt: attempt,
-          reason: lastReason,
-          respawn,
-        },
+    // The re-spawn round's spawn set routes through the one entry point
+    // (ticket 01) like the initial one: only the graders it hands back run
+    // again, so the merge hold (ticket 02) pauses re-spawns from the same
+    // place it pauses every other spawn.
+    const respawnable = readySet(session, pending.map((g) => g.marker));
+    pending = pending
+      .filter((g) => respawnable.some((m) => m.id === g.marker.id))
+      .map(({ marker, attempt, lastReason }) => {
+        // The re-spawn resolves its assignment fresh, so an operator's
+        // mid-run edit to console.json lands on the very next grader run.
+        const assignment = resolveEngineTicketAssignment(
+          session.state.config,
+          marker,
+          buildAssignment,
+          session.harnesses,
+        );
+        session.assignments.set(marker.id, assignment);
+        // The re-spawn marker and the schedule it opens share one attempt
+        // number: they are one lifecycle moment, and the fresh run's spawned
+        // event reads its attempt back from here.
+        const attemptNo = nextAttempt(session.runsDir, marker.id);
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt: attemptNo,
+          kind: "grader-respawn",
+          payload: {
+            build: build.id,
+            gradedAttempt: attempt,
+            reason: lastReason,
+            respawn,
+          },
+        });
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt: attemptNo,
+          kind: "scheduled",
+          payload: {},
+        });
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${build.id}: re-spawning grader ${marker.id} for attempt ` +
+              `${attempt} (respawn ${respawn} of ${GRADER_RESPAWN_LIMIT})`,
+          ],
+        });
+        return { marker, assignment, attempt, lastReason };
       });
-      appendEvent(session.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt: attemptNo,
-        kind: "scheduled",
-        payload: {},
-      });
-      session.state = applyUpdate(session.state, {
-        log: [
-          `ticket ${build.id}: re-spawning grader ${marker.id} for attempt ` +
-            `${attempt} (respawn ${respawn} of ${GRADER_RESPAWN_LIMIT})`,
-        ],
-      });
-      return { marker, assignment, attempt, lastReason };
-    });
     emit("running");
   }
 }
@@ -2973,9 +3010,15 @@ async function runHeadToHead(
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
   session.markers = loadPoolMarkers(session.issuesDir);
   const h2h = session.markers.find((m) => m.id === h2hId)!;
+  // The selection run's spawn set routes through the one entry point
+  // (ticket 01): the run spawns the judge the entry point hands back, and
+  // ADR-0012's merge hold (ticket 02) is the one rule that can withhold it.
+  // Today a cleared judge proposal always comes back whole; teaching the
+  // withheld run its behavior is ticket 02's.
+  const [judge] = readySet(session, [h2h]);
   const assignment = resolveEngineTicketAssignment(
     session.state.config,
-    h2h,
+    judge,
     session.assignments.get(build.id)!,
     session.harnesses,
   );
@@ -2995,8 +3038,8 @@ async function runHeadToHead(
         `${top.attempt} and ${runnerUp.attempt}`,
     ],
   });
-  writeMarkerStatus(h2h.file, "in-progress");
-  h2h.status = "in-progress";
+  writeMarkerStatus(judge.file, "in-progress");
+  judge.status = "in-progress";
   emit("running");
   // As in runGrader: the judge starts with no outcome, so a stale file from
   // a previous round can never pass for this round's pick.
@@ -3037,7 +3080,7 @@ async function runHeadToHead(
   });
   const ctx: SpawnContext = {
     id: h2hId,
-    issuePath: h2h.file,
+    issuePath: judge.file,
     body: prompt,
     driver: HEAD_TO_HEAD_DRIVER,
     harness: assignment.harness,
@@ -3079,8 +3122,8 @@ async function runHeadToHead(
       payload: { code: exitCode, reason: verdict.reason },
     });
   }
-  writeMarkerStatus(h2h.file, "done");
-  h2h.status = "done";
+  writeMarkerStatus(judge.file, "done");
+  judge.status = "done";
   const update: PoolUpdate = {
     tickets: { [h2hId]: "done" as const },
     log: [
