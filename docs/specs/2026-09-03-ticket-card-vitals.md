@@ -3,7 +3,7 @@
 Closes #25. Decided by grilling 2026-09-03 after the prototype on branch
 `25-agent-activity-visualization` (Variant A won; Variants B and C rejected).
 Glossary term: **Vitals** (CONTEXT.md). Architectural shape recorded in
-ADR 0006 (vitals are client-polled worktree/log reads, not engine events).
+ADR 0010 (vitals are client-polled worktree/log reads, not engine events).
 
 ## Problem Statement
 
@@ -89,7 +89,7 @@ show nothing — the final diff is the merge.
 - **Visual language**: `+added` in the ok color, `−removed` in the removed/
   interrupt-adjacent color, existing CSS tokens only; footer sits at the bottom
   of the card, always on running cards once data exists.
-- **Glossary & ADR**: "Vitals" is in CONTEXT.md; ADR 0006 records why Vitals
+- **Glossary & ADR**: "Vitals" is in CONTEXT.md; ADR 0010 records why Vitals
   are client-polled rather than snapshot-driven. No other ADRs.
 
 ## Testing Decisions
