@@ -1,0 +1,61 @@
+.pasgB-dot {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 11px/1.4 var(--mono, ui-monospace, monospace);
+  color: #c9d1d9;
+}
+
+.pasgB-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.pasgB-model {
+  color: #8b949e;
+}
+
+.pasgB-legend {
+  position: fixed;
+  top: 56px;
+  left: 16px;
+  z-index: 9999;
+  background: #10141c;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font: 12px/1.7 var(--mono, ui-monospace, monospace);
+  color: #c9d1d9;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.pasgB-title {
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  margin-bottom: 6px;
+}
+
+.pasgB-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pasgB-harness {
+  color: #f2f2f2;
+}
+
+.pasgB-models {
+  color: #8b949e;
+}
+
+.pasgB-count {
+  margin-left: auto;
+  color: #6b7280;
+}

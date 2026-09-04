@@ -1,0 +1,31 @@
+.pasgA-badge {
+  margin-top: 6px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #161b26;
+  border: 1px solid #2a3140;
+  font: 11px/1.5 var(--mono, ui-monospace, monospace);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pasgA-pair {
+  color: #4cc2ff;
+}
+
+.pasgA-src {
+  color: #6b7280;
+}
+
+.pasgA-override {
+  border-color: #4cc2ff;
+}
+
+.pasgA-override .pasgA-src {
+  color: #4cc2ff;
+}
+
+.pasgA-inherited .pasgA-pair {
+  font-style: italic;
+}

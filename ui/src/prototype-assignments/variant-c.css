@@ -1,0 +1,67 @@
+.pasgC-panel {
+  position: fixed;
+  top: 56px;
+  left: 16px;
+  bottom: 70px;
+  z-index: 9999;
+  width: 460px;
+  overflow: auto;
+  background: #10141c;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font: 12px/1.6 var(--mono, ui-monospace, monospace);
+  color: #c9d1d9;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.pasgC-head {
+  color: #f2f2f2;
+  font-size: 14px;
+  margin-bottom: 2px;
+}
+
+.pasgC-summary {
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+
+.pasgC-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.pasgC-table th {
+  text-align: left;
+  color: #6b7280;
+  font-weight: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  padding: 4px 6px;
+  border-bottom: 1px solid #2a3140;
+}
+
+.pasgC-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #1b2230;
+}
+
+.pasgC-group td {
+  color: #4cc2ff;
+  padding-top: 10px;
+  border-bottom: 1px solid #2a3140;
+}
+
+.pasgC-id {
+  color: #f2f2f2;
+}
+
+.pasgC-drivers,
+.pasgC-src {
+  color: #8b949e;
+}
+
+.pasgC-override .pasgC-src {
+  color: #4cc2ff;
+}
