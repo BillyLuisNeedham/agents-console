@@ -105,13 +105,15 @@ describe("Vitals store", () => {
   });
 
   it("a slow response for one ticket never delays the others", async () => {
-    let releaseA: ((value: TicketActivityResponse) => void) | null = null;
+    const gate: { release: ((value: TicketActivityResponse) => void) | null } = {
+      release: null,
+    };
     const h = makeStore(
       { "01": "in-progress", "02": "in-progress" },
       (ticketId) =>
         ticketId === "01"
           ? new Promise<TicketActivityResponse>((resolve) => {
-              releaseA = resolve;
+              gate.release = resolve;
             })
           : Promise.resolve(response(true)),
     );
@@ -121,8 +123,8 @@ describe("Vitals store", () => {
     // polling every tick.
     expect(h.fetched.filter((id) => id === "01")).toHaveLength(1);
     expect(h.fetched.filter((id) => id === "02").length).toBeGreaterThanOrEqual(2);
-    expect(releaseA).not.toBeNull();
-    releaseA?.(response(false));
+    expect(gate.release).not.toBeNull();
+    gate.release?.(response(false));
   });
 
   it("refetches every candidate on each snapshot, re-arming stopped tickets", async () => {

@@ -55,6 +55,7 @@ import {
   type PoolTicketState,
   type TabOverride,
   type TicketActivityResponse,
+  type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
   type TicketEventsResponse,
@@ -1870,7 +1871,7 @@ describe("projectVitals", () => {
   });
 
   it("switches to idle past the 60s threshold", () => {
-    const staleAt = (age: number): { kind: string; copy: string } | undefined =>
+    const staleAt = (age: number) =>
       projectVitals(
         vitalsState({ lastEventAt: new Date(VITALS_NOW - age).toISOString(), log: null }),
         "in-progress",
@@ -1948,7 +1949,9 @@ describe("projectPool vitals", () => {
     };
     const view = projectPool(snap, {}, vitals, VITALS_NOW);
     const cardOf = (id: string) =>
-      view.cards.find((c) => c.kind === "ticket" && c.ticketId === id);
+      view.cards.find(
+        (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+      );
     expect(cardOf("01")?.vitals?.mode).toBe("live");
     expect(cardOf("01")?.vitals?.samples).toEqual([10, 20]);
     expect(cardOf("02")?.vitals?.mode).toBe("frozen");
