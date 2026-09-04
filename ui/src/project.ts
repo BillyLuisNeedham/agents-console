@@ -404,6 +404,141 @@ export function logAtBottom(
 }
 
 // ---------------------------------------------------------------------------
+// Vitals: the card footer's liveness readout (ADR 0010)
+// ---------------------------------------------------------------------------
+
+/** Under this age the staleness readout counts as fresh movement. */
+export const VITALS_FRESH_MS = 10_000;
+/** Silence past this age reads as idle, in the interrupt color. */
+export const VITALS_IDLE_MS = 60_000;
+/** The sparkline holds at most this many per-poll diff-total samples. */
+export const VITALS_MAX_SAMPLES = 40;
+
+export type VitalsMode = "live" | "frozen";
+
+export interface VitalsDiffView {
+  added: number;
+  removed: number;
+  fileCount: number;
+}
+
+export interface VitalsStalenessView {
+  kind: "changed" | "output" | "idle";
+  /** Under VITALS_FRESH_MS the readout reads as moving. */
+  fresh: boolean;
+  copy: string;
+}
+
+export interface VitalsView {
+  mode: VitalsMode;
+  /** Totals for the `+a −r · N files` readout; null reads "no changes yet". */
+  diff: VitalsDiffView | null;
+  staleness: VitalsStalenessView | null;
+  /** Diff total per poll, oldest first, capped at VITALS_MAX_SAMPLES. */
+  samples: number[];
+}
+
+/** One ticket's held vitals: the latest activity payload and its samples. */
+export interface VitalsState {
+  activity: TicketActivityResponse;
+  samples: number[];
+}
+
+function vitalsAgoCopy(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s ago`;
+  return `${Math.floor(s / 60)}m ${s % 60}s ago`;
+}
+
+function vitalsIdleCopy(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
+/**
+ * The next sparkline sample list: one push per poll of the activity endpoint,
+ * capped at the last VITALS_MAX_SAMPLES samples (~80s at the 2s cadence).
+ * Pure; the store holds the list between polls.
+ */
+export function pushVitalsSample(samples: number[], total: number): number[] {
+  const next = [...samples, total];
+  return next.length > VITALS_MAX_SAMPLES
+    ? next.slice(next.length - VITALS_MAX_SAMPLES)
+    : next;
+}
+
+/**
+ * A card's vitals view from (activity payload, ticket status, now): live on
+ * an attempt that is running, including a resolver in flight on a
+ * checkpointed merge (which the response's running flag already means),
+ * frozen on a checkpoint whose latest response says nothing is live, and
+ * hidden for done and ready tickets, for an in-progress ticket that is not
+ * running (a crashed attempt parked at in-progress is not live work), and
+ * whenever no payload has arrived: the no-empty-flash rule.
+ */
+export function projectVitals(
+  input: VitalsState | null,
+  status: PoolStatus,
+  now: number,
+): VitalsView | null {
+  if (!input) return null;
+  if (status === "done" || status === "ready") return null;
+  const live = input.activity.running;
+  if (status === "in-progress" && !live) return null;
+  const diff = input.activity.diff;
+  return {
+    mode: live ? "live" : "frozen",
+    diff:
+      diff && diff.added + diff.removed > 0
+        ? { added: diff.added, removed: diff.removed, fileCount: diff.files.length }
+        : null,
+    staleness: projectStaleness(input.activity, now, live ? "live" : "frozen"),
+    samples: input.samples,
+  };
+}
+
+/**
+ * The staleness readout, anchored to the newest observable moment: the
+ * ticket's last engine event ("changed") or the attempt log's last write
+ * ("output"). Past VITALS_IDLE_MS of silence a live readout goes
+ * `idle Xm Ys`; a frozen one keeps its `paused ·` copy and never idles,
+ * since a paused card is waiting on the operator, not a stuck agent.
+ */
+function projectStaleness(
+  activity: TicketActivityResponse,
+  now: number,
+  mode: VitalsMode,
+): VitalsStalenessView | null {
+  const anchors: { at: number; kind: "changed" | "output" }[] = [];
+  const eventAt = activity.lastEventAt
+    ? Date.parse(activity.lastEventAt)
+    : Number.NaN;
+  if (!Number.isNaN(eventAt)) anchors.push({ at: eventAt, kind: "changed" });
+  const logAt = activity.log ? Date.parse(activity.log.mtime) : Number.NaN;
+  if (!Number.isNaN(logAt)) anchors.push({ at: logAt, kind: "output" });
+  if (anchors.length === 0) return null;
+  anchors.sort((a, b) => b.at - a.at);
+  const newest = anchors[0];
+  const age = now - newest.at;
+  if (mode === "frozen") {
+    return {
+      kind: newest.kind,
+      fresh: false,
+      copy: `paused · ${newest.kind} ${vitalsAgoCopy(age)}`,
+    };
+  }
+  if (age > VITALS_IDLE_MS) {
+    return { kind: "idle", fresh: false, copy: `idle ${vitalsIdleCopy(age)}` };
+  }
+  return {
+    kind: newest.kind,
+    fresh: age < VITALS_FRESH_MS,
+    copy: `${newest.kind} ${vitalsAgoCopy(age)}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // View model
 // ---------------------------------------------------------------------------
 
@@ -424,6 +559,10 @@ export interface TicketCardView {
   /** The ticket's latest grade, for the card summary. Null when ungraded:
    *  no grade UI renders at all, so there is no empty state. */
   grade: GradeView | null;
+  /** The Vitals footer's view data. Null whenever nothing should render:
+   *  done or ready tickets, a crashed attempt parked at in-progress, or no
+   *  activity payload yet (no empty flash before the first data lands). */
+  vitals: VitalsView | null;
   x: number;
   y: number;
 }
@@ -605,6 +744,8 @@ function projectTicket(
   state: PoolState,
   pos: Point,
   grade: GradeView | null,
+  vitals: VitalsState | null,
+  now: number,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
   return {
@@ -618,6 +759,7 @@ function projectTicket(
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,
+    vitals: projectVitals(vitals, ticket.status, now),
     x: pos.x,
     y: pos.y,
   };
@@ -645,6 +787,8 @@ function projectUtility(
 export function projectPool(
   snapshot: PoolSnapshot,
   grades: Record<string, GradeView> = {},
+  vitals: Record<string, VitalsState> = {},
+  now: number = Date.now(),
 ): PoolView {
   const tickets = snapshot.state.tickets;
   const positions = layoutPool(tickets);
@@ -656,6 +800,8 @@ export function projectPool(
         snapshot.state,
         positions[ticketCardId(ticket.id)],
         grades[ticket.id] ?? null,
+        vitals[ticket.id] ?? null,
+        now,
       ),
     ),
     projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),
