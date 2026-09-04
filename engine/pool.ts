@@ -20,7 +20,7 @@ export interface TicketMarker {
   /** The issue body after the title heading and its leading blank line. */
   spec: string;
   /**
-   * Set on engine-adopted spawn tickets (ADR-0008): the id of the ticket
+   * Set on engine-adopted spawn tickets (ADR-0010): the id of the ticket
    * whose attempt proposed this one. The engine writes the field; the
    * -spawn- namespace is reserved for files that carry it.
    */
@@ -97,7 +97,7 @@ export function writeMarkerStatus(file: string, status: TicketStatus): void {
   writeFileSync(file, lines.join(newline));
 }
 
-// The engine's own id convention for adopted spawn tickets (ADR-0008):
+// The engine's own id convention for adopted spawn tickets (ADR-0010):
 // `<parent-id>-spawn-N`, N counting per parent across the run. The namespace
 // is reserved alongside `-grader-N`: engine scheduling never treats a spawned
 // ticket specially (it is ordinary), but hand-written tickets may not use it.
@@ -133,7 +133,7 @@ export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
     if (marker.spawnedBy !== spawn.parent) {
       throw new Error(
         `pool load: ${marker.file}: the '-spawn-' id namespace is reserved ` +
-          "for engine-adopted tickets (ADR-0008); a hand-written ticket may " +
+          "for engine-adopted tickets (ADR-0010); a hand-written ticket may " +
           "not use it, and an adopted one carries spawned-by=" +
           `${spawn.parent} in its marker`,
       );

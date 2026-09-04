@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
   resolveAssignment,
   runPool,
@@ -21,6 +22,7 @@ import {
   type PoolConfig,
   type PoolRun,
 } from "./engine.ts";
+import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
 import { appendEvent } from "./events.ts";
 import { loadPoolMarkers } from "./pool.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
@@ -2547,6 +2549,70 @@ describe("super-steps", () => {
   });
 });
 
+// The spawn pump grace: a harness child that exits while a grandchild still
+// holds its stdout pipe would park the drive forever on an EOF that never
+// comes. The teardown bound turns the parked wait into a bounded drain, and
+// the drive proceeds to the next super-step.
+describe("spawn pump teardown", () => {
+  it("returns from a child whose grandchild holds its stdout pipe and runs the next super-step", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const holderPath = join(poolDir, "pipe-holder.sh");
+    writeFileSync(
+      holderPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome_path="$1"',
+        // The grandchild inherits the harness's stdout, writes one line
+        // inside the grace window, then outlives the run on purpose: an
+        // unbounded pump would park on its open pipe and blow the time
+        // bound below.
+        "bash -c 'sleep 0.3; echo late-output-from-grandchild; sleep 30' &",
+        'printf \'%s\' \'{"status":"done","summary":"held the pipe","commitSha":"sha-01"}\' > "$outcome_path"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const rig = stubHarness({});
+    const harnesses: Record<string, HarnessCommand> = {
+      stub: (ctx) =>
+        ctx.id === "01"
+          ? ["bash", holderPath, ctx.outcomePath]
+          : rig.harnesses.stub(ctx),
+    };
+
+    const started = Date.now();
+    const first = await runPool({ poolDir, harnesses });
+    // The bounded grace, not the grandchild's patience, returns the spawn:
+    // an unbounded pump would sit on the still-open pipe for the 30s the
+    // grandchild lives.
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    const run = await approveReview(first);
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.final.log).toContain("super-step 2: 02");
+    // The grandchild's line landed inside the grace window, so the attempt
+    // log still captured it.
+    expect(readFileSync(join(poolDir, "runs", "01.log"), "utf8")).toContain(
+      "late-output-from-grandchild",
+    );
+  }, 15000);
+});
+
 describe("ticket events", () => {
   interface EventLine {
     at: string;
@@ -3227,18 +3293,282 @@ describe("checkpoints", () => {
       .all() as { state: string }[];
     db.close();
 
-    // Two super-step joins, the review gate, the quiescent final, and the
-    // approval's done final.
-    expect(rows.length).toBe(5);
+    // Two super-step joins, the review gate, the quiescent final, the
+    // approval's own persist (a processed answer persists its state change),
+    // and the approval's done final.
+    expect(rows.length).toBe(6);
     const first = JSON.parse(rows[0].state);
     const second = JSON.parse(rows[1].state);
-    const terminal = JSON.parse(rows[4].state);
+    const approved = JSON.parse(rows[4].state);
+    const terminal = JSON.parse(rows[5].state);
     expect(first.tickets).toEqual({ "01": "done", "02": "ready" });
     expect(second.tickets).toEqual({ "01": "done", "02": "done" });
     expect(second.outcomes["01"].summary).toBe("summary-01");
+    expect(approved.interrupts).toEqual([]);
+    expect(approved.reviewApproved).toBe(true);
     expect(terminal.log.at(-1)).toBe("pool done: every ticket reached done");
     expect(terminal.reviewApproved).toBe(true);
     expect(run.snapshots.at(-1)?.phase).toBe("done");
+  });
+});
+
+describe("persist failures", () => {
+  // The substitutable-store seam: a real sqlite store wrapped in one whose
+  // write fails on demand. The wrapper counts every write attempt (failed or
+  // not) and every close, so a test can see the retries and prove a persist
+  // failure never closed the store.
+  class FlakyStore implements CheckpointStore {
+    writeAttempts = 0;
+    closeCalls = 0;
+    private inner: CheckpointStore;
+    constructor(
+      poolDir: string,
+      public failWritesLeft: number,
+    ) {
+      this.inner = new SqliteCheckpointStore(poolDir);
+    }
+    write(state: unknown): void {
+      this.writeAttempts += 1;
+      if (this.failWritesLeft > 0) {
+        this.failWritesLeft -= 1;
+        throw new Error("db is down");
+      }
+      this.inner.write(state);
+    }
+    latest(): unknown | null {
+      return this.inner.latest();
+    }
+    close(): void {
+      this.closeCalls += 1;
+      this.inner.close();
+    }
+  }
+
+  function checkpointRows(poolDir: string): { state: string }[] {
+    const db = new Database(join(poolDir, "console.db"), { readonly: true });
+    const rows = db
+      .query("SELECT state FROM checkpoints ORDER BY seq")
+      .all() as { state: string }[];
+    db.close();
+    return rows;
+  }
+
+  it("retries a failed boundary persist and recovers: the next ticket is scheduled and the row lands", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    // The first write attempt throws; the retry lands the row and the run
+    // carries on as if nothing happened.
+    const store = new FlakyStore(poolDir, 1);
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses, store }),
+    );
+
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(run.phase).toBe("done");
+    // Six healthy persists in a run to done: the failed boundary's retry,
+    // the second boundary, the review gate, the first drive's final, the
+    // answered-review drain persist, and the finished run's final. Plus the
+    // one failed boundary attempt that the retry recovered.
+    expect(store.writeAttempts).toBe(7);
+    const rows = checkpointRows(poolDir);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(JSON.parse(rows[0].state).tickets).toEqual({
+      "01": "done",
+      "02": "ready",
+    });
+  });
+
+  it("raises the persistence interrupt when the store keeps failing, and the store remains open", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts).toHaveLength(1);
+    expect(run.interrupts[0].ticketId).toBe(PERSISTENCE_TICKET_ID);
+    expect(run.interrupts[0].kind).toBe("persistence");
+    expect(run.interrupts[0].body).toContain("persistence is failing");
+    expect(run.interrupts[0].body).toContain("db is down");
+    // Ticket 01 ran; the failing boundary stopped any further scheduling.
+    expect(rig.spawnOrder).toEqual(["01"]);
+    // Bounded retries, not a forever loop: the boundary persist and the
+    // final settle each make four write attempts (1 + 3 backoff retries).
+    expect(store.writeAttempts).toBe(8);
+    // A persist failure never closes the checkpoint store.
+    expect(store.closeCalls).toBe(0);
+    expect(checkpointRows(poolDir)).toHaveLength(0);
+
+    // Once the store is healthy again, answering the interrupt continues
+    // the run: the next boundary write lands and the pool reaches Review.
+    store.failWritesLeft = 0;
+    const resumed = await run.resume(PERSISTENCE_TICKET_ID);
+    expect((await approveReview(resumed)).phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(checkpointRows(poolDir).length).toBeGreaterThan(0);
+  });
+
+  it("resumes cleanly from disk after a restart when the store kept failing", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses, store });
+    expect(first.phase).toBe("quiescent");
+    first.close();
+
+    // The markers were written before the store write failed, so disk says
+    // 01 done: restart-from-disk is the escape hatch, and 01 never re-runs.
+    expect(markerStatuses(poolDir, ["01-a.md", "02-b.md"])).toEqual({
+      "01": "done",
+      "02": "ready",
+    });
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect((await approveReview(second)).phase).toBe("done");
+  });
+
+  it("never reports dead for a persist failure the retry seam handles", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const store = new FlakyStore(poolDir, Infinity);
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
+
+    // The persistence interrupt is the outcome, exactly as ticket 01 left it:
+    // the run settles quiescent and no dead phase, dead error log, or pool
+    // dead line may appear.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.some((i) => i.kind === "persistence")).toBe(true);
+    expect(run.snapshots.map((s) => s.phase)).not.toContain("dead");
+    expect(run.final.log.some((line) => line.startsWith("pool dead"))).toBe(
+      false,
+    );
+    expect(existsSync(join(poolDir, "runs", "errors.jsonl"))).toBe(false);
+  });
+});
+
+describe("dead drives report themselves", () => {
+  // A harness command naming a binary that does not exist: Bun.spawn throws
+  // "Executable not found in $PATH" from inside the super-step, which is a
+  // genuine drive-killing error no catch along the way handles. The pool's
+  // config points its default harness ("stub") at it.
+  const killingHarnesses: Record<string, HarnessCommand> = {
+    stub: () => ["definitely-not-a-real-harness-binary"],
+  };
+
+  it("reports a drive-killing error through the shared mechanism: durable error log, pool log, and the terminal dead phase", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const run = startPool({ poolDir, harnesses: killingHarnesses });
+    // Registered synchronously, before the spawn's rejection can settle the
+    // drive: nextSettle only reports a past error through its waiters.
+    const settled = run.settled;
+
+    await expect(settled).rejects.toThrow(/Executable not found/);
+
+    // The terminal dead phase, emitted before the waiters were settled.
+    expect(run.phase).toBe("dead");
+    const phases = run.snapshots.map((s) => s.phase);
+    expect(phases.at(-1)).toBe("dead");
+    // Everything before the death is an ordinary running snapshot; the dead
+    // phase is the only terminal one the run ever emitted.
+    expect(phases.slice(0, -1).every((p) => p === "running")).toBe(true);
+
+    // The durable JSONL error log in the pool's runs directory: one line,
+    // naming the error, with a timestamp.
+    const errorsPath = join(poolDir, "runs", "errors.jsonl");
+    expect(existsSync(errorsPath)).toBe(true);
+    const lines = readFileSync(errorsPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const entry = JSON.parse(lines[0]) as { at: string; error: string };
+    expect(typeof entry.at).toBe("string");
+    expect(entry.error).toContain("definitely-not-a-real-harness-binary");
+
+    // The same error in the pool log, the Console log drawer's channel.
+    expect(run.final.log.at(-1)).toContain("pool dead:");
+    expect(run.final.log.at(-1)).toContain(
+      "definitely-not-a-real-harness-binary",
+    );
+  });
+
+  it("leaves restart-from-disk working after a dead drive", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+
+    const dead = startPool({ poolDir, harnesses: killingHarnesses });
+    await expect(dead.settled).rejects.toThrow(/Executable not found/);
+
+    // The escape hatch still works: a fresh run on the same pool directory
+    // rehydrates from the markers on disk (the dead attempt had marked the
+    // ticket in-progress, so restart resets it to ready) and runs to done.
+    const rig = stubHarness({});
+    const second = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect((await approveReview(second)).phase).toBe("done");
+    // The dead drive's error log survives the restart.
+    expect(existsSync(join(poolDir, "runs", "errors.jsonl"))).toBe(true);
   });
 });
 
@@ -3925,7 +4255,7 @@ describe("outcome contract", () => {
 });
 
 describe("outcome spawn schema", () => {
-  // ADR-0008: an Outcome may carry an optional spawn array of follow-up
+  // ADR-0010: an Outcome may carry an optional spawn array of follow-up
   // ticket proposals. Validation is per proposal, never per attempt: a
   // malformed entry is rejected with a reason while the attempt's own
   // done/checkpoint stands, so the schema tests go through the exported
@@ -4157,7 +4487,7 @@ describe("outcome spawn schema", () => {
 });
 
 describe("spawn adoption", () => {
-  // ADR-0008: the engine writes accepted proposals into the pool at the
+  // ADR-0010: the engine writes accepted proposals into the pool at the
   // super-step boundary as ordinary tickets, reloads markers and resolves
   // assignments, and the drive loop schedules them like any other ticket.
   // The behaviour is observable: ticket files on disk, events on the
@@ -5250,103 +5580,6 @@ describe("durability", () => {
     expect(rig.spawnOrder).toEqual(["02", "03"]);
   });
 
-  it("stays inspectable and continuable by run.sh after a part-run", async () => {
-    const poolDir = makePool({
-      tickets: [
-        {
-          file: "01-a.md",
-          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
-          body: "# 01\n\n## Brief\n\nneed a decision",
-        },
-        {
-          file: "02-b.md",
-          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
-        },
-        {
-          file: "03-c.md",
-          marker: "<!-- state: id=03 blocked-by=none status=ready -->",
-        },
-      ],
-      config: stubConfig,
-    });
-    const engine = await runPool({
-      poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
-    });
-    expect(engine.phase).toBe("quiescent");
-    engine.close();
-
-    const homeDir = join(poolDir, "home");
-    const binDir = join(poolDir, "bin");
-    mkdirSync(homeDir);
-    mkdirSync(binDir);
-    writeFileSync(
-      join(homeDir, ".issue-runner"),
-      "harness=claude\nmodel=stub-model\n",
-    );
-    writeFileSync(
-      join(binDir, "claude"),
-      [
-        "#!/usr/bin/env bash",
-        'prompt=""',
-        "while [ $# -gt 0 ]; do",
-        '  case "$1" in',
-        '    -p) prompt="$2"; shift 2 ;;',
-        "    *) shift ;;",
-        "  esac",
-        "done",
-        'rel="$(printf \'%s\' "$prompt" | head -1 | sed \'s|^/[^ ]* ||\')"',
-        'sed -i "1s/status=[a-z-]*/status=done/" "$rel"',
-        'echo "fake claude worked $rel"',
-        "",
-      ].join("\n"),
-    );
-    chmodSync(join(binDir, "claude"), 0o755);
-    writeFileSync(
-      join(poolDir, "run.sh"),
-      readFileSync(
-        join(import.meta.dir, "..", ".scratch", "console-pool", "run.sh"),
-        "utf8",
-      ),
-    );
-    const env = {
-      ...process.env,
-      HOME: homeDir,
-      PATH: `${binDir}:${process.env.PATH}`,
-    };
-    Bun.spawnSync(["git", "init"], { cwd: poolDir, stdout: "ignore", stderr: "ignore" });
-
-    const status = Bun.spawnSync(["bash", "run.sh", "status"], {
-      cwd: poolDir,
-      env,
-    });
-    const board = status.stdout.toString();
-    expect(status.exitCode).toBe(0);
-    expect(board).toMatch(/01\s+checkpoint/);
-    expect(board).toMatch(/02\s+ready/);
-    expect(board).toMatch(/03\s+done/);
-
-    const reset = Bun.spawnSync(["bash", "run.sh", "reset", "01"], {
-      cwd: poolDir,
-      env,
-    });
-    expect(reset.exitCode).toBe(0);
-
-    const continued = Bun.spawnSync(["bash", "run.sh"], {
-      cwd: poolDir,
-      env,
-    });
-    const output = continued.stdout.toString();
-    expect(continued.exitCode).toBe(0);
-    expect(output).toContain("fake claude worked issues/01-a.md");
-    expect(output).toContain("fake claude worked issues/02-b.md");
-    expect(output).not.toContain("fake claude worked issues/03-c.md");
-    expect(markerStatuses(poolDir, ["01-a.md", "02-b.md", "03-c.md"])).toEqual({
-      "01": "done",
-      "02": "done",
-      "03": "done",
-    });
-  });
 });
 
 // Worktree tests run the same public seam against pools that are real git
@@ -5923,6 +6156,73 @@ describe("worktrees", () => {
     expect(after.at(-1)?.kind).toBe("merged");
   }, 15000);
 
+  it("tears down a resolver spawn whose grandchild holds its pipe, still capturing late output", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    // The resolver reproduces the conflict, stages a resolution, and holds
+    // its stdout pipe open with a grandchild that outlives it: one line
+    // lands inside the grace window, then the grandchild exits by itself.
+    const holderPath = join(poolDir, "pipe-holder-resolver.sh");
+    writeFileSync(
+      holderPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome="$1"; worktree="$2"',
+        "bash -c 'sleep 0.3; echo resolver-late-output-from-grandchild; sleep 30' &",
+        'git -C "$worktree" merge main >/dev/null 2>&1 || true',
+        'printf \'%s\\n\' "resolved-by-resolver" > "$worktree/shared.txt"',
+        'git -C "$worktree" add shared.txt',
+        'printf \'%s\' \'{"resolved": true, "note": "staged by the pipe holder"}\' > "$outcome"',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const harnesses: Record<string, HarnessCommand> = {
+      ...rig.harnesses,
+      "resolver-stub": (ctx) => ["bash", holderPath, ctx.outcomePath, ctx.cwd],
+    };
+
+    // The comment above the ticket-spawn test's grandchild applies here too:
+    // the grandchild outlives the run, so only the bounded grace gets the
+    // resolver spawn back.
+    const started = Date.now();
+    const first = await runPool({ poolDir, harnesses });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const approval = first.interrupts.find((i) => i.kind === "merge-approval");
+    expect(approval).toBeTruthy();
+    expect(approval!.body).toContain("staged by the pipe holder");
+
+    const done = await approveReview(await first.approve("02"));
+    expect(done.phase).toBe("done");
+
+    // The resolver's log captured the grandchild's line that landed inside
+    // the grace window, and the drive did not park on the open pipe.
+    expect(
+      readFileSync(join(poolDir, "runs", "02.resolver.log"), "utf8"),
+    ).toContain("resolver-late-output-from-grandchild");
+  }, 15000);
+
   it("spawns the resolver on a conflict, raises an approval interrupt, and approve commits the merge and continues", async () => {
     const { poolDir, git } = makeGitPool(
       {
@@ -6168,6 +6468,53 @@ describe("worktrees", () => {
     expect(resolver.spawnOrder).toEqual(["02"]);
   }, 15000);
 
+  it("pins the resolver's own model when resolver= is the { harness, model } form", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: {
+          ...stubConfig,
+          resolver: { harness: "resolver-stub", model: "resolver-model" },
+        },
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "pinned-resolved",
+        note: "via pinned model",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+    expect(resolver.spawnOrder).toEqual(["02"]);
+    // The defaults' model ("stub-model") belongs to the stub harness; the
+    // resolver runs on resolver-stub and must spawn with its own model.
+    expect(resolver.spawned["02"].model).toBe("resolver-model");
+  }, 15000);
+
   it("fails fast when an explicit resolver names an unknown harness", async () => {
     const { poolDir } = makeGitPool(
       {
@@ -6347,9 +6694,11 @@ describe("accept/process split", () => {
   // sentinel file appears, so a test can keep a super-step in flight while it
   // answers an interrupt. Every other ticket takes the instant path. A ticket
   // can also fail: exitCode exits non-zero, and a status that is not done or
-  // checkpoint writes no outcome at all.
+  // checkpoint writes no outcome at all. `blocks` gates per attempt (a
+  // resumed ticket can hold its next super-step), and `sentinel` gives one
+  // ticket its own release file.
   function blockingHarness(
-    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; exitCode?: number; brief?: string }>,
+    behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; blocks?: boolean[]; exitCode?: number; brief?: string; sentinel?: string }>,
     sentinel: string,
   ): StubRig {
     const poolLocal = tempDirs[tempDirs.length - 1];
@@ -6383,6 +6732,9 @@ describe("accept/process split", () => {
       const b = behaviour[ctx.id] ?? {};
       const statuses = b.statuses ?? (["done"] as const);
       const status = statuses[Math.min(n, statuses.length - 1)];
+      const block = b.blocks
+        ? b.blocks[Math.min(n, b.blocks.length - 1)]
+        : b.block;
       const outcome =
         status === "done" || status === "checkpoint"
           ? JSON.stringify({
@@ -6398,8 +6750,8 @@ describe("accept/process split", () => {
         ctx.issuePath,
         status,
         ctx.outcomePath,
-        b.block ? "block" : "-",
-        sentinel,
+        block ? "block" : "-",
+        b.sentinel ?? sentinel,
         String(b.exitCode ?? 0),
         outcome,
       ];
@@ -6491,6 +6843,76 @@ describe("accept/process split", () => {
     // The answered event precedes the attempt it unblocked in the ticket log.
     const kinds01 = readEventsFile(poolDir, "01").map((e) => e.kind);
     expect(kinds01.indexOf("answered")).toBeLessThan(kinds01.lastIndexOf("spawned"));
+    expect(readQueuedAnswers(poolDir).answers.every((a) => a.processedAt !== null)).toBe(true);
+  }, 15000);
+
+  it("persists drained answers before the next super-step is scheduled", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+        { file: "04-d.md", marker: "<!-- state: id=04 blocked-by=03 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const release = join(poolDir, "release-03");
+    const hold = join(poolDir, "hold-resumed");
+    const rig = blockingHarness(
+      {
+        "01": { statuses: ["checkpoint", "done"], blocks: [false, true], sentinel: hold },
+        "02": { statuses: ["checkpoint", "done"], blocks: [false, true], sentinel: hold },
+        "03": { statuses: ["done"], block: true },
+        "04": { statuses: ["done"] },
+      },
+      release,
+    );
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(
+      () =>
+        rig.spawned["03"] !== undefined &&
+        run.interrupts.some((i) => i.ticketId === "01") &&
+        run.interrupts.some((i) => i.ticketId === "02"),
+      "ticket 03 spawned with interrupts pending for 01 and 02",
+    );
+
+    const first = run.resume("02", "answered first");
+    const second = run.resume("01", "answered second");
+
+    // Release the held super-step: its boundary drains both answers and the
+    // next super-step spawns the resumed tickets, which block again. While
+    // that super-step is in flight, the answered state must already be on
+    // disk: the drain persisted it before scheduling, so a kill here cannot
+    // leave the resume in memory only.
+    writeFileSync(release, "go");
+    await waitFor(
+      () => rig.spawnOrder.filter((id) => id === "01").length === 2,
+      "resumed ticket 01 spawned into the next super-step",
+    );
+    const db = new Database(join(poolDir, "console.db"));
+    const rows = db
+      .query("SELECT state FROM checkpoints ORDER BY seq DESC LIMIT 1")
+      .all() as { state: string }[];
+    db.close();
+    const persisted = JSON.parse(rows.at(-1)!.state) as {
+      tickets: Record<string, string>;
+      interrupts: { ticketId: string }[];
+      log: string[];
+    };
+    expect(persisted.tickets["01"]).toBe("ready");
+    expect(persisted.tickets["02"]).toBe("ready");
+    expect(persisted.interrupts).toEqual([]);
+    expect(persisted.log).toContain("interrupt answered for 02 (checkpoint): resumed");
+    expect(persisted.log).toContain("interrupt answered for 01 (checkpoint): resumed");
+
+    writeFileSync(hold, "go");
+    await run.settled;
+    await first;
+    await second;
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(rig.spawnOrder).toEqual(["01", "02", "03", "01", "02", "04"]);
     expect(readQueuedAnswers(poolDir).answers.every((a) => a.processedAt !== null)).toBe(true);
   }, 15000);
 
@@ -6631,6 +7053,107 @@ describe("accept/process split", () => {
     expect(issueText).toContain("## Resume note");
     expect(issueText).toContain("the name is Foo");
   });
+
+  it("keeps an answered interrupt durable across a kill before the next super-step", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=ready -->",
+          body: "# 01\n\n## Brief\n\npick a name",
+        },
+        {
+          file: "02-b.md",
+          marker: "<!-- state: id=02 blocked-by=01 status=ready -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const sentinel = join(poolDir, "release-01");
+    // Attempt 1 of 01 checkpoints; its resume attempt holds the super-step
+    // open on the sentinel, so the kill lands between the processed answer
+    // and the next super-step's join. The attempt-1 log only exists once a
+    // re-run rotated it, which marks the resume attempt as spawned.
+    writeFileSync(
+      join(poolDir, "agent.sh"),
+      [
+        "#!/usr/bin/env bash",
+        'issue="$1"; id="$2"; outcome_path="$3"; pool="$4"; sentinel="$5"',
+        'if [ "$id" = "01" ]; then',
+        '  if [ ! -f "$pool/runs/01.attempt-1.log" ]; then',
+        '    printf \'%s\' \'{"status":"checkpoint","summary":"need a name","commitSha":null,"brief":"pick a name"}\' > "$outcome_path"',
+        "    exit 0",
+        "  fi",
+        '  while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+        "  exit 0",
+        "fi",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(poolDir, "fixture.ts"),
+      [
+        "const [enginePath, poolDir] = process.argv.slice(2);",
+        "const { runPool } = await import(enginePath);",
+        "const harnesses = {",
+        "  stub: (ctx: { issuePath: string; id: string; outcomePath: string }) => [",
+        '    "bash",',
+        "    `${poolDir}/agent.sh`,",
+        "    ctx.issuePath,",
+        "    ctx.id,",
+        "    ctx.outcomePath,",
+        "    poolDir,",
+        "    `${poolDir}/release-01`,",
+        "  ],",
+        "};",
+        "const run = await runPool({ poolDir, harnesses });",
+        "await run.resume('01', 'the name is Foo');",
+        "",
+      ].join("\n"),
+    );
+
+    const proc = Bun.spawn(
+      ["bun", join(poolDir, "fixture.ts"), join(import.meta.dir, "engine.ts"), poolDir],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    try {
+      await waitFor(
+        () =>
+          existsSync(join(poolDir, "runs", "01.attempt-1.log")) &&
+          readQueuedAnswers(poolDir).answers[0]?.processedAt !== null,
+        "answer processed and the resume attempt spawned",
+      );
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+    // The killed engine's blocked attempt holds no one: release it so the
+    // orphaned stub exits instead of polling a directory the test teardown
+    // removes.
+    writeFileSync(sentinel, "go");
+
+    const rig = stubHarness({ "01": { status: "done" }, "02": { status: "done" } });
+    const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The answered state was on disk before the kill: the restart rehydrates
+    // it, shows the answer in the log without resubmission, and runs the
+    // resumed pool through to the review gate.
+    expect(restarted.phase).toBe("quiescent");
+    expect(restarted.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(restarted.final.log).toContain(
+      "interrupt answered for 01 (checkpoint): resumed",
+    );
+    const queue = readQueuedAnswers(poolDir);
+    expect(queue.answers).toHaveLength(1);
+    expect(queue.answers[0]?.processedAt).not.toBeNull();
+    const issueText = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issueText).toContain("## Resume note");
+    expect(issueText).toContain("the name is Foo");
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "answered"),
+    ).toHaveLength(1);
+  }, 20000);
 
   it("acknowledges a duplicate answer without a second event or record, and both callers settle", async () => {
     const poolDir = makePool({

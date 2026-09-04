@@ -1,0 +1,7 @@
+# run.sh compatibility contract retired
+
+The engine originally promised that a pool on disk stayed drivable by `run.sh`, the legacy bash issue-runner the engine replaced: the line-1 markers on ticket files were the truth both executors read, and a human could inspect, reset, and continue a crashed pool with the old script. That promise was kept deliberately, as an escape hatch, and one test enforced it by copying a real `run.sh` into a test pool and driving it.
+
+We decided the escape hatch is no longer needed. The Console and the engine are now the only way pools are driven; restart-from-disk through the engine itself covers the recovery scenario the hatch existed for. The enforcement test was deleted, and the claims of run.sh compatibility were removed from `skills/my-console-runner` and the engine comments. Mentions of run.sh as historical provenance ("ported from run.sh", "matching run.sh's interrupt semantics") stay: they record where the spawn kernel and interrupt behaviour came from, not a promise that must still hold.
+
+**Consequences**: nothing in the repo guarantees the pool's on-disk format stays readable by the legacy script, and the format may now drift away from it without warning. The line-1 markers remain the shared truth for ticket status — that part of the contract was never about run.sh — but a human recovering a stopped pool does it by restarting the engine on the pool directory, not by invoking run.sh. The script itself survives in git history (last tracked at 5e2070e, untracked at acae050) if it is ever needed again.

@@ -101,7 +101,7 @@ export interface PoolTicketState {
   status: PoolStatus;
 }
 
-export type PoolPhase = "running" | "done" | "quiescent" | "stalled";
+export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
 
 interface PoolState {
   tickets: PoolTicketState[];
@@ -678,6 +678,8 @@ export function phaseLabel(phase: PoolPhase): string {
       return "done";
     case "stalled":
       return "stalled";
+    case "dead":
+      return "dead";
   }
 }
 
@@ -687,25 +689,31 @@ export interface PoolTabStatus {
 }
 
 /** The tab status colors, from the Console palette. The favicon's boot dot
- *  consumes the idle color before any snapshot lands. */
+ *  consumes the idle color before any snapshot lands. Dead shares the alarm
+ *  red with needs input: its word carries the difference. */
 export const POOL_TAB_COLORS = {
   needsInput: "#f85149",
   running: "#d29922",
   complete: "#3fb950",
   idle: "#8b949e",
+  dead: "#f85149",
 } as const;
 
 /**
- * The pool's at-a-glance status for the browser tab, worst-first: a pending
- * interrupt with no queued answer or a stalled phase needs input; otherwise a
- * running phase is running, a done phase is complete, and anything else is
- * idle. An interrupt whose answer is already queued waits on the engine, not
- * the operator, so it stays out of needs input. Quiescent always carries a
- * pending interrupt, so it lands on needs input without a rule of its own.
- * Colors come from the Console palette; the tab title and the favicon both
- * consume this value.
+ * The pool's at-a-glance status for the browser tab, worst-first: a dead
+ * phase is terminal and outranks everything (no answer can reach a dead
+ * drive, so needs input would mislead); then a pending interrupt with no
+ * queued answer or a stalled phase needs input; otherwise a running phase is
+ * running, a done phase is complete, and anything else is idle. An interrupt
+ * whose answer is already queued waits on the engine, not the operator, so
+ * it stays out of needs input. Quiescent always carries a pending interrupt,
+ * so it lands on needs input without a rule of its own. Colors come from the
+ * Console palette; the tab title and the favicon both consume this value.
  */
 export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
+  if (snapshot.phase === "dead") {
+    return { word: "dead", color: POOL_TAB_COLORS.dead };
+  }
   const unanswered = snapshot.state.interrupts.some(
     (interrupt) => !isAnswerQueued(snapshot.state.queuedAnswers, interrupt),
   );
@@ -771,6 +779,81 @@ export function projectDetail(
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
+}
+
+// ---------------------------------------------------------------------------
+// Needs input tray
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the Needs input tray: a pending Interrupt with the card it
+ * selects, projected in card order. `ticketId` is who the interrupt is
+ * raised against (the answer and note-draft key); `label` is what the row
+ * shows (the ticket id, or the utility card's label for the final Review).
+ */
+export interface NeedsInputRow {
+  cardId: string;
+  ticketId: string;
+  label: string;
+  /** The ticket's title; null for a utility row. */
+  title: string | null;
+  interrupt: InterruptView;
+}
+
+/**
+ * The Needs input tray's rows: one per card holding an unresolved Interrupt,
+ * in card order, so the tray and the canvas agree. Each interrupt carries
+ * its form (the shared interrupt-form config, unknown kinds falling back to
+ * a plain resume form) and its queued flag, exactly as the cards project it.
+ * A pure projection of the snapshot: no new data source, the tray reads what
+ * the cards read.
+ */
+export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
+  const rows: NeedsInputRow[] = [];
+  for (const card of projectPool(snapshot).cards) {
+    if (!card.interrupt) continue;
+    rows.push(
+      card.kind === "ticket"
+        ? {
+            cardId: card.id,
+            ticketId: card.ticketId,
+            label: card.ticketId,
+            title: card.title,
+            interrupt: card.interrupt,
+          }
+        : {
+            cardId: card.id,
+            ticketId: card.interrupt.ticketId,
+            label: card.label,
+            title: null,
+            interrupt: card.interrupt,
+          },
+    );
+  }
+  return rows;
+}
+
+/**
+ * True when a row's interrupt form is the single-action resume shape the
+ * tray's bulk action covers: the resume kinds (checkpoint, crash, deadlock,
+ * merge-conflict) and an unknown kind's plain resume fallback. Review and
+ * merge-approval rows carry two actions and are answered individually.
+ */
+export function isResumeKindRow(row: NeedsInputRow): boolean {
+  return (
+    row.interrupt.form.actions.length === 1 &&
+    row.interrupt.form.actions[0].action === "resume"
+  );
+}
+
+/**
+ * The rows the tray's "resume all" fires: the open (not yet
+ * answered-and-waiting) resume-kind rows, in row order. Rows whose answer is
+ * already queued, and rows the operator answers individually (review and
+ * merge-approval), stay out of the bulk fire and out of its count.
+ */
+export function bulkResumeRows(rows: NeedsInputRow[]): NeedsInputRow[] {
+  return rows.filter((row) => !row.interrupt.queued && isResumeKindRow(row));
 }
 
 // ---------------------------------------------------------------------------

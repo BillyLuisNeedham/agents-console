@@ -94,8 +94,16 @@ _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
 An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)
 
+**Dead drive**:
+A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran; since ADR-0008 a reported death emits the terminal dead phase, and a death that emits nothing is lying.
+_Avoid_: stuck, frozen, hung pool
+
+**Needs input**:
+The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
+_Avoid_: action items, task list, notification center
+
 **Spawn**:
-A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0008 (`docs/adr/0008-agents-propose-spawn-engine-writes.md`), closing issue #32.
+A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32.
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 ## Verification
@@ -119,3 +127,4 @@ _Avoid_: merged attempt (that's the fallback, not the definition)
 **verify: N**:
 The per-ticket assign key that activates verification. N is both the number of parallel Attempts and the number of grader tickets. The key's absence — not a zero, not a false — means the ticket runs ungraded, exactly as before.
 _Avoid_: takes, retries
+
