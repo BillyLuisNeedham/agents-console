@@ -83,7 +83,7 @@ One run of a ticket by a harness, from spawn to exit. A ticket accumulates attem
 _Avoid_: run (that's the whole thread), execution, job
 
 **Outcome**:
-The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
+The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Ticket log**:
@@ -105,6 +105,10 @@ _Avoid_: stuck, frozen, hung pool
 **Needs input**:
 The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
 _Avoid_: action items, task list, notification center
+
+**Spawn**:
+A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32.
+_Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 ## Verification
 

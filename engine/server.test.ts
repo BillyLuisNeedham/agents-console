@@ -638,6 +638,68 @@ describe("ticket events endpoint", () => {
   });
 });
 
+describe("pool meta refresh", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  it("renders a ticket file added after boot as a card on the next snapshot", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+
+    await server.start();
+    const first = await server.settled();
+    expect(first.state.tickets.map((t) => t.id)).toEqual(["01"]);
+
+    // A ticket file lands after boot, the way the engine writes a Spawn
+    // adoption: an ordinary issues/<id>.md with the usual line-1 marker.
+    writeFileSync(
+      join(poolDir, "issues", "02-late.md"),
+      "<!-- state: id=02 blocked-by=none status=ready -->\n\n# body\n",
+    );
+
+    // Answering 01's checkpoint drives fresh snapshots; the enriched state
+    // carries the late ticket's card without a restart.
+    await server.answer("01", "resume");
+    const resumed = await server.settled();
+    const late = resumed.state.tickets.find((t) => t.id === "02");
+    expect(late).toBeDefined();
+    expect(late?.title).toBe("body");
+    expect(late?.blockedBy).toEqual([]);
+  });
+
+  it("accepts a late-arriving ticket id on the events and log endpoints", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    // No start: the server serves its boot state, and the ticket file plus
+    // an attempt log land afterwards. Both endpoints answer for the late id
+    // the way they would for one present at boot.
+    writeFileSync(
+      join(poolDir, "issues", "02-late.md"),
+      "<!-- state: id=02 blocked-by=none status=ready -->\n\n# body\n",
+    );
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(join(poolDir, "runs", "02.log"), "late attempt output\n");
+
+    const events = await fetch(`${server.url}/api/events?ticket=02`);
+    expect(events.status).toBe(200);
+    const eventsBody = (await events.json()) as {
+      events: unknown[];
+      reconstructed: boolean;
+      attempts: { attempt: number; logFile: string }[];
+    };
+    expect(eventsBody.reconstructed).toBe(true);
+    expect(eventsBody.events).toEqual([]);
+    expect(eventsBody.attempts.map((a) => [a.attempt, a.logFile])).toEqual([
+      [1, "02.log"],
+    ]);
+
+    const log = await fetch(`${server.url}/api/log?ticket=02`);
+    expect(log.status).toBe(200);
+    const logBody = (await log.json()) as { content: string };
+    expect(logBody.content).toContain("late attempt output");
+  });
+});
+
 describe("grades endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 

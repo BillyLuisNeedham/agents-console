@@ -404,7 +404,7 @@ export function logAtBottom(
 }
 
 // ---------------------------------------------------------------------------
-// Vitals: the card footer's liveness readout (ADR 0010)
+// Vitals: the card footer's liveness readout (ADR 0011)
 // ---------------------------------------------------------------------------
 
 /** Under this age the staleness readout counts as fresh movement. */

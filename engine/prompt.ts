@@ -232,6 +232,21 @@ export function buildPrompt(parts: PromptParts): string {
       'the human has to do next". The engine reads this file at your exit ' +
       "and writes the final status to the Issue itself. Never edit the " +
       "Issue's line-1 status marker; the engine owns that write.",
+    "",
+    "Follow-up work you discover mid-attempt is proposed, never written: " +
+      'add an optional "spawn" array to that outcome JSON, one entry per ' +
+      'follow-up, each shaped {"title": "...", "body": "...", "blockedBy": ' +
+      '["id", ...]}, the body carrying at least 20 characters of intent ' +
+      "for a fresh agent to work from, blockedBy optional and naming the " +
+      "ids the follow-up must wait for. The engine assigns the ids " +
+      "(<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), " +
+      "writes the ticket files at the super-step boundary, and schedules " +
+      "them like any other ticket. Thin or out-of-pool proposals are " +
+      "dropped with the reason recorded in the ticket log, and a dropped " +
+      "proposal never costs your attempt its result. Caps apply: 5 " +
+      "proposals honored per attempt and 20 per run, " +
+      "overflow truncated to the log. You never write pool state: no ticket " +
+      "files, no ids, no statuses. You propose; the engine writes.",
   );
   return sections.join("\n");
 }

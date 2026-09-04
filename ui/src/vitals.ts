@@ -1,6 +1,6 @@
 /**
  * Vitals store: the client side of the client-polled liveness readout
- * (ADR 0010). Polls the activity endpoint for every ticket that can hold a
+ * (ADR 0011). Polls the activity endpoint for every ticket that can hold a
  * live attempt (status in-progress, or checkpoint where a resolver may be
  * in flight, which only the response's running flag can tell), every 2s and
  * once per pool snapshot. A response that says nothing is live drops the

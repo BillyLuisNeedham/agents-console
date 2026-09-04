@@ -7,7 +7,11 @@
  * The engine's snapshot carries `state.tickets` as an id -> status map; the
  * server enriches it into an array of {id, title, blockedBy, status} so the
  * projection can draw blocked-by edges and show titles. The metadata (title,
- * spec, blockedBy) is the engine's own marker parsing, loaded once at start.
+ * spec, blockedBy) is the engine's own marker parsing, re-read from the
+ * pool's issues directory on every snapshot and ticket-scoped request: a
+ * ticket file that lands after boot (an engine-written Spawn or grader
+ * ticket, or a hand edit) renders as a live card without a restart. The
+ * grades endpoint re-derives from the same refreshed meta.
  */
 
 import {
@@ -364,7 +368,9 @@ interface ReconstructedAttempt {
 
 // The events endpoint answers for tickets the pool actually owns. Scoping to
 // the known ticket ids also keeps the lookup inside the pool's runs
-// directory: an arbitrary id can never walk out of it.
+// directory: an arbitrary id can never walk out of it. The set tracks the
+// pool's issues directory (refreshed per snapshot and per request), so a
+// ticket the engine writes after boot is known the moment it lands.
 function knownTicketIds(meta: TicketMarker[]): Set<string> {
   return new Set(meta.map((m) => m.id));
 }
@@ -788,12 +794,12 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   acquirePoolLock(poolDir, registryPath);
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
-  const meta = loadMeta(poolDir);
-  const ticketIds = knownTicketIds(meta);
+  let meta = loadMeta(poolDir);
+  let ticketIds = knownTicketIds(meta);
   const poolName = poolDir.split("/").slice(-2).join("/");
 
   // A short in-memory cache per ticket id absorbs the client's rapid repeat
-  // polls (ADR 0010): one entry per known ticket id, so it never grows past
+  // polls (ADR 0011): one entry per known ticket id, so it never grows past
   // the pool's size. No mtime-based invalidation in v1.
   const activityCache = new Map<
     string,
@@ -806,6 +812,21 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     const value = readTicketActivity(poolDir, ticketId);
     activityCache.set(ticketId, { at: now, value });
     return value;
+  }
+
+  // Pool meta is read from disk, never cached from boot: the engine writes
+  // ticket files mid-run (Spawn adoptions, grader and head-to-head tickets),
+  // and each must render as a card and be accepted by the ticket endpoints
+  // the moment it lands. A reload that fails keeps the last-known-good meta
+  // and the next snapshot or request retries: a torn write or a draft file
+  // without a valid marker must never break snapshot delivery.
+  function refreshMeta(): void {
+    try {
+      meta = loadMeta(poolDir);
+      ticketIds = knownTicketIds(meta);
+    } catch {
+      // Keep the last-known-good meta.
+    }
   }
 
   let latest: EnrichedSnapshot | null = null;
@@ -834,7 +855,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     currentRun = startPool({
       poolDir,
       harnesses,
-      onSnapshot: (snapshot) => broadcast(enrich(snapshot, meta, poolName)),
+      onSnapshot: (snapshot) => {
+        refreshMeta();
+        broadcast(enrich(snapshot, meta, poolName));
+      },
     });
     return latest!;
   }
@@ -947,6 +971,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
         if (pathname === "/api/events") {
           const ticketId = url.searchParams.get("ticket") ?? "";
+          refreshMeta();
           if (!ticketIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
@@ -954,11 +979,13 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         if (pathname === "/api/grades") {
+          refreshMeta();
           return Response.json({ grades: readPoolGrades(poolDir, meta) });
         }
 
         if (pathname === "/api/log") {
           const ticketId = url.searchParams.get("ticket") ?? "";
+          refreshMeta();
           if (!ticketIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
