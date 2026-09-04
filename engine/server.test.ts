@@ -232,6 +232,78 @@ describe("pool server", () => {
     }
   });
 
+  it("serves each ticket's resolved assignment on the enriched snapshot", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+      ],
+      {
+        defaults: { harness: "stub", model: "default-model" },
+        assign: {
+          // Full override: the record is the assign entry field-wise.
+          "02": { harness: "alt", model: "override-model", drivers: "bun review" },
+          // Partial (model-only): the rest comes from the pool defaults.
+          "03": { model: "partial-model" },
+        },
+      },
+    );
+    const stub = stubHarness({});
+    const server = await startServer(poolDir, { ...stub, alt: stub.stub! });
+
+    await server.start();
+    const snapshot = await server.settled();
+    expect(snapshot.phase).toBe("quiescent");
+    const byId = Object.fromEntries(
+      snapshot.state.tickets.map((t) => [t.id, t]),
+    );
+    // Pool defaults, drivers falling back to the engine's chain default.
+    expect(byId["01"]!.assignment).toEqual({
+      harness: "stub",
+      model: "default-model",
+      drivers: "implement",
+    });
+    expect(byId["02"]!.assignment).toEqual({
+      harness: "alt",
+      model: "override-model",
+      drivers: "bun review",
+    });
+    expect(byId["03"]!.assignment).toEqual({
+      harness: "stub",
+      model: "partial-model",
+      drivers: "implement",
+    });
+  });
+
+  it("renders an unassigned ticket with null harness and model, and dies naming the fix when it schedules", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      // Empty defaults override the helper's seeded ones: the pool reads as
+      // a console.json without a defaults block.
+      { defaults: {} },
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    await server.start();
+    await expect(server.settled()).rejects.toThrow(
+      /pool config: ticket 01 has no harness/,
+    );
+    // The unassigned record rode the snapshot as the pool started; the run
+    // then died at the spawn the ticket cannot run, with the fix named.
+    expect(server.latest?.phase).toBe("dead");
+    expect(server.latest?.state.tickets[0]!.assignment).toEqual({
+      harness: null,
+      model: null,
+      drivers: "implement",
+    });
+    expect(server.latest?.state.log).toContain(
+      "pool dead: pool config: ticket 01 has no harness (set one in console.json assign or defaults)",
+    );
+  });
+
   it("serves get state, start, and resume over HTTP", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },

@@ -4,10 +4,11 @@
  * answer), and an SSE stream that pushes a full state snapshot on every
  * change. The UI renders from those snapshots only.
  *
- * The engine's snapshot carries `state.tickets` as an id -> status map; the
- * server enriches it into an array of {id, title, blockedBy, status} so the
- * projection can draw blocked-by edges and show titles. The metadata (title,
- * spec, blockedBy) is the engine's own marker parsing, re-read from the
+ * The engine's snapshot carries `state.tickets` as an id -> status map and
+ * `assignments` as the resolved Assignment record per ticket (ADR-0012); the
+ * server enriches the former into an array of {id, title, blockedBy, status,
+ * assignment} so the projection can draw blocked-by edges, show titles, and
+ * render the record verbatim. The metadata (title, spec, blockedBy) is the engine's own marker parsing, re-read from the
  * pool's issues directory on every snapshot and ticket-scoped request: a
  * ticket file that lands after boot (an engine-written Spawn or grader
  * ticket, or a hand edit) renders as a live card without a restart. The
@@ -28,6 +29,7 @@ import {
   readConfig,
   REVIEW_TICKET_ID,
   startPool,
+  type AssignmentView,
   type HarnessCommand,
   type InterruptKind,
   type PoolRun,
@@ -73,6 +75,8 @@ interface EnrichedTicketState {
   title: string;
   blockedBy: string[];
   status: TicketStatus;
+  /** The ticket's resolved Assignment record (ADR-0012), served verbatim. */
+  assignment: AssignmentView;
 }
 
 interface EnrichedSnapshot {
@@ -118,6 +122,15 @@ function enrich(snapshot: PoolSnapshot, meta: TicketMarker[], poolName: string):
         title: m.title,
         blockedBy: m.blockedBy,
         status: snapshot.state.tickets[m.id] ?? "ready",
+        // A meta id the engine has not resolved yet (a hand-written file
+        // seen between the meta refresh and the boundary that adopts it)
+        // reads as unassigned until the record lands; the engine's map is
+        // the only derivation.
+        assignment: snapshot.assignments[m.id] ?? {
+          harness: null,
+          model: null,
+          drivers: "implement",
+        },
       })),
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
