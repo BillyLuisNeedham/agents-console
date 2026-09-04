@@ -3,13 +3,8 @@ import type { TicketActivity } from "./activity";
 import type { PrototypeRenderContext, PrototypeVariant } from "./index";
 import "./variant-c.css";
 
-interface FileSample {
-  added: number;
-  removed: number;
-}
-
 interface Sample {
-  files: Map<string, FileSample>;
+  files: Set<string>;
   logSize: number;
   at: number;
 }
@@ -51,34 +46,20 @@ function fmtKb(bytes: number): string {
 function updateFeed(ticketId: string, activity: TicketActivity, now: number): FeedEntry[] {
   const feed = feeds.get(ticketId) ?? [];
   feeds.set(ticketId, feed);
-  const files = new Map<string, FileSample>();
-  for (const f of activity.diff?.files ?? []) {
-    files.set(f.path, { added: f.added, removed: f.removed });
-  }
+  const files = new Set<string>(activity.diff?.files ?? []);
   const logSize = activity.log?.size ?? 0;
   const prev = samples.get(ticketId);
   samples.set(ticketId, { files, logSize, at: now });
   if (!prev) return feed;
 
   let grew = false;
-  let bestPath: string | null = null;
-  let bestGrow = 0;
-  let bestAdded = 0;
-  let bestRemoved = 0;
-  for (const [path, cur] of files) {
-    const old = prev.files.get(path);
-    const dA = cur.added - (old?.added ?? 0);
-    const dR = cur.removed - (old?.removed ?? 0);
-    if (dA + dR > bestGrow) {
-      bestGrow = dA + dR;
-      bestPath = path;
-      bestAdded = dA;
-      bestRemoved = dR;
+  // Per-file counts left the wire contract, so a touched file is detected by
+  // presence: a path in the diff that was not there on the previous poll.
+  for (const path of files) {
+    if (!prev.files.has(path)) {
+      feed.unshift({ at: now, text: `touched ${path}`, idle: false });
+      grew = true;
     }
-  }
-  if (bestPath && bestGrow > 0) {
-    feed.unshift({ at: now, text: `${bestPath} +${bestAdded} −${bestRemoved}`, idle: false });
-    grew = true;
   }
   if (logSize > prev.logSize) {
     feed.unshift({ at: now, text: `output +${fmtKb(logSize - prev.logSize)}`, idle: false });
@@ -150,35 +131,15 @@ function buildSection(
     ),
   );
 
-  const files = [...(activity.diff?.files ?? [])]
-    .sort((a, b) => b.added + b.removed - (a.added + a.removed))
-    .slice(0, 8);
-  const maxTotal = Math.max(1, ...files.map((f) => f.added + f.removed));
+  const files = [...(activity.diff?.files ?? [])].slice(-8).reverse();
   if (files.length) {
     const list = h("div", { class: "protoC-files" });
-    for (const f of files) {
-      const total = f.added + f.removed;
-      const width = (total / maxTotal) * 100;
-      const addW = total > 0 ? (f.added / total) * width : 0;
-      const remW = total > 0 ? (f.removed / total) * width : 0;
+    for (const path of files) {
       list.append(
         h(
           "div",
           { class: "protoC-row" },
-          h("span", { class: "protoC-name", title: f.path }, basename(f.path)),
-          h(
-            "span",
-            { class: "protoC-counts" },
-            h("span", { class: "protoC-add" }, `+${f.added}`),
-            " ",
-            h("span", { class: "protoC-rem" }, `−${f.removed}`),
-          ),
-          h(
-            "span",
-            { class: "protoC-bar" },
-            h("span", { class: "protoC-bar-add", style: `width:${addW}%` }),
-            h("span", { class: "protoC-bar-rem", style: `width:${remW}%` }),
-          ),
+          h("span", { class: "protoC-name", title: path }, basename(path)),
         ),
       );
     }

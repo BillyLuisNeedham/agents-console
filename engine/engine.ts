@@ -1473,7 +1473,7 @@ async function runResolver(
     at: new Date().toISOString(),
     attempt: nextAttempt(session.runsDir, marker.id),
     kind: "resolver",
-    payload: { files: result.conflicted, cwd: worktree.path },
+    payload: { files: result.conflicted, cwd: worktree.path, branch: worktree.branch },
   });
   const prompt = buildResolverPrompt({
     id: marker.id,

@@ -1,6 +1,6 @@
 import type { PoolClient } from "../client";
 import type { PoolSnapshot, TicketActivityResponse } from "../project";
-import type { ActivityFile, TicketActivity } from "./activity";
+import type { TicketActivity } from "./activity";
 
 export interface ActivitySource {
   activity: ReadonlyMap<string, TicketActivity>;
@@ -20,19 +20,23 @@ const DEMO_FILES = [
   "docs/CONTEXT.md",
 ];
 
+interface DemoFile {
+  added: number;
+  removed: number;
+}
+
 interface DemoTicketState {
-  files: Map<string, ActivityFile>;
+  files: Map<string, DemoFile>;
   logSize: number;
   idleTicks: number;
 }
 
 function toTicketActivity(res: TicketActivityResponse): TicketActivity {
   return {
-    ticketId: res.ticket,
+    ticketId: res.ticketId,
     running: res.running,
     lastEventAt: res.lastEventAt,
     log: res.log,
-    worktree: res.worktree,
     diff: res.diff,
   };
 }
@@ -83,7 +87,7 @@ export function createActivitySource(opts: {
     for (const id of targets()) {
       const st =
         demoState.get(id) ??
-        { files: new Map<string, ActivityFile>(), logSize: 2048, idleTicks: 0 };
+        { files: new Map<string, DemoFile>(), logSize: 2048, idleTicks: 0 };
       demoState.set(id, st);
       if (st.idleTicks > 0) {
         st.idleTicks -= 1;
@@ -93,7 +97,7 @@ export function createActivitySource(opts: {
       for (let i = 0; i < edits; i++) {
         const path =
           DEMO_FILES[Math.floor(Math.random() * DEMO_FILES.length)];
-        const file = st.files.get(path) ?? { path, added: 0, removed: 0 };
+        const file = st.files.get(path) ?? { added: 0, removed: 0 };
         file.added += Math.floor(Math.random() * 24);
         file.removed += Math.floor(Math.random() * 8);
         st.files.set(path, file);
@@ -102,17 +106,16 @@ export function createActivitySource(opts: {
       if (Math.random() < 0.2) {
         st.idleTicks = 1 + Math.floor(Math.random() * 3);
       }
-      const files = [...st.files.values()];
+      const files = [...st.files.entries()];
       activity.set(id, {
         ticketId: id,
         running: true,
         lastEventAt: now,
         log: { size: st.logSize, mtime: now },
-        worktree: null,
         diff: {
-          added: files.reduce((sum, f) => sum + f.added, 0),
-          removed: files.reduce((sum, f) => sum + f.removed, 0),
-          files,
+          added: files.reduce((sum, [, f]) => sum + f.added, 0),
+          removed: files.reduce((sum, [, f]) => sum + f.removed, 0),
+          files: files.map(([path]) => path),
         },
       });
     }

@@ -179,17 +179,11 @@ export interface TicketLogResponse {
 // ---------------------------------------------------------------------------
 
 export interface TicketActivityResponse {
-  ticket: string;
+  ticketId: string;
   running: boolean;
+  diff: { added: number; removed: number; files: string[] } | null;
+  log: { size: number; mtime: string } | null;
   lastEventAt: string | null;
-  worktree: string | null;
-  branch: string | null;
-  diff: {
-    added: number;
-    removed: number;
-    files: { path: string; added: number; removed: number }[];
-  } | null;
-  log: { size: number; mtime: string | null } | null;
 }
 
 // ---------------------------------------------------------------------------

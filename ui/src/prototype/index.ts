@@ -1,7 +1,7 @@
 // PROTOTYPE (issue #25, throwaway): three activity-visualization variants on the existing canvas/Detail, switchable via ?variant=A|B|C, ?demo=1 for synthetic data.
 import type { PoolSnapshot } from "../project";
 import type { TicketActivity } from "./activity";
-export type { ActivityFile, TicketActivity } from "./activity";
+export type { TicketActivity } from "./activity";
 import { PoolClient } from "../client";
 import { createActivitySource } from "./source";
 import {

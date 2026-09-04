@@ -54,7 +54,7 @@ function cell(ctx: PrototypeRenderContext, a: TicketActivity): HTMLElement {
   const diffText = a.diff
     ? `+${a.diff.added} −${a.diff.removed} · ${a.diff.files.length} file${a.diff.files.length === 1 ? "" : "s"}`
     : "no changes yet";
-  const lastFile = a.diff && a.diff.files.length > 0 ? basename(a.diff.files[a.diff.files.length - 1].path) : null;
+  const lastFile = a.diff && a.diff.files.length > 0 ? basename(a.diff.files[a.diff.files.length - 1]) : null;
 
   return h(
     "div",
