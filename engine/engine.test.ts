@@ -5751,6 +5751,53 @@ describe("worktrees", () => {
     expect(resolver.spawnOrder).toEqual(["02"]);
   }, 15000);
 
+  it("pins the resolver's own model when resolver= is the { harness, model } form", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02")],
+        config: {
+          ...stubConfig,
+          resolver: { harness: "resolver-stub", model: "resolver-model" },
+        },
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    const resolver = resolverStub(poolDir, {
+      "02": {
+        resolved: true,
+        conflictFile: "shared.txt",
+        resolution: "pinned-resolved",
+        note: "via pinned model",
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+    expect(resolver.spawnOrder).toEqual(["02"]);
+    // The defaults' model ("stub-model") belongs to the stub harness; the
+    // resolver runs on resolver-stub and must spawn with its own model.
+    expect(resolver.spawned["02"].model).toBe("resolver-model");
+  }, 15000);
+
   it("fails fast when an explicit resolver names an unknown harness", async () => {
     const { poolDir } = makeGitPool(
       {
