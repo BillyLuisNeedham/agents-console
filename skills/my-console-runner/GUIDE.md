@@ -50,4 +50,5 @@ request. You do those, after you have read the log.
 
 There is no spend cap. An unattended run spends until the pool stops.
 
-The pool on disk stays drivable by `run.sh`. The line-1 markers are the truth both executors read.
+The line-1 markers on each ticket file are the truth for ticket status; the engine and the human
+both read them.

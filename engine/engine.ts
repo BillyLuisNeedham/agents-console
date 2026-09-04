@@ -92,7 +92,11 @@ export interface PoolConfig {
   assign?: Record<string, TicketAssignment>;
   roster?: string;
   agents?: string;
-  resolver?: string;
+  // The merge resolver: a harness name (the model is inherited from
+  // defaults), "none" to opt out, or { harness, model } when the resolver
+  // runs on a harness other than the defaults', whose model names would not
+  // be recognised there.
+  resolver?: string | { harness?: string; model?: string };
   port?: number;
   // Who picks the winner of a verify fan-out: the engine's arithmetic rule
   // (default) or the human, via a selection interrupt carrying the grades.
@@ -962,7 +966,7 @@ function rehydrate(session: Session): void {
 
 // Markers dual-write: every checkpoint write is preceded by bringing the
 // line-1 markers on disk into agreement with state, so the pool directory is
-// always inspectable by run.sh and the markers stay the shared truth.
+// always inspectable and the markers stay the shared truth.
 function writeMarkers(session: Session): void {
   for (const marker of session.markers) {
     const status = session.state.tickets[marker.id];
@@ -1331,13 +1335,19 @@ interface ResolverAttempt {
 // opts out of the resolver, so the conflict takes the manual path; an explicit
 // resolver that names an unknown harness fails fast, matching how a ticket's
 // unknown harness is rejected. No configured resolver at all also means the
-// manual path.
+// manual path. The object form { harness, model } pins the resolver's own
+// model: a model name belongs to one harness, so a resolver on a different
+// harness than the defaults' must not inherit the defaults' model.
 function resolveResolver(session: Session): ResolverSpec | null {
   const config = session.state.config;
-  const explicit = config.resolver?.trim();
+  const spec =
+    typeof config.resolver === "string" || config.resolver == null
+      ? { harness: config.resolver, model: undefined }
+      : config.resolver;
+  const explicit = spec.harness?.trim();
   if (explicit === "" || explicit === "none") return null;
   let harness = explicit;
-  let model = config.defaults?.model;
+  let model = spec.model?.trim() || config.defaults?.model;
   if (!harness || !model) {
     const runner = readIssueRunner(session.issueRunnerPath);
     if (!harness) harness = runner?.harness;

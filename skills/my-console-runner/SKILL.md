@@ -99,7 +99,10 @@ the disagreement in its brief. That bounds a weaker model's power to strand good
 
 The merge resolver is config, not a question. Recommend the default harness for it, say
 that an explicit `none` opts out so every conflict comes straight to the human, and write whatever
-is agreed as the `resolver` key.
+is agreed as the `resolver` key. A model name belongs to one harness: if the resolver runs on a
+harness other than the default, it must carry its own model, written as the object form
+`{ "harness": "claude", "model": "..." }`, or it inherits the default harness's model and fails at
+spawn.
 
 ## 3. Check the drivers
 
@@ -156,9 +159,10 @@ Write `console.json` into the pool directory. All seven answers land here as dat
   tickets that use the defaults.
 - `roster` is the roster as plain words for the prompt, from answer 4. `agents` is the same roster
   as a JSON string for claude's `--agents` flag. Keep the two in step.
-- `resolver` is the merge resolver harness, or `none`. The engine falls back to the
-  `~/.issue-runner` default when the key is absent, but write it explicitly so the pool's config
-  says what it does.
+- `resolver` is the merge resolver harness, or `none`, or `{ "harness": .., "model": .. }` when
+  the resolver's harness differs from the default and so needs a model of its own. The engine
+  falls back to the `~/.issue-runner` default when the key is absent, but write it explicitly so
+  the pool's config says what it does.
 - `port` records the port answer when it is a concrete number. Omit it for `auto`. What each
   does at launch is in step 6.
 - `reviewer` and `checkpoint` record answers 5 and 6. The engine does not read them; the agents
@@ -299,7 +303,7 @@ Leave these alone rather than rediscovering them:
 - A merge conflict spawns the resolver agent; its resolution comes to the human as an approval
   interrupt, and rejecting hands the conflicted state over with the attempt noted.
 - Line-1 markers are dual-written alongside the sqlite checkpoint and are the truth on conflict,
-  so the pool on disk is always inspectable and `run.sh` agrees with the Console.
+  so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
 
 ---
