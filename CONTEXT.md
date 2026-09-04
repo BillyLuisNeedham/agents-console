@@ -90,6 +90,10 @@ _Avoid_: exit code (a crash signal, not a result), status marker (the engine own
 The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.
 _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
 
+**Vitals**:
+The compact liveness readout on a ticket card while an attempt runs — diff totals, time since last observable change, sparkline. Read live from the attempt's worktree diff and log growth, not from the ticket log.
+_Avoid_: activity (too generic), status (that's the ticket's lifecycle state), progress (implies a known finish line)
+
 **Queued answer**:
 An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)

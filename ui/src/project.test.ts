@@ -44,15 +44,23 @@ import {
   ticketCardId,
   ticketBodyHtml,
   ticketDepth,
+  projectVitals,
+  pushVitalsSample,
+  VITALS_FRESH_MS,
+  VITALS_IDLE_MS,
+  VITALS_MAX_SAMPLES,
   zoomAtCursor,
   type PoolSnapshot,
   type PoolStatus,
   type PoolTicketState,
   type TabOverride,
+  type TicketActivityResponse,
+  type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
   type TicketEventsResponse,
   type TimelineView,
+  type VitalsState,
 } from "./project";
 
 function ticket(
@@ -1759,5 +1767,196 @@ describe("a card click opens the Detail", () => {
       },
     });
     expect(selected && projectDetail(gone, selected)).toBeNull();
+  });
+});
+
+// -------------------------------------------------------------------------
+// Vitals: the card footer's liveness readout
+// -------------------------------------------------------------------------
+
+const VITALS_NOW = Date.parse("2026-09-04T12:00:00.000Z");
+
+function activity(
+  overrides: Partial<TicketActivityResponse> = {},
+): TicketActivityResponse {
+  return {
+    ticketId: "01",
+    running: true,
+    diff: { added: 128, removed: 34, files: ["a", "b", "c", "d", "e", "f"] },
+    log: { size: 4096, mtime: new Date(VITALS_NOW - 12_000).toISOString() },
+    lastEventAt: new Date(VITALS_NOW - 4_000).toISOString(),
+    ...overrides,
+  };
+}
+
+function vitalsState(
+  overrides: Partial<TicketActivityResponse> = {},
+  samples: number[] = [],
+): VitalsState {
+  return { activity: activity(overrides), samples };
+}
+
+describe("projectVitals", () => {
+  it("is hidden before the first payload arrives, whatever the status", () => {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+      expect(projectVitals(null, status, VITALS_NOW)).toBeNull();
+    }
+  });
+
+  it("is hidden for done and ready tickets even with a payload", () => {
+    expect(projectVitals(vitalsState(), "done", VITALS_NOW)).toBeNull();
+    expect(projectVitals(vitalsState(), "ready", VITALS_NOW)).toBeNull();
+  });
+
+  it("is live for a running attempt, on in-progress and checkpoint alike", () => {
+    expect(projectVitals(vitalsState(), "in-progress", VITALS_NOW)?.mode).toBe("live");
+    // A checkpoint with a resolver in flight reports running on the wire.
+    expect(projectVitals(vitalsState(), "checkpoint", VITALS_NOW)?.mode).toBe("live");
+  });
+
+  it("is frozen for a checkpoint whose latest response says nothing is live", () => {
+    const view = projectVitals(vitalsState({ running: false }), "checkpoint", VITALS_NOW);
+    expect(view?.mode).toBe("frozen");
+    expect(view?.diff).toEqual({ added: 128, removed: 34, fileCount: 6 });
+  });
+
+  it("is hidden for an in-progress ticket that is not running (a crashed attempt)", () => {
+    expect(
+      projectVitals(vitalsState({ running: false }), "in-progress", VITALS_NOW),
+    ).toBeNull();
+  });
+
+  it("shows diff totals, or the no-changes state for an empty diff", () => {
+    const view = projectVitals(vitalsState(), "in-progress", VITALS_NOW);
+    expect(view?.diff).toEqual({ added: 128, removed: 34, fileCount: 6 });
+    expect(
+      projectVitals(vitalsState({ diff: null }), "in-progress", VITALS_NOW)?.diff,
+    ).toBeNull();
+    expect(
+      projectVitals(
+        vitalsState({ diff: { added: 0, removed: 0, files: [] } }),
+        "in-progress",
+        VITALS_NOW,
+      )?.diff,
+    ).toBeNull();
+  });
+
+  it("anchors staleness to the newest of the last engine event and the log write", () => {
+    // The event is newest in the default fixture.
+    expect(projectVitals(vitalsState(), "in-progress", VITALS_NOW)?.staleness).toEqual({
+      kind: "changed",
+      fresh: true,
+      copy: "changed 4s ago",
+    });
+    // The log write overtakes it.
+    const logNewest = vitalsState({
+      log: { size: 4096, mtime: new Date(VITALS_NOW - 2_000).toISOString() },
+    });
+    expect(projectVitals(logNewest, "in-progress", VITALS_NOW)?.staleness).toEqual({
+      kind: "output",
+      fresh: true,
+      copy: "output 2s ago",
+    });
+  });
+
+  it("marks the readout fresh only under the 10s threshold", () => {
+    const freshAt = (age: number): boolean | undefined =>
+      projectVitals(
+        vitalsState({ lastEventAt: new Date(VITALS_NOW - age).toISOString(), log: null }),
+        "in-progress",
+        VITALS_NOW,
+      )?.staleness?.fresh;
+    expect(freshAt(VITALS_FRESH_MS - 1)).toBe(true);
+    expect(freshAt(VITALS_FRESH_MS)).toBe(false);
+  });
+
+  it("switches to idle past the 60s threshold", () => {
+    const staleAt = (age: number) =>
+      projectVitals(
+        vitalsState({ lastEventAt: new Date(VITALS_NOW - age).toISOString(), log: null }),
+        "in-progress",
+        VITALS_NOW,
+      )?.staleness;
+    expect(staleAt(VITALS_IDLE_MS)).toEqual({
+      kind: "changed",
+      fresh: false,
+      copy: "changed 1m 0s ago",
+    });
+    expect(staleAt(VITALS_IDLE_MS + 1)).toEqual({
+      kind: "idle",
+      fresh: false,
+      copy: "idle 1m 0s",
+    });
+    expect(staleAt(125_000)).toEqual({ kind: "idle", fresh: false, copy: "idle 2m 5s" });
+  });
+
+  it("serves paused copy on a frozen card and never idles it", () => {
+    const frozen = (age: number): VitalsState =>
+      vitalsState({
+        running: false,
+        lastEventAt: new Date(VITALS_NOW - age).toISOString(),
+        log: null,
+      });
+    expect(projectVitals(frozen(180_000), "checkpoint", VITALS_NOW)?.staleness).toEqual({
+      kind: "changed",
+      fresh: false,
+      copy: "paused · changed 3m 0s ago",
+    });
+    expect(projectVitals(frozen(600_000), "checkpoint", VITALS_NOW)?.staleness?.copy).toBe(
+      "paused · changed 10m 0s ago",
+    );
+  });
+
+  it("drops an unparseable anchor and hides the readout when none is usable", () => {
+    expect(
+      projectVitals(vitalsState({ lastEventAt: "not-a-date" }), "in-progress", VITALS_NOW)
+        ?.staleness?.kind,
+    ).toBe("output");
+    expect(
+      projectVitals(vitalsState({ lastEventAt: null, log: null }), "in-progress", VITALS_NOW)
+        ?.staleness,
+    ).toBeNull();
+  });
+});
+
+describe("pushVitalsSample", () => {
+  it("pushes one sample per poll and caps at the last 40", () => {
+    let samples: number[] = [];
+    for (let total = 1; total <= VITALS_MAX_SAMPLES + 5; total += 1) {
+      samples = pushVitalsSample(samples, total);
+    }
+    expect(samples).toHaveLength(VITALS_MAX_SAMPLES);
+    expect(samples[0]).toBe(6);
+    expect(samples[VITALS_MAX_SAMPLES - 1]).toBe(VITALS_MAX_SAMPLES + 5);
+  });
+});
+
+describe("projectPool vitals", () => {
+  it("rides the card view model: live on a running card, frozen on a parked checkpoint, absent elsewhere", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("01", { status: "in-progress" }),
+          ticket("02", { status: "checkpoint" }),
+          ticket("03", { status: "done" }),
+          ticket("04"),
+        ],
+      },
+    });
+    const vitals: Record<string, VitalsState> = {
+      "01": vitalsState({}, [10, 20]),
+      "02": vitalsState({ running: false }, [5]),
+    };
+    const view = projectPool(snap, {}, vitals, VITALS_NOW);
+    const cardOf = (id: string) =>
+      view.cards.find(
+        (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+      );
+    expect(cardOf("01")?.vitals?.mode).toBe("live");
+    expect(cardOf("01")?.vitals?.samples).toEqual([10, 20]);
+    expect(cardOf("02")?.vitals?.mode).toBe("frozen");
+    // Done and never-polled cards carry no footer at all: no empty flash.
+    expect(cardOf("03")?.vitals).toBeNull();
+    expect(cardOf("04")?.vitals).toBeNull();
   });
 });

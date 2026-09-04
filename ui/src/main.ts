@@ -8,6 +8,7 @@
 import "./styles.css";
 import { PoolClient } from "./client";
 import { LogPane } from "./log-pane";
+import { Vitals } from "./vitals";
 import {
   phaseLabel,
   POOL_TAB_COLORS,
@@ -26,12 +27,15 @@ import {
   type TimelineView,
 } from "./project";
 import { ConsoleView, type AppModel } from "./view";
+import { createPrototype, type Prototype } from "./prototype/index";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
 const root: HTMLElement = appRoot;
 
 const client = new PoolClient();
+
+let proto: Prototype | null = null;
 
 // The favicon: one reused link element whose href is a canvas-drawn dot in
 // the pool status color. The idle grey dot stands from page load, before the
@@ -103,6 +107,17 @@ const consoleView = new ConsoleView({
 // selected ticket's events. Absent until the first fetch lands: the cards
 // render no grade UI until then, which is the no-grade state anyway.
 let grades: Record<string, GradeView> = {};
+
+// The Vitals store: polls the activity endpoint per live-attempt ticket and
+// holds the payloads and sparkline samples the cards' footers project from.
+// Module scope so a full-DOM rebuild never drops them; the projection renders
+// nothing for a card until its first payload lands, so there is no empty
+// flash. Its onChange fires on poll responses and on the 2s wall-clock tick
+// that keeps staleness copy honest while the snapshot stream is silent.
+const vitals = new Vitals({
+  fetch: (ticketId) => client.getActivity(ticketId),
+  onChange: () => render(),
+});
 
 function refreshGrades(): void {
   client
@@ -228,7 +243,9 @@ async function loadTimeline(): Promise<void> {
 }
 
 function model(): AppModel {
-  const view = state.snapshot ? projectPool(state.snapshot, grades) : null;
+  const view = state.snapshot
+    ? projectPool(state.snapshot, grades, vitals.state())
+    : null;
   const detail =
     state.snapshot && state.selectedId
       ? projectDetail(state.snapshot, state.selectedId, grades)
@@ -324,12 +341,15 @@ function render(): void {
         });
     },
   });
+  proto?.afterRender(root);
 }
 
 function setSnapshot(snapshot: PoolSnapshot): void {
   state.snapshot = snapshot;
   state.connected = true;
   state.error = null;
+  vitals.update(snapshot);
+  proto?.update(snapshot);
   const status = poolStatus(snapshot);
   document.title = `${status.word} — ${snapshot.poolName}`;
   setFavicon(status.color);
@@ -344,6 +364,7 @@ function setSnapshot(snapshot: PoolSnapshot): void {
 }
 
 async function boot(): Promise<void> {
+  proto = createPrototype({ onNeedRender: () => render() });
   let snapshot: PoolSnapshot | null = null;
   try {
     snapshot = await client.getState();

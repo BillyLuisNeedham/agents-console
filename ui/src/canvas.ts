@@ -16,6 +16,7 @@ import {
   parseStoredLayout,
   statusLabel,
   strokeWidthForZoom,
+  VITALS_MAX_SAMPLES,
   zoomAtCursor,
   type CardBox,
   type EdgeMode,
@@ -26,6 +27,7 @@ import {
   type TopologyEdge,
   type UtilityCardView,
   type ViewTransform,
+  type VitalsView,
 } from "./project";
 import { h } from "./dom";
 
@@ -35,8 +37,71 @@ const CARD_WIDTH = 280;
 const LAYOUT_KEY = "console-canvas-layout";
 const DRAG_THRESHOLD = 4;
 const WORLD_MIN_WIDTH = 960;
+const SPARK_WIDTH = 48;
+const SPARK_HEIGHT = 14;
 
 type Positioned = { id: string; x: number; y: number };
+
+/**
+ * The Vitals footer: diff totals (`+a −r · N files`, or "no changes yet"),
+ * the staleness readout, and the sparkline of recent diff totals. The copy
+ * and colors come from the projection's view data; this is shape only.
+ */
+function renderVitals(vitals: VitalsView): HTMLElement {
+  const diff = vitals.diff
+    ? h(
+        "span",
+        { class: "vitals-diff" },
+        h("span", { class: "vitals-added" }, `+${vitals.diff.added}`),
+        " ",
+        h("span", { class: "vitals-removed" }, `−${vitals.diff.removed}`),
+        ` · ${vitals.diff.fileCount} files`,
+      )
+    : h("span", { class: "vitals-diff" }, "no changes yet");
+  const stale = vitals.staleness
+    ? h(
+        "span",
+        {
+          class:
+            "vitals-stale" +
+            (vitals.staleness.kind === "idle" ? " vitals-idle" : "") +
+            (vitals.staleness.fresh ? " vitals-fresh" : ""),
+        },
+        vitals.staleness.copy,
+      )
+    : null;
+  return h(
+    "div",
+    { class: `vitals vitals-${vitals.mode}` },
+    diff,
+    stale,
+    sparkline(vitals.samples),
+  );
+}
+
+/** The diff-total trend: a 48×14 polyline of the last 40 poll samples. */
+function sparkline(samples: number[]): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "vitals-spark");
+  svg.setAttribute("width", String(SPARK_WIDTH));
+  svg.setAttribute("height", String(SPARK_HEIGHT));
+  svg.setAttribute("viewBox", `0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`);
+  const poly = document.createElementNS(SVG_NS, "polyline");
+  if (samples.length > 1) {
+    const max = Math.max(...samples, 1);
+    const step = SPARK_WIDTH / (VITALS_MAX_SAMPLES - 1);
+    const points = samples
+      .map((value, i) => {
+        const x = SPARK_WIDTH - (samples.length - 1 - i) * step;
+        const y = SPARK_HEIGHT - 1 - (value / max) * (SPARK_HEIGHT - 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    poly.setAttribute("points", points);
+  }
+  svg.appendChild(poly);
+  return svg;
+}
 
 // The pending/queued dot every card with an interrupt carries in its head:
 // a plain dot while the interrupt waits on the operator, a queued dot once
@@ -341,6 +406,7 @@ export class Canvas {
             : "") +
           this.flowClass(card.id, selection),
         "data-node-id": card.id,
+        "data-ticket-id": card.ticketId,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
       },
       head,
@@ -359,6 +425,9 @@ export class Canvas {
               `grade ${card.grade.score}/10 · ${card.grade.verdict}`,
             )
           : null,
+        // The Vitals footer rides the view model, so it renders inside the
+        // card render and survives the full-DOM rebuild like everything else.
+        card.vitals ? renderVitals(card.vitals) : null,
       ),
     );
   }

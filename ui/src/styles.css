@@ -570,6 +570,57 @@ body {
   color: var(--interrupt);
 }
 
+/* The Vitals footer on a card with a live attempt: diff totals, staleness
+   readout, sparkline. Existing tokens only. Frozen vitals keep the
+   last-known payload, greyed. */
+.vitals {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.vitals-added {
+  color: var(--status-done);
+}
+
+.vitals-removed {
+  color: var(--interrupt);
+}
+
+.vitals-stale {
+  color: var(--text-dim);
+}
+
+.vitals-stale.vitals-fresh {
+  color: var(--status-done);
+}
+
+.vitals-stale.vitals-idle {
+  color: var(--interrupt);
+  font-weight: 600;
+}
+
+.vitals-frozen {
+  opacity: 0.55;
+}
+
+.vitals-spark {
+  flex: none;
+  margin-left: auto;
+  align-self: center;
+}
+
+.vitals-spark polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
 .card-channels {
   display: flex;
   flex-direction: column;

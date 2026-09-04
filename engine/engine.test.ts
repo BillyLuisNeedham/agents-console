@@ -6136,6 +6136,15 @@ describe("worktrees", () => {
     expect(before[0].attempt).toBe(1);
     expect(before.find((e) => e.kind === "resolver")?.attempt).toBe(2);
 
+    // Both run kinds record the worktree they ran in, so a ticket maps
+    // durably to its attempt's cwd/branch.
+    const spawnedEvent = before.find((e) => e.kind === "spawned")!;
+    expect(spawnedEvent.payload.cwd).toContain("pool-worktrees/02");
+    expect(spawnedEvent.payload.branch).toBe("pool/02");
+    const resolverEvent = before.find((e) => e.kind === "resolver")!;
+    expect(resolverEvent.payload.cwd).toBe(spawnedEvent.payload.cwd);
+    expect(resolverEvent.payload.branch).toBe("pool/02");
+
     const approved = await run.approve("02");
     const done = await approveReview(approved);
     expect(done.phase).toBe("done");

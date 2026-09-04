@@ -1512,7 +1512,7 @@ async function runResolver(
     at: new Date().toISOString(),
     attempt: nextAttempt(session.runsDir, marker.id),
     kind: "resolver",
-    payload: { files: result.conflicted },
+    payload: { files: result.conflicted, cwd: worktree.path, branch: worktree.branch },
   });
   const prompt = buildResolverPrompt({
     id: marker.id,
@@ -3904,7 +3904,7 @@ async function runTicket(
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "spawned",
-    payload: {},
+    payload: { cwd: plan.cwd, branch: plan.worktree?.branch ?? null },
   });
   const exitCode = await spawnToLog(argv, ctx);
 

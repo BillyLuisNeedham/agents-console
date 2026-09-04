@@ -55,6 +55,7 @@ import {
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
+import { git } from "./worktrees.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
@@ -183,6 +184,14 @@ interface TicketLogResponse {
   nextOffset: number;
   totalSize: number;
   attempts: LogAttemptInfo[];
+}
+
+interface TicketActivityResponse {
+  ticketId: string;
+  running: boolean;
+  diff: { added: number; removed: number; files: string[] } | null;
+  log: { size: number; mtime: string } | null;
+  lastEventAt: string | null;
 }
 
 // ANSI escape sequences: CSI (colors, cursor movement) and OSC (title, hyperlinks)
@@ -412,6 +421,132 @@ function readTicketEvents(
     spec,
   };
 }
+
+const UNTRACKED_MAX_BYTES = 256 * 1024;
+const UNTRACKED_MAX_FILES = 100;
+
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  let lines = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\n") lines++;
+  }
+  return text.endsWith("\n") ? lines : lines + 1;
+}
+
+function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
+  try {
+    const numstat = git(cwd, ["diff", "--numstat", "HEAD"]);
+    const status = git(cwd, ["status", "--porcelain"]);
+    if (!numstat.ok || !status.ok) return null;
+    const lines = new Map<string, { added: number; removed: number }>();
+    const order: string[] = [];
+    const record = (path: string, added: number, removed: number): void => {
+      const existing = lines.get(path);
+      if (existing) {
+        existing.added += added;
+        existing.removed += removed;
+      } else {
+        lines.set(path, { added, removed });
+        order.push(path);
+      }
+    };
+    for (const line of numstat.out.split("\n")) {
+      if (!line.trim()) continue;
+      const [added, removed, ...rest] = line.split("\t");
+      const path = rest.join("\t");
+      if (!path) continue;
+      // A binary entry ("- - path") counts as a file without lines.
+      record(path, added === "-" ? 0 : Number(added) || 0, removed === "-" ? 0 : Number(removed) || 0);
+    }
+    let untracked = 0;
+    for (const line of status.out.split("\n")) {
+      if (!line.startsWith("?? ")) continue;
+      if (untracked >= UNTRACKED_MAX_FILES) break;
+      untracked += 1;
+      let path = line.slice(3);
+      if (path.startsWith('"') && path.endsWith('"')) {
+        path = path.slice(1, -1);
+      }
+      try {
+        const full = join(cwd, path);
+        const stat = statSync(full);
+        if (!stat.isFile()) continue;
+        if (stat.size >= UNTRACKED_MAX_BYTES) {
+          // Over the read cap it still counts as a touched file, just with no
+          // line counts.
+          record(path, 0, 0);
+          continue;
+        }
+        record(path, countLines(readFileSync(full, "utf8")), 0);
+      } catch {
+        continue;
+      }
+    }
+    return {
+      added: order.reduce((sum, p) => sum + lines.get(p)!.added, 0),
+      removed: order.reduce((sum, p) => sum + lines.get(p)!.removed, 0),
+      files: order,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The events that close an attempt for good: a resolver run records no exited
+// event, so answered and merged close it too. Without them a resolver-driven
+// merge would read as live forever.
+const SETTLED_EVENT_KINDS = new Set(["exited", "crash", "answered", "merged"]);
+
+function readTicketActivity(
+  poolDir: string,
+  ticketId: string,
+): TicketActivityResponse {
+  const runsDir = join(poolDir, "runs");
+  const events = readEvents(runsDir, ticketId);
+  let worktree: string | null = null;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind !== "spawned" && event.kind !== "resolver") continue;
+    // Legacy events carry no cwd in their payload; they are skipped, never an
+    // error, and the search falls back to an older attempt that has one.
+    if (typeof event.payload?.cwd === "string") {
+      worktree = event.payload.cwd;
+      break;
+    }
+  }
+  // Live means the ticket's latest attempt is doing work: an implement run in
+  // flight, or a resolver run in flight on a checkpointed merge. The latest
+  // attempt is the highest attempt number recorded; an attempt only counts
+  // once it has actually spawned.
+  const latestAttempt = events.reduce((m, e) => Math.max(m, e.attempt), 0);
+  const latestAttemptEvents = events.filter((e) => e.attempt === latestAttempt);
+  const running =
+    latestAttempt > 0 &&
+    latestAttemptEvents.some(
+      (e) => e.kind === "spawned" || e.kind === "resolver",
+    ) &&
+    !latestAttemptEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind));
+  const lastEventAt = events.length > 0 ? events[events.length - 1].at : null;
+  const diff =
+    worktree !== null && existsSync(worktree)
+      ? computeActivityDiff(worktree)
+      : null;
+  const attempts = listAttemptLogs(runsDir, ticketId);
+  const current = attempts[attempts.length - 1];
+  let log: TicketActivityResponse["log"] = null;
+  if (current) {
+    try {
+      const stat = statSync(join(runsDir, current.logFile));
+      log = { size: stat.size, mtime: stat.mtime.toISOString() };
+    } catch {
+      log = null;
+    }
+  }
+  return { ticketId, running, diff, log, lastEventAt };
+}
+
+export const ACTIVITY_CACHE_TTL_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Grades endpoint
@@ -663,6 +798,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let ticketIds = knownTicketIds(meta);
   const poolName = poolDir.split("/").slice(-2).join("/");
 
+  // A short in-memory cache per ticket id absorbs the client's rapid repeat
+  // polls (ADR 0011): one entry per known ticket id, so it never grows past
+  // the pool's size. No mtime-based invalidation in v1.
+  const activityCache = new Map<
+    string,
+    { at: number; value: TicketActivityResponse }
+  >();
+  function readTicketActivityCached(ticketId: string): TicketActivityResponse {
+    const hit = activityCache.get(ticketId);
+    const now = Date.now();
+    if (hit && now - hit.at < ACTIVITY_CACHE_TTL_MS) return hit.value;
+    const value = readTicketActivity(poolDir, ticketId);
+    activityCache.set(ticketId, { at: now, value });
+    return value;
+  }
+
   // Pool meta is read from disk, never cached from boot: the engine writes
   // ticket files mid-run (Spawn adoptions, grader and head-to-head tickets),
   // and each must render as a card and be accepted by the ticket endpoints
@@ -862,6 +1013,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const range = await readLogRange(join(runsDir, logFile), offset, end);
           return Response.json({ ...range, attempts });
+        }
+
+        if (pathname === "/api/activity") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          if (!ticketIds.has(ticketId)) {
+            return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
+          }
+          return Response.json(readTicketActivityCached(ticketId));
         }
 
         if (pathname === "/api/ticket") {

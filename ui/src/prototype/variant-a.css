@@ -1,0 +1,46 @@
+.protoA-vitals {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.protoA-diff {
+  color: var(--text-dim);
+}
+
+.protoA-added {
+  color: var(--status-done);
+}
+
+.protoA-removed {
+  color: var(--interrupt);
+}
+
+.protoA-stale {
+  color: var(--text-dim);
+}
+
+.protoA-stale.protoA-idle {
+  color: var(--interrupt);
+}
+
+.protoA-spark {
+  margin-left: auto;
+  flex: none;
+  display: block;
+}
+
+.protoA-spark polyline {
+  fill: none;
+  stroke: var(--status-running);
+  stroke-width: 1;
+  opacity: 0.85;
+}

@@ -14,13 +14,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ACTIVITY_CACHE_TTL_MS,
   createPoolServer,
   LOG_CHUNK_BYTES,
   type PoolServer,
   type PoolServerOptions,
 } from "./server.ts";
 import { readFleetEntries } from "./fleet.ts";
-import { appendEvent } from "./events.ts";
+import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 
 const servers: PoolServer[] = [];
@@ -1221,6 +1222,248 @@ describe("ticket log endpoint", () => {
 
     const res = await fetch(`${server.url}/api/log?ticket=zzz&attempt=1`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("ticket activity endpoint", () => {
+  const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  interface ActivityBody {
+    ticketId: string;
+    running: boolean;
+    diff: { added: number; removed: number; files: string[] } | null;
+    log: { size: number; mtime: string } | null;
+    lastEventAt: string | null;
+  }
+
+  /** A real temporary git repo, to be an attempt's recorded worktree. */
+  function makeGitRepo(seed: Record<string, string> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), "activity-worktree-"));
+    tempDirs.push(dir);
+    const run = (args: string[]): void => {
+      const probe = Bun.spawnSync(["git", "-C", dir, ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (probe.exitCode !== 0) {
+        throw new Error(
+          `git ${args.join(" ")} failed: ${probe.stderr.toString()}`,
+        );
+      }
+    };
+    run(["init", "-q", "-b", "main"]);
+    run(["config", "user.email", "pool@test"]);
+    run(["config", "user.name", "pool"]);
+    for (const [path, content] of Object.entries(seed)) {
+      writeFileSync(join(dir, path), content);
+    }
+    run(["add", "-A"]);
+    run(["commit", "-qm", "init"]);
+    return dir;
+  }
+
+  function seedEvents(
+    poolDir: string,
+    ticketId: string,
+    events: {
+      at: string;
+      attempt: number;
+      kind: TicketEventKind;
+      payload?: Record<string, unknown>;
+    }[],
+  ): void {
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    for (const event of events) {
+      appendEvent(runsDir, ticketId, {
+        at: event.at,
+        attempt: event.attempt,
+        kind: event.kind,
+        payload: event.payload ?? {},
+      });
+    }
+  }
+
+  const T0 = "2026-01-01T00:00:00.000Z";
+  const ev = (
+    attempt: number,
+    kind: TicketEventKind,
+    payload: Record<string, unknown> = {},
+  ) => ({ at: T0, attempt, kind, payload });
+  const spawnedIn = (repo: string) =>
+    ev(1, "spawned", { cwd: repo, branch: "pool/01" });
+
+  async function getActivity(
+    server: PoolServer,
+    id = "01",
+  ): Promise<{ status: number; body: ActivityBody }> {
+    const res = await fetch(`${server.url}/api/activity?ticket=${id}`);
+    return { status: res.status, body: (await res.json()) as ActivityBody };
+  }
+
+  it("totals a mixed staged, unstaged and untracked worktree diff", async () => {
+    const repo = makeGitRepo({
+      "tracked-a.txt": "base\n",
+      "tracked-b.txt": "keep\n",
+    });
+    const run = (args: string[]) =>
+      Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+    // staged: +3 −1 on tracked-a
+    writeFileSync(join(repo, "tracked-a.txt"), "one\ntwo\nthree\n");
+    run(["add", "tracked-a.txt"]);
+    // unstaged: +1 on tracked-b
+    writeFileSync(join(repo, "tracked-b.txt"), "keep\nextra\n");
+    // untracked: +4
+    writeFileSync(join(repo, "new-file.md"), "a\nb\nc\nd\n");
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    seedEvents(poolDir, "01", [spawnedIn(repo)]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const { status, body } = await getActivity(server);
+    expect(status).toBe(200);
+    expect(body.ticketId).toBe("01");
+    expect(body.diff).toEqual({
+      added: 8,
+      removed: 1,
+      files: ["tracked-a.txt", "tracked-b.txt", "new-file.md"],
+    });
+  });
+
+  it("caps untracked files at 100 and line-counts only files under 256KB", async () => {
+    const repo = makeGitRepo({ "seed.txt": "seed\n" });
+    for (let i = 1; i <= 101; i++) {
+      writeFileSync(join(repo, `u-${String(i).padStart(3, "0")}.txt`), "line\n");
+    }
+    // Over the per-file read cap: still a touched file, but no line counts.
+    writeFileSync(join(repo, "big.bin"), "x".repeat(300 * 1024));
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    seedEvents(poolDir, "01", [spawnedIn(repo)]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const { body } = await getActivity(server);
+    // big.bin sorts first, so it takes a slot and 99 small files fit under
+    // the cap; u-100.txt and u-101.txt fall past it.
+    expect(body.diff?.files).toHaveLength(100);
+    expect(body.diff?.files).toContain("big.bin");
+    expect(body.diff?.files).not.toContain("u-101.txt");
+    expect(body.diff?.added).toBe(99);
+    expect(body.diff?.removed).toBe(0);
+  });
+
+  it("serves diff null for legacy events with no recorded cwd", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    seedEvents(poolDir, "01", [
+      ev(1, "spawned"),
+      ev(1, "exited", { code: 0, status: "done" }),
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const { status, body } = await getActivity(server);
+    expect(status).toBe(200);
+    expect(body.diff).toBeNull();
+    expect(body.running).toBe(false);
+    expect(body.lastEventAt).toBe(T0);
+  });
+
+  it("serves an empty payload for a ticket with no events at all", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const { body } = await getActivity(server);
+    expect(body).toEqual({
+      ticketId: "01",
+      running: false,
+      diff: null,
+      log: null,
+      lastEventAt: null,
+    });
+  });
+
+  it("404s an unknown ticket id", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const res = await fetch(`${server.url}/api/activity?ticket=zzz`);
+    expect(res.status).toBe(404);
+  });
+
+  it("reports the attempt log's size and last write with the ticket's last event time", async () => {
+    const repo = makeGitRepo({ "seed.txt": "seed\n" });
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, "01.log"), "hello\n");
+    utimesSync(join(runsDir, "01.log"), new Date(0), new Date(1000));
+    seedEvents(poolDir, "01", [
+      spawnedIn(repo),
+      ev(1, "exited", { code: 0, status: "done" }),
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const { body } = await getActivity(server);
+    expect(body.log).toEqual({ size: 6, mtime: "1970-01-01T00:00:01.000Z" });
+    expect(body.lastEventAt).toBe(T0);
+    expect(body.running).toBe(false);
+  });
+
+  it("reports running only while the latest attempt is live", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker },
+      { file: "02-b.md", marker: marker.replace("id=01", "id=02") },
+      { file: "03-c.md", marker: marker.replace("id=01", "id=03") },
+      { file: "04-d.md", marker: marker.replace("id=01", "id=04") },
+    ]);
+    // 01: an implement attempt in flight.
+    seedEvents(poolDir, "01", [ev(1, "spawned")]);
+    // 02: parked at a checkpoint.
+    seedEvents(poolDir, "02", [
+      ev(1, "spawned"),
+      ev(1, "exited", { code: 0, status: "checkpoint" }),
+      ev(1, "checkpoint"),
+    ]);
+    // 03: a conflicted merge, resolver attempt in flight.
+    seedEvents(poolDir, "03", [
+      ev(1, "spawned"),
+      ev(1, "exited", { code: 0, status: "done" }),
+      ev(1, "merge-conflict"),
+      ev(2, "resolver"),
+    ]);
+    // 04: the same, but the human has answered the approval interrupt.
+    seedEvents(poolDir, "04", [
+      ev(1, "spawned"),
+      ev(1, "exited", { code: 0, status: "done" }),
+      ev(1, "merge-conflict"),
+      ev(2, "resolver"),
+      ev(2, "answered"),
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    expect((await getActivity(server, "01")).body.running).toBe(true);
+    expect((await getActivity(server, "02")).body.running).toBe(false);
+    expect((await getActivity(server, "03")).body.running).toBe(true);
+    expect((await getActivity(server, "04")).body.running).toBe(false);
+  });
+
+  it("serves the cached payload for repeat requests inside the TTL", async () => {
+    const repo = makeGitRepo({ "seed.txt": "seed\n" });
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    seedEvents(poolDir, "01", [spawnedIn(repo)]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const first = await getActivity(server);
+    expect(first.body.diff).toEqual({ added: 0, removed: 0, files: [] });
+    // A change inside the TTL is not reflected yet.
+    writeFileSync(join(repo, "fresh.txt"), "one\ntwo\n");
+    const second = await getActivity(server);
+    expect(second.body).toEqual(first.body);
+    // Once the TTL has passed, the change shows up.
+    await Bun.sleep(ACTIVITY_CACHE_TTL_MS + 50);
+    const third = await getActivity(server);
+    expect(third.body.diff).toEqual({
+      added: 2,
+      removed: 0,
+      files: ["fresh.txt"],
+    });
   });
 });
 
