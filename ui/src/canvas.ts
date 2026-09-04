@@ -374,7 +374,7 @@ export class Canvas {
       h(
         "span",
         { class: `node-card-state ticket-state-${card.status}` },
-        statusLabel(card.status),
+        statusLabel(card.status, card.mergePending),
       ),
     );
     if (card.interrupt) {

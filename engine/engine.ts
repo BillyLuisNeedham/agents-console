@@ -4190,7 +4190,7 @@ function readOptional(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
 }
 
-function repoRootOf(poolDir: string): string {
+export function repoRootOf(poolDir: string): string {
   const probe = Bun.spawnSync({
     cmd: ["git", "-C", poolDir, "rev-parse", "--show-toplevel"],
     stdout: "pipe",

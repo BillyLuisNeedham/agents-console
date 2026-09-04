@@ -525,7 +525,7 @@ export class Detail {
       h(
         "div",
         { class: `detail-status ticket-state-${detail.status}` },
-        statusLabel(detail.status),
+        statusLabel(detail.status, detail.mergePending),
       ),
     );
     if (detail.interrupt) {
