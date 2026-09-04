@@ -873,6 +873,166 @@ describe("grades endpoint", () => {
   });
 });
 
+describe("merge pending enrichment", () => {
+  const DONE_01 = "<!-- state: id=01 blocked-by=none status=done -->";
+
+  interface EnrichedTicketWire {
+    id: string;
+    status: string;
+    mergePending: boolean;
+  }
+
+  /**
+   * A git repo with the pool inside. Markers come in pre-set done, so the
+   * engine boots into the review gate without running anything, and the
+   * caller parks branches by hand: the derivation reads only markers and
+   * branch state, so a hand-made park is exactly what a conflicted merge
+   * leaves behind.
+   */
+  function makeGitPool(
+    tickets: { file: string; marker: string }[],
+  ): { root: string; poolDir: string; run: (args: string[]) => void } {
+    const root = mkdtempSync(join(tmpdir(), "pool-git-"));
+    tempDirs.push(root);
+    const poolDir = join(root, "pool");
+    makePoolInto(poolDir, tickets, {});
+    const run = (args: string[]): void => {
+      const probe = Bun.spawnSync(["git", "-C", root, ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (probe.exitCode !== 0) {
+        throw new Error(
+          `git ${args.join(" ")} failed: ${probe.stderr.toString()}`,
+        );
+      }
+    };
+    run(["init", "-q", "-b", "main"]);
+    run(["config", "user.email", "pool@test"]);
+    run(["config", "user.name", "pool"]);
+    writeFileSync(join(root, "base.txt"), "base\n");
+    run(["add", "base.txt"]);
+    run(["commit", "-qm", "base"]);
+    return { root, poolDir, run };
+  }
+
+  /** Park pool/<id> with one commit main does not have. */
+  function parkBranch(root: string, run: (args: string[]) => void, id: string): void {
+    run(["checkout", "-q", "-b", `pool/${id}`]);
+    writeFileSync(join(root, `w-${id}.txt`), `work for ${id}\n`);
+    run(["add", `w-${id}.txt`]);
+    run(["commit", "-qm", `work ${id}`]);
+    run(["checkout", "-q", "main"]);
+  }
+
+  async function ticketsOf(server: PoolServer): Promise<EnrichedTicketWire[]> {
+    const res = await fetch(`${server.url}/api/state`);
+    const body = (await res.json()) as {
+      snapshot: { state: { tickets: EnrichedTicketWire[] } } | null;
+    };
+    return body.snapshot?.state.tickets ?? [];
+  }
+
+  it("labels a done ticket whose parked branch has not landed, and drops the label once it lands", async () => {
+    const { root, poolDir, run } = makeGitPool([{ file: "01-a.md", marker: DONE_01 }]);
+    parkBranch(root, run, "01");
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+    await server.settled();
+
+    // Parked and unmerged: the emit-time enrichment carries the label.
+    expect(server.latest?.state.tickets[0]).toMatchObject({
+      id: "01",
+      status: "done",
+      mergePending: true,
+    });
+
+    // A manual CLI merge, branch kept and now an ancestor of the working
+    // branch, lifts the label on the next snapshot without any Console
+    // action. The ticket is still done; only the merge was pending.
+    run(["merge", "--no-edit", "pool/01"]);
+    expect((await ticketsOf(server))[0]).toMatchObject({
+      id: "01",
+      status: "done",
+      mergePending: false,
+    });
+
+    // A branch that is gone reads as merged the same way: the engine
+    // deletes it once its own merge lands.
+    run(["checkout", "-q", "-B", "pool/01"]);
+    writeFileSync(join(root, "again.txt"), "more\n");
+    run(["add", "again.txt"]);
+    run(["commit", "-qm", "again"]);
+    run(["checkout", "-q", "main"]);
+    expect((await ticketsOf(server))[0]?.mergePending).toBe(true);
+    run(["branch", "-D", "pool/01"]);
+    expect((await ticketsOf(server))[0]?.mergePending).toBe(false);
+  });
+
+  it("reads the merge target as the working branch, so a feature branch holds a label main would clear", async () => {
+    const { root, poolDir, run } = makeGitPool([
+      { file: "01-a.md", marker: DONE_01 },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=done -->" },
+    ]);
+    // 02 lands in main, then feature/x is cut from main BEFORE that merge:
+    // the work is in main but not in the branch the pool works on.
+    run(["checkout", "-q", "-b", "pool/02"]);
+    writeFileSync(join(root, "w-02.txt"), "work 02\n");
+    run(["add", "w-02.txt"]);
+    run(["commit", "-qm", "work 02"]);
+    run(["checkout", "-q", "main"]);
+    run(["merge", "--no-edit", "pool/02"]);
+    run(["checkout", "-q", "-b", "feature/x", "main~1"]);
+    writeFileSync(join(root, "f.txt"), "feature\n");
+    run(["add", "f.txt"]);
+    run(["commit", "-qm", "feature"]);
+    parkBranch(root, run, "01");
+    run(["checkout", "-q", "feature/x"]);
+    const server = await startServer(poolDir, stubHarness({}));
+    await server.start();
+    await server.settled();
+
+    const byId = new Map(
+      (await ticketsOf(server)).map((t) => [t.id, t]),
+    );
+    // Unmerged anywhere: pending.
+    expect(byId.get("01")).toMatchObject({ status: "done", mergePending: true });
+    // Merged into main but not into feature/x: still pending. The target is
+    // the working branch, not main.
+    expect(byId.get("02")).toMatchObject({ status: "done", mergePending: true });
+  });
+
+  it("drops the label when the ticket reopens: a restart re-derives and the re-run's merge lands", async () => {
+    const { root, poolDir, run } = makeGitPool([{ file: "01-a.md", marker: DONE_01 }]);
+    parkBranch(root, run, "01");
+    const first = await startServer(poolDir, stubHarness({}));
+    await first.start();
+    await first.settled();
+    expect((await ticketsOf(first))[0]).toMatchObject({
+      status: "done",
+      mergePending: true,
+    });
+    await first.close();
+
+    // The engine reopens a ticket by writing its marker; the restarted
+    // server rehydrates from that write alone, no persisted label anywhere.
+    const file = join(poolDir, "issues", "01-a.md");
+    writeFileSync(file, readFileSync(file, "utf8").replace("status=done", "status=ready"));
+    rmSync(join(poolDir, "runs", "server.pid"));
+    const second = await startServer(poolDir, stubHarness({}));
+    await second.start();
+    await second.settled();
+
+    // The re-run reused the parked branch and merged it clean, so the
+    // ticket is done again with nothing pending.
+    expect((await ticketsOf(second))[0]).toMatchObject({
+      status: "done",
+      mergePending: false,
+    });
+    expect(existsSync(join(root, ".git", "pool-worktrees", "01"))).toBe(false);
+  });
+});
+
 describe("ticket body endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
