@@ -87,8 +87,12 @@ The JSON an attempt writes at exit to signal its result: done, or checkpoint wit
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Ticket log**:
-The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.
+The complete record of a ticket's work — every attempt's log plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail. Since ADR-0012 the per-attempt log is derived live from the attempt's Stream file, not raw harness bytes.
 _Avoid_: log drawer (that's the pool-level channel), transcript, chat history
+
+**Stream file**:
+The raw, verbatim tee of a streaming harness's structured output for one attempt — `runs/<id>.stream.jsonl`, written live as bytes arrive. The source of truth the attempt's human-readable log is derived from; kept for forensics when the derived view loses fidelity. Only harnesses with a structured stream mode (claude, cursor) produce one; opencode's raw stdout already serves as its log.
+_Avoid_: raw log (that's what the ticket log used to be), jsonl log, event log (that's the lifecycle events file)
 
 **Vitals**:
 The compact liveness readout on a ticket card while an attempt runs — diff totals, time since last observable change, sparkline. Read live from the attempt's worktree diff and log growth, not from the ticket log.
