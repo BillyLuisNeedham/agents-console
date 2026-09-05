@@ -74,6 +74,10 @@ The set of live Consoles on this machine, recorded in a registry file so any of 
 A named, machine-local bundle of a pool's behavioural config — harness, model, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
 _Avoid_: profile, template
 
+**Assignment**:
+The harness, model, and drivers a ticket runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. Every ticket card shows its Assignment.
+_Avoid_: config (that's the raw file the Assignment is resolved from), profile
+
 **Detail**:
 The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
@@ -85,6 +89,10 @@ _Avoid_: run (that's the whole thread), execution, job
 **Outcome**:
 The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
+
+**Merge hold**:
+The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0012 (`docs/adr/0012-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
+_Avoid_: block (that's a ticket dependency), gate (per-ticket gating was the rejected alternative)
 
 **Ticket log**:
 The complete record of a ticket's work — every attempt's raw harness output plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail.

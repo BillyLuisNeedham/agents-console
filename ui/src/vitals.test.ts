@@ -20,6 +20,7 @@ function snap(tickets: Record<string, PoolStatus>): PoolSnapshot {
         title: `ticket ${id}`,
         blockedBy: [],
         status,
+        assignment: { harness: null, model: null, drivers: "implement" },
       })),
       log: [],
       outcomes: {},

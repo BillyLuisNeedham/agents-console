@@ -201,6 +201,28 @@ interface PoolUpdate {
 // is lying.
 export type RunPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
 
+/**
+ * One ticket's resolved Assignment on the wire (ADR-0013): the engine's
+ * resolved record with no verify (Verify keeps its own surfaces) and the
+ * engine's empty string rendered as null for an unassigned field. The UI
+ * renders this record verbatim; nothing re-derives it.
+ */
+export interface AssignmentView {
+  harness: string | null;
+  model: string | null;
+  drivers: string;
+}
+
+// The record an unassigned ticket resolves to (ADR-0013): what
+// assignmentViewOf returns for a ticket with no assign entry and no pool
+// defaults. Exported so the server's mid-flight fallback for a meta id the
+// engine has not resolved yet quotes this record instead of restating it.
+export const UNASSIGNED_ASSIGNMENT_VIEW: AssignmentView = {
+  harness: null,
+  model: null,
+  drivers: "implement",
+};
+
 export interface PoolSnapshot {
   seq: number;
   phase: RunPhase;
@@ -210,6 +232,10 @@ export interface PoolSnapshot {
   // snapshot is where the two meet, so every emitted frame carries the
   // answered-and-waiting state with no change to super-step merge semantics.
   queuedAnswers: QueuedAnswer[];
+  // One resolved Assignment record per ticket (ADR-0013): the engine's single
+  // derivation travels with the state it belongs to, so the server and the UI
+  // render it without re-deriving.
+  assignments: Record<string, AssignmentView>;
 }
 
 interface RunOptions {
@@ -556,6 +582,17 @@ function reportDriveDeath(session: Session, error: unknown): void {
   settleDrive(session, "dead", error);
 }
 
+// The wire view of a resolved Assignment (ADR-0013): the empty string the
+// engine uses for an unassigned field reads as null, and verify stays off
+// the wire.
+function assignmentViewOf(assignment: Assignment): AssignmentView {
+  return {
+    harness: assignment.harness || null,
+    model: assignment.model || null,
+    drivers: assignment.drivers,
+  };
+}
+
 // One emit point for every snapshot the run produces: the drive loop's
 // lifecycle emits, the acceptance emit (a new queued answer while a
 // super-step is in flight), and the terminal dead emit from
@@ -568,6 +605,9 @@ function emitSnapshot(session: Session, phase: RunPhase): void {
     phase,
     state: session.state,
     queuedAnswers: session.answers.pending(),
+    assignments: Object.fromEntries(
+      [...session.assignments].map(([id, a]) => [id, assignmentViewOf(a)]),
+    ),
   };
   session.snapshots.push(snapshot);
   session.onSnapshot?.(snapshot);
@@ -1751,7 +1791,7 @@ function resolveEngineTicketAssignment(
 ): Assignment {
   const assign = config.assign?.[ticketMarker.id] ?? {};
   const harness = assign.harness ?? build.harness;
-  if (!harnesses[harness]) {
+  if (harness && !harnesses[harness]) {
     throw new Error(
       `pool config: ticket ${ticketMarker.id} names unknown harness ` +
         `'${harness}'. Known: ${Object.keys(harnesses).sort().join(", ")}`,
@@ -1779,7 +1819,7 @@ function resolveSpawnedTicketAssignment(
 ): Assignment {
   const assign = config.assign?.[marker.id] ?? {};
   const harness = assign.harness ?? parent.harness;
-  if (!harnesses[harness]) {
+  if (harness && !harnesses[harness]) {
     throw new Error(
       `pool config: ticket ${marker.id} names unknown harness ` +
         `'${harness}'. Known: ${Object.keys(harnesses).sort().join(", ")}`,
@@ -1861,6 +1901,34 @@ function resolveUnseenAssignments(
         `${unresolved.map((m) => m.id).join(", ")} (a spawned-by cycle?)`,
     );
   }
+}
+
+// The harness command for an assignment at its point of use: a spawn site.
+// Resolution is total (an unassigned ticket resolves to empty harness and
+// model and renders nulls on the wire), so the pool config error for it
+// fires here, at the spawn that cannot run, instead of at pool load: the
+// misconfiguration renders on the canvas first, and the run dies naming the
+// ticket and the fix.
+function harnessCommandFor(
+  harnesses: Record<string, HarnessCommand>,
+  assignment: Assignment,
+  ticketId: string,
+): HarnessCommand {
+  if (!assignment.harness || !assignment.model) {
+    throw new Error(
+      `pool config: ticket ${ticketId} has no ` +
+        `${assignment.harness ? "model" : "harness"} ` +
+        `(set one in console.json assign or defaults)`,
+    );
+  }
+  const command = harnesses[assignment.harness];
+  if (!command) {
+    throw new Error(
+      `pool config: ticket ${ticketId} names unknown harness '${assignment.harness}'. ` +
+        `Known: ${Object.keys(harnesses).sort().join(", ")}`,
+    );
+  }
+  return command;
 }
 
 // The grader's outcome: the standard contract plus a validated grade.
@@ -2217,7 +2285,7 @@ async function runGrader(
     outcomePath: graderOutcomePath,
     cwd: session.cwd,
   };
-  const argv = session.harnesses[assignment.harness](ctx);
+  const argv = harnessCommandFor(session.harnesses, assignment, gid)(ctx);
   appendEvent(runsDir, gid, {
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, gid),
@@ -3047,7 +3115,7 @@ async function runHeadToHead(
     outcomePath: h2hOutcomePath,
     cwd: session.cwd,
   };
-  const argv = session.harnesses[assignment.harness](ctx);
+  const argv = harnessCommandFor(session.harnesses, assignment, h2hId)(ctx);
   appendEvent(runsDir, h2hId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, h2hId),
@@ -3899,7 +3967,7 @@ async function runTicket(
     outcomePath,
     cwd: plan.cwd,
   };
-  const argv = env.harnesses[assignment.harness](ctx);
+  const argv = harnessCommandFor(env.harnesses, assignment, marker.id)(ctx);
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: plan.attempt,
@@ -4090,19 +4158,13 @@ export function resolveAssignment(
   const model = assign.model ?? config.defaults?.model ?? "";
   const drivers =
     assign.drivers ?? config.defaults?.drivers ?? "implement";
-  if (!harness) {
-    throw new Error(
-      `pool config: ticket ${marker.id} has no harness ` +
-        `(set one in console.json assign or defaults)`,
-    );
-  }
-  if (!model) {
-    throw new Error(
-      `pool config: ticket ${marker.id} has no model ` +
-        `(set one in console.json assign or defaults)`,
-    );
-  }
-  if (!harnesses[harness]) {
+  // Resolution is total: a ticket with no assign entry and no defaults
+  // resolves to empty harness and model (nulls on the wire), so the
+  // misconfiguration renders on the canvas instead of failing pool load.
+  // The pool config error for it fires at the spawn sites, in
+  // harnessCommandFor; only a named-but-unknown harness still fails here,
+  // at load, as it always has.
+  if (harness && !harnesses[harness]) {
     throw new Error(
       `pool config: ticket ${marker.id} names unknown harness '${harness}'. ` +
         `Known: ${Object.keys(harnesses).sort().join(", ")}`,

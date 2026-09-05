@@ -94,11 +94,24 @@ export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
   return INTERRUPT_FORMS[interrupt.kind] ?? { title: interrupt.kind, actions: [RESUME] };
 }
 
+/**
+ * One ticket's resolved Assignment (ADR-0013), served verbatim by the engine:
+ * null harness or model is an unassigned field, drivers is the engine's
+ * space-separated chain string.
+ */
+export interface PoolTicketAssignment {
+  harness: string | null;
+  model: string | null;
+  drivers: string;
+}
+
 export interface PoolTicketState {
   id: string;
   title: string;
   blockedBy: string[];
   status: PoolStatus;
+  /** The ticket's resolved Assignment record, rendered verbatim. */
+  assignment: PoolTicketAssignment;
 }
 
 export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
@@ -554,6 +567,8 @@ export interface TicketCardView {
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
   status: PoolStatus;
+  /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
+  assignment: PoolTicketAssignment;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
@@ -756,6 +771,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
+    assignment: ticket.assignment,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,

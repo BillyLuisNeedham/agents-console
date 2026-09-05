@@ -27,9 +27,9 @@ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const server of servers.splice(0)) {
-    void server.close();
+    await server.close();
   }
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
@@ -230,6 +230,78 @@ describe("pool server", () => {
       // test with the unhandled ENOENT.
       await server.settled();
     }
+  });
+
+  it("serves each ticket's resolved assignment on the enriched snapshot", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+      ],
+      {
+        defaults: { harness: "stub", model: "default-model" },
+        assign: {
+          // Full override: the record is the assign entry field-wise.
+          "02": { harness: "alt", model: "override-model", drivers: "bun review" },
+          // Partial (model-only): the rest comes from the pool defaults.
+          "03": { model: "partial-model" },
+        },
+      },
+    );
+    const stub = stubHarness({});
+    const server = await startServer(poolDir, { ...stub, alt: stub.stub! });
+
+    await server.start();
+    const snapshot = await server.settled();
+    expect(snapshot.phase).toBe("quiescent");
+    const byId = Object.fromEntries(
+      snapshot.state.tickets.map((t) => [t.id, t]),
+    );
+    // Pool defaults, drivers falling back to the engine's chain default.
+    expect(byId["01"]!.assignment).toEqual({
+      harness: "stub",
+      model: "default-model",
+      drivers: "implement",
+    });
+    expect(byId["02"]!.assignment).toEqual({
+      harness: "alt",
+      model: "override-model",
+      drivers: "bun review",
+    });
+    expect(byId["03"]!.assignment).toEqual({
+      harness: "stub",
+      model: "partial-model",
+      drivers: "implement",
+    });
+  });
+
+  it("renders an unassigned ticket with null harness and model, and dies naming the fix when it schedules", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      // Empty defaults override the helper's seeded ones: the pool reads as
+      // a console.json without a defaults block.
+      { defaults: {} },
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    await server.start();
+    await expect(server.settled()).rejects.toThrow(
+      /pool config: ticket 01 has no harness/,
+    );
+    // The unassigned record rode the snapshot as the pool started; the run
+    // then died at the spawn the ticket cannot run, with the fix named.
+    expect(server.latest?.phase).toBe("dead");
+    expect(server.latest?.state.tickets[0]!.assignment).toEqual({
+      harness: null,
+      model: null,
+      drivers: "implement",
+    });
+    expect(server.latest?.state.log).toContain(
+      "pool dead: pool config: ticket 01 has no harness (set one in console.json assign or defaults)",
+    );
   });
 
   it("serves get state, start, and resume over HTTP", async () => {
@@ -451,7 +523,7 @@ describe("pool server", () => {
       if (done) break;
       data += decoder.decode(value, { stream: true });
     }
-    reader!.cancel();
+    await reader!.cancel();
     expect(data).toContain('"ticketId":"01"');
 
     // Processing at the boundary clears the waiting state on the snapshot
@@ -492,7 +564,7 @@ describe("pool server", () => {
     }
     expect(data).toContain("event: snapshot");
     expect(data).toContain('"phase":"done"');
-    reader!.cancel();
+    await reader!.cancel();
   });
 
   it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
@@ -538,7 +610,11 @@ describe("pool server", () => {
     ]);
     expect(arrived).toBe(true);
     expect(closed).toBe(false);
-    reader.cancel();
+    await reader.cancel();
+    // The resume re-ran the ticket: let that drive settle before afterEach
+    // removes the pool dir, or its mid-run reads fail an unrelated test with
+    // the unhandled ENOENT.
+    await server.settled();
   }, 25_000);
 });
 
@@ -551,6 +627,10 @@ describe("ticket events endpoint", () => {
     await server.start();
     await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
+    // Let the closing drive settle before afterEach removes the pool dir: a
+    // drive still working when its dir vanishes fails an unrelated test with
+    // the unhandled ENOENT.
+    await server.settled();
 
     const res = await fetch(`${server.url}/api/events?ticket=01`);
     expect(res.status).toBe(200);
@@ -630,6 +710,7 @@ describe("ticket events endpoint", () => {
     );
     const server = await startServer(poolDir, stubHarness({}));
     await server.start();
+    await server.settled();
 
     const res = await fetch(`${server.url}/api/events?ticket=01`);
     const body = (await res.json()) as { spec: string };

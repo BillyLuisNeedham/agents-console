@@ -23,6 +23,7 @@ import {
   type InterruptView,
   type Point,
   type PoolCardView,
+  type PoolTicketAssignment,
   type TicketCardView,
   type TopologyEdge,
   type UtilityCardView,
@@ -101,6 +102,44 @@ function sparkline(samples: number[]): SVGSVGElement {
   }
   svg.appendChild(poly);
   return svg;
+}
+
+/**
+ * The Assignment badge: the ticket's resolved `harness · model · drivers`
+ * (ADR-0013), rendered verbatim under the card head. A record with neither
+ * harness nor model is an unassigned ticket and reads a muted word instead;
+ * a resolved-null field renders by omission, so no bare separator is
+ * stranded. One line, the model ellipsizing before the rest; a click
+ * toggles the full wrapped text in place.
+ */
+function renderAssignmentBadge(assignment: PoolTicketAssignment): HTMLElement {
+  const badge = h("div", { class: "assignment-badge" });
+  if (assignment.harness === null && assignment.model === null) {
+    badge.classList.add("assignment-badge-unassigned");
+    badge.append("unassigned");
+  } else {
+    const fields: { class: string; value: string }[] = [];
+    if (assignment.harness) {
+      fields.push({ class: "assignment-badge-harness", value: assignment.harness });
+    }
+    if (assignment.model) {
+      fields.push({ class: "assignment-badge-model", value: assignment.model });
+    }
+    if (assignment.drivers) {
+      fields.push({ class: "assignment-badge-drivers", value: assignment.drivers });
+    }
+    for (const [i, field] of fields.entries()) {
+      // Each separator leads the value it belongs to, so the expanded wrap
+      // never strands a bare dot at a line break.
+      badge.append(
+        h("span", { class: field.class }, i === 0 ? field.value : `· ${field.value}`),
+      );
+    }
+  }
+  badge.addEventListener("click", () =>
+    badge.classList.toggle("assignment-badge-expanded"),
+  );
+  return badge;
 }
 
 // The pending/queued dot every card with an interrupt carries in its head:
@@ -265,7 +304,7 @@ export class Canvas {
       const target = event.target instanceof Element ? event.target : null;
       const card = target?.closest(".node-card");
       const interactive = target?.closest(
-        "button, input, select, textarea, a, summary, label",
+        "button, input, select, textarea, a, summary, label, .assignment-badge",
       );
       if (card instanceof HTMLElement && !interactive) {
         const id = card.dataset.nodeId ?? "";
@@ -413,6 +452,10 @@ export class Canvas {
       h(
         "div",
         { class: "node-card-body" },
+        // The Assignment badge rides the view model like the Vitals footer,
+        // so it renders inside the card render and holds its row directly
+        // under the head whether or not a live attempt puts Vitals below.
+        renderAssignmentBadge(card.assignment),
         h("div", { class: "card-text ticket-card-summary" }, card.title),
         blockers,
         card.grade
