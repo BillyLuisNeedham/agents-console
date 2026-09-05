@@ -106,7 +106,7 @@ function sparkline(samples: number[]): SVGSVGElement {
 
 /**
  * The Assignment badge: the ticket's resolved `harness · model · drivers`
- * (ADR-0012), rendered verbatim under the card head. A record with neither
+ * (ADR-0013), rendered verbatim under the card head. A record with neither
  * harness nor model is an unassigned ticket and reads a muted word instead;
  * a resolved-null field renders by omission, so no bare separator is
  * stranded. One line, the model ellipsizing before the rest; a click

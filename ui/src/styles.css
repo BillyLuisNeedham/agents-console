@@ -622,7 +622,7 @@ body {
 }
 
 /* The Assignment badge under a ticket card's head: the engine's resolved
-   harness · model · drivers, rendered verbatim (ADR-0012). One line, the
+   harness · model · drivers, rendered verbatim (ADR-0013). One line, the
    model ellipsizing before the harness; the expanded toggle wraps the full
    text in place. An unassigned ticket reads a muted word. */
 .assignment-badge {

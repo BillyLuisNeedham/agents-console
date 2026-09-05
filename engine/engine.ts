@@ -202,7 +202,7 @@ interface PoolUpdate {
 export type RunPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
 
 /**
- * One ticket's resolved Assignment on the wire (ADR-0012): the engine's
+ * One ticket's resolved Assignment on the wire (ADR-0013): the engine's
  * resolved record with no verify (Verify keeps its own surfaces) and the
  * engine's empty string rendered as null for an unassigned field. The UI
  * renders this record verbatim; nothing re-derives it.
@@ -213,6 +213,16 @@ export interface AssignmentView {
   drivers: string;
 }
 
+// The record an unassigned ticket resolves to (ADR-0013): what
+// assignmentViewOf returns for a ticket with no assign entry and no pool
+// defaults. Exported so the server's mid-flight fallback for a meta id the
+// engine has not resolved yet quotes this record instead of restating it.
+export const UNASSIGNED_ASSIGNMENT_VIEW: AssignmentView = {
+  harness: null,
+  model: null,
+  drivers: "implement",
+};
+
 export interface PoolSnapshot {
   seq: number;
   phase: RunPhase;
@@ -222,7 +232,7 @@ export interface PoolSnapshot {
   // snapshot is where the two meet, so every emitted frame carries the
   // answered-and-waiting state with no change to super-step merge semantics.
   queuedAnswers: QueuedAnswer[];
-  // One resolved Assignment record per ticket (ADR-0012): the engine's single
+  // One resolved Assignment record per ticket (ADR-0013): the engine's single
   // derivation travels with the state it belongs to, so the server and the UI
   // render it without re-deriving.
   assignments: Record<string, AssignmentView>;
@@ -572,7 +582,7 @@ function reportDriveDeath(session: Session, error: unknown): void {
   settleDrive(session, "dead", error);
 }
 
-// The wire view of a resolved Assignment (ADR-0012): the empty string the
+// The wire view of a resolved Assignment (ADR-0013): the empty string the
 // engine uses for an unassigned field reads as null, and verify stays off
 // the wire.
 function assignmentViewOf(assignment: Assignment): AssignmentView {

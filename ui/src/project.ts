@@ -95,7 +95,7 @@ export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
 }
 
 /**
- * One ticket's resolved Assignment (ADR-0012), served verbatim by the engine:
+ * One ticket's resolved Assignment (ADR-0013), served verbatim by the engine:
  * null harness or model is an unassigned field, drivers is the engine's
  * space-separated chain string.
  */
@@ -567,7 +567,7 @@ export interface TicketCardView {
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
   status: PoolStatus;
-  /** The ticket's resolved Assignment (ADR-0012), rendered verbatim. */
+  /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
   assignment: PoolTicketAssignment;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
