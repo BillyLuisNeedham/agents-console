@@ -2050,3 +2050,25 @@ describe("projectPool vitals", () => {
     expect(cardOf("04")?.vitals).toBeNull();
   });
 });
+
+describe("projectPool paneId", () => {
+  it("carries paneId to the card for terminal-backed attempts and null for headless ones", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          // The enriched snapshot serves paneId only on terminal-backed
+          // attempts; headless tickets lack the field entirely.
+          ticket("01", { status: "in-progress", paneId: "pane-7" }),
+          ticket("02", { status: "in-progress" }),
+        ],
+      },
+    });
+    const view = projectPool(snap, {}, {}, VITALS_NOW);
+    const cardOf = (id: string) =>
+      view.cards.find(
+        (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+      );
+    expect(cardOf("01")?.paneId).toBe("pane-7");
+    expect(cardOf("02")?.paneId).toBeNull();
+  });
+});
