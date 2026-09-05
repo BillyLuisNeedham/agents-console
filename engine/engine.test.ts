@@ -792,23 +792,40 @@ describe("verify fan-out", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     // Today's crash semantics: one crash interrupt for the ticket, its
-    // body pointing at the crashed attempt's log.
+    // body quoting the crashed attempt's log path, the outcome fact, and
+    // (empty here) the log tail (ADR-0012).
     expect(run.phase).toBe("quiescent");
     const crashes = run.interrupts.filter((i) => i.kind === "crash");
     expect(crashes).toHaveLength(1);
     expect(crashes[0].ticketId).toBe("01");
-    expect(crashes[0].body).toBe(join(poolDir, "runs", "01.attempt-1.log"));
+    expect(crashes[0].body).toBe(
+      join(poolDir, "runs", "01.attempt-1.log") +
+        "\n\n" +
+        "outcome file: " +
+        join(poolDir, "runs", "01.attempt-1.outcome.json") +
+        " (missing)\n",
+    );
 
     const events = readEventLines(poolDir, "01");
     const crashEvent = events.find((e) => e.kind === "crash");
     expect(crashEvent?.attempt).toBe(1);
-    expect(crashEvent?.payload).toEqual({ code: 3, reason: "harness exited 3" });
+    expect(crashEvent?.payload).toEqual({
+      code: 3,
+      reason: "harness exited 3",
+      logTail: [],
+      outcomeExists: false,
+    });
 
     // The siblings survived the crash and sit on their branches as
     // candidates, outcomes written; the ticket wrote no status anywhere.
     for (const i of [2, 3]) {
       const exit = events.find((e) => e.kind === "exited" && e.attempt === i);
-      expect(exit?.payload).toEqual({ code: 0, status: "done" });
+      expect(exit?.payload).toEqual({
+        code: 0,
+        status: "done",
+        logTail: [],
+        outcomeExists: true,
+      });
       expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
         .toBe(0);
       expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
@@ -858,7 +875,12 @@ describe("verify fan-out", () => {
     expect(markerLine(poolDir, "01-t.md")).not.toContain("Brief");
     const events = readEventLines(poolDir, "01");
     const exit1 = events.find((e) => e.kind === "exited" && e.attempt === 1);
-    expect(exit1?.payload).toEqual({ code: 0, status: "checkpoint" });
+    expect(exit1?.payload).toEqual({
+      code: 0,
+      status: "checkpoint",
+      logTail: [],
+      outcomeExists: true,
+    });
     expect(
       JSON.parse(
         readFileSync(
@@ -1290,6 +1312,8 @@ describe("verify grading", () => {
     ).toEqual({
       code: 0,
       reason: "outcome carries no grade object",
+      logTail: [],
+      outcomeExists: true,
     });
 
     // The pool log narrates each re-spawn.
@@ -1330,6 +1354,8 @@ describe("verify grading", () => {
     ).toEqual({
       code: 0,
       reason: "grader outcome is a checkpoint, not a grade",
+      logTail: [],
+      outcomeExists: true,
     });
     expect(run.final.log).toContain(
       "ticket 01: grader 01-grader-1 produced no usable grade for " +
@@ -1485,7 +1511,12 @@ describe("verify grading", () => {
     expect(
       readEventLines(poolDir, "01-grader-1").find((e) => e.kind === "crash")
         ?.payload,
-    ).toEqual({ code: 0, reason: "no outcome written" });
+    ).toEqual({
+      code: 0,
+      reason: "no outcome written",
+      logTail: [],
+      outcomeExists: false,
+    });
     expect(
       readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
     ).toEqual([]);
@@ -1980,6 +2011,8 @@ describe("verify selection", () => {
     ).toEqual({
       code: 0,
       reason: "outcome names no winner among the two attempts",
+      logTail: [],
+      outcomeExists: true,
     });
     expect(run.final.log).toContain(
       "ticket 01: head-to-head 01-head-to-head gave no usable pick: " +
@@ -2674,11 +2707,21 @@ describe("ticket events", () => {
       "spawned",
       "exited",
     ]);
-    // The exited event carries the exit code and the status from the
-    // attempt's outcome JSON.
+    // The exited event carries the exit code, the status from the attempt's
+    // outcome JSON, and the exit facts (ADR-0012).
     const exited = events.filter((e) => e.kind === "exited");
-    expect(exited[0].payload).toEqual({ code: 0, status: "checkpoint" });
-    expect(exited[1].payload).toEqual({ code: 0, status: "done" });
+    expect(exited[0].payload).toEqual({
+      code: 0,
+      status: "checkpoint",
+      logTail: [],
+      outcomeExists: true,
+    });
+    expect(exited[1].payload).toEqual({
+      code: 0,
+      status: "done",
+      logTail: [],
+      outcomeExists: true,
+    });
 
     // The blocked ticket ran once, cleanly.
     const events02 = readEventsFile(poolDir, "02");
@@ -2717,6 +2760,8 @@ describe("ticket events", () => {
     expect(crash.at(-1)?.payload).toEqual({
       code: 3,
       reason: "harness exited 3",
+      logTail: [],
+      outcomeExists: false,
     });
 
     const resumed = await run.resume("01");
@@ -3433,6 +3478,38 @@ describe("harness CLIs", () => {
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
   });
 
+  it("records the real adapter's spawn facts on the spawned event", async () => {
+    const poolDir = oneTicketPool("claude", "claude-test");
+    const fake = fakeCli(poolDir, "claude");
+
+    await withFakePath(fake, async () => {
+      await runPool({ poolDir });
+    });
+
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.cwd).toBe(poolDir);
+    expect(spawned.payload.branch).toBeNull();
+    expect(spawned.payload.commitSha).toBeNull();
+    expect(spawned.payload.env).toEqual({ PWD: poolDir });
+    // The real claude adapter's argv, with the prompt body elided: the
+    // driver line and the issue reference stay, the prompt becomes the
+    // placeholder.
+    expect(spawned.payload.argv).toEqual([
+      "claude",
+      "-p",
+      `/implement ${join(poolDir, "issues", "01-a.md")}\n\n<prompt>`,
+      "--model",
+      "claude-test",
+      "--permission-mode",
+      "auto",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+    ]);
+  });
+
   it("drives status from the outcome JSON a spawned CLI writes, done or absent alike", async () => {
     const doneDir = oneTicketPool("claude", "claude-test");
     const doneFake = fakeCli(doneDir, "claude");
@@ -3459,7 +3536,13 @@ describe("harness CLIs", () => {
       {
         ticketId: "01",
         kind: "crash",
-        body: join(crashDir, "runs", "01.log"),
+        body:
+          join(crashDir, "runs", "01.log") +
+          "\n\n" +
+          "fake claude ran\n\n" +
+          "outcome file: " +
+          join(crashDir, "runs", "01.outcome.json") +
+          " (missing)\n",
       },
     ]);
     expect(markerLine(crashDir, "01-a.md")).toContain("status=in-progress");
@@ -3690,6 +3773,287 @@ describe("streamed logs at every spawn site", () => {
     expect(run.phase).toBe("done");
     expect(existsSync(join(poolDir, "runs", "01.stream.jsonl"))).toBe(false);
   });
+});
+
+describe("spawn and exit facts", () => {
+  // ADR-0012: the spawned event records the invocation (argv with the prompt
+  // body elided, cwd, branch, the commit the spawn cwd was at, the env the
+  // engine set), the exited and crash events record the attempt log's tail
+  // and the outcome file's existence, and the crash interrupt body quotes
+  // the log path, the tail and the outcome fact.
+
+  it("records a main-checkout implement attempt's spawn facts against the commit it ran at", async () => {
+    const { poolDir, head } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "a.txt", commitMsg: "work" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.final.tickets["01"]).toBe("done");
+
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    // A lone ready ticket runs in the main checkout: no worktree branch,
+    // the commit resolved at spawn time (before the stub's own commit).
+    expect(spawned.payload.cwd).toBe(poolDir);
+    expect(spawned.payload.branch).toBeNull();
+    expect(spawned.payload.commitSha).toBe(head);
+    expect(spawned.payload.env).toEqual({ PWD: poolDir });
+    expect(spawned.payload.argv).toEqual([
+      "bash",
+      join(poolDir, "git-stub.sh"),
+      join(poolDir, "issues", "01-t.md"),
+      "done",
+      join(poolDir, "runs", "01.outcome.json"),
+      expect.any(String),
+      "0",
+      join(poolDir, "plan-01-0.sh"),
+    ]);
+  }, 15000);
+
+  it("records an attempt worktree's spawn facts at the commit it was cut from", async () => {
+    const { poolDir, head } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 2 } } },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": { grade: { score: 9, verdict: "pass", reasons: "first" } },
+      "01-grader-2": { grade: { score: 4, verdict: "flag", reasons: "second" } },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.final.tickets["01"]).toBe("done");
+
+    const events = readEventLines(poolDir, "01");
+    for (const attempt of [1, 2]) {
+      const spawned = events.find(
+        (e) => e.kind === "spawned" && e.attempt === attempt,
+      )!;
+      expect(spawned.payload.cwd).toContain(
+        join(".git", "pool-worktrees", `01.attempt-${attempt}`),
+      );
+      expect(spawned.payload.branch).toBe(`pool/01.attempt-${attempt}`);
+      expect(spawned.payload.commitSha).toBe(head);
+      expect(spawned.payload.env).toEqual({ PWD: spawned.payload.cwd });
+    }
+  }, 15000);
+
+  it("records a null commit SHA and the engine env where git is unavailable", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.commitSha).toBeNull();
+    expect(spawned.payload.env).toEqual({ PWD: poolDir });
+  });
+
+  it("elides the prompt body to the placeholder in the spawned event's argv", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "echo", model: "m" } },
+    });
+    // A harness whose argv carries the prompt body as its own element, the
+    // shape the real claude and cursor adapters build.
+    const echo: HarnessCommand = (ctx) => [
+      "bash",
+      "-c",
+      `printf '%s' '{"status":"done","summary":"s","commitSha":null}' > '${ctx.outcomePath}'`,
+      ctx.body,
+      "--model",
+      ctx.model,
+    ];
+
+    const run = await runPool({ poolDir, harnesses: { echo } });
+    expect(run.final.tickets["01"]).toBe("done");
+
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    const argv = spawned.payload.argv as string[];
+    // The body element is exactly the placeholder; the invocation shape
+    // around it is untouched.
+    expect(argv[3]).toBe("<prompt>");
+    expect(argv.join(" ")).not.toContain("Standing instructions");
+    expect(argv.slice(0, 3)).toEqual([
+      "bash",
+      "-c",
+      expect.stringContaining("01.outcome.json"),
+    ]);
+    expect(argv.slice(4)).toEqual(["--model", "m"]);
+  });
+
+  it("carries the log tail and outcome fact on the exited and crash events, and quotes both in the crash body", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "noisy", model: "m" } },
+    });
+    let calls = 0;
+    const noisy: HarnessCommand = (ctx) => {
+      calls += 1;
+      if (calls === 1) {
+        // First attempt: prints two log lines, writes no outcome, dies.
+        return ["bash", "-c", "echo first-out-line; echo second-out-line; exit 7"];
+      }
+      // Retry: prints one line and writes an unparseable outcome.
+      return [
+        "bash",
+        "-c",
+        `echo retry-line; printf 'not json' > '${ctx.outcomePath}'`,
+      ];
+    };
+
+    const run = await runPool({ poolDir, harnesses: { noisy } });
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("crash");
+
+    const events = readEventLines(poolDir, "01");
+    const exit1 = events.find((e) => e.kind === "exited" && e.attempt === 1)!;
+    expect(exit1.payload).toEqual({
+      code: 7,
+      status: "in-progress",
+      logTail: ["first-out-line", "second-out-line"],
+      outcomeExists: false,
+    });
+    const crash1 = events.find((e) => e.kind === "crash")!;
+    expect(crash1.payload).toEqual({
+      code: 7,
+      reason: "harness exited 7",
+      logTail: ["first-out-line", "second-out-line"],
+      outcomeExists: false,
+    });
+    expect(run.interrupts[0]?.body).toBe(
+      join(poolDir, "runs", "01.log") +
+        "\n\n" +
+        "first-out-line\nsecond-out-line\n\n" +
+        "outcome file: " +
+        join(poolDir, "runs", "01.outcome.json") +
+        " (missing)\n",
+    );
+
+    // The retry crashes the other way: the outcome file exists but is
+    // invalid, exactly the distinction the outcome fact exists for.
+    await run.resume("01");
+    const later = readEventLines(poolDir, "01");
+    const exit2 = later.filter((e) => e.kind === "exited").at(-1)!;
+    expect(exit2.attempt).toBe(2);
+    expect(exit2.payload).toEqual({
+      code: 0,
+      status: "in-progress",
+      logTail: ["retry-line"],
+      outcomeExists: true,
+    });
+    const crash2 = later.filter((e) => e.kind === "crash").at(-1)!;
+    expect(crash2.attempt).toBe(2);
+    expect(crash2.payload).toEqual({
+      code: 0,
+      reason: "outcome is not parseable JSON",
+      logTail: ["retry-line"],
+      outcomeExists: true,
+    });
+  });
+
+  it("carries the spawn and exit facts on the engine-run judge sites", async () => {
+    const { poolDir, head } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 2 } } },
+    });
+    const noise = join(poolDir, "grader-noise.txt");
+    writeFileSync(noise, "grader noise line\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": [
+        { exitCode: 9, noiseFile: noise, outcome: null },
+        { grade: { score: 9, verdict: "pass", reasons: "recovered" }, noiseFile: noise },
+      ],
+      "01-grader-2": [
+        { grade: { score: 8, verdict: "pass", reasons: "fine" }, noiseFile: noise },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.final.tickets["01"]).toBe("done");
+
+    // The grader's spawn facts, on both of its runs.
+    const graderEvents = readEventLines(poolDir, "01-grader-1");
+    for (const attempt of [1, 2]) {
+      const spawned = graderEvents.find(
+        (e) => e.kind === "spawned" && e.attempt === attempt,
+      )!;
+      expect(spawned.payload.cwd).toBe(poolDir);
+      expect(spawned.payload.branch).toBeNull();
+      expect(spawned.payload.commitSha).toBe(head);
+      expect(spawned.payload.env).toEqual({ PWD: poolDir });
+    }
+    // The grader's first run died: the exit facts ride its exited and crash
+    // events, and the re-spawn's grading exit carries the same tail with a
+    // written outcome.
+    const graderExit1 = graderEvents.find(
+      (e) => e.kind === "exited" && e.attempt === 1,
+    )!;
+    expect(graderExit1.payload).toEqual({
+      code: 9,
+      status: "in-progress",
+      logTail: ["grader noise line"],
+      outcomeExists: false,
+    });
+    const graderCrash1 = graderEvents.find((e) => e.kind === "crash")!;
+    expect(graderCrash1.payload).toEqual({
+      code: 9,
+      reason: "harness exited 9",
+      logTail: ["grader noise line"],
+      outcomeExists: false,
+    });
+    const graderExit2 = graderEvents.find(
+      (e) => e.kind === "exited" && e.attempt === 2,
+    )!;
+    expect(graderExit2.payload).toEqual({
+      code: 0,
+      status: "done",
+      logTail: ["grader noise line"],
+      outcomeExists: true,
+    });
+
+    // The 9-8 spread calls the head-to-head judge; its unusable pick rides
+    // the deterministic fallback, with the same spawn and exit facts.
+    const h2hEvents = readEventLines(poolDir, "01-head-to-head");
+    const h2hSpawned = h2hEvents.find((e) => e.kind === "spawned")!;
+    expect(h2hSpawned.payload.cwd).toBe(poolDir);
+    expect(h2hSpawned.payload.branch).toBeNull();
+    expect(h2hSpawned.payload.commitSha).toBe(head);
+    expect(h2hSpawned.payload.env).toEqual({ PWD: poolDir });
+    const h2hExit = h2hEvents.find((e) => e.kind === "exited")!;
+    expect(h2hExit.payload).toEqual({
+      code: 0,
+      status: "in-progress",
+      logTail: [],
+      outcomeExists: true,
+    });
+    const h2hCrash = h2hEvents.find((e) => e.kind === "crash")!;
+    expect(h2hCrash.payload).toEqual({
+      code: 0,
+      reason: "outcome names no winner among the two attempts",
+      logTail: [],
+      outcomeExists: true,
+    });
+  }, 15000);
 });
 
 describe("checkpoints", () => {
@@ -4058,7 +4422,12 @@ describe("interrupts", () => {
       {
         ticketId: "01",
         kind: "crash",
-        body: join(poolDir, "runs", "01.log"),
+        body:
+          join(poolDir, "runs", "01.log") +
+          "\n\n" +
+          "outcome file: " +
+          join(poolDir, "runs", "01.outcome.json") +
+          " (missing)\n",
       },
     ]);
     expect(run.final.log.some((line) => line.includes("exited 1"))).toBe(true);
@@ -4087,7 +4456,12 @@ describe("interrupts", () => {
       {
         ticketId: "01",
         kind: "crash",
-        body: join(poolDir, "runs", "01.log"),
+        body:
+          join(poolDir, "runs", "01.log") +
+          "\n\n" +
+          "outcome file: " +
+          join(poolDir, "runs", "01.outcome.json") +
+          " (missing)\n",
       },
     ]);
     expect(rig.spawnOrder).toEqual(["01"]);
@@ -4481,6 +4855,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
       code: 0,
       reason: "no outcome written",
+      logTail: [],
+      outcomeExists: false,
     });
     expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
   });
@@ -4505,6 +4881,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
       code: 0,
       reason: "no outcome written",
+      logTail: [],
+      outcomeExists: false,
     });
     expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
   });
@@ -4517,6 +4895,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
       code: 0,
       reason: "outcome is not parseable JSON",
+      logTail: [],
+      outcomeExists: true,
     });
   });
 
@@ -4530,6 +4910,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
       code: 0,
       reason: "outcome's status is not done or checkpoint",
+      logTail: [],
+      outcomeExists: true,
     });
   });
 
@@ -4542,6 +4924,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
       code: 1,
       reason: "harness exited 1",
+      logTail: [],
+      outcomeExists: true,
     });
     expect(markerLine(poolDir, "01-a.md")).toContain("status=in-progress");
   });
@@ -4579,6 +4963,8 @@ describe("outcome contract", () => {
     expect(readEvents(poolDir, "01")[2]?.payload).toEqual({
       code: 0,
       status: "checkpoint",
+      logTail: [],
+      outcomeExists: true,
     });
   });
 
@@ -4888,7 +5274,12 @@ describe("outcome spawn schema", () => {
     expect(run.phase).toBe("done");
     expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
     const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited");
-    expect(exited?.payload).toEqual({ code: 0, status: "done" });
+    expect(exited?.payload).toEqual({
+      code: 0,
+      status: "done",
+      logTail: [],
+      outcomeExists: true,
+    });
     expect(run.final.outcomes["01"]?.spawn).toEqual([good]);
   });
 
@@ -6550,7 +6941,8 @@ describe("worktrees", () => {
         .map((line) => JSON.parse(line) as EventLine);
 
     // The implement attempt conflicted, then the resolver took the next
-    // attempt number for the same ticket.
+    // attempt number for the same ticket. The resolver's spawn carries the
+    // same spawned event every other site does (ADR-0012).
     const before = readEventsFile("02");
     expect(before.map((e) => e.kind)).toEqual([
       "scheduled",
@@ -6558,6 +6950,7 @@ describe("worktrees", () => {
       "exited",
       "merge-conflict",
       "resolver",
+      "spawned",
     ]);
     expect(before[0].attempt).toBe(1);
     expect(before.find((e) => e.kind === "resolver")?.attempt).toBe(2);
@@ -6570,6 +6963,23 @@ describe("worktrees", () => {
     const resolverEvent = before.find((e) => e.kind === "resolver")!;
     expect(resolverEvent.payload.cwd).toBe(spawnedEvent.payload.cwd);
     expect(resolverEvent.payload.branch).toBe("pool/02");
+
+    // The resolver's spawned event carries the uniform spawn facts (its own
+    // attempt number, the worktree it ran in, and the commit the parked
+    // worktree was at). This fake's argv takes structured fields and embeds
+    // no prompt, so the elision shows as an argv that carries no prompt
+    // text; the dedicated elision test below drives the placeholder itself.
+    const resolverSpawn = before.at(-1)!;
+    expect(resolverSpawn.kind).toBe("spawned");
+    expect(resolverSpawn.attempt).toBe(2);
+    expect(resolverSpawn.payload.cwd).toBe(resolverEvent.payload.cwd);
+    expect(resolverSpawn.payload.branch).toBe("pool/02");
+    expect(Array.isArray(resolverSpawn.payload.argv)).toBe(true);
+    expect((resolverSpawn.payload.argv as string[]).join(" ")).not.toContain(
+      "Resolve the git merge conflict",
+    );
+    expect(resolverSpawn.payload.env).toEqual({ PWD: resolverEvent.payload.cwd });
+    expect(typeof resolverSpawn.payload.commitSha).toBe("string");
 
     const approved = await run.approve("02");
     const done = await approveReview(approved);
@@ -6584,6 +6994,7 @@ describe("worktrees", () => {
       "exited",
       "merge-conflict",
       "resolver",
+      "spawned",
       "answered",
       "merged",
     ]);
@@ -7064,7 +7475,10 @@ describe("worktrees", () => {
     );
     expect(existsSync(join(poolDir, "runs", "02.resolver.log"))).toBe(true);
 
-    // Rotated names agree with the attempt numbers in the events file.
+    // Rotated names agree with the attempt numbers in the events file. The
+    // implement spawns (1 and 3) record exited events; the resolver runs
+    // (2 and 4) record resolver events plus their own spawned ones, so the
+    // rotated attempt numbers still interleave on the shared counter.
     const events = readFileSync(
       join(poolDir, "runs", "02.events.jsonl"),
       "utf8",
@@ -7074,6 +7488,9 @@ describe("worktrees", () => {
       .map((line) => JSON.parse(line) as { attempt: number; kind: string });
     expect(
       events.filter((e) => e.kind === "spawned").map((e) => e.attempt),
+    ).toEqual([1, 2, 3, 4]);
+    expect(
+      events.filter((e) => e.kind === "exited").map((e) => e.attempt),
     ).toEqual([1, 3]);
     expect(
       events.filter((e) => e.kind === "resolver").map((e) => e.attempt),
@@ -7676,6 +8093,8 @@ describe("accept/process split", () => {
     expect(readEventsFile(poolDir, "01").at(-1)?.payload).toEqual({
       code: 3,
       reason: "harness exited 3",
+      logTail: [],
+      outcomeExists: false,
     });
     expect(
       readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],

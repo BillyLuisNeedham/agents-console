@@ -40,6 +40,18 @@ export function currentBranch(repoRoot: string): string {
   return probe.out || "main";
 }
 
+/**
+ * The commit SHA the checkout or worktree at `cwd` was at, resolved with git
+ * at call time (ADR-0012: nothing captured this before). Works in the main
+ * checkout and in any linked worktree of the same repo; null when git is
+ * unavailable or the cwd is not a checkout with a HEAD, so a pool that does
+ * not run in git records the fact as absent rather than as a wrong SHA.
+ */
+export function commitShaAt(cwd: string): string | null {
+  const probe = git(cwd, ["rev-parse", "HEAD"]);
+  return probe.ok && probe.out ? probe.out : null;
+}
+
 // Completes an in-progress merge in a worktree: the resolver leaves a staged
 // resolution and a MERGE_HEAD in the worktree, and committing turns it into a
 // merge commit on the ticket's branch, making the working branch an ancestor

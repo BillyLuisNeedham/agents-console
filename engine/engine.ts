@@ -37,7 +37,10 @@ import {
 import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
+  elidePromptArgv,
+  engineEnvSet,
   harnessStreamMode,
+  spawnEnv,
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
@@ -48,6 +51,7 @@ import {
   commitMerge,
   attemptBranches,
   currentBranch,
+  commitShaAt,
   discardWorktree,
   git,
   gitAvailable,
@@ -628,7 +632,7 @@ async function driveLoop(session: Session): Promise<void> {
           session.runsDir,
           marker.id,
           join(session.runsDir, attemptLogName(marker.id, null, false)),
-          "spawned",
+          "exited",
         );
       }
       const base = nextAttempt(session.runsDir, marker.id);
@@ -780,16 +784,18 @@ async function driveLoop(session: Session): Promise<void> {
         );
       }
     }
-    for (const { marker, status, logPath } of results) {
-      if (status === "in-progress") {
+    for (const result of results) {
+      if (result.status === "in-progress") {
         // The crash event and the marker update landed at attempt exit;
         // only the crash interrupt waits for the boundary here. A
         // checkpoint's interrupt was already raised at exit, so the
-        // at-exit path is the only writer of its interrupt.
+        // at-exit path is the only writer of its interrupt. The body quotes
+        // the log path, the tail and the outcome fact (ADR-0012), so the
+        // Needs-input surface explains the dead attempt by itself.
         raiseInterrupt(session, {
-          ticketId: marker.id,
+          ticketId: result.marker.id,
           kind: "crash",
-          body: logPath,
+          body: crashInterruptBody(result),
         });
       }
     }
@@ -1563,6 +1569,14 @@ async function runResolver(
     cwd: worktree.path,
   };
   const argv = session.harnesses[resolver.harness](ctx);
+  // The resolver's spawn carries the same facts as every other spawn site
+  // (ADR-0012); the resolver event above stays the run's own record.
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, marker.id),
+    kind: "spawned",
+    payload: spawnedPayload(argv, ctx, worktree.branch),
+  });
   const exitCode = await spawnToLog(argv, ctx);
   const outcome = readResolverResult(outcomePath);
   if (exitCode === 0 && outcome?.resolved) {
@@ -2208,7 +2222,7 @@ async function runGrader(
   const graderOutcomePath = join(runsDir, outcomeFileName(gid, null));
   rmSync(graderOutcomePath, { force: true });
   const logPath = join(runsDir, attemptLogName(gid, null, false));
-  rotateAttemptLog(runsDir, gid, logPath, "spawned");
+  rotateAttemptLog(runsDir, gid, logPath, "exited");
   const streamPath = attemptStreamPath(
     runsDir,
     gid,
@@ -2258,17 +2272,41 @@ async function runGrader(
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, gid),
     kind: "spawned",
-    payload: {},
+    payload: spawnedPayload(argv, ctx, null),
   });
   const exitCode = await spawnToLog(argv, ctx);
+  // The grader's exit facts (ADR-0012), on the grade path and the crash
+  // path alike: the log tail and whether the grader wrote an outcome at all.
+  const logTail = readLogTail(logPath);
+  const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
     const reason = `harness exited ${exitCode}`;
-    recordGraderFailure(session, build, grader, attempt, exitCode, reason, emit);
+    recordGraderFailure(
+      session,
+      build,
+      grader,
+      attempt,
+      exitCode,
+      reason,
+      logTail,
+      outcomeExists,
+      emit,
+    );
     return { ok: false, reason };
   }
   if (!result.ok) {
-    recordGraderFailure(session, build, grader, attempt, exitCode, result.reason, emit);
+    recordGraderFailure(
+      session,
+      build,
+      grader,
+      attempt,
+      exitCode,
+      result.reason,
+      logTail,
+      outcomeExists,
+      emit,
+    );
     return { ok: false, reason: result.reason };
   }
   // A usable grade: the engine writes the grader's done status (ADR-0005:
@@ -2280,7 +2318,7 @@ async function runGrader(
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, gid),
     kind: "exited",
-    payload: { code: exitCode, status: "done" },
+    payload: { code: exitCode, status: "done", logTail, outcomeExists },
   });
   appendEvent(runsDir, build.id, {
     at: new Date().toISOString(),
@@ -2316,19 +2354,21 @@ function recordGraderFailure(
   attempt: number,
   exitCode: number,
   reason: string,
+  logTail: string[],
+  outcomeExists: boolean,
   emit: (phase: RunPhase) => void,
 ): void {
   appendEvent(session.runsDir, grader.id, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, grader.id),
     kind: "exited",
-    payload: { code: exitCode, status: "in-progress" },
+    payload: { code: exitCode, status: "in-progress", logTail, outcomeExists },
   });
   appendEvent(session.runsDir, grader.id, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, grader.id),
     kind: "crash",
-    payload: { code: exitCode, reason },
+    payload: { code: exitCode, reason, logTail, outcomeExists },
   });
   // Whatever marker status the grader agent wrote for itself, the engine
   // owns the write: a grader without a usable grade is never done.
@@ -3039,7 +3079,7 @@ async function runHeadToHead(
   const h2hOutcomePath = join(runsDir, outcomeFileName(h2hId, null));
   rmSync(h2hOutcomePath, { force: true });
   const logPath = join(runsDir, attemptLogName(h2hId, null, false));
-  rotateAttemptLog(runsDir, h2hId, logPath, "spawned");
+  rotateAttemptLog(runsDir, h2hId, logPath, "exited");
   const streamPath = attemptStreamPath(
     runsDir,
     h2hId,
@@ -3096,9 +3136,13 @@ async function runHeadToHead(
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, h2hId),
     kind: "spawned",
-    payload: {},
+    payload: spawnedPayload(argv, ctx, null),
   });
   const exitCode = await spawnToLog(argv, ctx);
+  // The judge's exit facts (ADR-0012): the log tail and whether an outcome
+  // file exists, on the pick path and the unusable path alike.
+  const logTail = readLogTail(logPath);
+  const outcomeExists = existsSync(h2hOutcomePath);
   let verdict = readHeadToHeadVerdict(h2hOutcomePath, [
     top.attempt,
     runnerUp.attempt,
@@ -3113,6 +3157,8 @@ async function runHeadToHead(
     payload: {
       code: exitCode,
       status: verdict.kind === "unusable" ? "in-progress" : "done",
+      logTail,
+      outcomeExists,
     },
   });
   if (verdict.kind === "unusable") {
@@ -3120,7 +3166,12 @@ async function runHeadToHead(
       at: new Date().toISOString(),
       attempt: lastAttempt(runsDir, h2hId),
       kind: "crash",
-      payload: { code: exitCode, reason: verdict.reason },
+      payload: {
+        code: exitCode,
+        reason: verdict.reason,
+        logTail,
+        outcomeExists,
+      },
     });
   }
   writeMarkerStatus(h2h.file, "done");
@@ -3514,6 +3565,70 @@ interface TicketResult {
   // boundary's adoption buffer. A verify candidate carries none: its
   // proposals ride or die with selection.
   spawnProposals?: SpawnProposal[];
+  // The exit facts (ADR-0012): the attempt log's tail and the outcome-file
+  // existence, computed at exit so the crash interrupt body the boundary
+  // raises freezes them at raise time exactly as the persisted events do.
+  logTail: string[];
+  outcomePath: string;
+  outcomeExists: boolean;
+}
+
+// The exit facts' log tail (ADR-0012): the last ~20 lines of the attempt's
+// log, so the events file alone shows how the attempt ended. A missing or
+// unreadable log reads as no lines, never as an error: the fact is the
+// empty tail.
+const LOG_TAIL_LINES = 20;
+
+function readLogTail(logPath: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(logPath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = text.split("\n");
+  // A trailing newline ends the file, it does not open an empty line.
+  if (lines.at(-1) === "") lines.pop();
+  return lines.slice(-LOG_TAIL_LINES);
+}
+
+/**
+ * The `spawned` event's payload (ADR-0012): the facts that would have
+ * diagnosed a wrong-commit or wrong-place spawn from one line. The argv
+ * carries the prompt body elided; the commit SHA resolves from the spawn cwd
+ * at spawn time (null when git is unavailable or the cwd is not a checkout);
+ * env is the keys the engine set on the child environment beyond the
+ * inherited parent's, with their values.
+ */
+function spawnedPayload(
+  argv: string[],
+  ctx: SpawnContext,
+  branch: string | null,
+): Record<string, unknown> {
+  return {
+    argv: elidePromptArgv(argv, ctx.body),
+    cwd: ctx.cwd,
+    branch,
+    commitSha: commitShaAt(ctx.cwd),
+    env: engineEnvSet(spawnEnv(ctx.cwd)),
+  };
+}
+
+/**
+ * The crash interrupt body (ADR-0012): the log path, a blank line, the tail
+ * the crash event carries, and the outcome-file line, so the Needs-input
+ * surface answers "what happened" without the operator opening files. The
+ * body persists with the pool state, so the tail freezes at raise time;
+ * accepted and desired.
+ */
+function crashInterruptBody(result: TicketResult): string {
+  const tail = result.logTail.join("\n");
+  return (
+    `${result.logPath}\n\n` +
+    (tail ? `${tail}\n\n` : "") +
+    `outcome file: ${result.outcomePath} ` +
+    `(${result.outcomeExists ? "exists" : "missing"})\n`
+  );
 }
 
 // Where an attempt runs. A multi-ticket super-step gives every ticket its own
@@ -3872,10 +3987,13 @@ function manualMergeInterrupt(
 // existing well-known log moves to its attempt-numbered name so a re-run
 // never destroys the ticket's history, and its Stream file rotates with it
 // (ADR-0012). The number is the attempt the events file recorded for the run
-// that wrote the file: the last implement spawn for the base log, the last
-// resolver run for the resolver log. A pre-feature log (written before
-// events existed) rotates to attempt-0. The names come from the events
-// module's naming contract.
+// that wrote the file: the last exited implement (or engine-run) attempt for
+// the base log, the last resolver run for the resolver log. Implement logs
+// key on "exited" rather than "spawned" because a resolver run now records a
+// spawned event of its own (ADR-0012) and never an exited one, so "exited"
+// still names exactly the run that wrote the file. A pre-feature log
+// (written before events existed) rotates to attempt-0. The names come from
+// the events module's naming contract.
 function rotateAttemptLog(
   runsDir: string,
   ticketId: string,
@@ -3921,7 +4039,7 @@ async function runTicket(
     ? join(env.runsDir, attemptLogName(marker.id, plan.attempt, false))
     : join(env.runsDir, attemptLogName(marker.id, null, false));
   if (!plan.verify) {
-    rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
+    rotateAttemptLog(env.runsDir, marker.id, logPath, "exited");
   }
   const streamPath = attemptStreamPath(
     env.runsDir,
@@ -3973,7 +4091,7 @@ async function runTicket(
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "spawned",
-    payload: { cwd: plan.cwd, branch: plan.worktree?.branch ?? null },
+    payload: spawnedPayload(argv, ctx, plan.worktree?.branch ?? null),
   });
   const exitCode = await spawnToLog(argv, ctx);
 
@@ -4022,25 +4140,33 @@ async function runTicket(
   ) {
     writeMarkerStatus(marker.file, "in-progress");
   }
+  // The exit facts (ADR-0012), computed the moment the attempt exits: the
+  // log is closed by now, so the tail is complete, and the outcome file's
+  // existence is the fact that distinguishes "agent never wrote its
+  // outcome" from "outcome was invalid".
+  const logTail = readLogTail(logPath);
+  const outcomeExists = existsSync(outcomePath);
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "exited",
-    payload: { code: exitCode, status },
+    payload: { code: exitCode, status, logTail, outcomeExists },
   });
   // A crash is recorded the moment the attempt exits (the marker has already
   // been corrected), not at the end of the super-step, so the ticket log
   // stops masquerading a dead attempt as running work. The payload carries
-  // the exit code and the reason, so the log distinguishes a dead harness
-  // from an agent that never wrote its outcome. Per-ticket event appends are
-  // concurrency-safe against siblings still in flight. The crash interrupt
-  // itself is still raised at the super-step boundary.
+  // the exit code, the reason, and the same log tail and outcome fact the
+  // exited event carries, so the log alone distinguishes a dead harness from
+  // an agent that never wrote its outcome from an outcome that was invalid.
+  // Per-ticket event appends are concurrency-safe against siblings still in
+  // flight. The crash interrupt itself is still raised at the super-step
+  // boundary.
   if (crashReason !== null) {
     appendEvent(env.runsDir, marker.id, {
       at: new Date().toISOString(),
       attempt: plan.attempt,
       kind: "crash",
-      payload: { code: exitCode, reason: crashReason },
+      payload: { code: exitCode, reason: crashReason, logTail, outcomeExists },
     });
   }
 
@@ -4051,6 +4177,9 @@ async function runTicket(
     exitCode,
     plan,
     joinedAtExit: false,
+    logTail,
+    outcomePath,
+    outcomeExists,
     spawnProposals:
       outcome.ok && !plan.verify && crashReason === null
         ? (outcome.outcome.spawn ?? [])
@@ -4087,16 +4216,12 @@ async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
 ): Promise<number> {
-  // env is passed explicitly: Bun resolves argv[0] against a cached PATH
-  // unless an env is given, and the parent environment at spawn time is
-  // what the child should inherit.
-  //
-  // PWD is forced to the spawn cwd: Bun passes env verbatim, so the
-  // server's stale PWD (the checkout it was launched from) would otherwise
-  // win, and opencode roots its project in PWD before cwd.
+  // The child env comes from spawnEnv, the same builder the spawned event's
+  // env facts derive from, so the event cannot drift from what the child
+  // actually ran under (ADR-0012).
   const proc = Bun.spawn(argv, {
     cwd: ctx.cwd,
-    env: { ...process.env, PWD: ctx.cwd },
+    env: spawnEnv(ctx.cwd),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

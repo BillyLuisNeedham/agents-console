@@ -569,7 +569,12 @@ describe("ticket events endpoint", () => {
     expect(body.events[0].attempt).toBe(1);
     expect(typeof body.events[0].at).toBe("string");
     const exited = body.events.find((e) => e.kind === "exited");
-    expect(exited?.payload).toEqual({ code: 0, status: "done" });
+    expect(exited?.payload).toEqual({
+      code: 0,
+      status: "done",
+      logTail: [],
+      outcomeExists: true,
+    });
   });
 
   it("backfills reconstructed attempt rows for a ticket with no events file", async () => {

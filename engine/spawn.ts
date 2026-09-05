@@ -38,6 +38,51 @@ export function harnessStreamMode(harness: string): HarnessStreamMode {
   return STREAMED_HARNESSES.has(harness) ? "stream" : "raw";
 }
 
+// The placeholder an argv element carries in a spawned event's facts where
+// the prompt body sat (ADR-0012): the event records how the agent was
+// invoked, and the prompt is the one wall of text it must not carry. The
+// driver line and the issue reference around the body stay, so the event
+// still names the command and the file the agent was sent to.
+export const PROMPT_PLACEHOLDER = "<prompt>";
+
+/**
+ * The argv as the spawned event records it (ADR-0012): every element that
+ * interpolates the prompt body carries the placeholder in its place. The
+ * adapters build argv from the context's fields, so the body is a literal
+ * substring of exactly the elements that hold it.
+ */
+export function elidePromptArgv(argv: string[], body: string): string[] {
+  if (body === "") return argv;
+  return argv.map((arg) =>
+    arg.includes(body) ? arg.replace(body, PROMPT_PLACEHOLDER) : arg,
+  );
+}
+
+/**
+ * The environment the engine hands a harness child: the parent environment
+ * verbatim, with PWD forced to the spawn cwd. Bun passes env verbatim, so
+ * the server's stale PWD (the checkout it was launched from) would otherwise
+ * win, and opencode roots its project in PWD before cwd.
+ */
+export function spawnEnv(cwd: string): Record<string, string | undefined> {
+  return { ...process.env, PWD: cwd };
+}
+
+/**
+ * The keys the engine's spawn environment sets beyond the inherited parent's,
+ * with their values. Today exactly PWD; derived from the actual delta rather
+ * than hardcoded, so a future key cannot silently drop off the spawn event.
+ */
+export function engineEnvSet(
+  env: Record<string, string | undefined>,
+): Record<string, string> {
+  const set: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && value !== process.env[key]) set[key] = value;
+  }
+  return set;
+}
+
 // One case per harness, matching run.sh's launch shapes: the driver and issue
 // reference arrive as structured fields and each adapter builds its own
 // invocation from them, so a prompt-format change cannot silently break one
