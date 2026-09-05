@@ -48,6 +48,7 @@ export interface DetailModel {
 /** The handlers the Detail's interactive elements report through. */
 export interface DetailHandlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
+  onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
@@ -334,6 +335,25 @@ export class Detail {
           selected ? h("span", { class: "timeline-selected" }, "showing") : null,
           winner ? h("span", { class: "timeline-winner" }, "winner") : null,
           attempt.reconstructed ? h("span", { class: "dim" }, "reconstructed") : null,
+          // The attempt's Stream file link (ADR-0012): one click from the
+          // timeline to the raw stream tee for deep forensics. Rendered only
+          // when the server's attempt listing resolved one; an attempt with
+          // no Stream file (opencode, pre-streaming) renders no link rather
+          // than a dead one.
+          attempt.streamFile
+            ? h(
+                "button",
+                {
+                  class: "timeline-stream",
+                  title: `view this attempt's stream file (${attempt.streamFile})`,
+                  onclick: (event: Event) => {
+                    event.stopPropagation();
+                    handlers.onSelectStream(ticketId, attempt.number);
+                  },
+                },
+                "stream",
+              )
+            : null,
         ),
       );
       if (attempt.events.length === 0) {
@@ -376,7 +396,7 @@ export class Detail {
       h(
         "div",
         { class: "log-pane-head" },
-        h("span", { class: "dim" }, "raw log"),
+        h("span", { class: "dim" }, logPane.stream ? "stream file" : "raw log"),
         logPane.selectedAttempt !== null
           ? h("span", { class: "log-pane-attempt" }, `attempt ${logPane.selectedAttempt}`)
           : null,

@@ -1147,6 +1147,24 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* The attempt row's Stream file link (ADR-0012): styled as the row's other
+   small spans, but pressable. One click swaps the pane below to the raw
+   stream tee; the row itself keeps opening the derived log. */
+.timeline-stream {
+  font-size: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.timeline-stream:hover {
+  color: var(--accent);
+}
+
 /* A verified ticket's winning attempt: the attempt the grades endpoint's
    winner names (ADR 0007: one derivation, server-side). The badge reads in
    the done green; the flagged verdict keeps the interrupt red it carries

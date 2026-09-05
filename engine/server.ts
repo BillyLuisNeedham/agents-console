@@ -36,6 +36,7 @@ import {
 } from "./engine.ts";
 import {
   attemptLogName,
+  attemptStreamName,
   parseAttemptLogName,
   readEvents,
   type TicketEvent,
@@ -175,6 +176,13 @@ interface LogAttemptInfo {
   attempt: number;
   kind: "implement" | "resolver" | "reconstructed";
   logFile: string;
+  /**
+   * The attempt's Stream file (the raw stream tee, ADR-0012), named by the
+   * events module's contract the same way `logFile` is. Null when the
+   * attempt has no Stream file on disk: a raw harness (opencode), a
+   * pre-streaming attempt, or a reconstructed row.
+   */
+  streamFile: string | null;
   current: boolean;
 }
 
@@ -208,11 +216,15 @@ function stripAnsi(text: string): string {
  * (an events file exists) derive implement/resolver attempts from the events:
  * the latest of each kind holds its well-known path while that file exists,
  * older attempts their rotated attempt-numbered name (both named by the
- * events module's contract). A verify fan-out's attempts write
+ * events module's contract). Stream files resolve through the same contract
+ * and the same current/rotated rule, so a re-run rotates both files alike;
+ * an attempt whose Stream file was never written (a raw harness such as
+ * opencode, or a pre-streaming attempt) carries null rather than a name the
+ * filesystem cannot back. A verify fan-out's attempts write
  * attempt-numbered logs directly and the well-known name never appears, so
  * the current attempt falls back to its own number. A pre-feature ticket (no
  * events file) uses the reconstructed attempt rows, each with the log file it
- * was built from.
+ * was built from and no Stream file, since none existed pre-streaming.
  */
 function listAttemptLogs(
   runsDir: string,
@@ -226,6 +238,17 @@ function listAttemptLogs(
     const maxResolver = resolvers.reduce((m, e) => Math.max(m, e.attempt), 0);
     const hasWellKnownLog = (resolver: boolean): boolean =>
       existsSync(join(runsDir, attemptLogName(ticketId, null, resolver)));
+    const hasWellKnownStream = (resolver: boolean): boolean =>
+      existsSync(join(runsDir, attemptStreamName(ticketId, null, resolver)));
+    // The Stream file exists check: null when the resolved name is absent on
+    // disk, so a raw harness's attempt renders no link rather than a dead one.
+    const streamName = (
+      attempt: number | null,
+      resolver: boolean,
+    ): string | null => {
+      const name = attemptStreamName(ticketId, attempt, resolver);
+      return existsSync(join(runsDir, name)) ? name : null;
+    };
     const byAttempt = new Map<number, LogAttemptInfo>();
     for (const event of spawned) {
       const current = event.attempt === maxSpawned;
@@ -236,6 +259,10 @@ function listAttemptLogs(
         logFile: attemptLogName(
           ticketId,
           current && hasWellKnownLog(false) ? null : event.attempt,
+          false,
+        ),
+        streamFile: streamName(
+          current && hasWellKnownStream(false) ? null : event.attempt,
           false,
         ),
       });
@@ -251,6 +278,10 @@ function listAttemptLogs(
           current && hasWellKnownLog(true) ? null : event.attempt,
           true,
         ),
+        streamFile: streamName(
+          current && hasWellKnownStream(true) ? null : event.attempt,
+          true,
+        ),
       });
     }
     return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
@@ -260,6 +291,7 @@ function listAttemptLogs(
     attempt: row.attempt,
     kind: "reconstructed" as const,
     logFile: row.logFile,
+    streamFile: null,
     current: index === reconstructed.length - 1,
   }));
 }
@@ -997,21 +1029,31 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           // The offset is a byte offset into the raw log; the client pages by
           // continuing from the returned nextOffset. Default to the current
           // (latest) attempt and offset 0. The optional end bounds the range
-          // for the log pane's "load earlier" prefix reads.
+          // for the log pane's "load earlier" prefix reads. The optional
+          // stream flag serves the attempt's Stream file (the raw stream tee)
+          // through the same byte-range path instead of its derived log.
+          const wantsStream = url.searchParams.get("stream") === "1";
           const attempt =
             rawAttempt !== null && rawAttempt !== ""
               ? Number(rawAttempt)
               : (attempts[attempts.length - 1]?.attempt ?? 0);
           const offset = rawOffset !== null && rawOffset !== "" ? Number(rawOffset) : 0;
           const end = rawEnd !== null && rawEnd !== "" ? Number(rawEnd) : undefined;
-          const logFile = attemptLogFile(runsDir, ticketId, attempt);
-          if (!logFile) {
+          const info = attempts.find((row) => row.attempt === attempt);
+          const file = wantsStream
+            ? (info?.streamFile ?? null)
+            : attemptLogFile(runsDir, ticketId, attempt);
+          if (!file) {
             return Response.json(
-              { error: `unknown attempt ${attempt} for ${ticketId}` },
+              {
+                error: info
+                  ? `no stream file for attempt ${attempt} of ${ticketId}`
+                  : `unknown attempt ${attempt} for ${ticketId}`,
+              },
               { status: 404 },
             );
           }
-          const range = await readLogRange(join(runsDir, logFile), offset, end);
+          const range = await readLogRange(join(runsDir, file), offset, end);
           return Response.json({ ...range, attempts });
         }
 
