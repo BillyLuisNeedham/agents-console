@@ -45,6 +45,11 @@ import {
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
+import {
+  HERDR_SOCKET_DEFAULT,
+  attemptTabLabel,
+  openAttemptTab,
+} from "./herdr.ts";
 import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
 import {
   branchExists,
@@ -165,6 +170,10 @@ export interface PoolConfig {
   // Who picks the winner of a verify fan-out: the engine's arithmetic rule
   // (default) or the human, via a selection interrupt carrying the grades.
   selection?: "auto" | "human";
+  // Terminal backing for every attempt (ADR-0014, ADR-0015): "herdr" opens a
+  // named herdr tab per attempt and records its pane id on the spawned
+  // event. Absent means headless, exactly as before.
+  terminal?: "herdr";
 }
 
 export type InterruptKind =
@@ -272,6 +281,9 @@ interface RunOptions {
   // on demand to prove a persist failure retries, then interrupts, and never
   // closes the store. Defaults to the real sqlite store.
   store?: CheckpointStore;
+  // The herdr daemon socket for terminal-backed attempts. Tests point this
+  // at a fake socket; the default is the daemon's path on this machine.
+  herdrSocket?: string;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -388,6 +400,8 @@ interface Session {
   handle: PoolRun | null;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
+  // Where terminal-backed attempts reach the herdr daemon (ADR-0014).
+  herdrSocket: string;
   resolverAttempts: Map<string, { files: string[]; note: string }>;
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
@@ -444,6 +458,7 @@ export function startPool(options: RunOptions): PoolRun {
     handle: null,
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
+    herdrSocket: options.herdrSocket ?? HERDR_SOCKET_DEFAULT,
     resolverAttempts: new Map(),
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
@@ -728,6 +743,7 @@ async function driveLoop(session: Session): Promise<void> {
             runsDir: session.runsDir,
             issuesDir: session.issuesDir,
             harnesses: session.harnesses,
+            herdrSocket: session.herdrSocket,
           },
           plan,
         ).then((result) => {
@@ -1612,11 +1628,22 @@ async function runResolver(
   const argv = session.harnesses[resolver.harness](ctx);
   // The resolver's spawn carries the same facts as every other spawn site
   // (ADR-0012); the resolver event above stays the run's own record.
+  // Terminal-backed pools open the resolver its own named tab too: every
+  // spawn site shares one code path (ADR-0014).
+  const terminal =
+    session.state.config.terminal === "herdr"
+      ? await openAttemptTerminal(
+          session.herdrSocket,
+          marker.id,
+          marker.title,
+          ctx.cwd,
+        )
+      : undefined;
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, marker.id),
     kind: "spawned",
-    payload: spawnedPayload(argv, ctx, worktree.branch),
+    payload: spawnedPayload(argv, ctx, worktree.branch, terminal),
   });
   const exitCode = await spawnToLog(argv, ctx);
   const outcome = readResolverResult(outcomePath);
@@ -2337,11 +2364,20 @@ async function runGrader(
     cwd: session.cwd,
   };
   const argv = harnessCommandFor(session.harnesses, assignment, gid)(ctx);
+  const terminal =
+    session.state.config.terminal === "herdr"
+      ? await openAttemptTerminal(
+          session.herdrSocket,
+          grader.id,
+          grader.title,
+          ctx.cwd,
+        )
+      : undefined;
   appendEvent(runsDir, gid, {
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, gid),
     kind: "spawned",
-    payload: spawnedPayload(argv, ctx, null),
+    payload: spawnedPayload(argv, ctx, null, terminal),
   });
   const exitCode = await spawnToLog(argv, ctx);
   // The grader's exit facts (ADR-0012), on the grade path and the crash
@@ -3201,11 +3237,20 @@ async function runHeadToHead(
     cwd: session.cwd,
   };
   const argv = harnessCommandFor(session.harnesses, assignment, h2hId)(ctx);
+  const terminal =
+    session.state.config.terminal === "herdr"
+      ? await openAttemptTerminal(
+          session.herdrSocket,
+          h2h.id,
+          h2h.title,
+          ctx.cwd,
+        )
+      : undefined;
   appendEvent(runsDir, h2hId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(runsDir, h2hId),
     kind: "spawned",
-    payload: spawnedPayload(argv, ctx, null),
+    payload: spawnedPayload(argv, ctx, null, terminal),
   });
   const exitCode = await spawnToLog(argv, ctx);
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
@@ -3608,6 +3653,7 @@ interface TicketEnv {
   runsDir: string;
   issuesDir: string;
   harnesses: Record<string, HarnessCommand>;
+  herdrSocket: string;
 }
 
 interface TicketPlan {
@@ -3662,17 +3708,58 @@ function readLogTail(logPath: string): string[] {
 }
 
 /**
+ * The terminal facts a terminal-backed spawn adds to the `spawned` event's
+ * payload (ADR-0014, ADR-0015): the pane id the attempt's named tab was
+ * recovered to, and, when the tab could not be opened, the error that
+ * stopped it. pane_id is null on that fallback path: the attempt runs
+ * headless and the ticket log carries why.
+ */
+interface AttemptTerminal {
+  paneId: string | null;
+  error?: string;
+}
+
+/**
+ * Open the attempt's named herdr tab for a terminal-backed spawn. Never
+ * throws: herdr is optional (ADR-0014), so a missing or misbehaving daemon
+ * falls the spawn back to headless and the failure lands on the spawned
+ * event, where the ticket log shows it.
+ */
+async function openAttemptTerminal(
+  socketPath: string,
+  id: string,
+  title: string,
+  cwd: string,
+): Promise<AttemptTerminal> {
+  try {
+    const tab = await openAttemptTab(
+      socketPath,
+      attemptTabLabel(id, title),
+      cwd,
+    );
+    return { paneId: tab.paneId };
+  } catch (err) {
+    return {
+      paneId: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
  * The `spawned` event's payload (ADR-0012): the facts that would have
  * diagnosed a wrong-commit or wrong-place spawn from one line. The argv
  * carries the prompt body elided; the commit SHA resolves from the spawn cwd
  * at spawn time (null when git is unavailable or the cwd is not a checkout);
  * env is the keys the engine set on the child environment beyond the
- * inherited parent's, with their values.
+ * inherited parent's, with their values. Terminal-backed spawns add pane_id
+ * (and terminal_error on the headless fallback), per ADR-0014 and ADR-0015.
  */
 function spawnedPayload(
   argv: string[],
   ctx: SpawnContext,
   branch: string | null,
+  terminal?: AttemptTerminal,
 ): Record<string, unknown> {
   return {
     argv: elidePromptArgv(argv, ctx.body),
@@ -3680,6 +3767,14 @@ function spawnedPayload(
     branch,
     commitSha: commitShaAt(ctx.cwd),
     env: engineEnvSet(spawnEnv(ctx.cwd)),
+    ...(terminal
+      ? {
+          pane_id: terminal.paneId,
+          ...(terminal.error !== undefined
+            ? { terminal_error: terminal.error }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -4156,11 +4251,23 @@ async function runTicket(
     cwd: plan.cwd,
   };
   const argv = harnessCommandFor(env.harnesses, assignment, marker.id)(ctx);
+  // A terminal-backed attempt opens its own named herdr tab before the
+  // spawn is recorded, so the spawned event can carry the recovered pane id
+  // (ADR-0014, ADR-0015). Headless spawns record no pane facts at all.
+  const terminal =
+    snapshot.config.terminal === "herdr"
+      ? await openAttemptTerminal(
+          env.herdrSocket,
+          marker.id,
+          marker.title,
+          plan.cwd,
+        )
+      : undefined;
   appendEvent(env.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: plan.attempt,
     kind: "spawned",
-    payload: spawnedPayload(argv, ctx, plan.worktree?.branch ?? null),
+    payload: spawnedPayload(argv, ctx, plan.worktree?.branch ?? null, terminal),
   });
   const exitCode = await spawnToLog(argv, ctx);
 
@@ -4478,6 +4585,9 @@ export function readConfig(poolDir: string): PoolConfig {
     parsed.selection !== "human"
   ) {
     throw new Error(`pool config: selection must be "auto" or "human"`);
+  }
+  if (parsed.terminal !== undefined && parsed.terminal !== "herdr") {
+    throw new Error(`pool config: terminal must be "herdr"`);
   }
   return parsed as PoolConfig;
 }

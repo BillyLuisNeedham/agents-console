@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
@@ -4166,6 +4167,242 @@ describe("spawn and exit facts", () => {
       logTail: [],
       outcomeExists: true,
     });
+  }, 15000);
+});
+
+describe("terminal-backed attempts (named herdr tabs)", () => {
+  // ADR-0014 + ADR-0015: on a `terminal: "herdr"` pool every attempt opens
+  // its own named herdr tab before the spawn is recorded — unfocused, in the
+  // attempt's cwd, labeled `<ticket-id> · <ticket-title>` — and the spawned
+  // event carries the root pane id recovered from pane.list, because
+  // tab.create returns none (verified herdr behaviour). The fake daemon
+  // speaks the real wire shape: newline-delimited JSON-RPC, one request per
+  // connection.
+
+  interface FakeHerdrRequest {
+    method: string;
+    params: Record<string, unknown>;
+  }
+
+  async function startFakeHerdr(): Promise<{
+    socketPath: string;
+    requests: FakeHerdrRequest[];
+    close: () => Promise<void>;
+  }> {
+    const requests: FakeHerdrRequest[] = [];
+    let minted = 0;
+    const panes: { tab_id: string; pane_id: string }[] = [];
+    const server = createServer((socket) => {
+      let buf = "";
+      socket.on("data", (d) => {
+        buf += d.toString();
+        if (!buf.includes("\n")) return;
+        const msg = JSON.parse(buf.slice(0, buf.indexOf("\n"))) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        requests.push({ method: msg.method, params: msg.params });
+        let result: unknown = {};
+        if (msg.method === "tab.create") {
+          minted += 1;
+          const tab_id = `tab-${minted}`;
+          panes.push({ tab_id, pane_id: `pane-${minted}` });
+          result = { tab: { tab_id } };
+        } else if (msg.method === "pane.list") {
+          result = { panes };
+        }
+        socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
+      });
+    });
+    const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+    tempDirs.push(dir);
+    const socketPath = join(dir, "herdr.sock");
+    await new Promise<void>((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(socketPath, () => resolve());
+    });
+    return {
+      socketPath,
+      requests,
+      close: () => new Promise((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  it("opens a named unfocused tab in the attempt cwd and records the recovered pane id", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Named herdr tabs\n\nticket body" },
+      ],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // tab.create, then the pane.list recovery — one connection each.
+    expect(fake.requests.map((r) => r.method)).toEqual([
+      "tab.create",
+      "pane.list",
+    ]);
+    expect(fake.requests[0].params).toEqual({
+      label: "01 · Named herdr tabs",
+      focus: false,
+      cwd: poolDir,
+    });
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBe("pane-1");
+    expect(spawned.payload.terminal_error).toBeUndefined();
+  }, 15000);
+
+  it("truncates a long ticket title to the tab label cap", async () => {
+    const longTitle = "Named herdr tabs ".repeat(3).trimEnd();
+    const poolDir = makePool({
+      tickets: [{ ...readyTicket("01"), body: `# ${longTitle}\n\nticket body` }],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    // The cap itself is unit-tested in herdr.test.ts; here the wiring from
+    // the ticket file's heading to the socket's label params.
+    expect(fake.requests[0].params.label).toBe(
+      `01 · ${longTitle.slice(0, 35)}`,
+    );
+  }, 15000);
+
+  it("opens a tab for every attempt of a verify fan-out, graders included", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 4, verdict: "flag", reasons: "second" },
+      },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Two attempt tabs and two grader tabs, each with its pane.list recovery.
+    const creates = fake.requests.filter((r) => r.method === "tab.create");
+    expect(creates).toHaveLength(4);
+    expect(fake.requests.filter((r) => r.method === "pane.list")).toHaveLength(
+      4,
+    );
+    // Every attempt tab is named for its ticket, unfocused. The build
+    // attempts label from the ticket title; the grader tickets carry the
+    // engine-written "grade attempt" title, capped at the label length.
+    for (const created of creates) {
+      expect(created.params.focus).toBe(false);
+      expect(String(created.params.label).length).toBeLessThanOrEqual(40);
+    }
+    const buildTabs = creates.filter((r) =>
+      String(r.params.label).startsWith("01 · "),
+    );
+    expect(buildTabs).toHaveLength(2);
+    for (const tab of buildTabs) {
+      expect(tab.params.label).toBe("01 · Pick a winner");
+      expect(String(tab.params.cwd)).toContain(
+        join(".git", "pool-worktrees"),
+      );
+    }
+    // The attempt worktrees differ per candidate: the two tabs never share.
+    expect(buildTabs[0].params.cwd).not.toBe(buildTabs[1].params.cwd);
+    // Graders run in the main checkout and record their pane ids on their
+    // own spawned events.
+    const graderTabs = creates.filter((r) =>
+      String(r.params.label).startsWith("01-grader-"),
+    );
+    expect(graderTabs).toHaveLength(2);
+    for (const tab of graderTabs) {
+      expect(tab.params.cwd).toBe(poolDir);
+    }
+    for (const gid of ["01-grader-1", "01-grader-2"]) {
+      const spawned = readEventLines(poolDir, gid).find(
+        (e) => e.kind === "spawned",
+      )!;
+      expect(String(spawned.payload.pane_id)).toMatch(/^pane-/);
+    }
+  }, 15000);
+
+  it("falls back to headless with the error on the spawned event when the daemon is absent", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: join(poolDir, "no-daemon.sock"),
+    });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBeNull();
+    expect(typeof spawned.payload.terminal_error).toBe("string");
+  }, 15000);
+
+  it("records no pane facts on a headless pool", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      // Pointing at nothing: a headless pool must never touch the socket.
+      herdrSocket: join(poolDir, "no-daemon.sock"),
+    });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBeUndefined();
+    expect(spawned.payload.terminal_error).toBeUndefined();
   }, 15000);
 });
 
