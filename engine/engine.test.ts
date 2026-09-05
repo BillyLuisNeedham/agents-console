@@ -180,6 +180,97 @@ async function approveReview(run: PoolRun): Promise<PoolRun> {
   return run.approve(review!.ticketId);
 }
 
+// The merge hold's pause (ADR-0012) keeps the drive alive and never settles
+// a held pool, so a test that observes the held state starts the pool
+// without awaiting its settle and waits for the hold's log line, the same
+// line the Console shows. The returned handle's answers drive the rest.
+async function heldRun(options: Parameters<typeof startPool>[0]): Promise<PoolRun> {
+  const run = startPool(options);
+  await waitFor(() =>
+    run.snapshots.some((s) =>
+      s.state.log.some((line) => line.startsWith("merge hold (ADR-0012)")),
+    ),
+  );
+  return run;
+}
+
+interface ResolverBehaviour {
+  resolved?: boolean;
+  note?: string;
+  exitCode?: number;
+  conflictFile?: string;
+  resolution?: string;
+  recordDir?: string;
+}
+
+function resolverStub(
+  poolDir: string,
+  behaviour: Record<string, ResolverBehaviour>,
+): {
+  harnesses: Record<string, HarnessCommand>;
+  spawned: Record<string, SpawnContext>;
+  spawnOrder: string[];
+} {
+  const stubPath = join(poolDir, "resolver-stub.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'outcome="$1"; plan="$2"; worktree="$3"',
+      'source "$plan"',
+      ': "${CONFLICT_FILE:=}" "${RESOLUTION:=}" "${RECORD_DIR:=}"',
+      'git -C "$worktree" merge "$WORKING_BRANCH" >/dev/null 2>&1 || true',
+      'if [ "$RESOLVED" = "1" ]; then',
+      '  if [ -n "$CONFLICT_FILE" ]; then',
+      '    printf \'%s\\n\' "$RESOLUTION" > "$worktree/$CONFLICT_FILE"',
+      '    git -C "$worktree" add "$CONFLICT_FILE"',
+      "  fi",
+      '  printf \'{"resolved": true, "note": "%s"}\' "$NOTE" > "$outcome"',
+      "else",
+      '  printf \'{"resolved": false, "note": "%s"}\' "$NOTE" > "$outcome"',
+      "fi",
+      'if [ -n "$RECORD_DIR" ]; then',
+      '  mkdir -p "$RECORD_DIR"',
+      '  git -C "$worktree" branch --show-current > "$RECORD_DIR/branch"',
+      '  git -C "$worktree" rev-parse --verify MERGE_HEAD > "$RECORD_DIR/mergehead" 2>/dev/null || true',
+      "fi",
+      'exit "$EXIT"',
+      "",
+    ].join("\n"),
+  );
+  const spawned: Record<string, SpawnContext> = {};
+  const spawnOrder: string[] = [];
+  const stub: HarnessCommand = (ctx) => {
+    spawned[ctx.id] = ctx;
+    spawnOrder.push(ctx.id);
+    const b = behaviour[ctx.id] ?? { resolved: false, note: "no behaviour" };
+    const planPath = join(poolDir, `resolver-plan-${ctx.id}.sh`);
+    const quote = (value: string) => JSON.stringify(value);
+    const lines = [
+      "WORKING_BRANCH=main",
+      `RESOLVED=${b.resolved ? "1" : ""}`,
+      `NOTE=${quote(b.note ?? "")}`,
+      `EXIT=${b.exitCode ?? 0}`,
+    ];
+    if (b.conflictFile) lines.push(`CONFLICT_FILE=${quote(b.conflictFile)}`);
+    if (b.resolution) lines.push(`RESOLUTION=${quote(b.resolution)}`);
+    if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
+    writeFileSync(planPath, lines.join("\n") + "\n");
+    return ["bash", stubPath, ctx.outcomePath, planPath, ctx.cwd];
+  };
+  return {
+    harnesses: { "resolver-stub": stub },
+    spawned,
+    spawnOrder,
+  };
+}
+
+const resolverConfig: PoolConfig = {
+  ...stubConfig,
+  resolver: "resolver-stub",
+};
+
 interface GitStubBehaviour {
   status?: "done" | "checkpoint" | "keep";
   outcome?: { summary: string; commitSha: string | null } | null;
@@ -5805,7 +5896,7 @@ describe("worktrees", () => {
     expect(baseOf01).toBe(head);
   }, 15000);
 
-  it("raises a merge-conflict interrupt on a clashing merge without stalling unrelated tickets", async () => {
+  it("holds the pool on a clashing merge and finishes the unrelated tickets it already ran", async () => {
     const { poolDir, git } = makeGitPool(
       {
         tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
@@ -5830,9 +5921,12 @@ describe("worktrees", () => {
       "03": { workFile: "three.txt", commitMsg: "work-03" },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    // 01, 02 and 03 all run in the same super-step; 02's merge conflicts at
+    // the boundary and the hold pauses the pool there, with 01 and 03
+    // already finished and merged.
+    const run = await heldRun({ poolDir, harnesses: rig.harnesses });
 
-    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01", "02", "03"]);
     expect(run.final.tickets).toEqual({
       "01": "done",
       "02": "done",
@@ -5856,7 +5950,8 @@ describe("worktrees", () => {
       existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
     ).toBe(true);
 
-    // The human resolves by hand in the main checkout, then resumes.
+    // The human resolves by hand in the main checkout, then resumes; the
+    // merge lands and the hold lifts.
     git(["checkout", "--", "issues/02-t.md"]);
     expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
     writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
@@ -5877,8 +5972,8 @@ describe("worktrees", () => {
     ).toBe(false);
   }, 15000);
 
-  it("passes a blocker's outcome downstream even when its merge conflicted", async () => {
-    const { poolDir } = makeGitPool(
+  it("holds a downstream ticket until its blocker's conflicted merge lands, then passes the outcome through", async () => {
+    const { poolDir, git } = makeGitPool(
       {
         tickets: [
           readyTicket("01"),
@@ -5907,17 +6002,33 @@ describe("worktrees", () => {
       "03": { workFile: "three.txt", commitMsg: "work-03" },
     });
 
-    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    // 01 and 02 run in the same super-step; 02 is done but its merge
+    // conflicts, so the hold pauses the pool and 03 never spawns against a
+    // HEAD the merge never reached.
+    const run = await heldRun({ poolDir, harnesses: rig.harnesses });
 
-    expect(run.phase).toBe("quiescent");
     expect(run.interrupts[0]?.kind).toBe("merge-conflict");
-    // 02 is done (its merge is machinery), so 03 ran in the next super-step
-    // with 02's outcome in its prompt, against a HEAD the merge never
-    // reached. The outcomes channel, not the merge, carries state downstream.
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done", "03": "ready" });
+
+    // The human resolves by hand; the merge lands, the hold lifts, and 03
+    // spawns in the next super-step with 02's outcome in its prompt. The
+    // outcomes channel, not the merge, carries state downstream; the merge
+    // decides when the downstream ticket may start.
+    git(["checkout", "--", "issues/02-t.md"]);
+    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
+    git(["add", "shared.txt"]);
+    git(["commit", "-qm", "resolve pool/02"]);
+
+    const resumed = await run.resume("02");
     expect(rig.spawnOrder).toContain("03");
     expect(rig.spawned["03"].body).toContain("02: schema v2");
-    expect(run.final.tickets["03"]).toBe("done");
     expect(rig.spawned["03"].cwd).toBe(poolDir);
+    const done = await approveReview(resumed);
+
+    expect(done.phase).toBe("done");
+    expect(done.final.tickets["03"]).toBe("done");
   }, 15000);
 
   it("keeps a checkpointed ticket's worktree parked and reuses it on resume", async () => {
@@ -5994,84 +6105,273 @@ describe("worktrees", () => {
     ).toBe("");
   }, 15000);
 
+  describe("merge hold (ADR-0012)", () => {
+    const DONE_01 = "<!-- state: id=01 blocked-by=none status=done -->";
+
+    // Park pool/<id> with one commit the working branch does not have.
+    function parkBranch(
+      poolDir: string,
+      git: (args: string[]) => { exitCode: number },
+      id: string,
+    ): void {
+      git(["checkout", "-q", "-b", `pool/${id}`]);
+      writeFileSync(join(poolDir, `w-${id}.txt`), `work for ${id}\n`);
+      git(["add", `w-${id}.txt`]);
+      git(["commit", "-qm", `work ${id}`]);
+      git(["checkout", "-q", "main"]);
+    }
+
+    it("holds a pool booted with a done ticket unmerged, and a manual CLI merge lifts it with no Console action", async () => {
+      // The disk state is what a killed engine leaves behind: a done marker,
+      // a parked branch, a ready downstream, and no hold anywhere in the
+      // checkpoint store, because there is no such field. The boot derives
+      // the hold from markers and branch state alone.
+      const { poolDir, git } = makeGitPool(
+        {
+          tickets: [
+            { file: "01-t.md", marker: DONE_01 },
+            readyTicket("02", "01"),
+          ],
+          config: stubConfig,
+        },
+        { "shared.txt": "base\n" },
+      );
+      parkBranch(poolDir, git, "01");
+      const rig = gitStubHarness(poolDir, {
+        "02": { workFile: "two.txt", commitMsg: "work-02" },
+      });
+
+      const run = await heldRun({ poolDir, harnesses: rig.harnesses });
+
+      // The hold pauses the pool: the downstream ticket never spawns.
+      expect(rig.spawnOrder).toEqual([]);
+
+      // A manual CLI merge lifts the hold on the next ready-set computation,
+      // with no operator action in the Console: the drive's derivation
+      // simply observes the branch landed.
+      git(["merge", "--no-edit", "pool/01"]);
+      await waitFor(() => rig.spawnOrder.includes("02"));
+      const done = await approveReview(await run.settled);
+
+      expect(done.phase).toBe("done");
+      expect(done.final.tickets).toEqual({ "01": "done", "02": "done" });
+    }, 15000);
+
+    it("re-derives the hold on a restart from markers and branch state alone", async () => {
+      const { poolDir } = makeGitPool(
+        {
+          tickets: [
+            readyTicket("01"),
+            readyTicket("02"),
+            readyTicket("03"),
+          ],
+          config: resolverConfig,
+        },
+        { "shared.txt": "base\n" },
+      );
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "shared.txt",
+          workLine: "from-01",
+          overwrite: true,
+          commitMsg: "work-01",
+        },
+        "02": {
+          waitMerged: "work-01",
+          workFile: "shared.txt",
+          workLine: "from-02",
+          overwrite: true,
+          commitMsg: "work-02",
+        },
+        // 03 checkpoints on its first run, so the first engine can be ended
+        // by a drained answer whose persist fails on the closed store,
+        // without touching the hold's facts on disk; its re-run finishes.
+        "03": [{ status: "checkpoint" }, { status: "done" }],
+      });
+      const resolver = resolverStub(poolDir, {
+        "02": {
+          resolved: true,
+          conflictFile: "shared.txt",
+          resolution: "resolved-by-agent",
+          note: "kept both lines",
+        },
+      });
+
+      // Engine one: the conflict raises the approval and the hold pauses the
+      // pool with 03's checkpoint interrupt up beside it.
+      const first = await heldRun({
+        poolDir,
+        harnesses: { ...rig.harnesses, ...resolver.harnesses },
+      });
+      expect(
+        new Set(first.interrupts.map((i) => `${i.ticketId}:${i.kind}`)),
+      ).toEqual(
+        new Set(["02:merge-approval", "03:checkpoint"]),
+      );
+
+      // Kill engine one: closing the store makes the next drained answer's
+      // persist fail, which reports the drive dead and ends it. The answer
+      // (resuming 03) still wrote its marker first, so the disk carries 03
+      // ready and the hold's facts untouched: 01 and 02 done, 02's branch
+      // parked and unmerged.
+      first.close();
+      await expect(first.resume("03")).rejects.toThrow();
+
+      // Engine two boots into the same pool. The hold is re-derived from
+      // markers and branch state alone, no persisted flag anywhere, and the
+      // merge-approval interrupt comes back with it; the ready set returns
+      // empty under the hold, so nothing new spawns.
+      const second = await heldRun({
+        poolDir,
+        harnesses: { ...rig.harnesses, ...resolver.harnesses },
+      });
+      expect(rig.spawnOrder).toEqual(["01", "02", "03"]);
+      expect(second.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([
+        ["02", "merge-approval"],
+      ]);
+
+      // The merge approval lifts the hold the same way it would have for
+      // engine one, and the pool finishes through the ordinary path. 03
+      // re-runs from the ready marker engine one's answer left.
+      const done = await approveReview(await second.approve("02"));
+      expect(done.phase).toBe("done");
+      expect(done.final.tickets).toEqual({
+        "01": "done",
+        "02": "done",
+        "03": "done",
+      });
+      expect(rig.spawnOrder).toEqual(["01", "02", "03", "03"]);
+    }, 20000);
+
+    it("withholds a verify round's graders while the hold stands, then grades and selects once it lifts", async () => {
+      const { poolDir, git } = makeGitPool(
+        {
+          tickets: [
+            { ...readyTicket("01"), body: "verify fan-out\n" },
+            readyTicket("02"),
+            readyTicket("03"),
+          ],
+          config: {
+            ...noResolverConfig,
+            assign: { "01": { verify: 2 } },
+          },
+        },
+        { "shared.txt": "base\n" },
+      );
+      const rig = gitStubHarness(poolDir, {
+        "01": { workFile: "one.txt", commitMsg: "work-01" },
+        "02": {
+          waitMerged: "work-03",
+          workFile: "shared.txt",
+          workLine: "from-02",
+          overwrite: true,
+          commitMsg: "work-02",
+        },
+        "03": {
+          workFile: "shared.txt",
+          workLine: "from-03",
+          overwrite: true,
+          commitMsg: "work-03",
+        },
+      });
+
+      // Super-step one runs 01's fan-out beside 02 and 03. 02's merge
+      // conflicts with 03's landed change, so the hold pauses the pool right
+      // where grading would begin: the grader tickets are written but not
+      // scheduled, and nothing engine-run spawns.
+      const run = await heldRun({ poolDir, harnesses: rig.harnesses });
+      expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(true);
+      expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(true);
+      expect(
+        existsSync(join(poolDir, "runs", "01-grader-1.events.jsonl")),
+      ).toBe(false);
+      expect(rig.spawnOrder).toEqual(["01", "01", "02", "03"]);
+
+      // The human resolves the conflicted merge; the hold lifts and the
+      // grading round runs. The default grades tie at 8, below the outright
+      // margin, so the selection run's judge routes through the same entry
+      // point and the head-to-head spawns only now.
+      git(["checkout", "--", "issues/02-t.md"]);
+      expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+      writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
+      git(["add", "shared.txt"]);
+      git(["commit", "-qm", "resolve pool/02"]);
+
+      const resumed = await run.resume("02");
+      expect(rig.spawnOrder).toEqual([
+        "01",
+        "01",
+        "02",
+        "03",
+        "01-grader-1",
+        "01-grader-2",
+        "01-head-to-head",
+      ]);
+      const done = await approveReview(resumed);
+
+      expect(done.phase).toBe("done");
+      expect(done.final.tickets["01"]).toBe("done");
+      expect(done.final.tickets["01-head-to-head"]).toBe("done");
+    }, 20000);
+
+    it("holds on a feature-branch merge target the same as main, and lifts when the branch lands there", async () => {
+      const { poolDir, git } = makeGitPool(
+        {
+          tickets: [
+            readyTicket("01"),
+            readyTicket("02"),
+            readyTicket("03", "02"),
+          ],
+          config: noResolverConfig,
+        },
+        { "shared.txt": "base\n" },
+      );
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "shared.txt",
+          workLine: "from-01",
+          overwrite: true,
+          commitMsg: "work-01",
+        },
+        "02": {
+          waitMerged: "work-01",
+          workFile: "shared.txt",
+          workLine: "from-02",
+          overwrite: true,
+          commitMsg: "work-02",
+        },
+        "03": { workFile: "three.txt", commitMsg: "work-03" },
+      });
+
+      const run = await heldRun({ poolDir, harnesses: rig.harnesses });
+      expect(rig.spawnOrder).toEqual(["01", "02"]);
+
+      // The merge target is the pool checkout's working branch. Cutting a
+      // feature branch moves the target: 02's work is in neither branch, the
+      // hold stands, and only landing 02 in the feature branch lifts it. If
+      // the engine read main as the target instead, nothing here would ever
+      // lift the hold and the test would time out waiting for 03.
+      git(["checkout", "-q", "-b", "feature/x"]);
+      expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+      writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
+      git(["add", "shared.txt"]);
+      git(["commit", "-qm", "resolve pool/02 onto feature/x"]);
+
+      await waitFor(() => rig.spawnOrder.includes("03"));
+      // The lift needed no Console action: 03 spawned before any answer. The
+      // resume here only clears the stale manual interrupt the CLI merge
+      // made moot; its re-attempt finds the merge already up to date.
+      const done = await approveReview(await run.resume("02"));
+
+      expect(done.phase).toBe("done");
+      expect(done.final.tickets["03"]).toBe("done");
+      expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
+        "resolved\n",
+      );
+    }, 15000);
+  });
+
   describe("resolver agent", () => {
-  interface ResolverBehaviour {
-    resolved?: boolean;
-    note?: string;
-    exitCode?: number;
-    conflictFile?: string;
-    resolution?: string;
-    recordDir?: string;
-  }
-
-  function resolverStub(
-    poolDir: string,
-    behaviour: Record<string, ResolverBehaviour>,
-  ): {
-    harnesses: Record<string, HarnessCommand>;
-    spawned: Record<string, SpawnContext>;
-    spawnOrder: string[];
-  } {
-    const stubPath = join(poolDir, "resolver-stub.sh");
-    writeFileSync(
-      stubPath,
-      [
-        "#!/usr/bin/env bash",
-        "set -uo pipefail",
-        'outcome="$1"; plan="$2"; worktree="$3"',
-        'source "$plan"',
-        ': "${CONFLICT_FILE:=}" "${RESOLUTION:=}" "${RECORD_DIR:=}"',
-        'git -C "$worktree" merge "$WORKING_BRANCH" >/dev/null 2>&1 || true',
-        'if [ "$RESOLVED" = "1" ]; then',
-        '  if [ -n "$CONFLICT_FILE" ]; then',
-        '    printf \'%s\\n\' "$RESOLUTION" > "$worktree/$CONFLICT_FILE"',
-        '    git -C "$worktree" add "$CONFLICT_FILE"',
-        "  fi",
-        '  printf \'{"resolved": true, "note": "%s"}\' "$NOTE" > "$outcome"',
-        "else",
-        '  printf \'{"resolved": false, "note": "%s"}\' "$NOTE" > "$outcome"',
-        "fi",
-        'if [ -n "$RECORD_DIR" ]; then',
-        '  mkdir -p "$RECORD_DIR"',
-        '  git -C "$worktree" branch --show-current > "$RECORD_DIR/branch"',
-        '  git -C "$worktree" rev-parse --verify MERGE_HEAD > "$RECORD_DIR/mergehead" 2>/dev/null || true',
-        "fi",
-        'exit "$EXIT"',
-        "",
-      ].join("\n"),
-    );
-    const spawned: Record<string, SpawnContext> = {};
-    const spawnOrder: string[] = [];
-    const stub: HarnessCommand = (ctx) => {
-      spawned[ctx.id] = ctx;
-      spawnOrder.push(ctx.id);
-      const b = behaviour[ctx.id] ?? { resolved: false, note: "no behaviour" };
-      const planPath = join(poolDir, `resolver-plan-${ctx.id}.sh`);
-      const quote = (value: string) => JSON.stringify(value);
-      const lines = [
-        "WORKING_BRANCH=main",
-        `RESOLVED=${b.resolved ? "1" : ""}`,
-        `NOTE=${quote(b.note ?? "")}`,
-        `EXIT=${b.exitCode ?? 0}`,
-      ];
-      if (b.conflictFile) lines.push(`CONFLICT_FILE=${quote(b.conflictFile)}`);
-      if (b.resolution) lines.push(`RESOLUTION=${quote(b.resolution)}`);
-      if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
-      writeFileSync(planPath, lines.join("\n") + "\n");
-      return ["bash", stubPath, ctx.outcomePath, planPath, ctx.cwd];
-    };
-    return {
-      harnesses: { "resolver-stub": stub },
-      spawned,
-      spawnOrder,
-    };
-  }
-
-  const resolverConfig: PoolConfig = {
-    ...stubConfig,
-    resolver: "resolver-stub",
-  };
-
   it("shares attempt numbers between implement and resolver runs", async () => {
     const { poolDir, git } = makeGitPool(
       {
@@ -6105,7 +6405,7 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
@@ -6124,7 +6424,8 @@ describe("worktrees", () => {
         .map((line) => JSON.parse(line) as EventLine);
 
     // The implement attempt conflicted, then the resolver took the next
-    // attempt number for the same ticket.
+    // attempt number for the same ticket. The hold has paused the pool here,
+    // so nothing further has spawned.
     const before = readEventsFile("02");
     expect(before.map((e) => e.kind)).toEqual([
       "scheduled",
@@ -6216,7 +6517,7 @@ describe("worktrees", () => {
     // the grandchild outlives the run, so only the bounded grace gets the
     // resolver spawn back.
     const started = Date.now();
-    const first = await runPool({ poolDir, harnesses });
+    const first = await heldRun({ poolDir, harnesses });
     expect(Date.now() - started).toBeLessThan(10_000);
     const approval = first.interrupts.find((i) => i.kind === "merge-approval");
     expect(approval).toBeTruthy();
@@ -6266,17 +6567,14 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    // The conflict pauses the pool on the merge hold: 03 is ready (its
+    // blocker 02 is done) but the hold withholds it until the merge lands.
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
 
-    expect(run.phase).toBe("quiescent");
-    expect(run.final.tickets).toEqual({
-      "01": "done",
-      "02": "done",
-      "03": "done",
-    });
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
     expect(run.interrupts).toHaveLength(1);
     const interrupt = run.interrupts[0];
     expect(interrupt.ticketId).toBe("02");
@@ -6297,7 +6595,10 @@ describe("worktrees", () => {
       readFileSync(join(poolDir, "res-rec", "mergehead"), "utf8").trim(),
     ).toBeTruthy();
 
+    // Approving the queued merge lifts the hold: the merge lands, the ready
+    // set computes fresh, and downstream 03 spawns.
     const approved = await run.approve("02");
+    expect(rig.spawnOrder).toContain("03");
     const done = await approveReview(approved);
     expect(done.phase).toBe("done");
     expect(done.interrupts).toEqual([]);
@@ -6311,10 +6612,10 @@ describe("worktrees", () => {
     ).toBe(false);
   }, 15000);
 
-  it("reject converts the approval to a manual interrupt carrying the attempt, and resume completes the merge", async () => {
+  it("reject reopens the ticket, lifts the hold, and the re-run's merge completes the pool", async () => {
     const { poolDir, git } = makeGitPool(
       {
-        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03", "02")],
         config: resolverConfig,
       },
       { "shared.txt": "base\n" },
@@ -6344,42 +6645,60 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
     expect(run.interrupts[0]?.kind).toBe("merge-approval");
 
-    const rejected = await run.reject("02", "the resolver dropped a field");
-    expect(rejected.phase).toBe("quiescent");
-    expect(rejected.interrupts).toHaveLength(1);
-    expect(rejected.interrupts[0].kind).toBe("merge-conflict");
-    expect(rejected.interrupts[0].body).toContain("resolver agent attempted");
-    expect(rejected.interrupts[0].body).toContain("kept both lines");
-    expect(rejected.interrupts[0].body).toContain("shared.txt");
-    // The rejection note was appended to the Issue as a durable resume note.
+    // Rejecting reopens the ticket instead of leaving it done with a manual
+    // interrupt: the marker is back to ready and the hold lifts because the
+    // ticket no longer counts as done. The rejection note rides along as a
+    // durable resume note. The staged resolution was discarded: the branch
+    // is back to its own commits and the working branch still holds 01's
+    // content. The re-run starts inside the same drive, so the reopen is
+    // read from the snapshot stream (the settle waits for the whole re-run).
+    run.accept("02", "the resolver dropped a field", false);
+    await waitFor(() =>
+      run.snapshots.some((s) =>
+        s.state.log.some((l) => l.includes("ticket reopened")),
+      ),
+    );
+    const reopened = run.snapshots.find((s) =>
+      s.state.log.some((l) => l.includes("ticket reopened")),
+    )!;
+    expect(reopened.state.tickets["02"]).toBe("ready");
     expect(
       readFileSync(join(poolDir, "issues", "02-t.md"), "utf8"),
     ).toContain("the resolver dropped a field");
-    // The staged resolution was discarded: the branch is back to its own
-    // commits and the working branch still holds 01's content.
-    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
     expect(
-      git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).exitCode,
-    ).not.toBe(0);
+      run.snapshots.every(
+        (s) => !s.state.interrupts.some((i) => i.kind === "merge-conflict"),
+      ),
+    ).toBe(true);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
 
-    // Billy resolves by hand in the main checkout, then resumes.
-    git(["checkout", "--", "issues/02-t.md"]);
-    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
-    writeFileSync(join(poolDir, "shared.txt"), "manual-resolution\n");
-    git(["add", "shared.txt"]);
-    git(["commit", "-qm", "resolve pool/02 manually"]);
-
-    const resumed = await rejected.resume("02");
-    expect((await approveReview(resumed)).phase).toBe("done");
-    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
-      "manual-resolution\n",
+    // The re-run reuses the parked branch, conflicts again, and the resolver
+    // takes a second run; approving the second resolution finishes the pool,
+    // with 03 spawned only after 02's merge landed.
+    await waitFor(
+      () =>
+        run.interrupts.some(
+          (i) => i.kind === "merge-approval" && i.ticketId === "02",
+        ),
     );
+    const done = await approveReview(await run.approve("02"));
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
+    expect(rig.spawnOrder).toEqual(["01", "02", "02", "03"]);
+    expect(resolver.spawnOrder).toEqual(["02", "02"]);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
+      "resolved-by-agent\n",
+    );
+    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(
+      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+    ).toBe(false);
   }, 15000);
 
   it("a resolver that fails takes the manual path with the failure noted", async () => {
@@ -6409,19 +6728,19 @@ describe("worktrees", () => {
       "02": { resolved: false, note: "could not reconcile the schema" },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
 
-    expect(run.phase).toBe("quiescent");
     expect(run.interrupts).toHaveLength(1);
     const interrupt = run.interrupts[0];
     expect(interrupt.kind).toBe("merge-conflict");
     expect(interrupt.body).toContain("resolver agent attempted");
     expect(interrupt.body).toContain("could not reconcile the schema");
 
-    // Manual resolution then resume completes the merge.
+    // Manual resolution then resume completes the merge; the merge landing
+    // lifts the hold.
     git(["checkout", "--", "issues/02-t.md"]);
     expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
     writeFileSync(join(poolDir, "shared.txt"), "manual\n");
@@ -6466,7 +6785,7 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
       issueRunnerPath: runnerFile,
@@ -6475,6 +6794,8 @@ describe("worktrees", () => {
     expect(run.interrupts[0]?.kind).toBe("merge-approval");
     expect(run.interrupts[0].body).toContain("via default");
     expect(resolver.spawnOrder).toEqual(["02"]);
+    const finished = await approveReview(await run.approve("02"));
+    expect(finished.phase).toBe("done");
   }, 15000);
 
   it("pins the resolver's own model when resolver= is the { harness, model } form", async () => {
@@ -6512,7 +6833,7 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
@@ -6522,6 +6843,8 @@ describe("worktrees", () => {
     // The defaults' model ("stub-model") belongs to the stub harness; the
     // resolver runs on resolver-stub and must spawn with its own model.
     expect(resolver.spawned["02"].model).toBe("resolver-model");
+    const finished = await approveReview(await run.approve("02"));
+    expect(finished.phase).toBe("done");
   }, 15000);
 
   it("fails fast when an explicit resolver names an unknown harness", async () => {
@@ -6613,7 +6936,7 @@ describe("worktrees", () => {
       },
     });
 
-    const run = await runPool({
+    const run = await heldRun({
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
     });
@@ -6623,11 +6946,19 @@ describe("worktrees", () => {
     expect(approved.phase).toBe("quiescent");
 
     // Reject 02 and 04 together (03 resets as 02's downstream) so 02 re-runs
-    // in a worktree alongside 04 and conflicts again.
-    const rejected = await run.reject(REVIEW_TICKET_ID, "redo 02 04");
-    expect(
-      rejected.interrupts.some((i) => i.kind === "merge-approval"),
-    ).toBe(true);
+    // in a worktree alongside 04 and conflicts again. The re-run's second
+    // conflict pauses the pool on the hold again, so the review reject is
+    // accepted without awaiting a settle and the second resolver run is
+    // waited for on its own event.
+    run.accept(REVIEW_TICKET_ID, "redo 02 04", false);
+    await waitFor(() => resolver.spawnOrder.length === 2);
+    await waitFor(() =>
+      run.interrupts.some((i) => i.kind === "merge-approval"),
+    );
+
+    // Approving the second resolution finishes the pool.
+    const done = await approveReview(await run.approve("02"));
+    expect(done.phase).toBe("done");
 
     // Implement attempt 1 rotated away; attempt 3 sits at the long-standing
     // path. Resolver attempt 2 rotated away; attempt 4 sits at its path.

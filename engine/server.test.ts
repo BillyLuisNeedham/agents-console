@@ -937,8 +937,10 @@ describe("merge pending enrichment", () => {
     const { root, poolDir, run } = makeGitPool([{ file: "01-a.md", marker: DONE_01 }]);
     parkBranch(root, run, "01");
     const server = await startServer(poolDir, stubHarness({}));
+    // The parked branch is exactly the merge hold (ADR-0012): the engine's
+    // drive pauses on it rather than settling, so the label is read from the
+    // first snapshot and the serve-time re-derivation, never from a settle.
     await server.start();
-    await server.settled();
 
     // Parked and unmerged: the emit-time enrichment carries the label.
     expect(server.latest?.state.tickets[0]).toMatchObject({
@@ -989,8 +991,10 @@ describe("merge pending enrichment", () => {
     parkBranch(root, run, "01");
     run(["checkout", "-q", "feature/x"]);
     const server = await startServer(poolDir, stubHarness({}));
+    // The hold stands here (both done tickets are unmerged into feature/x),
+    // so the drive never settles; the labels are served from the first
+    // snapshot's enrichment.
     await server.start();
-    await server.settled();
 
     const byId = new Map(
       (await ticketsOf(server)).map((t) => [t.id, t]),
@@ -1007,7 +1011,6 @@ describe("merge pending enrichment", () => {
     parkBranch(root, run, "01");
     const first = await startServer(poolDir, stubHarness({}));
     await first.start();
-    await first.settled();
     expect((await ticketsOf(first))[0]).toMatchObject({
       status: "done",
       mergePending: true,

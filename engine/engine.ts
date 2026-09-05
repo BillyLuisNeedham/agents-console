@@ -42,6 +42,7 @@ import {
 import {
   branchExists,
   branchFor,
+  branchLandedInto,
   commitMerge,
   attemptBranches,
   currentBranch,
@@ -229,7 +230,10 @@ interface RunOptions {
 // synchronously and resolve at the settle after it is processed; `accept` is
 // the same acceptance without the wait, for callers (the server) that
 // acknowledge and move on. The field getters read the session live, so they
-// are only meaningful once `settled` has resolved.
+// are only meaningful once `settled` has resolved; on a merge-hold pause
+// (ADR-0012) the pool never settles until the merge is answered, and the live
+// getters, the snapshots stream above all, are the observation of the held
+// state.
 export interface PoolRun {
   phase: Exclude<RunPhase, "running">;
   final: PoolState;
@@ -280,6 +284,69 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   };
 }
 
+// The merge hold's poll cadence while the pool pauses (ADR-0012). The hold
+// is re-derived from markers and branch state on every tick, so a manual
+// CLI merge is observed without any Console action; the cadence is only the
+// latency between the merge landing and the pool resuming.
+const MERGE_HOLD_POLL_MS = 250;
+
+// ADR-0012's merge hold, derived on demand and never persisted: the ids of
+// tickets whose status is done but whose branch has not landed in the merge
+// target, the pool checkout's working branch, main or a feature branch
+// alike. While the list is non-empty the entry point below withholds every
+// proposal and the pool pauses; it empties the moment a merge lands (an
+// approved one, or a manual CLI merge the next derivation simply observes)
+// or a rejection reopens the ticket so it no longer counts as done. Derived
+// from the in-memory statuses and branch state alone, including at startup
+// after rehydrate, so a restart re-derives the hold with no persisted flag.
+// A git-less pool has no branches, so nothing ever holds there; engine-run
+// tickets (graders, the head-to-head judge) work in the main checkout
+// without branches, so the missing-branch reading lands them the same way it
+// lands a merged ticket.
+function mergeHold(session: Session): string[] {
+  if (!session.git) return [];
+  const tickets = session.state.tickets;
+  if (!Object.values(tickets).some((status) => status === "done")) return [];
+  const target = currentBranch(session.cwd);
+  const hold: string[] = [];
+  for (const [id, status] of Object.entries(tickets)) {
+    if (status !== "done") continue;
+    if (branchLandedInto(session.cwd, branchFor(id), target)) continue;
+    hold.push(id);
+  }
+  return hold;
+}
+
+// The hold's wait, every caller's pause and the way the pause lifts. Polls
+// the derivation and drains queued answers as it goes, until nothing holds
+// the pool. Draining is what makes the wait live: an approved or rejected
+// merge processes here rather than at the boundary, so a pause is never
+// stuck behind the very answer that lifts it. Draining mid-super-step is
+// safe exactly where the boundary drain is safe (ADR-0004): at every wait
+// site every attempt has exited and the join is done, so the answer cannot
+// be undone, and processing never spawns. The engagement is logged once per
+// wait, so a held pool says why in the log the Console already shows.
+async function holdCleared(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+): Promise<void> {
+  const hold = mergeHold(session);
+  if (hold.length === 0) return;
+  session.state = applyUpdate(session.state, {
+    log: [
+      `merge hold (ADR-0012): pool paused; awaiting the merge of ` +
+        `${hold.join(", ")}`,
+    ],
+  });
+  emit("running");
+  while (mergeHold(session).length > 0) {
+    const pendingBefore = session.answers.pending().length;
+    drainAnswers(session);
+    if (session.answers.pending().length !== pendingBefore) emit("running");
+    await Bun.sleep(MERGE_HOLD_POLL_MS);
+  }
+}
+
 // The ready set's one home (ticket 01, the seam ADR-0012's merge hold stands
 // on): the single entry point every scheduling flow computes its spawn set
 // through. A flow proposes the tickets it intends to spawn and spawns only
@@ -293,14 +360,19 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
 // tickets, however stale and ready their card. The verify flow proposes the
 // grader tickets a round is about to run, and the selection run proposes the
 // head-to-head ticket it is about to spawn; those proposals are all engine
-// ids, already cleared by their own flow's context, so the entry point hands
-// them back untouched. The merge hold (ticket 02) is the one rule that
-// governs every proposal alike, and this function is the only place it will
-// live.
+// ids, already cleared by their own flow's context. The merge hold
+// (ADR-0012) is the one rule that governs every proposal alike, engine-run
+// or pool-wide, and this function is the only place it lives: while any done
+// ticket's branch is unmerged, nothing is handed back. Callers wait the hold
+// out through holdCleared, then recompute.
 function readySet(
   session: Session,
   candidates: TicketMarker[],
 ): TicketMarker[] {
+  // The hold withholds every proposal alike, before any clearing: an
+  // engine-run flow's proposal is all judges, cleared where proposed, but
+  // the pool-wide pause outranks the flow's context.
+  if (mergeHold(session).length > 0) return [];
   // An engine-run flow's proposal is all judges, cleared where proposed.
   if (candidates.every((marker) => engineTicketBuildId(marker.id))) {
     return candidates;
@@ -353,7 +425,6 @@ interface Session {
   handle: PoolRun | null;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
   issueRunnerPath: string;
-  resolverAttempts: Map<string, { files: string[]; note: string }>;
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
@@ -409,7 +480,6 @@ export function startPool(options: RunOptions): PoolRun {
     handle: null,
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
-    resolverAttempts: new Map(),
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
   };
@@ -611,9 +681,18 @@ async function driveLoop(session: Session): Promise<void> {
     // The super-step's spawn set routes through the one entry point
     // (ticket 01): the loop schedules the ready set it hands back, and
     // ADR-0012's merge hold (ticket 02) is the one rule that can withhold
-    // it.
+    // it. An empty set under the hold is a pause, not a stop: the loop
+    // waits for the hold to lift (an approved merge, an observed manual
+    // merge, a rejection that reopens the ticket) and recomputes, so a
+    // manual CLI merge resumes the pool with no Console action.
     const ready = readySet(session, session.markers);
-    if (ready.length === 0) break;
+    if (ready.length === 0) {
+      if (mergeHold(session).length > 0) {
+        await holdCleared(session, emit);
+        continue;
+      }
+      break;
+    }
     session.superStep += 1;
     // Every attempt this super-step spawns is numbered before any spawn,
     // so a verify fan-out cannot race the events counter: attempts run
@@ -1213,8 +1292,16 @@ function drainAnswers(session: Session): void {
     // leaves the record pending: a restart replays it onto the rehydrated
     // state, where it either re-applies or stale-consumes. A persist failure
     // leaves the record pending the same way and propagates like any other
-    // persist failure; the retry policy lives at the persist seam.
-    persist(session);
+    // persist failure; the retry policy lives at the persist seam. The
+    // failure still rejects this record's waiters before propagating: the
+    // state change happened, the run is going down, and an answerer left
+    // waiting on a promise nobody will ever settle hangs the client.
+    try {
+      persist(session);
+    } catch (error) {
+      for (const waiter of waiters) waiter.reject(error);
+      throw error;
+    }
     session.answers.markProcessed(record.seq);
     for (const waiter of waiters) waiter.resolve();
   }
@@ -1497,10 +1584,6 @@ async function handleMergeConflict(
     resolver,
     result,
   );
-  session.resolverAttempts.set(marker.id, {
-    files: result.conflicted,
-    note: resolverAttempt.note,
-  });
   if (resolverAttempt.resolved) {
     raiseInterrupt(
       session,
@@ -1644,9 +1727,11 @@ function approveMerge(
   });
 }
 
-// Rejecting discards the resolver's staged resolution (the parked branch is
-// restored) and converts the approval into a manual-resolution interrupt
-// carrying the conflicted state plus the agent's attempt, for Billy to resolve.
+// Rejecting the resolver's staged resolution abandons the merge and reopens
+// the ticket (ADR-0012): the staged work is discarded, the parked branch is
+// restored for the re-run to reuse the way a review-reject re-run does, and
+// the ticket no longer counts as done, which is what lifts the merge hold.
+// The rejection note rides along as a durable resume note on the Issue.
 function rejectMerge(
   session: Session,
   marker: TicketMarker,
@@ -1657,35 +1742,18 @@ function rejectMerge(
     path: worktreePathFor(session.cwd, marker.id),
     branch: branchFor(marker.id),
   };
-  const attempt = session.resolverAttempts.get(marker.id);
   git(worktree.path, ["merge", "--abort"]);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
-  const result: MergeResult = {
-    ok: false,
-    conflicted: attempt?.files ?? [],
-    detail: "",
-  };
-  const base = mergeConflictInterrupt(session, marker, result);
-  // In the normal flow the in-memory attempt record carries the note; after a
-  // restart the recorded approval interrupt (which holds the same note) stands
-  // in, so the agent's attempt is not lost.
-  const body = attempt
-    ? manualMergeInterrupt(
-        session,
-        marker,
-        result,
-        `${attempt.note} (resolution rejected by the human)`,
-      ).body
-    : `${base.body}\nThe resolver's rejected resolution said: ${interrupt.body}`;
+  writeMarkerStatus(marker.file, "ready");
+  marker.status = "ready";
   session.state = applyUpdate(session.state, {
-    interrupts: [
-      ...session.state.interrupts.filter((i) => i !== interrupt),
-      { ...base, body },
-    ],
+    tickets: { [marker.id]: "ready" as const },
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
-      `merge-approval rejected for ${marker.id}: converted to manual resolution`,
+      `merge-approval rejected for ${marker.id}: staged resolution ` +
+        "discarded, ticket reopened for a re-run",
     ],
   });
 }
@@ -2047,7 +2115,10 @@ async function runGraders(
   // The verify flow's spawn set routes through the one entry point
   // (ticket 01): the round runs the graders the entry point hands back, and
   // ADR-0012's merge hold (ticket 02) is the one rule that can withhold
-  // them. Today a cleared judge proposal always comes back whole.
+  // them. A withheld round waits the hold out first (draining queued
+  // answers, so an approval lifts the hold mid-wait) and then recomputes:
+  // an all-engine proposal returns empty for no reason but the hold.
+  await holdCleared(session, emit);
   const spawnable = readySet(session, pending.map((g) => g.marker));
   pending = pending.filter((g) =>
     spawnable.some((m) => m.id === g.marker.id),
@@ -2096,7 +2167,8 @@ async function runGraders(
     // The re-spawn round's spawn set routes through the one entry point
     // (ticket 01) like the initial one: only the graders it hands back run
     // again, so the merge hold (ticket 02) pauses re-spawns from the same
-    // place it pauses every other spawn.
+    // place it pauses every other spawn, waited out the same way.
+    await holdCleared(session, emit);
     const respawnable = readySet(session, pending.map((g) => g.marker));
     pending = pending
       .filter((g) => respawnable.some((m) => m.id === g.marker.id))
@@ -3013,8 +3085,10 @@ async function runHeadToHead(
   // The selection run's spawn set routes through the one entry point
   // (ticket 01): the run spawns the judge the entry point hands back, and
   // ADR-0012's merge hold (ticket 02) is the one rule that can withhold it.
-  // Today a cleared judge proposal always comes back whole; teaching the
-  // withheld run its behavior is ticket 02's.
+  // A withheld judge waits the hold out first (draining queued answers, so
+  // an approval lifts the hold mid-wait) and then recomputes: an all-engine
+  // proposal returns empty for no reason but the hold.
+  await holdCleared(session, emit);
   const [judge] = readySet(session, [h2h]);
   const assignment = resolveEngineTicketAssignment(
     session.state.config,
