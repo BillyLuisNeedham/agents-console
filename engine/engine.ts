@@ -364,8 +364,9 @@ async function holdCleared(
 // ids, already cleared by their own flow's context. The merge hold
 // (ADR-0012) is the one rule that governs every proposal alike, engine-run
 // or pool-wide, and this function is the only place it lives: while any done
-// ticket's branch is unmerged, nothing is handed back. Callers wait the hold
-// out through holdCleared, then recompute.
+// ticket's branch is unmerged, nothing is handed back. The engine-run flows
+// wait the hold out and recompute through engineSpawnSet below; the
+// pool-wide caller reads this entry point directly.
 function readySet(
   session: Session,
   candidates: TicketMarker[],
@@ -385,6 +386,31 @@ function readySet(
       tickets[marker.id] === "ready" &&
       marker.blockedBy.every((id) => tickets[id] === "done"),
   );
+}
+
+// The engine-run flows' spawn set: the wait-and-recompute rule ADR-0012
+// fixes, folded into one helper for the three sites that share it (grading's
+// initial round, its re-spawn rounds, and the head-to-head judge). The wait
+// is holdCleared, the recompute is readySet, and the loop is the rule the
+// ticket-02 sites spelled out per copy: an all-engine proposal returns empty
+// for no reason but the hold, so an empty return here is the hold re-engaged
+// in the gap between the wait's exit and the recompute, and the only honest
+// response is to wait again and recompute. The flow never sees an empty set,
+// so a judge spawn can never destructure one. The loop cannot run away on
+// its own: each turn's wait exits only once nothing holds, and whatever
+// re-engaged the hold between turns is what the next wait drains or
+// observes. The pool-wide caller keeps its own shape instead: an empty set
+// there can mean nothing ready, which is a stop, not a pause.
+export async function engineSpawnSet(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+  candidates: TicketMarker[],
+): Promise<TicketMarker[]> {
+  for (;;) {
+    await holdCleared(session, emit);
+    const spawnable = readySet(session, candidates);
+    if (spawnable.length > 0) return spawnable;
+  }
 }
 
 interface Assignment {
@@ -2114,13 +2140,17 @@ async function runGraders(
     return { marker, assignment, attempt, lastReason: "" };
   });
   // The verify flow's spawn set routes through the one entry point
-  // (ticket 01): the round runs the graders the entry point hands back, and
-  // ADR-0012's merge hold (ticket 02) is the one rule that can withhold
-  // them. A withheld round waits the hold out first (draining queued
-  // answers, so an approval lifts the hold mid-wait) and then recomputes:
-  // an all-engine proposal returns empty for no reason but the hold.
-  await holdCleared(session, emit);
-  const spawnable = readySet(session, pending.map((g) => g.marker));
+  // (ticket 01) via the shared engine-run helper: the round runs the graders
+  // it hands back, and ADR-0012's merge hold (ticket 02) is the one rule
+  // that can withhold them. The helper waits the hold out (draining queued
+  // answers, so an approval lifts the hold mid-wait) and recomputes, and an
+  // empty recompute is the hold re-engaged, so it loops: the round never
+  // runs on an empty set.
+  const spawnable = await engineSpawnSet(
+    session,
+    emit,
+    pending.map((g) => g.marker),
+  );
   pending = pending.filter((g) =>
     spawnable.some((m) => m.id === g.marker.id),
   );
@@ -2166,11 +2196,15 @@ async function runGraders(
     }
     const respawn = round + 1;
     // The re-spawn round's spawn set routes through the one entry point
-    // (ticket 01) like the initial one: only the graders it hands back run
-    // again, so the merge hold (ticket 02) pauses re-spawns from the same
-    // place it pauses every other spawn, waited out the same way.
-    await holdCleared(session, emit);
-    const respawnable = readySet(session, pending.map((g) => g.marker));
+    // (ticket 01) via the shared engine-run helper, like the initial one:
+    // only the graders it hands back run again, and an empty recompute is
+    // the merge hold (ticket 02) re-engaged, so the helper waits it out and
+    // recomputes instead of handing the round an empty set.
+    const respawnable = await engineSpawnSet(
+      session,
+      emit,
+      pending.map((g) => g.marker),
+    );
     pending = pending
       .filter((g) => respawnable.some((m) => m.id === g.marker.id))
       .map(({ marker, attempt, lastReason }) => {
@@ -3085,13 +3119,14 @@ async function runHeadToHead(
   session.markers = loadPoolMarkers(session.issuesDir);
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
-  // (ticket 01): the run spawns the judge the entry point hands back, and
-  // ADR-0012's merge hold (ticket 02) is the one rule that can withhold it.
-  // A withheld judge waits the hold out first (draining queued answers, so
-  // an approval lifts the hold mid-wait) and then recomputes: an all-engine
-  // proposal returns empty for no reason but the hold.
-  await holdCleared(session, emit);
-  const [judge] = readySet(session, [h2h]);
+  // (ticket 01) via the shared engine-run helper: the run spawns the judge
+  // it hands back, and ADR-0012's merge hold (ticket 02) is the one rule
+  // that can withhold it. The helper waits the hold out (draining queued
+  // answers, so an approval lifts the hold mid-wait) and recomputes, and an
+  // empty recompute is the hold re-engaged, so it loops: the judge the run
+  // destructures is never undefined, whatever lands between the wait and
+  // the recompute.
+  const [judge] = await engineSpawnSet(session, emit, [h2h]);
   const assignment = resolveEngineTicketAssignment(
     session.state.config,
     judge,
