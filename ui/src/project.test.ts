@@ -16,6 +16,7 @@ import {
   initialLogWindow,
   interruptForm,
   isTicketCardId,
+  joinStreamFiles,
   layoutStorageKey,
   LOG_BOTTOM_SLACK_PX,
   LOG_TAIL_BYTES,
@@ -1311,6 +1312,7 @@ describe("projectTimeline", () => {
       reconstructed: true,
       running: false,
       logFile: "01.log",
+      streamFile: null,
     });
     // The current attempt of an in-progress reconstructed ticket is the
     // newest log row.
@@ -1327,6 +1329,92 @@ describe("projectTimeline", () => {
   });
 });
 
+describe("joinStreamFiles", () => {
+  function eventRow(attempt: number): TicketEvent {
+    return { at: "2026-01-01T00:00:00.000Z", attempt, kind: "spawned", payload: {} };
+  }
+
+  it("joins each attempt's stream file from the listing by attempt number", () => {
+    const timeline = projectTimeline(
+      {
+        events: [eventRow(1), eventRow(2), eventRow(3)],
+        attempts: [],
+        reconstructed: false,
+        spec: "the spec",
+      },
+      "done",
+    );
+    const joined = joinStreamFiles(timeline, [
+      { attempt: 1, streamFile: "01.attempt-1.stream.jsonl" },
+      { attempt: 2, streamFile: null },
+      { attempt: 3, streamFile: "01.stream.jsonl" },
+    ]);
+    expect(joined.attempts.map((a) => a.streamFile)).toEqual([
+      "01.attempt-1.stream.jsonl",
+      null,
+      "01.stream.jsonl",
+    ]);
+    // The join touches nothing else: numbers, events and running stay put.
+    expect(joined.attempts.map((a) => a.number)).toEqual([1, 2, 3]);
+  });
+
+  it("surfaces no link for a non-streamed attempt: null in, null out", () => {
+    const timeline = projectTimeline(
+      { events: [eventRow(1)], attempts: [], reconstructed: false, spec: "s" },
+      "done",
+    );
+    const joined = joinStreamFiles(timeline, [
+      { attempt: 1, streamFile: null },
+    ]);
+    expect(joined.attempts[0].streamFile).toBeNull();
+  });
+
+  it("leaves rows the listing does not mention unlinked until it lands", () => {
+    const timeline = projectTimeline(
+      { events: [eventRow(1), eventRow(2)], attempts: [], reconstructed: false, spec: "s" },
+      "done",
+    );
+    const joined = joinStreamFiles(timeline, [
+      { attempt: 2, streamFile: "02.stream.jsonl" },
+    ]);
+    expect(joined.attempts[0].streamFile).toBeNull();
+    expect(joined.attempts[1].streamFile).toBe("02.stream.jsonl");
+  });
+
+  it("keeps the timeline as it is while the pane has answered nothing", () => {
+    const timeline = projectTimeline(
+      { events: [eventRow(1)], attempts: [], reconstructed: false, spec: "s" },
+      "done",
+    );
+    expect(joinStreamFiles(timeline, null)).toEqual(timeline);
+  });
+
+  it("keeps a reconstructed row's log file while nulling its stream link", () => {
+    const timeline = projectTimeline(
+      {
+        events: [],
+        attempts: [
+          { attempt: 1, logFile: "01.log", modifiedAt: "2026-01-01T00:00:00.000Z" },
+        ],
+        reconstructed: true,
+        spec: "the spec",
+      },
+      "done",
+    );
+    const joined = joinStreamFiles(timeline, [
+      { attempt: 1, streamFile: null },
+    ]);
+    expect(joined.attempts[0]).toEqual({
+      number: 1,
+      events: [],
+      reconstructed: true,
+      running: false,
+      logFile: "01.log",
+      streamFile: null,
+    });
+  });
+});
+
 function timelineView(attempts: { number: number; running: boolean }[]): TimelineView {
   return {
     attempts: attempts.map(({ number, running }) => ({
@@ -1335,6 +1423,7 @@ function timelineView(attempts: { number: number; running: boolean }[]): Timelin
       reconstructed: false,
       running,
       logFile: null,
+      streamFile: null,
     })),
     reconstructed: false,
   };
@@ -1370,7 +1459,7 @@ describe("projectLogPane", () => {
         { number: 2, running: true },
       ]),
       null,
-      { content: "the log", firstOffset: 0, offset: 50, totalSize: 100 },
+      { content: "the log", stream: false, firstOffset: 0, offset: 50, totalSize: 100 },
       null,
     );
     expect(pane).not.toBeNull();
@@ -1386,7 +1475,7 @@ describe("projectLogPane", () => {
     const pane = projectLogPane(
       timelineView([{ number: 1, running: false }]),
       null,
-      { content: "all", firstOffset: 0, offset: 100, totalSize: 100 },
+      { content: "all", stream: false, firstOffset: 0, offset: 100, totalSize: 100 },
       null,
     );
     expect(pane?.hasMore).toBe(false);
@@ -1426,14 +1515,14 @@ describe("projectLogPane", () => {
     const atHead = projectLogPane(
       timeline,
       null,
-      { content: "all", firstOffset: 0, offset: 3, totalSize: 3 },
+      { content: "all", stream: false, firstOffset: 0, offset: 3, totalSize: 3 },
       null,
     );
     expect(atHead?.hasEarlier).toBe(false);
     const midFile = projectLogPane(
       timeline,
       null,
-      { content: "tail", firstOffset: LOG_TAIL_BYTES, offset: LOG_TAIL_BYTES + 4, totalSize: LOG_TAIL_BYTES + 4 },
+      { content: "tail", stream: false, firstOffset: LOG_TAIL_BYTES, offset: LOG_TAIL_BYTES + 4, totalSize: LOG_TAIL_BYTES + 4 },
       null,
     );
     expect(midFile?.firstOffset).toBe(LOG_TAIL_BYTES);

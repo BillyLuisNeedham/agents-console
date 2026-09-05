@@ -111,7 +111,7 @@ export interface PoolTicketState {
   blockedBy: string[];
   status: PoolStatus;
   /** Server-derived: the ticket is done but its branch has not landed in
-   *  the merge target (ADR-0012). Absent on an older server's snapshot;
+   *  the merge target (ADR-0014). Absent on an older server's snapshot;
    *  the projection reads it as false. */
   mergePending?: boolean;
   /** The ticket's resolved Assignment record, rendered verbatim. */
@@ -180,6 +180,8 @@ interface LogAttemptInfo {
   attempt: number;
   kind: "implement" | "resolver" | "reconstructed";
   logFile: string;
+  /** The attempt's Stream file, or null when it has none on disk. */
+  streamFile: string | null;
   current: boolean;
 }
 
@@ -219,6 +221,12 @@ interface TimelineAttemptView {
   reconstructed: boolean;
   running: boolean;
   logFile: string | null;
+  /**
+   * The attempt's Stream file, joined from the log pane's attempt listing
+   * (see `joinStreamFiles`); null until a listing lands, and for an attempt
+   * that has no Stream file on disk.
+   */
+  streamFile: string | null;
 }
 
 export interface TimelineView {
@@ -253,6 +261,7 @@ export function projectTimeline(
         reconstructed: false,
         running: number === running,
         logFile: null,
+        streamFile: null,
       })),
       reconstructed: false,
     };
@@ -263,8 +272,36 @@ export function projectTimeline(
     reconstructed: true,
     running: status === "in-progress" && index === response.attempts.length - 1,
     logFile: row.logFile,
+    streamFile: null,
   }));
   return { attempts, reconstructed: response.reconstructed };
+}
+
+/**
+ * The timeline with each attempt's Stream file joined in from the log pane's
+ * attempt listing: the per-attempt listing the /api/log response has always
+ * carried and the UI discarded. The join is by attempt number, so a stream
+ * link surfaces only where the server found a Stream file on disk; an
+ * attempt with none (a raw harness such as opencode, or a pre-streaming
+ * attempt) keeps null and the Detail renders no link rather than a dead one.
+ * A null listing (the pane has not answered yet) leaves the timeline as it
+ * is; the next listing re-joins on the same pure rule.
+ */
+export function joinStreamFiles(
+  timeline: TimelineView,
+  listing: { attempt: number; streamFile: string | null }[] | null,
+): TimelineView {
+  if (!listing) return timeline;
+  const streamByAttempt = new Map(
+    listing.map((row) => [row.attempt, row.streamFile] as const),
+  );
+  return {
+    ...timeline,
+    attempts: timeline.attempts.map((row) => ({
+      ...row,
+      streamFile: streamByAttempt.get(row.number) ?? null,
+    })),
+  };
 }
 
 // An attempt is live only while its last recorded event has not yet ended
@@ -293,6 +330,11 @@ function runningAttempt(
 export interface LogPaneView {
   /** The attempt whose log the pane shows; null when the ticket has never run. */
   selectedAttempt: number | null;
+  /**
+   * Whether the pane shows the attempt's Stream file (the raw stream tee)
+   * rather than its derived log; the pane head labels the difference.
+   */
+  stream: boolean;
   /** The raw log text (ANSI stripped server-side) fetched for that attempt. */
   content: string;
   /** The raw byte offset of the first byte the pane holds. */
@@ -339,7 +381,13 @@ export function selectLogAttempt(
 export function projectLogPane(
   timeline: TimelineView | null,
   clickedAttempt: number | null,
-  log: { content: string; firstOffset: number; offset: number; totalSize: number } | null,
+  log: {
+    stream: boolean;
+    content: string;
+    firstOffset: number;
+    offset: number;
+    totalSize: number;
+  } | null,
   error: string | null,
 ): LogPaneView | null {
   if (!timeline) return null;
@@ -347,6 +395,7 @@ export function projectLogPane(
   if (!hasAttempts) {
     return {
       selectedAttempt: null,
+      stream: false,
       content: "",
       firstOffset: 0,
       offset: 0,
@@ -358,9 +407,16 @@ export function projectLogPane(
     };
   }
   const selectedAttempt = selectLogAttempt(timeline, clickedAttempt);
-  const loaded = log ?? { content: "", firstOffset: 0, offset: 0, totalSize: 0 };
+  const loaded = log ?? {
+    stream: false,
+    content: "",
+    firstOffset: 0,
+    offset: 0,
+    totalSize: 0,
+  };
   return {
     selectedAttempt,
+    stream: loaded.stream,
     content: loaded.content,
     firstOffset: loaded.firstOffset,
     offset: loaded.offset,

@@ -1,6 +1,6 @@
 /// <reference types="bun" />
 
-// Stress pin for the spawnToLog pump teardown (the engine's live log pumps): a
+// Stress pin for the spawnToLog pump teardown (ADR-0012's live log pumps): a
 // grandchild that inherits the child's stdout/stderr pipe and outlives it
 // holds the write end open, so the pumps park until the child-exit grace
 // cancels them. A run whose pump is still alive when its pool directory is
@@ -26,6 +26,7 @@ import { join } from "node:path";
 import {
   startPool,
   type HarnessCommand,
+  type PoolConfig,
   type PoolRun,
 } from "./engine.ts";
 
@@ -50,10 +51,7 @@ function settleEither(run: PoolRun): Promise<PoolRun | Error> {
 }
 
 /** No teardown artifact on the settled error or the engine's death record. */
-function expectNoTeardownArtifact(
-  poolDir: string,
-  settled: PoolRun | Error,
-): void {
+function expectNoTeardownArtifact(poolDir: string, settled: PoolRun | Error): void {
   const message = settled instanceof Error ? settled.message : "";
   for (const artifact of TEARDOWN_ARTIFACTS) {
     expect(message).not.toContain(artifact);
@@ -76,14 +74,18 @@ afterEach(() => {
 
 const MARKER = "<!-- state: id=01 blocked-by=none status=ready -->";
 
-function makePool(): string {
+function makePool(config: Partial<PoolConfig> = {}): string {
   const poolDir = mkdtempSync(join(tmpdir(), "pool-pump-"));
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   writeFileSync(join(poolDir, "issues", "01-a.md"), `${MARKER}\n\n# body\n`);
   writeFileSync(
     join(poolDir, "console.json"),
-    JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
+    JSON.stringify(
+      { defaults: { harness: "stub", model: "m" }, ...config },
+      null,
+      2,
+    ),
   );
   return poolDir;
 }
@@ -160,8 +162,7 @@ describe("spawn pump teardown", () => {
         await Bun.sleep(50);
       }
     },
-    // Three grandchild-parked rounds at the pump grace's own pace; the
-    // explicit timeout holds all three, which the default cannot.
+    // Three grandchild-parked rounds at the pump grace's own pace.
     30000,
   );
 
@@ -186,8 +187,7 @@ describe("spawn pump teardown", () => {
         await Bun.sleep(50);
       }
     },
-    // Three grandchild-parked rounds at the pump grace's own pace; the
-    // explicit timeout holds all three, which the default cannot.
+    // Three grandchild-parked rounds at the pump grace's own pace.
     30000,
   );
 });

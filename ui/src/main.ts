@@ -10,6 +10,7 @@ import { PoolClient } from "./client";
 import { LogPane } from "./log-pane";
 import { Vitals } from "./vitals";
 import {
+  joinStreamFiles,
   phaseLabel,
   POOL_TAB_COLORS,
   poolStatus,
@@ -85,8 +86,8 @@ const timelineState = {
 // stale-selection guards, and the scroll pin. The bootstrap drives it and
 // renders when it changes; it never does offset arithmetic itself.
 const logPane = new LogPane({
-  fetch: (ticketId, attempt, offset, end) =>
-    client.getLog(ticketId, attempt, offset, end),
+  fetch: (ticketId, attempt, offset, end, stream) =>
+    client.getLog(ticketId, attempt, offset, end, stream),
   onChange: () => render(),
 });
 
@@ -255,6 +256,16 @@ function model(): AppModel {
     detailTicketId !== null && timelineState.ticketId === detailTicketId;
   const logIsCurrent =
     detailTicketId !== null && logPane.state.ticketId === detailTicketId;
+  // The timeline joins the log pane's attempt listing (the /api/log response's
+  // per-attempt Stream file resolution), so each attempt row knows its Stream
+  // file. A pane for another ticket (or no pane yet) contributes no listing.
+  const timeline =
+    isCurrent && timelineState.view
+      ? joinStreamFiles(
+          timelineState.view,
+          logIsCurrent ? logPane.state.attempts : null,
+        )
+      : null;
   return {
     phase: view?.phase ?? null,
     phaseLabel: view ? phaseLabel(view.phase) : "connecting",
@@ -280,13 +291,14 @@ function model(): AppModel {
       detailTicketId !== null
         ? (ticketBodyErrors.get(detailTicketId) ?? null)
         : null,
-    timeline: isCurrent ? timelineState.view : null,
+    timeline,
     logPane: detailTicketId
       ? projectLogPane(
           isCurrent ? timelineState.view : null,
           logIsCurrent ? logPane.state.attempt : null,
           logIsCurrent
             ? {
+                stream: logPane.state.stream,
                 content: logPane.state.content,
                 firstOffset: logPane.state.firstOffset,
                 offset: logPane.state.offset,
@@ -325,6 +337,9 @@ function render(): void {
     },
     onSelectAttempt: (ticketId, attempt) => {
       logPane.selectAttempt(ticketId, attempt);
+    },
+    onSelectStream: (ticketId, attempt) => {
+      logPane.selectStream(ticketId, attempt);
     },
     onLoadEarlier: (ticketId, attempt) => {
       void logPane.loadEarlier(ticketId, attempt);

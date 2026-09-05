@@ -73,6 +73,52 @@ export interface AttemptLogName {
 }
 
 /**
+ * One attempt Stream file name, the naming contract extended to the raw
+ * stream tee (ADR-0012): the well-known paths for the current attempt
+ * (`<id>.stream.jsonl`, `<id>.resolver.stream.jsonl`) and the rotated
+ * attempt-numbered names (`<id>.attempt-N.stream.jsonl`,
+ * `<id>.attempt-N.resolver.stream.jsonl`). Same free variables and rotation
+ * rules as `attemptLogName`, so a re-run rotates both files the same way.
+ */
+export function attemptStreamName(
+  ticketId: string,
+  attempt: number | null,
+  resolver: boolean,
+): string {
+  const numbered = attempt === null ? "" : `.attempt-${attempt}`;
+  const suffix = resolver ? ".resolver" : "";
+  return `${ticketId}${numbered}${suffix}.stream.jsonl`;
+}
+
+/**
+ * Match a file name against a ticket's Stream file naming contract, the four
+ * shapes `attemptStreamName` produces. Round-trip through the naming function
+ * keeps it the single authority, exactly as for `parseAttemptLogName`.
+ */
+export function parseAttemptStreamName(
+  ticketId: string,
+  fileName: string,
+): AttemptLogName | null {
+  if (!fileName.startsWith(ticketId)) return null;
+  let rest = fileName.slice(ticketId.length);
+  let attempt: number | null = null;
+  if (rest.startsWith(".attempt-")) {
+    const digits = /^\d+/.exec(rest.slice(".attempt-".length));
+    if (!digits) return null;
+    attempt = Number(digits[0]);
+    rest = rest.slice(".attempt-".length + digits[0].length);
+  }
+  let resolver = false;
+  if (rest.startsWith(".resolver")) {
+    resolver = true;
+    rest = rest.slice(".resolver".length);
+  }
+  if (rest !== ".stream.jsonl") return null;
+  if (attemptStreamName(ticketId, attempt, resolver) !== fileName) return null;
+  return { attempt, resolver };
+}
+
+/**
  * Match a file name against a ticket's log naming contract: the four shapes
  * `attemptLogName` produces. Returns the free variables, or null when the
  * name is not one of this ticket's logs. A round-trip through the naming

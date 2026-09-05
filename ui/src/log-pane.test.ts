@@ -25,6 +25,7 @@ interface LogCall {
   attempt: number;
   offset: number;
   end?: number;
+  stream?: boolean;
 }
 
 /** A log fetch whose every call returns a promise the test settles by hand. */
@@ -36,8 +37,9 @@ function fakeFetch() {
     attempt: number,
     offset: number,
     end?: number,
+    stream?: boolean,
   ): Promise<LogChunk> => {
-    calls.push({ ticketId, attempt, offset, end });
+    calls.push({ ticketId, attempt, offset, end, stream });
     const d = deferred<LogChunk>();
     pending.push(d);
     return d.promise;
@@ -50,8 +52,9 @@ function chunk(
   offset: number,
   nextOffset: number,
   totalSize: number,
+  attempts?: { attempt: number; streamFile: string | null }[],
 ): LogChunk {
-  return { content, offset, nextOffset, totalSize };
+  return { content, offset, nextOffset, totalSize, attempts };
 }
 
 function timelineView(
@@ -64,6 +67,7 @@ function timelineView(
       reconstructed: false,
       running,
       logFile: null,
+      streamFile: null,
     })),
     reconstructed: false,
   };
@@ -339,5 +343,119 @@ describe("LogPane.loadEarlier", () => {
     fake.pending[4].resolve(chunk("two", 0, 7, 7));
     await flush();
     expect(pane.state.content).toBe("two");
+  });
+});
+
+describe("LogPane stream variant", () => {
+  it("opens a Stream file with the stream flag and holds the response's listing", async () => {
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const listing = [
+      { attempt: 1, streamFile: null },
+      { attempt: 2, streamFile: "01.attempt-2.stream.jsonl" },
+    ];
+    const opened = pane.open("01", 2, true, true);
+    expect(pane.state.stream).toBe(true);
+    expect(fake.calls[0]).toMatchObject({
+      ticketId: "01",
+      attempt: 2,
+      offset: Number.MAX_SAFE_INTEGER,
+      stream: true,
+    });
+    fake.pending[0].resolve(chunk("", 300, 300, 300));
+    await flush();
+    expect(fake.calls[1]).toMatchObject({ offset: 0, stream: true });
+    fake.pending[1].resolve(chunk("raw", 0, 300, 300, listing));
+    await opened;
+    await flush();
+    expect(pane.state.content).toBe("raw");
+    expect(pane.state.attempts).toEqual(listing);
+  });
+
+  it("selectStream switches the pane to the stream and back, no-op only when already there", async () => {
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const opened = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 10, 10, 10));
+    await flush();
+    fake.pending[1].resolve(chunk("log", 0, 10, 10));
+    await opened;
+    await flush();
+    // Picking the attempt row again while the log shows: a no-op.
+    pane.selectAttempt("01", 1);
+    expect(fake.calls).toHaveLength(2);
+    // The stream link reopens the same attempt in the stream variant.
+    pane.selectStream("01", 1);
+    expect(fake.calls[2]).toMatchObject({ attempt: 1, offset: Number.MAX_SAFE_INTEGER, stream: true });
+    fake.pending[2].resolve(chunk("", 9, 9, 9));
+    await flush();
+    fake.pending[3].resolve(chunk("stream", 0, 9, 9));
+    await flush();
+    expect(pane.state.stream).toBe(true);
+    expect(pane.state.content).toBe("stream");
+    // Re-picking the shown stream is a no-op; the attempt row switches back
+    // to the derived log.
+    pane.selectStream("01", 1);
+    expect(fake.calls).toHaveLength(4);
+    pane.selectAttempt("01", 1);
+    expect(fake.calls[4]).toMatchObject({ attempt: 1, stream: false });
+    fake.pending[4].resolve(chunk("", 5, 5, 5));
+    await flush();
+    fake.pending[5].resolve(chunk("log2", 0, 5, 5));
+    await flush();
+    expect(pane.state.stream).toBe(false);
+    expect(pane.state.content).toBe("log2");
+  });
+
+  it("keeps the stream variant when an unclicked pane follows a new attempt", async () => {
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const opened = pane.open("01", 1, false, true);
+    fake.pending[0].resolve(chunk("", 10, 10, 10));
+    await flush();
+    fake.pending[1].resolve(chunk("one", 0, 10, 10));
+    await opened;
+    await flush();
+    // Attempt 2 starts running; the unclicked pane follows it and stays in
+    // the stream variant.
+    const following = pane.follow(
+      "01",
+      timelineView([
+        { number: 1, running: false },
+        { number: 2, running: true },
+      ]),
+    );
+    expect(pane.state.attempt).toBe(2);
+    expect(pane.state.stream).toBe(true);
+    expect(fake.calls[2]).toMatchObject({ attempt: 2, offset: Number.MAX_SAFE_INTEGER, stream: true });
+    fake.pending[2].resolve(chunk("", 8, 8, 8));
+    await flush();
+    fake.pending[3].resolve(chunk("two", 0, 8, 8));
+    await following;
+    await flush();
+    expect(pane.state.content).toBe("two");
+  });
+
+  it("never lets an in-flight log tail land after the pane switched to the stream", async () => {
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const opened = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 12, 12, 12));
+    await flush();
+    fake.pending[1].resolve(chunk("a", 0, 5, 12));
+    await opened;
+    await flush();
+    // The log's trailing tail fetch is out when the stream link fires.
+    expect(fake.calls[2]).toMatchObject({ offset: 5, stream: false });
+    pane.selectStream("01", 1);
+    fake.pending[3].resolve(chunk("", 8, 8, 8));
+    await flush();
+    fake.pending[4].resolve(chunk("stream-head", 0, 8, 8));
+    await flush();
+    // The stale log tail answers now: it must not append into the stream view.
+    fake.pending[2].resolve(chunk("STALE-LOG", 5, 12, 12));
+    await flush();
+    expect(pane.state.content).toBe("stream-head");
+    expect(pane.state.stream).toBe(true);
   });
 });
