@@ -350,10 +350,12 @@ const MERGE_HOLD_POLL_MS = 250;
 // or a rejection reopens the ticket so it no longer counts as done. Derived
 // from the in-memory statuses and branch state alone, including at startup
 // after rehydrate, so a restart re-derives the hold with no persisted flag.
-// A git-less pool has no branches, so nothing ever holds there; engine-run
-// tickets (graders, the head-to-head judge) work in the main checkout
-// without branches, so the missing-branch reading lands them the same way it
-// lands a merged ticket.
+// A git-less pool has no branches, so nothing ever holds there. Engine-run
+// tickets (graders, the head-to-head judge) are excluded explicitly: they
+// reach done in the main checkout without a branch, so there is never a
+// merge to await for them. A vanished ordinary-ticket branch — a human
+// merging by hand outside the engine — still reads as landed, the
+// operator-trust reading ADR-0014 owns.
 function mergeHold(session: Session): string[] {
   if (!session.git) return [];
   const tickets = session.state.tickets;
@@ -362,6 +364,7 @@ function mergeHold(session: Session): string[] {
   const hold: string[] = [];
   for (const [id, status] of Object.entries(tickets)) {
     if (status !== "done") continue;
+    if (engineTicketBuildId(id)) continue;
     if (branchLandedInto(session.cwd, branchFor(session.cwd, id), target)) continue;
     hold.push(id);
   }
@@ -414,28 +417,34 @@ async function holdCleared(
 // ids, already cleared by their own flow's context. The merge hold
 // (ADR-0014) is the one rule that governs every proposal alike, engine-run
 // or pool-wide, and this function is the only place it lives: while any done
-// ticket's branch is unmerged, nothing is handed back. The engine-run flows
-// wait the hold out and recompute through engineSpawnSet below; the
-// pool-wide caller reads this entry point directly.
+// ticket's branch is unmerged, nothing is handed back. The hold is derived
+// once and handed back alongside the ready set, so the pool-wide caller
+// reading this entry point directly cannot mistake a hold that lifted
+// between two derivations for a stop; the engine-run flows wait the hold out
+// and recompute through engineSpawnSet below.
 function readySet(
   session: Session,
   candidates: TicketMarker[],
-): TicketMarker[] {
+): { ready: TicketMarker[]; hold: string[] } {
   // The hold withholds every proposal alike, before any clearing: an
   // engine-run flow's proposal is all judges, cleared where proposed, but
   // the pool-wide pause outranks the flow's context.
-  if (mergeHold(session).length > 0) return [];
+  const hold = mergeHold(session);
+  if (hold.length > 0) return { ready: [], hold };
   // An engine-run flow's proposal is all judges, cleared where proposed.
   if (candidates.every((marker) => engineTicketBuildId(marker.id))) {
-    return candidates;
+    return { ready: candidates, hold };
   }
   const tickets = session.state.tickets;
-  return candidates.filter(
-    (marker) =>
-      !engineTicketBuildId(marker.id) &&
-      tickets[marker.id] === "ready" &&
-      marker.blockedBy.every((id) => tickets[id] === "done"),
-  );
+  return {
+    ready: candidates.filter(
+      (marker) =>
+        !engineTicketBuildId(marker.id) &&
+        tickets[marker.id] === "ready" &&
+        marker.blockedBy.every((id) => tickets[id] === "done"),
+    ),
+    hold,
+  };
 }
 
 // The engine-run flows' spawn set: the wait-and-recompute rule ADR-0014
@@ -458,8 +467,8 @@ export async function engineSpawnSet(
 ): Promise<TicketMarker[]> {
   for (;;) {
     await holdCleared(session, emit);
-    const spawnable = readySet(session, candidates);
-    if (spawnable.length > 0) return spawnable;
+    const { ready, hold } = readySet(session, candidates);
+    if (hold.length === 0) return ready;
   }
 }
 
@@ -776,9 +785,9 @@ async function driveLoop(session: Session): Promise<void> {
     // waits for the hold to lift (an approved merge, an observed manual
     // merge, a rejection that reopens the ticket) and recomputes, so a
     // manual CLI merge resumes the pool with no Console action.
-    const ready = readySet(session, session.markers);
+    const { ready, hold } = readySet(session, session.markers);
     if (ready.length === 0) {
-      if (mergeHold(session).length > 0) {
+      if (hold.length > 0) {
         await holdCleared(session, emit);
         continue;
       }
