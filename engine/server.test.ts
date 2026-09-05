@@ -27,9 +27,17 @@ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const server of servers.splice(0)) {
-    void server.close();
+    // The pool's true quiescence before the temp dir goes away: a test that
+    // ends right after an answer leaves a fresh drive running its last
+    // attempt, and a directory removed under that attempt makes its
+    // continuation read deleted files, the stray ENOENT that fails
+    // whichever test runs next. A drive that died reports its death through
+    // settled()'s rejection, and by then the work it was driving is over,
+    // so the cleanup still proceeds.
+    await server.settled().catch(() => {});
+    await server.close();
   }
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
