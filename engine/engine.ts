@@ -15,6 +15,7 @@ import { dirname, join, relative } from "node:path";
 import {
   appendEvent,
   attemptLogName,
+  attemptStreamName,
   lastAttempt,
   lastAttemptOfKind,
   nextAttempt,
@@ -36,9 +37,11 @@ import {
 import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
+  harnessStreamMode,
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
+import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
 import {
   branchExists,
   branchFor,
@@ -117,6 +120,23 @@ function outcomeFileName(ticketId: string, attempt: number | null): string {
   return attempt === null
     ? `${ticketId}.outcome.json`
     : `${ticketId}.attempt-${attempt}.outcome.json`;
+}
+
+// One attempt's Stream file path (ADR-0012), or null for a raw harness:
+// stream mode is keyed by harness name, not by spawn site, so opencode and
+// any custom harness keep the raw-passthrough log and write no Stream file.
+// Verify attempts write attempt-numbered Stream files directly, exactly as
+// their logs do, so N parallel attempts never share a path.
+function attemptStreamPath(
+  runsDir: string,
+  ticketId: string,
+  harness: string,
+  attempt: number | null,
+  resolver: boolean,
+): string | null {
+  return harnessStreamMode(harness) === "stream"
+    ? join(runsDir, attemptStreamName(ticketId, attempt, resolver))
+    : null;
 }
 
 interface TicketAssignment {
@@ -1508,6 +1528,13 @@ async function runResolver(
   rmSync(outcomePath, { force: true });
   const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
   rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
+  const streamPath = attemptStreamPath(
+    session.runsDir,
+    marker.id,
+    resolver.harness,
+    null,
+    true,
+  );
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: nextAttempt(session.runsDir, marker.id),
@@ -1531,6 +1558,7 @@ async function runResolver(
     model: resolver.model,
     agents: session.state.config.agents,
     logPath,
+    streamPath,
     outcomePath,
     cwd: worktree.path,
   };
@@ -2181,6 +2209,13 @@ async function runGrader(
   rmSync(graderOutcomePath, { force: true });
   const logPath = join(runsDir, attemptLogName(gid, null, false));
   rotateAttemptLog(runsDir, gid, logPath, "spawned");
+  const streamPath = attemptStreamPath(
+    runsDir,
+    gid,
+    assignment.harness,
+    null,
+    false,
+  );
   const attemptOutcomePath = join(runsDir, outcomeFileName(build.id, attempt));
   const diffPath = join(runsDir, `${gid}.diff.patch`);
   const trimPath = join(runsDir, `${gid}.trim.log`);
@@ -2214,6 +2249,7 @@ async function runGrader(
     model: assignment.model,
     agents: session.state.config.agents,
     logPath,
+    streamPath,
     outcomePath: graderOutcomePath,
     cwd: session.cwd,
   };
@@ -3004,6 +3040,13 @@ async function runHeadToHead(
   rmSync(h2hOutcomePath, { force: true });
   const logPath = join(runsDir, attemptLogName(h2hId, null, false));
   rotateAttemptLog(runsDir, h2hId, logPath, "spawned");
+  const streamPath = attemptStreamPath(
+    runsDir,
+    h2hId,
+    assignment.harness,
+    null,
+    false,
+  );
   for (const side of sides) {
     writeFileSync(side.diffPath, attemptDiff(session, build.id, side.attempt));
     writeFileSync(
@@ -3044,6 +3087,7 @@ async function runHeadToHead(
     model: assignment.model,
     agents: session.state.config.agents,
     logPath,
+    streamPath,
     outcomePath: h2hOutcomePath,
     cwd: session.cwd,
   };
@@ -3825,24 +3869,41 @@ function manualMergeInterrupt(
 }
 
 // Attempt rotation on re-run (ADR 0002): before a new attempt writes, an
-// existing well-known raw log moves to its attempt-numbered name so a re-run
-// never destroys the ticket's history. The number is the attempt the events
-// file recorded for the run that wrote the file: the last implement spawn for
-// the base log, the last resolver run for the resolver log. A pre-feature
-// log (written before events existed) rotates to attempt-0. The names come
-// from the events module's naming contract.
+// existing well-known log moves to its attempt-numbered name so a re-run
+// never destroys the ticket's history, and its Stream file rotates with it
+// (ADR-0012). The number is the attempt the events file recorded for the run
+// that wrote the file: the last implement spawn for the base log, the last
+// resolver run for the resolver log. A pre-feature log (written before
+// events existed) rotates to attempt-0. The names come from the events
+// module's naming contract.
 function rotateAttemptLog(
   runsDir: string,
   ticketId: string,
   wellKnownPath: string,
   kind: TicketEventKind,
 ): void {
-  if (!existsSync(wellKnownPath)) return;
+  const resolver = kind === "resolver";
   const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
-  renameSync(
-    wellKnownPath,
-    join(runsDir, attemptLogName(ticketId, attempt, kind === "resolver")),
+  if (existsSync(wellKnownPath)) {
+    renameSync(
+      wellKnownPath,
+      join(runsDir, attemptLogName(ticketId, attempt, resolver)),
+    );
+  }
+  // The Stream file was written by the run that wrote the log, so it
+  // rotates under the same attempt number. Rotated independently of the
+  // log: a stream-only leftover (a run that died before any log line
+  // derived) must still rotate.
+  const wellKnownStream = join(
+    runsDir,
+    attemptStreamName(ticketId, null, resolver),
   );
+  if (existsSync(wellKnownStream)) {
+    renameSync(
+      wellKnownStream,
+      join(runsDir, attemptStreamName(ticketId, attempt, resolver)),
+    );
+  }
 }
 
 async function runTicket(
@@ -3862,6 +3923,13 @@ async function runTicket(
   if (!plan.verify) {
     rotateAttemptLog(env.runsDir, marker.id, logPath, "spawned");
   }
+  const streamPath = attemptStreamPath(
+    env.runsDir,
+    marker.id,
+    assignment.harness,
+    plan.verify ? plan.attempt : null,
+    false,
+  );
   const outcomePath = join(
     env.runsDir,
     outcomeFileName(marker.id, plan.verify ? plan.attempt : null),
@@ -3896,6 +3964,7 @@ async function runTicket(
     model: assignment.model,
     agents: snapshot.config.agents,
     logPath,
+    streamPath,
     outcomePath,
     cwd: plan.cwd,
   };
@@ -4032,24 +4101,52 @@ async function spawnToLog(
     stdout: "pipe",
     stderr: "pipe",
   });
+  // A streamed harness (ADR-0012) also tees every stdout chunk verbatim to
+  // the attempt's Stream file, live as bytes arrive; both files open at
+  // spawn, so a tail on either shows activity from the first chunk.
+  const tee = ctx.streamPath ? createWriteStream(ctx.streamPath) : null;
   // Both streams land in one log writer in arrival order, and land live,
   // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
   // is still running, and a crash log reads in the order the output
-  // happened.
+  // happened. Stream mode writes derived lines instead of raw bytes
+  // (assistant text verbatim, one `[tool] Name: summary` line per tool
+  // call); raw mode writes the chunk itself, exactly as before.
   const log = createWriteStream(ctx.logPath);
   const exited = proc.exited;
+  const writeDerivedLine = async (line: string): Promise<void> => {
+    const text = deriveStreamLine(line) ?? line;
+    if (text === "") return;
+    if (!log.write(`${text}\n`)) await once(log, "drain");
+  };
   // Each pump reads through an explicit reader so the child-exit grace can
   // cancel the read from outside: the for-await loop used before locks the
   // stream against exactly that teardown. A pump that drains before the
   // grace expires (the normal case: the pipe closes with the child) clears
   // its own timer, so clean spawns are untouched by the bound.
-  const pump = (stream: ReadableStream<Uint8Array>) => {
+  //
+  // In stream mode stdout carries the structured stream: its chunks tee
+  // verbatim to the Stream file and derive the log line by line. stderr
+  // feeds the same deriver without teeing, so plain-text diagnostics pass
+  // through to the log. Raw mode writes the chunk itself, exactly as
+  // before. Per-stream buffers: a partial line from one stream never merges
+  // with the other's.
+  type PumpMode = "stream" | "diagnostics" | "raw";
+  const pump = (stream: ReadableStream<Uint8Array>, mode: PumpMode) => {
     const reader = stream.getReader();
+    const buffer = mode === "raw" ? null : new StreamLineBuffer();
     const reading = (async () => {
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) return;
-        if (!log.write(value)) {
+        if (done) {
+          for (const line of buffer?.flush() ?? []) await writeDerivedLine(line);
+          return;
+        }
+        if (mode === "stream" && tee && !tee.write(value)) {
+          await once(tee, "drain");
+        }
+        if (buffer) {
+          for (const line of buffer.push(value)) await writeDerivedLine(line);
+        } else if (!log.write(value)) {
           await once(log, "drain");
         }
       }
@@ -4069,14 +4166,21 @@ async function spawnToLog(
   };
   const [exitCode] = await Promise.all([
     exited,
-    pump(proc.stdout),
-    pump(proc.stderr),
+    pump(proc.stdout, tee ? "stream" : "raw"),
+    pump(proc.stderr, tee ? "diagnostics" : "raw"),
   ]);
   await new Promise<void>((resolve, reject) => {
     log.end((error: Error | null | undefined) =>
       error ? reject(error) : resolve(),
     );
   });
+  if (tee) {
+    await new Promise<void>((resolve, reject) => {
+      tee.end((error: Error | null | undefined) =>
+        error ? reject(error) : resolve(),
+      );
+    });
+  }
   return exitCode;
 }
 

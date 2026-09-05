@@ -3146,6 +3146,204 @@ describe("harness CLIs", () => {
     });
   }
 
+  // A fake stream-json CLI: the same argv recording as fakeCli, plus a
+  // caller-written stdout script, so a test can stream canned JSONL
+  // progressively, hold the pipe open, or die mid-run.
+  function streamingFakeCli(
+    poolDir: string,
+    scriptBody: string[],
+  ): FakeCli {
+    const binDir = join(poolDir, "bin");
+    const recordDir = join(poolDir, "record");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(binDir, "claude"),
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'out="$FAKE_RECORD_DIR"',
+        "i=0",
+        'for a in "$@"; do printf \'%s\' "$a" > "$out/argv.$i"; i=$((i+1)); done',
+        ...scriptBody,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(binDir, "claude"), 0o755);
+    return { binDir, recordDir };
+  }
+
+  const streamAssistantLine = (text: string): string =>
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text }] },
+    });
+  const streamToolLine = (
+    name: string,
+    input: Record<string, unknown>,
+  ): string =>
+    JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name, input }] },
+    });
+
+  function readAttemptFile(poolDir: string, name: string): string {
+    return readFileSync(join(poolDir, "runs", name), "utf8");
+  }
+
+  it("streams a claude attempt: tees the raw stream verbatim and derives the log live", async () => {
+    const systemLine = '{"type":"system","subtype":"init"}';
+    const poolDir = oneTicketPool("claude", "claude-test");
+    const fake = streamingFakeCli(poolDir, [
+      `echo '${systemLine}'`,
+      `echo '${streamAssistantLine("Reading the ticket.")}'`,
+      `echo '${streamToolLine("Bash", { command: "bun test engine/" })}'`,
+      "echo 'this is not json at all'",
+      'touch "$out/first-burst"',
+      // Hold the pipe open so the test reads the log mid-run, then finish.
+      'while [ ! -f "$out/release" ]; do sleep 0.02; done',
+      `echo '${streamAssistantLine("All done.")}'`,
+      'printf \'{"status":"done","summary":"fake","commitSha":null}\' > "$FAKE_OUTCOME_REL"',
+    ]);
+
+    let run: Awaited<ReturnType<typeof runPool>> | undefined;
+    await withFakePath(fake, async () => {
+      const pending = runPool({ poolDir });
+      await waitFor(() => existsSync(join(fake.recordDir, "first-burst")));
+      // The fake is still running, blocked on the release file: the derived
+      // log already shows the first burst, in arrival order, live.
+      await waitFor(() => {
+        if (!existsSync(join(poolDir, "runs", "01.log"))) return false;
+        const text = readAttemptFile(poolDir, "01.log");
+        return (
+          text.includes("Reading the ticket.") &&
+          text.includes("[tool] Bash: bun test engine/") &&
+          text.includes("this is not json at all")
+        );
+      });
+      writeFileSync(join(fake.recordDir, "release"), "go");
+      run = await approveReview(await pending);
+    });
+
+    expect(run!.phase).toBe("done");
+    // The derived log: unrecognized and unparseable lines pass through,
+    // assistant text is verbatim, the tool call is one [tool] line.
+    expect(readAttemptFile(poolDir, "01.log")).toBe(
+      [
+        systemLine,
+        "Reading the ticket.",
+        "[tool] Bash: bun test engine/",
+        "this is not json at all",
+        "All done.",
+        "",
+      ].join("\n"),
+    );
+    // The Stream file holds the raw stream bytes verbatim.
+    expect(readAttemptFile(poolDir, "01.stream.jsonl")).toBe(
+      [
+        systemLine,
+        streamAssistantLine("Reading the ticket."),
+        streamToolLine("Bash", { command: "bun test engine/" }),
+        "this is not json at all",
+        streamAssistantLine("All done."),
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps a killed attempt's log and stream file up to the kill", async () => {
+    const poolDir = oneTicketPool("claude", "claude-test");
+    const fake = streamingFakeCli(poolDir, [
+      `echo '${streamAssistantLine("before the kill")}'`,
+      `echo '${streamToolLine("Bash", { command: "sleep 100" })}'`,
+      'touch "$out/kill-burst"',
+      // Hold the pipe so the test proves mid-run readability, then die hard,
+      // the way a kill or an OOM takes an attempt down.
+      'while [ ! -f "$out/kill-release" ]; do sleep 0.02; done',
+      "kill -9 $$",
+    ]);
+
+    let run: Awaited<ReturnType<typeof runPool>> | undefined;
+    await withFakePath(fake, async () => {
+      const pending = runPool({ poolDir });
+      await waitFor(() => existsSync(join(fake.recordDir, "kill-burst")));
+      await waitFor(() => {
+        if (!existsSync(join(poolDir, "runs", "01.log"))) return false;
+        return readAttemptFile(poolDir, "01.log").includes(
+          "[tool] Bash: sleep 100",
+        );
+      });
+      // The fake is still alive here: the log was readable mid-run. Now the
+      // kill, and everything emitted before it survives in arrival order.
+      writeFileSync(join(fake.recordDir, "kill-release"), "go");
+      run = await pending;
+    });
+
+    expect(run!.phase).toBe("quiescent");
+    expect(run!.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+    expect(readAttemptFile(poolDir, "01.log")).toBe(
+      ["before the kill", "[tool] Bash: sleep 100", ""].join("\n"),
+    );
+    expect(readAttemptFile(poolDir, "01.stream.jsonl")).toBe(
+      [
+        streamAssistantLine("before the kill"),
+        streamToolLine("Bash", { command: "sleep 100" }),
+        "",
+      ].join("\n"),
+    );
+    const events = readEventLines(poolDir, "01");
+    expect(events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "crash",
+    ]);
+    expect(events.find((e) => e.kind === "exited")?.payload.code).toBe(137);
+  });
+
+  it("rotates both the log and the stream file on a re-run", async () => {
+    const poolDir = oneTicketPool("claude", "claude-test");
+    const fake = streamingFakeCli(poolDir, [
+      'if [ -f "$out/ran-once" ]; then',
+      `  echo '${streamAssistantLine("second run text")}'`,
+      '  printf \'{"status":"done","summary":"fake","commitSha":null}\' > "$FAKE_OUTCOME_REL"',
+      "else",
+      '  touch "$out/ran-once"',
+      `  echo '${streamAssistantLine("first run text")}'`,
+      "  exit 1",
+      "fi",
+    ]);
+
+    let run: Awaited<ReturnType<typeof runPool>> | undefined;
+    await withFakePath(fake, async () => {
+      const crashed = await runPool({ poolDir });
+      expect(crashed.phase).toBe("quiescent");
+      const resumed = await crashed.resume("01", "go again");
+      run = await approveReview(resumed);
+    });
+    expect(run!.phase).toBe("done");
+
+    // Attempt 1's log and Stream file rotated away together; attempt 2's
+    // sit at the well-known paths.
+    expect(readAttemptFile(poolDir, "01.attempt-1.log")).toBe(
+      "first run text\n",
+    );
+    expect(readAttemptFile(poolDir, "01.attempt-1.stream.jsonl")).toBe(
+      `${streamAssistantLine("first run text")}\n`,
+    );
+    expect(readAttemptFile(poolDir, "01.log")).toBe("second run text\n");
+    expect(readAttemptFile(poolDir, "01.stream.jsonl")).toBe(
+      `${streamAssistantLine("second run text")}\n`,
+    );
+    const events = readEventLines(poolDir, "01");
+    expect(events.some((e) => e.kind === "spawned" && e.attempt === 1)).toBe(
+      true,
+    );
+    expect(events.some((e) => e.kind === "spawned" && e.attempt === 2)).toBe(
+      true,
+    );
+  });
+
   it("spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode", async () => {
     const agents =
       '{"deepseek":{"description":"General-purpose subagent","prompt":"Do the reading.","model":"deepseek"}}';
@@ -3174,7 +3372,8 @@ describe("harness CLIs", () => {
       "--agents",
       agents,
       "--output-format",
-      "text",
+      "stream-json",
+      "--verbose",
     ]);
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
     expect(markerLine(poolDir, "01-a.md")).toContain("status=done");
@@ -3228,7 +3427,8 @@ describe("harness CLIs", () => {
       "--force",
       "--trust",
       "--output-format",
-      "text",
+      "stream-json",
+      "--verbose",
     ]);
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
   });
@@ -3263,6 +3463,232 @@ describe("harness CLIs", () => {
       },
     ]);
     expect(markerLine(crashDir, "01-a.md")).toContain("status=in-progress");
+  });
+});
+
+describe("streamed logs at every spawn site", () => {
+  // A stub harness registered under the streamed name "claude", so every
+  // spawn site that resolves it exercises the stream pump. The script emits
+  // one recognizable assistant text event, one tool call, and one
+  // unparseable line, then writes its outcome: the same three-way derivation
+  // at every site, with the site's own file names.
+  const DERIVED_LOG = [
+    "stub text",
+    "[tool] Bash: ls -la",
+    "stub raw line",
+    "",
+  ].join("\n");
+  const RAW_STREAM = [
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"stub text"}]}}',
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}',
+    "stub raw line",
+    "",
+  ].join("\n");
+
+  function streamedStub(
+    behaviour: Record<string, { outcome?: unknown; exitCode?: number }> = {},
+  ): { harnesses: Record<string, HarnessCommand>; spawned: Record<string, SpawnContext> } {
+    const poolLocal = tempDirs[tempDirs.length - 1];
+    const stubPath = join(poolLocal, "streamed-stub.sh");
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome_path="$1"; outcome_json="$2"; exit_code="$3"',
+        'echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"stub text"}]}}\'',
+        'echo \'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}\'',
+        "echo 'stub raw line'",
+        'if [ -n "$outcome_json" ]; then printf \'%s\' "$outcome_json" > "$outcome_path"; fi',
+        'exit "$exit_code"',
+        "",
+      ].join("\n"),
+    );
+    const spawned: Record<string, SpawnContext> = {};
+    const harness: HarnessCommand = (ctx) => {
+      spawned[ctx.id] = ctx;
+      const b = behaviour[ctx.id] ?? {};
+      return [
+        "bash",
+        stubPath,
+        ctx.outcomePath,
+        b.outcome !== undefined ? JSON.stringify(b.outcome) : "",
+        String(b.exitCode ?? 0),
+      ];
+    };
+    return { harnesses: { claude: harness }, spawned };
+  }
+
+  it("streams an implement attempt on the well-known paths", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "claude", model: "claude-model" } },
+    });
+    const rig = streamedStub({
+      "01": { outcome: { status: "done", summary: "built", commitSha: "sha" } },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(readFileSync(join(poolDir, "runs", "01.log"), "utf8")).toBe(
+      DERIVED_LOG,
+    );
+    expect(
+      readFileSync(join(poolDir, "runs", "01.stream.jsonl"), "utf8"),
+    ).toBe(RAW_STREAM);
+  });
+
+  it("streams the resolver run beside its resolver log", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03", "02")],
+        config: { ...stubConfig, resolver: "claude" },
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "shared.txt",
+        workLine: "from-01",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+      "03": { workFile: "three.txt", commitMsg: "work-03" },
+    });
+    const resolver = streamedStub({
+      "02": { outcome: { resolved: true, note: "kept both lines" } },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+    expect(run.interrupts[0]?.kind).toBe("merge-approval");
+
+    // The resolver's streamed run sits beside the resolver log, under the
+    // resolver naming variants.
+    expect(
+      readFileSync(join(poolDir, "runs", "02.resolver.stream.jsonl"), "utf8"),
+    ).toBe(RAW_STREAM);
+    expect(
+      readFileSync(join(poolDir, "runs", "02.resolver.log"), "utf8"),
+    ).toBe(DERIVED_LOG);
+  });
+
+  it("streams grader runs and keeps the grader artifacts working", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "claude-model" },
+        assign: { "01": { verify: 1 } },
+      },
+    });
+    const rig = streamedStub({
+      "01": { outcome: { status: "done", summary: "built", commitSha: "sha" } },
+      "01-grader-1": {
+        outcome: {
+          status: "done",
+          summary: "graded",
+          commitSha: null,
+          grade: { score: 8, verdict: "pass", reasons: "good work" },
+        },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // The verify attempt's log and Stream file are attempt-numbered.
+    expect(
+      readFileSync(join(poolDir, "runs", "01.attempt-1.log"), "utf8"),
+    ).toBe(DERIVED_LOG);
+    expect(
+      readFileSync(join(poolDir, "runs", "01.attempt-1.stream.jsonl"), "utf8"),
+    ).toBe(RAW_STREAM);
+    // The grader's own run is streamed on the grader id's paths.
+    expect(
+      readFileSync(join(poolDir, "runs", "01-grader-1.log"), "utf8"),
+    ).toBe(DERIVED_LOG);
+    expect(
+      readFileSync(join(poolDir, "runs", "01-grader-1.stream.jsonl"), "utf8"),
+    ).toBe(RAW_STREAM);
+    // The trimmed log artifact still exists and carries the derived text.
+    const trim = readFileSync(
+      join(poolDir, "runs", "01-grader-1.trim.log"),
+      "utf8",
+    );
+    expect(trim).toContain("stub text");
+    expect(trim).toContain("[tool] Bash: ls -la");
+  });
+
+  it("streams the head-to-head judge run and keeps its side artifacts working", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "claude-model" },
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const grade = (score: number) => ({
+      status: "done",
+      summary: "graded",
+      commitSha: null,
+      grade: { score, verdict: "pass", reasons: "fine" },
+    });
+    const rig = streamedStub({
+      "01": { outcome: { status: "done", summary: "one", commitSha: "sha-1" } },
+      "01-grader-1": { outcome: grade(8) },
+      "01-grader-2": { outcome: grade(7) },
+      "01-head-to-head": {
+        outcome: { status: "done", summary: "picked", commitSha: null, winner: 1 },
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // The one-point margin called the head-to-head ticket, and its run is
+    // streamed on the head-to-head id's paths.
+    expect(
+      readFileSync(join(poolDir, "runs", "01-head-to-head.log"), "utf8"),
+    ).toBe(DERIVED_LOG);
+    expect(
+      readFileSync(join(poolDir, "runs", "01-head-to-head.stream.jsonl"), "utf8"),
+    ).toBe(RAW_STREAM);
+    // The per-side trimmed logs still exist.
+    expect(
+      existsSync(join(poolDir, "runs", "01-head-to-head.attempt-1.trim.log")),
+    ).toBe(true);
+    expect(
+      existsSync(join(poolDir, "runs", "01-head-to-head.attempt-2.trim.log")),
+    ).toBe(true);
+  });
+
+  it("keeps a raw harness's log passthrough with no Stream file", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({
+      "01": { outcome: { summary: "raw work", commitSha: "sha" } },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "runs", "01.stream.jsonl"))).toBe(false);
   });
 });
 

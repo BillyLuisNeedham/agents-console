@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { defaultHarnesses, type SpawnContext } from "./spawn.ts";
+import {
+  defaultHarnesses,
+  harnessStreamMode,
+  type SpawnContext,
+} from "./spawn.ts";
 
 function context(overrides?: Partial<SpawnContext>): SpawnContext {
   return {
@@ -12,6 +16,7 @@ function context(overrides?: Partial<SpawnContext>): SpawnContext {
     logPath: "/tmp/pool/runs/01.log",
     outcomePath: "/tmp/pool/runs/01.outcome.json",
     cwd: "/tmp/pool",
+    streamPath: null,
     ...overrides,
   };
 }
@@ -28,7 +33,8 @@ describe("defaultHarnesses", () => {
       "--permission-mode",
       "auto",
       "--output-format",
-      "text",
+      "stream-json",
+      "--verbose",
     ]);
   });
 
@@ -53,6 +59,9 @@ describe("defaultHarnesses", () => {
     expect(
       defaultHarnesses.opencode(context())[3],
     ).not.toContain("/implement");
+    expect(defaultHarnesses.opencode(context())).not.toContain(
+      "--output-format",
+    );
   });
 
   it("builds the cursor argv from the fields (unproven line, carried over from run.sh)", () => {
@@ -66,7 +75,17 @@ describe("defaultHarnesses", () => {
       "--force",
       "--trust",
       "--output-format",
-      "text",
+      "stream-json",
+      "--verbose",
     ]);
+  });
+});
+
+describe("harnessStreamMode", () => {
+  it("declares the structured-stream harnesses streamed and everything else raw", () => {
+    expect(harnessStreamMode("claude")).toBe("stream");
+    expect(harnessStreamMode("cursor")).toBe("stream");
+    expect(harnessStreamMode("opencode")).toBe("raw");
+    expect(harnessStreamMode("mystery")).toBe("raw");
   });
 });
