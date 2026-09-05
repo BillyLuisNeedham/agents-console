@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface WorktreeInfo {
@@ -51,16 +52,22 @@ export function commitMerge(worktree: WorktreeInfo): GitProbe {
 // The solo branch keeps the well-known name; a verify fan-out's attempt
 // branches suffix the attempt number. Dotted rather than slashed, so an
 // attempt branch never collides with a parked solo branch: git forbids
-// refs where one is a prefix path of the other.
-export function branchFor(ticketId: string, attempt?: number): string {
+// refs where one is a prefix path of the other. The pool key namespaces
+// everything by the pool's own directory, so two pools sharing one repo
+// (distinct checkouts, one common git dir) never collide on a ticket id.
+export function branchFor(
+  repoRoot: string,
+  ticketId: string,
+  attempt?: number,
+): string {
   return attempt === undefined
-    ? `pool/${ticketId}`
-    : `pool/${ticketId}.attempt-${attempt}`;
+    ? `pool/${poolKeyFor(repoRoot)}/${ticketId}`
+    : `pool/${poolKeyFor(repoRoot)}/${ticketId}.attempt-${attempt}`;
 }
 
 // Worktrees live inside the common git dir so they never appear in a
 // checkout's status, where an in-place ticket could sweep one into a commit.
-// The common dir is the main checkout's .git for every worktree of the repo —
+// The common dir is the main checkout's .git for every worktree of the repo ,
 // a linked worktree's own .git is a file, not a directory, so anchoring there
 // would break ticket worktree creation.
 const commonDirCache = new Map<string, string>();
@@ -78,6 +85,28 @@ function gitCommonDir(repoRoot: string): string {
   return dir;
 }
 
+// Two pools can share one repo: two checkouts of it (a plain clone and a
+// linked worktree, say) have distinct roots but one common git dir, so a
+// bare ticket id would collide on worktree paths and pool/<id> refs across
+// pools, proven live on 2026-09-05, when two engines of different pools
+// shared one worktree concurrently. The key namespaces by the pool's own
+// directory, the identity a pool has on disk: deterministic across restarts,
+// distinct per pool, and independent of the pool's working branch, which a
+// feature-branch merge target changes. Eight hex chars: opaque, but the
+// birthday bound at pool counts a repo will ever see is beyond negligible.
+const poolKeyCache = new Map<string, string>();
+
+export function poolKeyFor(repoRoot: string): string {
+  const cached = poolKeyCache.get(repoRoot);
+  if (cached) return cached;
+  const key = createHash("sha256")
+    .update(realpathSync(repoRoot))
+    .digest("hex")
+    .slice(0, 8);
+  poolKeyCache.set(repoRoot, key);
+  return key;
+}
+
 export function worktreePathFor(
   repoRoot: string,
   ticketId: string,
@@ -86,6 +115,7 @@ export function worktreePathFor(
   return join(
     gitCommonDir(repoRoot),
     "pool-worktrees",
+    poolKeyFor(repoRoot),
     attempt === undefined ? ticketId : `${ticketId}.attempt-${attempt}`,
   );
 }
@@ -95,7 +125,7 @@ export function branchExists(
   ticketId: string,
   attempt?: number,
 ): boolean {
-  return refExists(repoRoot, branchFor(ticketId, attempt));
+  return refExists(repoRoot, branchFor(repoRoot, ticketId, attempt));
 }
 
 // A parked branch or worktree (left by a checkpoint, a crash or a conflict)
@@ -103,18 +133,51 @@ export function branchExists(
 // moved under it. Fresh tickets branch from HEAD. An attempt number names a
 // verify fan-out's per-attempt branch and worktree; attempt numbers never
 // repeat for a ticket, so an attempt worktree is always created fresh.
+// The reuse rule only trusts a worktree on this pool's own branch: two
+// pools sharing one repo share the worktree registry too, and the old
+// bare-id paths let one pool silently adopt another's worktree, proven
+// live on 2026-09-05. A registered worktree at this path on any other
+// branch (or a detached HEAD) is foreign, and reusing it would graft one
+// pool's parked work into another's run, so it is rejected loudly.
+interface RegisteredWorktree {
+  path: string;
+  branch: string | null;
+}
+
+function registeredWorktrees(repoRoot: string): RegisteredWorktree[] {
+  const trees: RegisteredWorktree[] = [];
+  let current: RegisteredWorktree | null = null;
+  for (const line of git(repoRoot, ["worktree", "list", "--porcelain"]).out.split(
+    "\n",
+  )) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length), branch: null };
+      trees.push(current);
+    } else if (current && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length);
+    }
+  }
+  return trees;
+}
+
 export function prepareWorktree(
   repoRoot: string,
   ticketId: string,
   attempt?: number,
 ): WorktreeInfo {
-  const branch = branchFor(ticketId, attempt);
+  const branch = branchFor(repoRoot, ticketId, attempt);
   const path = worktreePathFor(repoRoot, ticketId, attempt);
   git(repoRoot, ["worktree", "prune"]);
-  const registered = git(repoRoot, ["worktree", "list", "--porcelain"])
-    .out.split("\n")
-    .includes(`worktree ${path}`);
-  if (!registered) {
+  const existing = registeredWorktrees(repoRoot).find((t) => t.path === path);
+  if (existing) {
+    if (existing.branch !== `refs/heads/${branch}`) {
+      throw new Error(
+        `worktree ${path} is checked out on ` +
+          `${existing.branch ?? "a detached HEAD"}, not this pool's ` +
+          `${branch}; refusing to adopt a foreign pool's worktree`,
+      );
+    }
+  } else {
     mkdirSync(dirname(path), { recursive: true });
     const add = branchExists(repoRoot, ticketId, attempt)
       ? git(repoRoot, ["worktree", "add", path, branch])
@@ -179,11 +242,11 @@ export function branchLandedInto(
 // discards the rest, so a superseded round's branches are cleaned up with
 // the round that beat them.
 export function attemptBranches(repoRoot: string, ticketId: string): number[] {
-  const prefix = `refs/heads/pool/${ticketId}.attempt-`;
+  const prefix = `refs/heads/pool/${poolKeyFor(repoRoot)}/${ticketId}.attempt-`;
   return git(repoRoot, [
     "for-each-ref",
     "--format=%(refname)",
-    `refs/heads/pool/${ticketId}.attempt-*`,
+    `refs/heads/pool/${poolKeyFor(repoRoot)}/${ticketId}.attempt-*`,
   ])
     .out.split("\n")
     .filter((ref) => ref.startsWith(prefix))
