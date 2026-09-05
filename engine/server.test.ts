@@ -27,9 +27,9 @@ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const server of servers.splice(0)) {
-    void server.close();
+    await server.close();
   }
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
@@ -523,7 +523,7 @@ describe("pool server", () => {
       if (done) break;
       data += decoder.decode(value, { stream: true });
     }
-    reader!.cancel();
+    await reader!.cancel();
     expect(data).toContain('"ticketId":"01"');
 
     // Processing at the boundary clears the waiting state on the snapshot
@@ -564,7 +564,7 @@ describe("pool server", () => {
     }
     expect(data).toContain("event: snapshot");
     expect(data).toContain('"phase":"done"');
-    reader!.cancel();
+    await reader!.cancel();
   });
 
   it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
@@ -610,7 +610,11 @@ describe("pool server", () => {
     ]);
     expect(arrived).toBe(true);
     expect(closed).toBe(false);
-    reader.cancel();
+    await reader.cancel();
+    // The resume re-ran the ticket: let that drive settle before afterEach
+    // removes the pool dir, or its mid-run reads fail an unrelated test with
+    // the unhandled ENOENT.
+    await server.settled();
   }, 25_000);
 });
 
@@ -623,6 +627,10 @@ describe("ticket events endpoint", () => {
     await server.start();
     await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
+    // Let the closing drive settle before afterEach removes the pool dir: a
+    // drive still working when its dir vanishes fails an unrelated test with
+    // the unhandled ENOENT.
+    await server.settled();
 
     const res = await fetch(`${server.url}/api/events?ticket=01`);
     expect(res.status).toBe(200);
@@ -702,6 +710,7 @@ describe("ticket events endpoint", () => {
     );
     const server = await startServer(poolDir, stubHarness({}));
     await server.start();
+    await server.settled();
 
     const res = await fetch(`${server.url}/api/events?ticket=01`);
     const body = (await res.json()) as { spec: string };
