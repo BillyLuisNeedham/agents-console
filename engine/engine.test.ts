@@ -3271,11 +3271,11 @@ describe("harness CLIs", () => {
     });
 
     expect(run!.phase).toBe("done");
-    // The derived log: unrecognized and unparseable lines pass through,
-    // assistant text is verbatim, the tool call is one [tool] line.
+    // The derived log: unparseable lines pass through, recognized
+    // nothing-to-say events (the system init) leave no line, assistant text
+    // is verbatim, the tool call is one [tool] line.
     expect(readAttemptFile(poolDir, "01.log")).toBe(
       [
-        systemLine,
         "Reading the ticket.",
         "[tool] Bash: bun test engine/",
         "this is not json at all",

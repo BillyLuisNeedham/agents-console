@@ -72,9 +72,18 @@ describe("deriveStreamLine", () => {
     ).toBe("");
   });
 
-  it("passes through other event types and non-jsonl lines verbatim", () => {
-    expect(deriveStreamLine('{"type":"system","subtype":"init"}')).toBeNull();
-    expect(deriveStreamLine('{"type":"result","usage":{}}')).toBeNull();
+  it("writes no line for recognized events the log has no use for", () => {
+    expect(deriveStreamLine('{"type":"system","subtype":"init"}')).toBe("");
+    expect(deriveStreamLine('{"type":"result","usage":{}}')).toBe("");
+    expect(
+      deriveStreamLine(
+        '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}',
+      ),
+    ).toBe("");
+  });
+
+  it("passes through unrecognized event types and non-jsonl lines verbatim", () => {
+    expect(deriveStreamLine('{"type":"future-event","data":{}}')).toBeNull();
     expect(deriveStreamLine("fake claude ran")).toBeNull();
     expect(deriveStreamLine("")).toBeNull();
     expect(deriveStreamLine("[1,2,3]")).toBeNull();
@@ -87,12 +96,28 @@ describe("deriveStreamLine", () => {
         '{"type":"assistant","message":{"content":"a plain string"}}',
       ),
     ).toBeNull();
+    expect(deriveStreamLine('{"type":"assistant"}')).toBeNull();
+    expect(
+      deriveStreamLine(
+        '{"type":"assistant","message":{"content":[{"type":"future-block"}]}}',
+      ),
+    ).toBeNull();
+  });
+
+  it("skips thinking blocks but keeps the message's text and tool calls", () => {
+    expect(
+      deriveStreamLine(
+        '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"The answer."}]}}',
+      ),
+    ).toBe("The answer.");
+  });
+
+  it("writes no line for a thinking-only assistant message", () => {
     expect(
       deriveStreamLine(
         '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}',
       ),
-    ).toBeNull();
-    expect(deriveStreamLine('{"type":"assistant"}')).toBeNull();
+    ).toBe("");
   });
 });
 

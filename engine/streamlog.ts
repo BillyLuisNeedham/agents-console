@@ -30,6 +30,17 @@ const TOOL_SUMMARY_FIELD: Record<string, string> = {
 // beyond this it truncates with an ellipsis.
 const TOOL_SUMMARY_MAX_CHARS = 200;
 
+// Current-schema stream events the log has no use for: system init, user
+// (tool results), the final result. Recognized, nothing to say, so they
+// contribute no log line; the Stream file keeps them verbatim. An event type
+// outside this set and "assistant" is schema drift and passes through.
+const SILENT_EVENT_TYPES = new Set(["system", "user", "result"]);
+
+// Content blocks the log has no use for inside an assistant message:
+// thinking is not the assistant's text, and the Stream file keeps it
+// verbatim for forensics.
+const SILENT_BLOCK_TYPES = new Set(["thinking", "redacted_thinking"]);
+
 /**
  * Derive the log text one structured stream line contributes, or null when
  * the line is unparseable or unrecognized and must pass through verbatim. A
@@ -48,11 +59,17 @@ export function deriveStreamLine(line: string): string | null {
     return null;
   }
   const event = parsed as { type?: unknown; message?: unknown };
-  if (event.type !== "assistant") return null;
+  if (event.type !== "assistant") {
+    return typeof event.type === "string" && SILENT_EVENT_TYPES.has(event.type)
+      ? ""
+      : null;
+  }
   if (typeof event.message !== "object" || event.message === null) return null;
   const content = (event.message as { content?: unknown }).content;
   if (!Array.isArray(content)) return null;
   const parts: string[] = [];
+  let sawKnownBlock = false;
+  let sawUnknownBlock = false;
   for (const item of content) {
     if (typeof item !== "object" || item === null) return null;
     const block = item as {
@@ -62,20 +79,30 @@ export function deriveStreamLine(line: string): string | null {
       input?: unknown;
     };
     if (block.type === "text" && typeof block.text === "string") {
+      sawKnownBlock = true;
       parts.push(block.text);
     } else if (
       block.type === "tool_use" &&
       typeof block.name === "string" &&
       block.name.trim() !== ""
     ) {
+      sawKnownBlock = true;
       const summary = toolSummary(block.name, block.input);
       parts.push(`[tool] ${block.name}${summary ? `: ${summary}` : ":"}`);
+    } else if (
+      typeof block.type === "string" &&
+      SILENT_BLOCK_TYPES.has(block.type)
+    ) {
+      sawKnownBlock = true;
     } else {
-      // A content block the deriver does not know is schema drift, the exact
-      // case the pass-through rule exists for.
-      return null;
+      // A content block the deriver does not know is schema drift. It costs
+      // the message its line only when nothing in the message is known:
+      // known blocks still derive, so drift degrades the log instead of
+      // replacing recognized content with a raw JSON wall.
+      sawUnknownBlock = true;
     }
   }
+  if (parts.length === 0 && sawUnknownBlock && !sawKnownBlock) return null;
   return parts.join("\n");
 }
 
