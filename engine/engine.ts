@@ -8,6 +8,7 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
+  type WriteStream,
 } from "node:fs";
 import { once } from "node:events";
 import { homedir } from "node:os";
@@ -4132,6 +4133,13 @@ async function runTicket(
 // forever on a child that is already gone.
 const SPAWN_PUMP_GRACE_MS = 2_000;
 
+// A drain wait that cannot reject: a write stream an error is destroying
+// never drains, and that failure is recorded by the stream's error
+// listener, never by the pump's wait.
+function drainWait(stream: WriteStream): Promise<unknown> {
+  return once(stream, "drain").catch(() => {});
+}
+
 async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
@@ -4155,6 +4163,18 @@ async function spawnToLog(
   // is still running, and a crash log reads in the order the output
   // happened.
   const log = createWriteStream(ctx.logPath);
+  // A failing write stream errors and destroys itself, and an unlistened
+  // 'error' event escapes as an unhandled failure far from its cause. The
+  // stream reports into one first-error capture here: the spawn fails on it
+  // after teardown (a log the engine cannot write is a real failure, and
+  // still kills the spawn), while the destruction itself can no longer
+  // reject the teardown, because the writes and the end call below check
+  // the stream first.
+  let streamError: unknown = null;
+  const noteStreamError = (error: unknown): void => {
+    if (streamError === null) streamError = error;
+  };
+  log.on("error", noteStreamError);
   const exited = proc.exited;
   // Each pump reads through an explicit reader so the child-exit grace can
   // cancel the read from outside: the for-await loop used before locks the
@@ -4163,13 +4183,26 @@ async function spawnToLog(
   // its own timer, so clean spawns are untouched by the bound.
   const pump = (stream: ReadableStream<Uint8Array>) => {
     const reader = stream.getReader();
+    // One error boundary for the whole pump: a pump failure settles this
+    // promise instead of rejecting it, so both pumps always settle before
+    // the teardown below runs, and a stream destroyed mid-write can never
+    // reject the spawn through a multiplexed Promise.all whose sibling pump
+    // is still unwinding. Every failure is recorded through the same
+    // first-error capture the stream's error listener feeds, so a genuine
+    // failure still fails the spawn at the rethrow after teardown; the
+    // destruction itself is never a rejection, because a destroyed writer
+    // fails writes silently and the end call below skips it.
     const reading = (async () => {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) return;
-        if (!log.write(value)) {
-          await once(log, "drain");
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          if (!log.destroyed && !log.write(value)) {
+            await drainWait(log);
+          }
         }
+      } catch (error) {
+        noteStreamError(error);
       }
     })();
     void exited
@@ -4190,11 +4223,30 @@ async function spawnToLog(
     pump(proc.stdout),
     pump(proc.stderr),
   ]);
-  await new Promise<void>((resolve, reject) => {
-    log.end((error: Error | null | undefined) =>
-      error ? reject(error) : resolve(),
-    );
-  });
+  // The teardown the pumps can never reject: end() on a stream an error
+  // already destroyed throws ERR_STREAM_DESTROYED, so the destroyed check
+  // skips it, and end's own write failure is recorded rather than thrown,
+  // leaving the boundary below as the spawn's only rejection path.
+  const endStream = (stream: WriteStream): Promise<void> =>
+    new Promise<void>((resolve) => {
+      if (stream.destroyed) {
+        resolve();
+        return;
+      }
+      try {
+        stream.end((error: Error | null | undefined) => {
+          if (error) noteStreamError(error);
+          resolve();
+        });
+      } catch {
+        resolve();
+      }
+    });
+  await endStream(log);
+  // The spawn still fails on a genuine write failure, exactly as a
+  // rejecting pump did before the boundary existed; the destruction itself
+  // is not one.
+  if (streamError !== null) throw streamError;
   return exitCode;
 }
 
