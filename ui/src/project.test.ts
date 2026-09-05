@@ -935,6 +935,7 @@ describe("projectDetailTab", () => {
       ticketId,
       title: `ticket ${ticketId}`,
       status,
+      mergePending: false,
       blockedBy: [],
       blockedByCheckpoint: [],
       outcome: null,
@@ -993,6 +994,7 @@ describe("projectDetailTabs", () => {
       ticketId,
       title: `ticket ${ticketId}`,
       status,
+      mergePending: false,
       blockedBy: [],
       blockedByCheckpoint: [],
       outcome: null,
@@ -1070,6 +1072,46 @@ describe("statusLabel", () => {
     expect(statusLabel("in-progress")).toBe("running");
     expect(statusLabel("done")).toBe("done");
     expect(statusLabel("checkpoint")).toBe("checkpoint");
+  });
+
+  it("reads done, merge pending for a done ticket whose branch has not landed", () => {
+    expect(statusLabel("done", true)).toBe("done, merge pending");
+    expect(statusLabel("done", false)).toBe("done");
+    // Only a done ticket carries it: the derivation never sets the flag on
+    // any other status, and the label does not leak if one ever did.
+    expect(statusLabel("ready", true)).toBe("ready");
+  });
+});
+
+describe("merge pending projection", () => {
+  it("carries the server-derived flag onto the card and Detail; absent reads false", () => {
+    const snap = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [
+          ticket("01", { status: "done", mergePending: true }),
+          ticket("02", { status: "done" }),
+          ticket("03", { status: "ready" }),
+        ],
+      },
+    });
+    const cardOf = (id: string): TicketCardView | undefined =>
+      projectPool(snap).cards.find(
+        (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+      );
+    // The held ticket's card state word: what the canvas renders from.
+    expect(cardOf("01")?.mergePending).toBe(true);
+    expect(statusLabel(cardOf("01")!.status, cardOf("01")!.mergePending)).toBe(
+      "done, merge pending",
+    );
+    // A plain done ticket labels plain; the projection re-derives nothing.
+    expect(cardOf("02")?.mergePending).toBe(false);
+    expect(cardOf("03")?.mergePending).toBe(false);
+    // The Detail mirrors the card.
+    const detail = projectDetail(snap, ticketCardId("01"));
+    expect(detail?.kind === "ticket" && detail.mergePending).toBe(true);
+    const plain = projectDetail(snap, ticketCardId("02"));
+    expect(plain?.kind === "ticket" && plain.mergePending).toBe(false);
   });
 });
 
