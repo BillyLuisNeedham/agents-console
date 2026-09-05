@@ -74,6 +74,10 @@ The set of live Consoles on this machine, recorded in a registry file so any of 
 A named, machine-local bundle of a pool's behavioural config — harness, model, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
 _Avoid_: profile, template
 
+**Assignment**:
+The harness, model, and drivers a ticket runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. Every ticket card shows its Assignment.
+_Avoid_: config (that's the raw file the Assignment is resolved from), profile
+
 **Detail**:
 The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)

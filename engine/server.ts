@@ -4,11 +4,13 @@
  * answer), and an SSE stream that pushes a full state snapshot on every
  * change. The UI renders from those snapshots only.
  *
- * The engine's snapshot carries `state.tickets` as an id -> status map; the
- * server enriches it into an array of {id, title, blockedBy, status} so the
- * projection can draw blocked-by edges and show titles. The metadata (title,
- * spec, blockedBy) is the engine's own marker parsing, re-read from the
- * pool's issues directory on every snapshot and ticket-scoped request: a
+ * The engine's snapshot carries `state.tickets` as an id -> status map and
+ * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
+ * server enriches the former into an array of {id, title, blockedBy, status,
+ * assignment} so the projection can draw blocked-by edges, show titles, and
+ * render the record verbatim. The metadata (title, spec, blockedBy) is the
+ * engine's own marker parsing, re-read from the pool's issues directory on
+ * every snapshot and ticket-scoped request: a
  * ticket file that lands after boot (an engine-written Spawn or grader
  * ticket, or a hand edit) renders as a live card without a restart. The
  * grades endpoint re-derives from the same refreshed meta.
@@ -29,6 +31,8 @@ import {
   REVIEW_TICKET_ID,
   repoRootOf,
   startPool,
+  UNASSIGNED_ASSIGNMENT_VIEW,
+  type AssignmentView,
   type HarnessCommand,
   type InterruptKind,
   type PoolRun,
@@ -84,6 +88,8 @@ interface EnrichedTicketState {
    *  merge target (ADR-0012): the "done, merge pending" card label. Derived
    *  server-side here; every UI surface reads this field and never git. */
   mergePending: boolean;
+  /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
+  assignment: AssignmentView;
 }
 
 interface EnrichedSnapshot {
@@ -165,6 +171,13 @@ function enrich(
         blockedBy: m.blockedBy,
         status: snapshot.state.tickets[m.id] ?? "ready",
         mergePending: pending.has(m.id),
+        // A meta id the engine has not resolved yet (a hand-written file
+        // seen between the meta refresh and the boundary that adopts it)
+        // reads as unassigned until the record lands; the engine's map is
+        // the only derivation, and the engine owns the unassigned record.
+        assignment: snapshot.assignments[m.id] ?? {
+          ...UNASSIGNED_ASSIGNMENT_VIEW,
+        },
       })),
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
