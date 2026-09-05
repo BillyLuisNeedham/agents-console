@@ -29,6 +29,14 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   for (const server of servers.splice(0)) {
+    // The pool's true quiescence before the temp dir goes away: a test that
+    // ends right after an answer leaves a fresh drive running its last
+    // attempt, and a directory removed under that attempt makes its
+    // continuation read deleted files, the stray ENOENT that fails
+    // whichever test runs next. A drive that died reports its death through
+    // settled()'s rejection, and by then the work it was driving is over,
+    // so the cleanup still proceeds.
+    await server.settled().catch(() => {});
     await server.close();
   }
   while (tempDirs.length > 0) {
@@ -649,7 +657,12 @@ describe("ticket events endpoint", () => {
     expect(body.events[0].attempt).toBe(1);
     expect(typeof body.events[0].at).toBe("string");
     const exited = body.events.find((e) => e.kind === "exited");
-    expect(exited?.payload).toEqual({ code: 0, status: "done" });
+    expect(exited?.payload).toEqual({
+      code: 0,
+      status: "done",
+      logTail: [],
+      outcomeExists: true,
+    });
   });
 
   it("backfills reconstructed attempt rows for a ticket with no events file", async () => {
@@ -1034,7 +1047,13 @@ describe("ticket log endpoint", () => {
     expect(body.totalSize).toBe(17);
     expect(body.nextOffset).toBe(17);
     expect(body.attempts).toEqual([
-      { attempt: 1, kind: "reconstructed", logFile: "01.log", current: true },
+      {
+        attempt: 1,
+        kind: "reconstructed",
+        logFile: "01.log",
+        streamFile: null,
+        current: true,
+      },
     ]);
   });
 
@@ -1197,7 +1216,7 @@ describe("ticket log endpoint", () => {
     expect(body.nextOffset).toBe(10);
   });
 
-  it("lists event-based attempts with their rotated log files", async () => {
+  it("lists event-based attempts with their rotated log files and stream files", async () => {
     const poolDir = makePool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
@@ -1216,25 +1235,141 @@ describe("ticket log endpoint", () => {
     writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
     writeFileSync(join(runsDir, "01.resolver.log"), "resolver\n");
     writeFileSync(join(runsDir, "01.log"), "third\n");
+    writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
+    writeFileSync(join(runsDir, "01.resolver.stream.jsonl"), "stream-resolver\n");
+    writeFileSync(join(runsDir, "01.stream.jsonl"), "stream-third\n");
     const server = await startServer(poolDir, stubHarness({}));
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       content: string;
-      attempts: { attempt: number; kind: string; logFile: string; current: boolean }[];
+      attempts: {
+        attempt: number;
+        kind: string;
+        logFile: string;
+        streamFile: string | null;
+        current: boolean;
+      }[];
     };
     // The older rotated log is readable through its attempt number.
     expect(body.content).toBe("first\n");
     expect(body.attempts).toEqual([
-      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", current: false },
-      { attempt: 2, kind: "resolver", logFile: "01.resolver.log", current: true },
-      { attempt: 3, kind: "implement", logFile: "01.log", current: true },
+      {
+        attempt: 1,
+        kind: "implement",
+        logFile: "01.attempt-1.log",
+        streamFile: "01.attempt-1.stream.jsonl",
+        current: false,
+      },
+      {
+        attempt: 2,
+        kind: "resolver",
+        logFile: "01.resolver.log",
+        streamFile: "01.resolver.stream.jsonl",
+        current: true,
+      },
+      {
+        attempt: 3,
+        kind: "implement",
+        logFile: "01.log",
+        streamFile: "01.stream.jsonl",
+        current: true,
+      },
     ]);
 
     const third = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
     const thirdBody = (await third.json()) as { content: string };
     expect(thirdBody.content).toBe("third\n");
+  });
+
+  it("serves an attempt's stream file through the same byte-range path", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(
+      join(runsDir, "01.events.jsonl"),
+      [
+        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(runsDir, "01.log"), "derived log\n");
+    writeFileSync(join(runsDir, "01.stream.jsonl"), '{"type":"assistant"}\n');
+    const server = await startServer(poolDir, stubHarness({}));
+
+    // The well-known Stream file belongs to the current attempt; a stream
+    // request reads it through the same ANSI-stripped, byte-ranged reader
+    // the derived log goes through.
+    const res = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=1&offset=1&end=5&stream=1`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      content: string;
+      offset: number;
+      nextOffset: number;
+      totalSize: number;
+    };
+    expect(body.content).toBe('"typ');
+    expect(body.offset).toBe(1);
+    expect(body.nextOffset).toBe(5);
+    expect(body.totalSize).toBe(21);
+    // The derived log keeps serving under the plain request.
+    const log = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
+    expect(((await log.json()) as { content: string }).content).toBe("derived log\n");
+  });
+
+  it("answers 404 with a no-stream-file error for an attempt that has none", async () => {
+    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const runsDir = join(poolDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    // Attempt 1 streamed, attempt 2 (current) is a raw-harness run whose
+    // only file is the derived log.
+    writeFileSync(
+      join(runsDir, "01.events.jsonl"),
+      [
+        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 2, kind: "spawned", payload: {} }),
+        JSON.stringify({ at: "t", attempt: 2, kind: "exited", payload: {} }),
+      ].join("\n") + "\n",
+    );
+    writeFileSync(join(runsDir, "01.attempt-1.log"), "one\n");
+    writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
+    writeFileSync(join(runsDir, "01.log"), "two\n");
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const listing = await fetch(`${server.url}/api/log?ticket=01&attempt=2`);
+    const listingBody = (await listing.json()) as {
+      attempts: {
+        attempt: number;
+        kind: string;
+        logFile: string;
+        streamFile: string | null;
+        current: boolean;
+      }[];
+    };
+    expect(listingBody.attempts).toEqual([
+      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", streamFile: "01.attempt-1.stream.jsonl", current: false },
+      { attempt: 2, kind: "implement", logFile: "01.log", streamFile: null, current: true },
+    ]);
+    // The attempt exists, so the error names the missing stream file rather
+    // than an unknown attempt; a truly unknown attempt still 404s as before.
+    const streamRes = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=2&stream=1`,
+    );
+    expect(streamRes.status).toBe(404);
+    expect(((await streamRes.json()) as { error: string }).error).toBe(
+      "no stream file for attempt 2 of 01",
+    );
+    const unknownRes = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=99&stream=1`,
+    );
+    expect(unknownRes.status).toBe(404);
+    expect(((await unknownRes.json()) as { error: string }).error).toBe(
+      "unknown attempt 99 for 01",
+    );
   });
 
   it("serves a verify fan-out's current attempt through its attempt-numbered log", async () => {
@@ -1255,22 +1390,34 @@ describe("ticket log endpoint", () => {
     writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
     writeFileSync(join(runsDir, "01.attempt-2.log"), "second\n");
     writeFileSync(join(runsDir, "01.attempt-3.log"), "third\n");
+    // A fan-out of streamed attempts: every attempt's Stream file is
+    // attempt-numbered, the well-known name never appearing.
+    writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
+    writeFileSync(join(runsDir, "01.attempt-2.stream.jsonl"), "stream-two\n");
+    writeFileSync(join(runsDir, "01.attempt-3.stream.jsonl"), "stream-three\n");
     const server = await startServer(poolDir, stubHarness({}));
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       content: string;
-      attempts: { attempt: number; kind: string; logFile: string; current: boolean }[];
+      attempts: { attempt: number; kind: string; logFile: string; streamFile: string | null; current: boolean }[];
     };
     // The current attempt reads its own attempt-numbered log: the pane must
     // not serve an empty file for a fan-out's live attempt.
     expect(body.content).toBe("third\n");
     expect(body.attempts).toEqual([
-      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", current: false },
-      { attempt: 2, kind: "implement", logFile: "01.attempt-2.log", current: false },
-      { attempt: 3, kind: "implement", logFile: "01.attempt-3.log", current: true },
+      { attempt: 1, kind: "implement", logFile: "01.attempt-1.log", streamFile: "01.attempt-1.stream.jsonl", current: false },
+      { attempt: 2, kind: "implement", logFile: "01.attempt-2.log", streamFile: "01.attempt-2.stream.jsonl", current: false },
+      { attempt: 3, kind: "implement", logFile: "01.attempt-3.log", streamFile: "01.attempt-3.stream.jsonl", current: true },
     ]);
+
+    const stream = await fetch(
+      `${server.url}/api/log?ticket=01&attempt=2&stream=1`,
+    );
+    expect(((await stream.json()) as { content: string }).content).toBe(
+      "stream-two\n",
+    );
   });
 
   it("defaults to the latest attempt when none is named", async () => {

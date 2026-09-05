@@ -115,13 +115,16 @@ export class PoolClient {
    * is a raw byte offset; the response reports `nextOffset` (where the next
    * range starts) and `totalSize`, so the pane pages until offset reaches the
    * total. The optional `end` bounds the range, which is how "load earlier"
-   * reads exactly the prefix before the bytes the pane already holds.
+   * reads exactly the prefix before the bytes the pane already holds. With
+   * `stream`, the same range is read from the attempt's Stream file (the raw
+   * stream tee) instead of its derived log.
    */
   async getLog(
     ticketId: string,
     attempt: number,
     offset: number,
     end?: number,
+    stream?: boolean,
   ): Promise<TicketLogResponse> {
     const params = new URLSearchParams({
       ticket: ticketId,
@@ -129,6 +132,7 @@ export class PoolClient {
       offset: String(offset),
     });
     if (end !== undefined) params.set("end", String(end));
+    if (stream) params.set("stream", "1");
     const res = await fetch(`${this.base}/api/log?${params}`);
     if (!res.ok) throw new Error(`ticket log failed: ${res.status}`);
     return res.json();

@@ -27,25 +27,30 @@ import {
  * A byte range of an attempt's log, as the wire serves it. `offset` is where
  * the range was read from, `nextOffset` where the next range starts, and
  * `totalSize` the log's full byte size; the pane pages until `nextOffset`
- * reaches `totalSize`.
+ * reaches `totalSize`. `attempts` is the response's per-attempt listing with
+ * each row's resolved Stream file; the pane holds the latest one for the
+ * timeline's stream links.
  */
 export interface LogChunk {
   content: string;
   offset: number;
   nextOffset: number;
   totalSize: number;
+  attempts?: { attempt: number; streamFile: string | null }[];
 }
 
 /**
  * The one wire call the pane needs: a byte range of a ticket's attempt log,
- * optionally bounded by `end` (how "load earlier" reads exactly the prefix
- * before the bytes the pane already holds).
+ * or of its Stream file when `stream` is set, optionally bounded by `end`
+ * (how "load earlier" reads exactly the prefix before the bytes the pane
+ * already holds).
  */
 export type LogFetch = (
   ticketId: string,
   attempt: number,
   offset: number,
   end?: number,
+  stream?: boolean,
 ) => Promise<LogChunk>;
 
 export interface LogPaneOptions {
@@ -64,17 +69,22 @@ export class LogPane {
    * (`firstOffset`..`offset` bookend the window inside a log of `totalSize`),
    * and the last fetch error. `clicked` records whether the attempt was
    * picked by hand: a clicked attempt stays when a new attempt starts, an
-   * unclicked pane follows the running one.
+   * unclicked pane follows the running one. `stream` is the pane's variant:
+   * true shows the attempt's Stream file (the raw stream tee) rather than
+   * its derived log. `attempts` is the latest response's per-attempt listing
+   * (attempt number to Stream file), held for the timeline's stream links.
    */
   readonly state = {
     ticketId: null as string | null,
     attempt: null as number | null,
     clicked: false,
+    stream: false,
     content: "",
     firstOffset: 0,
     offset: 0,
     totalSize: 0,
     error: null as string | null,
+    attempts: [] as { attempt: number; streamFile: string | null }[],
   };
 
   private readonly fetchChunk: LogFetch;
@@ -96,17 +106,20 @@ export class LogPane {
    * Open an attempt's raw log tail-first: probe the size (an offset past EOF
    * serves empty content plus the total), fetch the last window, then tail
    * whatever grew in the meantime. A null attempt holds an empty pane for a
-   * ticket with no attempts. A slow answer only lands when it is still the
-   * selected attempt.
+   * ticket with no attempts. `stream` opens the attempt's Stream file
+   * instead of its derived log, through the same byte-window machine. A slow
+   * answer only lands when it is still the selected attempt and variant.
    */
   async open(
     ticketId: string,
     attempt: number | null,
     clicked: boolean,
+    stream = false,
   ): Promise<void> {
     this.resetWindow(ticketId);
     this.state.attempt = attempt;
     this.state.clicked = clicked;
+    this.state.stream = stream;
     this.onChange();
     if (attempt === null) return;
     try {
@@ -114,30 +127,37 @@ export class LogPane {
         ticketId,
         attempt,
         Number.MAX_SAFE_INTEGER,
+        undefined,
+        stream,
       );
-      if (!this.isCurrent(ticketId, attempt)) return;
+      if (!this.isCurrent(ticketId, attempt, stream)) return;
       const chunk = await this.fetchChunk(
         ticketId,
         attempt,
         initialLogWindow(probe.totalSize),
+        undefined,
+        stream,
       );
-      if (!this.isCurrent(ticketId, attempt)) return;
+      if (!this.isCurrent(ticketId, attempt, stream)) return;
+      this.note(chunk);
       this.state.content = chunk.content;
       this.state.firstOffset = chunk.offset;
       this.state.offset = chunk.nextOffset;
       this.state.totalSize = chunk.totalSize;
       this.onChange();
       // The attempt may have grown while the open fetched.
-      void this.tail(ticketId, attempt);
+      void this.tail(ticketId, attempt, stream);
     } catch {
-      this.fail(ticketId, attempt);
+      this.fail(ticketId, attempt, stream);
     }
   }
 
   /**
    * The snapshot-cadence liveness step for the open pane. Attempt-stay: a
    * clicked attempt is never switched away from; an unclicked pane follows
-   * the running attempt as new attempts start. The selected attempt tails.
+   * the running attempt as new attempts start, keeping its variant (a pane
+   * following in stream mode stays in stream mode). The selected attempt
+   * tails.
    */
   follow(
     ticketId: string,
@@ -146,7 +166,12 @@ export class LogPane {
     if (!timeline) return;
     if (this.state.attempt === null) {
       if (timeline.attempts.length > 0) {
-        return this.open(ticketId, selectLogAttempt(timeline, null), false);
+        return this.open(
+          ticketId,
+          selectLogAttempt(timeline, null),
+          false,
+          this.state.stream,
+        );
       }
       return;
     }
@@ -156,20 +181,41 @@ export class LogPane {
     );
     if (desired === null) return;
     if (desired !== this.state.attempt) {
-      return this.open(ticketId, desired, false);
+      return this.open(ticketId, desired, false, this.state.stream);
     }
-    return this.tail(ticketId, desired);
+    return this.tail(ticketId, desired, this.state.stream);
   }
 
   /**
    * A hand-picked attempt from the timeline: clicked, so attempt-stay keeps
-   * it when a newer attempt starts. Re-picking the shown attempt is a no-op.
+   * it when a newer attempt starts. Re-picking the shown attempt's log is a
+   * no-op; picking the attempt row while the pane shows its Stream file
+   * switches back to the derived log.
    */
   selectAttempt(ticketId: string, attempt: number): void {
-    if (this.state.ticketId === ticketId && this.state.attempt === attempt) {
+    if (
+      this.state.ticketId === ticketId &&
+      this.state.attempt === attempt &&
+      !this.state.stream
+    ) {
       return;
     }
-    void this.open(ticketId, attempt, true);
+    void this.open(ticketId, attempt, true, false);
+  }
+
+  /**
+   * A hand-picked Stream file from an attempt row's stream link: clicked,
+   * same attempt-stay rule as `selectAttempt`, in the pane's stream variant.
+   */
+  selectStream(ticketId: string, attempt: number): void {
+    if (
+      this.state.ticketId === ticketId &&
+      this.state.attempt === attempt &&
+      this.state.stream
+    ) {
+      return;
+    }
+    void this.open(ticketId, attempt, true, true);
   }
 
   /**
@@ -180,7 +226,7 @@ export class LogPane {
    */
   async loadEarlier(ticketId: string, attempt: number): Promise<void> {
     if (this.earlierInFlight) return;
-    if (!this.isCurrent(ticketId, attempt)) return;
+    if (!this.isCurrent(ticketId, attempt, this.state.stream)) return;
     const from = earlierLogOffset(this.state.firstOffset);
     if (from === null) return;
     this.earlierInFlight = true;
@@ -190,33 +236,46 @@ export class LogPane {
         attempt,
         from,
         this.state.firstOffset,
+        this.state.stream,
       );
-      if (!this.isCurrent(ticketId, attempt)) return;
+      if (!this.isCurrent(ticketId, attempt, this.state.stream)) return;
+      this.note(chunk);
       captureLogAnchor();
       this.state.content = chunk.content + this.state.content;
       this.state.firstOffset = chunk.offset;
       this.onChange();
     } catch {
-      this.fail(ticketId, attempt);
+      this.fail(ticketId, attempt, this.state.stream);
     } finally {
       this.earlierInFlight = false;
     }
   }
 
   /**
-   * Append whatever bytes the selected attempt's log has grown since the
+   * Append whatever bytes the selected attempt's file has grown since the
    * last read: the live tail, driven by the snapshot cadence. Fetches only
    * bytes past the last offset read; a no-op once caught up.
    */
-  private async tail(ticketId: string, attempt: number): Promise<void> {
+  private async tail(
+    ticketId: string,
+    attempt: number,
+    stream: boolean,
+  ): Promise<void> {
     if (this.tailInFlight) return;
-    if (!this.isCurrent(ticketId, attempt)) return;
+    if (!this.isCurrent(ticketId, attempt, stream)) return;
     this.tailInFlight = true;
     try {
       while (logTailOffset(this.state.offset, this.state.totalSize) !== null) {
         const from = this.state.offset;
-        const chunk = await this.fetchChunk(ticketId, attempt, from);
-        if (!this.isCurrent(ticketId, attempt)) return;
+        const chunk = await this.fetchChunk(
+          ticketId,
+          attempt,
+          from,
+          undefined,
+          stream,
+        );
+        if (!this.isCurrent(ticketId, attempt, stream)) return;
+        this.note(chunk);
         this.state.content += chunk.content;
         this.state.offset = chunk.nextOffset;
         this.state.totalSize = chunk.totalSize;
@@ -224,29 +283,49 @@ export class LogPane {
         if (chunk.nextOffset <= from) break;
       }
     } catch {
-      this.fail(ticketId, attempt);
+      this.fail(ticketId, attempt, stream);
     } finally {
       this.tailInFlight = false;
     }
   }
 
   /** A failed fetch marks the pane, but only while it is still selected. */
-  private fail(ticketId: string, attempt: number): void {
-    if (this.isCurrent(ticketId, attempt)) {
+  private fail(ticketId: string, attempt: number, stream: boolean): void {
+    if (this.isCurrent(ticketId, attempt, stream)) {
       this.state.error = `log fetch failed: ${ticketId}:${attempt}`;
       this.onChange();
     }
   }
 
-  /** The stale-selection guard: an answer lands only while still selected. */
-  private isCurrent(ticketId: string, attempt: number): boolean {
-    return this.state.ticketId === ticketId && this.state.attempt === attempt;
+  /**
+   * The stale-selection guard: an answer lands only while the pane still
+   * shows the same ticket, attempt, and variant, so an in-flight log tail
+   * never appends into a view the user has switched to the Stream file.
+   */
+  private isCurrent(
+    ticketId: string,
+    attempt: number,
+    stream: boolean,
+  ): boolean {
+    return (
+      this.state.ticketId === ticketId &&
+      this.state.attempt === attempt &&
+      this.state.stream === stream
+    );
+  }
+
+  /** Hold the response's per-attempt listing: the latest one wins, and the
+   *  timeline's stream links re-join from it on every render. */
+  private note(chunk: LogChunk): void {
+    if (chunk.attempts) this.state.attempts = chunk.attempts;
   }
 
   private resetWindow(ticketId: string | null): void {
+    if (ticketId !== this.state.ticketId) this.state.attempts = [];
     this.state.ticketId = ticketId;
     this.state.attempt = null;
     this.state.clicked = false;
+    this.state.stream = false;
     this.state.content = "";
     this.state.firstOffset = 0;
     this.state.offset = 0;

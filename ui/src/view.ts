@@ -59,6 +59,7 @@ export interface Handlers {
   onToggleInspector: () => void;
   onSelectNode: (nodeId: string | null) => void;
   onSelectAttempt: (ticketId: string, attempt: number) => void;
+  onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
@@ -129,7 +130,8 @@ export class ConsoleView {
       model.logPane &&
       !model.logPane.neverRun &&
       model.logPane.selectedAttempt !== null
-        ? `${model.detail.ticketId}:${model.logPane.selectedAttempt}`
+        ? `${model.detail.ticketId}:${model.logPane.selectedAttempt}` +
+          (model.logPane.stream ? ":stream" : "")
         : null;
     restoreLogScroll(logPaneKey);
     this.detail.restoreNoteFocus(root, noteFocus);
