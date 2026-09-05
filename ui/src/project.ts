@@ -567,6 +567,8 @@ export interface TicketCardView {
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
   status: PoolStatus;
+  /** The ticket's resolved Assignment (ADR-0012), rendered verbatim. */
+  assignment: PoolTicketAssignment;
   outcome: PoolOutcome | null;
   interrupt: InterruptView | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
@@ -769,6 +771,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
+    assignment: ticket.assignment,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,

@@ -28,10 +28,6 @@ import {
 } from "./project";
 import { ConsoleView, type AppModel } from "./view";
 import { createPrototype, type Prototype } from "./prototype/index";
-import {
-  createAssignmentsPrototype,
-  type AssignmentsPrototype,
-} from "./prototype-assignments/index";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
@@ -40,7 +36,6 @@ const root: HTMLElement = appRoot;
 const client = new PoolClient();
 
 let proto: Prototype | null = null;
-let assignProto: AssignmentsPrototype | null = null;
 
 // The favicon: one reused link element whose href is a canvas-drawn dot in
 // the pool status color. The idle grey dot stands from page load, before the
@@ -347,7 +342,6 @@ function render(): void {
     },
   });
   proto?.afterRender(root);
-  assignProto?.afterRender(root);
 }
 
 function setSnapshot(snapshot: PoolSnapshot): void {
@@ -356,7 +350,6 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.error = null;
   vitals.update(snapshot);
   proto?.update(snapshot);
-  assignProto?.update(snapshot);
   const status = poolStatus(snapshot);
   document.title = `${status.word} — ${snapshot.poolName}`;
   setFavicon(status.color);
@@ -372,7 +365,6 @@ function setSnapshot(snapshot: PoolSnapshot): void {
 
 async function boot(): Promise<void> {
   proto = createPrototype({ onNeedRender: () => render() });
-  assignProto = createAssignmentsPrototype({ onNeedRender: () => render() });
   let snapshot: PoolSnapshot | null = null;
   try {
     snapshot = await client.getState();
