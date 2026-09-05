@@ -621,6 +621,64 @@ body {
   stroke-width: 1;
 }
 
+/* The Assignment badge under a ticket card's head: the engine's resolved
+   harness · model · drivers, rendered verbatim (ADR-0013). One line, the
+   model ellipsizing before the harness; the expanded toggle wraps the full
+   text in place. An unassigned ticket reads a muted word. */
+.assignment-badge {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+/* One line: the model ellipsizes first, then the harness and drivers share
+   what is left; the shrink weights stage the model far ahead of the rest.
+   The click toggle shows everything, so no value stays unreadable. */
+.assignment-badge-harness,
+.assignment-badge-model,
+.assignment-badge-drivers {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assignment-badge-model {
+  flex: 0 1000 auto;
+}
+
+.assignment-badge-harness,
+.assignment-badge-drivers {
+  flex: 0 1 auto;
+}
+
+.assignment-badge-unassigned {
+  color: var(--text-dim);
+}
+
+/* Expanded: the same badge allowed to wrap, so the full text shows in place.
+   The value spans drop their ellipsis and their text wraps within the row. */
+.assignment-badge-expanded {
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.assignment-badge-expanded .assignment-badge-harness,
+.assignment-badge-expanded .assignment-badge-model,
+.assignment-badge-expanded .assignment-badge-drivers {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .card-channels {
   display: flex;
   flex-direction: column;

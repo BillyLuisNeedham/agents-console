@@ -153,8 +153,20 @@ describe("NeedsInputTray waiting rows", () => {
       poolName: "repo/pool",
       state: {
         tickets: [
-          { id: "A", title: "ticket A", blockedBy: [], status: "checkpoint" },
-          { id: "B", title: "ticket B", blockedBy: [], status: "checkpoint" },
+          {
+            id: "A",
+            title: "ticket A",
+            blockedBy: [],
+            status: "checkpoint",
+            assignment: { harness: null, model: null, drivers: "implement" },
+          },
+          {
+            id: "B",
+            title: "ticket B",
+            blockedBy: [],
+            status: "checkpoint",
+            assignment: { harness: null, model: null, drivers: "implement" },
+          },
         ],
         log: [],
         outcomes: {},

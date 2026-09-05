@@ -382,7 +382,7 @@ describe("pool loading", () => {
     ).rejects.toThrow(/no Issue files/);
   });
 
-  it("rejects a ticket with no resolvable harness", async () => {
+  it("renders an unresolvable-harness ticket unassigned on the snapshot, and dies naming the fix when it schedules", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -391,9 +391,23 @@ describe("pool loading", () => {
         },
       ],
     });
-    await expect(
-      runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
-    ).rejects.toThrow(/no harness/);
+    // Resolution is total (the unassigned record rides the snapshot with
+    // nulls), so the pool starts and the pool config error fires when the
+    // ticket schedules, at the spawn that cannot run.
+    const run = startPool({ poolDir, harnesses: stubHarness({}).harnesses });
+    await expect(run.settled).rejects.toThrow(
+      /pool config: ticket 01 has no harness/,
+    );
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.phase).toBe("dead");
+    expect(last.assignments["01"]).toEqual({
+      harness: null,
+      model: null,
+      drivers: "implement",
+    });
+    expect(run.final.log).toContain(
+      "pool dead: pool config: ticket 01 has no harness (set one in console.json assign or defaults)",
+    );
   });
 });
 
@@ -1226,6 +1240,74 @@ describe("verify grading", () => {
       readEventLines(poolDir, "01").find((e) => e.kind === "graded" && e.attempt === 2)
         ?.payload,
     ).toEqual({ score: 6, verdict: "pass", reasons: "ok" });
+  }, 15000);
+
+  it("serves grader tickets the Assignment inherited from their build ticket on the snapshot", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "stub", model: "pool-default-model" },
+        assign: {
+          "01": {
+            verify: 2,
+            harness: "stub",
+            model: "build-model",
+            drivers: "implement code-review",
+          },
+          "01-grader-2": { harness: "other" },
+        },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    const otherScript = join(poolDir, "other-harness.sh");
+    writeFileSync(
+      otherScript,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'issue="$1"; outcome_path="$2"',
+        'printf \'%s\' \'{"status":"done","summary":"other-grader",' +
+          '"commitSha":null,"grade":{"score":6,"verdict":"pass",' +
+          '"reasons":"ok"}}\' > "$outcome_path"',
+        "",
+      ].join("\n"),
+    );
+    const other: HarnessCommand = (ctx) => [
+      "bash",
+      otherScript,
+      ctx.issuePath,
+      ctx.outcomePath,
+    ];
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { ...rig.harnesses, other },
+    });
+
+    // The records on the served snapshot come from the engine's resolution:
+    // the graders inherit their build ticket's model and drivers, not the
+    // pool defaults (whose model name appears on no record).
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["01"]).toEqual({
+      harness: "stub",
+      model: "build-model",
+      drivers: "implement code-review",
+    });
+    expect(last.assignments["01-grader-1"]).toEqual({
+      harness: "stub",
+      model: "build-model",
+      drivers: "implement code-review",
+    });
+    expect(last.assignments["01-grader-2"]).toEqual({
+      harness: "other",
+      model: "build-model",
+      drivers: "implement code-review",
+    });
   }, 15000);
 
   it("re-spawns a grader that produced no usable grade and lands the eventual grade", async () => {
@@ -2187,6 +2269,37 @@ describe("verify selection", () => {
     const h2h = rig.spawned["01-head-to-head"];
     expect(h2h.model).toBe("h2h-model");
     expect(h2h.harness).toBe("stub");
+  }, 15000);
+
+  it("serves the head-to-head the Assignment inherited from its build ticket on the snapshot", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "stub", model: "pool-default-model" },
+        assign: {
+          "01": { verify: 2, harness: "stub", model: "build-model" },
+          // Model-only override: the harness still comes from the build.
+          "01-head-to-head": { model: "h2h-model" },
+        },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [attemptWork(1), attemptWork(2)],
+      "01-grader-1": grade(9),
+      "01-grader-2": grade(8),
+      "01-head-to-head": { winner: 1 },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // The judge's record carries the field-wise override over the build
+    // ticket's assignment, not the pool defaults.
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["01-head-to-head"]).toEqual({
+      harness: "stub",
+      model: "h2h-model",
+      drivers: "implement",
+    });
   }, 15000);
 
   it("falls back to the higher raw score when the head-to-head ties", async () => {
@@ -5723,6 +5836,46 @@ describe("spawn adoption", () => {
     expect(run.final.tickets).toEqual({
       "01": "done",
       "01-spawn-1": "done",
+    });
+  });
+
+  it("serves spawned tickets the Assignment inherited from their parent on the snapshot", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        {
+          file: "01-spawn-1.md",
+          marker:
+            "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->",
+          body: "# 01-spawn-1: Adopted earlier\n\nAlready on disk.\n",
+        },
+      ],
+      // No defaults: the spawned id resolves only through its parent, so the
+      // record can only come from inheritance. The spawned id's own assign
+      // entry overrides field-wise: drivers here, harness and model inherited.
+      config: {
+        assign: {
+          "01": { harness: "stub", model: "parent-model" },
+          "01-spawn-1": { drivers: "implement code-review" },
+        },
+      },
+    });
+    const rig = stubHarness({});
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["01"]).toEqual({
+      harness: "stub",
+      model: "parent-model",
+      drivers: "implement",
+    });
+    expect(last.assignments["01-spawn-1"]).toEqual({
+      harness: "stub",
+      model: "parent-model",
+      drivers: "implement code-review",
     });
   });
 

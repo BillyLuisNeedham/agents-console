@@ -73,6 +73,7 @@ function ticket(
     title: `ticket ${id}`,
     blockedBy: [],
     status: "ready",
+    assignment: { harness: null, model: null, drivers: "implement" },
     ...overrides,
   };
 }
