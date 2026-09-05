@@ -143,3 +143,42 @@ export async function openAttemptTab(
   }
   return { tabId, paneId };
 }
+
+/**
+ * Read a pane's recent output for the card's read-only peek: `pane.read`
+ * with source `recent`, text format, ANSI stripped, a small line count.
+ * Resolves with the text; an empty read (a freshly created background tab
+ * returns empty for its first seconds while herdr warms up its viewport,
+ * verified behaviour) resolves to empty text, never an error. `revision`
+ * is deliberately not part of the return: the prototype verified it stays
+ * stagnant while output grows, so freshness comes from re-polling and
+ * comparing text, never from the revision counter.
+ */
+export async function peekPane(
+  socketPath: string,
+  paneId: string,
+  lines: number,
+): Promise<string> {
+  const res = await herdrRpc(socketPath, "pane.read", {
+    pane_id: paneId,
+    source: "recent",
+    format: "text",
+    strip_ansi: true,
+    lines,
+  });
+  const read = (res as { read?: { text?: unknown } } | null)?.read;
+  return typeof read?.text === "string" ? read.text : "";
+}
+
+/**
+ * Focus the pane's tab in the operator's herdr TUI: one `pane.focus` call.
+ * The pool server only ever names panes its own `spawned` events recorded
+ * (the spawned-only guard in server.ts), so this can never yank the TUI
+ * to an unrelated live agent session sharing the daemon.
+ */
+export async function focusPane(
+  socketPath: string,
+  paneId: string,
+): Promise<void> {
+  await herdrRpc(socketPath, "pane.focus", { pane_id: paneId });
+}
