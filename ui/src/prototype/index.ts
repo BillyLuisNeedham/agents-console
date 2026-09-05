@@ -12,6 +12,7 @@ import {
 import { variantA } from "./variant-a";
 import { variantB } from "./variant-b";
 import { variantC } from "./variant-c";
+import { variantT } from "./variant-t";
 
 export interface PrototypeRenderContext {
   root: HTMLElement;
@@ -32,15 +33,18 @@ export interface Prototype {
   dispose(): void;
 }
 
-const VARIANTS: PrototypeVariant[] = [variantA, variantB, variantC];
+const VARIANTS: PrototypeVariant[] = [variantA, variantB, variantC, variantT];
 
 export function createPrototype(opts: {
   onNeedRender: () => void;
 }): Prototype | null {
   const params = new URLSearchParams(location.search);
-  if (!params.has("variant")) return null;
+  // The prototype activates on ?variant= as before, and additionally on
+  // ?termproto=1 (issue #29), which selects variant T by default.
+  const termproto = params.get("termproto") === "1";
+  if (!params.has("variant") && !termproto) return null;
   const demo = params.get("demo") === "1";
-  const wanted = (params.get("variant") ?? "A").toUpperCase();
+  const wanted = (params.get("variant") ?? (termproto ? "T" : "A")).toUpperCase();
   let current = VARIANTS.find((v) => v.key === wanted) ?? VARIANTS[0];
 
   const source = createActivitySource({

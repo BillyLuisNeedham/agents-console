@@ -1,0 +1,271 @@
+/* PROTOTYPE — throwaway, issue #29 terminal-surface exploration (surface B).
+   Embedded xterm terminal. The shared .surface wrapper centers and pads, so
+   surface B overrides that to fill the shell edge-to-edge. */
+
+/* The shared .surface centering/padding only applies to variant A's card. */
+.surface:has(.varb-root) {
+  align-items: stretch;
+  justify-content: stretch;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.varb-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #0d1119;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* Room for the fixed switcher pill floating at the bottom. */
+  padding-bottom: 48px;
+}
+
+/* --------------------------------------------------------------- header */
+.varb-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: linear-gradient(180deg, #10151f, #0c1018);
+  border-bottom: 1px solid var(--border-strong);
+  flex: none;
+}
+
+.varb-header-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.varb-header-pane {
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(76, 194, 255, 0.1);
+  border: 1px solid rgba(76, 194, 255, 0.3);
+  padding: 2px 8px;
+  border-radius: 999px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.varb-header-conn {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--text-faint);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.varb-header-conn.live {
+  color: var(--status-done);
+  border-color: var(--status-done);
+  background: rgba(63, 185, 80, 0.1);
+}
+
+.varb-header-conn.polling {
+  color: var(--status-running);
+  border-color: var(--status-running);
+  background: rgba(210, 153, 34, 0.1);
+}
+
+.varb-header-conn.idle {
+  color: var(--text-faint);
+}
+
+.varb-header-pop {
+  margin-left: auto;
+  appearance: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.varb-header-pop:hover {
+  background: rgba(76, 194, 255, 0.12);
+  border-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- body */
+.varb-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #0d1119;
+}
+
+.varb-term {
+  position: absolute;
+  inset: 0;
+  padding: 6px 4px 4px;
+}
+
+.varb-term .xterm {
+  height: 100%;
+}
+
+.varb-term .xterm-viewport {
+  background-color: #0d1119;
+}
+
+/* -------------------------------------------------------------- banner */
+.varb-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--status-running);
+  background: rgba(210, 153, 34, 0.08);
+  border-top: 1px solid rgba(210, 153, 34, 0.4);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.varb-banner[hidden] {
+  display: none;
+}
+
+.varb-banner-msg {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.varb-banner-btn {
+  appearance: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: #06121a;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.varb-banner-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.varb-banner-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* -------------------------------------------------------------- status */
+.varb-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-top: 1px solid var(--border);
+  background: #0b0e14;
+  font-size: 10px;
+  color: var(--text-faint);
+  flex: none;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.varb-status-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.varb-status-peek {
+  appearance: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+}
+
+.varb-status-peek:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* --------------------------------------------------------------- launch */
+.varb-launch {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.varb-launch-card {
+  max-width: 460px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 22px 24px;
+}
+
+.varb-launch-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.varb-launch-sub {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+}
+
+.varb-launch-btn {
+  appearance: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: #06121a;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 8px 16px;
+}
+
+.varb-launch-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.varb-launch-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

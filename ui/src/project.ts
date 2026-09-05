@@ -827,7 +827,9 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
-    assignment: ticket.assignment,
+    // A pre-Assignment pool checkpoint has no assignment field; default it so
+    // the card renders as an unassigned ticket instead of crashing.
+    assignment: ticket.assignment ?? { harness: null, model: null, drivers: "implement" },
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,
