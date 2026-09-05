@@ -23,6 +23,7 @@ import {
 import { readFleetEntries } from "./fleet.ts";
 import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
+import { branchFor, worktreePathFor } from "./worktrees.ts";
 
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
@@ -918,7 +919,7 @@ describe("merge pending enrichment", () => {
 
   /** Park pool/<id> with one commit main does not have. */
   function parkBranch(root: string, run: (args: string[]) => void, id: string): void {
-    run(["checkout", "-q", "-b", `pool/${id}`]);
+    run(["checkout", "-q", "-b", branchFor(root, id)]);
     writeFileSync(join(root, `w-${id}.txt`), `work for ${id}\n`);
     run(["add", `w-${id}.txt`]);
     run(["commit", "-qm", `work ${id}`]);
@@ -952,7 +953,7 @@ describe("merge pending enrichment", () => {
     // A manual CLI merge, branch kept and now an ancestor of the working
     // branch, lifts the label on the next snapshot without any Console
     // action. The ticket is still done; only the merge was pending.
-    run(["merge", "--no-edit", "pool/01"]);
+    run(["merge", "--no-edit", branchFor(root, "01")]);
     expect((await ticketsOf(server))[0]).toMatchObject({
       id: "01",
       status: "done",
@@ -961,13 +962,13 @@ describe("merge pending enrichment", () => {
 
     // A branch that is gone reads as merged the same way: the engine
     // deletes it once its own merge lands.
-    run(["checkout", "-q", "-B", "pool/01"]);
+    run(["checkout", "-q", "-B", branchFor(root, "01")]);
     writeFileSync(join(root, "again.txt"), "more\n");
     run(["add", "again.txt"]);
     run(["commit", "-qm", "again"]);
     run(["checkout", "-q", "main"]);
     expect((await ticketsOf(server))[0]?.mergePending).toBe(true);
-    run(["branch", "-D", "pool/01"]);
+    run(["branch", "-D", branchFor(root, "01")]);
     expect((await ticketsOf(server))[0]?.mergePending).toBe(false);
   });
 
@@ -978,12 +979,12 @@ describe("merge pending enrichment", () => {
     ]);
     // 02 lands in main, then feature/x is cut from main BEFORE that merge:
     // the work is in main but not in the branch the pool works on.
-    run(["checkout", "-q", "-b", "pool/02"]);
+    run(["checkout", "-q", "-b", branchFor(root, "02")]);
     writeFileSync(join(root, "w-02.txt"), "work 02\n");
     run(["add", "w-02.txt"]);
     run(["commit", "-qm", "work 02"]);
     run(["checkout", "-q", "main"]);
-    run(["merge", "--no-edit", "pool/02"]);
+    run(["merge", "--no-edit", branchFor(root, "02")]);
     run(["checkout", "-q", "-b", "feature/x", "main~1"]);
     writeFileSync(join(root, "f.txt"), "feature\n");
     run(["add", "f.txt"]);
@@ -1032,7 +1033,7 @@ describe("merge pending enrichment", () => {
       status: "done",
       mergePending: false,
     });
-    expect(existsSync(join(root, ".git", "pool-worktrees", "01"))).toBe(false);
+    expect(existsSync(worktreePathFor(root, "01"))).toBe(false);
   });
 });
 
@@ -1454,7 +1455,7 @@ describe("ticket activity endpoint", () => {
     payload: Record<string, unknown> = {},
   ) => ({ at: T0, attempt, kind, payload });
   const spawnedIn = (repo: string) =>
-    ev(1, "spawned", { cwd: repo, branch: "pool/01" });
+    ev(1, "spawned", { cwd: repo, branch: branchFor(repo, "01") });
 
   async function getActivity(
     server: PoolServer,

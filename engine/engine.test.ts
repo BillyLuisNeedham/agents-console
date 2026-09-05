@@ -25,6 +25,7 @@ import {
 import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
 import { appendEvent } from "./events.ts";
 import { loadPoolMarkers } from "./pool.ts";
+import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import type { SpawnContext } from "./spawn.ts";
 
@@ -707,14 +708,14 @@ describe("verify fan-out", () => {
     for (let i = 1; i <= 3; i++) {
       const rec = join(poolDir, `rec-${i}`);
       expect(readFileSync(join(rec, "branch"), "utf8").trim()).toBe(
-        `pool/01.attempt-${i}`,
+        branchFor(poolDir, "01", i),
       );
       expect(readFileSync(join(rec, "head"), "utf8").trim()).toBe(head);
       expect(readFileSync(join(rec, "cwd"), "utf8").trim()).toBe(
-        join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`),
+        worktreePathFor(poolDir, "01", i),
       );
       expect(rig.spawnList[i - 1].cwd).toBe(
-        join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`),
+        worktreePathFor(poolDir, "01", i),
       );
     }
 
@@ -728,7 +729,7 @@ describe("verify fan-out", () => {
         ),
       );
       expect(outcome.status).toBe("done");
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .not.toBe(0);
       expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(i === 1);
     }
@@ -805,7 +806,7 @@ describe("verify fan-out", () => {
       "merged",
     ]);
     // The merged attempt branch is cleaned up like any merged branch.
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .not.toBe(0);
   }, 15000);
 
@@ -841,7 +842,7 @@ describe("verify fan-out", () => {
     expect(rig.spawnOrder.filter((id) => id === "01")).toHaveLength(3);
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
     for (let i = 1; i <= 3; i++) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .not.toBe(0);
     }
     expect(run.phase).toBe("quiescent");
@@ -900,7 +901,7 @@ describe("verify fan-out", () => {
     for (const i of [2, 3]) {
       const exit = events.find((e) => e.kind === "exited" && e.attempt === i);
       expect(exit?.payload).toEqual({ code: 0, status: "done" });
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .toBe(0);
       expect(existsSync(join(poolDir, `cand-${i}.txt`))).toBe(false);
       expect(
@@ -958,7 +959,7 @@ describe("verify fan-out", () => {
         ),
       ).status,
     ).toBe("checkpoint");
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .toBe(0);
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
   }, 15000);
@@ -1705,7 +1706,7 @@ describe("lone attempt resolution", () => {
     expect(issueText).toContain("## Brief");
     expect(issueText).toContain("the claimed tests do not exist");
     expect(existsSync(join(poolDir, "cand.txt"))).toBe(false);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .toBe(0);
 
     // The grader's grade landed before the resolution, and the grader card
@@ -1800,7 +1801,7 @@ describe("lone attempt resolution", () => {
       [2, "graded"],
       [2, "merged"],
     ]);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .not.toBe(0);
   }, 15000);
 
@@ -1886,10 +1887,10 @@ describe("lone attempt resolution", () => {
     expect(run.interrupts).toHaveLength(1);
     expect(run.interrupts[0]?.kind).toBe("checkpoint");
     expect(run.interrupts[0]?.body).toContain("cand.txt");
-    expect(run.interrupts[0]?.body).toContain("pool/01.attempt-1");
+    expect(run.interrupts[0]?.body).toContain(branchFor(poolDir, "01", 1));
     expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
     expect(readFileSync(join(poolDir, "cand.txt"), "utf8")).toBe("plain\n");
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .toBe(0);
   }, 15000);
 });
@@ -1946,10 +1947,10 @@ describe("verify selection", () => {
     // Every attempt branch is gone: the winner's after its merge, the
     // losers' discarded unmerged.
     for (const i of [1, 2, 3]) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .not.toBe(0);
       expect(
-        existsSync(join(poolDir, ".git", "pool-worktrees", `01.attempt-${i}`)),
+        existsSync(worktreePathFor(poolDir, "01", i)),
       ).toBe(false);
     }
 
@@ -2029,7 +2030,7 @@ describe("verify selection", () => {
     ).toEqual([1]);
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .not.toBe(0);
     expect(run.final.log).toContain(
       "ticket 01: head-to-head 01-head-to-head tied",
@@ -2077,9 +2078,9 @@ describe("verify selection", () => {
         "outcome names no winner among the two attempts",
     );
     expect(events.filter((e) => e.kind === "merged")).toHaveLength(1);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .not.toBe(0);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .not.toBe(0);
     expect(run.phase).toBe("quiescent");
   }, 15000);
@@ -2107,7 +2108,7 @@ describe("verify selection", () => {
     expect(events.some((e) => e.kind === "merged")).toBe(false);
     expect(run.final.tickets["01"]).toBe("in-progress");
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .toBe(0);
     expect(run.phase).toBe("stalled");
   }, 15000);
@@ -2192,7 +2193,7 @@ describe("verify selection", () => {
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
     expect(existsSync(join(poolDir, "cand-3.txt"))).toBe(false);
     for (const i of [1, 2, 3]) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .not.toBe(0);
     }
 
@@ -2271,7 +2272,7 @@ describe("verify selection", () => {
       events.filter((e) => e.kind === "merged").map((e) => e.attempt),
     ).toEqual([2]);
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .not.toBe(0);
     expect(run.phase).toBe("quiescent");
   }, 15000);
@@ -2347,7 +2348,7 @@ describe("verify human selection", () => {
     expect(
       events.filter((e) => e.kind === "merged").map((e) => e.attempt),
     ).toEqual([1]);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-1"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode)
       .not.toBe(0);
   }, 15000);
 
@@ -2380,7 +2381,7 @@ describe("verify human selection", () => {
     expect(events.some((e) => e.kind === "selected")).toBe(false);
     expect(events.some((e) => e.kind === "merged")).toBe(false);
     for (const i of [1, 2]) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .toBe(0);
     }
   }, 15000);
@@ -2411,7 +2412,7 @@ describe("verify human selection", () => {
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(false);
     for (const i of [1, 2]) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .not.toBe(0);
     }
     expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
@@ -2443,7 +2444,7 @@ describe("verify human selection", () => {
     expect(readEventLines(poolDir, "01").some((e) => e.kind === "merged"))
       .toBe(false);
     for (const i of [1, 2]) {
-      expect(git(["rev-parse", "--verify", `pool/01.attempt-${i}`]).exitCode)
+      expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", i)]).exitCode)
         .toBe(0);
     }
     expect(run.final.tickets["01"]).toBe("in-progress");
@@ -2457,7 +2458,7 @@ describe("verify human selection", () => {
         .filter((e) => e.kind === "merged")
         .map((e) => e.attempt),
     ).toEqual([1]);
-    expect(git(["rev-parse", "--verify", "pool/01.attempt-2"]).exitCode)
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .not.toBe(0);
   }, 15000);
 
@@ -5713,10 +5714,10 @@ describe("worktrees", () => {
       const rec = join(poolDir, `rec-${id}`);
       expect(readFileSync(join(rec, "head"), "utf8").trim()).toBe(head);
       expect(readFileSync(join(rec, "branch"), "utf8").trim()).toBe(
-        `pool/${id}`,
+        branchFor(poolDir, id),
       );
       expect(readFileSync(join(rec, "cwd"), "utf8").trim()).toBe(
-        join(poolDir, ".git", "pool-worktrees", id),
+        worktreePathFor(poolDir, id),
       );
     }
     expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
@@ -5734,6 +5735,103 @@ describe("worktrees", () => {
       git(["branch", "--list", "pool/*"]).stdout.toString().trim(),
     ).toBe("");
   }, 15000);
+
+  it("keeps two pools sharing one repo out of each other's worktrees and branches", async () => {
+    // The live collision (2026-09-05): two pools on one repo share the
+    // common git dir and the ref namespace, so bare ticket ids collided on
+    // pool-worktrees/<id> and pool/<id>, and one engine adopted the other's
+    // worktree. A linked worktree as the second pool is exactly that shape.
+    const { poolDir: rootA, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const base = mkdtempSync(join(tmpdir(), "pool-b-"));
+    tempDirs.push(base);
+    const poolB = join(base, "checkout");
+    expect(
+      git(["worktree", "add", poolB, "-b", "pool-b-main", "HEAD"]).exitCode,
+    ).toBe(0);
+    mkdirSync(join(poolB, "issues"), { recursive: true });
+    // The checkout inherited pool A's committed ticket files, so pool B's
+    // markers overwrite them in place rather than sitting beside them as
+    // duplicate ids.
+    for (const id of ["01", "02"]) {
+      writeFileSync(
+        join(poolB, "issues", readyTicket(id).file),
+        `${readyTicket(id).marker}\n\n# body\n`,
+      );
+    }
+    writeFileSync(
+      join(poolB, "console.json"),
+      JSON.stringify(stubConfig, null, 2),
+    );
+
+    const rigA = gitStubHarness(rootA, {
+      "01": {
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        recordDir: join(rootA, "rec-01"),
+      },
+      "02": {
+        workFile: "two.txt",
+        commitMsg: "work-02",
+        recordDir: join(rootA, "rec-02"),
+      },
+    });
+    const rigB = gitStubHarness(poolB, {
+      "01": {
+        workFile: "b-one.txt",
+        commitMsg: "work-b-01",
+        recordDir: join(poolB, "rec-01"),
+      },
+      "02": {
+        workFile: "b-two.txt",
+        commitMsg: "work-b-02",
+        recordDir: join(poolB, "rec-02"),
+      },
+    });
+
+    const doneA = await approveReview(
+      await runPool({ poolDir: rootA, harnesses: rigA.harnesses }),
+    );
+    expect(doneA.phase).toBe("done");
+    const doneB = await approveReview(
+      await runPool({ poolDir: poolB, harnesses: rigB.harnesses }),
+    );
+    expect(doneB.phase).toBe("done");
+
+    // Each pool ran in its own namespaced worktrees on its own branches.
+    for (const id of ["01", "02"]) {
+      expect(branchFor(rootA, id)).not.toBe(branchFor(poolB, id));
+      expect(
+        readFileSync(join(rootA, `rec-${id}`, "cwd"), "utf8").trim(),
+      ).toBe(worktreePathFor(rootA, id));
+      expect(
+        readFileSync(join(poolB, `rec-${id}`, "cwd"), "utf8").trim(),
+      ).toBe(worktreePathFor(poolB, id));
+      expect(
+        readFileSync(join(rootA, `rec-${id}`, "branch"), "utf8").trim(),
+      ).toBe(branchFor(rootA, id));
+      expect(
+        readFileSync(join(poolB, `rec-${id}`, "branch"), "utf8").trim(),
+      ).toBe(branchFor(poolB, id));
+    }
+
+    // And each merge landed only in its own pool's working branch: no
+    // engine ever touched the other's checkout.
+    const subjectsA = git(["log", "--format=%s", "main"]).stdout.toString();
+    expect(subjectsA).toContain("work-01");
+    expect(subjectsA).toContain("work-02");
+    expect(subjectsA).not.toContain("work-b-01");
+    const subjectsB = git([
+      "log",
+      "--format=%s",
+      "pool-b-main",
+    ]).stdout.toString();
+    expect(subjectsB).toContain("work-b-01");
+    expect(subjectsB).toContain("work-b-02");
+    expect(subjectsB).not.toContain("work-01");
+  }, 20000);
 
   // A fake opencode binary on PATH records the PWD the engine passed it.
   // The real opencode CLI is a Bun binary and bun hands the inherited
@@ -5793,7 +5891,7 @@ describe("worktrees", () => {
       // The tickets ran in worktrees; the child must see the worktree as
       // PWD, not the server's checkout (where the test process lives).
       expect(readFileSync(join(fake.recordDir, `pwd.${id}`), "utf8")).toBe(
-        join(poolDir, ".git", "pool-worktrees", id),
+        worktreePathFor(poolDir, id),
       );
       expect(readFileSync(join(fake.recordDir, `pwd.${id}`), "utf8")).not.toBe(
         process.env.PWD,
@@ -5829,7 +5927,7 @@ describe("worktrees", () => {
         join(poolDir, "issues", `${id}-t.md`),
       );
       expect(rig.spawned[id].cwd).toBe(
-        join(poolDir, ".git", "pool-worktrees", id),
+        worktreePathFor(poolDir, id),
       );
       // The engine wrote the marker on exactly that file: done on disk.
       expect(markerLine(poolDir, `${id}-t.md`)).toContain("status=done");
@@ -5937,7 +6035,7 @@ describe("worktrees", () => {
     expect(interrupt.ticketId).toBe("02");
     expect(interrupt.kind).toBe("merge-conflict");
     expect(interrupt.body).toContain("shared.txt");
-    expect(interrupt.body).toContain("pool/02");
+    expect(interrupt.body).toContain(branchFor(poolDir, "02"));
     // The working branch was left clean: no half-merged state, 01's content
     // in place, 03 merged past the conflict, 02's branch parked for a human.
     expect(
@@ -5945,15 +6043,15 @@ describe("worktrees", () => {
     ).not.toBe(0);
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
     expect(existsSync(join(poolDir, "three.txt"))).toBe(true);
-    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "02")]).exitCode).toBe(0);
     expect(
-      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+      existsSync(worktreePathFor(poolDir, "02")),
     ).toBe(true);
 
     // The human resolves by hand in the main checkout, then resumes; the
     // merge lands and the hold lifts.
     git(["checkout", "--", "issues/02-t.md"]);
-    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["merge", "--no-edit", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
     git(["add", "shared.txt"]);
     git(["commit", "-qm", "resolve pool/02"]);
@@ -5966,9 +6064,9 @@ describe("worktrees", () => {
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
       "resolved\n",
     );
-    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     expect(
-      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+      existsSync(worktreePathFor(poolDir, "02")),
     ).toBe(false);
   }, 15000);
 
@@ -6016,7 +6114,7 @@ describe("worktrees", () => {
     // outcomes channel, not the merge, carries state downstream; the merge
     // decides when the downstream ticket may start.
     git(["checkout", "--", "issues/02-t.md"]);
-    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["merge", "--no-edit", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
     git(["add", "shared.txt"]);
     git(["commit", "-qm", "resolve pool/02"]);
@@ -6059,11 +6157,11 @@ describe("worktrees", () => {
     ]);
     // The checkpoint parked 01's worktree with its partial work; 02 merged
     // and cleaned up.
-    expect(existsSync(join(poolDir, ".git", "pool-worktrees", "01"))).toBe(
+    expect(existsSync(worktreePathFor(poolDir, "01"))).toBe(
       true,
     );
-    expect(git(["rev-parse", "--verify", "pool/01"]).exitCode).toBe(0);
-    expect(existsSync(join(poolDir, ".git", "pool-worktrees", "02"))).toBe(
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).toBe(0);
+    expect(existsSync(worktreePathFor(poolDir, "02"))).toBe(
       false,
     );
 
@@ -6076,7 +6174,7 @@ describe("worktrees", () => {
     expect(rig.spawnOrder).toEqual(["01", "02", "01"]);
     expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
     expect(existsSync(join(poolDir, "one-more.txt"))).toBe(true);
-    expect(git(["rev-parse", "--verify", "pool/01"]).exitCode).not.toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).not.toBe(0);
     const issueText = readFileSync(join(poolDir, "issues", "01-t.md"), "utf8");
     expect(issueText).toContain("status=done");
     expect(issueText).toContain("carry on");
@@ -6114,7 +6212,7 @@ describe("worktrees", () => {
       git: (args: string[]) => { exitCode: number },
       id: string,
     ): void {
-      git(["checkout", "-q", "-b", `pool/${id}`]);
+      git(["checkout", "-q", "-b", branchFor(poolDir, id)]);
       writeFileSync(join(poolDir, `w-${id}.txt`), `work for ${id}\n`);
       git(["add", `w-${id}.txt`]);
       git(["commit", "-qm", `work ${id}`]);
@@ -6149,7 +6247,7 @@ describe("worktrees", () => {
       // A manual CLI merge lifts the hold on the next ready-set computation,
       // with no operator action in the Console: the drive's derivation
       // simply observes the branch landed.
-      git(["merge", "--no-edit", "pool/01"]);
+      git(["merge", "--no-edit", branchFor(poolDir, "01")]);
       await waitFor(() => rig.spawnOrder.includes("02"));
       const done = await approveReview(await run.settled);
 
@@ -6292,7 +6390,7 @@ describe("worktrees", () => {
       // margin, so the selection run's judge routes through the same entry
       // point and the head-to-head spawns only now.
       git(["checkout", "--", "issues/02-t.md"]);
-      expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+      expect(git(["merge", "--no-edit", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
       writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
       git(["add", "shared.txt"]);
       git(["commit", "-qm", "resolve pool/02"]);
@@ -6352,7 +6450,7 @@ describe("worktrees", () => {
       // the engine read main as the target instead, nothing here would ever
       // lift the hold and the test would time out waiting for 03.
       git(["checkout", "-q", "-b", "feature/x"]);
-      expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+      expect(git(["merge", "--no-edit", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
       writeFileSync(join(poolDir, "shared.txt"), "resolved\n");
       git(["add", "shared.txt"]);
       git(["commit", "-qm", "resolve pool/02 onto feature/x"]);
@@ -6440,11 +6538,11 @@ describe("worktrees", () => {
     // Both run kinds record the worktree they ran in, so a ticket maps
     // durably to its attempt's cwd/branch.
     const spawnedEvent = before.find((e) => e.kind === "spawned")!;
-    expect(spawnedEvent.payload.cwd).toContain("pool-worktrees/02");
-    expect(spawnedEvent.payload.branch).toBe("pool/02");
+    expect(spawnedEvent.payload.cwd).toContain(worktreePathFor(poolDir, "02"));
+    expect(spawnedEvent.payload.branch).toBe(branchFor(poolDir, "02"));
     const resolverEvent = before.find((e) => e.kind === "resolver")!;
     expect(resolverEvent.payload.cwd).toBe(spawnedEvent.payload.cwd);
-    expect(resolverEvent.payload.branch).toBe("pool/02");
+    expect(resolverEvent.payload.branch).toBe(branchFor(poolDir, "02"));
 
     const approved = await run.approve("02");
     const done = await approveReview(approved);
@@ -6586,10 +6684,10 @@ describe("worktrees", () => {
     // resolution staged: the resolution is not yet committed, MERGE_HEAD set.
     expect(resolver.spawnOrder).toEqual(["02"]);
     expect(resolver.spawned["02"].cwd).toBe(
-      join(poolDir, ".git", "pool-worktrees", "02"),
+      worktreePathFor(poolDir, "02"),
     );
     expect(readFileSync(join(poolDir, "res-rec", "branch"), "utf8").trim()).toBe(
-      "pool/02",
+      branchFor(poolDir, "02"),
     );
     expect(
       readFileSync(join(poolDir, "res-rec", "mergehead"), "utf8").trim(),
@@ -6606,9 +6704,9 @@ describe("worktrees", () => {
       "resolved-by-agent\n",
     );
     expect(done.final.tickets["03"]).toBe("done");
-    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     expect(
-      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+      existsSync(worktreePathFor(poolDir, "02")),
     ).toBe(false);
   }, 15000);
 
@@ -6695,9 +6793,9 @@ describe("worktrees", () => {
     expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe(
       "resolved-by-agent\n",
     );
-    expect(git(["rev-parse", "--verify", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     expect(
-      existsSync(join(poolDir, ".git", "pool-worktrees", "02")),
+      existsSync(worktreePathFor(poolDir, "02")),
     ).toBe(false);
   }, 15000);
 
@@ -6742,7 +6840,7 @@ describe("worktrees", () => {
     // Manual resolution then resume completes the merge; the merge landing
     // lifts the hold.
     git(["checkout", "--", "issues/02-t.md"]);
-    expect(git(["merge", "--no-edit", "pool/02"]).exitCode).not.toBe(0);
+    expect(git(["merge", "--no-edit", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
     writeFileSync(join(poolDir, "shared.txt"), "manual\n");
     git(["add", "shared.txt"]);
     git(["commit", "-qm", "resolve pool/02"]);

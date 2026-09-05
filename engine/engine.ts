@@ -311,7 +311,7 @@ function mergeHold(session: Session): string[] {
   const hold: string[] = [];
   for (const [id, status] of Object.entries(tickets)) {
     if (status !== "done") continue;
-    if (branchLandedInto(session.cwd, branchFor(id), target)) continue;
+    if (branchLandedInto(session.cwd, branchFor(session.cwd, id), target)) continue;
     hold.push(id);
   }
   return hold;
@@ -843,7 +843,7 @@ async function driveLoop(session: Session): Promise<void> {
         });
         session.state = applyUpdate(session.state, {
           log: [
-            `ticket ${merge.marker.id}: merged ${branchFor(merge.marker.id)} ` +
+            `ticket ${merge.marker.id}: merged ${branchFor(session.cwd, merge.marker.id)} ` +
               "onto the working branch" +
               (merge.result.detail.endsWith("is gone")
                 ? ` (${merge.result.detail})`
@@ -1420,7 +1420,7 @@ function resumeMerge(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const branch = branchFor(marker.id);
+  const branch = branchFor(session.cwd, marker.id);
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
     branch,
@@ -1561,7 +1561,7 @@ async function handleMergeConflict(
   });
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(marker.id),
+    branch: branchFor(session.cwd, marker.id),
   };
   const resolver = resolveResolver(session);
   if (!resolver) {
@@ -1667,7 +1667,7 @@ function approvalInterrupt(
       `The resolver agent resolved the merge conflict for ticket ${marker.id}.\n` +
       `It attempted: ${attemptNote}\n` +
       `conflicted files: ${result.conflicted.join(", ") || "(none listed)"}\n` +
-      `the resolution is staged on branch ${branchFor(marker.id)}; approve to ` +
+      `the resolution is staged on branch ${branchFor(session.cwd, marker.id)}; approve to ` +
       "commit it and continue, or reject to resolve by hand.",
   };
 }
@@ -1683,7 +1683,7 @@ function approveMerge(
 ): void {
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(marker.id),
+    branch: branchFor(session.cwd, marker.id),
   };
   commitMerge(worktree);
   if (note && note.trim()) {
@@ -1740,7 +1740,7 @@ function rejectMerge(
 ): void {
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(marker.id),
+    branch: branchFor(session.cwd, marker.id),
   };
   git(worktree.path, ["merge", "--abort"]);
   if (note && note.trim()) {
@@ -2027,7 +2027,7 @@ function attemptDiff(
   attempt: number,
 ): string {
   if (!session.git) return "(no diff: the pool does not run in git)\n";
-  const branch = branchFor(buildId, attempt);
+  const branch = branchFor(session.cwd, buildId, attempt);
   if (!branchExists(session.cwd, buildId, attempt)) {
     return `(no diff: no attempt branch ${branch})\n`;
   }
@@ -2529,7 +2529,7 @@ function completeLoneAttempt(
   if (session.git) {
     const worktree = result.plan.worktree ?? {
       path: worktreePathFor(session.cwd, marker.id, attempt),
-      branch: branchFor(marker.id, attempt),
+      branch: branchFor(session.cwd, marker.id, attempt),
     };
     const merge = mergeTicket(session, marker, worktree);
     if (!merge.ok) {
@@ -2541,7 +2541,7 @@ function completeLoneAttempt(
         session,
         marker,
         attempt,
-        mergeConflictComplaint(marker.id, attempt, merge),
+        mergeConflictComplaint(session, marker.id, attempt, merge),
         `ticket ${marker.id}: attempt ${attempt} passed grading but its ` +
           "merge conflicted; checkpoint raised for the human",
         emit,
@@ -2556,7 +2556,7 @@ function completeLoneAttempt(
     });
     update.log = [
       `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
-        `${branchFor(marker.id, attempt)} onto the working branch`,
+        `${branchFor(session.cwd, marker.id, attempt)} onto the working branch`,
     ];
   }
   writeMarkerStatus(marker.file, "done");
@@ -2591,11 +2591,12 @@ function gradeComplaint(grade: Grade): string {
 
 // The checkpoint Brief for a lone attempt whose passing merge conflicted.
 function mergeConflictComplaint(
+  session: Session,
   buildId: string,
   attempt: number,
   result: MergeResult,
 ): string {
-  const branch = branchFor(buildId, attempt);
+  const branch = branchFor(session.cwd, buildId, attempt);
   const files =
     result.conflicted.length > 0
       ? result.conflicted.join(", ")
@@ -2875,7 +2876,7 @@ function completeSelection(
   if (session.git) {
     const worktree = {
       path: worktreePathFor(session.cwd, marker.id, attempt),
-      branch: branchFor(marker.id, attempt),
+      branch: branchFor(session.cwd, marker.id, attempt),
     };
     const merge = mergeTicket(session, marker, worktree);
     if (!merge.ok) {
@@ -2884,7 +2885,7 @@ function completeSelection(
         session,
         marker,
         attempt,
-        mergeConflictComplaint(marker.id, attempt, merge),
+        mergeConflictComplaint(session, marker.id, attempt, merge),
         `ticket ${marker.id}: attempt ${attempt} selected but its merge ` +
           "conflicted; checkpoint raised for the human",
         emit,
@@ -2897,7 +2898,7 @@ function completeSelection(
       kind: "merged",
       payload: {},
     });
-    mergedNote = ` merged ${branchFor(marker.id, attempt)} onto the working branch`;
+    mergedNote = ` merged ${branchFor(session.cwd, marker.id, attempt)} onto the working branch`;
   } else {
     mergedNote =
       " (the pool does not run in git; the selected work is already in the checkout)";
@@ -2948,7 +2949,7 @@ function discardLosers(
   for (const attempt of losers) {
     discardWorktree(session.cwd, {
       path: worktreePathFor(session.cwd, buildId, attempt),
-      branch: branchFor(buildId, attempt),
+      branch: branchFor(session.cwd, buildId, attempt),
     });
   }
   return losers;
@@ -3906,7 +3907,7 @@ function mergeConflictInterrupt(
   marker: TicketMarker,
   result: MergeResult,
 ): Interrupt {
-  const branch = branchFor(marker.id);
+  const branch = branchFor(session.cwd, marker.id);
   const files =
     result.conflicted.length > 0
       ? result.conflicted.join(", ")
