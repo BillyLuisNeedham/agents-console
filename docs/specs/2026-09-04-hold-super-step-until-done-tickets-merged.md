@@ -32,7 +32,7 @@ The pool pauses for merge hygiene: the scheduler computes no ready set at all wh
 - The hold is a check at ready-set time: if any ticket has a `done` marker whose `pool/NN` branch is not in its merge target, the scheduler computes no ready set and the pool pauses. One rule, one code path, applied at every site that computes the ready set (main scheduling loop, verify flows, selection runs).
 - The hold is **derived, never persisted**: it is recomputed on demand from markers and branch state, including at startup, consistent with ADR-0007's derive-server-side pattern. No new fields in pool state, no new checkpoint data.
 - The hold lifts in exactly two ways: the merge lands (via the existing merge-approval flow or an observed manual merge), or the merge is rejected and the ticket reopens. No new force-resume mechanism — the existing controls are the escape hatches.
-- Running attempts are untouched; the hold gates only spawning, matching how queued answers are already processed at the super-step boundary (ADR-0004).
+- Running attempts are untouched; the hold withholds only spawning, matching how queued answers are already processed at the super-step boundary (ADR-0004).
 - No new "held" interrupt is raised. The existing merge-approval interrupt is the signal; the Console adds a "done, merge pending" label on held tickets via the existing server-side enrichment seam (ADR-0007).
 - The Outcome channel is unchanged — a blocker's Outcome JSON still carries its result downstream; only the timing changes. Downstream tickets now wait for the merge as well as the marker.
 - The spawn-time warning about unmerged blockers becomes dead code under the hold and is removed.

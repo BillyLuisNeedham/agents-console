@@ -137,7 +137,7 @@ function deriveMergePending(
   const target = currentBranch(cwd);
   for (const [id, status] of entries) {
     if (status !== "done") continue;
-    if (branchLandedInto(cwd, branchFor(id), target)) continue;
+    if (branchLandedInto(cwd, branchFor(cwd, id), target)) continue;
     pending.add(id);
   }
   return pending;
