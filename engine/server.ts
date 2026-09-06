@@ -1,8 +1,10 @@
 /**
  * The pool server: one Bun process per pool. It drives the pool engine and
  * serves the built SPA, a small JSON API (get state, start, resume-with-
- * answer), and an SSE stream that pushes a full state snapshot on every
- * change. The UI renders from those snapshots only.
+ * answer, ticket reads, terminal peek/focus), and an SSE stream that pushes
+ * a full state snapshot on every change. The UI renders from those
+ * snapshots only. The terminal endpoints are the UI's only path to the
+ * herdr daemon (ADR-0014): the Console never talks to herdr directly.
  *
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
@@ -58,6 +60,11 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
+import {
+  HERDR_SOCKET_DEFAULT,
+  focusPane,
+  peekPane,
+} from "./herdr.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
@@ -72,7 +79,7 @@ export interface PoolServerOptions {
   harnesses?: Record<string, HarnessCommand>;
   distDir?: string;
   registryPath?: string;
-  /** The herdr daemon socket for terminal-backed attempts; tests point this at a fake. */
+  /** The herdr daemon socket for terminal-backed attempts and the terminal endpoints; tests point this at a fake. Defaults to the daemon's path on this machine. */
   herdrSocket?: string;
 }
 
@@ -643,6 +650,80 @@ function readTicketActivity(
 export const ACTIVITY_CACHE_TTL_MS = 1000;
 
 // ---------------------------------------------------------------------------
+// Terminal endpoints (peek and focus)
+// ---------------------------------------------------------------------------
+
+/**
+ * The card's read-only preview shows this many lines of the pane's recent
+ * output: enough for a liveness signal, small enough to stay a glance, not
+ * a log (~6-8 per the spec).
+ */
+export const TERMINAL_PEEK_LINES = 8;
+
+/**
+ * The ticket-id -> pane-id translation both terminal endpoints key on
+ * (ADR-0014): the pane id recorded on the ticket's latest attempt's
+ * `spawned` event, but only while that attempt is still live. A settled
+ * attempt (finished), a headless fallback spawn (pane_id null on the
+ * spawned event), and a ticket with no attempt at all all resolve to null,
+ * so the endpoints answer "no pane" rather than reaching a stale or foreign
+ * pane.
+ */
+export function resolveTerminalPane(
+  runsDir: string,
+  ticketId: string,
+): string | null {
+  const events = readEvents(runsDir, ticketId);
+  const latest = events.reduce((m, e) => Math.max(m, e.attempt), 0);
+  if (latest === 0) return null;
+  const latestEvents = events.filter((e) => e.attempt === latest);
+  if (latestEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind))) return null;
+  const spawned = latestEvents.filter((e) => e.kind === "spawned");
+  const paneId = spawned.at(-1)?.payload.pane_id;
+  return typeof paneId === "string" && paneId !== "" ? paneId : null;
+}
+
+/**
+ * Every pane id this pool recorded on a `spawned` event, across its
+ * tickets: the allowlist behind the spawned-only guard. Derived from pool
+ * state at request time rather than held in memory, so a server restart
+ * neither widens it (forgetting a spawn) nor narrows it (protecting a pane
+ * that is legitimately gone); the prototype's per-process Set did both.
+ */
+export function spawnedPaneAllowlist(
+  runsDir: string,
+  meta: TicketMarker[],
+): Set<string> {
+  const allowlist = new Set<string>();
+  for (const marker of meta) {
+    for (const event of readEvents(runsDir, marker.id)) {
+      if (event.kind !== "spawned") continue;
+      const paneId = event.payload.pane_id;
+      if (typeof paneId === "string" && paneId !== "") allowlist.add(paneId);
+    }
+  }
+  return allowlist;
+}
+
+/**
+ * The spawned-only refusal (the headline guard, user story 12): null when
+ * the pane id is one this pool recorded on a spawned event, else the error
+ * message the endpoint serves with its 403. Because the endpoints are
+ * keyed by ticket id and the translation above only yields pane ids from
+ * the pool's own events, normal traffic can never trip this; it exists so
+ * a hand-corrupted events file still cannot point the Console at a pane
+ * the pool did not spawn.
+ */
+export function terminalSpawnRefusal(
+  allowlist: Set<string>,
+  paneId: string,
+): string | null {
+  return allowlist.has(paneId)
+    ? null
+    : `refusing: pane ${paneId} is not one this pool spawned`;
+}
+
+// ---------------------------------------------------------------------------
 // Grades endpoint
 // ---------------------------------------------------------------------------
 
@@ -888,6 +969,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   acquirePoolLock(poolDir, registryPath);
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
+  const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
   let meta = loadMeta(poolDir);
   let ticketIds = knownTicketIds(meta);
   const poolName = poolDir.split("/").slice(-2).join("/");
@@ -949,7 +1031,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     currentRun = startPool({
       poolDir,
       harnesses,
-      ...(options.herdrSocket !== undefined ? { herdrSocket: options.herdrSocket } : {}),
+      herdrSocket,
       onSnapshot: (snapshot) => {
         refreshMeta();
         broadcast(
@@ -1022,6 +1104,42 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     if (!run) return Promise.resolve(latest!);
     return run.settled.then(() => latest!);
   };
+
+  // The shared first half of both terminal endpoints: the ticket-id -> pane
+  // translation and the spawned-only guard. Unknown tickets take the same
+  // "no pane" answer as headless, finished, and never-spawned ones, so the
+  // endpoints never reveal which ticket ids exist and every no-pane case is
+  // one shape. The 403 guard cannot trip on well-formed pool state (the
+  // translation and the allowlist read the same events); it is the
+  // belt-and-braces refusal for corrupted state.
+  function resolveTerminalRequest(ticketId: string):
+    | { ok: true; paneId: string }
+    | { ok: false; status: number; error: string } {
+    refreshMeta();
+    if (!ticketIds.has(ticketId)) {
+      return {
+        ok: false,
+        status: 404,
+        error: `no terminal-backed pane for ticket ${ticketId}`,
+      };
+    }
+    const paneId = resolveTerminalPane(join(poolDir, "runs"), ticketId);
+    if (paneId === null) {
+      return {
+        ok: false,
+        status: 404,
+        error: `no terminal-backed pane for ticket ${ticketId}`,
+      };
+    }
+    const refusal = terminalSpawnRefusal(
+      spawnedPaneAllowlist(join(poolDir, "runs"), meta),
+      paneId,
+    );
+    if (refusal !== null) {
+      return { ok: false, status: 403, error: refusal };
+    }
+    return { ok: true, paneId };
+  }
 
   const resolution = resolvePort(
     options.port,
@@ -1133,6 +1251,64 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
           return Response.json(readTicketActivityCached(ticketId));
+        }
+
+        // The card's read-only peek: the attempt pane's recent output as
+        // plain text (ANSI stripped herdr-side, a small line count). An
+        // empty read (a background tab still warming up) is empty text,
+        // not an error; a daemon failure is a clean 502 the card renders
+        // as "pane unavailable". Nothing here reads pane.read's revision:
+        // it is verified stagnant, so freshness is the card re-polling and
+        // comparing text.
+        if (pathname === "/api/terminal/peek") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          const resolved = resolveTerminalRequest(ticketId);
+          if (!resolved.ok) {
+            return Response.json(
+              { error: resolved.error },
+              { status: resolved.status },
+            );
+          }
+          try {
+            const text = await peekPane(
+              herdrSocket,
+              resolved.paneId,
+              TERMINAL_PEEK_LINES,
+            );
+            return Response.json({
+              ticket: ticketId,
+              paneId: resolved.paneId,
+              text,
+            });
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 502 },
+            );
+          }
+        }
+
+        // "Open in herdr": focus the attempt's pane, jumping the operator's
+        // herdr TUI to the attempt's tab. Same translation and spawned-only
+        // guard as peek; a mutating call, so POST only.
+        if (pathname === "/api/terminal/focus" && req.method === "POST") {
+          const ticketId = url.searchParams.get("ticket") ?? "";
+          const resolved = resolveTerminalRequest(ticketId);
+          if (!resolved.ok) {
+            return Response.json(
+              { error: resolved.error },
+              { status: resolved.status },
+            );
+          }
+          try {
+            await focusPane(herdrSocket, resolved.paneId);
+            return Response.json({ ok: true, paneId: resolved.paneId });
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 502 },
+            );
+          }
         }
 
         if (pathname === "/api/ticket") {
