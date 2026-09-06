@@ -9,8 +9,9 @@
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
  * server enriches the former into an array of {id, title, blockedBy, status,
- * assignment} so the projection can draw blocked-by edges, show titles, and
- * render the record verbatim. The metadata (title, spec, blockedBy) is the
+ * assignment, paneId?} so the projection can draw blocked-by edges, show
+ * titles, render the record verbatim, and reach a terminal-backed attempt's
+ * herdr pane (ADR-0014). The metadata (title, spec, blockedBy) is the
  * engine's own marker parsing, re-read from the pool's issues directory on
  * every snapshot and ticket-scoped request: a
  * ticket file that lands after boot (an engine-written Spawn or grader
@@ -78,7 +79,7 @@ export interface PoolServerOptions {
   harnesses?: Record<string, HarnessCommand>;
   distDir?: string;
   registryPath?: string;
-  /** The herdr daemon socket for terminal endpoints (and engine spawns). Defaults to the daemon's path on this machine. */
+  /** The herdr daemon socket for terminal-backed attempts and the terminal endpoints; tests point this at a fake. Defaults to the daemon's path on this machine. */
   herdrSocket?: string;
 }
 
@@ -89,6 +90,12 @@ interface EnrichedTicketState {
   status: TicketStatus;
   /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
   assignment: AssignmentView;
+  /**
+   * The current attempt's herdr pane id (ADR-0014), present only while the
+   * latest spawned event records one: terminal-backed attempts carry it,
+   * headless pools and headless-fallback attempts have the field absent.
+   */
+  paneId?: string;
 }
 
 interface EnrichedSnapshot {
@@ -122,8 +129,40 @@ function loadMeta(poolDir: string): TicketMarker[] {
   return loadPoolMarkers(join(poolDir, "issues"));
 }
 
+/**
+ * The current attempt's pane id per ticket, derived from the ticket's own
+ * events: a terminal-backed spawn records its recovered pane id on the
+ * `spawned` event as `pane_id` (ADR-0014, ADR-0015), and the latest spawned
+ * event wins, so a later headless-fallback attempt clears an earlier pane id.
+ * Only a latest spawn carrying a string pane_id maps to an entry; everything
+ * else — no events yet, a headless pool (no pane facts recorded), or the
+ * fallback's `pane_id: null` — leaves the ticket without a paneId, so headless
+ * attempts and headless pools expose none.
+ */
+export function currentAttemptPaneIds(
+  runsDir: string,
+  meta: TicketMarker[],
+): Record<string, string> {
+  const paneIds: Record<string, string> = {};
+  for (const marker of meta) {
+    const latestSpawn = readEvents(runsDir, marker.id)
+      .filter((e) => e.kind === "spawned")
+      .at(-1);
+    const paneId = latestSpawn?.payload.pane_id;
+    if (typeof paneId === "string" && paneId !== "") {
+      paneIds[marker.id] = paneId;
+    }
+  }
+  return paneIds;
+}
+
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
-function enrich(snapshot: PoolSnapshot, meta: TicketMarker[], poolName: string): EnrichedSnapshot {
+function enrich(
+  snapshot: PoolSnapshot,
+  meta: TicketMarker[],
+  poolName: string,
+  paneIds: Record<string, string>,
+): EnrichedSnapshot {
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -141,6 +180,7 @@ function enrich(snapshot: PoolSnapshot, meta: TicketMarker[], poolName: string):
         assignment: snapshot.assignments[m.id] ?? {
           ...UNASSIGNED_ASSIGNMENT_VIEW,
         },
+        ...(paneIds[m.id] !== undefined ? { paneId: paneIds[m.id] } : {}),
       })),
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
@@ -987,7 +1027,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       herdrSocket,
       onSnapshot: (snapshot) => {
         refreshMeta();
-        broadcast(enrich(snapshot, meta, poolName));
+        broadcast(
+          enrich(
+            snapshot,
+            meta,
+            poolName,
+            currentAttemptPaneIds(join(poolDir, "runs"), meta),
+          ),
+        );
       },
     });
     return latest!;

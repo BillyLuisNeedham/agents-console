@@ -112,6 +112,12 @@ export interface PoolTicketState {
   status: PoolStatus;
   /** The ticket's resolved Assignment record, rendered verbatim. */
   assignment: PoolTicketAssignment;
+  /**
+   * The current attempt's herdr pane id (ADR-0014), served only for
+   * terminal-backed attempts; absent on headless pools and headless
+   * fallbacks.
+   */
+  paneId?: string;
 }
 
 export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
@@ -634,6 +640,11 @@ export interface TicketCardView {
    *  done or ready tickets, a crashed attempt parked at in-progress, or no
    *  activity payload yet (no empty flash before the first data lands). */
   vitals: VitalsView | null;
+  /**
+   * The current attempt's herdr pane id (ADR-0014), for the card's terminal
+   * surface. Null for headless attempts and headless pools.
+   */
+  paneId: string | null;
   x: number;
   y: number;
 }
@@ -834,6 +845,7 @@ function projectTicket(
     interrupt: toInterruptView(raw, state),
     grade,
     vitals: projectVitals(vitals, ticket.status, now),
+    paneId: ticket.paneId ?? null,
     x: pos.x,
     y: pos.y,
   };
