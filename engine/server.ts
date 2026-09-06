@@ -122,15 +122,23 @@ function loadMeta(poolDir: string): TicketMarker[] {
   return loadPoolMarkers(join(poolDir, "issues"));
 }
 
+// The events that close an attempt for good: a resolver run records no exited
+// event, so answered and merged close it too. Without them a resolver-driven
+// merge would read as live forever.
+const SETTLED_EVENT_KINDS = new Set(["exited", "crash", "answered", "merged"]);
+
 /**
  * The current attempt's pane id per ticket, derived from the ticket's own
  * events: a terminal-backed spawn records its recovered pane id on the
- * `spawned` event as `pane_id` (ADR-0014, ADR-0015), and the latest spawned
- * event wins, so a later headless-fallback attempt clears an earlier pane id.
- * Only a latest spawn carrying a string pane_id maps to an entry; everything
- * else — no events yet, a headless pool (no pane facts recorded), or the
- * fallback's `pane_id: null` — leaves the ticket without a paneId, so headless
- * attempts and headless pools expose none.
+ * `spawned` event as `pane_id` (ADR-0014, ADR-0015), and the latest attempt's
+ * latest spawned event wins, so a later headless-fallback attempt clears an
+ * earlier pane id. Only a live attempt maps to an entry: a settled attempt
+ * (SETTLED_EVENT_KINDS), a headless pool (no pane facts recorded), the
+ * fallback's `pane_id: null`, and a ticket with no attempt at all all leave
+ * the ticket without a paneId, so headless attempts and headless pools expose
+ * none — and a finished attempt's paneId leaves the snapshot, which is what
+ * stops the card's terminal surface and its polling (the spec's "stops when
+ * the attempt ends").
  */
 export function currentAttemptPaneIds(
   runsDir: string,
@@ -138,10 +146,14 @@ export function currentAttemptPaneIds(
 ): Record<string, string> {
   const paneIds: Record<string, string> = {};
   for (const marker of meta) {
-    const latestSpawn = readEvents(runsDir, marker.id)
+    const events = readEvents(runsDir, marker.id);
+    const latest = events.reduce((m, e) => Math.max(m, e.attempt), 0);
+    if (latest === 0) continue;
+    const latestEvents = events.filter((e) => e.attempt === latest);
+    if (latestEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind))) continue;
+    const paneId = latestEvents
       .filter((e) => e.kind === "spawned")
-      .at(-1);
-    const paneId = latestSpawn?.payload.pane_id;
+      .at(-1)?.payload.pane_id;
     if (typeof paneId === "string" && paneId !== "") {
       paneIds[marker.id] = paneId;
     }
@@ -579,11 +591,6 @@ function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
     return null;
   }
 }
-
-// The events that close an attempt for good: a resolver run records no exited
-// event, so answered and merged close it too. Without them a resolver-driven
-// merge would read as live forever.
-const SETTLED_EVENT_KINDS = new Set(["exited", "crash", "answered", "merged"]);
 
 function readTicketActivity(
   poolDir: string,

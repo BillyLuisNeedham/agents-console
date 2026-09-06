@@ -184,7 +184,7 @@ export class TerminalSurface {
           paneId,
           status: "unavailable",
           text: "",
-          justFocused: false,
+          justFocused: this.entries.get(ticketId)?.justFocused ?? false,
         });
         this.notify();
       })
@@ -260,7 +260,7 @@ export function renderTerminalSurface(
               ?.writeText(`herdr agent attach ${view.paneId}`)
               .catch(() => {
                 // Clipboard denied (permissions, insecure context): the chip
-                // text stays selectable, so the operator copies by hand.
+                // keeps showing the full command for the operator to type.
               });
           },
         },

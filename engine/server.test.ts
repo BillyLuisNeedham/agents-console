@@ -2440,4 +2440,37 @@ describe("currentAttemptPaneIds", () => {
     ];
     expect(currentAttemptPaneIds(runsDir, two)).toEqual({});
   });
+
+  it("omits a ticket whose latest attempt has settled, so a finished card's surface and polling stop", () => {
+    const runsDir = runsWith({
+      "01": [
+        { attempt: 1, pane_id: "pane-1" },
+        { attempt: 2, pane_id: "pane-2" },
+      ],
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-05T00:01:00Z",
+      attempt: 2,
+      kind: "exited",
+      payload: {},
+    });
+    // An earlier attempt settling changes nothing while the latest runs.
+    appendEvent(runsDir, "02", {
+      at: "2026-09-05T00:00:30Z",
+      attempt: 1,
+      kind: "exited",
+      payload: {},
+    });
+    const two = [
+      ...meta,
+      { id: "02", file: "02.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" },
+    ];
+    appendEvent(runsDir, "02", {
+      at: "2026-09-05T00:02:00Z",
+      attempt: 2,
+      kind: "spawned",
+      payload: { pane_id: "pane-2b" },
+    });
+    expect(currentAttemptPaneIds(runsDir, two)).toEqual({ "02": "pane-2b" });
+  });
 });

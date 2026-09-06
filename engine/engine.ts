@@ -4331,6 +4331,14 @@ function closeAttemptTabs(session: Session, ticketId: string): void {
   }
 }
 
+/** The exit facts a crash interrupt body quotes (ADR-0012), frozen at raise time. */
+interface CrashFacts {
+  logPath: string;
+  logTail: string[];
+  outcomePath: string;
+  outcomeExists: boolean;
+}
+
 /**
  * The crash interrupt body (ADR-0012): the log path, a blank line, the tail
  * the crash event carries, and the outcome-file line, so the Needs-input
@@ -4338,12 +4346,7 @@ function closeAttemptTabs(session: Session, ticketId: string): void {
  * body persists with the pool state, so the tail freezes at raise time;
  * accepted and desired.
  */
-function crashInterruptBody(result: {
-  logPath: string;
-  logTail: string[];
-  outcomePath: string;
-  outcomeExists: boolean;
-}): string {
+function crashInterruptBody(result: CrashFacts): string {
   const tail = result.logTail.join("\n");
   return (
     `${result.logPath}\n\n` +

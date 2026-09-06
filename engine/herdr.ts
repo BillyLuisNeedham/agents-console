@@ -19,9 +19,11 @@
  */
 
 import { connect } from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-/** The daemon's socket on this machine; overridable per run (tests, other layouts). */
-export const HERDR_SOCKET_DEFAULT = "/home/billy/.config/herdr/herdr.sock";
+/** The daemon's socket under the user's config dir; overridable per run (tests, other layouts). */
+export const HERDR_SOCKET_DEFAULT = join(homedir(), ".config/herdr/herdr.sock");
 
 /** Attempt tab labels cap at this many characters (`~40` per the spec). */
 export const ATTEMPT_TAB_LABEL_MAX = 40;
