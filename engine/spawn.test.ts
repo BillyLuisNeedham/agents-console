@@ -17,6 +17,7 @@ function context(overrides?: Partial<SpawnContext>): SpawnContext {
     model: "claude-test",
     logPath: "/tmp/pool/runs/01.log",
     outcomePath: "/tmp/pool/runs/01.outcome.json",
+    exitCodePath: "/tmp/pool/runs/01.exitcode",
     cwd: "/tmp/pool",
     streamPath: null,
     ...overrides,
