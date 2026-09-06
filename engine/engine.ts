@@ -1524,8 +1524,8 @@ async function finalizeAdoptedAttempt(
   try {
     // Fast path: the wrapper writes the exit-code file before the shell
     // exits, so the file's presence means the attempt already finished
-    // (spawnToPane removes any previous attempt's file before sending the
-    // wrapper, so it cannot be stale). Otherwise wait on the pane; the
+    // (sendWrapperToPane removes any previous attempt's file before sending
+    // the wrapper, so it cannot be stale). Otherwise wait on the pane; the
     // daemon's event subscription reports the end, and a lost subscription
     // falls back to the file, unbounded, the way the headless spawn waits
     // on its child.
@@ -2238,15 +2238,19 @@ async function runResolver(
           ctx.cwd,
         )
       : undefined;
-  appendEvent(session.runsDir, marker.id, {
-    at: new Date().toISOString(),
-    attempt: lastAttempt(session.runsDir, marker.id),
-    kind: "spawned",
-    payload: spawnedPayload(argv, ctx, worktree.branch, terminal),
-  });
-  const exitCode = terminal?.paneId
-    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
-    : await spawnToLog(argv, ctx);
+  const exitCode = await spawnWithTerminal(
+    session.herdrSocket,
+    terminal,
+    argv,
+    ctx,
+    (terminalError) =>
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: lastAttempt(session.runsDir, marker.id),
+        kind: "spawned",
+        payload: spawnedPayload(argv, ctx, worktree.branch, terminal, terminalError),
+      }),
+  );
   const outcome = readResolverResult(outcomePath);
   if (exitCode === 0 && outcome?.resolved) {
     return { resolved: true, note: outcome.note || "(resolver gave no note)" };
@@ -2993,15 +2997,19 @@ async function runGrader(
   // the value read here (before this round's spawned append) is the one the
   // spawned event and the verdict-landed tab close both key off.
   const graderAttempt = lastAttempt(runsDir, gid);
-  appendEvent(runsDir, gid, {
-    at: new Date().toISOString(),
-    attempt: graderAttempt,
-    kind: "spawned",
-    payload: spawnedPayload(argv, ctx, null, terminal),
-  });
-  const exitCode = terminal?.paneId
-    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
-    : await spawnToLog(argv, ctx);
+  const exitCode = await spawnWithTerminal(
+    session.herdrSocket,
+    terminal,
+    argv,
+    ctx,
+    (terminalError) =>
+      appendEvent(runsDir, gid, {
+        at: new Date().toISOString(),
+        attempt: graderAttempt,
+        kind: "spawned",
+        payload: spawnedPayload(argv, ctx, null, terminal, terminalError),
+      }),
+  );
   // The grader's exit facts (ADR-0012), on the grade path and the crash
   // path alike: the log tail and whether the grader wrote an outcome at all.
   const logTail = readLogTail(logPath);
@@ -3901,15 +3909,19 @@ async function runHeadToHead(
   // append above bumped lastAttempt to it, so the value read here (before
   // the spawned append) is the one the tab close keys off.
   const h2hAttempt = lastAttempt(runsDir, h2hId);
-  appendEvent(runsDir, h2hId, {
-    at: new Date().toISOString(),
-    attempt: h2hAttempt,
-    kind: "spawned",
-    payload: spawnedPayload(argv, ctx, null, terminal),
-  });
-  const exitCode = terminal?.paneId
-    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
-    : await spawnToLog(argv, ctx);
+  const exitCode = await spawnWithTerminal(
+    session.herdrSocket,
+    terminal,
+    argv,
+    ctx,
+    (terminalError) =>
+      appendEvent(runsDir, h2hId, {
+        at: new Date().toISOString(),
+        attempt: h2hAttempt,
+        kind: "spawned",
+        payload: spawnedPayload(argv, ctx, null, terminal, terminalError),
+      }),
+  );
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
   // file exists, on the pick path and the unusable path alike.
   const logTail = readLogTail(logPath);
@@ -4417,13 +4429,16 @@ async function openAttemptTerminal(
  * at spawn time (null when git is unavailable or the cwd is not a checkout);
  * env is the keys the engine set on the child environment beyond the
  * inherited parent's, with their values. Terminal-backed spawns add pane_id
- * (and terminal_error on the headless fallback), per ADR-0014 and ADR-0015.
+ * (and terminal_error on a headless fallback, whenever it happened: the tab
+ * refusing to open or the wrapper refusing to send), per ADR-0014 and
+ * ADR-0015.
  */
 function spawnedPayload(
   argv: string[],
   ctx: SpawnContext,
   branch: string | null,
   terminal?: AttemptTerminal,
+  terminalError?: string,
 ): Record<string, unknown> {
   return {
     argv: elidePromptArgv(argv, ctx.body),
@@ -4433,10 +4448,14 @@ function spawnedPayload(
     env: engineEnvSet(spawnEnv(ctx.cwd)),
     ...(terminal
       ? {
-          pane_id: terminal.paneId,
-          tab_id: terminal.tabId,
-          ...(terminal.error !== undefined
-            ? { terminal_error: terminal.error }
+          // A mid-flight fallback (the wrapper could not be sent to the pane)
+          // nulls both ids and carries its own error, exactly the shape of
+          // the tab.create fallback below: the attempt runs headless, and
+          // the log must never point at the dead pane the fallback closed.
+          pane_id: terminalError !== undefined ? null : terminal.paneId,
+          tab_id: terminalError !== undefined ? null : terminal.tabId,
+          ...(terminal.error !== undefined || terminalError !== undefined
+            ? { terminal_error: terminalError ?? terminal.error }
             : {}),
         }
       : {}),
@@ -4980,7 +4999,10 @@ async function runTicket(
   const argv = harnessCommandFor(env.harnesses, assignment, marker.id)(ctx);
   // A terminal-backed attempt opens its own named herdr tab before the
   // spawn is recorded, so the spawned event can carry the recovered pane id
-  // (ADR-0014, ADR-0015). Headless spawns record no pane facts at all.
+  // (ADR-0014, ADR-0015); the event is recorded by spawnWithTerminal once
+  // the wrapper send's outcome is known, so a mid-flight fallback records
+  // pane_id null + terminal_error instead of the dead pane. Headless spawns
+  // record no pane facts at all.
   const terminal =
     snapshot.config.terminal === "herdr"
       ? await openAttemptTerminal(
@@ -4990,15 +5012,25 @@ async function runTicket(
           plan.cwd,
         )
       : undefined;
-  appendEvent(env.runsDir, marker.id, {
-    at: new Date().toISOString(),
-    attempt: plan.attempt,
-    kind: "spawned",
-    payload: spawnedPayload(argv, ctx, plan.worktree?.branch ?? null, terminal),
-  });
-  const exitCode = terminal?.paneId
-    ? await spawnToPane(env.herdrSocket, terminal.paneId, argv, ctx)
-    : await spawnToLog(argv, ctx);
+  const exitCode = await spawnWithTerminal(
+    env.herdrSocket,
+    terminal,
+    argv,
+    ctx,
+    (terminalError) =>
+      appendEvent(env.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: plan.attempt,
+        kind: "spawned",
+        payload: spawnedPayload(
+          argv,
+          ctx,
+          plan.worktree?.branch ?? null,
+          terminal,
+          terminalError,
+        ),
+      }),
+  );
 
   // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
   // with a valid outcome the engine writes the final status to the canonical
@@ -5185,45 +5217,90 @@ function shellQuote(arg: string): string {
 }
 
 /**
- * The terminal-backed spawn (ADR-0014): the harness does not run as the
- * engine's child but inside the attempt's herdr pane. The wrapper line is
- * sent to the pane as keystrokes, the engine waits for the pane to end
- * (herdr's `pane_exited`/`pane_closed`, or the exit-code file when the wait
- * itself is unsupported), and the exit code comes from the file the wrapper
- * wrote. Streamed harnesses additionally get a follow-file tailer on the
- * tee'd Stream file feeding the ADR-0012 derivation into the attempt log,
- * live. Resolves with the harness's exit code exactly like `spawnToLog`, so
- * every spawn site's exit handling is unchanged.
+ * Send the attempt's wrapper to its pane (ADR-0014), the send half of a
+ * terminal-backed spawn. Text and Enter travel in separate `pane.send_input`
+ * calls: herdr treats a literal newline in text as pasted data, not a submit
+ * (verified), and `agent prompt` sends text then Enter for the same reason.
+ * Resolves with `undefined` once the pane carries the wrapper. On failure —
+ * the daemon died after the tab opened, or rejected the input: exactly the
+ * ADR's headless-fallback case — closes whatever half-started pane remains
+ * (best-effort: it kills a wrapper that false-alarm Enter loss may actually
+ * have started) and resolves with the error message, so the caller records
+ * the fallback on the spawned event and runs the attempt headless instead of
+ * failing the spawn: one attempt's terminal trouble must never take the
+ * drive down with it.
  */
-async function spawnToPane(
+async function sendWrapperToPane(
   socketPath: string,
   paneId: string,
   argv: string[],
   ctx: SpawnContext,
-): Promise<number> {
+): Promise<string | undefined> {
   // The exit-code file must not carry a previous attempt's code, and the
   // tailer must not read a stale Stream file's bytes before the pane's tee
   // truncates it.
   rmSync(ctx.exitCodePath, { force: true });
   if (ctx.streamPath) rmSync(ctx.streamPath, { force: true });
-  // Text and Enter travel separately: herdr treats a literal newline in text
-  // as pasted data, not a submit (verified), and `agent prompt` sends text
-  // then Enter for the same reason.
   try {
     await paneSendInput(socketPath, paneId, {
       text: terminalWrapper(argv, ctx),
     });
     await paneSendInput(socketPath, paneId, { keys: ["enter"] });
-  } catch {
-    // The daemon died after the tab opened, or rejected the input: exactly
-    // the ADR's headless-fallback case. Close whatever half-started pane
-    // remains (best-effort: it kills a wrapper that false-alarm Enter loss
-    // may actually have started) and run the attempt headless instead of
-    // failing the spawn: one attempt's terminal trouble must never take the
-    // drive down with it.
+    return undefined;
+  } catch (err) {
     void closePane(socketPath, paneId).catch(() => {});
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * One terminal-backed spawn, end to end (ADR-0014, ADR-0015): send the
+ * wrapper to the attempt's pane, record the spawned event, then wait the
+ * pane out. Resolves with the harness's exit code exactly like `spawnToLog`,
+ * so every spawn site's exit handling is unchanged. `recordSpawned` runs
+ * only once the spawn's terminal outcome is known: a `pane.send_input`
+ * failure falls back to headless BEFORE the event is recorded, and the error
+ * it receives lands on the event (`pane_id: null` + `terminal_error`, the
+ * same shape as the tab.create fallback), so the log never carries the dead
+ * pane id the fallback just closed. Headless spawns — no terminal, or the
+ * tab itself could not be opened — record and run exactly as a headless
+ * pool's spawn would.
+ */
+async function spawnWithTerminal(
+  socketPath: string,
+  terminal: AttemptTerminal | undefined,
+  argv: string[],
+  ctx: SpawnContext,
+  recordSpawned: (terminalError?: string) => void,
+): Promise<number> {
+  if (!terminal?.paneId) {
+    recordSpawned();
     return spawnToLog(argv, ctx);
   }
+  const terminalError = await sendWrapperToPane(
+    socketPath,
+    terminal.paneId,
+    argv,
+    ctx,
+  );
+  recordSpawned(terminalError);
+  if (terminalError !== undefined) return spawnToLog(argv, ctx);
+  return awaitPaneSpawn(socketPath, terminal.paneId, ctx);
+}
+
+/**
+ * The wait half of a terminal-backed spawn (ADR-0014): the engine waits for
+ * the pane to end (herdr's `pane_exited`/`pane_closed`, or the exit-code
+ * file when the wait itself is unsupported), and the exit code comes from
+ * the file the wrapper wrote. Streamed harnesses additionally get a
+ * follow-file tailer on the tee'd Stream file feeding the ADR-0012
+ * derivation into the attempt log, live.
+ */
+async function awaitPaneSpawn(
+  socketPath: string,
+  paneId: string,
+  ctx: SpawnContext,
+): Promise<number> {
   const tailer = ctx.streamPath
     ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
     : null;

@@ -2987,6 +2987,46 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     expect(event?.payload.pane_id).toBeNull();
     expect(typeof event?.payload.terminal_error).toBe("string");
   });
+
+  it("exposes no paneId when the tab opened but the wrapper send was refused and the attempt fell back to headless", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      { terminal: "herdr" },
+    );
+    // The daemon accepts tab.create, so the attempt has a real pane; the
+    // pane.send_input that would start the wrapper in it is refused, and the
+    // spawn falls back to headless mid-flight.
+    const fake = await startFakeHerdr({ fail: ["pane.send_input"] });
+    const server = await startServer(poolDir, stubHarness({}), {
+      herdrSocket: fake.socketPath,
+    });
+
+    await server.start();
+    const snapshot = await server.settled();
+    // The fallback runs headless and still completes; the spawned event
+    // records the fallback (pane_id null + terminal_error), not the dead
+    // pane id the fallback closed, so the enrichment exposes no paneId.
+    expect(snapshot.state.tickets[0]!.status).toBe("done");
+    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    // The close is fire-and-forget on the fallback path, so wait for the
+    // daemon to have recorded it rather than racing the settled snapshot.
+    await waitFor(
+      () => fake.requests.some((r) => r.method === "pane.close"),
+      "the fallback's orphaned pane close",
+    );
+    const spawned = readFileSync(
+      join(poolDir, "runs", "01.events.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; payload: { pane_id?: unknown; terminal_error?: unknown } });
+    const event = spawned.find((e) => e.kind === "spawned");
+    expect(event?.payload.pane_id).toBeNull();
+    expect(typeof event?.payload.terminal_error).toBe("string");
+  });
 });
 
 describe("currentAttemptPaneIds", () => {
