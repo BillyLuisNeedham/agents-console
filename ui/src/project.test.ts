@@ -55,6 +55,7 @@ import {
   type PoolStatus,
   type PoolTicketState,
   type TabOverride,
+  type TerminalSurfaceView,
   type TicketActivityResponse,
   type TicketCardView,
   type TicketDetailView,
@@ -2037,7 +2038,7 @@ describe("projectPool vitals", () => {
       "01": vitalsState({}, [10, 20]),
       "02": vitalsState({ running: false }, [5]),
     };
-    const view = projectPool(snap, {}, vitals, VITALS_NOW);
+    const view = projectPool(snap, {}, vitals, {}, VITALS_NOW);
     const cardOf = (id: string) =>
       view.cards.find(
         (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
@@ -2063,12 +2064,70 @@ describe("projectPool paneId", () => {
         ],
       },
     });
-    const view = projectPool(snap, {}, {}, VITALS_NOW);
+    const view = projectPool(snap, {}, {}, {}, VITALS_NOW);
     const cardOf = (id: string) =>
       view.cards.find(
         (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
       );
     expect(cardOf("01")?.paneId).toBe("pane-7");
     expect(cardOf("02")?.paneId).toBeNull();
+  });
+});
+
+describe("projectPool terminal surface", () => {
+  const terminalSnap = (tickets: PoolTicketState[]) =>
+    snapshot({ state: { tickets } });
+  const cardOf = (view: ReturnType<typeof projectPool>, id: string) =>
+    view.cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+    );
+
+  it("gives a terminal-backed card the surface, pending before the first peek", () => {
+    const snap = terminalSnap([
+      // The enriched snapshot serves paneId only on terminal-backed running
+      // attempts; the surface appears with it.
+      ticket("01", { status: "in-progress", paneId: "pane-7" }),
+      ticket("02", { status: "in-progress" }),
+    ]);
+    const view = projectPool(snap, {}, {}, {});
+    expect(cardOf(view, "01")?.terminal).toEqual({
+      paneId: "pane-7",
+      status: "pending",
+      text: "",
+      justFocused: false,
+    });
+    // Headless cards never show the surface.
+    expect(cardOf(view, "02")?.terminal).toBeNull();
+  });
+
+  it("threads the store's peek text and focus confirmation into the surface", () => {
+    const snap = terminalSnap([
+      ticket("01", { status: "in-progress", paneId: "pane-7" }),
+    ]);
+    const terminal: Record<string, TerminalSurfaceView> = {
+      "01": { paneId: "pane-7", status: "live", text: "output", justFocused: true },
+    };
+    const view = projectPool(snap, {}, {}, terminal);
+    expect(cardOf(view, "01")?.terminal).toEqual({
+      paneId: "pane-7",
+      status: "live",
+      text: "output",
+      justFocused: true,
+    });
+  });
+
+  it("keeps finished and headless cards untouched even with a stale store entry", () => {
+    const snap = terminalSnap([
+      // A finished attempt no longer carries a paneId, so the surface is
+      // gone even though the store still holds the entry.
+      ticket("01", { status: "done" }),
+      ticket("02", { status: "in-progress" }),
+    ]);
+    const terminal: Record<string, TerminalSurfaceView> = {
+      "01": { paneId: "pane-7", status: "live", text: "output", justFocused: false },
+    };
+    const view = projectPool(snap, {}, {}, terminal);
+    expect(cardOf(view, "01")?.terminal).toBeNull();
+    expect(cardOf(view, "02")?.terminal).toBeNull();
   });
 });

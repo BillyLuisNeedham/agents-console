@@ -621,6 +621,74 @@ body {
   stroke-width: 1;
 }
 
+/* The terminal surface on a terminal-backed attempt's card (ADR-0014): a
+   dim read-only peek of the pane's recent output, the "Open in herdr"
+   jump, and the copyable attach-command chip. The peek is a viewport, not
+   a terminal: no pointer events, no input affordance; typing happens in
+   herdr. */
+.terminal-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
+.terminal-peek {
+  margin: 0;
+  padding: 4px 6px;
+  max-height: 96px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* A viewport, not a terminal: clicks pass through to the card and no
+     selection or cursor suggests input. */
+  pointer-events: none;
+  user-select: none;
+}
+
+.terminal-peek-unavailable {
+  color: var(--interrupt);
+}
+
+.terminal-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.terminal-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.terminal-chip-cmd {
+  font-family: var(--mono);
+}
+
+.terminal-chip-pane {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-note {
+  color: var(--status-done);
+  font-size: 11px;
+}
+
 /* The Assignment badge under a ticket card's head: the engine's resolved
    harness · model · drivers, rendered verbatim (ADR-0013). One line, the
    model ellipsizing before the harness; the expanded toggle wraps the full

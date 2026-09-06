@@ -208,6 +208,21 @@ export interface TicketActivityResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal surface wire types (served by /api/terminal/peek and /focus)
+// ---------------------------------------------------------------------------
+
+/**
+ * The peek endpoint's answer for one ticket: the attempt pane's recent
+ * output as plain text (ANSI stripped server-side, ~8 lines). The UI keys
+ * every terminal call by ticket id; the server resolves and guards the pane.
+ */
+export interface TerminalPeekResponse {
+  ticket: string;
+  paneId: string;
+  text: string;
+}
+
+// ---------------------------------------------------------------------------
 // Timeline view model
 // ---------------------------------------------------------------------------
 
@@ -645,6 +660,13 @@ export interface TicketCardView {
    * surface. Null for headless attempts and headless pools.
    */
   paneId: string | null;
+  /**
+   * The card's terminal surface: the peek viewport, "Open in herdr", and the
+   * attach chip. Present exactly while the attempt is terminal-backed and
+   * running (the snapshot carries its paneId); null for headless and
+   * finished cards, which stay untouched.
+   */
+  terminal: TerminalSurfaceView | null;
   x: number;
   y: number;
 }
@@ -657,6 +679,25 @@ export interface GradeView {
   /** The attempt Selection named (merged attempt on pre-selection tickets);
    *  null until either event lands. Derived once, server-side. */
   winner: number | null;
+}
+
+export type TerminalSurfaceStatus = "pending" | "live" | "waiting" | "unavailable";
+
+/**
+ * The terminal surface's view data: the read-only peek of the attempt pane
+ * plus the transient "Open in herdr" confirmation. `pending` is the state
+ * before the first peek answers (the surface shell already renders, in its
+ * "waiting for output" body); `waiting` is an answered-but-empty read (a
+ * background tab still warming up), never an error; `unavailable` is a
+ * missing or unreadable pane, which also disables the focus button.
+ */
+export interface TerminalSurfaceView {
+  paneId: string;
+  status: TerminalSurfaceStatus;
+  /** The latest peek text; meaningful only while `status` is "live". */
+  text: string;
+  /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
+  justFocused: boolean;
 }
 
 export interface UtilityCardView {
@@ -821,12 +862,29 @@ function toInterruptView(raw: PoolInterrupt | null, state: PoolState): Interrupt
   };
 }
 
+/**
+ * The card's terminal surface (ADR-0014): present exactly when the ticket's
+ * current attempt is terminal-backed and running (the enriched snapshot
+ * carries its paneId, and drops it the moment the attempt ends), so headless
+ * and finished cards stay untouched. Before the first peek payload lands the
+ * store holds no entry; the card still gets the surface, in its pending
+ * "waiting for output" state, so there is no empty flash.
+ */
+export function projectTerminalSurface(
+  paneId: string | null,
+  state: TerminalSurfaceView | undefined,
+): TerminalSurfaceView | null {
+  if (paneId === null) return null;
+  return state ?? { paneId, status: "pending", text: "", justFocused: false };
+}
+
 function projectTicket(
   ticket: PoolTicketState,
   state: PoolState,
   pos: Point,
   grade: GradeView | null,
   vitals: VitalsState | null,
+  terminal: TerminalSurfaceView | undefined,
   now: number,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
@@ -846,6 +904,7 @@ function projectTicket(
     grade,
     vitals: projectVitals(vitals, ticket.status, now),
     paneId: ticket.paneId ?? null,
+    terminal: projectTerminalSurface(ticket.paneId ?? null, terminal),
     x: pos.x,
     y: pos.y,
   };
@@ -874,6 +933,7 @@ export function projectPool(
   snapshot: PoolSnapshot,
   grades: Record<string, GradeView> = {},
   vitals: Record<string, VitalsState> = {},
+  terminal: Record<string, TerminalSurfaceView> = {},
   now: number = Date.now(),
 ): PoolView {
   const tickets = snapshot.state.tickets;
@@ -887,6 +947,7 @@ export function projectPool(
         positions[ticketCardId(ticket.id)],
         grades[ticket.id] ?? null,
         vitals[ticket.id] ?? null,
+        terminal[ticket.id],
         now,
       ),
     ),

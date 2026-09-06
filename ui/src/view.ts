@@ -65,6 +65,11 @@ export interface Handlers {
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 
+export type ConsoleViewOptions = NeedsInputOptions & {
+  /** "Open in herdr": focus the attempt's pane; resolves false on failure. */
+  onFocusTerminal: (ticketId: string) => Promise<boolean>;
+};
+
 /**
  * The per-session view state: one instance created by the bootstrap, holding
  * the selection plus the three sub-views with their own state, so a session's
@@ -74,9 +79,7 @@ export interface Handlers {
  * notification belong to the module, not the render pass.
  */
 export class ConsoleView {
-  private readonly canvas = new Canvas({
-    onCardTap: (nodeId) => this.selectNode(nodeId),
-  });
+  private readonly canvas: Canvas;
   private readonly detail = new Detail({
     onClose: () => this.closeDetail(),
   });
@@ -89,7 +92,11 @@ export class ConsoleView {
   private selectedNodeId: string | null = null;
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
 
-  constructor(options: NeedsInputOptions) {
+  constructor(options: ConsoleViewOptions) {
+    this.canvas = new Canvas({
+      onCardTap: (nodeId) => this.selectNode(nodeId),
+      onFocusTerminal: options.onFocusTerminal,
+    });
     this.needsInput = new NeedsInputTray(options);
   }
 
