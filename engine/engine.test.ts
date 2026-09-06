@@ -195,6 +195,7 @@ async function startExecutingFakeHerdr(options?: {
     { tabId: string; cwd: string; alive: boolean; buffer: string }
   >();
   const subscribers: Socket[] = [];
+  const connections = new Set<Socket>();
   const firePaneEnd = (
     paneId: string,
     event: "pane_exited" | "pane_closed",
@@ -218,6 +219,8 @@ async function startExecutingFakeHerdr(options?: {
     }
   };
   const server = createServer((socket) => {
+    connections.add(socket);
+    socket.on("close", () => connections.delete(socket));
     let buf = "";
     socket.on("data", (d) => {
       buf += d.toString();
@@ -315,6 +318,11 @@ async function startExecutingFakeHerdr(options?: {
     close: () =>
       new Promise<void>((resolve) => {
         for (const sub of subscribers) sub.destroy();
+        // bun's server.close() waits for every connection to drain, and a
+        // request/response connection whose client already destroyed its
+        // end can linger in a half-closed state that outlives the test.
+        // Teardown destroys what is left instead of waiting on it.
+        for (const conn of connections) conn.destroy();
         server.close(() => resolve());
       }),
     injectPane: (paneId) => {
@@ -4498,6 +4506,211 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       )!;
       expect(String(spawned.payload.pane_id)).toMatch(/^pane-/);
     }
+  }, 15000);
+
+  async function untilTabCloses(
+    fake: { requests: FakeHerdrRequest[] },
+    tabIds: string[],
+  ): Promise<void> {
+    const closed = () =>
+      new Set(
+        fake.requests
+          .filter((r) => r.method === "tab.close")
+          .map((r) => String(r.params.tab_id)),
+      );
+    const deadline = Date.now() + 5000;
+    while (!tabIds.every((id) => closed().has(id))) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `timed out waiting for tab.close of ${tabIds.join(", ")}; ` +
+            `closed so far: ${[...closed()].join(", ") || "(none)"}`,
+        );
+      }
+      await Bun.sleep(10);
+    }
+  }
+
+  function spawnedTabIds(poolDir: string, ids: string[]): string[] {
+    return ids.flatMap((id) =>
+      readEventLines(poolDir, id)
+        .filter(
+          (e) => e.kind === "spawned" && typeof e.payload.tab_id === "string",
+        )
+        .map((e) => e.payload.tab_id as string),
+    );
+  }
+
+  it("closes grader tabs when the verdict lands and loser tabs when selection completes", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 4, verdict: "flag", reasons: "second" },
+      },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    // Grader tabs never merge, so their close is the verdict-landed one; the
+    // loser's tab closes with the discard; the winner's at its merge. Every
+    // close is best-effort fire-and-forget, so wait for the requests to land.
+    const tabIds = spawnedTabIds(poolDir, [
+      "01",
+      "01-grader-1",
+      "01-grader-2",
+    ]);
+    expect(tabIds).toHaveLength(4);
+    await untilTabCloses(fake, tabIds);
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const closes = fake.requests.filter((r) => r.method === "tab.close");
+    const closed = closes.map((r) => String(r.params.tab_id));
+    expect(closed.sort()).toEqual([...tabIds].sort());
+    // Every tab closes exactly once: a permutation (the discard closing the
+    // winner's tab, the merge closing the loser's) would still satisfy the
+    // set equality above.
+    for (const tabId of tabIds) {
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+    // ... and each close fires at its own trigger: the graders' verdicts
+    // land before selection, the winner's merge close precedes the discard.
+    const closeIndexOf = (tabId: string) =>
+      closes.findIndex((r) => String(r.params.tab_id) === tabId);
+    const spawned = readEventLines(poolDir, "01").filter(
+      (e) => e.kind === "spawned",
+    );
+    const winnerTab = spawned.find((e) => e.attempt === 1)!.payload
+      .tab_id as string;
+    const loserTab = spawned.find((e) => e.attempt === 2)!.payload
+      .tab_id as string;
+    for (const gid of ["01-grader-1", "01-grader-2"]) {
+      const graderTab = readEventLines(poolDir, gid).find(
+        (e) => e.kind === "spawned",
+      )!.payload.tab_id as string;
+      expect(closeIndexOf(graderTab)).toBeLessThan(closeIndexOf(winnerTab));
+    }
+    expect(closeIndexOf(winnerTab)).toBeLessThan(closeIndexOf(loserTab));
+  }, 15000);
+
+  it("closes the head-to-head tab when the judge's verdict lands", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 8, verdict: "pass", reasons: "second" },
+      },
+      // The margin of 1 is below the outright band, so the judge runs and
+      // its pick decides the selection.
+      "01-head-to-head": { winner: 2 },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    const tabIds = spawnedTabIds(poolDir, [
+      "01",
+      "01-grader-1",
+      "01-grader-2",
+      "01-head-to-head",
+    ]);
+    expect(tabIds).toHaveLength(5);
+    await untilTabCloses(fake, tabIds);
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const closed = fake.requests
+      .filter((r) => r.method === "tab.close")
+      .map((r) => String(r.params.tab_id));
+    expect(closed.sort()).toEqual([...tabIds].sort());
+    for (const tabId of tabIds) {
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+  }, 15000);
+
+  it("closes a crashed grader's tab on the failure path", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 1 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [{ workFile: "cand-1.txt", commitMsg: "cand-1" }],
+      // A grader that always crashes drives the re-spawn rounds to their
+      // bound; every failed round's tab is dead weight once its crash lands.
+      "01-grader-1": { exitCode: 1 },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    // One tab per re-spawn round: the initial spawn plus GRADER_RESPAWN_LIMIT
+    // (2) re-spawns, each closed when its crash lands.
+    const graderTabIds = spawnedTabIds(poolDir, ["01-grader-1"]);
+    expect(graderTabIds).toHaveLength(3);
+    await untilTabCloses(fake, graderTabIds);
+    await fake.close();
+
+    // The grading exhausted its re-spawn bound: the build ticket sits with
+    // its crash interrupt, its own attempt tab untouched.
+    const attemptTabIds = spawnedTabIds(poolDir, ["01"]);
+    expect(run.final.tickets["01"]).not.toBe("done");
+    const closed = fake.requests
+      .filter((r) => r.method === "tab.close")
+      .map((r) => String(r.params.tab_id));
+    for (const tabId of graderTabIds) {
+      expect(closed).toContain(tabId);
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+    for (const tabId of attemptTabIds) expect(closed).not.toContain(tabId);
   }, 15000);
 
   it("falls back to headless with the error on the spawned event when the daemon is absent", async () => {
