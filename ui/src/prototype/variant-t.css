@@ -1,0 +1,117 @@
+/* PROTOTYPE — throwaway, issue #29 terminal surface on real cards.
+   Dense, dark, native to the Console card palette. */
+.termproto {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.termproto-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.termproto-meta {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.termproto-peek {
+  margin: 0;
+  padding: 5px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  pointer-events: none;
+  user-select: none;
+  max-height: calc(6 * 1.4em);
+  overflow: hidden;
+}
+
+.termproto-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.termproto-focus {
+  background: var(--bg-panel-2);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.termproto-focus:hover {
+  border-color: var(--accent);
+}
+
+.termproto-focus:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.termproto-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  cursor: copy;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.termproto-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.termproto-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.termproto-chip-cmd {
+  color: var(--text-dim);
+}
+
+.termproto-chip-pane {
+  color: var(--status-running);
+}
+
+.termproto-note {
+  font-size: 9px;
+  color: var(--status-running);
+  white-space: nowrap;
+}

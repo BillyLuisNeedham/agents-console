@@ -86,6 +86,10 @@ _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channe
 One run of a ticket by a harness, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects.
 _Avoid_: run (that's the whole thread), execution, job
 
+**Terminal-backed attempt**:
+An Attempt whose harness runs in a herdr pane instead of a headless child — live in a real terminal the operator can watch and type into, while the engine stays oblivious to that input and the attempt still ends only on exit plus Outcome. Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
+_Avoid_: interactive attempt (interaction is the operator's, not the attempt's), attached attempt, PTY attempt
+
 **Outcome**:
 The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)

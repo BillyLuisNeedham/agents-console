@@ -31,6 +31,7 @@ import {
   type VitalsView,
 } from "./project";
 import { h } from "./dom";
+import { renderTerminalSurface } from "./terminal";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
@@ -215,9 +216,14 @@ export class Canvas {
   private canvas: CanvasBind | null = null;
   private drag: Drag | null = null;
   private readonly onCardTap: (nodeId: string) => void;
+  private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
 
-  constructor(options: { onCardTap: (nodeId: string) => void }) {
+  constructor(options: {
+    onCardTap: (nodeId: string) => void;
+    onFocusTerminal: (ticketId: string) => Promise<boolean>;
+  }) {
     this.onCardTap = options.onCardTap;
+    this.onFocusTerminal = options.onFocusTerminal;
     if (typeof window !== "undefined") {
       window.addEventListener("pointerup", (event) => this.endDrag(event));
       window.addEventListener("pointercancel", (event) => this.endDrag(event));
@@ -471,6 +477,13 @@ export class Canvas {
         // The Vitals footer rides the view model, so it renders inside the
         // card render and survives the full-DOM rebuild like everything else.
         card.vitals ? renderVitals(card.vitals) : null,
+        // The terminal surface (ADR-0014) rides the view model the same way:
+        // present only while the attempt is terminal-backed and running.
+        card.terminal
+          ? renderTerminalSurface(card.terminal, {
+              onFocus: () => this.onFocusTerminal(card.ticketId),
+            })
+          : null,
       ),
     );
   }

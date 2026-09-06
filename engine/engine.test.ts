@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
@@ -165,6 +166,181 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
     ];
   };
   return { harnesses: { stub }, spawned, spawnOrder, spawnList };
+}
+
+interface FakeHerdrRequest {
+  method: string;
+  params: Record<string, unknown>;
+}
+
+// The fake herdr daemon speaks the real wire shape (newline-delimited
+// JSON-RPC, one request per connection) and actually RUNS what a pane is
+// sent: the engine's wrapper shell executes under bash in the pane's cwd,
+// so the tee'd log and Stream files, the exit-code file, and the harness's
+// outcome are all real, exactly as a live herdr would produce them. Pane
+// ends are pushed to the engine's events.subscribe connections, the way
+// herdr pushes subscribed events. `breakSubscriptions` simulates a daemon
+// that cannot keep a subscription (restart mid-wait), for the exit-code
+// file fallback. Test-only controls simulate the orphans boot
+// reconciliation must handle: a pane with no process behind it, and its
+// later end.
+async function startExecutingFakeHerdr(options?: {
+  breakSubscriptions?: boolean;
+}): Promise<{
+  socketPath: string;
+  requests: FakeHerdrRequest[];
+  close: () => Promise<void>;
+  injectPane: (paneId: string) => void;
+  endPane: (paneId: string) => void;
+}> {
+  const breakSubscriptions = options?.breakSubscriptions === true;
+  const requests: FakeHerdrRequest[] = [];
+  let minted = 0;
+  const panes = new Map<
+    string,
+    { tabId: string; cwd: string; alive: boolean; buffer: string }
+  >();
+  const subscribers: Socket[] = [];
+  const connections = new Set<Socket>();
+  const firePaneEnd = (
+    paneId: string,
+    event: "pane_exited" | "pane_closed",
+  ): void => {
+    const pane = panes.get(paneId);
+    if (pane) pane.alive = false;
+    // herdr pushes every pane's events to every subscriber; the engine
+    // filters by pane id. A subscriber whose wait already settled has
+    // closed its end, so prune before broadcasting.
+    for (const sub of [...subscribers]) {
+      if (sub.destroyed || !sub.writable) {
+        subscribers.splice(subscribers.indexOf(sub), 1);
+        continue;
+      }
+      sub.write(
+        JSON.stringify({
+          event,
+          data: { type: event, pane_id: paneId, workspace_id: "w1" },
+        }) + "\n",
+      );
+    }
+  };
+  const server = createServer((socket) => {
+    connections.add(socket);
+    socket.on("close", () => connections.delete(socket));
+    let buf = "";
+    socket.on("data", (d) => {
+      buf += d.toString();
+      if (!buf.includes("\n")) return;
+      const msg = JSON.parse(buf.slice(0, buf.indexOf("\n"))) as {
+        id: string;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      requests.push({ method: msg.method, params: msg.params });
+      const respond = (result: unknown): void => {
+        socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
+      };
+      if (msg.method === "tab.create") {
+        minted += 1;
+        const tabId = `tab-${minted}`;
+        const paneId = `pane-${minted}`;
+        panes.set(paneId, {
+          tabId,
+          cwd: String(msg.params.cwd ?? "/"),
+          alive: true,
+          buffer: "",
+        });
+        respond({ tab: { tab_id: tabId } });
+      } else if (msg.method === "pane.list") {
+        respond({
+          panes: [...panes.entries()]
+            .filter(([, pane]) => pane.alive)
+            .map(([paneId, pane]) => ({ tab_id: pane.tabId, pane_id: paneId })),
+        });
+      } else if (msg.method === "pane.send_input") {
+        const pane = panes.get(String(msg.params.pane_id));
+        if (pane) {
+          if (typeof msg.params.text === "string") {
+            pane.buffer += msg.params.text;
+          }
+          if (
+            Array.isArray(msg.params.keys) &&
+            msg.params.keys.includes("enter")
+          ) {
+            const command = pane.buffer;
+            pane.buffer = "";
+            const proc = Bun.spawn(["bash", "-c", command], {
+              cwd: pane.cwd,
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "ignore",
+            });
+            void proc.exited.then(() =>
+              firePaneEnd(String(msg.params.pane_id), "pane_exited"),
+            );
+          }
+        }
+        respond({});
+      } else if (msg.method === "events.subscribe") {
+        if (breakSubscriptions) {
+          // The daemon drops the subscription before acking: the engine's
+          // wait degrades to the exit-code file.
+          socket.destroy();
+          return;
+        }
+        // The ack answers this request; the connection then stays open and
+        // receives pushed events until close() destroys it or the
+        // subscriber's own end closes it (an exited wait releases its
+        // socket, and firePaneEnd prunes closed subscribers).
+        subscribers.push(socket);
+        socket.on("close", () => {
+          const at = subscribers.indexOf(socket);
+          if (at !== -1) subscribers.splice(at, 1);
+        });
+        socket.write(
+          JSON.stringify({ id: msg.id, result: { type: "subscription_started" } }) + "\n",
+        );
+      } else if (msg.method === "pane.close") {
+        const paneId = String(msg.params.pane_id ?? "");
+        respond({ type: "ok" });
+        firePaneEnd(paneId, "pane_closed");
+      } else if (msg.method === "tab.close") {
+        respond({ type: "ok" });
+      } else {
+        respond({});
+      }
+    });
+  });
+  const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+  tempDirs.push(dir);
+  const socketPath = join(dir, "herdr.sock");
+  await new Promise<void>((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(socketPath, () => resolve());
+  });
+  return {
+    socketPath,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const sub of subscribers) sub.destroy();
+        // bun's server.close() waits for every connection to drain, and a
+        // request/response connection whose client already destroyed its
+        // end can linger in a half-closed state that outlives the test.
+        // Teardown destroys what is left instead of waiting on it.
+        for (const conn of connections) conn.destroy();
+        server.close(() => resolve());
+      }),
+    injectPane: (paneId) => {
+      panes.set(paneId, {
+        tabId: "tab-ghost",
+        cwd: "/tmp",
+        alive: true,
+        buffer: "",
+      });
+    },
+    endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
+  };
 }
 
 const stubConfig: PoolConfig = {
@@ -4265,6 +4441,789 @@ describe("spawn and exit facts", () => {
       logTail: [],
       outcomeExists: true,
     });
+  }, 15000);
+});
+
+describe("terminal-backed attempts (named herdr tabs)", () => {
+  // ADR-0014 + ADR-0015: on a `terminal: "herdr"` pool every attempt opens
+  // its own named herdr tab before the spawn is recorded — unfocused, in the
+  // attempt's cwd, labeled `<ticket-id> · <ticket-title>` — and the spawned
+  // event carries the root pane id recovered from pane.list, because
+  // tab.create returns none (verified herdr behaviour). The fake daemon
+  // speaks the real wire shape and actually executes the wrapper a pane is
+  // sent, so the harness genuinely runs in the pane.
+  async function startFakeHerdr(): ReturnType<typeof startExecutingFakeHerdr> {
+    return startExecutingFakeHerdr();
+  }
+
+  it("opens a named unfocused tab in the attempt cwd and records the recovered pane id", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Named herdr tabs\n\nticket body" },
+      ],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Boot reconciliation's liveness pane.list comes first, then the
+    // attempt's tab.create and its pane.list recovery.
+    expect(fake.requests.map((r) => r.method).slice(1, 3)).toEqual([
+      "tab.create",
+      "pane.list",
+    ]);
+    expect(fake.requests[1].params).toEqual({
+      label: "01 · Named herdr tabs",
+      focus: false,
+      cwd: poolDir,
+    });
+    // The harness ran inside the pane: the wrapper line was sent as text,
+    // Enter as a key, and the pane's end was awaited on an events.subscribe
+    // stream matching pane_exited and pane_closed.
+    const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+    expect(sends).toHaveLength(2);
+    expect(typeof sends[0].params.text).toBe("string");
+    expect(sends[1].params.keys).toEqual(["enter"]);
+    const subscriptions = fake.requests.filter(
+      (r) => r.method === "events.subscribe",
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0].params.subscriptions).toEqual([
+      { type: "pane.exited" },
+      { type: "pane.closed" },
+    ]);
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBe("pane-1");
+    expect(spawned.payload.tab_id).toBe("tab-1");
+    expect(spawned.payload.terminal_error).toBeUndefined();
+  }, 15000);
+
+  it("truncates a long ticket title to the tab label cap", async () => {
+    const longTitle = "Named herdr tabs ".repeat(3).trimEnd();
+    const poolDir = makePool({
+      tickets: [{ ...readyTicket("01"), body: `# ${longTitle}\n\nticket body` }],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    // The cap itself is unit-tested in herdr.test.ts; here the wiring from
+    // the ticket file's heading to the socket's label params. Request 0 is
+    // boot reconciliation's liveness pane.list; the tab.create follows.
+    expect(fake.requests[1].params.label).toBe(
+      `01 · ${longTitle.slice(0, 35)}`,
+    );
+  }, 15000);
+
+  it("opens a tab for every attempt of a verify fan-out, graders included", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 4, verdict: "flag", reasons: "second" },
+      },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Two attempt tabs and two grader tabs; pane.list is also boot
+    // reconciliation's liveness check and the exit-wait backstop (one per
+    // pane end), whose exact count and interleaving are timing-dependent
+    // and pinned in the mechanics tests below.
+    const creates = fake.requests.filter((r) => r.method === "tab.create");
+    expect(creates).toHaveLength(4);
+    // Every attempt tab is named for its ticket, unfocused. The build
+    // attempts label from the ticket title; the grader tickets carry the
+    // engine-written "grade attempt" title, capped at the label length.
+    for (const created of creates) {
+      expect(created.params.focus).toBe(false);
+      expect(String(created.params.label).length).toBeLessThanOrEqual(40);
+    }
+    const buildTabs = creates.filter((r) =>
+      String(r.params.label).startsWith("01 · "),
+    );
+    expect(buildTabs).toHaveLength(2);
+    for (const tab of buildTabs) {
+      expect(tab.params.label).toBe("01 · Pick a winner");
+      expect(String(tab.params.cwd)).toContain(
+        join(".git", "pool-worktrees"),
+      );
+    }
+    // The attempt worktrees differ per candidate: the two tabs never share.
+    expect(buildTabs[0].params.cwd).not.toBe(buildTabs[1].params.cwd);
+    // Graders run in the main checkout and record their pane ids on their
+    // own spawned events.
+    const graderTabs = creates.filter((r) =>
+      String(r.params.label).startsWith("01-grader-"),
+    );
+    expect(graderTabs).toHaveLength(2);
+    for (const tab of graderTabs) {
+      expect(tab.params.cwd).toBe(poolDir);
+    }
+    for (const gid of ["01-grader-1", "01-grader-2"]) {
+      const spawned = readEventLines(poolDir, gid).find(
+        (e) => e.kind === "spawned",
+      )!;
+      expect(String(spawned.payload.pane_id)).toMatch(/^pane-/);
+    }
+  }, 15000);
+
+  async function untilTabCloses(
+    fake: { requests: FakeHerdrRequest[] },
+    tabIds: string[],
+  ): Promise<void> {
+    const closed = () =>
+      new Set(
+        fake.requests
+          .filter((r) => r.method === "tab.close")
+          .map((r) => String(r.params.tab_id)),
+      );
+    const deadline = Date.now() + 5000;
+    while (!tabIds.every((id) => closed().has(id))) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `timed out waiting for tab.close of ${tabIds.join(", ")}; ` +
+            `closed so far: ${[...closed()].join(", ") || "(none)"}`,
+        );
+      }
+      await Bun.sleep(10);
+    }
+  }
+
+  function spawnedTabIds(poolDir: string, ids: string[]): string[] {
+    return ids.flatMap((id) =>
+      readEventLines(poolDir, id)
+        .filter(
+          (e) => e.kind === "spawned" && typeof e.payload.tab_id === "string",
+        )
+        .map((e) => e.payload.tab_id as string),
+    );
+  }
+
+  it("closes grader tabs when the verdict lands and loser tabs when selection completes", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 4, verdict: "flag", reasons: "second" },
+      },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    // Grader tabs never merge, so their close is the verdict-landed one; the
+    // loser's tab closes with the discard; the winner's at its merge. Every
+    // close is best-effort fire-and-forget, so wait for the requests to land.
+    const tabIds = spawnedTabIds(poolDir, [
+      "01",
+      "01-grader-1",
+      "01-grader-2",
+    ]);
+    expect(tabIds).toHaveLength(4);
+    await untilTabCloses(fake, tabIds);
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const closes = fake.requests.filter((r) => r.method === "tab.close");
+    const closed = closes.map((r) => String(r.params.tab_id));
+    expect(closed.sort()).toEqual([...tabIds].sort());
+    // Every tab closes exactly once: a permutation (the discard closing the
+    // winner's tab, the merge closing the loser's) would still satisfy the
+    // set equality above.
+    for (const tabId of tabIds) {
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+    // ... and each close fires at its own trigger: the graders' verdicts
+    // land before selection, the winner's merge close precedes the discard.
+    const closeIndexOf = (tabId: string) =>
+      closes.findIndex((r) => String(r.params.tab_id) === tabId);
+    const spawned = readEventLines(poolDir, "01").filter(
+      (e) => e.kind === "spawned",
+    );
+    const winnerTab = spawned.find((e) => e.attempt === 1)!.payload
+      .tab_id as string;
+    const loserTab = spawned.find((e) => e.attempt === 2)!.payload
+      .tab_id as string;
+    for (const gid of ["01-grader-1", "01-grader-2"]) {
+      const graderTab = readEventLines(poolDir, gid).find(
+        (e) => e.kind === "spawned",
+      )!.payload.tab_id as string;
+      expect(closeIndexOf(graderTab)).toBeLessThan(closeIndexOf(winnerTab));
+    }
+    expect(closeIndexOf(winnerTab)).toBeLessThan(closeIndexOf(loserTab));
+  }, 15000);
+
+  it("closes the head-to-head tab when the judge's verdict lands", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 2 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+      "01-grader-1": {
+        grade: { score: 9, verdict: "pass", reasons: "first" },
+      },
+      "01-grader-2": {
+        grade: { score: 8, verdict: "pass", reasons: "second" },
+      },
+      // The margin of 1 is below the outright band, so the judge runs and
+      // its pick decides the selection.
+      "01-head-to-head": { winner: 2 },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    const tabIds = spawnedTabIds(poolDir, [
+      "01",
+      "01-grader-1",
+      "01-grader-2",
+      "01-head-to-head",
+    ]);
+    expect(tabIds).toHaveLength(5);
+    await untilTabCloses(fake, tabIds);
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const closed = fake.requests
+      .filter((r) => r.method === "tab.close")
+      .map((r) => String(r.params.tab_id));
+    expect(closed.sort()).toEqual([...tabIds].sort());
+    for (const tabId of tabIds) {
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+  }, 15000);
+
+  it("closes a crashed grader's tab on the failure path", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { ...readyTicket("01"), body: "# Pick a winner\n\nticket body" },
+      ],
+      config: {
+        ...stubConfig,
+        terminal: "herdr",
+        assign: { "01": { verify: 1 } },
+      },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [{ workFile: "cand-1.txt", commitMsg: "cand-1" }],
+      // A grader that always crashes drives the re-spawn rounds to their
+      // bound; every failed round's tab is dead weight once its crash lands.
+      "01-grader-1": { exitCode: 1 },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+
+    // One tab per re-spawn round: the initial spawn plus GRADER_RESPAWN_LIMIT
+    // (2) re-spawns, each closed when its crash lands.
+    const graderTabIds = spawnedTabIds(poolDir, ["01-grader-1"]);
+    expect(graderTabIds).toHaveLength(3);
+    await untilTabCloses(fake, graderTabIds);
+    await fake.close();
+
+    // The grading exhausted its re-spawn bound: the build ticket sits with
+    // its crash interrupt, its own attempt tab untouched.
+    const attemptTabIds = spawnedTabIds(poolDir, ["01"]);
+    expect(run.final.tickets["01"]).not.toBe("done");
+    const closed = fake.requests
+      .filter((r) => r.method === "tab.close")
+      .map((r) => String(r.params.tab_id));
+    for (const tabId of graderTabIds) {
+      expect(closed).toContain(tabId);
+      expect(closed.filter((id) => id === tabId)).toHaveLength(1);
+    }
+    for (const tabId of attemptTabIds) expect(closed).not.toContain(tabId);
+  }, 15000);
+
+  it("falls back to headless with the error on the spawned event when the daemon is absent", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: join(poolDir, "no-daemon.sock"),
+    });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBeNull();
+    expect(typeof spawned.payload.terminal_error).toBe("string");
+  }, 15000);
+
+  it("records no pane facts on a headless pool", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      // Pointing at nothing: a headless pool must never touch the socket.
+      herdrSocket: join(poolDir, "no-daemon.sock"),
+    });
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const spawned = readEventLines(poolDir, "01").find(
+      (e) => e.kind === "spawned",
+    )!;
+    expect(spawned.payload.pane_id).toBeUndefined();
+    expect(spawned.payload.terminal_error).toBeUndefined();
+  }, 15000);
+});
+
+describe("terminal-backed engine mechanics (ADR-0014)", () => {
+  // The fake daemon actually executes the wrapper shell a pane is sent, so
+  // these tests observe the real files a pane run produces: the tee'd log,
+  // the derived log from a streamed harness, the wrapper's exit-code file,
+  // and the tab close a merge triggers.
+
+  async function startFakeHerdr(options?: {
+    breakSubscriptions?: boolean;
+  }): ReturnType<typeof startExecutingFakeHerdr> {
+    return startExecutingFakeHerdr(options);
+  }
+
+  // A settled run's `settled` getter resolves immediately (there is no next
+  // settle to wait for), so post-settle state changes the engine's own
+  // bookkeeping drives (an adopted attempt's finalize) are polled here.
+  async function until(cond: () => boolean, what: string): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  it("wraps the harness in the bash wrapper shell and reads the exit code from the file", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const wrapper = fake.requests.find(
+      (r) => r.method === "pane.send_input" && typeof r.params.text === "string",
+    )!.params.text as string;
+    // ADR-0014's wrapper: merged output teed to the log (the stub harness
+    // is raw mode, so the tee target is the log itself), the exit code out
+    // of PIPESTATUS (a pipeline's $? would be tee's), and `exit` so the
+    // pane ends and pane_exited can fire.
+    expect(wrapper).toContain("2>&1 | tee ");
+    expect(wrapper).toContain(".log'");
+    expect(wrapper).not.toContain(".stream.jsonl");
+    expect(wrapper).toMatch(/\$\{PIPESTATUS\[0\]\} > .*\.exitcode'; exit$/);
+    // The wrapper's promise, on the pane: the exit-code file the wrapper
+    // wrote and the harness outcome it ran.
+    expect(readFileSync(join(poolDir, "runs", "01.exitcode"), "utf8").trim()).toBe("0");
+    expect(existsSync(join(poolDir, "runs", "01.log"))).toBe(true);
+    const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited")!;
+    expect(exited.payload.code).toBe(0);
+  }, 15000);
+
+  it("tees a streamed harness to the Stream file and derives the log live from it", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "test-model" },
+        terminal: "herdr",
+      },
+    });
+    // A streamed harness: one structured stream line, one plain diagnostic,
+    // and the outcome. The wrapper tees the merged output to the Stream
+    // file; the follow-file tailer must derive the log from it.
+    const script = join(poolDir, "stream-stub.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from the pane"}]}}'`,
+        "echo plain-diagnostics",
+        `printf '%s' '{"status":"done","summary":"streamed","commitSha":null}' > "$1"`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const harnesses: Record<string, HarnessCommand> = {
+      claude: (ctx: SpawnContext) => ["bash", script, ctx.outcomePath],
+    };
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // The Stream file carries the tee'd bytes verbatim, stderr merged with
+    // the structured stdout per the ADR's 2>&1 contract.
+    const stream = readFileSync(
+      join(poolDir, "runs", "01.stream.jsonl"),
+      "utf8",
+    );
+    expect(stream).toContain('"type":"assistant"');
+    expect(stream).toContain("plain-diagnostics");
+    // The log is the ADR-0012 derivation of those bytes, not a second tee.
+    const log = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
+    expect(log).toContain("hello from the pane");
+    expect(log).toContain("plain-diagnostics");
+    expect(log).not.toContain('"type":"assistant"');
+  }, 15000);
+
+  it("a non-zero pane exit is the attempt's crash, with the wrapper's code", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({ "01": { exitCode: 3 } });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+    expect(readFileSync(join(poolDir, "runs", "01.exitcode"), "utf8").trim()).toBe("3");
+    const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+    expect(crash.payload.code).toBe(3);
+    expect(crash.payload.reason).toBe("harness exited 3");
+  }, 15000);
+
+  it("waits on the exit-code file when the event subscription cannot be kept", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = stubHarness({});
+    // A daemon that drops every subscription (a restart mid-wait, or one
+    // too old for events.subscribe): the wrapper's exit-code file is the
+    // only end signal, and the attempt must still complete.
+    const fake = await startFakeHerdr({ breakSubscriptions: true });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(
+      fake.requests.filter((r) => r.method === "events.subscribe").length,
+    ).toBeGreaterThan(0);
+    const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited")!;
+    expect(exited.payload.code).toBe(0);
+  }, 15000);
+
+  it("closes the attempt's tab when the ticket merges", async () => {
+    // Two independent tickets land in one super-step, so each attempt gets
+    // its own worktree and a real merge to close its tab by.
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "work-1.txt", commitMsg: "attempt 1 work" },
+      "02": { workFile: "work-2.txt", commitMsg: "attempt 2 work" },
+    });
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await until(
+      () => fake.requests.some((r) => r.method === "tab.close"),
+      "tab close requests",
+    );
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(run.final.tickets["02"]).toBe("done");
+    // Every merged attempt's tab closed, by the tab id its spawned event
+    // recorded.
+    const tabIds = ["01", "02"].map(
+      (id) =>
+        readEventLines(poolDir, id).find((e) => e.kind === "spawned")!.payload
+          .tab_id,
+    );
+    const closed = fake.requests
+      .filter((r) => r.method === "tab.close")
+      .map((r) => r.params.tab_id);
+    expect(closed.sort()).toEqual(tabIds.sort());
+    for (const id of ["01", "02"]) {
+      expect(
+        readEventLines(poolDir, id).some((e) => e.kind === "merged"),
+      ).toBe(true);
+    }
+  }, 15000);
+
+  it("boot reconciliation crashes an orphan attempt whose pane is gone and re-runs the ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+        },
+      ],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    // The died run's record: attempt 1 scheduled and spawned into a pane
+    // this pool's daemon no longer holds, and never exited.
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:00Z",
+      attempt: 1,
+      kind: "scheduled",
+      payload: {},
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:01Z",
+      attempt: 1,
+      kind: "spawned",
+      payload: { pane_id: "pane-orphan", tab_id: "tab-orphan" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    // The orphan crashed on the record; the ticket re-ran as a fresh
+    // attempt in a new tab and finished.
+    expect(run.final.tickets["01"]).toBe("done");
+    const events = readEventLines(poolDir, "01");
+    const crash = events.find((e) => e.kind === "crash" && e.attempt === 1)!;
+    expect(crash.payload.reason).toBe(
+      "attempt pane gone at boot reconciliation",
+    );
+    expect(events.filter((e) => e.kind === "spawned")).toHaveLength(2);
+    expect(events.filter((e) => e.kind === "exited")).toHaveLength(1);
+    expect(events.find((e) => e.kind === "spawned")!.payload.pane_id).toBe(
+      "pane-orphan",
+    );
+    expect(events.filter((e) => e.kind === "spawned")[1].payload.pane_id).toBe(
+      "pane-1",
+    );
+  }, 15000);
+
+  it("boot reconciliation re-adopts an orphan attempt whose pane is live, and its exit lands later", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+        },
+      ],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:00Z",
+      attempt: 1,
+      kind: "scheduled",
+      payload: {},
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:01Z",
+      attempt: 1,
+      kind: "spawned",
+      payload: { pane_id: "pane-ghost", tab_id: "tab-ghost" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+    fake.injectPane("pane-ghost");
+
+    const run = startPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await run.settled;
+
+    // Adopted, not duplicated: no fresh tab, the marker kept in-progress,
+    // and the interrupt names the wait.
+    expect(run.final.tickets["01"]).toBe("in-progress");
+    expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(0);
+    const issue = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issue.split("\n")[0]).toContain("status=in-progress");
+    expect(issue).not.toContain("back to ready");
+    const adoption = run.interrupts.find((i) => i.ticketId === "01")!;
+    expect(adoption.kind).toBe("checkpoint");
+    expect(adoption.body).toContain("re-adopted");
+
+    // The pane's wrapper finished while the engine was down: its exit-code
+    // and outcome files are on disk, then the pane ends.
+    writeFileSync(join(poolDir, "runs", "01.exitcode"), "0");
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "adopted", commitSha: null }),
+    );
+    fake.endPane("pane-ghost");
+    await until(() => run.final.tickets["01"] === "done", "adopted attempt recorded");
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const events = readEventLines(poolDir, "01");
+    const exited = events.find((e) => e.kind === "exited" && e.attempt === 1)!;
+    expect(exited.payload.code).toBe(0);
+    expect(exited.payload.status).toBe("done");
+    // One spawn on the record, no crash, and the adoption interrupt made
+    // way for the closing gate's Review.
+    expect(events.filter((e) => e.kind === "spawned")).toHaveLength(1);
+    expect(events.some((e) => e.kind === "crash")).toBe(false);
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    await fake.close();
+  }, 15000);
+
+  it("answering the adoption interrupt abandons the pane and re-runs the ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=in-progress -->",
+        },
+      ],
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:00Z",
+      attempt: 1,
+      kind: "scheduled",
+      payload: {},
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:01Z",
+      attempt: 1,
+      kind: "spawned",
+      payload: { pane_id: "pane-ghost", tab_id: "tab-ghost" },
+    });
+    const rig = stubHarness({});
+    const fake = await startFakeHerdr();
+    fake.injectPane("pane-ghost");
+
+    const run = startPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await run.settled;
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+
+    const answered = await run.resume("01");
+
+    // The adopted pane was closed, the finalize recorded nothing for
+    // attempt 1, and the ticket re-ran as attempt 2 to done.
+    expect(answered.final.tickets["01"]).toBe("done");
+    const closes = fake.requests.filter((r) => r.method === "pane.close");
+    expect(closes.map((r) => r.params.pane_id)).toEqual(["pane-ghost"]);
+    const events = readEventLines(poolDir, "01");
+    expect(events.filter((e) => e.kind === "spawned")).toHaveLength(2);
+    expect(events.some((e) => e.kind === "exited" && e.attempt === 1)).toBe(false);
+    expect(answered.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    await fake.close();
   }, 15000);
 });
 
@@ -8735,8 +9694,11 @@ describe("accept/process split", () => {
     );
 
     const run = startPool({ poolDir, harnesses: rig.harnesses });
-    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
+    // Counted synchronously, before the drive's first emit: the assertion
+    // below needs every emit this run produces accounted for, and counting
+    // later risks observing 01's fast crash before the count lands.
     const snapshotsBefore = run.snapshots.length;
+    await waitFor(() => rig.spawned["02"] !== undefined, "ticket 02 spawned");
 
     // The crash is recorded the moment 01's attempt exits: the event lands in
     // the ticket log and the marker is corrected while 02 still holds the
@@ -8760,8 +9722,12 @@ describe("accept/process split", () => {
     expect(
       readFileSync(join(poolDir, "issues", "01-a.md"), "utf8").split("\n")[0],
     ).toContain("status=in-progress");
+    // The crash emit is one more snapshot on top of the run's opening and
+    // scheduling emits; 02 still blocks, so no boundary emit can explain the
+    // count. (Counting from before the drive started keeps this true however
+    // late this thread observes the crash.)
     await waitFor(
-      () => run.snapshots.length > snapshotsBefore,
+      () => run.snapshots.length > snapshotsBefore + 1,
       "snapshot emitted at crash recording",
     );
     // The interrupt itself still waits for the super-step boundary.

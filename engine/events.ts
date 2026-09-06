@@ -91,6 +91,23 @@ export function attemptStreamName(
 }
 
 /**
+ * One attempt exit-code file name (ADR-0014): the wrapper shell the engine
+ * sends to a terminal-backed attempt's pane writes the harness's exit code
+ * here, because herdr's API exposes no exit codes. Same naming contract and
+ * free variables as `attemptLogName`, so the exit-code file sits beside the
+ * attempt's log and Stream file under the same name.
+ */
+export function attemptExitCodeName(
+  ticketId: string,
+  attempt: number | null,
+  resolver: boolean,
+): string {
+  const numbered = attempt === null ? "" : `.attempt-${attempt}`;
+  const suffix = resolver ? ".resolver" : "";
+  return `${ticketId}${numbered}${suffix}.exitcode`;
+}
+
+/**
  * Match a file name against a ticket's Stream file naming contract, the four
  * shapes `attemptStreamName` produces. Round-trip through the naming function
  * keeps it the single authority, exactly as for `parseAttemptLogName`.

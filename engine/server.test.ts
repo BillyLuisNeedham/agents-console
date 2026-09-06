@@ -11,12 +11,18 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ACTIVITY_CACHE_TTL_MS,
   createPoolServer,
+  currentAttemptPaneIds,
   LOG_CHUNK_BYTES,
+  resolveTerminalPane,
+  spawnedPaneAllowlist,
+  TERMINAL_PEEK_LINES,
+  terminalSpawnRefusal,
   type PoolServer,
   type PoolServerOptions,
 } from "./server.ts";
@@ -111,10 +117,12 @@ function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Reco
 
 // A stub harness whose blocked tickets hold their spawned script until the
 // sentinel file appears, so a test can keep a super-step in flight while it
-// answers an interrupt. Every other ticket takes the instant path.
+// answers an interrupt. Every other ticket takes the instant path. A
+// function sentinel resolves per ticket, so two tickets can block on their
+// own files and be released one at a time.
 function blockingHarness(
   behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
-  sentinel: string,
+  sentinel: string | ((id: string) => string),
 ): Record<string, HarnessCommand> {
   const poolLocal = tempDirs[tempDirs.length - 1];
   const stubPath = join(poolLocal, "blocking-stub.sh");
@@ -139,13 +147,14 @@ function blockingHarness(
     const b = behaviour[ctx.id] ?? {};
     const statuses = b.statuses ?? (["done"] as const);
     const status = statuses[Math.min(n, statuses.length - 1)];
+    const release = typeof sentinel === "function" ? sentinel(ctx.id) : sentinel;
     return [
       "bash",
       stubPath,
       status,
       ctx.outcomePath,
       b.block ? "block" : "-",
-      sentinel,
+      release,
     ];
   };
   return { stub: harness };
@@ -164,13 +173,18 @@ function fleetRegistry(poolDir: string): string {
   return join(poolDir, "fleet.json");
 }
 
-async function startServer(poolDir: string, harnesses: Record<string, HarnessCommand>): Promise<PoolServer> {
+async function startServer(
+  poolDir: string,
+  harnesses: Record<string, HarnessCommand>,
+  options: { herdrSocket?: string } = {},
+): Promise<PoolServer> {
   const server = createPoolServer({
     poolDir,
     port: 0,
     harnesses,
     distDir: "/nonexistent",
     registryPath: fleetRegistry(poolDir),
+    ...options,
   });
   servers.push(server);
   return server;
@@ -2396,5 +2410,712 @@ describe("fleet registration", () => {
     expect(entries.map((e) => e.pid).sort()).toEqual(
       [childA.pid, childB.pid].sort(),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Terminal endpoints (peek and focus)
+// ---------------------------------------------------------------------------
+
+describe("terminal endpoints", () => {
+  const fakeServers: import("node:net").Server[] = [];
+
+  afterEach(async () => {
+    while (fakeServers.length > 0) {
+      const server = fakeServers.pop()!;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  interface TerminalFakeRequest {
+    method: string;
+    params: Record<string, unknown>;
+  }
+
+  interface TerminalFake {
+    socketPath: string;
+    requests: TerminalFakeRequest[];
+    /** Per-pane recent-output text; a pane absent here reads as empty. */
+    text: Record<string, string>;
+    /** Methods forced to answer with a herdr-style error body. */
+    fail: Record<string, unknown>;
+  }
+
+  /**
+   * A fake herdr daemon for the terminal endpoints: newline-delimited
+   * JSON-RPC, one request per connection. `pane.read` serves the per-pane
+   * text table (revision always 0, exactly the stagnation the
+   * implementation must not rely on); `pane.focus` just records. A foreign
+   * pane seeded in the table stands in for a live agent session sharing
+   * the daemon, which no endpoint may ever name.
+   */
+  function startFakeHerdr(seed?: { text?: Record<string, string> }): Promise<TerminalFake> {
+    const requests: TerminalFakeRequest[] = [];
+    const fake: TerminalFake = {
+      socketPath: "",
+      requests,
+      text: { "pane-foreign": "someone else's agent\n", ...seed?.text },
+      fail: {},
+    };
+    const server = createServer((socket) => {
+      let buf = "";
+      socket.on("data", (d) => {
+        buf += d.toString();
+        const newline = buf.indexOf("\n");
+        if (newline < 0) return;
+        const msg = JSON.parse(buf.slice(0, newline)) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        requests.push({ method: msg.method, params: msg.params });
+        let response: Record<string, unknown>;
+        if (msg.method in fake.fail) {
+          response = { id: msg.id, error: fake.fail[msg.method] };
+        } else if (msg.method === "pane.read") {
+          const paneId = String(msg.params.pane_id ?? "");
+          response = {
+            id: msg.id,
+            result: {
+              read: {
+                text: fake.text[paneId] ?? "",
+                revision: 0,
+                truncated: false,
+              },
+            },
+          };
+        } else if (msg.method === "pane.focus") {
+          response = { id: msg.id, result: {} };
+        } else {
+          response = {
+            id: msg.id,
+            error: { code: -32601, message: `unknown method ${msg.method}` },
+          };
+        }
+        socket.end(JSON.stringify(response) + "\n");
+      });
+    });
+    fakeServers.push(server);
+    const dir = mkdtempSync(join(tmpdir(), "herdr-terminal-"));
+    tempDirs.push(dir);
+    fake.socketPath = join(dir, "herdr.sock");
+    return new Promise((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(fake.socketPath, () => resolve(fake));
+    });
+  }
+
+  /** A pool with three tickets; the caller writes the events each test needs. */
+  function makeTerminalPool(): { poolDir: string; runsDir: string } {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+    ]);
+    return { poolDir, runsDir: join(poolDir, "runs") };
+  }
+
+  function recordSpawned(runsDir: string, ticketId: string, attempt: number, paneId: string | null): void {
+    appendEvent(runsDir, ticketId, {
+      at: "2026-09-05T00:00:00Z",
+      attempt,
+      kind: "spawned",
+      payload: { pane_id: paneId },
+    });
+  }
+
+  function recordSettled(runsDir: string, ticketId: string, attempt: number, kind: "exited" | "crash" | "answered" | "merged"): void {
+    appendEvent(runsDir, ticketId, {
+      at: "2026-09-05T00:01:00Z",
+      attempt,
+      kind,
+      payload: {},
+    });
+  }
+
+  function startTerminalServer(poolDir: string, herdrSocket: string): PoolServer {
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath: fleetRegistry(poolDir),
+      herdrSocket,
+    });
+    servers.push(server);
+    return server;
+  }
+
+  it("peek translates the ticket id to the recorded pane id and serves its recent output", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    const fake = await startFakeHerdr({ text: { "pane-1": "working\nstill working" } });
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ticket: "01", paneId: "pane-1", text: "working\nstill working" });
+    // The wire call is the prototype's verified peek shape, small line count.
+    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(6);
+    expect(TERMINAL_PEEK_LINES).toBeLessThanOrEqual(8);
+    expect(fake.requests).toEqual([
+      {
+        method: "pane.read",
+        params: {
+          pane_id: "pane-1",
+          source: "recent",
+          format: "text",
+          strip_ansi: true,
+          lines: TERMINAL_PEEK_LINES,
+        },
+      },
+    ]);
+  });
+
+  it("focus calls pane.focus with the recorded pane id", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    const fake = await startFakeHerdr();
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    const res = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, paneId: "pane-1" });
+    expect(fake.requests).toEqual([
+      { method: "pane.focus", params: { pane_id: "pane-1" } },
+    ]);
+  });
+
+  it("never names a pane the pool did not spawn, and the guard refuses one", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    const fake = await startFakeHerdr();
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
+    // The daemon hosts a foreign live-agent pane; no request may name it.
+    // This is the spawned-only guarantee end to end: the endpoints are keyed
+    // by ticket id and translate only through the pool's own spawned events,
+    // so there is no request that reaches herdr for an unrelated pane.
+    expect(fake.requests).toHaveLength(2);
+    for (const request of fake.requests) {
+      expect(String(request.params.pane_id)).not.toBe("pane-foreign");
+    }
+
+    // The refusal behind the 403, at the unit seam: only pane ids the pool
+    // recorded on a spawned event pass. End to end the guard cannot trip on
+    // well-formed state (resolution and allowlist read the same events);
+    // it exists so corrupted state still cannot point the Console at a
+    // foreign pane.
+    const meta = [{ id: "01" }] as Parameters<typeof spawnedPaneAllowlist>[1];
+    const allowlist = spawnedPaneAllowlist(runsDir, meta);
+    expect([...allowlist].sort()).toEqual(["pane-1"]);
+    expect(terminalSpawnRefusal(allowlist, "pane-1")).toBeNull();
+    expect(terminalSpawnRefusal(allowlist, "pane-foreign")).toContain(
+      "not one this pool spawned",
+    );
+  });
+
+  it("answers unknown, headless, and finished tickets with a clean no-pane 404", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    // Ticket 02 spawned headless: the recorded fallback fact is pane_id null.
+    recordSpawned(runsDir, "02", 1, null);
+    // Ticket 03 ran terminal-backed but its attempt has settled.
+    recordSpawned(runsDir, "03", 1, "pane-3");
+    recordSettled(runsDir, "03", 1, "exited");
+    const fake = await startFakeHerdr();
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    for (const ticket of ["02", "03", "99"]) {
+      const peek = await fetch(`${server.url}/api/terminal/peek?ticket=${ticket}`);
+      expect(peek.status).toBe(404);
+      expect((await peek.json()).error).toBe(
+        `no terminal-backed pane for ticket ${ticket}`,
+      );
+      const focus = await fetch(`${server.url}/api/terminal/focus?ticket=${ticket}`, {
+        method: "POST",
+      });
+      expect(focus.status).toBe(404);
+      expect((await focus.json()).error).toBe(
+        `no terminal-backed pane for ticket ${ticket}`,
+      );
+    }
+    // No-pane tickets never reach the daemon.
+    expect(fake.requests).toEqual([]);
+  });
+
+  it("resolves the ticket's latest attempt's pane: a retry supersedes the old one", () => {
+    const { runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-old");
+    recordSettled(runsDir, "01", 1, "exited");
+    recordSpawned(runsDir, "01", 2, "pane-new");
+    expect(resolveTerminalPane(runsDir, "01")).toBe("pane-new");
+    recordSettled(runsDir, "01", 2, "exited");
+    expect(resolveTerminalPane(runsDir, "01")).toBeNull();
+    expect(resolveTerminalPane(runsDir, "02")).toBeNull();
+  });
+
+  it("treats an empty read as empty text, not an error", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    // No text seeded: a background tab still warming up reads empty.
+    const fake = await startFakeHerdr();
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ticket: "01", paneId: "pane-1", text: "" });
+  });
+
+  it("freshness comes from text, not revision: a stagnant revision still serves new text", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    const fake = await startFakeHerdr({ text: { "pane-1": "first" } });
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    const first = await (await fetch(`${server.url}/api/terminal/peek?ticket=01`)).json();
+    expect(first.text).toBe("first");
+    fake.text["pane-1"] = "second";
+    const second = await (await fetch(`${server.url}/api/terminal/peek?ticket=01`)).json();
+    expect(second.text).toBe("second");
+    // The response carries no revision at all: nothing downstream may rely
+    // on it advancing (the fake serves revision 0 for both reads).
+    expect("revision" in second).toBe(false);
+  });
+
+  it("a daemon failure is a clean 502, not a crash", async () => {
+    const { poolDir, runsDir } = makeTerminalPool();
+    recordSpawned(runsDir, "01", 1, "pane-1");
+    const fake = await startFakeHerdr();
+    fake.fail["pane.read"] = { code: -1, message: "daemon says no" };
+    fake.fail["pane.focus"] = { code: -1, message: "daemon says no" };
+    const server = startTerminalServer(poolDir, fake.socketPath);
+
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(peek.status).toBe(502);
+    expect((await peek.json()).error).toContain("daemon says no");
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, {
+      method: "POST",
+    });
+    expect(focus.status).toBe(502);
+    expect((await focus.json()).error).toContain("daemon says no");
+  });
+});
+
+describe("paneId enrichment (terminal-backed attempts)", () => {
+  // ADR-0014: the spawned event records the attempt's pane_id; the server's
+  // snapshot enrichment threads it to the card projection as paneId. These
+  // tests drive real pools against a fake herdr daemon (the engine's herdr
+  // socket is overridable per run, exactly as the engine tests do), never the
+  // live daemon.
+
+  const fakeHerdrServers: { close: () => Promise<void> }[] = [];
+
+  afterEach(async () => {
+    while (fakeHerdrServers.length > 0) {
+      await fakeHerdrServers.pop()!.close();
+    }
+  });
+
+  /**
+   * A fake herdr daemon speaking the real wire shape (newline-delimited
+   * JSON-RPC) and actually RUNNING what a pane is sent: the engine's wrapper
+   * shell executes under bash in the pane's cwd, so the tee'd log, the
+   * exit-code file, and the harness's outcome are all real, exactly as a
+   * live herdr would produce them. Pane ends are pushed to events.subscribe
+   * connections, the way herdr pushes subscribed events, and the connection
+   * stays open after the ack — a daemon that closed it would turn every
+   * terminal-backed attempt into the unbounded exit-code-file wait, which is
+   * not the behavior under test. A method named in `fail` answers with a
+   * herdr-style error body, the shape of a daemon refusing the call.
+   */
+  function startFakeHerdr(options?: { fail?: string[] }): Promise<{
+    socketPath: string;
+    requests: { method: string; params: Record<string, unknown> }[];
+  }> {
+    const requests: { method: string; params: Record<string, unknown> }[] = [];
+    let minted = 0;
+    const panes = new Map<string, { tabId: string; cwd: string; buffer: string }>();
+    const subscribers: import("node:net").Socket[] = [];
+    const connections = new Set<import("node:net").Socket>();
+    const firePaneEnd = (paneId: string, event: "pane_exited" | "pane_closed"): void => {
+      panes.delete(paneId);
+      // herdr pushes every pane's events to every subscriber; the engine
+      // filters by pane id. A subscriber whose wait already settled has
+      // closed its end, so prune before broadcasting.
+      for (const sub of [...subscribers]) {
+        if (sub.destroyed || !sub.writable) {
+          subscribers.splice(subscribers.indexOf(sub), 1);
+          continue;
+        }
+        sub.write(
+          JSON.stringify({
+            event,
+            data: { type: event, pane_id: paneId, workspace_id: "w1" },
+          }) + "\n",
+        );
+      }
+    };
+    const server = createServer((socket) => {
+      connections.add(socket);
+      socket.on("close", () => connections.delete(socket));
+      let buf = "";
+      socket.on("data", (d) => {
+        buf += d.toString();
+        if (!buf.includes("\n")) return;
+        const msg = JSON.parse(buf.slice(0, buf.indexOf("\n"))) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        requests.push({ method: msg.method, params: msg.params });
+        if (options?.fail?.includes(msg.method)) {
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              error: { code: -32000, message: `${msg.method} refused` },
+            }) + "\n",
+          );
+          return;
+        }
+        const respond = (result: unknown): void => {
+          socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
+        };
+        if (msg.method === "tab.create") {
+          minted += 1;
+          const tabId = `tab-${minted}`;
+          panes.set(`pane-${minted}`, {
+            tabId,
+            cwd: String(msg.params.cwd ?? "/"),
+            buffer: "",
+          });
+          respond({ tab: { tab_id: tabId } });
+        } else if (msg.method === "pane.list") {
+          respond({
+            panes: [...panes.entries()].map(([paneId, pane]) => ({
+              tab_id: pane.tabId,
+              pane_id: paneId,
+            })),
+          });
+        } else if (msg.method === "pane.send_input") {
+          const pane = panes.get(String(msg.params.pane_id));
+          if (pane) {
+            if (typeof msg.params.text === "string") {
+              pane.buffer += msg.params.text;
+            }
+            if (
+              Array.isArray(msg.params.keys) &&
+              msg.params.keys.includes("enter")
+            ) {
+              const command = pane.buffer;
+              pane.buffer = "";
+              const proc = Bun.spawn(["bash", "-c", command], {
+                cwd: pane.cwd,
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: "ignore",
+              });
+              void proc.exited.then(() =>
+                firePaneEnd(String(msg.params.pane_id), "pane_exited"),
+              );
+            }
+          }
+          respond({});
+        } else if (msg.method === "events.subscribe") {
+          // The ack answers this request; the connection then stays open and
+          // receives pushed events until the teardown destroys it or the
+          // subscriber's own end closes it (a settled wait releases its
+          // socket, and firePaneEnd prunes closed subscribers).
+          subscribers.push(socket);
+          socket.on("close", () => {
+            const at = subscribers.indexOf(socket);
+            if (at !== -1) subscribers.splice(at, 1);
+          });
+          socket.write(
+            JSON.stringify({ id: msg.id, result: { type: "subscription_started" } }) + "\n",
+          );
+        } else if (msg.method === "pane.close") {
+          respond({ type: "ok" });
+          firePaneEnd(String(msg.params.pane_id), "pane_closed");
+        } else if (msg.method === "tab.close") {
+          respond({ type: "ok" });
+        } else {
+          respond({});
+        }
+      });
+    });
+    fakeHerdrServers.push({
+      close: () =>
+        new Promise<void>((resolve) => {
+          for (const sub of subscribers) sub.destroy();
+          // bun's server.close() waits for every connection to drain, and a
+          // request/response connection whose client already destroyed its
+          // end can linger in a half-closed state that outlives the test.
+          // Teardown destroys what is left instead of waiting on it.
+          for (const conn of connections) conn.destroy();
+          server.close(() => resolve());
+        }),
+    });
+    const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+    tempDirs.push(dir);
+    const socketPath = join(dir, "herdr.sock");
+    return new Promise((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(socketPath, () => resolve({ socketPath, requests }));
+    });
+  }
+
+  it("exposes each terminal-backed ticket's paneId on the enriched snapshot", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+      ],
+      { terminal: "herdr" },
+    );
+    const fake = await startFakeHerdr();
+    // A settled attempt's paneId drops from the snapshot by design (a
+    // finished card's surface and polling stop), and no emit separates a
+    // spawn from its exit while its siblings all run — the one emit that
+    // catches attempts live is the sibling-exit emit. So the three ready
+    // tickets share one super-step: 01 finishes (slowly enough that every
+    // spawn below has been persisted), and its exit emit must still carry
+    // 02 and 03's blocked attempts, each held open on its own sentinel
+    // until the snapshot has been read.
+    const release = {
+      "02": join(poolDir, "release-02"),
+      "03": join(poolDir, "release-03"),
+    };
+    const blocking = blockingHarness(
+      { "02": { block: true }, "03": { block: true } },
+      (id) => release[id as keyof typeof release]!,
+    );
+    const server = await startServer(
+      poolDir,
+      {
+        stub: (ctx) =>
+          ctx.id === "01"
+            ? [
+                "bash",
+                "-c",
+                `sleep 0.5; printf '{"status":"done","summary":"smoke","commitSha":null}' > '${ctx.outcomePath}'`,
+              ]
+            : blocking.stub(ctx),
+      },
+      {
+        herdrSocket: fake.socketPath,
+      },
+    );
+
+    await server.start();
+    let live: { pane02: string; pane03: string } | null = null;
+    await waitFor(() => {
+      const tickets = server.latest?.state.tickets;
+      const pane02 = tickets?.find((t) => t.id === "02")?.paneId;
+      const pane03 = tickets?.find((t) => t.id === "03")?.paneId;
+      live = typeof pane02 === "string" && typeof pane03 === "string" ? { pane02, pane03 } : null;
+      return live !== null;
+    }, "02 and 03's live attempts to expose paneIds on one snapshot");
+    const { pane02, pane03 } = live!;
+    // Every attempt of a terminal-backed pool opens its own named tab, so
+    // each ticket's current attempt carries a distinct recovered pane id.
+    expect(pane02).toMatch(/^pane-/);
+    expect(pane03).toMatch(/^pane-/);
+    expect(pane02).not.toBe(pane03);
+    // The pane ids the enrichment serves are the ones the spawned events
+    // record.
+    const spawnedPane = (id: string): unknown =>
+      readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { kind: string; payload: { pane_id?: unknown } })
+        .find((e) => e.kind === "spawned")?.payload.pane_id;
+    expect(spawnedPane("02")).toBe(pane02);
+    expect(spawnedPane("03")).toBe(pane03);
+    // Release the held attempts and let the drive reach quiescence before
+    // teardown; a merge-held pool never settles by design, so the wait
+    // races the same beat the file-level cleanup uses.
+    writeFileSync(release["02"], "");
+    writeFileSync(release["03"], "");
+    await Promise.race([
+      server.settled().catch(() => {}),
+      Bun.sleep(2000),
+    ]);
+  });
+
+  it("exposes no paneId on a headless pool", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}));
+
+    await server.start();
+    const snapshot = await server.settled();
+    // Headless spawns record no pane facts at all, so the field is absent
+    // rather than null: the card projection reads absence as "no surface".
+    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+  });
+
+  it("exposes no paneId when the daemon refused the tab and the attempt fell back to headless", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      { terminal: "herdr" },
+    );
+    const fake = await startFakeHerdr({ fail: ["tab.create"] });
+    const server = await startServer(poolDir, stubHarness({}), {
+      herdrSocket: fake.socketPath,
+    });
+
+    await server.start();
+    const snapshot = await server.settled();
+    // The fallback runs headless and still completes; the spawned event's
+    // pane_id is null, so the enrichment exposes no paneId.
+    expect(snapshot.state.tickets[0]!.status).toBe("done");
+    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    const spawned = readFileSync(
+      join(poolDir, "runs", "01.events.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; payload: { pane_id?: unknown; terminal_error?: unknown } });
+    const event = spawned.find((e) => e.kind === "spawned");
+    expect(event?.payload.pane_id).toBeNull();
+    expect(typeof event?.payload.terminal_error).toBe("string");
+  });
+
+  it("exposes no paneId when the tab opened but the wrapper send was refused and the attempt fell back to headless", async () => {
+    const poolDir = makePool(
+      [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      { terminal: "herdr" },
+    );
+    // The daemon accepts tab.create, so the attempt has a real pane; the
+    // pane.send_input that would start the wrapper in it is refused, and the
+    // spawn falls back to headless mid-flight.
+    const fake = await startFakeHerdr({ fail: ["pane.send_input"] });
+    const server = await startServer(poolDir, stubHarness({}), {
+      herdrSocket: fake.socketPath,
+    });
+
+    await server.start();
+    const snapshot = await server.settled();
+    // The fallback runs headless and still completes; the spawned event
+    // records the fallback (pane_id null + terminal_error), not the dead
+    // pane id the fallback closed, so the enrichment exposes no paneId.
+    expect(snapshot.state.tickets[0]!.status).toBe("done");
+    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    // The close is fire-and-forget on the fallback path, so wait for the
+    // daemon to have recorded it rather than racing the settled snapshot.
+    await waitFor(
+      () => fake.requests.some((r) => r.method === "pane.close"),
+      "the fallback's orphaned pane close",
+    );
+    const spawned = readFileSync(
+      join(poolDir, "runs", "01.events.jsonl"),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; payload: { pane_id?: unknown; terminal_error?: unknown } });
+    const event = spawned.find((e) => e.kind === "spawned");
+    expect(event?.payload.pane_id).toBeNull();
+    expect(typeof event?.payload.terminal_error).toBe("string");
+  });
+});
+
+describe("currentAttemptPaneIds", () => {
+  // The derivation the enrichment rides on: the ticket's latest spawned
+  // event is the only source, so a string pane_id maps, and a later null
+  // (the headless fallback) clears an earlier attempt's pane.
+
+  function runsWith(events: Record<string, { attempt: number; pane_id?: unknown }[]>): string {
+    const runsDir = join(mkdtempSync(join(tmpdir(), "pane-ids-")), "runs");
+    tempDirs.push(join(runsDir, ".."));
+    mkdirSync(runsDir, { recursive: true });
+    for (const [id, list] of Object.entries(events)) {
+      for (const event of list) {
+        appendEvent(runsDir, id, {
+          at: "2026-09-05T00:00:00Z",
+          attempt: event.attempt,
+          kind: "spawned",
+          payload:
+            event.pane_id === undefined ? {} : { pane_id: event.pane_id },
+        });
+      }
+    }
+    return runsDir;
+  }
+
+  const meta = [{ id: "01", file: "01.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" }];
+
+  it("maps the latest spawned event's string pane_id", () => {
+    const runsDir = runsWith({
+      "01": [
+        { attempt: 1, pane_id: "pane-1" },
+        { attempt: 2, pane_id: "pane-2" },
+      ],
+    });
+    expect(currentAttemptPaneIds(runsDir, meta)).toEqual({ "01": "pane-2" });
+  });
+
+  it("omits a ticket whose latest spawn fell back to headless (pane_id null), even after a terminal-backed attempt", () => {
+    const runsDir = runsWith({
+      "01": [
+        { attempt: 1, pane_id: "pane-1" },
+        { attempt: 2, pane_id: null },
+      ],
+    });
+    expect(currentAttemptPaneIds(runsDir, meta)).toEqual({});
+  });
+
+  it("omits headless spawns (no pane facts) and tickets with no events", () => {
+    const runsDir = runsWith({
+      "01": [{ attempt: 1 }],
+      "02": [{ attempt: 1, pane_id: 42 }],
+    });
+    const two = [
+      ...meta,
+      { id: "02", file: "02.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" },
+    ];
+    expect(currentAttemptPaneIds(runsDir, two)).toEqual({});
+  });
+
+  it("omits a ticket whose latest attempt has settled, so a finished card's surface and polling stop", () => {
+    const runsDir = runsWith({
+      "01": [
+        { attempt: 1, pane_id: "pane-1" },
+        { attempt: 2, pane_id: "pane-2" },
+      ],
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-05T00:01:00Z",
+      attempt: 2,
+      kind: "exited",
+      payload: {},
+    });
+    // An earlier attempt settling changes nothing while the latest runs.
+    appendEvent(runsDir, "02", {
+      at: "2026-09-05T00:00:30Z",
+      attempt: 1,
+      kind: "exited",
+      payload: {},
+    });
+    const two = [
+      ...meta,
+      { id: "02", file: "02.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" },
+    ];
+    appendEvent(runsDir, "02", {
+      at: "2026-09-05T00:02:00Z",
+      attempt: 2,
+      kind: "spawned",
+      payload: { pane_id: "pane-2b" },
+    });
+    expect(currentAttemptPaneIds(runsDir, two)).toEqual({ "02": "pane-2b" });
   });
 });

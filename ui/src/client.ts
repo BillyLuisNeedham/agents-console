@@ -6,7 +6,7 @@
  * to the server.
  */
 
-import type { GradeView, PoolSnapshot, TicketActivityResponse, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
+import type { GradeView, PoolSnapshot, TerminalPeekResponse, TicketActivityResponse, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -136,6 +136,34 @@ export class PoolClient {
     const res = await fetch(`${this.base}/api/log?${params}`);
     if (!res.ok) throw new Error(`ticket log failed: ${res.status}`);
     return res.json();
+  }
+
+  /**
+   * The attempt pane's recent output as plain text for the card's read-only
+   * peek (ADR-0014). Keyed by ticket id: the server resolves the pane from
+   * the pool's own events and refuses panes the pool did not spawn. Any
+   * failure (no pane, spawn-guard refusal, daemon error) throws; the card
+   * renders "pane unavailable" and disables its focus button.
+   */
+  async peekTerminal(ticketId: string): Promise<TerminalPeekResponse> {
+    const res = await fetch(
+      `${this.base}/api/terminal/peek?ticket=${encodeURIComponent(ticketId)}`,
+    );
+    if (!res.ok) throw new Error(`terminal peek failed: ${res.status}`);
+    return res.json();
+  }
+
+  /**
+   * "Open in herdr": focus the attempt's pane, jumping the operator's herdr
+   * TUI to the attempt's tab. Same ticket-keyed translation and guard as the
+   * peek; a mutating call, so POST. Throws on any failure.
+   */
+  async focusTerminal(ticketId: string): Promise<void> {
+    const res = await fetch(
+      `${this.base}/api/terminal/focus?ticket=${encodeURIComponent(ticketId)}`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw new Error(`terminal focus failed: ${res.status}`);
   }
 
   /**

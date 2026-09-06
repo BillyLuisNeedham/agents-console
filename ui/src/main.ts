@@ -28,6 +28,7 @@ import {
   type TimelineView,
 } from "./project";
 import { ConsoleView, type AppModel } from "./view";
+import { TerminalSurface } from "./terminal";
 import { createPrototype, type Prototype } from "./prototype/index";
 
 const appRoot = document.getElementById("app");
@@ -101,6 +102,7 @@ const consoleView = new ConsoleView({
   onAnswer: (ticketId, action, note) =>
     client.answer(ticketId, action, note).then(setSnapshot),
   onChange: () => render(),
+  onFocusTerminal: (ticketId) => terminal.focus(ticketId),
 });
 
 // The latest grade per ticket, for the card summaries. Module scope so a
@@ -117,6 +119,17 @@ let grades: Record<string, GradeView> = {};
 // that keeps staleness copy honest while the snapshot stream is silent.
 const vitals = new Vitals({
   fetch: (ticketId) => client.getActivity(ticketId),
+  onChange: () => render(),
+});
+
+// The Terminal surface store: polls the peek endpoint per terminal-backed
+// running attempt and holds the peek text and focus confirmations the cards'
+// surfaces project from. Module scope so a full-DOM rebuild never drops the
+// entries; the projection renders a pending "waiting for output" shell for a
+// pane before its first payload lands, so there is no empty flash.
+const terminal = new TerminalSurface({
+  peek: (ticketId) => client.peekTerminal(ticketId),
+  focus: (ticketId) => client.focusTerminal(ticketId),
   onChange: () => render(),
 });
 
@@ -245,7 +258,7 @@ async function loadTimeline(): Promise<void> {
 
 function model(): AppModel {
   const view = state.snapshot
-    ? projectPool(state.snapshot, grades, vitals.state())
+    ? projectPool(state.snapshot, grades, vitals.state(), terminal.state())
     : null;
   const detail =
     state.snapshot && state.selectedId
@@ -364,6 +377,7 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.connected = true;
   state.error = null;
   vitals.update(snapshot);
+  terminal.update(snapshot);
   proto?.update(snapshot);
   const status = poolStatus(snapshot);
   document.title = `${status.word} — ${snapshot.poolName}`;
