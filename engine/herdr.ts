@@ -6,8 +6,8 @@
  * CONNECTION: open a fresh connection, write `{"id":..,"method":..,
  * "params":..}\n`, read exactly one JSON line, then the daemon closes the
  * socket. Every call therefore connects anew (verified live against herdr
- * 0.8.2; the prototype at prototype/console-terminal-surface/ holds the raw
- * evidence).
+ * 0.8.2; the prototype-verified quirks are recorded in
+ * docs/adr/0015-attempts-spawn-as-named-herdr-tabs.md).
  *
  * Terminal-backed attempts (pools configured `terminal: "herdr"`) each open
  * their own named tab at spawn time via `openAttemptTab`: the tab is created
