@@ -13,6 +13,11 @@ export interface SpawnContext {
   agents?: string;
   logPath: string;
   outcomePath: string;
+  // The attempt's exit-code file (ADR-0014): a terminal-backed attempt's pane
+  // runs a wrapper shell that writes the harness's exit code here, because
+  // herdr's API exposes none. Headless spawns ignore it. Named by
+  // attemptExitCodeName with the same free variables as logPath.
+  exitCodePath: string;
   cwd: string;
   // The attempt's Stream file (ADR-0012), the verbatim tee of the harness's
   // structured stream, or null when the harness has no stream mode (raw

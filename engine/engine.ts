@@ -1,10 +1,14 @@
 import {
   appendFileSync,
+  closeSync,
   copyFileSync,
   createWriteStream,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -15,11 +19,13 @@ import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import {
   appendEvent,
+  attemptExitCodeName,
   attemptLogName,
   attemptStreamName,
   lastAttempt,
   lastAttemptOfKind,
   nextAttempt,
+  readEvents,
   type TicketEventKind,
 } from "./events.ts";
 import {
@@ -48,7 +54,12 @@ import {
 import {
   HERDR_SOCKET_DEFAULT,
   attemptTabLabel,
+  closePane,
+  closeTab,
+  listPaneIds,
   openAttemptTab,
+  paneSendInput,
+  waitForPaneEnd,
 } from "./herdr.ts";
 import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
 import {
@@ -409,6 +420,28 @@ interface Session {
   // Spawn tickets adopted so far this run, bounding the per-run cap. Seeded
   // from the markers at start, so a resumed run continues the same count.
   spawnedThisRun: number;
+  // Terminal-backed boot reconciliation (ADR-0014): set at startPool to the
+  // reconciliation running against herdr, awaited by the drive loop before
+  // its first scheduling so a ticket about to be re-adopted from a live pane
+  // is never re-spawned as a duplicate.
+  terminalReconcile: Promise<void>;
+  // Attempts re-adopted at boot, keyed by ticket id: the orphaned spawned
+  // event's pane proved live, so the ticket stayed in-progress and a
+  // background finalize waits on the pane's end instead.
+  adopted: Map<string, AdoptedAttempt>;
+  // The merge serialization chain: every mergeTicket call, from the drive
+  // loop or from an adopted attempt's finalize, chains onto this so two
+  // merges never run their git work concurrently on the main checkout.
+  mergeChain: Promise<void>;
+}
+
+// One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
+// set when the human answered the adoption interrupt: the pane is being
+// closed and the finalize must record nothing further.
+interface AdoptedAttempt {
+  paneId: string;
+  attempt: number;
+  abandoned: boolean;
 }
 
 export function startPool(options: RunOptions): PoolRun {
@@ -462,9 +495,13 @@ export function startPool(options: RunOptions): PoolRun {
     resolverAttempts: new Map(),
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
+    terminalReconcile: Promise.resolve(),
+    adopted: new Map(),
+    mergeChain: Promise.resolve(),
   };
 
   rehydrate(session);
+  session.terminalReconcile = reconcileTerminalAttempts(session);
   const handle = makeHandle(session);
   session.handle = handle;
   startDrive(session);
@@ -657,6 +694,10 @@ async function driveLoop(session: Session): Promise<void> {
   const emit = (phase: RunPhase) => emitSnapshot(session, phase);
 
   emit("running");
+  // Boot reconciliation lands before the first scheduling: a ticket whose
+  // orphaned terminal attempt proved live is in-progress again by now and
+  // can never enter the ready set as a duplicate spawn.
+  await session.terminalReconcile;
   for (;;) {
     reconcileDeadlocks(session);
     // The super-step boundary: answers accepted while the previous
@@ -725,13 +766,16 @@ async function driveLoop(session: Session): Promise<void> {
 
     // Merges land in completion order: each ticket's merge chains onto a
     // serialized queue the moment the ticket finishes, while its siblings
-    // are still running.
+    // are still running. The queue starts from the session-wide merge chain
+    // so a boot-adopted terminal attempt's finalize merge (ADR-0014), which
+    // runs outside the drive loop, never runs its git work concurrently
+    // with this step's merges on the main checkout.
     const merges: {
       marker: TicketMarker;
       result: MergeResult;
       attempt: number;
     }[] = [];
-    let mergeQueue: Promise<void> = Promise.resolve();
+    let mergeQueue: Promise<void> = session.mergeChain;
     const results = await Promise.all(
       planned.map(({ marker, plan }) =>
         runTicket(
@@ -775,6 +819,11 @@ async function driveLoop(session: Session): Promise<void> {
                 attempt: result.plan.attempt,
               });
             });
+            // Publish the tail at every extension, not once after the await:
+            // an adopted terminal attempt's finalize merge (ADR-0014) chains
+            // onto session.mergeChain from outside the drive loop and must
+            // never see a stale, already-settled tail.
+            session.mergeChain = mergeQueue.catch(() => {});
           }
           if (result.status === "in-progress") {
             // A crashed attempt was recorded at exit (the crash event
@@ -823,6 +872,7 @@ async function driveLoop(session: Session): Promise<void> {
           kind: "merged",
           payload: {},
         });
+        closeAttemptTab(session, merge.marker.id, merge.attempt);
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${merge.marker.id}: merged ${branchFor(merge.marker.id)} ` +
@@ -1091,6 +1141,404 @@ function rehydrate(session: Session): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Terminal-backed boot reconciliation (ADR-0014)
+// ---------------------------------------------------------------------------
+
+// A terminal attempt herdr recorded on a `spawned` event but never saw exit:
+// the newest spawned event carrying a pane id with no exited or crash event
+// for the same attempt after it. Attempt numbers are unique per ticket, so
+// "no exit event with that attempt number after the spawn" is exact.
+function terminalOrphan(
+  session: Session,
+  ticketId: string,
+): { attempt: number; paneId: string } | null {
+  const events = readEvents(session.runsDir, ticketId);
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (
+      event.kind !== "spawned" ||
+      typeof event.payload.pane_id !== "string"
+    ) {
+      continue;
+    }
+    const exited = events.some(
+      (other, j) =>
+        j > i &&
+        other.attempt === event.attempt &&
+        (other.kind === "exited" || other.kind === "crash"),
+    );
+    if (!exited) return { attempt: event.attempt, paneId: event.payload.pane_id };
+  }
+  return null;
+}
+
+// Whether an orphaned terminal attempt can be re-adopted, or must keep the
+// headless orphan fate. Only ordinary solo implement attempts qualify:
+// engine-run tickets (graders, head-to-head) and verify candidates belong to
+// machinery that cannot be re-entered at boot, and a resolver attempt belongs
+// to the merge-conflict flow, which re-runs its resolver on answer.
+function terminalAdoptable(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+): boolean {
+  if (engineTicketBuildId(ticketId)) return false;
+  if (session.assignments.get(ticketId)?.verify != null) return false;
+  return !readEvents(session.runsDir, ticketId).some(
+    (event) => event.kind === "resolver" && event.attempt === attempt,
+  );
+}
+
+/**
+ * Boot reconciliation for terminal-backed pools (ADR-0014), run at startPool
+ * and awaited by the drive loop before its first scheduling. Every orphan of
+ * the engine process that died is checked against herdr's live pane list: a
+ * live pane re-adopts the attempt (the ticket returns to in-progress, an
+ * interrupt records the wait, and a background finalize records the
+ * attempt's real ending), a missing pane crashes it (a crash event; the
+ * ticket rehydrate already reset to ready re-runs it). A ticket that was
+ * mid-adoption when the engine died again is re-entered the same way: its
+ * marker stayed in-progress with the adoption checkpoint interrupt up. Never
+ * rejects: reconciliation is advisory boot work, and a daemon that cannot be
+ * asked changes nothing about the pool's ordinary recovery.
+ */
+async function reconcileTerminalAttempts(session: Session): Promise<void> {
+  if (session.state.config.terminal !== "herdr") return;
+  let live: string[];
+  try {
+    live = await listPaneIds(session.herdrSocket);
+  } catch {
+    session.state = applyUpdate(session.state, {
+      log: ["terminal reconciliation skipped: herdr daemon unreachable"],
+    });
+    return;
+  }
+  const livePanes = new Set(live);
+  const log: string[] = [];
+  for (const marker of session.markers) {
+    const orphan = terminalOrphan(session, marker.id);
+    if (!orphan) continue;
+    // A parked checkpoint interrupt on an in-progress marker is the adoption
+    // pattern from a previous boot: an ordinary checkpoint always writes its
+    // marker to "checkpoint" before raising, an adopted attempt stays
+    // in-progress while it waits.
+    const midAdoption =
+      marker.status === "in-progress" &&
+      session.state.interrupts.some(
+        (i) => i.ticketId === marker.id && i.kind === "checkpoint",
+      );
+    if (marker.status !== "ready" && !midAdoption) continue;
+    if (!terminalAdoptable(session, marker.id, orphan.attempt)) {
+      log.push(
+        `ticket ${marker.id}: orphaned terminal attempt ${orphan.attempt} ` +
+          "kept the headless orphan fate (engine-run or verify attempt)",
+      );
+      continue;
+    }
+    if (!livePanes.has(orphan.paneId)) {
+      // The attempt's pane is gone: the attempt crashed. The ready ticket
+      // re-runs; a mid-adoption ticket loses its interrupt and joins it.
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt: orphan.attempt,
+        kind: "crash",
+        payload: {
+          code: null,
+          reason: "attempt pane gone at boot reconciliation",
+          logTail: [],
+          outcomeExists: existsSync(
+            join(session.runsDir, outcomeFileName(marker.id, null)),
+          ),
+        },
+      });
+      if (midAdoption) {
+        session.state = applyUpdate(session.state, {
+          interrupts: session.state.interrupts.filter(
+            (i) => i.ticketId !== marker.id,
+          ),
+        });
+        writeMarkerStatus(marker.file, "ready");
+        marker.status = "ready";
+        session.state = applyUpdate(session.state, {
+          tickets: { [marker.id]: "ready" },
+        });
+      }
+      log.push(
+        `ticket ${marker.id}: attempt ${orphan.attempt}'s pane is gone at ` +
+          "boot; the attempt crashed and the ticket re-runs",
+      );
+      continue;
+    }
+    adoptTerminalAttempt(session, marker, orphan, midAdoption, log);
+  }
+  if (log.length > 0) {
+    session.state = applyUpdate(session.state, { log });
+  }
+}
+
+// Re-adopt one live orphan (ADR-0014). A fresh adoption undoes rehydrate's
+// reset for this ticket (marker back to in-progress, the reset note stripped,
+// it was appended this boot) and raises the interrupt that keeps the pool
+// honest about the wait. A mid-adoption restart keeps the interrupt it
+// already has and only re-registers the wait.
+function adoptTerminalAttempt(
+  session: Session,
+  marker: TicketMarker,
+  orphan: { attempt: number; paneId: string },
+  midAdoption: boolean,
+  log: string[],
+): void {
+  if (!midAdoption) {
+    writeMarkerStatus(marker.file, "in-progress");
+    stripEngineResetNote(marker.file);
+    marker.status = "in-progress";
+    session.state = applyUpdate(session.state, {
+      tickets: { [marker.id]: "in-progress" },
+    });
+    raiseInterrupt(session, {
+      ticketId: marker.id,
+      kind: "checkpoint",
+      body:
+        `The engine restarted while this ticket's terminal-backed attempt ` +
+        `${orphan.attempt} was still running in herdr pane ${orphan.paneId}. ` +
+        "The pane proved live at boot, so the engine re-adopted the attempt " +
+        "and is waiting on the pane's exit; the attempt's real outcome will " +
+        "be recorded then. Answering this interrupt abandons the attempt " +
+        "(the pane is closed) and re-runs the ticket.",
+    });
+  }
+  session.adopted.set(marker.id, {
+    paneId: orphan.paneId,
+    attempt: orphan.attempt,
+    abandoned: false,
+  });
+  log.push(
+    `ticket ${marker.id}: attempt ${orphan.attempt} re-adopted from live ` +
+      `pane ${orphan.paneId}; waiting on its exit`,
+  );
+  void finalizeAdoptedAttempt(session, marker.id).catch(() => {});
+}
+
+// Remove the note rehydrate appended this boot: it is a known constant and
+// is the file's tail, having just been appended by this process.
+function stripEngineResetNote(issueFile: string): void {
+  const text = readFileSync(issueFile, "utf8");
+  if (!text.endsWith(ENGINE_RESET_NOTE)) return;
+  writeFileSync(
+    issueFile,
+    text.slice(0, text.length - ENGINE_RESET_NOTE.length),
+  );
+}
+
+// Answering the adoption interrupt abandons the re-adopted attempt: the pane
+// is closed, the finalize records nothing, and the generic answer handling
+// re-runs the ticket from its reset marker.
+function abandonAdoption(session: Session, ticketId: string): void {
+  const adopted = session.adopted.get(ticketId);
+  if (!adopted) return;
+  adopted.abandoned = true;
+  session.adopted.delete(ticketId);
+  void closePane(session.herdrSocket, adopted.paneId).catch(() => {});
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${ticketId}: adoption abandoned (interrupt answered); pane ` +
+        `${adopted.paneId} closed and the ticket re-runs`,
+    ],
+  });
+}
+
+/**
+ * The adopted attempt's background ending (ADR-0014): waits on the pane,
+ * then records the attempt's exit exactly the way runTicket's tail would:
+ * the exited event on every ending, the crash event and interrupt on a bad
+ * exit, the marker status and checkpoint Brief on a clean one, and a done
+ * ticket's merge chained onto the session merge chain so it never runs its
+ * git work concurrently with the drive's merges. The finalize never
+ * rejects: it is advisory bookkeeping alongside the drive.
+ */
+async function finalizeAdoptedAttempt(
+  session: Session,
+  ticketId: string,
+): Promise<void> {
+  const adopted = session.adopted.get(ticketId);
+  if (!adopted) return;
+  const marker = session.markers.find((m) => m.id === ticketId);
+  if (!marker) return;
+  const attempt = adopted.attempt;
+  const assignment = session.assignments.get(ticketId);
+  // Streamed harnesses: resume the ADR-0012 derivation the killed engine
+  // left behind, over the bytes the pane's tee kept writing. The Stream file
+  // holds the attempt from its first byte, so deriving it whole reproduces
+  // the log exactly, and a fresh tailer is correct even though the pre-kill
+  // engine already derived part of it.
+  const streamPath = attemptStreamPath(
+    session.runsDir,
+    ticketId,
+    assignment?.harness ?? "",
+    null,
+    false,
+  );
+  const logPath = join(session.runsDir, attemptLogName(ticketId, null, false));
+  const exitCodePath = join(
+    session.runsDir,
+    attemptExitCodeName(ticketId, null, false),
+  );
+  const tailer = streamPath ? startPaneStreamTail(streamPath, logPath) : null;
+  try {
+    // Fast path: the wrapper writes the exit-code file before the shell
+    // exits, so the file's presence means the attempt already finished
+    // (spawnToPane removes any previous attempt's file before sending the
+    // wrapper, so it cannot be stale). Otherwise wait on the pane; the
+    // daemon's event subscription reports the end, and a lost subscription
+    // falls back to the file, unbounded, the way the headless spawn waits
+    // on its child.
+    if (!existsSync(exitCodePath)) {
+      const end = await waitForPaneEnd(session.herdrSocket, adopted.paneId);
+      if (end === "lost") await waitForExitCodeFile(exitCodePath);
+    }
+    // Abandoned while waiting (the human answered): the answer path owns
+    // the ticket now and this finalize records nothing further.
+    if (adopted.abandoned) return;
+    const code = await readExitCode(exitCodePath);
+    // The answer path may have abandoned the attempt while the exit code was
+    // being read; the map entry is the ownership record, so a missing or
+    // flagged entry means the answer path owns the ticket from here.
+    const current = session.adopted.get(ticketId);
+    if (!current || current.abandoned) return;
+    // Ownership passes to the recorded exit: from here a later answer is
+    // ordinary interrupt handling, never an abandonment.
+    session.adopted.delete(ticketId);
+    recordAdoptedExit(session, marker, attempt, code, logPath);
+  } finally {
+    if (tailer) await tailer.finish().catch(() => {});
+  }
+}
+
+// Record one adopted attempt's exit (ADR-0014): the mirror of runTicket's
+// exit tail, without the spawn-time parts. Mutates session state and emits,
+// exactly the paths the drive's own exit handling uses.
+function recordAdoptedExit(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  code: number,
+  logPath: string,
+): void {
+  const ticketId = marker.id;
+  const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
+  const outcome = readOutcomeResult(outcomePath);
+  const outcomeExists = existsSync(outcomePath);
+  const logTail = readLogTail(logPath);
+  let status: TicketStatus = "in-progress";
+  let crashReason: string | null = null;
+  if (code !== 0) {
+    crashReason = `harness exited ${code}`;
+  } else if (!outcome.ok) {
+    crashReason = outcome.reason;
+  } else {
+    status = outcome.outcome.status;
+  }
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "exited",
+    payload: { code, status, logTail, outcomeExists },
+  });
+  if (crashReason !== null) {
+    appendEvent(session.runsDir, ticketId, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "crash",
+      payload: { code, reason: crashReason, logTail, outcomeExists },
+    });
+  } else {
+    writeMarkerStatus(marker.file, status);
+    marker.status = status;
+    if (status === "checkpoint") {
+      landCheckpointBrief(marker.file, outcome.ok ? outcome.outcome.brief : undefined);
+    }
+  }
+  const log: string[] = [
+    `ticket ${ticketId}: adopted attempt ${attempt} exited ${code}, ` +
+      `marker ${status}` +
+      (crashReason !== null ? `, crash: ${crashReason}` : ""),
+  ];
+  const update: PoolUpdate = {
+    tickets: { [ticketId]: status },
+    interrupts: session.state.interrupts.filter(
+      (i) => i.ticketId !== ticketId,
+    ),
+    log,
+    ...(outcome.ok ? { outcomes: { [ticketId]: outcome.outcome } } : {}),
+  };
+  session.state = applyUpdate(session.state, update);
+  if (crashReason !== null) {
+    raiseInterrupt(session, {
+      ticketId,
+      kind: "crash",
+      body: crashInterruptBody({ logPath, logTail, outcomePath, outcomeExists }),
+    });
+  } else if (status === "checkpoint") {
+    raiseCheckpoint(session, marker, attempt);
+  }
+  if (status === "done" && branchExists(session.cwd, branchFor(ticketId))) {
+    // The merge chains onto the session merge chain: the drive's merges
+    // wait for it and it waits for them, so two git merges never run
+    // concurrently on the main checkout. The kick below runs only once the
+    // chain settles, so a resumed drive's closing gate can never raise the
+    // Review interrupt ahead of this merge landing.
+    const worktree: WorktreeInfo = {
+      path: worktreePathFor(session.cwd, ticketId),
+      branch: branchFor(ticketId),
+    };
+    const next = session.mergeChain.then(async () => {
+      const merge = mergeTicket(session, marker, worktree);
+      if (merge.ok) {
+        appendEvent(session.runsDir, ticketId, {
+          at: new Date().toISOString(),
+          attempt,
+          kind: "merged",
+          payload: {},
+        });
+        closeAttemptTab(session, ticketId, attempt);
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${ticketId}: adopted attempt ${attempt} merged ` +
+              `${branchFor(ticketId)} onto the working branch`,
+          ],
+        });
+      } else {
+        await handleMergeConflict(session, marker, merge, attempt);
+      }
+    });
+    session.mergeChain = next.catch(() => {});
+    void next.then(
+      () => finishAdoptedFinalize(session),
+      () => finishAdoptedFinalize(session),
+    );
+  } else {
+    finishAdoptedFinalize(session);
+  }
+}
+
+// The adopted finalize's last step, after its merge chain has settled: emit
+// the new state, persist it, and kick a drive pass when the run had already
+// settled (it was waiting quiescent on the adoption interrupt), so the
+// closing gate, the ready set, and any queued answers see the attempt's
+// real ending. The kick is a no-op while a drive is in flight; its boundary
+// machinery picks the state up instead.
+function finishAdoptedFinalize(session: Session): void {
+  emitSnapshot(session, session.driving ? "running" : "quiescent");
+  try {
+    persist(session);
+  } catch {
+    // The next boundary persist (or the persistence interrupt machinery)
+    // owns store failures; the finalize's record must not die on one.
+  }
+  kickProcessing(session);
+}
+
 // Markers dual-write: every checkpoint write is preceded by bringing the
 // line-1 markers on disk into agreement with state, so the pool directory is
 // always inspectable and the markers stay the shared truth.
@@ -1345,6 +1793,12 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     processSelectionAnswer(session, marker, interrupt, record.note);
     return;
   }
+  // Answering an adoption checkpoint interrupt abandons the re-adopted
+  // attempt (ADR-0014): the pane is closed, the finalize records nothing,
+  // and the generic handling below re-runs the ticket.
+  if (session.adopted.has(record.ticketId)) {
+    abandonAdoption(session, record.ticketId);
+  }
   if (marker.status !== "done") {
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
@@ -1426,6 +1880,7 @@ function resumeMerge(
     kind: "merged",
     payload: {},
   });
+  closeAttemptTabs(session, marker.id);
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -1623,6 +2078,10 @@ async function runResolver(
     logPath,
     streamPath,
     outcomePath,
+    exitCodePath: join(
+      session.runsDir,
+      attemptExitCodeName(marker.id, null, true),
+    ),
     cwd: worktree.path,
   };
   const argv = session.harnesses[resolver.harness](ctx);
@@ -1645,7 +2104,9 @@ async function runResolver(
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, worktree.branch, terminal),
   });
-  const exitCode = await spawnToLog(argv, ctx);
+  const exitCode = terminal?.paneId
+    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
+    : await spawnToLog(argv, ctx);
   const outcome = readResolverResult(outcomePath);
   if (exitCode === 0 && outcome?.resolved) {
     return { resolved: true, note: outcome.note || "(resolver gave no note)" };
@@ -1723,6 +2184,7 @@ function approveMerge(
     kind: "merged",
     payload: {},
   });
+  closeAttemptTabs(session, marker.id);
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -2361,6 +2823,7 @@ async function runGrader(
     logPath,
     streamPath,
     outcomePath: graderOutcomePath,
+    exitCodePath: join(runsDir, attemptExitCodeName(gid, null, false)),
     cwd: session.cwd,
   };
   const argv = harnessCommandFor(session.harnesses, assignment, gid)(ctx);
@@ -2379,7 +2842,9 @@ async function runGrader(
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, null, terminal),
   });
-  const exitCode = await spawnToLog(argv, ctx);
+  const exitCode = terminal?.paneId
+    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
+    : await spawnToLog(argv, ctx);
   // The grader's exit facts (ADR-0012), on the grade path and the crash
   // path alike: the log tail and whether the grader wrote an outcome at all.
   const logTail = readLogTail(logPath);
@@ -2626,6 +3091,7 @@ function completeLoneAttempt(
       kind: "merged",
       payload: {},
     });
+    closeAttemptTab(session, marker.id, attempt);
     update.log = [
       `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
         `${branchFor(marker.id, attempt)} onto the working branch`,
@@ -2969,6 +3435,7 @@ function completeSelection(
       kind: "merged",
       payload: {},
     });
+    closeAttemptTab(session, marker.id, attempt);
     mergedNote = ` merged ${branchFor(marker.id, attempt)} onto the working branch`;
   } else {
     mergedNote =
@@ -3234,6 +3701,7 @@ async function runHeadToHead(
     logPath,
     streamPath,
     outcomePath: h2hOutcomePath,
+    exitCodePath: join(runsDir, attemptExitCodeName(h2hId, null, false)),
     cwd: session.cwd,
   };
   const argv = harnessCommandFor(session.harnesses, assignment, h2hId)(ctx);
@@ -3252,7 +3720,9 @@ async function runHeadToHead(
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, null, terminal),
   });
-  const exitCode = await spawnToLog(argv, ctx);
+  const exitCode = terminal?.paneId
+    ? await spawnToPane(session.herdrSocket, terminal.paneId, argv, ctx)
+    : await spawnToLog(argv, ctx);
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
   // file exists, on the pick path and the unusable path alike.
   const logTail = readLogTail(logPath);
@@ -3710,12 +4180,14 @@ function readLogTail(logPath: string): string[] {
 /**
  * The terminal facts a terminal-backed spawn adds to the `spawned` event's
  * payload (ADR-0014, ADR-0015): the pane id the attempt's named tab was
- * recovered to, and, when the tab could not be opened, the error that
- * stopped it. pane_id is null on that fallback path: the attempt runs
- * headless and the ticket log carries why.
+ * recovered to and the tab id that pane lives in (the tab id is what merge
+ * cleanup closes the terminal by), and, when the tab could not be opened, the
+ * error that stopped it. Both ids are null on that fallback path: the attempt
+ * runs headless and the ticket log carries why.
  */
 interface AttemptTerminal {
   paneId: string | null;
+  tabId: string | null;
   error?: string;
 }
 
@@ -3737,10 +4209,11 @@ async function openAttemptTerminal(
       attemptTabLabel(id, title),
       cwd,
     );
-    return { paneId: tab.paneId };
+    return { paneId: tab.paneId, tabId: tab.tabId };
   } catch (err) {
     return {
       paneId: null,
+      tabId: null,
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -3770,6 +4243,7 @@ function spawnedPayload(
     ...(terminal
       ? {
           pane_id: terminal.paneId,
+          tab_id: terminal.tabId,
           ...(terminal.error !== undefined
             ? { terminal_error: terminal.error }
             : {}),
@@ -3779,13 +4253,65 @@ function spawnedPayload(
 }
 
 /**
+ * Close the attempt's herdr tab once its ticket has merged (ADR-0014:
+ * exited panes persist until merge, then the engine closes them). The tab
+ * id rides the attempt's spawned event, so no state is threaded through
+ * the merge paths; a missing id (headless pool, headless fallback) leaves
+ * nothing to close. Best-effort and non-blocking: closing a terminal must
+ * never fail or delay a merge, and a daemon that has gone away, or that
+ * already reaped the exited tab (verified live: herdr closes a tab whose
+ * shell ends), changes nothing about the merged ticket.
+ */
+function closeAttemptTab(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+): void {
+  if (session.state.config.terminal !== "herdr") return;
+  const spawned = readEvents(session.runsDir, ticketId).find(
+    (event) =>
+      event.kind === "spawned" &&
+      event.attempt === attempt &&
+      typeof event.payload.tab_id === "string",
+  );
+  if (!spawned || typeof spawned.payload.tab_id !== "string") return;
+  const tabId = spawned.payload.tab_id;
+  void closeTab(session.herdrSocket, tabId).catch(() => {});
+}
+
+/**
+ * Close every herdr tab the ticket ever opened (ADR-0014), not just one
+ * attempt's: the merge-conflict merge paths (resumeMerge, approveMerge)
+ * cannot know which attempt's branch they are merging — the resolver is the
+ * latest attempt, the merged work an earlier one — and by merge time every
+ * tab the ticket opened is done.
+ */
+function closeAttemptTabs(session: Session, ticketId: string): void {
+  if (session.state.config.terminal !== "herdr") return;
+  for (const spawned of readEvents(session.runsDir, ticketId)) {
+    if (
+      spawned.kind !== "spawned" ||
+      typeof spawned.payload.tab_id !== "string"
+    ) {
+      continue;
+    }
+    void closeTab(session.herdrSocket, spawned.payload.tab_id).catch(() => {});
+  }
+}
+
+/**
  * The crash interrupt body (ADR-0012): the log path, a blank line, the tail
  * the crash event carries, and the outcome-file line, so the Needs-input
  * surface answers "what happened" without the operator opening files. The
  * body persists with the pool state, so the tail freezes at raise time;
  * accepted and desired.
  */
-function crashInterruptBody(result: TicketResult): string {
+function crashInterruptBody(result: {
+  logPath: string;
+  logTail: string[];
+  outcomePath: string;
+  outcomeExists: boolean;
+}): string {
   const tail = result.logTail.join("\n");
   return (
     `${result.logPath}\n\n` +
@@ -4248,6 +4774,10 @@ async function runTicket(
     logPath,
     streamPath,
     outcomePath,
+    exitCodePath: join(
+      env.runsDir,
+      attemptExitCodeName(marker.id, plan.verify ? plan.attempt : null, false),
+    ),
     cwd: plan.cwd,
   };
   const argv = harnessCommandFor(env.harnesses, assignment, marker.id)(ctx);
@@ -4269,7 +4799,9 @@ async function runTicket(
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, plan.worktree?.branch ?? null, terminal),
   });
-  const exitCode = await spawnToLog(argv, ctx);
+  const exitCode = terminal?.paneId
+    ? await spawnToPane(env.herdrSocket, terminal.paneId, argv, ctx)
+    : await spawnToLog(argv, ctx);
 
   // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
   // with a valid outcome the engine writes the final status to the canonical
@@ -4395,6 +4927,253 @@ function drainWait(stream: WriteStream): Promise<unknown> {
   return once(stream, "drain").catch(() => {});
 }
 
+// The teardown write streams get at spawn end: end() on a stream an error
+// already destroyed throws ERR_STREAM_DESTROYED, so the destroyed check
+// skips it, and end's own write failure is recorded through onError rather
+// than thrown. Shared by the headless spawn's pumps and the terminal-backed
+// spawn's follow-file tailer.
+function endWriteStream(
+  stream: WriteStream,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (stream.destroyed) {
+      resolve();
+      return;
+    }
+    try {
+      stream.end((error: Error | null | undefined) => {
+        if (error) onError(error);
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+// The follow-file tailer's poll interval: the log derives from the tee'd
+// Stream file within a quarter second of the harness writing it, live
+// enough for the ticket log and the Console's liveness signals.
+const PANE_TAIL_POLL_MS = 250;
+
+/**
+ * The ADR-0014 wrapper shell the attempt's pane runs, as one line of bash:
+ * the harness with stdout and stderr merged into `tee` (the same merged
+ * arrival order the headless pump writes), the exit code captured from
+ * `PIPESTATUS` because a pipeline's `$?` would be tee's, and `exit` so the
+ * pane's shell ends and herdr's `pane_exited` fires: without it the shell
+ * would sit at its prompt and the engine would wait forever. The pane's
+ * shell is bash (herdr spawns bash panes), the one shell `PIPESTATUS` is
+ * portable on.
+ */
+function terminalWrapper(argv: string[], ctx: SpawnContext): string {
+  const command = argv.map(shellQuote).join(" ");
+  // Stream-mode harnesses tee to the Stream file, which the follow-file
+  // tailer derives the log from (the stderr merge rides into the Stream
+  // file with the stdout, the ADR's `2>&1` contract); raw harnesses tee
+  // straight to the log, so the pane writes exactly the file spawnToLog
+  // would have.
+  const teeTarget = ctx.streamPath ?? ctx.logPath;
+  return (
+    `${command} 2>&1 | tee ${shellQuote(teeTarget)}; ` +
+    `echo \${PIPESTATUS[0]} > ${shellQuote(ctx.exitCodePath)}; exit`
+  );
+}
+
+// One POSIX-safe single-quote: the quoted text cannot touch the surrounding
+// shell, whatever the harness argv carries.
+function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The terminal-backed spawn (ADR-0014): the harness does not run as the
+ * engine's child but inside the attempt's herdr pane. The wrapper line is
+ * sent to the pane as keystrokes, the engine waits for the pane to end
+ * (herdr's `pane_exited`/`pane_closed`, or the exit-code file when the wait
+ * itself is unsupported), and the exit code comes from the file the wrapper
+ * wrote. Streamed harnesses additionally get a follow-file tailer on the
+ * tee'd Stream file feeding the ADR-0012 derivation into the attempt log,
+ * live. Resolves with the harness's exit code exactly like `spawnToLog`, so
+ * every spawn site's exit handling is unchanged.
+ */
+async function spawnToPane(
+  socketPath: string,
+  paneId: string,
+  argv: string[],
+  ctx: SpawnContext,
+): Promise<number> {
+  // The exit-code file must not carry a previous attempt's code, and the
+  // tailer must not read a stale Stream file's bytes before the pane's tee
+  // truncates it.
+  rmSync(ctx.exitCodePath, { force: true });
+  if (ctx.streamPath) rmSync(ctx.streamPath, { force: true });
+  // Text and Enter travel separately: herdr treats a literal newline in text
+  // as pasted data, not a submit (verified), and `agent prompt` sends text
+  // then Enter for the same reason.
+  try {
+    await paneSendInput(socketPath, paneId, {
+      text: terminalWrapper(argv, ctx),
+    });
+    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
+  } catch {
+    // The daemon died after the tab opened, or rejected the input: exactly
+    // the ADR's headless-fallback case. Close whatever half-started pane
+    // remains (best-effort: it kills a wrapper that false-alarm Enter loss
+    // may actually have started) and run the attempt headless instead of
+    // failing the spawn: one attempt's terminal trouble must never take the
+    // drive down with it.
+    void closePane(socketPath, paneId).catch(() => {});
+    return spawnToLog(argv, ctx);
+  }
+  const tailer = ctx.streamPath
+    ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
+    : null;
+  try {
+    const end = await waitForPaneEnd(socketPath, paneId);
+    if (end === "lost") {
+      // The subscription could not be kept (daemon restart, or a daemon
+      // without events.subscribe): the wrapper still writes the exit-code
+      // file when it finishes, so wait on that exactly as the headless
+      // spawn waits on its child, with no bound.
+      await waitForExitCodeFile(ctx.exitCodePath);
+    }
+    // The exit-code file is written before the shell exits, so it is already
+    // there in the normal case; the retry only covers a daemon that reaps
+    // the pane ahead of the wrapper's last write.
+    const code = await readExitCode(ctx.exitCodePath);
+    return code;
+  } finally {
+    if (tailer) await tailer.finish();
+  }
+}
+
+// Wait until the exit-code file exists, polling: the fallback wait for a
+// daemon whose event subscription could not be kept. Unbounded, like the
+// headless spawn's wait on its child.
+async function waitForExitCodeFile(path: string): Promise<void> {
+  for (;;) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, PANE_TAIL_POLL_MS));
+  }
+}
+
+// Read the wrapper-written exit code, retrying briefly for a reaping race,
+// and translating a missing or malformed file into 1: the attempt crashed
+// (pane killed, daemon lost) and the crash path the spawn sites already have
+// is the right ending.
+async function readExitCode(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const parsed = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
+      if (Number.isFinite(parsed)) return parsed;
+    } catch {
+      // not there yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return 1;
+}
+
+/**
+ * The follow-file tailer (ADR-0014): reads the pane's tee'd Stream file as
+ * it grows and derives the attempt log from it line by line, exactly the
+ * derivation the headless pump runs (StreamLineBuffer + deriveStreamLine),
+ * so the log is byte-for-byte what a headless streamed attempt would write.
+ * Polls by positioned reads; `finish` drains the tail, flushes the line
+ * buffer, and ends the log stream.
+ */
+function startPaneStreamTail(
+  streamPath: string,
+  logPath: string,
+): { finish: () => Promise<void> } {
+  const log = createWriteStream(logPath);
+  let streamError: unknown = null;
+  log.on("error", (error) => {
+    if (streamError === null) streamError = error;
+  });
+  const writeDerivedLine = async (line: string): Promise<void> => {
+    const text = deriveStreamLine(line) ?? line;
+    if (text === "") return;
+    if (log.destroyed) return;
+    if (!log.write(`${text}\n`)) await drainWait(log);
+  };
+  let buffer = new StreamLineBuffer();
+  let offset = 0;
+  let fd: number | null = null;
+  let stepping = false;
+  const chunk = new Uint8Array(64 * 1024);
+  // One poll step: open the file once the pane's tee has created it, then
+  // read everything new since the last offset through the line buffer.
+  // Concurrent ticks are skipped, never interleaved: a step awaits its log
+  // writes under backpressure, and two steps running at once could write
+  // the derived log out of order.
+  const step = async (): Promise<void> => {
+    if (stepping) return;
+    stepping = true;
+    try {
+      if (fd === null) {
+        try {
+          fd = openSync(streamPath, "r");
+        } catch {
+          return; // tee has not created the file yet
+        }
+        offset = 0;
+        buffer = new StreamLineBuffer();
+      }
+      let size: number;
+      try {
+        size = fstatSync(fd).size;
+      } catch {
+        return;
+      }
+      if (size < offset) {
+        // The file was replaced (a re-run truncated it): re-read from scratch.
+        offset = 0;
+        buffer = new StreamLineBuffer();
+      }
+      while (offset < size) {
+        let read: number;
+        try {
+          read = readSync(fd, chunk, 0, chunk.length, offset);
+        } catch {
+          return;
+        }
+        if (read <= 0) return;
+        offset += read;
+        for (const line of buffer.push(chunk.subarray(0, read))) {
+          await writeDerivedLine(line);
+        }
+      }
+    } finally {
+      stepping = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void step().catch(() => {});
+  }, PANE_TAIL_POLL_MS);
+  const finish = async (): Promise<void> => {
+    clearInterval(timer);
+    await step().catch(() => {});
+    for (const line of buffer.flush()) await writeDerivedLine(line);
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already gone
+      }
+    }
+    await endWriteStream(log, (error) => {
+      if (streamError === null) streamError = error;
+    });
+    // A log the engine cannot write is a real failure, same as the headless
+    // spawn's rethrow.
+    if (streamError !== null) throw streamError;
+  };
+  return { finish };
+}
+
 async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
@@ -4504,27 +5283,13 @@ async function spawnToLog(
     pump(proc.stdout, tee ? "stream" : "raw"),
     pump(proc.stderr, tee ? "diagnostics" : "raw"),
   ]);
-  // The teardown the pumps can never reject: end() on a stream an error
-  // already destroyed throws ERR_STREAM_DESTROYED, so the destroyed check
-  // skips it, and end's own write failure is recorded rather than thrown,
-  // leaving the boundary below as the spawn's only rejection path.
-  const endStream = (stream: WriteStream): Promise<void> =>
-    new Promise<void>((resolve) => {
-      if (stream.destroyed) {
-        resolve();
-        return;
-      }
-      try {
-        stream.end((error: Error | null | undefined) => {
-          if (error) noteStreamError(error);
-          resolve();
-        });
-      } catch {
-        resolve();
-      }
-    });
-  await endStream(log);
-  if (tee) await endStream(tee);
+  // The teardown the pumps can never reject, shared with the terminal-backed
+  // tailer: end() on a stream an error already destroyed throws
+  // ERR_STREAM_DESTROYED, so the destroyed check skips it, and end's own
+  // write failure is recorded rather than thrown, leaving the boundary below
+  // as the spawn's only rejection path.
+  await endWriteStream(log, noteStreamError);
+  if (tee) await endWriteStream(tee, noteStreamError);
   // The spawn still fails on a genuine write failure, exactly as a
   // rejecting pump did before the boundary existed; the destruction itself
   // is not one.
