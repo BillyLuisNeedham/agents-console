@@ -2836,9 +2836,14 @@ async function runGrader(
           ctx.cwd,
         )
       : undefined;
+  // The grader ticket's own attempt number for this round: the scheduled
+  // event runGraders appended bumped lastAttempt to this round's number, so
+  // the value read here (before this round's spawned append) is the one the
+  // spawned event and the verdict-landed tab close both key off.
+  const graderAttempt = lastAttempt(runsDir, gid);
   appendEvent(runsDir, gid, {
     at: new Date().toISOString(),
-    attempt: lastAttempt(runsDir, gid),
+    attempt: graderAttempt,
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, null, terminal),
   });
@@ -2857,6 +2862,7 @@ async function runGrader(
       build,
       grader,
       attempt,
+      graderAttempt,
       exitCode,
       reason,
       logTail,
@@ -2871,6 +2877,7 @@ async function runGrader(
       build,
       grader,
       attempt,
+      graderAttempt,
       exitCode,
       result.reason,
       logTail,
@@ -2900,6 +2907,10 @@ async function runGrader(
       reasons: result.grade.reasons,
     },
   });
+  // The grader's tab never merges, so its role ends the moment the verdict
+  // lands; the grade lives in the events and the log files, and a re-spawn
+  // round opens a fresh tab.
+  closeAttemptTab(session, gid, graderAttempt);
   session.state = applyUpdate(session.state, {
     tickets: { [gid]: "done" },
     outcomes: { [gid]: result.outcome },
@@ -2922,6 +2933,7 @@ function recordGraderFailure(
   build: TicketMarker,
   grader: TicketMarker,
   attempt: number,
+  graderAttempt: number,
   exitCode: number,
   reason: string,
   logTail: string[],
@@ -2930,13 +2942,13 @@ function recordGraderFailure(
 ): void {
   appendEvent(session.runsDir, grader.id, {
     at: new Date().toISOString(),
-    attempt: lastAttempt(session.runsDir, grader.id),
+    attempt: graderAttempt,
     kind: "exited",
     payload: { code: exitCode, status: "in-progress", logTail, outcomeExists },
   });
   appendEvent(session.runsDir, grader.id, {
     at: new Date().toISOString(),
-    attempt: lastAttempt(session.runsDir, grader.id),
+    attempt: graderAttempt,
     kind: "crash",
     payload: { code: exitCode, reason, logTail, outcomeExists },
   });
@@ -2945,6 +2957,12 @@ function recordGraderFailure(
   if (readMarker(grader.file).status !== "in-progress") {
     writeMarkerStatus(grader.file, "in-progress");
   }
+  // The failed round's tab is dead: the pane already exited and the re-spawn
+  // opens a fresh tab, so the verdict-less close is the failure path's too.
+  // The round's own attempt number comes from the caller, not a re-read:
+  // the exited and crash appends above must key off the same number or a
+  // later round's events would shift the close onto the wrong tab.
+  closeAttemptTab(session, grader.id, graderAttempt);
   session.state = applyUpdate(session.state, {
     log: [
       `ticket ${build.id}: grader ${grader.id} produced no usable grade ` +
@@ -3475,8 +3493,10 @@ function completeSelection(
 }
 
 // Every attempt branch of the build ticket except the winner's goes: this
-// round's losers and any superseded round's alike. Returns the attempt
-// numbers discarded, so the pool log can name them.
+// round's losers and any superseded round's alike, and each discarded
+// attempt's terminal tab with it, because a loser's tab never merges: its
+// role ends exactly here. Returns the attempt numbers discarded, so the
+// pool log can name them.
 function discardLosers(
   session: Session,
   buildId: string,
@@ -3489,6 +3509,7 @@ function discardLosers(
       path: worktreePathFor(session.cwd, buildId, attempt),
       branch: branchFor(buildId, attempt),
     });
+    closeAttemptTab(session, buildId, attempt);
   }
   return losers;
 }
@@ -3714,9 +3735,13 @@ async function runHeadToHead(
           ctx.cwd,
         )
       : undefined;
+  // This round's attempt number for the head-to-head ticket: the scheduled
+  // append above bumped lastAttempt to it, so the value read here (before
+  // the spawned append) is the one the tab close keys off.
+  const h2hAttempt = lastAttempt(runsDir, h2hId);
   appendEvent(runsDir, h2hId, {
     at: new Date().toISOString(),
-    attempt: lastAttempt(runsDir, h2hId),
+    attempt: h2hAttempt,
     kind: "spawned",
     payload: spawnedPayload(argv, ctx, null, terminal),
   });
@@ -3760,6 +3785,10 @@ async function runHeadToHead(
   }
   writeMarkerStatus(h2h.file, "done");
   h2h.status = "done";
+  // The judge's tab never merges: its role ends the moment the verdict is
+  // consumed and the card goes done, on a usable pick and an unusable one
+  // alike.
+  closeAttemptTab(session, h2hId, h2hAttempt);
   const update: PoolUpdate = {
     tickets: { [h2hId]: "done" as const },
     log: [
@@ -4253,14 +4282,17 @@ function spawnedPayload(
 }
 
 /**
- * Close the attempt's herdr tab once its ticket has merged (ADR-0014:
- * exited panes persist until merge, then the engine closes them). The tab
- * id rides the attempt's spawned event, so no state is threaded through
- * the merge paths; a missing id (headless pool, headless fallback) leaves
- * nothing to close. Best-effort and non-blocking: closing a terminal must
- * never fail or delay a merge, and a daemon that has gone away, or that
- * already reaped the exited tab (verified live: herdr closes a tab whose
- * shell ends), changes nothing about the merged ticket.
+ * Close the attempt's herdr tab. For a merging attempt the trigger is the
+ * ticket's merge (ADR-0014: exited panes persist until merge, then the
+ * engine closes them); for attempts that never merge (graders, the
+ * head-to-head judge, losing verify candidates) the trigger is the moment
+ * their role ends: the verdict landing or the selection discarding them.
+ * The tab id rides the attempt's spawned event, so no state is threaded
+ * through the merge or grading paths; a missing id (headless pool,
+ * headless fallback) leaves nothing to close. Best-effort and non-blocking:
+ * closing a terminal must never fail or delay the engine, and a daemon that
+ * has gone away, or that already reaped the exited tab (verified live:
+ * herdr closes a tab whose shell ends), changes nothing about the ticket.
  */
 function closeAttemptTab(
   session: Session,
