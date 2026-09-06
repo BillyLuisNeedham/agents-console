@@ -32,6 +32,7 @@ import { join, resolve } from "node:path";
 import {
   readConfig,
   REVIEW_TICKET_ID,
+  repoRootOf,
   startPool,
   UNASSIGNED_ASSIGNMENT_VIEW,
   type AssignmentView,
@@ -68,7 +69,13 @@ import {
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
-import { git } from "./worktrees.ts";
+import {
+  branchLandedInto,
+  branchFor,
+  currentBranch,
+  git,
+  gitAvailable,
+} from "./worktrees.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
@@ -88,6 +95,10 @@ interface EnrichedTicketState {
   title: string;
   blockedBy: string[];
   status: TicketStatus;
+  /** True when the ticket is done but its branch has not landed in the
+   *  merge target (ADR-0014): the "done, merge pending" card label. Derived
+   *  server-side here; every UI surface reads this field and never git. */
+  mergePending: boolean;
   /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
   assignment: AssignmentView;
   /**
@@ -168,13 +179,44 @@ export function currentAttemptPaneIds(
   return paneIds;
 }
 
+/**
+ * The done-but-unmerged ticket ids (ADR-0014): a ticket the snapshot reports
+ * done whose branch has not landed in the merge target, the pool checkout's
+ * current branch, main or a feature branch alike. Derived on demand from
+ * branch state, never persisted, the way the engine derives the hold itself
+ * (ADR-0007's pattern). A git-less pool has no branches, so nothing is ever
+ * pending there.
+ */
+function deriveMergePending(
+  poolDir: string,
+  statuses: Iterable<readonly [string, TicketStatus]>,
+): Set<string> {
+  const entries = [...statuses];
+  const pending = new Set<string>();
+  if (!entries.some(([, status]) => status === "done")) return pending;
+  const cwd = repoRootOf(poolDir);
+  if (!gitAvailable(cwd)) return pending;
+  const target = currentBranch(cwd);
+  for (const [id, status] of entries) {
+    if (status !== "done") continue;
+    if (branchLandedInto(cwd, branchFor(cwd, id), target)) continue;
+    pending.add(id);
+  }
+  return pending;
+}
+
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
 function enrich(
   snapshot: PoolSnapshot,
   meta: TicketMarker[],
   poolName: string,
+  poolDir: string,
   paneIds: Record<string, string>,
 ): EnrichedSnapshot {
+  const pending = deriveMergePending(
+    poolDir,
+    Object.entries(snapshot.state.tickets),
+  );
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -185,6 +227,7 @@ function enrich(
         title: m.title,
         blockedBy: m.blockedBy,
         status: snapshot.state.tickets[m.id] ?? "ready",
+        mergePending: pending.has(m.id),
         // A meta id the engine has not resolved yet (a hand-written file
         // seen between the meta refresh and the boundary that adopts it)
         // reads as unassigned until the record lands; the engine's map is
@@ -199,6 +242,35 @@ function enrich(
       interrupts: snapshot.state.interrupts,
       queuedAnswers: snapshot.queuedAnswers,
       config: snapshot.state.config as unknown as Record<string, unknown>,
+    },
+  };
+}
+
+/**
+ * The cached latest was enriched at its emit, but the branch state behind
+ * the merge-pending label can move without one: a manual CLI merge while
+ * the pool sits quiescent raises no snapshot. The replay surfaces (/api/state
+ * and a stream connect) re-derive before serving, so a Console opened after
+ * such a merge sees the label gone rather than the last emit's.
+ */
+function withMergePending(
+  snapshot: EnrichedSnapshot,
+  poolDir: string,
+): EnrichedSnapshot {
+  const pending = deriveMergePending(
+    poolDir,
+    snapshot.state.tickets.map(
+      (ticket) => [ticket.id, ticket.status] as const,
+    ),
+  );
+  return {
+    ...snapshot,
+    state: {
+      ...snapshot.state,
+      tickets: snapshot.state.tickets.map((ticket) => ({
+        ...ticket,
+        mergePending: pending.has(ticket.id),
+      })),
     },
   };
 }
@@ -1039,6 +1111,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             snapshot,
             meta,
             poolName,
+            poolDir,
             currentAttemptPaneIds(join(poolDir, "runs"), meta),
           ),
         );
@@ -1158,7 +1231,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         const pathname = url.pathname;
 
         if (pathname === "/api/state") {
-          return Response.json({ snapshot: latest });
+          return Response.json({
+            snapshot: latest ? withMergePending(latest, poolDir) : null,
+          });
         }
 
         if (pathname === "/api/start" && req.method === "POST") {
@@ -1329,7 +1404,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             start(ctrl) {
               controller = ctrl;
               clients.add(ctrl);
-              if (latest) ctrl.enqueue(encodeSnapshot(latest));
+              if (latest) {
+                ctrl.enqueue(encodeSnapshot(withMergePending(latest, poolDir)));
+              }
             },
             cancel() {
               if (controller) clients.delete(controller);

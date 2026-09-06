@@ -110,6 +110,10 @@ export interface PoolTicketState {
   title: string;
   blockedBy: string[];
   status: PoolStatus;
+  /** Server-derived: the ticket is done but its branch has not landed in
+   *  the merge target (ADR-0014). Absent on an older server's snapshot;
+   *  the projection reads it as false. */
+  mergePending?: boolean;
   /** The ticket's resolved Assignment record, rendered verbatim. */
   assignment: PoolTicketAssignment;
   /**
@@ -644,6 +648,9 @@ export interface TicketCardView {
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
   status: PoolStatus;
+  /** Done with its branch still unmerged: the card's state word reads
+   *  "done, merge pending". Derived server-side; the card only shows it. */
+  mergePending: boolean;
   /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
   assignment: PoolTicketAssignment;
   outcome: PoolOutcome | null;
@@ -896,6 +903,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
+    mergePending: ticket.mergePending ?? false,
     assignment: ticket.assignment,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
@@ -967,7 +975,8 @@ export function projectLog(raw: unknown): string[] {
   return (raw as { log: unknown[] }).log.filter((line): line is string => typeof line === "string");
 }
 
-export function statusLabel(status: PoolStatus): string {
+export function statusLabel(status: PoolStatus, mergePending = false): string {
+  if (status === "done" && mergePending) return "done, merge pending";
   return status === "in-progress" ? "running" : status;
 }
 
@@ -1041,6 +1050,8 @@ export interface TicketDetailView {
   ticketId: string;
   title: string;
   status: PoolStatus;
+  /** Mirrors the card's: done with its branch still unmerged. */
+  mergePending: boolean;
   blockedBy: string[];
   blockedByCheckpoint: string[];
   outcome: PoolOutcome | null;
@@ -1074,6 +1085,7 @@ export function projectDetail(
       ticketId: card.ticketId,
       title: card.title,
       status: card.status,
+      mergePending: card.mergePending,
       blockedBy: card.blockedBy,
       blockedByCheckpoint: card.blockedByCheckpoint,
       outcome: card.outcome,

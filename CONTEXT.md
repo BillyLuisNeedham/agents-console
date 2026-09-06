@@ -95,7 +95,7 @@ The JSON an attempt writes at exit to signal its result: done, or checkpoint wit
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Merge hold**:
-The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0012 (`docs/adr/0012-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
+The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
 _Avoid_: block (that's a ticket dependency), gate (per-ticket gating was the rejected alternative)
 
 **Ticket log**:
