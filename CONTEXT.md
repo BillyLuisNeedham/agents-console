@@ -87,7 +87,7 @@ One run of a ticket by a harness, from spawn to exit. A ticket accumulates attem
 _Avoid_: run (that's the whole thread), execution, job
 
 **Terminal-backed attempt**:
-An Attempt whose harness runs in a herdr pane instead of a headless child — live in a real terminal the operator can watch and type into, while the engine stays oblivious to that input and the attempt still ends only on exit plus Outcome. Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
+An Attempt whose harness runs as an interactive TUI in a herdr pane instead of a headless child — a real terminal the operator can watch and type into mid-run, while the engine stays oblivious to that input. The attempt ends when a valid Outcome appears; the TUI stays alive afterward and pane exit trails whenever the operator closes the tab, so pane loss *without* an Outcome is the crash signal. Its Stream file is a `script` typescript (both directions), not harness stream-json (ADR-0016). Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
 _Avoid_: interactive attempt (interaction is the operator's, not the attempt's), attached attempt, PTY attempt
 
 **Outcome**:
