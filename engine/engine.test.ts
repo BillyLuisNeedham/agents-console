@@ -3835,7 +3835,7 @@ describe("harness CLIs", () => {
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
   });
 
-  it("launches cursor's agent CLI with the documented flags (unproven line, carried over from run.sh)", async () => {
+  it("launches cursor's agent CLI with the documented flags (run against the real Cursor Agent CLI)", async () => {
     const poolDir = oneTicketPool("cursor", "cursor-test");
     const fake = fakeCli(poolDir, "agent");
 
@@ -3859,7 +3859,6 @@ describe("harness CLIs", () => {
       "--trust",
       "--output-format",
       "stream-json",
-      "--verbose",
     ]);
     expect(readFileSync(join(fake.recordDir, "stdin"), "utf8")).toBe("eof");
   });

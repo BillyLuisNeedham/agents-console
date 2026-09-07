@@ -128,7 +128,9 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     ctx.model,
     "--auto",
   ],
-  // UNPROVEN: written from Cursor's CLI docs, not yet run on a real queue.
+  // Run against the real Cursor Agent CLI (2026.09.02-c22c1a3). --verbose was
+  // dropped: that CLI has no such flag and rejects it with "unknown option
+  // '--verbose'", unlike claude where the flag is required.
   cursor: (ctx) => [
     "agent",
     "-p",
@@ -140,6 +142,5 @@ export const defaultHarnesses: Record<string, HarnessCommand> = {
     // The structured stream, same shape as claude's (ADR-0012).
     "--output-format",
     "stream-json",
-    "--verbose",
   ],
 };

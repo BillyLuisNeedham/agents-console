@@ -67,7 +67,7 @@ describe("defaultHarnesses", () => {
     );
   });
 
-  it("builds the cursor argv from the fields (unproven line, carried over from run.sh)", () => {
+  it("builds the cursor argv from the fields (run against the real Cursor Agent CLI)", () => {
     expect(defaultHarnesses.cursor(context())).toEqual([
       "agent",
       "-p",
@@ -79,7 +79,6 @@ describe("defaultHarnesses", () => {
       "--trust",
       "--output-format",
       "stream-json",
-      "--verbose",
     ]);
   });
 });
