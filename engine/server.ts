@@ -99,7 +99,8 @@ export interface PoolServerOptions {
  * comment frame is invisible to a browser EventSource, so the Console's client
  * reads the stream with fetch and treats any frame, snapshot or heartbeat, as
  * its liveness signal, reopening a stream that stays silent for a bounded
- * multiple of this interval.
+ * multiple of this interval. The interval is served as the stream's opening
+ * frame, so the client's silence window derives from the served value.
  */
 export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 
@@ -298,6 +299,15 @@ function encodeSnapshot(snapshot: EnrichedSnapshot): Uint8Array {
 // event for a browser EventSource to dispatch and is pure keep-alive plus the
 // raw-frame liveness signal the fetch-based client measures.
 const HEARTBEAT_FRAME = new TextEncoder().encode(": heartbeat\n\n");
+
+// The stream's opening frame: the server publishes its heartbeat interval so
+// the client derives its silence window from the served value rather than a
+// hard-coded copy that could drift from the server's interval.
+function encodeStreamConfig(heartbeatMs: number): Uint8Array {
+  return new TextEncoder().encode(
+    `event: stream-config\ndata: ${JSON.stringify({ heartbeatMs })}\n\n`,
+  );
+}
 
 function serveStatic(distDir: string, pathname: string): Response | null {
   const resolved = pathname === "/" ? "/index.html" : pathname;
@@ -1439,6 +1449,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             start(ctrl) {
               controller = ctrl;
               clients.add(ctrl);
+              ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
               if (latest) {
                 ctrl.enqueue(encodeSnapshot(withMergePending(latest, poolDir)));
               }

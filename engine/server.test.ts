@@ -678,6 +678,27 @@ describe("pool server", () => {
     const heartbeat = frames.find((f) => f.includes(": heartbeat"));
     expect(heartbeat).toBe(": heartbeat");
   });
+
+  it("opens the snapshot stream with a frame publishing the heartbeat interval", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}), {
+      streamHeartbeatMs: 40,
+    });
+    await server.start();
+    await server.settled();
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    // The opening frame carries the configured interval, ahead of the
+    // replayed snapshot, so the client's silence window derives from it.
+    const firstFrame = new TextDecoder().decode(value).split("\n\n")[0];
+    expect(firstFrame).toBe('event: stream-config\ndata: {"heartbeatMs":40}');
+  });
 });
 
 describe("ticket events endpoint", () => {
