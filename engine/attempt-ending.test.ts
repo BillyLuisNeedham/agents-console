@@ -109,6 +109,36 @@ describe("waitForAttemptEnding", () => {
     expect(await ending).toBe("exit-code");
   });
 
+  it("stays waiting after hang-up while the pane is still listed and no file appears", async () => {
+    // A FIN settles the pane-end wait as lost. Lost is not an attempt ending:
+    // the pane can still be running, and ranking the hang-up as done is what
+    // parked a wait that then never looked at the file. This row is hang-up
+    // with the pane still listed and no file yet, which must park until one
+    // of the other observations arrives.
+    const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
+    const path = exitCodePath();
+    const ending = waitForAttemptEnding(
+      fake.socketPath,
+      "pane-1",
+      path,
+      undefined,
+      QUICK,
+    );
+    await watching(fake);
+    const before = sweeps(fake);
+    fake.hangUpSubscribers();
+    await until("several sweeps after hang-up", () => sweeps(fake) >= before + 5);
+    const stillWaiting = await Promise.race([
+      ending,
+      new Promise<"waiting">((resolve) =>
+        setTimeout(() => resolve("waiting"), QUICK.livenessMs * 4),
+      ),
+    ]);
+    expect(stillWaiting).toBe("waiting");
+    writeFileSync(path, "0\n");
+    expect(await ending).toBe("exit-code");
+  });
+
   it("ends as a crash when the pane is gone and no file follows it", async () => {
     // Both observations failed at once: no event arrived and no file was ever
     // written. The pane leaving the daemon's listing is the only thing left
