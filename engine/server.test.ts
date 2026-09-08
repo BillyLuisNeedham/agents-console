@@ -176,7 +176,7 @@ function fleetRegistry(poolDir: string): string {
 async function startServer(
   poolDir: string,
   harnesses: Record<string, HarnessCommand>,
-  options: { herdrSocket?: string } = {},
+  options: { herdrSocket?: string; streamHeartbeatMs?: number } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
     poolDir,
@@ -648,6 +648,36 @@ describe("pool server", () => {
     // the unhandled ENOENT.
     await server.settled();
   }, 25_000);
+
+  it("pushes an SSE heartbeat comment frame on the snapshot stream", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}), {
+      streamHeartbeatMs: 40,
+    });
+    await server.start();
+    await server.settled();
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    let data = "";
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && !data.includes(": heartbeat")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("stream closed before a heartbeat frame");
+      data += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+    // The heartbeat is a comment frame: nothing but the comment line, so a
+    // browser EventSource dispatches no event for it.
+    const frames = data.split("\n\n");
+    const heartbeat = frames.find((f) => f.includes(": heartbeat"));
+    expect(heartbeat).toBe(": heartbeat");
+  });
 });
 
 describe("ticket events endpoint", () => {
