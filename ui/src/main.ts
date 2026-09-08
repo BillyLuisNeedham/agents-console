@@ -6,7 +6,7 @@
  */
 
 import "./styles.css";
-import { PoolClient } from "./client";
+import { PoolClient, refetchStateOnVisible } from "./client";
 import { LogPane } from "./log-pane";
 import { Vitals } from "./vitals";
 import {
@@ -448,6 +448,15 @@ async function boot(): Promise<void> {
       render();
     },
   });
+  // Belt and braces over the stream's self-healing: a tab that returns to
+  // visible (after the machine slept, or hours buried) refetches the latest
+  // snapshot, so a stale page catches up even before the stream's silence
+  // watchdog reopens it.
+  refetchStateOnVisible(
+    document,
+    () => client.getState(),
+    (snapshot) => setSnapshot(snapshot),
+  );
 }
 
 void boot();

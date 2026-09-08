@@ -1,9 +1,9 @@
 /**
  * Pool client: the Console's single path to the pool server. The server serves
  * the built SPA, a small JSON API (get state, start, resume-with-answer), and
- * an SSE stream that pushes a full state snapshot on every change. The UI
- * renders from those snapshots only; this module is the only code that talks
- * to the server.
+ * an SSE stream that pushes a full state snapshot on every change plus an SSE
+ * comment heartbeat on a fixed cadence. The UI renders from those snapshots
+ * only; this module is the only code that talks to the server.
  */
 
 import type { GradeView, PoolSnapshot, TerminalPeekResponse, TicketActivityResponse, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
@@ -11,12 +11,65 @@ import type { GradeView, PoolSnapshot, TerminalPeekResponse, TicketActivityRespo
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
 
+/**
+ * The snapshot stream's heartbeat interval, matching the server's (the engine
+ * serves the SPA, so the two sides ship together). Any stream frame, snapshot
+ * or heartbeat, proves the connection is alive.
+ */
+export const STREAM_HEARTBEAT_MS = 20_000;
+
+/** The bounded multiple of the heartbeat interval a stream may stay silent. */
+export const STREAM_SILENCE_FACTOR = 3;
+const STREAM_SILENCE_MS = STREAM_HEARTBEAT_MS * STREAM_SILENCE_FACTOR;
+
+/** The reconnect delay after a failed or closed stream, matching the browser
+ *  EventSource's default reconnection time. */
+const STREAM_RETRY_MS = 3_000;
+
 interface StreamHandlers {
   onSnapshot: (snapshot: PoolSnapshot) => void;
   onError: (message: string) => void;
 }
 
 type ResumeAction = "resume" | "approve" | "reject";
+
+/** Split complete SSE frames (terminated by a blank line) off a buffer. */
+function takeSseFrames(buffer: string): { rest: string; frames: string[] } {
+  let rest = buffer;
+  const frames: string[] = [];
+  for (let end = rest.indexOf("\n\n"); end !== -1; end = rest.indexOf("\n\n")) {
+    frames.push(rest.slice(0, end));
+    rest = rest.slice(end + 2);
+  }
+  return { rest, frames };
+}
+
+/**
+ * The snapshot an SSE frame carries, or null for a frame that is not a
+ * snapshot (a heartbeat comment or any malformed frame). The server pushes
+ * exactly `event: snapshot` with a single-line JSON data field, so the
+ * per-field parse is small.
+ */
+function snapshotFromSseFrame(frame: string): PoolSnapshot | null {
+  let eventType = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const field = line.slice(0, colon);
+    let value = line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") eventType = value;
+    else if (field === "data") data.push(value);
+  }
+  if (eventType !== "snapshot" || data.length === 0) return null;
+  try {
+    return JSON.parse(data.join("\n")) as PoolSnapshot;
+  } catch {
+    return null;
+  }
+}
 
 export class PoolClient {
   private base: string;
@@ -167,24 +220,145 @@ export class PoolClient {
   }
 
   /**
-   * Open the SSE snapshot stream. Each change pushes a full snapshot; on
-   * connect the server immediately replays the latest snapshot so a client
-   * joining mid-run does not miss state. Returns a function that closes the
-   * stream.
+   * Open the SSE snapshot stream, self-healing. Each change pushes a full
+   * snapshot; on connect the server immediately replays the latest snapshot so
+   * a client joining mid-run does not miss state, and it pushes a comment
+   * heartbeat on a fixed cadence. The stream is read with fetch rather than a
+   * browser EventSource because the heartbeat is a comment frame: EventSource
+   * never dispatches comments, and the client needs every frame to tell a
+   * half-open connection from a quiet-but-healthy pool. Any frame resets the
+   * silence window; a stream silent for STREAM_SILENCE_MS (a bounded multiple
+   * of the heartbeat interval) is torn down and reopened, and the replayed
+   * snapshot on reconnect renders, so a half-open connection recovers with no
+   * page refresh. Silence is a reconnect trigger, never the connection
+   * banner's error; only a fetch failure or a stream error or close raises
+   * onError, and those schedule a retry reopen the way EventSource would.
+   * Returns a function that closes the stream.
    */
   stream(handlers: StreamHandlers): () => void {
-    const source = new EventSource(`${this.base}${STREAM_PATH}`);
-    source.addEventListener("snapshot", (event) => {
-      try {
-        const snapshot = JSON.parse((event as MessageEvent).data) as PoolSnapshot;
-        handlers.onSnapshot(snapshot);
-      } catch {
-        // ignore malformed frames; the next snapshot will supersede
+    const aborted = new AbortController();
+    let closed = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // True while the silence watchdog is tearing down a quiet stream: the
+    // cancel of the in-flight read rejects, and that rejection is the reopen
+    // already in flight, not the connection banner's error.
+    let reopening = false;
+
+    const clearTimer = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
       }
-    });
-    source.onerror = () => {
-      handlers.onError("pool stream disconnected");
     };
-    return () => source.close();
+
+    const arm = (delay: number, fn: () => void): void => {
+      clearTimer();
+      timer = setTimeout(fn, delay);
+    };
+
+    const armSilence = (): void => {
+      arm(STREAM_SILENCE_MS, () => {
+        reopening = true;
+        void reader?.cancel().catch(() => {});
+        void open();
+      });
+    };
+
+    const open = async (): Promise<void> => {
+      if (closed) return;
+      let buffer = "";
+      const decoder = new TextDecoder();
+      try {
+        const res = await fetch(`${this.base}${STREAM_PATH}`, {
+          signal: aborted.signal,
+        });
+        if (!res.ok || !res.body) {
+          throw new Error(`pool stream failed: ${res.status}`);
+        }
+        reader = res.body.getReader();
+        armSilence();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          // Bytes arrived: the connection is alive, reset the silence window.
+          armSilence();
+          buffer += decoder.decode(value, { stream: true });
+          const { rest, frames } = takeSseFrames(buffer);
+          buffer = rest;
+          for (const frame of frames) {
+            const snapshot = snapshotFromSseFrame(frame);
+            if (!snapshot) continue;
+            try {
+              handlers.onSnapshot(snapshot);
+            } catch {
+              // A snapshot render failure is not a stream failure; the next
+              // snapshot supersedes it and the stream keeps flowing.
+            }
+          }
+        }
+      } catch (err) {
+        if (closed) return;
+        if (reopening) {
+          reopening = false;
+          return;
+        }
+        handlers.onError(err instanceof Error ? err.message : String(err));
+        arm(STREAM_RETRY_MS, () => void open());
+        return;
+      }
+      if (closed) return;
+      if (reopening) {
+        reopening = false;
+        return;
+      }
+      // The server closed the stream: reconnect after the retry delay, the way
+      // the browser EventSource reconnects on a closed connection.
+      handlers.onError("pool stream disconnected");
+      arm(STREAM_RETRY_MS, () => void open());
+    };
+
+    void open();
+
+    return () => {
+      closed = true;
+      clearTimer();
+      aborted.abort();
+      void reader?.cancel().catch(() => {});
+    };
   }
+}
+
+/** The slice of a page's visibility lifecycle the refetch-on-visible reads. */
+export interface VisibilitySource {
+  addEventListener(type: "visibilitychange", listener: () => void): void;
+  removeEventListener(type: "visibilitychange", listener: () => void): void;
+  readonly visibilityState: string;
+}
+
+/**
+ * Belt and braces over the stream's self-healing: when the page returns to
+ * visible (a tab the machine slept under, or one buried for hours), refetch
+ * the latest snapshot and render it. The stream's silence watchdog reopens a
+ * half-open connection on the same wake, so the two paths race harmlessly to
+ * the same fresh render. Returns a function that removes the listener.
+ */
+export function refetchStateOnVisible(
+  source: VisibilitySource,
+  getState: () => Promise<PoolSnapshot | null>,
+  onSnapshot: (snapshot: PoolSnapshot) => void,
+): () => void {
+  const handler = (): void => {
+    if (source.visibilityState !== "visible") return;
+    void getState()
+      .then((snapshot) => {
+        if (snapshot) onSnapshot(snapshot);
+      })
+      .catch(() => {
+        // The stream recovers on its own; a failed refetch leaves the last
+        // snapshot in place.
+      });
+  };
+  source.addEventListener("visibilitychange", handler);
+  return () => source.removeEventListener("visibilitychange", handler);
 }

@@ -88,7 +88,20 @@ export interface PoolServerOptions {
   registryPath?: string;
   /** The herdr daemon socket for terminal-backed attempts and the terminal endpoints; tests point this at a fake. Defaults to the daemon's path on this machine. */
   herdrSocket?: string;
+  /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
+  streamHeartbeatMs?: number;
 }
+
+/**
+ * The snapshot stream's heartbeat interval: the server pushes one SSE comment
+ * frame per connection at this cadence, inside common browser and proxy idle
+ * timeouts so a healthy stream never idles out into a half-open state. A
+ * comment frame is invisible to a browser EventSource, so the Console's client
+ * reads the stream with fetch and treats any frame, snapshot or heartbeat, as
+ * its liveness signal, reopening a stream that stays silent for a bounded
+ * multiple of this interval.
+ */
+export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 
 interface EnrichedTicketState {
   id: string;
@@ -280,6 +293,11 @@ function encodeSnapshot(snapshot: EnrichedSnapshot): Uint8Array {
     `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
   );
 }
+
+// The snapshot stream's liveness pulse: an SSE comment frame, so it carries no
+// event for a browser EventSource to dispatch and is pure keep-alive plus the
+// raw-frame liveness signal the fetch-based client measures.
+const HEARTBEAT_FRAME = new TextEncoder().encode(": heartbeat\n\n");
 
 function serveStatic(distDir: string, pathname: string): Response | null {
   const resolved = pathname === "/" ? "/index.html" : pathname;
@@ -1042,6 +1060,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
+  const streamHeartbeatMs =
+    options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   let meta = loadMeta(poolDir);
   let ticketIds = knownTicketIds(meta);
   const poolName = poolDir.split("/").slice(-2).join("/");
@@ -1396,10 +1416,21 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         if (pathname === "/api/stream") {
-          // The stream is silent whenever the pool waits at an interrupt, so it
-          // opts out of the default idle timeout; every other route keeps it.
+          // The stream is silent whenever the pool waits at an interrupt, so
+          // it opts out of the default idle timeout; every other route keeps
+          // it. Heartbeat comment frames still flow on their own cadence (the
+          // client's liveness signal, and what keeps proxy idle timeouts from
+          // firing), but a quiet pool emits no snapshot, and the opt-out keeps
+          // the wait from being cut short.
           bunServer.timeout(req, 0);
           let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+          let heartbeat: ReturnType<typeof setInterval> | null = null;
+          const stopHeartbeat = (): void => {
+            if (heartbeat !== null) {
+              clearInterval(heartbeat);
+              heartbeat = null;
+            }
+          };
           const stream = new ReadableStream<Uint8Array>({
             start(ctrl) {
               controller = ctrl;
@@ -1407,8 +1438,18 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               if (latest) {
                 ctrl.enqueue(encodeSnapshot(withMergePending(latest, poolDir)));
               }
+              heartbeat = setInterval(() => {
+                try {
+                  ctrl.enqueue(HEARTBEAT_FRAME);
+                } catch {
+                  // A dead connection's enqueue throws; drop the client.
+                  stopHeartbeat();
+                  clients.delete(ctrl);
+                }
+              }, streamHeartbeatMs);
             },
             cancel() {
+              stopHeartbeat();
               if (controller) clients.delete(controller);
             },
           });
