@@ -1545,7 +1545,7 @@ async function finalizeAdoptedAttempt(
     // Ownership passes to the recorded exit: from here a later answer is
     // ordinary interrupt handling, never an abandonment.
     session.adopted.delete(ticketId);
-    recordAdoptedExit(session, marker, attempt, code, logPath);
+    recordAdoptedExit(session, marker, attempt, code, logPath, exitCodePath);
   } finally {
     if (tailer) await tailer.finish().catch(() => {});
   }
@@ -1560,6 +1560,7 @@ function recordAdoptedExit(
   attempt: number,
   code: number,
   logPath: string,
+  exitCodePath: string,
 ): void {
   const ticketId = marker.id;
   const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
@@ -1569,7 +1570,7 @@ function recordAdoptedExit(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (code !== 0) {
-    crashReason = `harness exited ${code}`;
+    crashReason = exitCrashReason(code, exitCodePath, "harness");
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -2257,7 +2258,7 @@ async function runResolver(
   }
   const reason =
     exitCode !== 0
-      ? `resolver exited ${exitCode}`
+      ? exitCrashReason(exitCode, ctx.exitCodePath, "resolver")
       : outcome
         ? outcome.note || "resolver reported no resolution"
         : "resolver produced no resolution";
@@ -3016,7 +3017,7 @@ async function runGrader(
   const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    const reason = `harness exited ${exitCode}`;
+    const reason = exitCrashReason(exitCode, ctx.exitCodePath, "harness");
     recordGraderFailure(
       session,
       build,
@@ -3931,7 +3932,10 @@ async function runHeadToHead(
     runnerUp.attempt,
   ]);
   if (exitCode !== 0) {
-    verdict = { kind: "unusable", reason: `harness exited ${exitCode}` };
+    verdict = {
+      kind: "unusable",
+      reason: exitCrashReason(exitCode, ctx.exitCodePath, "harness"),
+    };
   }
   appendEvent(runsDir, h2hId, {
     at: new Date().toISOString(),
@@ -5056,7 +5060,7 @@ async function runTicket(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
-    crashReason = `harness exited ${exitCode}`;
+    crashReason = exitCrashReason(exitCode, ctx.exitCodePath, "harness");
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -5340,10 +5344,32 @@ async function waitForExitCodeFile(path: string): Promise<void> {
   }
 }
 
+// No exit code ever arrived: the wrapper's file was missing or unparseable
+// after every retry. A shell exit status is 0-255, so a negative can never
+// collide with a real one, which is what makes it usable as the signal.
+const EXIT_CODE_UNREADABLE = -1;
+
+// The crash reason for a non-zero exit, whose two causes want different
+// words. A real code came from the harness; EXIT_CODE_UNREADABLE means the
+// harness's fate is unknown and the pane wrapper is the thing to look at.
+// The distinction is worth a helper: an unparseable file reported itself as
+// `exited 1` on attempts that had in fact succeeded, and read as a harness
+// fault until the file itself was inspected (ADR-0014's amendment).
+export function exitCrashReason(
+  code: number,
+  exitCodePath: string,
+  subject: string,
+): string {
+  return code === EXIT_CODE_UNREADABLE
+    ? `${subject} exit code unreadable: the pane wrapper never wrote a ` +
+      `usable ${exitCodePath}`
+    : `${subject} exited ${code}`;
+}
+
 // Read the wrapper-written exit code, retrying briefly for a reaping race,
-// and translating a missing or malformed file into 1: the attempt crashed
-// (pane killed, daemon lost) and the crash path the spawn sites already have
-// is the right ending.
+// and translating a missing or malformed file into EXIT_CODE_UNREADABLE: the
+// attempt still ended (pane killed, daemon lost) and the crash path the
+// spawn sites already have is the right ending, but it says which happened.
 async function readExitCode(path: string): Promise<number> {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
@@ -5354,7 +5380,7 @@ async function readExitCode(path: string): Promise<number> {
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  return 1;
+  return EXIT_CODE_UNREADABLE;
 }
 
 /**
