@@ -5192,9 +5192,16 @@ const PANE_TAIL_POLL_MS = 250;
  * arrival order the headless pump writes), the exit code captured from
  * `PIPESTATUS` because a pipeline's `$?` would be tee's, and `exit` so the
  * pane's shell ends and herdr's `pane_exited` fires: without it the shell
- * would sit at its prompt and the engine would wait forever. The pane's
- * shell is bash (herdr spawns bash panes), the one shell `PIPESTATUS` is
- * portable on.
+ * would sit at its prompt and the engine would wait forever.
+ *
+ * The pipeline runs under an explicit `bash -c` because herdr spawns the
+ * operator's login shell, not bash: verified live on a zsh host, where
+ * `${PIPESTATUS[0]}` expands to nothing (zsh spells it `pipestatus`), the
+ * exit-code file got a bare newline, and every successful attempt was
+ * reported as `harness exited 1`. `PIPESTATUS` is the one portable way to
+ * read a pipeline's first status, so the fix is to guarantee the shell it
+ * needs rather than to guess at the host's. The trailing `exit` stays
+ * outside `bash -c`, since it is the pane's own shell that must end.
  */
 function terminalWrapper(argv: string[], ctx: SpawnContext): string {
   const command = argv.map(shellQuote).join(" ");
@@ -5204,10 +5211,10 @@ function terminalWrapper(argv: string[], ctx: SpawnContext): string {
   // straight to the log, so the pane writes exactly the file spawnToLog
   // would have.
   const teeTarget = ctx.streamPath ?? ctx.logPath;
-  return (
+  const pipeline =
     `${command} 2>&1 | tee ${shellQuote(teeTarget)}; ` +
-    `echo \${PIPESTATUS[0]} > ${shellQuote(ctx.exitCodePath)}; exit`
-  );
+    `echo \${PIPESTATUS[0]} > ${shellQuote(ctx.exitCodePath)}`;
+  return `bash -c ${shellQuote(pipeline)}; exit`;
 }
 
 // One POSIX-safe single-quote: the quoted text cannot touch the surrounding

@@ -4900,11 +4900,15 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     // ADR-0014's wrapper: merged output teed to the log (the stub harness
     // is raw mode, so the tee target is the log itself), the exit code out
     // of PIPESTATUS (a pipeline's $? would be tee's), and `exit` so the
-    // pane ends and pane_exited can fire.
+    // pane ends and pane_exited can fire. The pipeline runs under an
+    // explicit `bash -c` because the pane's shell is the operator's login
+    // shell: under zsh, PIPESTATUS expands to nothing and every attempt
+    // reads as exit 1. The `exit` stays outside, for the pane's own shell.
+    expect(wrapper).toStartWith("bash -c '");
     expect(wrapper).toContain("2>&1 | tee ");
-    expect(wrapper).toContain(".log'");
+    expect(wrapper).toContain(".log");
     expect(wrapper).not.toContain(".stream.jsonl");
-    expect(wrapper).toMatch(/\$\{PIPESTATUS\[0\]\} > .*\.exitcode'; exit$/);
+    expect(wrapper).toMatch(/\$\{PIPESTATUS\[0\]\} > .*\.exitcode.*; exit$/);
     // The wrapper's promise, on the pane: the exit-code file the wrapper
     // wrote and the harness outcome it ran.
     expect(readFileSync(join(poolDir, "runs", "01.exitcode"), "utf8").trim()).toBe("0");
