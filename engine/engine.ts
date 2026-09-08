@@ -1526,7 +1526,7 @@ async function finalizeAdoptedAttempt(
     // The same ending wait the live spawn runs, so the two cannot drift: an
     // exit-code file already on disk finalises the attempt without waiting on
     // anything, and otherwise the pane's end and the file race each other.
-    await waitForAttemptEnding(
+    const ending = await waitForAttemptEnding(
       session.herdrSocket,
       adopted.paneId,
       exitCodePath,
@@ -1535,7 +1535,11 @@ async function finalizeAdoptedAttempt(
     // Abandoned while waiting (the human answered): the answer path owns
     // the ticket now and this finalize records nothing further.
     if (adopted.abandoned) return;
-    const code = await readExitCode(exitCodePath);
+    // The pane is gone with no file, exactly as the live spawn reads it.
+    const code =
+      ending === "pane-gone"
+        ? EXIT_CODE_PANE_GONE
+        : await readExitCode(exitCodePath);
     // The answer path may have abandoned the attempt while the exit code was
     // being read; the map entry is the ownership record, so a missing or
     // flagged entry means the answer path owns the ticket from here.
@@ -1544,7 +1548,15 @@ async function finalizeAdoptedAttempt(
     // Ownership passes to the recorded exit: from here a later answer is
     // ordinary interrupt handling, never an abandonment.
     session.adopted.delete(ticketId);
-    recordAdoptedExit(session, marker, attempt, code, logPath, exitCodePath);
+    recordAdoptedExit(
+      session,
+      marker,
+      attempt,
+      code,
+      logPath,
+      exitCodePath,
+      adopted.paneId,
+    );
   } finally {
     release.abort();
     if (tailer) await tailer.finish().catch(() => {});
@@ -1561,6 +1573,7 @@ function recordAdoptedExit(
   code: number,
   logPath: string,
   exitCodePath: string,
+  paneId: string,
 ): void {
   const ticketId = marker.id;
   const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
@@ -1570,7 +1583,7 @@ function recordAdoptedExit(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (code !== 0) {
-    crashReason = exitCrashReason(code, exitCodePath, "harness");
+    crashReason = exitCrashReason(code, exitCodePath, "harness", paneId);
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -2258,7 +2271,12 @@ async function runResolver(
   }
   const reason =
     exitCode !== 0
-      ? exitCrashReason(exitCode, ctx.exitCodePath, "resolver")
+      ? exitCrashReason(
+          exitCode,
+          ctx.exitCodePath,
+          "resolver",
+          terminal?.paneId ?? null,
+        )
       : outcome
         ? outcome.note || "resolver reported no resolution"
         : "resolver produced no resolution";
@@ -3017,7 +3035,12 @@ async function runGrader(
   const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    const reason = exitCrashReason(exitCode, ctx.exitCodePath, "harness");
+    const reason = exitCrashReason(
+      exitCode,
+      ctx.exitCodePath,
+      "harness",
+      terminal?.paneId ?? null,
+    );
     recordGraderFailure(
       session,
       build,
@@ -3934,7 +3957,12 @@ async function runHeadToHead(
   if (exitCode !== 0) {
     verdict = {
       kind: "unusable",
-      reason: exitCrashReason(exitCode, ctx.exitCodePath, "harness"),
+      reason: exitCrashReason(
+        exitCode,
+        ctx.exitCodePath,
+        "harness",
+        terminal?.paneId ?? null,
+      ),
     };
   }
   appendEvent(runsDir, h2hId, {
@@ -5060,7 +5088,12 @@ async function runTicket(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
-    crashReason = exitCrashReason(exitCode, ctx.exitCodePath, "harness");
+    crashReason = exitCrashReason(
+      exitCode,
+      ctx.exitCodePath,
+      "harness",
+      terminal?.paneId ?? null,
+    );
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -5314,12 +5347,17 @@ async function awaitPaneSpawn(
     : null;
   const release = new AbortController();
   try {
-    await waitForAttemptEnding(
+    const ending = await waitForAttemptEnding(
       socketPath,
       paneId,
       ctx.exitCodePath,
       release.signal,
     );
+    // A pane that left the listing has already been given the ending's grace
+    // window to write its file and did not, so there is nothing to read and
+    // nothing to wait for: reading anyway buys only the retry's two seconds
+    // and then the wrong words, blaming a wrapper that never got to run.
+    if (ending === "pane-gone") return EXIT_CODE_PANE_GONE;
     // The exit-code file is written before the shell exits, so it is already
     // there in the normal case; the retry only covers a daemon that reaps
     // the pane ahead of the wrapper's last write.
@@ -5338,21 +5376,42 @@ async function awaitPaneSpawn(
 // collide with a real one, which is what makes it usable as the signal.
 const EXIT_CODE_UNREADABLE = -1;
 
-// The crash reason for a non-zero exit, whose two causes want different
+// The pane left herdr's listing and the ending's grace window passed with no
+// file behind it (attempt-ending.ts): the attempt is over and its exit status
+// is not recoverable from anywhere. Its own value for the same reason as
+// EXIT_CODE_UNREADABLE, and distinct from it because the two want different
+// words: nothing here is the wrapper's doing.
+const EXIT_CODE_PANE_GONE = -2;
+
+// The crash reason for a non-zero exit, whose three causes want different
 // words. A real code came from the harness; EXIT_CODE_UNREADABLE means the
-// harness's fate is unknown and the pane wrapper is the thing to look at.
-// The distinction is worth a helper: an unparseable file reported itself as
-// `exited 1` on attempts that had in fact succeeded, and read as a harness
-// fault until the file itself was inspected (ADR-0014's amendment).
+// harness's fate is unknown and the pane wrapper is the thing to look at;
+// EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
+// their faults and is why it names the pane instead. The distinction is worth
+// a helper: an unparseable file reported itself as `exited 1` on attempts
+// that had in fact succeeded, and read as a harness fault until the file
+// itself was inspected (ADR-0014's amendment). `paneId` is not optional so
+// that a new crash site has to say whether it has a pane at all; a headless
+// attempt has none and can never end this way.
 export function exitCrashReason(
   code: number,
   exitCodePath: string,
   subject: string,
+  paneId: string | null,
 ): string {
-  return code === EXIT_CODE_UNREADABLE
-    ? `${subject} exit code unreadable: the pane wrapper never wrote a ` +
+  if (code === EXIT_CODE_UNREADABLE) {
+    return (
+      `${subject} exit code unreadable: the pane wrapper never wrote a ` +
       `usable ${exitCodePath}`
-    : `${subject} exited ${code}`;
+    );
+  }
+  if (code === EXIT_CODE_PANE_GONE) {
+    return (
+      `${subject} pane gone: ${paneId ?? "the pane"} left herdr's listing ` +
+      `and no exit code was written to ${exitCodePath}`
+    );
+  }
+  return `${subject} exited ${code}`;
 }
 
 // Read the wrapper-written exit code, retrying briefly for a reaping race,

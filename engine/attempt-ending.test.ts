@@ -36,6 +36,11 @@ function exitCodePath(): string {
   return join(dir, "01.exitcode");
 }
 
+// How many times the wait has asked the daemon for its pane listing.
+function sweeps(fake: FakeHerdr): number {
+  return fake.requests.filter((r) => r.method === "pane.list").length;
+}
+
 // The wait has a subscription up and has been past the daemon at least once,
 // so from here only what the test does next can end it.
 async function watching(fake: FakeHerdr): Promise<void> {
@@ -119,6 +124,62 @@ describe("waitForAttemptEnding", () => {
     await watching(fake);
     fake.removePane("pane-1");
     expect(await ending).toBe("pane-gone");
+  });
+
+  it("records the real exit code when the file lands inside the grace window", async () => {
+    // The daemon reaps the pane just ahead of the wrapper's final write, which
+    // is the ordering the exit-code read's own retry already assumes. Settling
+    // the moment the pane leaves the listing would call this attempt a crash
+    // and throw away the exit code it was in the middle of writing.
+    const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
+    const path = exitCodePath();
+    const ending = waitForAttemptEnding(
+      fake.socketPath,
+      "pane-1",
+      path,
+      undefined,
+      // A grace window with room to spare, so the file can land well after
+      // the sweep has seen the pane go and still be inside the window on a
+      // loaded machine. Nothing waits it out: the wait settles the moment the
+      // file appears, so the window's size costs the test nothing.
+      { pollMs: 5, livenessMs: 10, graceMs: 5_000 },
+    );
+    await watching(fake);
+    const before = sweeps(fake);
+    fake.removePane("pane-1");
+    // Only once a sweep has answered without the pane is the wait inside its
+    // grace window; writing the file before that would prove nothing.
+    await until("a sweep without the pane", () => sweeps(fake) > before);
+    writeFileSync(path, "7\n");
+    expect(await ending).toBe("exit-code");
+  });
+
+  it("leaves a healthy long attempt waiting however many sweeps pass", async () => {
+    // The liveness sweep is what stands in for a deadline, so it must never
+    // become one: a real review attempt runs for ninety-eight minutes with its
+    // pane listed and nothing else to show, and every sweep must simply look
+    // and say nothing.
+    const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
+    const path = exitCodePath();
+    const ending = waitForAttemptEnding(
+      fake.socketPath,
+      "pane-1",
+      path,
+      undefined,
+      QUICK,
+    );
+    await until("several sweeps", () => sweeps(fake) >= 5);
+    // Five sweeps in, with the pane still listed, the wait is still waiting.
+    const stillWaiting = await Promise.race([
+      ending,
+      new Promise<"waiting">((resolve) =>
+        setTimeout(() => resolve("waiting"), QUICK.livenessMs * 4),
+      ),
+    ]);
+    expect(stillWaiting).toBe("waiting");
+    // And it is still the wait it was: the attempt's own ending still ends it.
+    writeFileSync(path, "0\n");
+    expect(await ending).toBe("exit-code");
   });
 
   it("rides out a daemon that cannot answer for the pane at all", async () => {
