@@ -271,11 +271,17 @@ export type PaneEnd = "exited" | "closed" | "lost";
  * is the only event channel) and the first matching event settles the wait.
  * The daemon pushes every pane's events to every subscriber, so the filter is
  * client-side. Two backstops close the gaps a subscription cannot see: the
- * socket erroring settles "lost" (the caller falls back to the exit-code
- * file), and a pane already absent from `pane.list` when the subscription ack
- * lands settles "exited" (its end predated the subscription, so no event will
- * ever arrive). The liveness check runs only after the ack, so an end can
- * never slip between the check and the daemon registering the subscription.
+ * socket ending, erroring or closing settles "lost" (the caller falls back to
+ * the exit-code file), and a pane already absent from `pane.list` when the
+ * subscription ack lands settles "exited" (its end predated the subscription,
+ * so no event will ever arrive). The liveness check runs only after the ack,
+ * so an end can never slip between the check and the daemon registering the
+ * subscription.
+ *
+ * Every way the connection can go must settle it, because whatever does not
+ * settle it parks it: an attempt that had finished and written its exit code
+ * was left reading `running` for 98 minutes on a wait that nothing could
+ * reach. A peer's FIN raises "end", so "end" settles too.
  */
 export function waitForPaneEnd(
   socketPath: string,
@@ -335,6 +341,7 @@ export function waitForPaneEnd(
         return;
       }
     });
+    sock.on("end", () => settle("lost"));
     sock.on("error", () => settle("lost"));
     sock.on("close", () => settle("lost"));
   });
