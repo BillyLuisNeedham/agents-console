@@ -259,8 +259,8 @@ export async function paneSendInput(
  * - "closed": the pane vanished without exiting (`pane_closed`, e.g. the
  *   operator closed the tab): the attempt is gone either way.
  * - "lost": the subscription could not be kept (daemon restart, or a daemon
- *   without `events.subscribe`): the caller must fall back to watching the
- *   attempt's own exit-code file.
+ *   without `events.subscribe`). Says only that this observation is over,
+ *   never that the attempt is.
  */
 export type PaneEnd = "exited" | "closed" | "lost";
 
