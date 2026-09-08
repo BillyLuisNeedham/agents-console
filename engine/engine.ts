@@ -1610,7 +1610,7 @@ function recordAdoptedExit(
     }
   }
   const log: string[] = [
-    `ticket ${ticketId}: adopted attempt ${attempt} exited ${code}, ` +
+    `ticket ${ticketId}: adopted attempt ${attempt} ${exitedPhrase(code)}, ` +
       `marker ${status}` +
       (crashReason !== null ? `, crash: ${crashReason}` : ""),
   ];
@@ -5166,10 +5166,10 @@ async function runTicket(
       ...(plan.verify ? {} : { tickets: { [marker.id]: status } }),
       log: [
         plan.verify
-          ? `ticket ${marker.id}: attempt ${plan.attempt} exited ${exitCode} ` +
-            `(${status})` +
+          ? `ticket ${marker.id}: attempt ${plan.attempt} ` +
+            `${exitedPhrase(exitCode)} (${status})` +
             (crashReason !== null ? `, crash: ${crashReason}` : "")
-          : `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
+          : `ticket ${marker.id}: ${exitedPhrase(exitCode)}, marker ${status}` +
             (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
       ...(outcome.ok && !plan.verify
@@ -5412,6 +5412,19 @@ export function exitCrashReason(
     );
   }
   return `${subject} exited ${code}`;
+}
+
+// How the pool log names the ending in passing, where the line is about the
+// marker and the code is one clause of it. A real code is the shell's own
+// status and reads as one; a sentinel is not a status at all, so it says what
+// happened instead of printing a number no shell produced. Templating it
+// unconditionally put `exited -2` on the same line as a crash reason whose
+// whole purpose is to report that no exit status was ever observed, which
+// described one attempt two contradictory ways in a single breath.
+export function exitedPhrase(code: number): string {
+  if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
+  if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
+  return `exited ${code}`;
 }
 
 // Read the wrapper-written exit code, retrying briefly for a reaping race,
