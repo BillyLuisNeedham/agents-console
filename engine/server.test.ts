@@ -2555,9 +2555,11 @@ describe("terminal endpoints", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ticket: "01", paneId: "pane-1", text: "working\nstill working" });
-    // The wire call is the prototype's verified peek shape, small line count.
-    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(6);
-    expect(TERMINAL_PEEK_LINES).toBeLessThanOrEqual(8);
+    // The wire call is the prototype's verified peek shape. The line count is
+    // at least a terminal height: a TUI fills the pane, and pane.read returns
+    // only the last N rendered rows, so a small count reads empty or a footer
+    // sliver (prototype/tui-prompt-paste/FINDINGS.md section 2, proven).
+    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(80);
     expect(fake.requests).toEqual([
       {
         method: "pane.read",

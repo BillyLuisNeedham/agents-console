@@ -727,10 +727,14 @@ export const ACTIVITY_CACHE_TTL_MS = 1000;
 
 /**
  * The card's read-only preview shows this many lines of the pane's recent
- * output: enough for a liveness signal, small enough to stay a glance, not
- * a log (~6-8 per the spec).
+ * output. On a terminal-backed attempt the harness fills the pane with a
+ * full-screen TUI, and `pane.read source=recent` returns only the last N
+ * rendered rows (prototype/tui-prompt-paste/FINDINGS.md section 2, proven):
+ * a small line count reads empty on a fresh pane or a footer sliver on a live
+ * TUI. This must be at least a terminal height so the peek shows the TUI's
+ * working area, while staying a bounded glance rather than a full log.
  */
-export const TERMINAL_PEEK_LINES = 8;
+export const TERMINAL_PEEK_LINES = 80;
 
 /**
  * The ticket-id -> pane-id translation both terminal endpoints key on
