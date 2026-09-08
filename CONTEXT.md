@@ -94,6 +94,10 @@ _Avoid_: interactive attempt (interaction is the operator's, not the attempt's),
 The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
+**Attempt ending**:
+The observation that an Attempt is over. Headless, that is the harness's child exiting. A Terminal-backed attempt has no child, so its ending is whichever of three forms is observed first: herdr reporting the pane's end, the attempt's exit code landing on disk, or the pane found gone with no exit code behind it, which is a crash. The forms are raced, never ranked, because each is blind where another sees; only the exit code landing does not depend on the daemon still talking to us. Recorded in the fifth amendment to ADR-0014, "Attempts may run terminal-backed in herdr panes".
+_Avoid_: exit (one form of an ending, not the ending), timeout (there is none; liveness is the signal), completion (an ending may be a crash), Outcome (the attempt's account of its result; an ending only says it stopped)
+
 **Merge hold**:
 The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
 _Avoid_: block (that's a ticket dependency), gate (per-ticket gating was the rejected alternative)
