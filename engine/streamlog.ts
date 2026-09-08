@@ -164,3 +164,128 @@ export class StreamLineBuffer {
 function stripCarriageReturn(line: string): string {
   return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
+
+/**
+ * The transcript line buffer for a terminal-backed attempt (ADR-0016): the
+ * Stream file is a `script` typescript, raw ANSI recording both directions
+ * of the session, and the derived log is that transcript with the ANSI and
+ * control noise removed. The buffer strips escape sequences incrementally —
+ * a sequence split across chunks is held back until the next chunk completes
+ * it — then splits on line endings exactly like `StreamLineBuffer`. What the
+ * log keeps is the readable text: printable characters, `\n`, and `\t`.
+ * Everything else a terminal paints with is dropped: CSI sequences (colours,
+ * cursor moves), OSC sequences (title/kitty sequences), other escape
+ * sequences (charset designators, screen saves), and C0 controls including
+ * the `\r` of a CRLF line ending and the standalone carriage return a
+ * redraw uses to overwrite a line.
+ */
+export class TranscriptLineBuffer {
+  private readonly decoder = new TextDecoder();
+  private pending = "";
+  private escape: string | null = null;
+
+  /** Feed one raw chunk; returns the transcript lines it completed. */
+  push(chunk: Uint8Array): string[] {
+    this.pending += this.clean(this.decoder.decode(chunk, { stream: true }));
+    return this.takeLines();
+  }
+
+  /** Returns a final unterminated line, if one remains, at end of stream. */
+  flush(): string[] {
+    const rest = this.pending + this.clean(this.decoder.decode());
+    this.pending = "";
+    return rest === "" ? [] : [rest];
+  }
+
+  private takeLines(): string[] {
+    const lines: string[] = [];
+    let index: number;
+    while ((index = this.pending.indexOf("\n")) !== -1) {
+      lines.push(this.pending.slice(0, index));
+      this.pending = this.pending.slice(index + 1);
+    }
+    return lines;
+  }
+
+  // Append cleaned text to the pending buffer: ANSI escapes and control
+  // characters removed. A partial escape sequence at the end of the input is
+  // held in `escape` until the next call completes it.
+  private clean(text: string): string {
+    const work = (this.escape ?? "") + text;
+    this.escape = null;
+    let out = "";
+    let i = 0;
+    const n = work.length;
+    while (i < n) {
+      const ch = work[i];
+      if (ch !== "\x1b") {
+        if (ch === "\n" || ch === "\t" || ch >= " ") out += ch;
+        i++;
+        continue;
+      }
+      const next = work[i + 1];
+      if (next === undefined) {
+        this.escape = work.slice(i);
+        break;
+      }
+      if (next === "[") {
+        // CSI: `ESC [` parameter/intermediate bytes then a final byte in
+        // [@-~]. A sequence that runs out of input is held back.
+        let j = i + 2;
+        for (; j < n; j++) {
+          if (work[j] >= "@" && work[j] <= "~") break;
+        }
+        if (j === n) {
+          this.escape = work.slice(i);
+          break;
+        }
+        i = j + 1;
+      } else if (
+        next === "]" ||
+        next === "P" ||
+        next === "_" ||
+        next === "^" ||
+        next === "X"
+      ) {
+        // OSC/DCS/APC/PM/SOS string sequences: payload until BEL or ST
+        // (`ESC \`). Anything until the terminator is dropped.
+        let j = i + 2;
+        let end = -1;
+        for (; j < n; j++) {
+          if (work[j] === "\x07") {
+            end = j;
+            break;
+          }
+          if (work[j] === "\x1b" && work[j + 1] === "\\") {
+            end = j + 1;
+            break;
+          }
+        }
+        if (end === -1) {
+          this.escape = work.slice(i);
+          break;
+        }
+        i = end + 1;
+      } else if (
+        next === "(" ||
+        next === ")" ||
+        next === "*" ||
+        next === "+" ||
+        next === "-" ||
+        next === "." ||
+        next === "/"
+      ) {
+        // Charset designator `ESC ( X`: three bytes, held back if split.
+        if (work[i + 2] === undefined) {
+          this.escape = work.slice(i);
+          break;
+        }
+        i += 3;
+      } else {
+        // Two-byte escape (`ESC 7`, `ESC M`, ...): drop both.
+        i += 2;
+      }
+    }
+    return out;
+  }
+}

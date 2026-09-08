@@ -8,6 +8,7 @@ import {
   attemptTabLabel,
   herdrRpc,
   openAttemptTab,
+  waitForPaneEnd,
 } from "./herdr.ts";
 
 const tempDirs: string[] = [];
@@ -192,5 +193,100 @@ describe("openAttemptTab", () => {
     await expect(
       openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree"),
     ).rejects.toThrow(/no pane found for new tab/);
+  });
+});
+
+describe("waitForPaneEnd", () => {
+  // A fake daemon that accepts the events.subscribe subscription (the ack
+  // answers the request and the connection stays open, as real herdr does),
+  // and reports a live pane id so the subscribe-time liveness backstop does
+  // not settle the wait prematurely.
+  function startSubscribingHerdr(): Promise<{
+    socketPath: string;
+    connections: number;
+    subscribers: import("node:net").Socket[];
+  }> {
+    const subscribers: import("node:net").Socket[] = [];
+    const server = createServer((socket) => {
+      let buf = "";
+      socket.on("data", (d) => {
+        buf += d.toString();
+        const newline = buf.indexOf("\n");
+        if (newline < 0) return;
+        const msg = JSON.parse(buf.slice(0, newline)) as {
+          id: string;
+          method: string;
+        };
+        if (msg.method === "events.subscribe") {
+          subscribers.push(socket);
+          socket.on("close", () => {
+            const at = subscribers.indexOf(socket);
+            if (at !== -1) subscribers.splice(at, 1);
+          });
+          socket.write(
+            JSON.stringify({
+              id: msg.id,
+              result: { type: "subscription_started" },
+            }) + "\n",
+          );
+          return;
+        }
+        if (msg.method === "pane.list") {
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              result: { panes: [{ tab_id: "tab-1", pane_id: "pane-1" }] },
+            }) + "\n",
+          );
+          return;
+        }
+        socket.end(JSON.stringify({ id: msg.id, result: {} }) + "\n");
+      });
+    });
+    servers.push(server);
+    const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+    tempDirs.push(dir);
+    const socketPath = join(dir, "herdr.sock");
+    let connections = 0;
+    return new Promise((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(socketPath, () =>
+        resolve({ socketPath, get connections() { return connections; }, subscribers }),
+      );
+    });
+  }
+
+  it("aborting the wait settles it and releases the subscription socket", async () => {
+    const fake = await startSubscribingHerdr();
+    const controller = new AbortController();
+    const end = waitForPaneEnd(fake.socketPath, "pane-1", controller.signal);
+    // The subscription is live until the abort releases it.
+    const deadline = Date.now() + 5000;
+    while (fake.subscribers.length === 0) {
+      if (Date.now() > deadline) throw new Error("subscription never registered");
+      await Bun.sleep(10);
+    }
+    controller.abort();
+    expect(await end).toBe("lost");
+    // The released subscription socket disconnected from the daemon.
+    await Bun.sleep(20);
+    expect(fake.subscribers).toHaveLength(0);
+  });
+
+  it("settles exited when the pane's end event arrives", async () => {
+    const fake = await startSubscribingHerdr();
+    const end = waitForPaneEnd(fake.socketPath, "pane-1");
+    const deadline = Date.now() + 5000;
+    while (fake.subscribers.length === 0) {
+      if (Date.now() > deadline) throw new Error("subscription never registered");
+      await Bun.sleep(10);
+    }
+    fake.subscribers[0]!.write(
+      JSON.stringify({
+        event: "pane_exited",
+        data: { type: "pane_exited", pane_id: "pane-1" },
+      }) + "\n",
+    );
+    expect(await end).toBe("exited");
   });
 });

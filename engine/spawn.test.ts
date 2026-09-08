@@ -5,6 +5,8 @@ import {
   elidePromptArgv,
   engineEnvSet,
   harnessStreamMode,
+  interactiveHarnessCommand,
+  type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
 
@@ -94,7 +96,7 @@ describe("defaultHarnessDescriptors", () => {
 
   const names = ["claude", "opencode", "cursor"] as const;
 
-  it("describes every known harness with all five descriptor fields", () => {
+  it("describes every known harness with all descriptor fields", () => {
     for (const name of names) {
       const descriptor = defaultHarnessDescriptors[name];
       expect(descriptor).toBeDefined();
@@ -104,7 +106,27 @@ describe("defaultHarnessDescriptors", () => {
       expect(typeof descriptor.promptShaping.batch).toBe("function");
       expect(typeof descriptor.promptShaping.interactive).toBe("function");
       expect(["stream", "raw"]).toContain(descriptor.streamMode);
+      // echoPattern is optional (opencode echoes the paste inline and has
+      // no marker); when present it is a non-empty pane-rendered pattern.
+      if (descriptor.echoPattern !== undefined) {
+        expect(descriptor.echoPattern.length).toBeGreaterThan(0);
+      }
     }
+  });
+
+  it("exposes the prototype-validated ready and echo patterns", () => {
+    // The ready patterns are the prototype's canonical fixtures: claude's
+    // header, opencode's first-boot placeholder, cursor's header — not the
+    // bare prompt glyph, which the pane's own bash prompt collides with.
+    expect(defaultHarnessDescriptors.claude.readyPattern).toBe("Claude Code v");
+    expect(defaultHarnessDescriptors.opencode.readyPattern).toBe("Ask anything");
+    expect(defaultHarnessDescriptors.cursor.readyPattern).toBe("Cursor Agent");
+    // claude and cursor collapse a long paste to a `[Pasted text #N +N
+    // lines]` marker the echo verification matches; opencode echoes inline
+    // and carries no marker.
+    expect(defaultHarnessDescriptors.claude.echoPattern).toBe("Pasted text");
+    expect(defaultHarnessDescriptors.cursor.echoPattern).toBe("Pasted text");
+    expect(defaultHarnessDescriptors.opencode.echoPattern).toBeUndefined();
   });
 
   it("is the single source the batch-argv projection and the stream mode read from", () => {
@@ -227,6 +249,35 @@ describe("harnessStreamMode", () => {
     expect(harnessStreamMode("cursor")).toBe("stream");
     expect(harnessStreamMode("opencode")).toBe("raw");
     expect(harnessStreamMode("mystery")).toBe("raw");
+  });
+});
+
+describe("interactiveHarnessCommand", () => {
+  const ctx = context();
+
+  it("replaces the engine's own batch command with the descriptor's interactive argv", () => {
+    // `defaultHarnesses` is the record the engine hands a spawn site, so a
+    // known harness resolves to its interactive TUI.
+    const command = interactiveHarnessCommand(defaultHarnesses, "claude");
+    expect(command(ctx)).toEqual(defaultHarnessDescriptors.claude.interactiveArgv(ctx));
+    expect(command(ctx)).not.toContain("-p");
+    expect(interactiveHarnessCommand(defaultHarnesses, "opencode")(ctx)).toEqual(
+      ["opencode", "--model", "claude-test", "--auto"],
+    );
+  });
+
+  it("runs a pool-registered override as the pane command as-is", () => {
+    // A pool (or test) that overrides a harness by name owns what runs: the
+    // override is not the descriptor's batch command, so it is used verbatim
+    // in the TUI.
+    const custom: HarnessCommand = () => ["bash", "/tmp/pool/stub.sh"];
+    const harnesses = { ...defaultHarnesses, claude: custom };
+    expect(interactiveHarnessCommand(harnesses, "claude")).toBe(custom);
+  });
+
+  it("falls back to the registered command for a custom harness name", () => {
+    const custom: HarnessCommand = () => ["bash", "/tmp/pool/custom.sh"];
+    expect(interactiveHarnessCommand({ custom }, "custom")).toBe(custom);
   });
 });
 

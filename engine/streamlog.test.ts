@@ -1,7 +1,11 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
+import {
+  StreamLineBuffer,
+  TranscriptLineBuffer,
+  deriveStreamLine,
+} from "./streamlog.ts";
 
 describe("deriveStreamLine", () => {
   it("passes assistant text through verbatim", () => {
@@ -163,6 +167,66 @@ describe("StreamLineBuffer", () => {
   it("emits nothing for an empty flush", () => {
     const buffer = new StreamLineBuffer();
     expect(buffer.push(new TextEncoder().encode("done\n"))).toEqual(["done"]);
+    expect(buffer.flush()).toEqual([]);
+  });
+});
+
+describe("TranscriptLineBuffer (ADR-0016)", () => {
+  const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+  it("derives an ANSI-laden typescript line into its readable text", () => {
+    const buffer = new TranscriptLineBuffer();
+    // A PTY paints with colour and cursor moves; script records the raw
+    // bytes, CR line endings included. The derived line is the plain text.
+    expect(
+      buffer.push(
+        encode("\x1b[32mClaude Code v2.1.263\x1b[0m\r\nhello from the TUI\r\n"),
+      ),
+    ).toEqual(["Claude Code v2.1.263", "hello from the TUI"]);
+  });
+
+  it("strips CSI sequences, OSC sequences, and two-byte escapes", () => {
+    const buffer = new TranscriptLineBuffer();
+    expect(
+      buffer.push(
+        encode(
+          "\x1b]0;title\x07agent output\x1b7\x1b8\x1b[1A\x1b[2Kprogress done\r\n",
+        ),
+      ),
+    ).toEqual(["agent outputprogress done"]);
+  });
+
+  it("keeps the operator's keystrokes, which the typescript records too", () => {
+    const buffer = new TranscriptLineBuffer();
+    // The engine's typed prompt appears in the typescript like any other
+    // input, and the derivation keeps it so the ticket log shows the
+    // steering.
+    expect(
+      buffer.push(encode("❯ /implement /tmp/pool/issues/01-t.md\r\n")),
+    ).toEqual(["❯ /implement /tmp/pool/issues/01-t.md"]);
+  });
+
+  it("reassembles an escape sequence split across chunks", () => {
+    const buffer = new TranscriptLineBuffer();
+    const bytes = encode("\x1b[32mcoloured\x1b[0m\r\n");
+    // The escape is cut mid-sequence in the first chunk.
+    expect(buffer.push(bytes.slice(0, 4))).toEqual([]);
+    expect(buffer.push(bytes.slice(4))).toEqual(["coloured"]);
+  });
+
+  it("keeps blank lines and non-ASCII text", () => {
+    const buffer = new TranscriptLineBuffer();
+    expect(buffer.push(encode("one\r\n\r\ntwo ✓\r\n"))).toEqual([
+      "one",
+      "",
+      "two ✓",
+    ]);
+  });
+
+  it("flushes a final unterminated line once", () => {
+    const buffer = new TranscriptLineBuffer();
+    expect(buffer.push(encode("partial\x1b[0m"))).toEqual([]);
+    expect(buffer.flush()).toEqual(["partial"]);
     expect(buffer.flush()).toEqual([]);
   });
 });

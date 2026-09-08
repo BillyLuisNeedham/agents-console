@@ -276,10 +276,16 @@ export type PaneEnd = "exited" | "closed" | "lost";
  * lands settles "exited" (its end predated the subscription, so no event will
  * ever arrive). The liveness check runs only after the ack, so an end can
  * never slip between the check and the daemon registering the subscription.
+ *
+ * `signal` cancels the wait: aborting settles it "lost" (the caller that
+ * aborts ignores the value) and releases the subscription socket, so the
+ * interactive completion wait can race the pane end against an outcome poll
+ * without leaking a subscription per attempt.
  */
 export function waitForPaneEnd(
   socketPath: string,
   paneId: string,
+  signal?: AbortSignal,
 ): Promise<PaneEnd> {
   return new Promise<PaneEnd>((resolve) => {
     let settled = false;
@@ -293,9 +299,15 @@ export function waitForPaneEnd(
     const settle = (end: PaneEnd): void => {
       if (settled) return;
       settled = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
       release();
       resolve(end);
     };
+    const onAbort = (): void => settle("lost");
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
     sock.on("connect", () => {
       sock.write(
         JSON.stringify({

@@ -71,9 +71,18 @@ export interface HarnessDescriptor {
   // the spawn paths, which still run batch through the typed wrapper.
   interactiveArgv: HarnessCommand;
   // The pane-rendered pattern that marks the TUI ready for typed input. One
-  // canonical fixture per harness, to be validated against the real TUIs by
-  // the prototype ticket before the readiness-polling path keys on it.
+  // canonical fixture per harness, validated against the real TUIs by the
+  // prototype ticket (prototype/tui-prompt-paste/FINDINGS.md): claude's
+  // header line, opencode's first-boot placeholder, cursor's header. The
+  // bare prompt glyph is deliberately not used: the pane's own bash prompt
+  // collides with it.
   readyPattern: string;
+  // The pane-rendered pattern that confirms a pasted prompt landed in the
+  // input area. claude and cursor collapse a long paste to a
+  // `[Pasted text #N +N lines]` marker, so the engine matches that; opencode
+  // echoes the paste inline, so it has no marker and the engine falls back
+  // to the prompt's issue reference.
+  echoPattern?: string;
   // The prompt shaping per mode.
   promptShaping: {
     batch: PromptShaping;
@@ -143,7 +152,11 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       "auto",
       ...(ctx.agents ? ["--agents", ctx.agents] : []),
     ],
-    readyPattern: ">",
+    readyPattern: "Claude Code v",
+    // claude collapses a long paste to `[Pasted text #N +N lines]` in the
+    // input area before Enter (prototype finding); the engine matches that
+    // marker to confirm the paste landed.
+    echoPattern: "Pasted text",
     promptShaping: claudeShaping,
     streamMode: "stream",
   },
@@ -162,7 +175,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       "--auto",
     ],
     interactiveArgv: (ctx) => ["opencode", "--model", ctx.model, "--auto"],
-    readyPattern: ">",
+    readyPattern: "Ask anything",
     promptShaping: opencodeShaping,
     streamMode: "raw",
   },
@@ -189,7 +202,10 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       "--force",
       "--trust",
     ],
-    readyPattern: ">",
+    readyPattern: "Cursor Agent",
+    // cursor collapses a long paste to `[Pasted text #N +N lines]` the same
+    // way claude does (prototype finding).
+    echoPattern: "Pasted text",
     promptShaping: cursorShaping,
     streamMode: "stream",
   },
@@ -212,6 +228,28 @@ export const defaultHarnesses: Record<string, HarnessCommand> = Object.fromEntri
 // can never silently stream.
 export function harnessStreamMode(harness: string): HarnessStreamMode {
   return defaultHarnessDescriptors[harness]?.streamMode ?? "raw";
+}
+
+/**
+ * The command a terminal-backed spawn hands its pane: the descriptor's
+ * interactive argv when the registered command is the engine's own batch
+ * command (no override, so the TUI replaces the batch flags), or the
+ * registered command itself when it is not — a pool or test that overrides a
+ * harness by name owns what runs, and its command runs as the pane command
+ * under the script wrapper. `harnesses` is the same `{ ...defaultHarnesses,
+ * ...poolHarnesses }` record the batch resolution reads, so the identity
+ * check is "did the pool replace the engine's default" and nothing else.
+ */
+export function interactiveHarnessCommand(
+  harnesses: Record<string, HarnessCommand>,
+  harness: string,
+): HarnessCommand {
+  const descriptor = defaultHarnessDescriptors[harness];
+  const command = harnesses[harness];
+  if (descriptor && command === descriptor.batchArgv) {
+    return descriptor.interactiveArgv;
+  }
+  return command;
 }
 
 // The placeholder an argv element carries in a spawned event's facts where
