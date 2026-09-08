@@ -259,8 +259,8 @@ export async function paneSendInput(
  * - "closed": the pane vanished without exiting (`pane_closed`, e.g. the
  *   operator closed the tab): the attempt is gone either way.
  * - "lost": the subscription could not be kept (daemon restart, or a daemon
- *   without `events.subscribe`): the caller must fall back to watching the
- *   attempt's own exit-code file.
+ *   without `events.subscribe`). Says only that this observation is over,
+ *   never that the attempt is.
  */
 export type PaneEnd = "exited" | "closed" | "lost";
 
@@ -270,44 +270,52 @@ export type PaneEnd = "exited" | "closed" | "lost";
  * 0.8.2; `events.wait` only supports agent-status matches, so a subscription
  * is the only event channel) and the first matching event settles the wait.
  * The daemon pushes every pane's events to every subscriber, so the filter is
- * client-side. Two backstops close the gaps a subscription cannot see: the
- * socket erroring settles "lost" (the caller falls back to the exit-code
- * file), and a pane already absent from `pane.list` when the subscription ack
- * lands settles "exited" (its end predated the subscription, so no event will
- * ever arrive). The liveness check runs only after the ack, so an end can
- * never slip between the check and the daemon registering the subscription.
+ * client-side. Three backstops close the gaps a subscription cannot see: the
+ * socket ending, erroring or closing settles "lost"; a pane already absent
+ * from `pane.list` when the subscription ack lands settles "exited" (its end
+ * predated the subscription, so no event will ever arrive); and the optional
+ * release signal settles "lost" for a caller that found the attempt's ending
+ * somewhere else and wants its connection back. The liveness check runs only
+ * after the ack, so an end can never slip between the check and the daemon
+ * registering the subscription.
  *
- * `signal` cancels the wait: aborting settles it "lost" (the caller that
- * aborts ignores the value) and releases the subscription socket, so the
- * interactive completion wait can race the pane end against an outcome poll
- * without leaking a subscription per attempt.
+ * "lost" says only that this observation is over, never that the attempt is:
+ * the pane may still be running and the daemon merely unreachable. What a
+ * caller does about that is the caller's, and this module has no opinion on
+ * it, because it has no knowledge of anything the attempt writes.
+ *
+ * Every way the connection can go must settle it, because whatever does not
+ * settle it parks it: an attempt that had finished and written its exit code
+ * was left reading `running` for 98 minutes on a wait that nothing could
+ * reach. A peer's FIN raises "end", so "end" settles too.
  */
 export function waitForPaneEnd(
   socketPath: string,
   paneId: string,
-  signal?: AbortSignal,
+  releaseSignal?: AbortSignal,
 ): Promise<PaneEnd> {
   return new Promise<PaneEnd>((resolve) => {
     let settled = false;
     const sock = connect(socketPath);
     liveSockets.add(sock);
     let buf = "";
+    const onRelease = (): void => settle("lost");
     const release = (): void => {
+      releaseSignal?.removeEventListener("abort", onRelease);
       liveSockets.delete(sock);
       sock.destroy();
     };
     const settle = (end: PaneEnd): void => {
       if (settled) return;
       settled = true;
-      if (signal) signal.removeEventListener("abort", onAbort);
       release();
       resolve(end);
     };
-    const onAbort = (): void => settle("lost");
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
+    if (releaseSignal?.aborted) {
+      settle("lost");
+      return;
     }
+    releaseSignal?.addEventListener("abort", onRelease, { once: true });
     sock.on("connect", () => {
       sock.write(
         JSON.stringify({
@@ -347,6 +355,7 @@ export function waitForPaneEnd(
         return;
       }
     });
+    sock.on("end", () => settle("lost"));
     sock.on("error", () => settle("lost"));
     sock.on("close", () => settle("lost"));
   });

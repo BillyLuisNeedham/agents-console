@@ -5529,7 +5529,10 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(run.final.tickets["01"]).toBe("in-progress");
         expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
         const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
-        expect(crash.payload.reason).toBe("harness exited 1");
+        // The pane ended with the wrapper's exit-code file never written
+        // (the killed pane took the wrapper down with it): the crash names
+        // the unreadable file rather than inventing an exit status.
+        expect(crash.payload.reason).toContain("exit code unreadable");
         await fake.close();
       }, 20000);
 

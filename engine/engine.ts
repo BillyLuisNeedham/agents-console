@@ -63,8 +63,8 @@ import {
   paneSendInput,
   peekPane,
   waitForPaneEnd,
-  type PaneEnd,
 } from "./herdr.ts";
+import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
 import {
   StreamLineBuffer,
   TranscriptLineBuffer,
@@ -1542,9 +1542,10 @@ async function finalizeAdoptedAttempt(
   try {
     // The adopted attempt ends on its Outcome without requiring pane exit,
     // exactly as a live terminal-backed spawn: the TUI deliberately stays
-    // alive after the agent declares done (ADR-0016). Pane loss without an
-    // Outcome is the crash signal. An outcome written while the engine was
-    // down resolves immediately.
+    // alive after the agent declares done (ADR-0016). The ending race
+    // underneath is attempt-ending.ts's: pane end against the exit-code
+    // file, with pane loss without an Outcome the crash signal. An outcome
+    // written while the engine was down resolves immediately.
     const code = await awaitOutcomeOrPaneEnd(
       session.herdrSocket,
       adopted.paneId,
@@ -1563,7 +1564,15 @@ async function finalizeAdoptedAttempt(
     // Ownership passes to the recorded exit: from here a later answer is
     // ordinary interrupt handling, never an abandonment.
     session.adopted.delete(ticketId);
-    recordAdoptedExit(session, marker, attempt, code, logPath);
+    recordAdoptedExit(
+      session,
+      marker,
+      attempt,
+      code,
+      logPath,
+      exitCodePath,
+      adopted.paneId,
+    );
   } finally {
     if (tailer) await tailer.finish().catch(() => {});
   }
@@ -1578,6 +1587,8 @@ function recordAdoptedExit(
   attempt: number,
   code: number,
   logPath: string,
+  exitCodePath: string,
+  paneId: string,
 ): void {
   const ticketId = marker.id;
   const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
@@ -1587,7 +1598,7 @@ function recordAdoptedExit(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (code !== 0) {
-    crashReason = harnessExitReason(code);
+    crashReason = exitCrashReason(code, exitCodePath, "harness", paneId);
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -1614,7 +1625,7 @@ function recordAdoptedExit(
     }
   }
   const log: string[] = [
-    `ticket ${ticketId}: adopted attempt ${attempt} exited ${code}, ` +
+    `ticket ${ticketId}: adopted attempt ${attempt} ${exitedPhrase(code)}, ` +
       `marker ${status}` +
       (crashReason !== null ? `, crash: ${crashReason}` : ""),
   ];
@@ -2292,7 +2303,12 @@ async function runResolver(
   }
   const reason =
     exitCode !== 0
-      ? harnessExitReason(exitCode)
+      ? exitCrashReason(
+          exitCode,
+          ctx.exitCodePath,
+          "resolver",
+          terminal?.paneId ?? null,
+        )
       : outcome
         ? outcome.note || "resolver reported no resolution"
         : "resolver produced no resolution";
@@ -3061,7 +3077,12 @@ async function runGrader(
   const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    const reason = harnessExitReason(exitCode);
+    const reason = exitCrashReason(
+      exitCode,
+      ctx.exitCodePath,
+      "harness",
+      terminal?.paneId ?? null,
+    );
     recordGraderFailure(
       session,
       build,
@@ -3988,7 +4009,15 @@ async function runHeadToHead(
     runnerUp.attempt,
   ]);
   if (exitCode !== 0) {
-    verdict = { kind: "unusable", reason: harnessExitReason(exitCode) };
+    verdict = {
+      kind: "unusable",
+      reason: exitCrashReason(
+        exitCode,
+        ctx.exitCodePath,
+        "harness",
+        terminal?.paneId ?? null,
+      ),
+    };
   }
   appendEvent(runsDir, h2hId, {
     at: new Date().toISOString(),
@@ -5122,7 +5151,12 @@ async function runTicket(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
-    crashReason = harnessExitReason(exitCode);
+    crashReason = exitCrashReason(
+      exitCode,
+      ctx.exitCodePath,
+      "harness",
+      terminal?.paneId ?? null,
+    );
   } else if (!outcome.ok) {
     crashReason = outcome.reason;
   } else {
@@ -5195,10 +5229,10 @@ async function runTicket(
       ...(plan.verify ? {} : { tickets: { [marker.id]: status } }),
       log: [
         plan.verify
-          ? `ticket ${marker.id}: attempt ${plan.attempt} exited ${exitCode} ` +
-            `(${status})` +
+          ? `ticket ${marker.id}: attempt ${plan.attempt} ` +
+            `${exitedPhrase(exitCode)} (${status})` +
             (crashReason !== null ? `, crash: ${crashReason}` : "")
-          : `ticket ${marker.id}: exited ${exitCode}, marker ${status}` +
+          : `ticket ${marker.id}: ${exitedPhrase(exitCode)}, marker ${status}` +
             (crashReason !== null ? `, crash: ${crashReason}` : ""),
       ],
       ...(outcome.ok && !plan.verify
@@ -5247,11 +5281,6 @@ function endWriteStream(
   });
 }
 
-// The follow-file tailer's poll interval: the log derives from the
-// terminal-backed Stream file within a quarter second of the harness writing
-// it, live enough for the ticket log and the Console's liveness signals.
-const PANE_TAIL_POLL_MS = 250;
-
 // The pane-read line count for readiness and echo polling: a freshly spawned
 // pane renders mostly blank rows above its prompt, so a small read returns
 // empty (prototype finding); 200 lines covers the TUI's input area and the
@@ -5282,9 +5311,10 @@ const PROMPT_ECHO_TIMEOUT_MS = 2_000;
 const ATTEMPT_COMPLETE_POLL_MS = 250;
 // The engine's own negative "exit codes" for a botched interactive spawn,
 // mapped to human reasons by the spawn sites. They are deliberately not
-// codes a harness can exit with.
-const SPAWN_INTERACTIVE_READY_FAILED = -1;
-const SPAWN_INTERACTIVE_PROMPT_FAILED = -2;
+// codes a harness can exit with, and stay clear of EXIT_CODE_UNREADABLE and
+// EXIT_CODE_PANE_GONE, the ending wait's own sentinels.
+const SPAWN_INTERACTIVE_READY_FAILED = -3;
+const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
 
 function sleep(ms: number): Promise<null> {
   return new Promise((resolve) => setTimeout(() => resolve(null), ms));
@@ -5354,21 +5384,6 @@ async function sendWrapperToPane(
     void closePane(socketPath, paneId).catch(() => {});
     return err instanceof Error ? err.message : String(err);
   }
-}
-
-/**
- * The crash reason a spawn exit code carries. A negative code is the engine's
- * own botched-spawn marker for a terminal-backed attempt, mapped to the human
- * reason here; anything else is the harness's own exit.
- */
-function harnessExitReason(exitCode: number): string {
-  if (exitCode === SPAWN_INTERACTIVE_READY_FAILED) {
-    return "TUI never became ready";
-  }
-  if (exitCode === SPAWN_INTERACTIVE_PROMPT_FAILED) {
-    return "prompt never landed";
-  }
-  return `harness exited ${exitCode}`;
 }
 
 /**
@@ -5622,15 +5637,14 @@ async function paneShows(
 }
 
 /**
- * The completion wait of a terminal-backed spawn (ADR-0016): the attempt
- * ends on a valid Outcome without requiring pane exit — a TUI deliberately
- * stays alive after the agent declares done — while pane loss without an
- * Outcome is the crash signal. The outcome poll and the pane-end watch race;
- * the loser is cancelled so no subscription leaks. A "lost" pane-end
- * subscription (a daemon restart, or one without events.subscribe) degrades
- * to polling the exit-code file the wrapper writes when the TUI eventually
- * exits, still racing the outcome poll, exactly the headless spawn's
- * fallback.
+ * The completion wait of a terminal-backed spawn (ADR-0016, on ADR-0014's
+ * raced endings): the attempt ends on a valid Outcome without requiring pane
+ * exit — a TUI deliberately stays alive after the agent declares done — so
+ * the outcome poll races the attempt's ending (attempt-ending.ts races
+ * herdr's pane end against the wrapper's exit-code file, and a pane that
+ * vanishes from the listing with no file behind it is the pane's own crash),
+ * and the loser is released so one attempt costs the pool no subscription
+ * and no timer once it is over.
  */
 async function awaitOutcomeOrPaneEnd(
   socketPath: string,
@@ -5639,50 +5653,118 @@ async function awaitOutcomeOrPaneEnd(
   outcomePath: string,
   completed: (path: string) => boolean,
 ): Promise<number> {
-  const controller = new AbortController();
-  const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
-  let end: PaneEnd | null = null;
+  const release = new AbortController();
   try {
-    for (;;) {
-      if (completed(outcomePath)) {
-        controller.abort();
-        return 0;
-      }
-      if (end === null) {
-        end = await Promise.race([
-          paneEnd,
-          sleep(ATTEMPT_COMPLETE_POLL_MS).then(() => null),
-        ]);
-        if (end === null) continue;
-      }
-      // The pane ended (or the watch was lost). The outcome may have been
-      // written a moment before the end; confirm, then crash on its absence.
-      if (completed(outcomePath)) {
-        controller.abort();
-        return 0;
-      }
-      if (end === "lost") {
-        // No pane-end events: the exit-code file is the end proxy. Poll it
-        // alongside the outcome, so a TUI that stays alive after its Outcome
-        // still completes.
-        if (existsSync(exitCodePath)) {
-          controller.abort();
-          return readExitCode(exitCodePath);
-        }
-        continue;
-      }
-      controller.abort();
-      return readExitCode(exitCodePath);
-    }
+    const ending = await Promise.race([
+      waitForAttemptEnding(socketPath, paneId, exitCodePath, release.signal),
+      outcomeCompleted(outcomePath, completed, release.signal),
+    ]);
+    // The Outcome may have been written a moment before the ending landed;
+    // confirm before reading the ending as a crash.
+    if (ending === "outcome" || completed(outcomePath)) return 0;
+    // A pane that left the listing has already been given the ending's grace
+    // window to write its file and did not, so there is nothing to read and
+    // nothing to wait for: reading anyway buys only the retry's two seconds
+    // and then the wrong words, blaming a wrapper that never got to run.
+    if (ending === "pane-gone") return EXIT_CODE_PANE_GONE;
+    // The exit-code file is written before the shell exits, so it is already
+    // there in the normal case; the retry only covers a daemon that reaps
+    // the pane ahead of the wrapper's last write.
+    return readExitCode(exitCodePath);
   } finally {
-    controller.abort();
+    release.abort();
   }
 }
 
+// The outcome half of the completion race: resolves once the attempt's
+// completion predicate holds, polling at the completion cadence. Once the
+// race is lost it stops polling and never settles, collected with the race.
+async function outcomeCompleted(
+  outcomePath: string,
+  completed: (path: string) => boolean,
+  release: AbortSignal,
+): Promise<"outcome"> {
+  while (!release.aborted) {
+    if (completed(outcomePath)) return "outcome";
+    await sleep(ATTEMPT_COMPLETE_POLL_MS);
+  }
+  return new Promise(() => {});
+}
+
+// No exit code ever arrived: the wrapper's file was missing or unparseable
+// after every retry. A shell exit status is 0-255, so a negative can never
+// collide with a real one, which is what makes it usable as the signal.
+const EXIT_CODE_UNREADABLE = -1;
+
+// The pane left herdr's listing and the ending's grace window passed with no
+// file behind it (attempt-ending.ts): the attempt is over and its exit status
+// is not recoverable from anywhere. Its own value for the same reason as
+// EXIT_CODE_UNREADABLE, and distinct from it because the two want different
+// words: nothing here is the wrapper's doing.
+const EXIT_CODE_PANE_GONE = -2;
+
+// The crash reason for a non-zero exit, whose causes want different words. A
+// real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
+// fate is unknown and the pane wrapper is the thing to look at;
+// EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
+// their faults and is why it names the pane instead; the SPAWN_INTERACTIVE
+// codes are the engine's own botched interactive spawn, where the harness
+// never ran at all. The distinction is worth a helper: an unparseable file
+// reported itself as `exited 1` on attempts that had in fact succeeded, and
+// read as a harness fault until the file itself was inspected (ADR-0014's
+// amendment). `paneId` is not optional so that a new crash site has to say
+// whether it has a pane at all; a headless attempt has none and can never
+// end this way.
+export function exitCrashReason(
+  code: number,
+  exitCodePath: string,
+  subject: string,
+  paneId: string | null,
+): string {
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "TUI never became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "prompt never landed";
+  }
+  if (code === EXIT_CODE_UNREADABLE) {
+    return (
+      `${subject} exit code unreadable: the pane wrapper never wrote a ` +
+      `usable ${exitCodePath}`
+    );
+  }
+  if (code === EXIT_CODE_PANE_GONE) {
+    return (
+      `${subject} pane gone: ${paneId ?? "the pane"} left herdr's listing ` +
+      `and no exit code was written to ${exitCodePath}`
+    );
+  }
+  return `${subject} exited ${code}`;
+}
+
+// How the pool log names the ending in passing, where the line is about the
+// marker and the code is one clause of it. A real code is the shell's own
+// status and reads as one; a sentinel is not a status at all, so it says what
+// happened instead of printing a number no shell produced. Templating it
+// unconditionally put `exited -2` on the same line as a crash reason whose
+// whole purpose is to report that no exit status was ever observed, which
+// described one attempt two contradictory ways in a single breath.
+export function exitedPhrase(code: number): string {
+  if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
+  if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "ended before its TUI became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "ended before its prompt landed";
+  }
+  return `exited ${code}`;
+}
+
 // Read the wrapper-written exit code, retrying briefly for a reaping race,
-// and translating a missing or malformed file into 1: the attempt crashed
-// (pane killed, daemon lost) and the crash path the spawn sites already have
-// is the right ending.
+// and translating a missing or malformed file into EXIT_CODE_UNREADABLE: the
+// attempt still ended (pane killed, daemon lost) and the crash path the
+// spawn sites already have is the right ending, but it says which happened.
 async function readExitCode(path: string): Promise<number> {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
@@ -5693,7 +5775,7 @@ async function readExitCode(path: string): Promise<number> {
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  return 1;
+  return EXIT_CODE_UNREADABLE;
 }
 
 /**
