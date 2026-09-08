@@ -58,6 +58,107 @@ same kind of relay the probe used, so the drop hits only that pool's subscriber.
 4. FIN the subscriber. Confirm the exit-code file is still absent at that instant.
 5. Let the attempt finish. Do not interrupt it.
 
+The CLI still has no `--herdr-socket`. A pasteable starter for steps 1 and 2 lives
+outside the repo (throwaway, as the relay must). Copy the block below to
+`/tmp/prove-endings-relay.ts` and run it from anywhere as
+`bun /tmp/prove-endings-relay.ts <this-worktree> <throwaway-poolDir>`, with the
+throwaway pool already populated (`issues/`, `AGENT.md`, `console.json` with
+`"terminal": "herdr"`, one short ticket). It listens on `/tmp/prove-endings-relay.sock`,
+prints `subscribers N` as connections classify, and FINs only those pairs when you
+write `hangup` to `/tmp/prove-endings-relay.ctl`.
+
+```ts
+import { connect, createServer, type Socket } from "node:net";
+import { unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const herdr = join(homedir(), ".config/herdr/herdr.sock");
+const relayPath = "/tmp/prove-endings-relay.sock";
+const ctlPath = "/tmp/prove-endings-relay.ctl";
+const worktree = process.argv[2];
+const poolDir = process.argv[3];
+if (!worktree || !poolDir) {
+  throw new Error("usage: bun /tmp/prove-endings-relay.ts <worktree> <poolDir>");
+}
+const { createPoolServer } = await import(join(worktree, "engine/server.ts"));
+
+const pairs: { client: Socket; daemon: Socket }[] = [];
+
+function hangUp(): void {
+  for (const pair of pairs.splice(0)) {
+    pair.client.end();
+    pair.daemon.end();
+  }
+  console.log("subscribers", pairs.length);
+}
+
+function listenUnlinked(path: string, onConn: (s: Socket) => void): void {
+  try {
+    unlinkSync(path);
+  } catch {}
+  createServer(onConn).listen(path);
+}
+
+listenUnlinked(relayPath, (client) => {
+  const daemon = connect(herdr);
+  let head = "";
+  let classified = false;
+  client.on("data", (chunk) => {
+    if (!classified) {
+      head += chunk.toString();
+      const nl = head.indexOf("\n");
+      if (nl !== -1) {
+        classified = true;
+        try {
+          const msg = JSON.parse(head.slice(0, nl));
+          if (msg?.method === "events.subscribe") {
+            pairs.push({ client, daemon });
+            console.log("subscribers", pairs.length);
+          }
+        } catch {}
+      }
+    }
+    daemon.write(chunk);
+  });
+  daemon.on("data", (chunk) => client.write(chunk));
+  const drop = (): void => {
+    const i = pairs.findIndex((p) => p.client === client);
+    if (i !== -1) pairs.splice(i, 1);
+    client.destroy();
+    daemon.destroy();
+  };
+  client.on("close", drop);
+  daemon.on("close", drop);
+});
+
+listenUnlinked(ctlPath, (s) => {
+  s.on("data", (d) => {
+    if (d.toString().includes("hangup")) hangUp();
+    s.end(`subscribers ${pairs.length}\n`);
+  });
+});
+
+const server = createPoolServer({
+  poolDir,
+  herdrSocket: relayPath,
+  port: 0,
+});
+void server.start().then(() => {
+  console.log(`throwaway pool on ${server.url}`);
+});
+```
+
+After `spawned` records a `pane_id`, confirm the exit-code file is still absent, then
+hang up with:
+
+```
+bun -e 'import { connect } from "node:net"; const s = connect("/tmp/prove-endings-relay.ctl"); s.write("hangup\n"); s.on("data", (d) => { console.log(d.toString()); process.exit(0); });'
+```
+
+Let the attempt finish. Then gather the artefacts below and stop the throwaway server;
+do not touch the attempt-endings-raced server or pid 92565.
+
 ## What to gather
 
 From that pool's `runs/` directory, for the attempt that was dropped on:
