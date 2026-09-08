@@ -48,6 +48,10 @@ function snapshotFrame(snapshot: PoolSnapshot): string {
 
 const HEARTBEAT_FRAME = ": heartbeat\n\n";
 
+function streamConfigFrame(heartbeatMs: number): string {
+  return `event: stream-config\ndata: ${JSON.stringify({ heartbeatMs })}\n\n`;
+}
+
 interface ReadResult {
   value?: Uint8Array;
   done: boolean;
@@ -211,6 +215,61 @@ describe("PoolClient.stream", () => {
     expect(snapshots).toEqual([]);
     // A full window past the heartbeat, silence finally reopens the stream.
     timers!.tick(SILENCE_MS / 2);
+    expect(streams.length).toBe(2);
+  });
+
+  it("derives the silence window from the served heartbeat interval", async () => {
+    const { fetch, streams } = streamFetch();
+    globalThis.fetch = fetch;
+    const snapshots: PoolSnapshot[] = [];
+    const client = new PoolClient();
+    client.stream({
+      onSnapshot: (s) => snapshots.push(s),
+      onError: () => {},
+    });
+    await flush();
+    // The server's opening frame publishes a 100ms interval: the silence
+    // window becomes 300ms, far inside the fallback's. The config frame is
+    // liveness and never renders as a snapshot.
+    streams[0]!.push(streamConfigFrame(100));
+    await flush();
+    expect(snapshots).toEqual([]);
+    timers!.tick(299);
+    expect(streams.length).toBe(1);
+    timers!.tick(1);
+    expect(streams.length).toBe(2);
+  });
+
+  it("keeps the fallback silence window when no stream-config frame arrives", async () => {
+    const { fetch, streams } = streamFetch();
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    client.stream({
+      onSnapshot: () => {},
+      onError: () => {},
+    });
+    await flush();
+    timers!.tick(SILENCE_MS - 1);
+    expect(streams.length).toBe(1);
+    timers!.tick(1);
+    expect(streams.length).toBe(2);
+  });
+
+  it("ignores a stream-config frame whose interval is not a positive number", async () => {
+    const { fetch, streams } = streamFetch();
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    client.stream({
+      onSnapshot: () => {},
+      onError: () => {},
+    });
+    await flush();
+    streams[0]!.push("event: stream-config\ndata: {}\n\n");
+    await flush();
+    // The fallback window still applies: one full window reopens, nothing sooner.
+    timers!.tick(SILENCE_MS - 1);
+    expect(streams.length).toBe(1);
+    timers!.tick(1);
     expect(streams.length).toBe(2);
   });
 

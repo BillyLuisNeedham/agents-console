@@ -12,15 +12,16 @@ const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
 
 /**
- * The snapshot stream's heartbeat interval, matching the server's (the engine
- * serves the SPA, so the two sides ship together). Any stream frame, snapshot
- * or heartbeat, proves the connection is alive.
+ * The fallback snapshot-stream heartbeat interval. The server publishes its
+ * real interval as the stream's opening frame and the silence window derives
+ * from that served value; this default covers the window before that first
+ * frame lands and a server old enough to never send one. Any stream frame,
+ * snapshot or heartbeat, proves the connection is alive.
  */
 export const STREAM_HEARTBEAT_MS = 20_000;
 
 /** The bounded multiple of the heartbeat interval a stream may stay silent. */
 export const STREAM_SILENCE_FACTOR = 3;
-const STREAM_SILENCE_MS = STREAM_HEARTBEAT_MS * STREAM_SILENCE_FACTOR;
 
 /** The reconnect delay after a failed or closed stream, matching the browser
  *  EventSource's default reconnection time. */
@@ -44,13 +45,20 @@ function takeSseFrames(buffer: string): { rest: string; frames: string[] } {
   return { rest, frames };
 }
 
+type StreamFrame =
+  | { kind: "snapshot"; snapshot: PoolSnapshot }
+  | { kind: "stream-config"; heartbeatMs: number };
+
 /**
- * The snapshot an SSE frame carries, or null for a frame that is not a
- * snapshot (a heartbeat comment or any malformed frame). The server pushes
- * exactly `event: snapshot` with a single-line JSON data field, so the
- * per-field parse is small.
+ * What an SSE frame carries, or null for a frame that is neither a snapshot
+ * nor the stream config (a heartbeat comment or any malformed frame). The
+ * server opens the stream with one `event: stream-config` frame publishing
+ * its heartbeat interval, then pushes exactly `event: snapshot` with a
+ * single-line JSON data field, so the per-field parse is small. A config
+ * frame whose interval is not a positive finite number is ignored: the
+ * fallback interval keeps applying.
  */
-function snapshotFromSseFrame(frame: string): PoolSnapshot | null {
+function streamFrameFromSse(frame: string): StreamFrame | null {
   let eventType = "message";
   const data: string[] = [];
   for (const line of frame.split("\n")) {
@@ -63,9 +71,19 @@ function snapshotFromSseFrame(frame: string): PoolSnapshot | null {
     if (field === "event") eventType = value;
     else if (field === "data") data.push(value);
   }
-  if (eventType !== "snapshot" || data.length === 0) return null;
+  if (data.length === 0) return null;
   try {
-    return JSON.parse(data.join("\n")) as PoolSnapshot;
+    const parsed = JSON.parse(data.join("\n"));
+    if (eventType === "snapshot") {
+      return { kind: "snapshot", snapshot: parsed as PoolSnapshot };
+    }
+    if (eventType === "stream-config") {
+      const heartbeatMs = (parsed as { heartbeatMs?: unknown }).heartbeatMs;
+      if (typeof heartbeatMs === "number" && Number.isFinite(heartbeatMs) && heartbeatMs > 0) {
+        return { kind: "stream-config", heartbeatMs };
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -226,9 +244,11 @@ export class PoolClient {
    * heartbeat on a fixed cadence. The stream is read with fetch rather than a
    * browser EventSource because the heartbeat is a comment frame: EventSource
    * never dispatches comments, and the client needs every frame to tell a
-   * half-open connection from a quiet-but-healthy pool. Any frame resets the
-   * silence window; a stream silent for STREAM_SILENCE_MS (a bounded multiple
-   * of the heartbeat interval) is torn down and reopened, and the replayed
+   * half-open connection from a quiet-but-healthy pool. The server's opening
+   * frame publishes its heartbeat interval and the silence window derives
+   * from it (falling back to STREAM_HEARTBEAT_MS until it lands). Any frame
+   * resets the silence window; a stream silent for a bounded multiple of the
+   * heartbeat interval is torn down and reopened, and the replayed
    * snapshot on reconnect renders, so a half-open connection recovers with no
    * page refresh. Silence is a reconnect trigger, never the connection
    * banner's error; only a fetch failure or a stream error or close raises
@@ -244,6 +264,9 @@ export class PoolClient {
     // cancel of the in-flight read rejects, and that rejection is the reopen
     // already in flight, not the connection banner's error.
     let reopening = false;
+    // The heartbeat interval the silence window derives from: the fallback
+    // until the server's opening stream-config frame serves the real value.
+    let heartbeatMs = STREAM_HEARTBEAT_MS;
 
     const clearTimer = (): void => {
       if (timer !== null) {
@@ -258,7 +281,7 @@ export class PoolClient {
     };
 
     const armSilence = (): void => {
-      arm(STREAM_SILENCE_MS, () => {
+      arm(heartbeatMs * STREAM_SILENCE_FACTOR, () => {
         reopening = true;
         void reader?.cancel().catch(() => {});
         void open();
@@ -287,10 +310,17 @@ export class PoolClient {
           const { rest, frames } = takeSseFrames(buffer);
           buffer = rest;
           for (const frame of frames) {
-            const snapshot = snapshotFromSseFrame(frame);
-            if (!snapshot) continue;
+            const parsed = streamFrameFromSse(frame);
+            if (!parsed) continue;
+            if (parsed.kind === "stream-config") {
+              // The served interval replaces the fallback; re-arm so the new
+              // window takes effect from this frame, not the next one.
+              heartbeatMs = parsed.heartbeatMs;
+              armSilence();
+              continue;
+            }
             try {
-              handlers.onSnapshot(snapshot);
+              handlers.onSnapshot(parsed.snapshot);
             } catch {
               // A snapshot render failure is not a stream failure; the next
               // snapshot supersedes it and the stream keeps flowing.
