@@ -1,7 +1,8 @@
 # Race the attempt's two endings, and trust the exit-code file
 
 Decision record: a fifth amendment on ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`),
-superseding the amendment that made the exit-code file a fallback behind the pane-end subscription.
+superseding its second amendment, which made the exit-code file a fallback behind the pane-end
+subscription.
 
 ## Problem Statement
 
@@ -84,7 +85,7 @@ that restarts, and it does so without depending on the daemon to be honest about
     the fix is covered on a machine where that file cannot run.
 19. As a maintainer, I want one fake herdr daemon in the test suite rather than two, so that the
     wire shape the tests assume is defined in a single place.
-20. As a maintainer, I want the superseded ADR-0014 amendment marked as superseded rather than
+20. As a maintainer, I want ADR-0014's second amendment marked as superseded rather than
     quietly rewritten, so that a future reader can see the decision was tried and found wanting.
 21. As a maintainer, I want **Attempt ending** written into the glossary, so that "lost", "exited"
     and "the exit-code file" stop being three ways of saying the same thing in comments.
@@ -136,10 +137,14 @@ that restarts, and it does so without depending on the daemon to be honest about
 - **Ownership and release are explicit.** Whichever observation loses the race is released by the
   caller when the ending is recorded, alongside the existing shutdown of the live log tailer, so a
   long-running pool leaks neither a subscription nor a timer per attempt.
-- **ADR-0014 gains a fifth amendment** recording that the fourth amendment's design — subscription
+- **ADR-0014 gains a fifth amendment** recording that a design it already carries — subscription
   primary, exit-code file polled only once the subscription reported itself lost — was live-tested
-  and found to have a silent hole, and that endings are now raced. The earlier amendment text stays
-  as written and is marked superseded.
+  and found to have a silent hole, and that endings are now raced. The design being superseded is
+  the one in ADR-0014's **second** amendment, headed `Amendment (ticket 01-spawn-1-spawn-1)`,
+  whose second half introduced the fall back to an unbounded poll of the exit-code file on a lost
+  subscription. Its text stays as written and is marked superseded. The two amendments after it
+  stay in force and are not touched: the zsh `bash -c` wrapper and `EXIT_CODE_UNREADABLE` are both
+  load-bearing here, since the raced ending still reads the exit code the wrapper writes.
 - **`CONTEXT.md` gains an Attempt ending entry**, naming the three observed forms and stating which
   one does not depend on the daemon. It must not blur the existing Outcome entry's "avoid: exit
   code" note: the Outcome is the agent's account of itself, the exit code is evidence, and an
