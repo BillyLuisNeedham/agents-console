@@ -5489,9 +5489,11 @@ async function deliverPromptInner(
   const prompt = descriptor.promptShaping.interactive(ctx);
   // The fallback's prompt file, written by the engine so the path is known
   // to both sides; named from the outcome path so N parallel attempts never
-  // share one.
+  // share one. It carries the issue reference the primary prompt's driver
+  // line would have carried, then the body, so the agent the fallback
+  // reaches still starts on the right ticket.
   const promptFile = ctx.outcomePath.replace(/\.json$/, ".prompt.txt");
-  writeFileSync(promptFile, ctx.body);
+  writeFileSync(promptFile, `${ctx.issuePath}\n\n${ctx.body}`);
   const echoTargets = [
     descriptor.echoPattern,
     // The issue reference rides every known TUI's prompt, so it is the
@@ -5510,7 +5512,9 @@ async function deliverPromptInner(
   }
   // Full-prompt pasting failed: the file-referencing fallback, short enough
   // to survive any input-buffer cap (prototype finding, all three harnesses).
-  const fallback = `/implement ${promptFile}`;
+  // The command carries the attempt's own driver, so a grader, resolver, or
+  // head-to-head judge falls back to its own skill, not the ticket driver's.
+  const fallback = `/${ctx.driver} ${promptFile}`;
   await paneSendInput(socketPath, paneId, { text: fallback });
   if (await paneShows(socketPath, paneId, [promptFile])) {
     await paneSendInput(socketPath, paneId, { keys: ["enter"] });

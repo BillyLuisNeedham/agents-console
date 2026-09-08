@@ -57,18 +57,16 @@ export type PromptShaping = (ctx: PromptShapingContext) => string;
  * The per-harness spawn descriptor (pool ticket 01): one record carrying
  * everything the two spawn paths need, so the interactive-TUI work lands as
  * fields here instead of as surgery inside the spawn paths. The batch argv is
- * what headless spawns run and terminal-backed spawns still wrap today; the
- * interactive argv, readiness pattern, and interactive prompt shaping are
- * what the terminal-backed path will consume once interactive spawning lands
- * (the prototype ticket), and are carried here unread until then.
+ * what headless spawns run; the interactive argv, readiness pattern, and
+ * interactive prompt shaping are what the terminal-backed path consumes
+ * (ADR-0016).
  */
 export interface HarnessDescriptor {
   // The argv a headless spawn runs: batch mode, stdin closed by the engine,
   // the prompt carried as argv (or --command), the fullest auto-approve mode.
   batchArgv: HarnessCommand;
-  // The argv a terminal-backed spawn will run: the interactive TUI, the
-  // batch-only flags dropped, auto-approve preserved. Not yet consumed by
-  // the spawn paths, which still run batch through the typed wrapper.
+  // The argv a terminal-backed spawn runs: the interactive TUI, the
+  // batch-only flags dropped, auto-approve preserved.
   interactiveArgv: HarnessCommand;
   // The pane-rendered pattern that marks the TUI ready for typed input. One
   // canonical fixture per harness, validated against the real TUIs by the
@@ -98,9 +96,11 @@ export interface HarnessDescriptor {
 // mode carries the bare driver name in --command (so its batch shape is the
 // message alone) while its TUI takes "/<driver> ..." like claude's; cursor's
 // batch mode expands the slash line like claude's, and its interactive agent
-// takes a plain message (no documented slash expansion). The interactive
-// shapes are canonical fixtures, validated against the real TUIs by the
-// prototype ticket.
+// takes the same slash-line paste: the prototype pasted that exact form into
+// cursor and the agent acted on it, and cursor executed "/implement <file>"
+// as a typed command (prototype/tui-prompt-paste/FINDINGS.md sections 3-4).
+// The interactive shapes are canonical fixtures, validated against the real
+// TUIs by the prototype ticket.
 const claudeShaping: HarnessDescriptor["promptShaping"] = {
   batch: ({ driver, issuePath, body }) => `/${driver} ${issuePath}\n\n${body}`,
   interactive: ({ driver, issuePath, body }) =>
@@ -113,7 +113,8 @@ const opencodeShaping: HarnessDescriptor["promptShaping"] = {
 };
 const cursorShaping: HarnessDescriptor["promptShaping"] = {
   batch: ({ driver, issuePath, body }) => `/${driver} ${issuePath}\n\n${body}`,
-  interactive: ({ issuePath, body }) => `${issuePath}\n\n${body}`,
+  interactive: ({ driver, issuePath, body }) =>
+    `/${driver} ${issuePath}\n\n${body}`,
 };
 
 // One case per harness, matching run.sh's launch shapes: the driver and issue

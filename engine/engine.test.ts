@@ -5562,20 +5562,60 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(sends[0].params.text as string).toContain("script -eqfc ");
         expect(sends[1].params.keys).toEqual(["enter"]);
         // The three retries carry the full prompt, again the descriptor's
-        // interactive shape (cursor's plain message has no slash line).
+        // interactive shape.
         for (const send of [sends[2], sends[3], sends[4]]) {
           const text = send.params.text as string;
           expect(
             text.startsWith(promptPrefix(harness, join(poolDir, "issues", "01-t.md"))),
           ).toBe(true);
         }
-        // The fallback references the engine-written prompt file, derived
-        // from the attempt's outcome path.
+        // The fallback carries the attempt's driver and references the
+        // engine-written prompt file, derived from the attempt's outcome
+        // path; the file carries the issue reference the primary prompt's
+        // driver line would have carried, then the body.
         const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
         expect(sends[5].params.text as string).toBe(`/implement ${promptFile}`);
         expect(sends[6].params.keys).toEqual(["enter"]);
         expect(existsSync(promptFile)).toBe(true);
-        expect(readFileSync(promptFile, "utf8")).toContain("Standing instructions");
+        const promptFileText = readFileSync(promptFile, "utf8");
+        expect(
+          promptFileText.startsWith(`${join(poolDir, "issues", "01-t.md")}\n\n`),
+        ).toBe(true);
+        expect(promptFileText).toContain("Standing instructions");
+      }, 20000);
+
+      it("falls back to the attempt's own driver, not a hardcoded one", async () => {
+        // A pool whose ticket driver is not "implement" (grader, resolver,
+        // and head-to-head spawn sites pass their own drivers) must fall
+        // back to that driver's slash command, or a lost paste would invoke
+        // the wrong skill.
+        const pool = poolFor(harness);
+        pool.config = {
+          ...pool.config,
+          defaults: { ...pool.config?.defaults, drivers: "verify" },
+        };
+        const poolDir = makePool(pool);
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 3,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
+        expect(sends[5].params.text as string).toBe(`/verify ${promptFile}`);
+        expect(sends[6].params.keys).toEqual(["enter"]);
       }, 20000);
 
       it("surfaces a botched spawn (TUI never ready) as a failure, not an idle tab", async () => {

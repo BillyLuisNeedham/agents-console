@@ -215,20 +215,16 @@ describe("defaultHarnessDescriptors", () => {
 
   it("shapes the interactive prompt the way each TUI accepts the driver invocation", () => {
     const ctx = context();
-    // claude and opencode expand a leading /driver slash command in their
-    // TUIs; cursor's interactive agent takes a plain message.
-    expect(defaultHarnessDescriptors.claude.promptShaping.interactive(ctx)).toBe(
-      "/implement /tmp/pool/issues/01-a.md\n\n" +
-        "Standing instructions for this job:\n\nDo the thing.",
-    );
-    expect(defaultHarnessDescriptors.opencode.promptShaping.interactive(ctx)).toBe(
-      "/implement /tmp/pool/issues/01-a.md\n\n" +
-        "Standing instructions for this job:\n\nDo the thing.",
-    );
-    expect(defaultHarnessDescriptors.cursor.promptShaping.interactive(ctx)).toBe(
-      "/tmp/pool/issues/01-a.md\n\n" +
-        "Standing instructions for this job:\n\nDo the thing.",
-    );
+    // All three TUIs take the leading /driver slash line: claude and
+    // opencode expand it as a slash command, and the prototype pasted this
+    // exact form into cursor and observed the agent act on it (FINDINGS
+    // sections 3-4).
+    for (const name of names) {
+      expect(defaultHarnessDescriptors[name].promptShaping.interactive(ctx)).toBe(
+        "/implement /tmp/pool/issues/01-a.md\n\n" +
+          "Standing instructions for this job:\n\nDo the thing.",
+      );
+    }
   });
 
   it("exposes one canonical readiness pattern fixture per harness", () => {
