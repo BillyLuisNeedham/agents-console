@@ -47,8 +47,10 @@ Look these up. Asking for them wastes a question:
 - whether `~/.issue-runner` exists, and its contents if it does
 - whether `~/.console-runner` exists, and the `engine=` path it names if it does
 - which of `claude`, `opencode` and `agent` are on PATH
+- whether herdr is installed and its daemon live: the `herdr` binary on PATH, and a socket at
+  `~/.config/herdr/herdr.sock`
 
-Report all nine back in one short brief and get it confirmed. If the pool has no `issues/`
+Report all ten back in one short brief and get it confirmed. If the pool has no `issues/`
 directory, no tickets in it, or any ticket without a state marker, say which and stop: the human
 fixes the pool, or `to-tickets` writes it again. If the worktree is dirty, recommend committing
 before launch: tickets commit to the current branch, and an unattended agent can sweep unrelated
@@ -60,13 +62,13 @@ Q0 comes first, and only when Setups exist. Look in `~/.agent-graphs/setups/`. I
 directory is missing or empty, Q0 does not appear and the interview below runs exactly as
 before. If Setups exist, open by listing them by name with a "none" option and ask which
 to start from. A Setup file that does not parse as JSON, or that lacks any of the six
-behavioural keys, is malformed: report it by name, leave it off the list, and carry on. A
+required behavioural keys (`terminal` is optional), is malformed: report it by name, leave it off the list, and carry on. A
 bad Setup is never fatal.
 
 "None" runs the interview un-prefilled. Choosing a Setup prefills it: the Setup's values
 become the recommendations on the questions they answer (`defaults` for questions 1 and
 2, `roster` and `agents` for question 4, `reviewer` for question 5, `checkpoint` for
-question 6, `resolver` for the resolver config), and every one of those questions is
+question 6, `terminal` for question 8, `resolver` for the resolver config), and every one of those questions is
 still asked and confirmed with the operator exactly as today. A Setup is a starting
 point, never a silent override. Question 2's `~/.issue-runner` skip still applies; when
 that file and the chosen Setup disagree, name the disagreement and ask rather than skip.
@@ -75,7 +77,7 @@ What a Setup cannot answer is always asked fresh: the per-ticket overrides of qu
 the port probe of question 7, the expected stops, and the AGENT.md pool prose. Those pin
 one pool and no Setup carries them.
 
-Seven questions follow Q0, each with your recommendation attached:
+Eight questions follow Q0, each with your recommendation attached:
 
 1. Which skill or skills drive each ticket, and whether that differs per ticket
 2. The default harness and model. If `~/.issue-runner` already exists, read it, confirm it, and
@@ -88,6 +90,12 @@ Seven questions follow Q0, each with your recommendation attached:
 7. Which port the pool should pin. Probe 8787 at setup time; recommend it when it is free,
    otherwise the next free port, or the pool's current pin on a re-interview. A concrete answer
    becomes the `port` key in `console.json`; `auto` (or next free) writes no key.
+8. Whether attempts run terminal-backed, so every spawn site opens its own named herdr tab in
+   the attempt's worktree instead of running headless (ADR-0014, ADR-0015). Recommend yes when
+   detection found the binary and a live socket: it is what makes the Console's open-in-herdr
+   surface do anything, and it costs nothing when the daemon is absent, since the engine falls
+   back to headless with a visible warning. A yes becomes `"terminal": "herdr"`; a no writes no
+   key.
 
 Recommend the orchestrator's own model for every subagent unless there is a reason to go smaller.
 Delegating a skill to a cheaper model moves the substance of a ticket onto that model, which is
@@ -148,6 +156,7 @@ Write `console.json` into the pool directory. All seven answers land here as dat
   "agents": "{\"deepseek\": {\"description\": \"general-purpose subagent\", \"model\": \"...\"}}",
   "resolver": "opencode",
   "port": 8787,
+  "terminal": "herdr",
   "reviewer": "a reviewer checks acceptance criteria only; a failure buys one fix attempt",
   "checkpoint": "a device, an external write, an undecided decision, or a material guess"
 }
@@ -165,6 +174,8 @@ Write `console.json` into the pool directory. All seven answers land here as dat
   the pool's config says what it does.
 - `port` records the port answer when it is a concrete number. Omit it for `auto`. What each
   does at launch is in step 6.
+- `terminal` records answer 8, and its only legal value is `"herdr"`. Omit the key for a
+  headless pool; the engine rejects any other value when it loads the config.
 - `reviewer` and `checkpoint` record answers 5 and 6. The engine does not read them; the agents
   do, through `AGENT.md`. Write both places from the one answer.
 
@@ -207,7 +218,7 @@ Ask one question: "Save this Setup as...?", with no recommendation either way. A
 empty name writes nothing and the skill moves on to launch as before. A name is slugified
 (lowercase, spaces and underscores to hyphens, anything outside `[a-z0-9-]` stripped) and the
 Setup is written to `~/.agent-graphs/setups/<slug>.json`, creating the directory if it is
-missing. The file holds exactly the six behavioural keys, copied verbatim from the
+missing. The file holds the seven behavioural keys, copied verbatim from the
 `console.json` just written:
 
 ```json
@@ -216,11 +227,14 @@ missing. The file holds exactly the six behavioural keys, copied verbatim from t
   "roster": "- deepseek (DeepSeek V4 Flash via opencode go): general-purpose subagent...",
   "agents": "{\"deepseek\": {\"description\": \"general-purpose subagent\", \"model\": \"...\"}}",
   "resolver": "opencode",
+  "terminal": "herdr",
   "reviewer": "a reviewer checks acceptance criteria only; a failure buys one fix attempt",
   "checkpoint": "a device, an external write, an undecided decision, or a material guess"
 }
 ```
 
+`terminal` belongs in a Setup because herdr is a property of the machine rather than of one
+pool: if the daemon is there it is there for every pool. Omit it when the pool went headless.
 Never `port`, never `assign`: those pin one pool and would clobber the next. `roster` and
 `agents` are copied together from the one interview answer, so the pair stays in step in the
 saved file exactly as it does in the pool config. If `<slug>.json` already exists, name the
@@ -231,9 +245,15 @@ untouched and saves nothing.
 
 One action, in order:
 
-1. Build the Console if it is not built. Read the engine repo path from the `engine=` line in
-   `~/.console-runner`; `$ENGINE/ui/dist/` must exist. If it does not, run `bun install` and
-   `bun run build` in `$ENGINE/ui/`.
+1. Build the Console if the build is missing **or stale**. Read the engine repo path from the
+   `engine=` line in `~/.console-runner`. Rebuild when `$ENGINE/ui/dist/` is absent, and also
+   when it is older than the last commit touching `$ENGINE/ui/src`: the server serves `dist`,
+   so a fetch that brings new UI work leaves the Console silently running the old surface —
+   the assignment badges and the herdr pane both went missing this way. Compare
+   `git -C "$ENGINE" log -1 --format=%ct -- ui/src` against the mtime of
+   `$ENGINE/ui/dist/index.html`, and on either condition run `bun install` and `bun run build`
+   in `$ENGINE/ui/`. A rebuild needs no restart: the server reads `dist` from disk per request,
+   so a browser reload is enough.
 2. Start the server detached so it outlives this session, from `$ENGINE`. The engine
    resolves the port itself: the `--port` flag wins, then the `console.json` pin, then
    8787-or-next-free. A pinned port must bind exactly at launch or the engine refuses loudly
@@ -305,6 +325,12 @@ Leave these alone rather than rediscovering them:
 - Line-1 markers are dual-written alongside the sqlite checkpoint and are the truth on conflict,
   so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
+- The pool config is parsed once, at boot. An edit to `console.json` — a new assignment, or
+  `terminal: herdr` — only takes effect on a restart. A restart is otherwise cheap: markers and
+  the checkpoint are the truth, so ticket state and a pending interrupt both survive it. What
+  does not survive is an attempt in flight: killing the server kills its harness, and the
+  engine schedules a fresh attempt at boot, discarding whatever the killed one had done. Never
+  restart a pool that is `running` without saying so first.
 
 ---
 
