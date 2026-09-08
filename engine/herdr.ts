@@ -270,13 +270,19 @@ export type PaneEnd = "exited" | "closed" | "lost";
  * 0.8.2; `events.wait` only supports agent-status matches, so a subscription
  * is the only event channel) and the first matching event settles the wait.
  * The daemon pushes every pane's events to every subscriber, so the filter is
- * client-side. Two backstops close the gaps a subscription cannot see: the
- * socket ending, erroring or closing settles "lost" (the caller falls back to
- * the exit-code file), and a pane already absent from `pane.list` when the
- * subscription ack lands settles "exited" (its end predated the subscription,
- * so no event will ever arrive). The liveness check runs only after the ack,
- * so an end can never slip between the check and the daemon registering the
- * subscription.
+ * client-side. Three backstops close the gaps a subscription cannot see: the
+ * socket ending, erroring or closing settles "lost"; a pane already absent
+ * from `pane.list` when the subscription ack lands settles "exited" (its end
+ * predated the subscription, so no event will ever arrive); and the optional
+ * release signal settles "lost" for a caller that found the attempt's ending
+ * somewhere else and wants its connection back. The liveness check runs only
+ * after the ack, so an end can never slip between the check and the daemon
+ * registering the subscription.
+ *
+ * "lost" says only that this observation is over, never that the attempt is:
+ * the pane may still be running and the daemon merely unreachable. What a
+ * caller does about that is the caller's, and this module has no opinion on
+ * it, because it has no knowledge of anything the attempt writes.
  *
  * Every way the connection can go must settle it, because whatever does not
  * settle it parks it: an attempt that had finished and written its exit code
@@ -286,13 +292,16 @@ export type PaneEnd = "exited" | "closed" | "lost";
 export function waitForPaneEnd(
   socketPath: string,
   paneId: string,
+  releaseSignal?: AbortSignal,
 ): Promise<PaneEnd> {
   return new Promise<PaneEnd>((resolve) => {
     let settled = false;
     const sock = connect(socketPath);
     liveSockets.add(sock);
     let buf = "";
+    const onRelease = (): void => settle("lost");
     const release = (): void => {
+      releaseSignal?.removeEventListener("abort", onRelease);
       liveSockets.delete(sock);
       sock.destroy();
     };
@@ -302,6 +311,11 @@ export function waitForPaneEnd(
       release();
       resolve(end);
     };
+    if (releaseSignal?.aborted) {
+      settle("lost");
+      return;
+    }
+    releaseSignal?.addEventListener("abort", onRelease, { once: true });
     sock.on("connect", () => {
       sock.write(
         JSON.stringify({

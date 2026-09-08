@@ -59,8 +59,8 @@ import {
   listPaneIds,
   openAttemptTab,
   paneSendInput,
-  waitForPaneEnd,
 } from "./herdr.ts";
+import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
 import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
 import {
   branchExists,
@@ -1521,18 +1521,17 @@ async function finalizeAdoptedAttempt(
     attemptExitCodeName(ticketId, null, false),
   );
   const tailer = streamPath ? startPaneStreamTail(streamPath, logPath) : null;
+  const release = new AbortController();
   try {
-    // Fast path: the wrapper writes the exit-code file before the shell
-    // exits, so the file's presence means the attempt already finished
-    // (sendWrapperToPane removes any previous attempt's file before sending
-    // the wrapper, so it cannot be stale). Otherwise wait on the pane; the
-    // daemon's event subscription reports the end, and a lost subscription
-    // falls back to the file, unbounded, the way the headless spawn waits
-    // on its child.
-    if (!existsSync(exitCodePath)) {
-      const end = await waitForPaneEnd(session.herdrSocket, adopted.paneId);
-      if (end === "lost") await waitForExitCodeFile(exitCodePath);
-    }
+    // The same ending wait the live spawn runs, so the two cannot drift: an
+    // exit-code file already on disk finalises the attempt without waiting on
+    // anything, and otherwise the pane's end and the file race each other.
+    await waitForAttemptEnding(
+      session.herdrSocket,
+      adopted.paneId,
+      exitCodePath,
+      release.signal,
+    );
     // Abandoned while waiting (the human answered): the answer path owns
     // the ticket now and this finalize records nothing further.
     if (adopted.abandoned) return;
@@ -1547,6 +1546,7 @@ async function finalizeAdoptedAttempt(
     session.adopted.delete(ticketId);
     recordAdoptedExit(session, marker, attempt, code, logPath, exitCodePath);
   } finally {
+    release.abort();
     if (tailer) await tailer.finish().catch(() => {});
   }
 }
@@ -5185,11 +5185,6 @@ function endWriteStream(
   });
 }
 
-// The follow-file tailer's poll interval: the log derives from the tee'd
-// Stream file within a quarter second of the harness writing it, live
-// enough for the ticket log and the Console's liveness signals.
-const PANE_TAIL_POLL_MS = 250;
-
 /**
  * The ADR-0014 wrapper shell the attempt's pane runs, as one line of bash:
  * the harness with stdout and stderr merged into `tee` (the same merged
@@ -5301,11 +5296,13 @@ async function spawnWithTerminal(
 
 /**
  * The wait half of a terminal-backed spawn (ADR-0014): the engine waits for
- * the pane to end (herdr's `pane_exited`/`pane_closed`, or the exit-code
- * file when the wait itself is unsupported), and the exit code comes from
- * the file the wrapper wrote. Streamed harnesses additionally get a
- * follow-file tailer on the tee'd Stream file feeding the ADR-0012
- * derivation into the attempt log, live.
+ * the attempt's ending (attempt-ending.ts races herdr's pane end against the
+ * wrapper's exit-code file) and the exit code comes from the file the wrapper
+ * wrote. Streamed harnesses additionally get a follow-file tailer on the
+ * tee'd Stream file feeding the ADR-0012 derivation into the attempt log,
+ * live. The ending is not the exit code: whichever way the attempt ended, the
+ * file is what is read, and a file that never arrived reads as unreadable and
+ * crashes the attempt naming the wrapper, exactly as before.
  */
 async function awaitPaneSpawn(
   socketPath: string,
@@ -5315,32 +5312,24 @@ async function awaitPaneSpawn(
   const tailer = ctx.streamPath
     ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
     : null;
+  const release = new AbortController();
   try {
-    const end = await waitForPaneEnd(socketPath, paneId);
-    if (end === "lost") {
-      // The subscription could not be kept (daemon restart, or a daemon
-      // without events.subscribe): the wrapper still writes the exit-code
-      // file when it finishes, so wait on that exactly as the headless
-      // spawn waits on its child, with no bound.
-      await waitForExitCodeFile(ctx.exitCodePath);
-    }
+    await waitForAttemptEnding(
+      socketPath,
+      paneId,
+      ctx.exitCodePath,
+      release.signal,
+    );
     // The exit-code file is written before the shell exits, so it is already
     // there in the normal case; the retry only covers a daemon that reaps
     // the pane ahead of the wrapper's last write.
     const code = await readExitCode(ctx.exitCodePath);
     return code;
   } finally {
+    // Whatever lost the race goes with the log tailer: one attempt must cost
+    // the pool no subscription and no timer once it is over.
+    release.abort();
     if (tailer) await tailer.finish();
-  }
-}
-
-// Wait until the exit-code file exists, polling: the fallback wait for a
-// daemon whose event subscription could not be kept. Unbounded, like the
-// headless spawn's wait on its child.
-async function waitForExitCodeFile(path: string): Promise<void> {
-  for (;;) {
-    if (existsSync(path)) return;
-    await new Promise((resolve) => setTimeout(resolve, PANE_TAIL_POLL_MS));
   }
 }
 
