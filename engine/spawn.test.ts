@@ -106,6 +106,7 @@ describe("defaultHarnessDescriptors", () => {
       expect(typeof descriptor.promptShaping.batch).toBe("function");
       expect(typeof descriptor.promptShaping.interactive).toBe("function");
       expect(["stream", "raw"]).toContain(descriptor.streamMode);
+      expect(Array.isArray(descriptor.clearKeys)).toBe(true);
       // echoPattern is optional (opencode echoes the paste inline and has
       // no marker); when present it is a non-empty pane-rendered pattern.
       if (descriptor.echoPattern !== undefined) {
@@ -127,6 +128,12 @@ describe("defaultHarnessDescriptors", () => {
     expect(defaultHarnessDescriptors.claude.echoPattern).toBe("Pasted text");
     expect(defaultHarnessDescriptors.cursor.echoPattern).toBe("Pasted text");
     expect(defaultHarnessDescriptors.opencode.echoPattern).toBeUndefined();
+  });
+
+  it("carries the prototype-verified clear keys, with claude empty pending verification", () => {
+    expect(defaultHarnessDescriptors.opencode.clearKeys).toEqual(["ctrl+c"]);
+    expect(defaultHarnessDescriptors.cursor.clearKeys).toEqual(["ctrl+c"]);
+    expect(defaultHarnessDescriptors.claude.clearKeys).toEqual([]);
   });
 
   it("is the single source the batch-argv projection and the stream mode read from", () => {
@@ -222,8 +229,15 @@ describe("defaultHarnessDescriptors", () => {
     for (const name of names) {
       expect(defaultHarnessDescriptors[name].promptShaping.interactive(ctx)).toBe(
         "/implement /tmp/pool/issues/01-a.md\n\n" +
-          "Standing instructions for this job:\n\nDo the thing.",
+          "Standing instructions for this job:\n\nDo the thing.\n" +
+          "/tmp/pool/issues/01-a.md",
       );
+      expect(
+        defaultHarnessDescriptors[name].promptShaping
+          .interactive(ctx)
+          .split("\n")
+          .at(-1),
+      ).toBe(ctx.issuePath);
     }
   });
 

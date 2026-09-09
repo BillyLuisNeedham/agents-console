@@ -5516,20 +5516,32 @@ async function deliverPromptInner(
     // paste to their echoPattern marker).
     ctx.issuePath,
   ].filter((target): target is string => typeof target === "string");
-  for (let attempt = 0; attempt < PROMPT_TYPED_ATTEMPTS; attempt++) {
+  const clearKeys = descriptor.clearKeys;
+  // A harness with no verified clear sequence cannot safely re-paste: a
+  // false-negative echo would concatenate. One attempt, then a loud fail.
+  // Clear keys are not sent before the first paste: opencode's ctrl+c
+  // exits on empty input (prototype/tui-clear-input/FINDINGS.md).
+  const attempts = clearKeys.length > 0 ? PROMPT_TYPED_ATTEMPTS : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      await paneSendInput(socketPath, paneId, { keys: clearKeys });
+    }
     await paneSendInput(socketPath, paneId, { text: prompt });
     if (await paneShows(socketPath, paneId, echoTargets)) {
       await paneSendInput(socketPath, paneId, { keys: ["enter"] });
       return undefined;
     }
     // The paste did not land in the input area (the prototype's false-ready
-    // paste loss): retry the full paste.
+    // paste loss), or it landed and the echo missed it. With clear keys
+    // the next iteration empties the input first; without, we fail now.
   }
+  if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
   // Full-prompt pasting failed: the file-referencing fallback, short enough
   // to survive any input-buffer cap (prototype finding, all three harnesses).
   // The command carries the attempt's own driver, so a grader, resolver, or
   // head-to-head judge falls back to its own skill, not the ticket driver's.
   const fallback = `/${ctx.driver} ${promptFile}`;
+  await paneSendInput(socketPath, paneId, { keys: clearKeys });
   await paneSendInput(socketPath, paneId, { text: fallback });
   if (await paneShows(socketPath, paneId, [promptFile])) {
     await paneSendInput(socketPath, paneId, { keys: ["enter"] });

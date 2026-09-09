@@ -81,6 +81,13 @@ export interface HarnessDescriptor {
   // echoes the paste inline, so it has no marker and the engine falls back
   // to the prompt's issue reference.
   echoPattern?: string;
+  // Keys that empty the TUI input area, sent before a retry or fallback
+  // paste so a false-negative echo cannot concatenate. Empty until a
+  // sequence is verified against the live TUI: opencode and cursor use
+  // ctrl+c (prototype/tui-clear-input/FINDINGS.md); claude's slot stays
+  // empty pending the operator's manual verification. Not sent before the
+  // first paste: opencode's sequence exits on empty input.
+  clearKeys: string[];
   // The prompt shaping per mode.
   promptShaping: {
     batch: PromptShaping;
@@ -104,17 +111,17 @@ export interface HarnessDescriptor {
 const claudeShaping: HarnessDescriptor["promptShaping"] = {
   batch: ({ driver, issuePath, body }) => `/${driver} ${issuePath}\n\n${body}`,
   interactive: ({ driver, issuePath, body }) =>
-    `/${driver} ${issuePath}\n\n${body}`,
+    `/${driver} ${issuePath}\n\n${body}\n${issuePath}`,
 };
 const opencodeShaping: HarnessDescriptor["promptShaping"] = {
   batch: ({ issuePath, body }) => `${issuePath}\n\n${body}`,
   interactive: ({ driver, issuePath, body }) =>
-    `/${driver} ${issuePath}\n\n${body}`,
+    `/${driver} ${issuePath}\n\n${body}\n${issuePath}`,
 };
 const cursorShaping: HarnessDescriptor["promptShaping"] = {
   batch: ({ driver, issuePath, body }) => `/${driver} ${issuePath}\n\n${body}`,
   interactive: ({ driver, issuePath, body }) =>
-    `/${driver} ${issuePath}\n\n${body}`,
+    `/${driver} ${issuePath}\n\n${body}\n${issuePath}`,
 };
 
 // One case per harness, matching run.sh's launch shapes: the driver and issue
@@ -160,6 +167,9 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     echoPattern: "Pasted text",
     promptShaping: claudeShaping,
     streamMode: "stream",
+    // Unverified on this machine (login expired). The operator confirms a
+    // clear sequence on another machine before this slot is populated.
+    clearKeys: [],
   },
   // opencode does not expand a slash command inside a run message, so the
   // driver goes through --command (bare name, no slash) and everything else
@@ -179,6 +189,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     readyPattern: "Ask anything",
     promptShaping: opencodeShaping,
     streamMode: "raw",
+    clearKeys: ["ctrl+c"],
   },
   // Run against the real Cursor Agent CLI (2026.09.02-c22c1a3). --verbose was
   // dropped: that CLI has no such flag and rejects it with "unknown option
@@ -209,6 +220,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     echoPattern: "Pasted text",
     promptShaping: cursorShaping,
     streamMode: "stream",
+    clearKeys: ["ctrl+c"],
   },
 };
 
