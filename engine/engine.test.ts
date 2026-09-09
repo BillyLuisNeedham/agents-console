@@ -33,7 +33,10 @@ import {
 } from "./pool.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
-import type { SpawnContext } from "./spawn.ts";
+import {
+  defaultHarnessDescriptors,
+  type SpawnContext,
+} from "./spawn.ts";
 
 const tempDirs: string[] = [];
 
@@ -176,38 +179,76 @@ interface FakeHerdrRequest {
 // The fake herdr daemon speaks the real wire shape (newline-delimited
 // JSON-RPC, one request per connection) and actually RUNS what a pane is
 // sent: the engine's wrapper shell executes under bash in the pane's cwd,
-// so the tee'd log and Stream files, the exit-code file, and the harness's
+// so the typescript Stream file, the exit-code file, and the harness's
 // outcome are all real, exactly as a live herdr would produce them. Pane
 // ends are pushed to the engine's events.subscribe connections, the way
 // herdr pushes subscribed events. `breakSubscriptions` simulates a daemon
 // that cannot keep a subscription (restart mid-wait), for the exit-code
-// file fallback. Test-only controls simulate the orphans boot
-// reconciliation must handle: a pane with no process behind it, and its
-// later end.
-async function startExecutingFakeHerdr(options?: {
-  breakSubscriptions?: boolean;
-}): Promise<{
-  socketPath: string;
-  requests: FakeHerdrRequest[];
-  close: () => Promise<void>;
-  injectPane: (paneId: string) => void;
-  endPane: (paneId: string) => void;
-}> {
-  const breakSubscriptions = options?.breakSubscriptions === true;
-  const requests: FakeHerdrRequest[] = [];
+// file fallback. Test-only controls simulate the interactive surface:
+// `rendered` supplies the pane.read text every new pane shows (a test sets
+// it to a harness's ready frame so the engine's readiness poll passes),
+// `setPaneContent` overrides a single pane's rendered text, and
+  // `dropPaneInput` drops the next typed inputs after the wrapper (a lost
+  // paste) so the engine's echo verification has a failure to retry on.
+  // After the wrapper boots, the pane has an input area: paste appends,
+  // clear keys empty it, Enter submits it (`submitted` records each
+  // submit). `hideInputs` conceals that many pastes from pane.read so a
+  // false-negative echo is testable — the text still occupies the input.
+  // The fake executes only the pane's FIRST Enter as bash — the wrapper — and
+  // treats every later Enter as the TUI consuming input, matching how a real
+  // pane hands control to the harness. Test-only controls simulate the
+  // orphans boot reconciliation must handle: a pane with no process behind
+  // it, and its later end.
+  async function startExecutingFakeHerdr(options?: {
+    breakSubscriptions?: boolean;
+    rendered?: string;
+    dropInputs?: number;
+    hideInputs?: number;
+  }): Promise<{
+    socketPath: string;
+    requests: FakeHerdrRequest[];
+    submitted: string[];
+    close: () => Promise<void>;
+    injectPane: (paneId: string) => void;
+    endPane: (paneId: string) => void;
+    setPaneContent: (paneId: string, text: string) => void;
+    dropPaneInput: (paneId: string, count: number) => void;
+  }> {
+    const breakSubscriptions = options?.breakSubscriptions === true;
+    const defaultRendered = options?.rendered ?? "";
+    const defaultDropInputs = options?.dropInputs ?? 0;
+    const defaultHideInputs = options?.hideInputs ?? 0;
+    const requests: FakeHerdrRequest[] = [];
+    const submitted: string[] = [];
   let minted = 0;
   const panes = new Map<
     string,
-    { tabId: string; cwd: string; alive: boolean; buffer: string }
+    {
+      tabId: string;
+      cwd: string;
+      alive: boolean;
+      buffer: string;
+      rendered: string;
+      booted: boolean;
+      dropInputs: number;
+      hideInputs: number;
+      inputArea: string;
+      hideEcho: boolean;
+      proc?: ReturnType<typeof Bun.spawn>;
+    }
   >();
   const subscribers: Socket[] = [];
   const connections = new Set<Socket>();
+  const procs: ReturnType<typeof Bun.spawn>[] = [];
   const firePaneEnd = (
     paneId: string,
     event: "pane_exited" | "pane_closed",
   ): void => {
     const pane = panes.get(paneId);
-    if (pane) pane.alive = false;
+    if (pane) {
+      pane.alive = false;
+      pane.proc?.kill();
+    }
     // herdr pushes every pane's events to every subscriber; the engine
     // filters by pane id. A subscriber whose wait already settled has
     // closed its end, so prune before broadcasting.
@@ -249,6 +290,12 @@ async function startExecutingFakeHerdr(options?: {
           cwd: String(msg.params.cwd ?? "/"),
           alive: true,
           buffer: "",
+          rendered: defaultRendered,
+          booted: false,
+          dropInputs: defaultDropInputs,
+          hideInputs: defaultHideInputs,
+          inputArea: "",
+          hideEcho: false,
         });
         respond({ tab: { tab_id: tabId } });
       } else if (msg.method === "pane.list") {
@@ -257,27 +304,65 @@ async function startExecutingFakeHerdr(options?: {
             .filter(([, pane]) => pane.alive)
             .map(([paneId, pane]) => ({ tab_id: pane.tabId, pane_id: paneId })),
         });
+      } else if (msg.method === "pane.read") {
+        const pane = panes.get(String(msg.params.pane_id));
+        const visible = pane
+          ? pane.booted
+            ? pane.hideEcho
+              ? pane.rendered
+              : `${pane.rendered}${pane.inputArea}`
+            : `${pane.rendered}${pane.buffer}`
+          : "";
+        respond({
+          read: {
+            text: visible,
+            revision: 0,
+            truncated: false,
+          },
+        });
       } else if (msg.method === "pane.send_input") {
         const pane = panes.get(String(msg.params.pane_id));
         if (pane) {
           if (typeof msg.params.text === "string") {
-            pane.buffer += msg.params.text;
+            if (!pane.booted) {
+              pane.buffer += msg.params.text;
+            } else if (pane.dropInputs > 0) {
+              // A lost paste: the text vanishes from the pane, the way a
+              // paste sent before the TUI is truly ready can.
+              pane.dropInputs -= 1;
+            } else {
+              pane.inputArea += msg.params.text;
+              pane.hideEcho = pane.hideInputs > 0;
+              if (pane.hideInputs > 0) pane.hideInputs -= 1;
+            }
           }
-          if (
-            Array.isArray(msg.params.keys) &&
-            msg.params.keys.includes("enter")
-          ) {
-            const command = pane.buffer;
-            pane.buffer = "";
-            const proc = Bun.spawn(["bash", "-c", command], {
-              cwd: pane.cwd,
-              stdin: "ignore",
-              stdout: "ignore",
-              stderr: "ignore",
-            });
-            void proc.exited.then(() =>
-              firePaneEnd(String(msg.params.pane_id), "pane_exited"),
-            );
+          if (Array.isArray(msg.params.keys)) {
+            if (msg.params.keys.includes("enter")) {
+              if (pane.booted) {
+                submitted.push(pane.inputArea);
+                pane.inputArea = "";
+                pane.hideEcho = false;
+                respond({});
+                return;
+              }
+              const command = pane.buffer;
+              pane.buffer = "";
+              pane.booted = true;
+              const proc = Bun.spawn(["bash", "-c", command], {
+                cwd: pane.cwd,
+                stdin: "ignore",
+                stdout: "ignore",
+                stderr: "ignore",
+              });
+              pane.proc = proc;
+              procs.push(proc);
+              void proc.exited.then(() =>
+                firePaneEnd(String(msg.params.pane_id), "pane_exited"),
+              );
+            } else if (pane.booted) {
+              pane.inputArea = "";
+              pane.hideEcho = false;
+            }
           }
         }
         respond({});
@@ -321,8 +406,10 @@ async function startExecutingFakeHerdr(options?: {
   return {
     socketPath,
     requests,
+    submitted,
     close: () =>
       new Promise<void>((resolve) => {
+        for (const proc of procs) proc.kill();
         for (const sub of subscribers) sub.destroy();
         // bun's server.close() waits for every connection to drain, and a
         // request/response connection whose client already destroyed its
@@ -337,9 +424,23 @@ async function startExecutingFakeHerdr(options?: {
         cwd: "/tmp",
         alive: true,
         buffer: "",
+        rendered: defaultRendered,
+        booted: true,
+        dropInputs: 0,
+        hideInputs: 0,
+        inputArea: "",
+        hideEcho: false,
       });
     },
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
+    setPaneContent: (paneId, text) => {
+      const pane = panes.get(paneId);
+      if (pane) pane.rendered = text;
+    },
+    dropPaneInput: (paneId, count) => {
+      const pane = panes.get(paneId);
+      if (pane) pane.dropInputs += count;
+    },
   };
 }
 
@@ -4878,7 +4979,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     }
   }
 
-  it("wraps the harness in the bash wrapper shell and reads the exit code from the file", async () => {
+  it("wraps the harness in the script wrapper shell and reads the exit code from the file", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
@@ -4897,18 +4998,18 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     const wrapper = fake.requests.find(
       (r) => r.method === "pane.send_input" && typeof r.params.text === "string",
     )!.params.text as string;
-    // ADR-0014's wrapper: merged output teed to the log (the stub harness
-    // is raw mode, so the tee target is the log itself), the exit code out
-    // of PIPESTATUS (a pipeline's $? would be tee's), and `exit` so the
-    // pane ends and pane_exited can fire. The pipeline runs under an
-    // explicit `bash -c` because the pane's shell is the operator's login
-    // shell: under zsh, PIPESTATUS expands to nothing and every attempt
-    // reads as exit 1. The `exit` stays outside, for the pane's own shell.
-    expect(wrapper).toStartWith("bash -c '");
-    expect(wrapper).toContain("2>&1 | tee ");
-    expect(wrapper).toContain(".log");
-    expect(wrapper).not.toContain(".stream.jsonl");
-    expect(wrapper).toMatch(/\$\{PIPESTATUS\[0\]\} > .*\.exitcode.*; exit$/);
+    // ADR-0016's wrapper: the interactive command wrapped in
+    // `script -eqfc '<cmd>' <stream-file>` (the PTY that supplies the session
+    // and the typescript the log derives from; `-e` makes script's exit the
+    // harness's), the trailing exit-code write for crash forensics, and no
+    // `exit` — the pane stays open after the attempt completes. The
+    // terminal-backed path streams to the attempt's Stream file whatever the
+    // harness's stream mode.
+    expect(wrapper).toContain("script -eqfc ");
+    expect(wrapper).toContain(".stream.jsonl'");
+    expect(wrapper).toMatch(/; echo \$\? > .*\.exitcode'$/);
+    expect(wrapper).not.toContain("2>&1 | tee");
+    expect(wrapper).not.toContain("PIPESTATUS");
     // The wrapper's promise, on the pane: the exit-code file the wrapper
     // wrote and the harness outcome it ran.
     expect(readFileSync(join(poolDir, "runs", "01.exitcode"), "utf8").trim()).toBe("0");
@@ -4917,32 +5018,33 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     expect(exited.payload.code).toBe(0);
   }, 15000);
 
-  it("tees a streamed harness to the Stream file and derives the log live from it", async () => {
+  it("captures the session in the script typescript Stream file and derives the ANSI-stripped log from it", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01")],
       config: {
-        defaults: { harness: "claude", model: "test-model" },
+        defaults: { harness: "transcript", model: "stub-model" },
         terminal: "herdr",
       },
     });
-    // A streamed harness: one structured stream line, one plain diagnostic,
-    // and the outcome. The wrapper tees the merged output to the Stream
-    // file; the follow-file tailer must derive the log from it.
-    const script = join(poolDir, "stream-stub.sh");
+    // A harness whose output carries ANSI, the way a real TUI paints. The
+    // wrapper runs it under script, so the Stream file is the raw typescript
+    // (both directions, ANSI included) and the follow-file tailer must strip
+    // the ANSI out for the log.
+    const script = join(poolDir, "transcript-stub.sh");
     writeFileSync(
       script,
       [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from the pane"}]}}'`,
-        "echo plain-diagnostics",
-        `printf '%s' '{"status":"done","summary":"streamed","commitSha":null}' > "$1"`,
+        "printf 'hello from the pane\\n'",
+        "printf '\\033[32mgreen text\\033[0m\\n'",
+        `printf '%s' '{"status":"done","summary":"transcript","commitSha":null}' > "$1"`,
         "exit 0",
         "",
       ].join("\n"),
     );
     const harnesses: Record<string, HarnessCommand> = {
-      claude: (ctx: SpawnContext) => ["bash", script, ctx.outcomePath],
+      transcript: (ctx: SpawnContext) => ["bash", script, ctx.outcomePath],
     };
     const fake = await startFakeHerdr();
 
@@ -4954,19 +5056,21 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     await fake.close();
 
     expect(run.final.tickets["01"]).toBe("done");
-    // The Stream file carries the tee'd bytes verbatim, stderr merged with
-    // the structured stdout per the ADR's 2>&1 contract.
+    // The Stream file is the script typescript: the session's raw bytes,
+    // including the ANSI the TUI painted and the CR a PTY line ending
+    // carries.
     const stream = readFileSync(
       join(poolDir, "runs", "01.stream.jsonl"),
       "utf8",
     );
-    expect(stream).toContain('"type":"assistant"');
-    expect(stream).toContain("plain-diagnostics");
-    // The log is the ADR-0012 derivation of those bytes, not a second tee.
+    expect(stream).toContain("hello from the pane");
+    expect(stream).toContain("\u001b[32m");
+    // The log is the ANSI-stripped transcript, not the raw bytes.
     const log = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
     expect(log).toContain("hello from the pane");
-    expect(log).toContain("plain-diagnostics");
-    expect(log).not.toContain('"type":"assistant"');
+    expect(log).toContain("green text");
+    expect(log).not.toContain("\u001b[");
+    expect(log).not.toContain("hello from the pane\r");
   }, 15000);
 
   it("a non-zero pane exit is the attempt's crash, with the wrapper's code", async () => {
@@ -4974,7 +5078,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({ "01": { exitCode: 3 } });
+    const rig = stubHarness({ "01": { outcome: null, exitCode: 3 } });
     const fake = await startFakeHerdr();
 
     const run = await runPool({
@@ -5228,6 +5332,519 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     expect(answered.interrupts.map((i) => i.kind)).toEqual(["review"]);
     await fake.close();
   }, 15000);
+});
+
+describe("interactive terminal-backed attempts (ADR-0016)", () => {
+  // The interactive tests drive the engine against the fake herdr seam with a
+  // KNOWN harness name whose command the test replaces with a bash script, so
+  // the engine's descriptor-driven readiness and prompt delivery run (the
+  // descriptor survives the command override) while the pane actually
+  // executes the stub. The fake fabricates the TUI's rendered content
+  // (`rendered` carries the ready frame) and can drop typed pastes to
+  // exercise the retry and fallback.
+  //
+  // The same seam contract runs for every known harness — claude, opencode,
+  // cursor — with all per-harness behavior (ready frame, typed prompt shape,
+  // echo target) coming from the descriptor table alone, so these tests pin
+  // that the interactive machinery is harness-agnostic (pool ticket 04).
+
+  const knownHarnesses = ["claude", "opencode", "cursor"] as const;
+
+  const poolFor = (harness: string): PoolSpec => ({
+    tickets: [readyTicket("01")],
+    config: {
+      defaults: { harness, model: "stub-model" },
+      terminal: "herdr",
+    },
+  });
+
+  // The ready frame each harness's TUI renders, from the descriptor's
+  // prototype-validated ready pattern (the bare prompt glyph is not a ready
+  // signal: the pane's own bash prompt collides with it).
+  const readyFrame = (harness: string): string =>
+    `${defaultHarnessDescriptors[harness].readyPattern}\n❯ `;
+
+  // The typed prompt's leading shape, straight from the descriptor's
+  // interactive shaping: claude and opencode expand a leading /driver slash
+  // command, cursor takes a plain message (spawn.test.ts pins each shape).
+  // The engine holds no per-harness prompt code, only the descriptor table.
+  // Body is a sentinel so the trailing issue-path echo line is not part of
+  // the prefix a real (non-empty) prompt must start with.
+  const promptPrefix = (harness: string, issuePath: string): string => {
+    const shaped = defaultHarnessDescriptors[harness].promptShaping.interactive({
+      driver: "implement",
+      issuePath,
+      body: "\0",
+    });
+    return shaped.slice(0, shaped.indexOf("\0"));
+  };
+
+  // The command stub, harness-agnostic: optionally waits for a trigger file,
+  // prints an output line, writes the outcome, then optionally holds the pane
+  // open the way a real TUI stays alive after the agent declares done.
+  function harnessStub(
+    poolDir: string,
+    opts: {
+      outcome?: string;
+      hold?: boolean;
+      waitFor?: string;
+      output?: string;
+    } = {},
+  ): { stubPath: string; command: HarnessCommand } {
+    const stubPath = join(poolDir, "tui-stub.sh");
+    const waitFor = opts.waitFor ?? "";
+    const output = opts.output ?? "";
+    writeFileSync(
+      stubPath,
+      [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        'outcome="$1"; wait_for="$2"; output="$3"',
+        'if [ -n "$wait_for" ]; then',
+        "  for _ in $(seq 1 200); do",
+        '    [ -e "$wait_for" ] && break',
+        "    sleep 0.05",
+        "  done",
+        "fi",
+        ...(output !== "" ? [`printf '%s\\n' "$output"`] : []),
+        ...(opts.outcome !== undefined
+          ? [`printf '%s' '${opts.outcome}' > "$outcome"`]
+          : []),
+        ...(opts.hold ? ["sleep 30"] : []),
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    return {
+      stubPath,
+      command: (ctx: SpawnContext) => [
+        "bash",
+        stubPath,
+        ctx.outcomePath,
+        waitFor,
+        output,
+      ],
+    };
+  }
+
+  const doneOutcome = JSON.stringify({
+    status: "done",
+    summary: "interactive",
+    commitSha: null,
+  });
+
+  async function startFakeHerdr(options?: {
+    rendered?: string;
+    dropInputs?: number;
+    hideInputs?: number;
+  }): ReturnType<typeof startExecutingFakeHerdr> {
+    return startExecutingFakeHerdr(options);
+  }
+
+  async function until(
+    cond: () => boolean,
+    what: string,
+    timeout = 5000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeout;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  for (const harness of knownHarnesses) {
+    describe(harness, () => {
+      it("waits for readiness, types the descriptor's interactive prompt, and completes on the Outcome", async () => {
+        const poolDir = makePool(poolFor(harness));
+        // The stub writes its Outcome and holds the pane open, so the pane
+        // does not die mid-readiness the way a script that exits would.
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        // The fake's rendered content is the harness's ready frame; the
+        // stub's outcome needs no trigger, so it is written directly.
+        const fake = await startFakeHerdr({ rendered: readyFrame(harness) });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        // The send sequence: wrapper text + enter, then the typed driver
+        // prompt text + enter. Nothing else is sent.
+        expect(sends).toHaveLength(4);
+        expect(sends[0].params.text as string).toContain("script -eqfc ");
+        expect(sends[1].params.keys).toEqual(["enter"]);
+        const prompt = sends[2].params.text as string;
+        const issuePath = join(poolDir, "issues", "01-t.md");
+        expect(prompt.startsWith(promptPrefix(harness, issuePath))).toBe(true);
+        // The issue reference rides the prompt, so it is the harness-agnostic
+        // echo target the verification matched. It is also the final line, so
+        // a long paste cannot scroll it out of the peeked tail.
+        expect(prompt).toContain(issuePath);
+        expect(prompt.split("\n").at(-1)).toBe(issuePath);
+        expect(sends[3].params.keys).toEqual(["enter"]);
+        // The readiness poll read the pane before the prompt was typed.
+        expect(
+          fake.requests
+            .slice(0, fake.requests.indexOf(sends[2]))
+            .some((r) => r.method === "pane.read"),
+        ).toBe(true);
+        // The spawned event records the argv the pane actually ran — the
+        // interactive command (the stub), not the batch line.
+        const spawned = readEventLines(poolDir, "01").find(
+          (e) => e.kind === "spawned",
+        )!;
+        const argv = spawned.payload.argv as string[];
+        expect(argv[0]).toBe("bash");
+        expect(argv).toContain(join(poolDir, "tui-stub.sh"));
+        expect(argv).not.toContain("-p");
+        expect(argv).not.toContain("--output-format");
+      }, 20000);
+
+      it("completes on a valid Outcome without pane exit, leaving the pane open", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const trigger = join(poolDir, "hold-trigger");
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+          waitFor: trigger,
+        });
+        const fake = await startFakeHerdr({ rendered: readyFrame(harness) });
+
+        const run = startPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        // Let the attempt spawn and reach its completion wait, then write the
+        // trigger so the stub declares done while the pane stays open.
+        await until(
+          () => fake.requests.some((r) => r.method === "events.subscribe"),
+          "the completion wait's pane-end subscription",
+        );
+        writeFileSync(trigger, "");
+        await run.settled;
+
+        expect(run.final.tickets["01"]).toBe("done");
+        // The pane never closed and the wrapper never finished: the exit-code
+        // file the wrapper writes when the TUI eventually exits is absent, so
+        // the TUI is still alive after the attempt completed.
+        expect(fake.requests.filter((r) => r.method === "pane.close")).toHaveLength(0);
+        expect(existsSync(join(poolDir, "runs", "01.exitcode"))).toBe(false);
+        const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited")!;
+        expect(exited.payload.code).toBe(0);
+        await fake.close();
+      }, 20000);
+
+      it("treats pane loss without an Outcome as a crash", async () => {
+        const poolDir = makePool(poolFor(harness));
+        // The stub holds without writing any outcome: the attempt stays in
+        // flight until the pane is lost.
+        const { command } = harnessStub(poolDir, { hold: true });
+        const fake = await startFakeHerdr({ rendered: readyFrame(harness) });
+
+        const run = startPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        // Wait until the prompt has been delivered (four send_input calls:
+        // the wrapper pair and the prompt pair) so the completion wait is
+        // live, then lose the pane with no outcome on disk.
+        await until(
+          () =>
+            fake.requests.filter((r) => r.method === "pane.send_input").length >= 4,
+          "the typed prompt's send",
+        );
+        fake.endPane("pane-1");
+        await run.settled;
+
+        expect(run.final.tickets["01"]).toBe("in-progress");
+        expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+        const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+        // The pane ended with the wrapper's exit-code file never written
+        // (the killed pane took the wrapper down with it): the crash names
+        // the unreadable file rather than inventing an exit status.
+        expect(crash.payload.reason).toContain("exit code unreadable");
+        await fake.close();
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("retries a lost paste, then falls back to the file-referencing command", async () => {
+        const clearKeys = defaultHarnessDescriptors[harness].clearKeys;
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        // The first three full-prompt pastes are lost (the prototype's
+        // false-ready paste loss): the echo verification fails each time, the
+        // engine retries, then falls back to `/implement <promptfile>`.
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 3,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        // Wrapper pair, three lost full-prompt pastes with a clear before
+        // each retry and before the fallback, then the fallback and Enter.
+        expect(sends).toHaveLength(10);
+        expect(sends[0].params.text as string).toContain("script -eqfc ");
+        expect(sends[1].params.keys).toEqual(["enter"]);
+        const issuePath = join(poolDir, "issues", "01-t.md");
+        expect(
+          (sends[2].params.text as string).startsWith(promptPrefix(harness, issuePath)),
+        ).toBe(true);
+        expect(sends[3].params.keys).toEqual(clearKeys);
+        expect(
+          (sends[4].params.text as string).startsWith(promptPrefix(harness, issuePath)),
+        ).toBe(true);
+        expect(sends[5].params.keys).toEqual(clearKeys);
+        expect(
+          (sends[6].params.text as string).startsWith(promptPrefix(harness, issuePath)),
+        ).toBe(true);
+        expect(sends[7].params.keys).toEqual(clearKeys);
+        const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
+        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
+        expect(sends[9].params.keys).toEqual(["enter"]);
+        expect(existsSync(promptFile)).toBe(true);
+        const promptFileText = readFileSync(promptFile, "utf8");
+        expect(
+          promptFileText.startsWith(`${issuePath}\n\n`),
+        ).toBe(true);
+        expect(promptFileText).toContain("Standing instructions");
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("falls back to the attempt's own driver, not a hardcoded one", async () => {
+        const clearKeys = defaultHarnessDescriptors[harness].clearKeys;
+        // A pool whose ticket driver is not "implement" (grader, resolver,
+        // and head-to-head spawn sites pass their own drivers) must fall
+        // back to that driver's slash command, or a lost paste would invoke
+        // the wrong skill.
+        const pool = poolFor(harness);
+        pool.config = {
+          ...pool.config,
+          defaults: { ...pool.config?.defaults, drivers: "verify" },
+        };
+        const poolDir = makePool(pool);
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 3,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
+        expect(sends[7].params.keys).toEqual(clearKeys);
+        expect(sends[8].params.text as string).toBe(`/verify ${promptFile}`);
+        expect(sends[9].params.keys).toEqual(["enter"]);
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("clears the input before pasting the file-reference fallback", async () => {
+        const clearKeys = defaultHarnessDescriptors[harness].clearKeys;
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 3,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
+        expect(sends[7].params.keys).toEqual(clearKeys);
+        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("fails the spawn when the fallback echo misses", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 4,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("in-progress");
+        expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+        const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+        expect(crash.payload.reason).toBe("prompt never landed");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        expect(sends.at(-1)?.params.text as string | undefined).toContain(
+          "/implement ",
+        );
+        const promptEnters = sends.filter(
+          (s, i) =>
+            i > 1 &&
+            Array.isArray(s.params.keys) &&
+            (s.params.keys as string[]).includes("enter"),
+        );
+        expect(promptEnters).toHaveLength(0);
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("submits one clean prompt when a landed paste's echo is unseen", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          hideInputs: 1,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        expect(fake.submitted).toHaveLength(1);
+        const submitted = fake.submitted[0];
+        const issuePath = join(poolDir, "issues", "01-t.md");
+        expect(submitted.startsWith(promptPrefix(harness, issuePath))).toBe(true);
+        expect(submitted.split("\n").at(-1)).toBe(issuePath);
+        // One leading reference and one trailing echo line. A concatenated
+        // retry would carry four.
+        expect(submitted.split(issuePath).length - 1).toBe(2);
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length > 0)("fails the spawn on the first echo miss when it has no clear keys", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 1,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("in-progress");
+        expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+        const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+        expect(crash.payload.reason).toBe("prompt never landed");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        // Wrapper pair and one paste. No retry, no fallback, no Enter on the prompt.
+        expect(sends).toHaveLength(3);
+        expect(sends[2].params.text as string).toContain(
+          join(poolDir, "issues", "01-t.md"),
+        );
+        expect(fake.submitted).toEqual([]);
+      }, 20000);
+
+      it("surfaces a botched spawn (TUI never ready) as a failure, not an idle tab", async () => {
+        const poolDir = makePool(poolFor(harness));
+        // The stub exits immediately and the fake never renders the ready
+        // frame, so the TUI never comes up; the pane ends during the
+        // readiness wait.
+        const { command } = harnessStub(poolDir, {});
+        const fake = await startFakeHerdr();
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+
+        expect(run.final.tickets["01"]).toBe("in-progress");
+        expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+        const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+        expect(crash.payload.reason).toBe("TUI never became ready");
+        // The pane was closed so the operator is not left a silently idle
+        // tab; the close is fire-and-forget, so wait for the request to land.
+        await until(
+          () => fake.requests.some((r) => r.method === "pane.close"),
+          "the botched spawn's pane close",
+        );
+        const closes = fake.requests.filter((r) => r.method === "pane.close");
+        expect(closes.length).toBeGreaterThan(0);
+        await fake.close();
+      }, 20000);
+    });
+  }
+
+  it("gives opencode a Stream file in terminal-backed mode and derives a readable log from it", async () => {
+    // opencode is a raw harness headless (no structured stream), so this pins
+    // the ADR-0016 rule that a terminal-backed attempt always gets a Stream
+    // file — the script typescript — whatever its stream mode, and that the
+    // derived log is the ANSI-stripped transcript (spec user story 15).
+    const poolDir = makePool(poolFor("opencode"));
+    const { command } = harnessStub(poolDir, {
+      outcome: doneOutcome,
+      hold: true,
+      output: "opencode agent working",
+    });
+    const fake = await startFakeHerdr({ rendered: readyFrame("opencode") });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: { opencode: command },
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // The Stream file is the script typescript: the session's raw bytes.
+    const stream = readFileSync(join(poolDir, "runs", "01.stream.jsonl"), "utf8");
+    expect(stream).toContain("opencode agent working");
+    // The log is the readable transcript derived from it.
+    const log = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
+    expect(log).toContain("opencode agent working");
+  }, 20000);
 });
 
 describe("checkpoints", () => {

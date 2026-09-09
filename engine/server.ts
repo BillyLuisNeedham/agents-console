@@ -88,7 +88,21 @@ export interface PoolServerOptions {
   registryPath?: string;
   /** The herdr daemon socket for terminal-backed attempts and the terminal endpoints; tests point this at a fake. Defaults to the daemon's path on this machine. */
   herdrSocket?: string;
+  /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
+  streamHeartbeatMs?: number;
 }
+
+/**
+ * The snapshot stream's heartbeat interval: the server pushes one SSE comment
+ * frame per connection at this cadence, inside common browser and proxy idle
+ * timeouts so a healthy stream never idles out into a half-open state. A
+ * comment frame is invisible to a browser EventSource, so the Console's client
+ * reads the stream with fetch and treats any frame, snapshot or heartbeat, as
+ * its liveness signal, reopening a stream that stays silent for a bounded
+ * multiple of this interval. The interval is served as the stream's opening
+ * frame, so the client's silence window derives from the served value.
+ */
+export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 
 interface EnrichedTicketState {
   id: string;
@@ -278,6 +292,20 @@ function withMergePending(
 function encodeSnapshot(snapshot: EnrichedSnapshot): Uint8Array {
   return new TextEncoder().encode(
     `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
+  );
+}
+
+// The snapshot stream's liveness pulse: an SSE comment frame, so it carries no
+// event for a browser EventSource to dispatch and is pure keep-alive plus the
+// raw-frame liveness signal the fetch-based client measures.
+const HEARTBEAT_FRAME = new TextEncoder().encode(": heartbeat\n\n");
+
+// The stream's opening frame: the server publishes its heartbeat interval so
+// the client derives its silence window from the served value rather than a
+// hard-coded copy that could drift from the server's interval.
+function encodeStreamConfig(heartbeatMs: number): Uint8Array {
+  return new TextEncoder().encode(
+    `event: stream-config\ndata: ${JSON.stringify({ heartbeatMs })}\n\n`,
   );
 }
 
@@ -727,10 +755,14 @@ export const ACTIVITY_CACHE_TTL_MS = 1000;
 
 /**
  * The card's read-only preview shows this many lines of the pane's recent
- * output: enough for a liveness signal, small enough to stay a glance, not
- * a log (~6-8 per the spec).
+ * output. On a terminal-backed attempt the harness fills the pane with a
+ * full-screen TUI, and `pane.read source=recent` returns only the last N
+ * rendered rows (prototype/tui-prompt-paste/FINDINGS.md section 2, proven):
+ * a small line count reads empty on a fresh pane or a footer sliver on a live
+ * TUI. This must be at least a terminal height so the peek shows the TUI's
+ * working area, while staying a bounded glance rather than a full log.
  */
-export const TERMINAL_PEEK_LINES = 8;
+export const TERMINAL_PEEK_LINES = 80;
 
 /**
  * The ticket-id -> pane-id translation both terminal endpoints key on
@@ -1042,6 +1074,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
+  const streamHeartbeatMs =
+    options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   let meta = loadMeta(poolDir);
   let ticketIds = knownTicketIds(meta);
   const poolName = poolDir.split("/").slice(-2).join("/");
@@ -1396,19 +1430,41 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         if (pathname === "/api/stream") {
-          // The stream is silent whenever the pool waits at an interrupt, so it
-          // opts out of the default idle timeout; every other route keeps it.
+          // The stream is silent whenever the pool waits at an interrupt, so
+          // it opts out of the default idle timeout; every other route keeps
+          // it. Heartbeat comment frames still flow on their own cadence (the
+          // client's liveness signal, and what keeps proxy idle timeouts from
+          // firing), but a quiet pool emits no snapshot, and the opt-out keeps
+          // the wait from being cut short.
           bunServer.timeout(req, 0);
           let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+          let heartbeat: ReturnType<typeof setInterval> | null = null;
+          const stopHeartbeat = (): void => {
+            if (heartbeat !== null) {
+              clearInterval(heartbeat);
+              heartbeat = null;
+            }
+          };
           const stream = new ReadableStream<Uint8Array>({
             start(ctrl) {
               controller = ctrl;
               clients.add(ctrl);
+              ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
               if (latest) {
                 ctrl.enqueue(encodeSnapshot(withMergePending(latest, poolDir)));
               }
+              heartbeat = setInterval(() => {
+                try {
+                  ctrl.enqueue(HEARTBEAT_FRAME);
+                } catch {
+                  // A dead connection's enqueue throws; drop the client.
+                  stopHeartbeat();
+                  clients.delete(ctrl);
+                }
+              }, streamHeartbeatMs);
             },
             cancel() {
+              stopHeartbeat();
               if (controller) clients.delete(controller);
             },
           });

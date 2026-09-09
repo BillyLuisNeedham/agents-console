@@ -176,7 +176,7 @@ function fleetRegistry(poolDir: string): string {
 async function startServer(
   poolDir: string,
   harnesses: Record<string, HarnessCommand>,
-  options: { herdrSocket?: string } = {},
+  options: { herdrSocket?: string; streamHeartbeatMs?: number } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
     poolDir,
@@ -648,6 +648,57 @@ describe("pool server", () => {
     // the unhandled ENOENT.
     await server.settled();
   }, 25_000);
+
+  it("pushes an SSE heartbeat comment frame on the snapshot stream", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}), {
+      streamHeartbeatMs: 40,
+    });
+    await server.start();
+    await server.settled();
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    let data = "";
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && !data.includes(": heartbeat")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("stream closed before a heartbeat frame");
+      data += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+    // The heartbeat is a comment frame: nothing but the comment line, so a
+    // browser EventSource dispatches no event for it.
+    const frames = data.split("\n\n");
+    const heartbeat = frames.find((f) => f.includes(": heartbeat"));
+    expect(heartbeat).toBe(": heartbeat");
+  });
+
+  it("opens the snapshot stream with a frame publishing the heartbeat interval", async () => {
+    const poolDir = makePool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness({}), {
+      streamHeartbeatMs: 40,
+    });
+    await server.start();
+    await server.settled();
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    // The opening frame carries the configured interval, ahead of the
+    // replayed snapshot, so the client's silence window derives from it.
+    const firstFrame = new TextDecoder().decode(value).split("\n\n")[0];
+    expect(firstFrame).toBe('event: stream-config\ndata: {"heartbeatMs":40}');
+  });
 });
 
 describe("ticket events endpoint", () => {
@@ -2555,9 +2606,11 @@ describe("terminal endpoints", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ticket: "01", paneId: "pane-1", text: "working\nstill working" });
-    // The wire call is the prototype's verified peek shape, small line count.
-    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(6);
-    expect(TERMINAL_PEEK_LINES).toBeLessThanOrEqual(8);
+    // The wire call is the prototype's verified peek shape. The line count is
+    // at least a terminal height: a TUI fills the pane, and pane.read returns
+    // only the last N rendered rows, so a small count reads empty or a footer
+    // sliver (prototype/tui-prompt-paste/FINDINGS.md section 2, proven).
+    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(80);
     expect(fake.requests).toEqual([
       {
         method: "pane.read",

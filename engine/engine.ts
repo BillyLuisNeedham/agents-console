@@ -43,10 +43,12 @@ import {
 } from "./pool.ts";
 import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
+  defaultHarnessDescriptors,
   defaultHarnesses,
   elidePromptArgv,
   engineEnvSet,
   harnessStreamMode,
+  interactiveHarnessCommand,
   spawnEnv,
   type HarnessCommand,
   type SpawnContext,
@@ -59,9 +61,15 @@ import {
   listPaneIds,
   openAttemptTab,
   paneSendInput,
+  peekPane,
+  waitForPaneEnd,
 } from "./herdr.ts";
 import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
-import { StreamLineBuffer, deriveStreamLine } from "./streamlog.ts";
+import {
+  StreamLineBuffer,
+  TranscriptLineBuffer,
+  deriveStreamLine,
+} from "./streamlog.ts";
 import {
   branchExists,
   branchFor,
@@ -144,21 +152,28 @@ function outcomeFileName(ticketId: string, attempt: number | null): string {
     : `${ticketId}.attempt-${attempt}.outcome.json`;
 }
 
-// One attempt's Stream file path (ADR-0012), or null for a raw harness:
-// stream mode is keyed by harness name, not by spawn site, so opencode and
-// any custom harness keep the raw-passthrough log and write no Stream file.
-// Verify attempts write attempt-numbered Stream files directly, exactly as
-// their logs do, so N parallel attempts never share a path.
+// One attempt's Stream file path (ADR-0012, amended by ADR-0016 for the
+// terminal-backed path), or null when headless and the harness is raw: the
+// file's mode follows the pool. A terminal-backed attempt always gets a
+// Stream file — the `script` typescript capturing the whole session,
+// whatever the harness's stream mode — because the derived log comes from
+// it. A headless attempt's Stream file is the harness's structured stream,
+// which only stream-mode harnesses (claude, cursor) produce; raw harnesses
+// keep the old passthrough log. Verify attempts write attempt-numbered
+// Stream files directly, exactly as their logs do, so N parallel attempts
+// never share a path.
 function attemptStreamPath(
   runsDir: string,
   ticketId: string,
   harness: string,
   attempt: number | null,
   resolver: boolean,
+  terminal: boolean,
 ): string | null {
-  return harnessStreamMode(harness) === "stream"
-    ? join(runsDir, attemptStreamName(ticketId, attempt, resolver))
-    : null;
+  if (terminal || harnessStreamMode(harness) === "stream") {
+    return join(runsDir, attemptStreamName(ticketId, attempt, resolver));
+  }
+  return null;
 }
 
 interface TicketAssignment {
@@ -1485,9 +1500,10 @@ function abandonAdoption(session: Session, ticketId: string): void {
 }
 
 /**
- * The adopted attempt's background ending (ADR-0014): waits on the pane,
- * then records the attempt's exit exactly the way runTicket's tail would:
- * the exited event on every ending, the crash event and interrupt on a bad
+ * The adopted attempt's background ending (ADR-0014, amended by ADR-0016):
+ * waits for the attempt's Outcome, or the pane's loss without one, then
+ * records the attempt's exit exactly the way runTicket's tail would: the
+ * exited event on every ending, the crash event and interrupt on a bad
  * exit, the marker status and checkpoint Brief on a clean one, and a done
  * ticket's merge chained onto the session merge chain so it never runs its
  * git work concurrently with the drive's merges. The finalize never
@@ -1503,44 +1519,44 @@ async function finalizeAdoptedAttempt(
   if (!marker) return;
   const attempt = adopted.attempt;
   const assignment = session.assignments.get(ticketId);
-  // Streamed harnesses: resume the ADR-0012 derivation the killed engine
-  // left behind, over the bytes the pane's tee kept writing. The Stream file
-  // holds the attempt from its first byte, so deriving it whole reproduces
-  // the log exactly, and a fresh tailer is correct even though the pre-kill
-  // engine already derived part of it.
+  // Adopted attempts are terminal-backed by definition (they have a pane);
+  // their Stream file is the `script` typescript the killed engine's pane
+  // kept writing, so deriving it whole reproduces the log exactly, and a
+  // fresh tailer is correct even though the pre-kill engine already derived
+  // part of it.
   const streamPath = attemptStreamPath(
     session.runsDir,
     ticketId,
     assignment?.harness ?? "",
     null,
     false,
+    true,
   );
   const logPath = join(session.runsDir, attemptLogName(ticketId, null, false));
   const exitCodePath = join(
     session.runsDir,
     attemptExitCodeName(ticketId, null, false),
   );
+  const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
   const tailer = streamPath ? startPaneStreamTail(streamPath, logPath) : null;
-  const release = new AbortController();
   try {
-    // The same ending wait the live spawn runs, so the two cannot drift: an
-    // exit-code file already on disk finalises the attempt without waiting on
-    // anything, and otherwise the pane's end and the file race each other.
-    const ending = await waitForAttemptEnding(
+    // The adopted attempt ends on its Outcome without requiring pane exit,
+    // exactly as a live terminal-backed spawn: the TUI deliberately stays
+    // alive after the agent declares done (ADR-0016). The ending race
+    // underneath is attempt-ending.ts's: pane end against the exit-code
+    // file, with pane loss without an Outcome the crash signal. An outcome
+    // written while the engine was down resolves immediately.
+    const code = await awaitOutcomeOrPaneEnd(
       session.herdrSocket,
       adopted.paneId,
       exitCodePath,
-      release.signal,
+      outcomePath,
+      (path) => readOutcomeResult(path).ok,
     );
     // Abandoned while waiting (the human answered): the answer path owns
     // the ticket now and this finalize records nothing further.
     if (adopted.abandoned) return;
-    // The pane is gone with no file, exactly as the live spawn reads it.
-    const code =
-      ending === "pane-gone"
-        ? EXIT_CODE_PANE_GONE
-        : await readExitCode(exitCodePath);
-    // The answer path may have abandoned the attempt while the exit code was
+    // The answer path may have abandoned the attempt while the code was
     // being read; the map entry is the ownership record, so a missing or
     // flagged entry means the answer path owns the ticket from here.
     const current = session.adopted.get(ticketId);
@@ -1558,7 +1574,6 @@ async function finalizeAdoptedAttempt(
       adopted.paneId,
     );
   } finally {
-    release.abort();
     if (tailer) await tailer.finish().catch(() => {});
   }
 }
@@ -2206,6 +2221,7 @@ async function runResolver(
     resolver.harness,
     null,
     true,
+    session.state.config.terminal === "herdr",
   );
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
@@ -2242,7 +2258,9 @@ async function runResolver(
   // The resolver's spawn carries the same facts as every other spawn site
   // (ADR-0012); the resolver event above stays the run's own record.
   // Terminal-backed pools open the resolver its own named tab too: every
-  // spawn site shares one code path (ADR-0014).
+  // spawn site shares one code path (ADR-0014), and a terminal-backed pool
+  // hands the pane the interactive TUI while the headless fallback keeps
+  // the batch command (ADR-0016).
   const terminal =
     session.state.config.terminal === "herdr"
       ? await openAttemptTerminal(
@@ -2252,17 +2270,31 @@ async function runResolver(
           ctx.cwd,
         )
       : undefined;
+  const interactiveArgv =
+    session.state.config.terminal === "herdr"
+      ? interactiveHarnessCommand(session.harnesses, resolver.harness)(ctx)
+      : argv;
   const exitCode = await spawnWithTerminal(
     session.herdrSocket,
     terminal,
+    interactiveArgv,
     argv,
     ctx,
-    (terminalError) =>
+    // The resolver's completion: its outcome file holds a result the moment
+    // the resolver writes it, without waiting for the TUI to exit.
+    (path) => readResolverResult(path) !== null,
+    (terminalError, argvUsed) =>
       appendEvent(session.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: lastAttempt(session.runsDir, marker.id),
         kind: "spawned",
-        payload: spawnedPayload(argv, ctx, worktree.branch, terminal, terminalError),
+        payload: spawnedPayload(
+          argvUsed,
+          ctx,
+          worktree.branch,
+          terminal,
+          terminalError,
+        ),
       }),
   );
   const outcome = readResolverResult(outcomePath);
@@ -2962,6 +2994,7 @@ async function runGrader(
     assignment.harness,
     null,
     false,
+    session.state.config.terminal === "herdr",
   );
   const attemptOutcomePath = join(runsDir, outcomeFileName(build.id, attempt));
   const diffPath = join(runsDir, `${gid}.diff.patch`);
@@ -3011,6 +3044,10 @@ async function runGrader(
           ctx.cwd,
         )
       : undefined;
+  const interactiveArgv =
+    session.state.config.terminal === "herdr"
+      ? interactiveHarnessCommand(session.harnesses, assignment.harness)(ctx)
+      : argv;
   // The grader ticket's own attempt number for this round: the scheduled
   // event runGraders appended bumped lastAttempt to this round's number, so
   // the value read here (before this round's spawned append) is the one the
@@ -3019,14 +3056,19 @@ async function runGrader(
   const exitCode = await spawnWithTerminal(
     session.herdrSocket,
     terminal,
+    interactiveArgv,
     argv,
     ctx,
-    (terminalError) =>
+    // The grader's completion: a usable grade (or a definite refusal of
+    // one) the moment the grader writes its outcome, without waiting for the
+    // TUI to exit.
+    (path) => readGraderResult(path).ok,
+    (terminalError, argvUsed) =>
       appendEvent(runsDir, gid, {
         at: new Date().toISOString(),
         attempt: graderAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argv, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
       }),
   );
   // The grader's exit facts (ADR-0012), on the grade path and the crash
@@ -3873,6 +3915,7 @@ async function runHeadToHead(
     assignment.harness,
     null,
     false,
+    session.state.config.terminal === "herdr",
   );
   for (const side of sides) {
     writeFileSync(side.diffPath, attemptDiff(session, build.id, side.attempt));
@@ -3933,17 +3976,28 @@ async function runHeadToHead(
   // append above bumped lastAttempt to it, so the value read here (before
   // the spawned append) is the one the tab close keys off.
   const h2hAttempt = lastAttempt(runsDir, h2hId);
+  const interactiveArgv =
+    session.state.config.terminal === "herdr"
+      ? interactiveHarnessCommand(session.harnesses, assignment.harness)(ctx)
+      : argv;
   const exitCode = await spawnWithTerminal(
     session.herdrSocket,
     terminal,
+    interactiveArgv,
     argv,
     ctx,
-    (terminalError) =>
+    // The judge's completion: a pick (or tie, or a definite unusable
+    // refusal) the moment it writes its outcome, without waiting for the
+    // TUI to exit.
+    (path) =>
+      readHeadToHeadVerdict(path, [top.attempt, runnerUp.attempt]).kind !==
+      "unusable",
+    (terminalError, argvUsed) =>
       appendEvent(runsDir, h2hId, {
         at: new Date().toISOString(),
         attempt: h2hAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argv, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
       }),
   );
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
@@ -4985,6 +5039,7 @@ async function runTicket(
     assignment.harness,
     plan.verify ? plan.attempt : null,
     false,
+    snapshot.config.terminal === "herdr",
   );
   const outcomePath = join(
     env.runsDir,
@@ -5044,18 +5099,26 @@ async function runTicket(
           plan.cwd,
         )
       : undefined;
+  const interactiveArgv =
+    snapshot.config.terminal === "herdr"
+      ? interactiveHarnessCommand(env.harnesses, assignment.harness)(ctx)
+      : argv;
   const exitCode = await spawnWithTerminal(
     env.herdrSocket,
     terminal,
+    interactiveArgv,
     argv,
     ctx,
-    (terminalError) =>
+    // The attempt's completion: a valid Outcome the moment it appears,
+    // without waiting for the TUI to exit (ADR-0016).
+    (path) => readOutcomeResult(path).ok,
+    (terminalError, argvUsed) =>
       appendEvent(env.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: plan.attempt,
         kind: "spawned",
         payload: spawnedPayload(
-          argv,
+          argvUsed,
           ctx,
           plan.worktree?.branch ?? null,
           terminal,
@@ -5218,35 +5281,66 @@ function endWriteStream(
   });
 }
 
+// The pane-read line count for readiness and echo polling: a freshly spawned
+// pane renders mostly blank rows above its prompt, so a small read returns
+// empty (prototype finding); 200 lines covers the TUI's input area and the
+// recent transcript whatever the pane's height.
+const INTERACTIVE_PANE_READ_LINES = 200;
+// Readiness requires the ready pattern on this many consecutive reads,
+// ~this far apart: a single match can be a boot flicker, and empty reads
+// are not ready (prototype finding).
+const READINESS_CONFIRMATIONS = 3;
+const READINESS_POLL_MS = 500;
+// A TUI that cannot reach its ready frame within this bound is botched: the
+// engine closes the pane and the attempt surfaces as a failure, never a
+// silently idle tab.
+const READINESS_TIMEOUT_MS = 60_000;
+// claude's first-run trust dialog marks a directory claude has not seen;
+// the "No, exit" button label names it, and answering it needs pacing — a
+// key sent too early is dropped (prototype finding).
+const TRUST_DIALOG_PATTERN = "No, exit";
+const TRUST_DIALOG_SETTLE_MS = 1_500;
+const TRUST_DIALOG_KEY_GAP_MS = 500;
+// How many times the engine types the full prompt before the file-referencing
+// fallback, and how long an echo verification may wait per attempt.
+const PROMPT_TYPED_ATTEMPTS = 3;
+const PROMPT_ECHO_POLL_MS = 250;
+const PROMPT_ECHO_TIMEOUT_MS = 2_000;
+// The completion poll's cadence: how often a terminal-backed attempt checks
+// whether its Outcome has appeared.
+const ATTEMPT_COMPLETE_POLL_MS = 250;
+// The engine's own negative "exit codes" for a botched interactive spawn,
+// mapped to human reasons by the spawn sites. They are deliberately not
+// codes a harness can exit with, and stay clear of EXIT_CODE_UNREADABLE and
+// EXIT_CODE_PANE_GONE, the ending wait's own sentinels.
+const SPAWN_INTERACTIVE_READY_FAILED = -3;
+const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
+
+function sleep(ms: number): Promise<null> {
+  return new Promise((resolve) => setTimeout(() => resolve(null), ms));
+}
+
 /**
- * The ADR-0014 wrapper shell the attempt's pane runs, as one line of bash:
- * the harness with stdout and stderr merged into `tee` (the same merged
- * arrival order the headless pump writes), the exit code captured from
- * `PIPESTATUS` because a pipeline's `$?` would be tee's, and `exit` so the
- * pane's shell ends and herdr's `pane_exited` fires: without it the shell
- * would sit at its prompt and the engine would wait forever.
- *
- * The pipeline runs under an explicit `bash -c` because herdr spawns the
- * operator's login shell, not bash: verified live on a zsh host, where
- * `${PIPESTATUS[0]}` expands to nothing (zsh spells it `pipestatus`), the
- * exit-code file got a bare newline, and every successful attempt was
- * reported as `harness exited 1`. `PIPESTATUS` is the one portable way to
- * read a pipeline's first status, so the fix is to guarantee the shell it
- * needs rather than to guess at the host's. The trailing `exit` stays
- * outside `bash -c`, since it is the pane's own shell that must end.
+ * The ADR-0016 wrapper shell the attempt's pane runs, as one line of bash:
+ * `script -eqfc '<interactive argv>' <stream-file>` — script allocates the
+ * PTY the TUI requires, passes the session through to the pane live, and
+ * records both directions to the attempt's Stream file (the typescript the
+ * derived log comes from). `-e` makes script's own exit status the child's,
+ * so the trailing exit-code write carries the harness's code, not script's
+ * unconditional 0. The trailing exit-code write stays, firing whenever the
+ * TUI eventually exits, for crash forensics; there is no `exit`, because the
+ * pane stays open after the attempt completes for the operator to read and
+ * steer. The pane's shell is bash (herdr spawns bash panes).
  */
-function terminalWrapper(argv: string[], ctx: SpawnContext): string {
+function interactiveWrapper(argv: string[], ctx: SpawnContext): string {
   const command = argv.map(shellQuote).join(" ");
-  // Stream-mode harnesses tee to the Stream file, which the follow-file
-  // tailer derives the log from (the stderr merge rides into the Stream
-  // file with the stdout, the ADR's `2>&1` contract); raw harnesses tee
-  // straight to the log, so the pane writes exactly the file spawnToLog
-  // would have.
-  const teeTarget = ctx.streamPath ?? ctx.logPath;
-  const pipeline =
-    `${command} 2>&1 | tee ${shellQuote(teeTarget)}; ` +
-    `echo \${PIPESTATUS[0]} > ${shellQuote(ctx.exitCodePath)}`;
-  return `bash -c ${shellQuote(pipeline)}; exit`;
+  // Terminal-backed attempts always carry a Stream path (the typescript);
+  // the log path is the defensive fallback for a malformed context.
+  return (
+    `script -eqfc ${shellQuote(command)} ` +
+    `${shellQuote(ctx.streamPath ?? ctx.logPath)}; ` +
+    `echo $? > ${shellQuote(ctx.exitCodePath)}`
+  );
 }
 
 // One POSIX-safe single-quote: the quoted text cannot touch the surrounding
@@ -5276,13 +5370,13 @@ async function sendWrapperToPane(
   ctx: SpawnContext,
 ): Promise<string | undefined> {
   // The exit-code file must not carry a previous attempt's code, and the
-  // tailer must not read a stale Stream file's bytes before the pane's tee
-  // truncates it.
+  // tailer must not read a stale Stream file's bytes before script creates
+  // it fresh.
   rmSync(ctx.exitCodePath, { force: true });
   if (ctx.streamPath) rmSync(ctx.streamPath, { force: true });
   try {
     await paneSendInput(socketPath, paneId, {
-      text: terminalWrapper(argv, ctx),
+      text: interactiveWrapper(argv, ctx),
     });
     await paneSendInput(socketPath, paneId, { keys: ["enter"] });
     return undefined;
@@ -5293,66 +5387,293 @@ async function sendWrapperToPane(
 }
 
 /**
- * One terminal-backed spawn, end to end (ADR-0014, ADR-0015): send the
- * wrapper to the attempt's pane, record the spawned event, then wait the
- * pane out. Resolves with the harness's exit code exactly like `spawnToLog`,
- * so every spawn site's exit handling is unchanged. `recordSpawned` runs
- * only once the spawn's terminal outcome is known: a `pane.send_input`
- * failure falls back to headless BEFORE the event is recorded, and the error
- * it receives lands on the event (`pane_id: null` + `terminal_error`, the
- * same shape as the tab.create fallback), so the log never carries the dead
- * pane id the fallback just closed. Headless spawns — no terminal, or the
- * tab itself could not be opened — record and run exactly as a headless
- * pool's spawn would.
+ * One terminal-backed spawn, end to end (ADR-0014, ADR-0015, amended by
+ * ADR-0016): send the wrapper to the attempt's pane, record the spawned
+ * event, then run the interactive session — readiness, prompt delivery, and
+ * completion on the attempt's Outcome. Resolves with an exit code exactly
+ * like `spawnToLog`, so every spawn site's exit handling is unchanged: 0 on
+ * a valid Outcome, the wrapper's code on pane loss without one, and the
+ * engine's negative botched-spawn codes. The pane runs `interactiveArgv`
+ * (the TUI) wrapped in `script`; a headless fallback always runs
+ * `batchArgv`. `recordSpawned` runs only once the spawn's terminal outcome
+ * is known: a `pane.send_input` failure falls back to headless BEFORE the
+ * event is recorded, and the error it receives lands on the event
+ * (`pane_id: null` + `terminal_error`, the same shape as the tab.create
+ * fallback), so the log never carries the dead pane id the fallback just
+ * closed. Headless spawns — no terminal, or the tab itself could not be
+ * opened — record and run exactly as a headless pool's spawn would.
  */
 async function spawnWithTerminal(
   socketPath: string,
   terminal: AttemptTerminal | undefined,
-  argv: string[],
+  interactiveArgv: string[],
+  batchArgv: string[],
   ctx: SpawnContext,
-  recordSpawned: (terminalError?: string) => void,
+  completed: (outcomePath: string) => boolean,
+  recordSpawned: (terminalError: string | undefined, argv: string[]) => void,
 ): Promise<number> {
   if (!terminal?.paneId) {
-    recordSpawned();
-    return spawnToLog(argv, ctx);
+    recordSpawned(undefined, batchArgv);
+    return spawnToLog(batchArgv, ctx);
   }
   const terminalError = await sendWrapperToPane(
     socketPath,
     terminal.paneId,
-    argv,
+    interactiveArgv,
     ctx,
   );
-  recordSpawned(terminalError);
-  if (terminalError !== undefined) return spawnToLog(argv, ctx);
-  return awaitPaneSpawn(socketPath, terminal.paneId, ctx);
+  recordSpawned(terminalError, terminalError !== undefined ? batchArgv : interactiveArgv);
+  if (terminalError !== undefined) return spawnToLog(batchArgv, ctx);
+  return awaitInteractiveSpawn(socketPath, terminal.paneId, ctx, completed);
 }
 
 /**
- * The wait half of a terminal-backed spawn (ADR-0014): the engine waits for
- * the attempt's ending (attempt-ending.ts races herdr's pane end against the
- * wrapper's exit-code file) and the exit code comes from the file the wrapper
- * wrote. Streamed harnesses additionally get a follow-file tailer on the
- * tee'd Stream file feeding the ADR-0012 derivation into the attempt log,
- * live. The ending is not the exit code: whichever way the attempt ended, the
- * file is what is read, and a file that never arrived reads as unreadable and
- * crashes the attempt naming the wrapper, exactly as before.
+ * The session half of a terminal-backed spawn (ADR-0016): the tailer on the
+ * attempt's typescript Stream file, then prompt delivery (readiness wait,
+ * typed prompt, echo verification, retry, file-reference fallback), then the
+ * wait for the attempt's Outcome. A botched delivery closes the pane so the
+ * operator is not left a silently idle tab and resolves with the engine's
+ * negative code; the tailer always drains the transcript it has so the crash
+ * log carries what the pane showed.
  */
-async function awaitPaneSpawn(
+async function awaitInteractiveSpawn(
   socketPath: string,
   paneId: string,
   ctx: SpawnContext,
+  completed: (outcomePath: string) => boolean,
 ): Promise<number> {
   const tailer = ctx.streamPath
     ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
     : null;
-  const release = new AbortController();
   try {
-    const ending = await waitForAttemptEnding(
+    const failure = await deliverPrompt(socketPath, paneId, ctx);
+    if (failure !== undefined) {
+      void closePane(socketPath, paneId).catch(() => {});
+      return failure;
+    }
+    return await awaitOutcomeOrPaneEnd(
       socketPath,
       paneId,
       ctx.exitCodePath,
-      release.signal,
+      ctx.outcomePath,
+      completed,
     );
+  } finally {
+    if (tailer) await tailer.finish().catch(() => {});
+  }
+}
+
+/**
+ * The prompt delivery half of a terminal-backed spawn (ADR-0016): wait for
+ * the harness's ready frame, type the driver prompt, verify the echo, retry
+ * on a lost paste, and fall back to a short file-referencing command when
+ * full-prompt pasting fails. Resolves `undefined` once the prompt is in; a
+ * botched delivery resolves with the engine's negative code. A custom
+ * harness (no descriptor) declares no TUI: its command runs as-is under the
+ * script wrapper and its Outcome or pane end decides the attempt, so the
+ * engine types nothing and resolves immediately.
+ */
+async function deliverPrompt(
+  socketPath: string,
+  paneId: string,
+  ctx: SpawnContext,
+): Promise<number | undefined> {
+  try {
+    return await deliverPromptInner(socketPath, paneId, ctx);
+  } catch {
+    // A send failed mid-delivery (the daemon died after the wrapper was
+    // sent): the prompt never landed. One attempt's terminal trouble must
+    // never take the drive down, so this surfaces as the botched-spawn
+    // failure rather than a throw.
+    return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  }
+}
+
+async function deliverPromptInner(
+  socketPath: string,
+  paneId: string,
+  ctx: SpawnContext,
+): Promise<number | undefined> {
+  const descriptor = defaultHarnessDescriptors[ctx.harness];
+  if (!descriptor) return undefined;
+  if (
+    !(await waitForReadiness(socketPath, paneId, ctx.harness, descriptor.readyPattern))
+  ) {
+    return SPAWN_INTERACTIVE_READY_FAILED;
+  }
+  const prompt = descriptor.promptShaping.interactive(ctx);
+  // The fallback's prompt file, written by the engine so the path is known
+  // to both sides; named from the outcome path so N parallel attempts never
+  // share one. It carries the issue reference the primary prompt's driver
+  // line would have carried, then the body, so the agent the fallback
+  // reaches still starts on the right ticket.
+  const promptFile = ctx.outcomePath.replace(/\.json$/, ".prompt.txt");
+  writeFileSync(promptFile, `${ctx.issuePath}\n\n${ctx.body}`);
+  const echoTargets = [
+    descriptor.echoPattern,
+    // The issue reference rides every known TUI's prompt, so it is the
+    // harness-agnostic echo signal (claude and cursor also collapse the
+    // paste to their echoPattern marker).
+    ctx.issuePath,
+  ].filter((target): target is string => typeof target === "string");
+  const clearKeys = descriptor.clearKeys;
+  // A harness with no verified clear sequence cannot safely re-paste: a
+  // false-negative echo would concatenate. One attempt, then a loud fail.
+  // Clear keys are not sent before the first paste: opencode's ctrl+c
+  // exits on empty input (prototype/tui-clear-input/FINDINGS.md).
+  const attempts = clearKeys.length > 0 ? PROMPT_TYPED_ATTEMPTS : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      await paneSendInput(socketPath, paneId, { keys: clearKeys });
+    }
+    await paneSendInput(socketPath, paneId, { text: prompt });
+    if (await paneShows(socketPath, paneId, echoTargets)) {
+      await paneSendInput(socketPath, paneId, { keys: ["enter"] });
+      return undefined;
+    }
+    // The paste did not land in the input area (the prototype's false-ready
+    // paste loss), or it landed and the echo missed it. With clear keys
+    // the next iteration empties the input first; without, we fail now.
+  }
+  if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  // Full-prompt pasting failed: the file-referencing fallback, short enough
+  // to survive any input-buffer cap (prototype finding, all three harnesses).
+  // The command carries the attempt's own driver, so a grader, resolver, or
+  // head-to-head judge falls back to its own skill, not the ticket driver's.
+  const fallback = `/${ctx.driver} ${promptFile}`;
+  await paneSendInput(socketPath, paneId, { keys: clearKeys });
+  await paneSendInput(socketPath, paneId, { text: fallback });
+  if (await paneShows(socketPath, paneId, [promptFile])) {
+    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
+    return undefined;
+  }
+  return SPAWN_INTERACTIVE_PROMPT_FAILED;
+}
+
+/**
+ * Wait for the harness's ready frame on the pane's rendered content: the
+ * ready pattern on READINESS_CONFIRMATIONS consecutive reads, with empty
+ * reads not ready (a fresh pane renders mostly blank) and a single match
+ * discounted as a boot flicker (prototype findings). claude's first-run
+ * trust dialog is answered inside the wait, paced so the keys land. A pane
+ * that ends before the TUI comes up is a botched spawn, failed fast rather
+ * than polled to the timeout; a lost pane-end subscription (an old daemon,
+ * or a restart) just stops the watch and keeps polling the content.
+ */
+async function waitForReadiness(
+  socketPath: string,
+  paneId: string,
+  harness: string,
+  readyPattern: string,
+): Promise<boolean> {
+  const deadline = Date.now() + READINESS_TIMEOUT_MS;
+  let stable = 0;
+  let lost = false;
+  const controller = new AbortController();
+  const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
+  try {
+    while (Date.now() < deadline) {
+      let text: string;
+      if (lost) {
+        text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
+          () => "",
+        );
+      } else {
+        const settled = await Promise.race([
+          peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).then(
+            (t) => ({ text: t }) as const,
+            () => ({ text: "" }) as const,
+          ),
+          paneEnd.then((end) => ({ end }) as const),
+        ]);
+        if ("end" in settled) {
+          if (settled.end === "lost") {
+            lost = true;
+            continue;
+          }
+          return false;
+        }
+        text = settled.text;
+      }
+      if (harness === "claude" && text.includes(TRUST_DIALOG_PATTERN)) {
+        await answerTrustDialog(socketPath, paneId);
+        stable = 0;
+      } else {
+        stable = text.includes(readyPattern) ? stable + 1 : 0;
+      }
+      if (stable >= READINESS_CONFIRMATIONS) return true;
+      await sleep(READINESS_POLL_MS);
+    }
+    return false;
+  } finally {
+    controller.abort();
+  }
+}
+
+/**
+ * Answer claude's first-run trust dialog (prototype finding): settle so the
+ * dialog's controls render, move the selection to "Yes, I trust this
+ * folder" with down, and confirm with enter. Sending a key before the
+ * dialog settles is dropped, so the steps are paced.
+ */
+async function answerTrustDialog(
+  socketPath: string,
+  paneId: string,
+): Promise<void> {
+  await sleep(TRUST_DIALOG_SETTLE_MS);
+  await paneSendInput(socketPath, paneId, { keys: ["down"] }).catch(() => {});
+  await sleep(TRUST_DIALOG_KEY_GAP_MS);
+  await paneSendInput(socketPath, paneId, { keys: ["enter"] }).catch(() => {});
+}
+
+/**
+ * Whether the pane's rendered content shows any of the targets within the
+ * echo timeout: the paste-echo verification. A pane read that fails (a
+ * daemon blip mid-poll) is treated as not shown, so the delivery loop retries
+ * instead of throwing the drive down.
+ */
+async function paneShows(
+  socketPath: string,
+  paneId: string,
+  targets: string[],
+): Promise<boolean> {
+  const deadline = Date.now() + PROMPT_ECHO_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
+      () => "",
+    );
+    if (targets.some((target) => text.includes(target))) return true;
+    await sleep(PROMPT_ECHO_POLL_MS);
+  }
+  return false;
+}
+
+/**
+ * The completion wait of a terminal-backed spawn (ADR-0016, on ADR-0014's
+ * raced endings): the attempt ends on a valid Outcome without requiring pane
+ * exit — a TUI deliberately stays alive after the agent declares done — so
+ * the outcome poll races the attempt's ending (attempt-ending.ts races
+ * herdr's pane end against the wrapper's exit-code file, and a pane that
+ * vanishes from the listing with no file behind it is the pane's own crash),
+ * and the loser is released so one attempt costs the pool no subscription
+ * and no timer once it is over.
+ */
+async function awaitOutcomeOrPaneEnd(
+  socketPath: string,
+  paneId: string,
+  exitCodePath: string,
+  outcomePath: string,
+  completed: (path: string) => boolean,
+): Promise<number> {
+  const release = new AbortController();
+  try {
+    const ending = await Promise.race([
+      waitForAttemptEnding(socketPath, paneId, exitCodePath, release.signal),
+      outcomeCompleted(outcomePath, completed, release.signal),
+    ]);
+    // The Outcome may have been written a moment before the ending landed;
+    // confirm before reading the ending as a crash.
+    if (ending === "outcome" || completed(outcomePath)) return 0;
     // A pane that left the listing has already been given the ending's grace
     // window to write its file and did not, so there is nothing to read and
     // nothing to wait for: reading anyway buys only the retry's two seconds
@@ -5361,14 +5682,25 @@ async function awaitPaneSpawn(
     // The exit-code file is written before the shell exits, so it is already
     // there in the normal case; the retry only covers a daemon that reaps
     // the pane ahead of the wrapper's last write.
-    const code = await readExitCode(ctx.exitCodePath);
-    return code;
+    return readExitCode(exitCodePath);
   } finally {
-    // Whatever lost the race goes with the log tailer: one attempt must cost
-    // the pool no subscription and no timer once it is over.
     release.abort();
-    if (tailer) await tailer.finish();
   }
+}
+
+// The outcome half of the completion race: resolves once the attempt's
+// completion predicate holds, polling at the completion cadence. Once the
+// race is lost it stops polling and never settles, collected with the race.
+async function outcomeCompleted(
+  outcomePath: string,
+  completed: (path: string) => boolean,
+  release: AbortSignal,
+): Promise<"outcome"> {
+  while (!release.aborted) {
+    if (completed(outcomePath)) return "outcome";
+    await sleep(ATTEMPT_COMPLETE_POLL_MS);
+  }
+  return new Promise(() => {});
 }
 
 // No exit code ever arrived: the wrapper's file was missing or unparseable
@@ -5383,22 +5715,30 @@ const EXIT_CODE_UNREADABLE = -1;
 // words: nothing here is the wrapper's doing.
 const EXIT_CODE_PANE_GONE = -2;
 
-// The crash reason for a non-zero exit, whose three causes want different
-// words. A real code came from the harness; EXIT_CODE_UNREADABLE means the
-// harness's fate is unknown and the pane wrapper is the thing to look at;
+// The crash reason for a non-zero exit, whose causes want different words. A
+// real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
+// fate is unknown and the pane wrapper is the thing to look at;
 // EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
-// their faults and is why it names the pane instead. The distinction is worth
-// a helper: an unparseable file reported itself as `exited 1` on attempts
-// that had in fact succeeded, and read as a harness fault until the file
-// itself was inspected (ADR-0014's amendment). `paneId` is not optional so
-// that a new crash site has to say whether it has a pane at all; a headless
-// attempt has none and can never end this way.
+// their faults and is why it names the pane instead; the SPAWN_INTERACTIVE
+// codes are the engine's own botched interactive spawn, where the harness
+// never ran at all. The distinction is worth a helper: an unparseable file
+// reported itself as `exited 1` on attempts that had in fact succeeded, and
+// read as a harness fault until the file itself was inspected (ADR-0014's
+// amendment). `paneId` is not optional so that a new crash site has to say
+// whether it has a pane at all; a headless attempt has none and can never
+// end this way.
 export function exitCrashReason(
   code: number,
   exitCodePath: string,
   subject: string,
   paneId: string | null,
 ): string {
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "TUI never became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "prompt never landed";
+  }
   if (code === EXIT_CODE_UNREADABLE) {
     return (
       `${subject} exit code unreadable: the pane wrapper never wrote a ` +
@@ -5424,6 +5764,12 @@ export function exitCrashReason(
 export function exitedPhrase(code: number): string {
   if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
   if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "ended before its TUI became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "ended before its prompt landed";
+  }
   return `exited ${code}`;
 }
 
@@ -5445,12 +5791,14 @@ async function readExitCode(path: string): Promise<number> {
 }
 
 /**
- * The follow-file tailer (ADR-0014): reads the pane's tee'd Stream file as
- * it grows and derives the attempt log from it line by line, exactly the
- * derivation the headless pump runs (StreamLineBuffer + deriveStreamLine),
- * so the log is byte-for-byte what a headless streamed attempt would write.
- * Polls by positioned reads; `finish` drains the tail, flushes the line
- * buffer, and ends the log stream.
+ * The follow-file tailer (ADR-0014, amended by ADR-0016): reads the pane's
+ * `script` typescript Stream file as it grows and derives the attempt log
+ * from it line by line, stripping the ANSI and control noise so the log is
+ * the readable transcript of the whole session, operator input included
+ * (TranscriptLineBuffer). Terminal-backed attempts never derive stream-json
+ * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
+ * derivation. Polls by positioned reads; `finish` drains the tail, flushes
+ * the line buffer, and ends the log stream.
  */
 function startPaneStreamTail(
   streamPath: string,
@@ -5462,18 +5810,16 @@ function startPaneStreamTail(
     if (streamError === null) streamError = error;
   });
   const writeDerivedLine = async (line: string): Promise<void> => {
-    const text = deriveStreamLine(line) ?? line;
-    if (text === "") return;
     if (log.destroyed) return;
-    if (!log.write(`${text}\n`)) await drainWait(log);
+    if (!log.write(`${line}\n`)) await drainWait(log);
   };
-  let buffer = new StreamLineBuffer();
+  let buffer = new TranscriptLineBuffer();
   let offset = 0;
   let fd: number | null = null;
   let stepping = false;
   const chunk = new Uint8Array(64 * 1024);
-  // One poll step: open the file once the pane's tee has created it, then
-  // read everything new since the last offset through the line buffer.
+  // One poll step: open the file once script has created it, then read
+  // everything new since the last offset through the line buffer.
   // Concurrent ticks are skipped, never interleaved: a step awaits its log
   // writes under backpressure, and two steps running at once could write
   // the derived log out of order.
@@ -5485,10 +5831,10 @@ function startPaneStreamTail(
         try {
           fd = openSync(streamPath, "r");
         } catch {
-          return; // tee has not created the file yet
+          return; // script has not created the file yet
         }
         offset = 0;
-        buffer = new StreamLineBuffer();
+        buffer = new TranscriptLineBuffer();
       }
       let size: number;
       try {
@@ -5499,7 +5845,7 @@ function startPaneStreamTail(
       if (size < offset) {
         // The file was replaced (a re-run truncated it): re-read from scratch.
         offset = 0;
-        buffer = new StreamLineBuffer();
+        buffer = new TranscriptLineBuffer();
       }
       while (offset < size) {
         let read: number;
