@@ -194,6 +194,11 @@ interface FakeHerdrRequest {
   // clear keys empty it, Enter submits it (`submitted` records each
   // submit). `hideInputs` conceals that many pastes from pane.read so a
   // false-negative echo is testable — the text still occupies the input.
+  // `wrapWidth` renders the input area the way a real TUI draws it: a
+  // bordered box narrower than the pane, every input line hard-wrapped at
+  // that width with a border glyph and padding on each row, so a long echo
+  // target (an issue path) lands split across rows (the opencode viewport
+  // that issue #56 found).
   // The fake executes only the pane's FIRST Enter as bash — the wrapper — and
   // treats every later Enter as the TUI consuming input, matching how a real
   // pane hands control to the harness. Test-only controls simulate the
@@ -204,6 +209,7 @@ interface FakeHerdrRequest {
     rendered?: string;
     dropInputs?: number;
     hideInputs?: number;
+    wrapWidth?: number;
   }): Promise<{
     socketPath: string;
     requests: FakeHerdrRequest[];
@@ -218,6 +224,20 @@ interface FakeHerdrRequest {
     const defaultRendered = options?.rendered ?? "";
     const defaultDropInputs = options?.dropInputs ?? 0;
     const defaultHideInputs = options?.hideInputs ?? 0;
+    const wrapWidth = options?.wrapWidth;
+    // The input area as pane.read shows it: verbatim, or drawn as a bordered
+    // box that wraps each line at `wrapWidth` columns.
+    const renderInput = (inputArea: string): string => {
+      if (wrapWidth === undefined) return inputArea;
+      const rows: string[] = [];
+      for (const line of inputArea.split("\n")) {
+        for (let i = 0; i < Math.max(line.length, 1); i += wrapWidth) {
+          const chunk = line.slice(i, i + wrapWidth);
+          rows.push(`  ┃  ${chunk.padEnd(wrapWidth)}  ┃`);
+        }
+      }
+      return `\n${rows.join("\n")}\n`;
+    };
     const requests: FakeHerdrRequest[] = [];
     const submitted: string[] = [];
   let minted = 0;
@@ -310,7 +330,7 @@ interface FakeHerdrRequest {
           ? pane.booted
             ? pane.hideEcho
               ? pane.rendered
-              : `${pane.rendered}${pane.inputArea}`
+              : `${pane.rendered}${renderInput(pane.inputArea)}`
             : `${pane.rendered}${pane.buffer}`
           : "";
         respond({
@@ -5437,6 +5457,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
     rendered?: string;
     dropInputs?: number;
     hideInputs?: number;
+    wrapWidth?: number;
   }): ReturnType<typeof startExecutingFakeHerdr> {
     return startExecutingFakeHerdr(options);
   }
@@ -5724,6 +5745,75 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
             (s.params.keys as string[]).includes("enter"),
         );
         expect(promptEnters).toHaveLength(0);
+      }, 20000);
+
+      it("verifies the echo when the viewport wraps the issue path across bordered rows", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        // The TUI draws its input as a box narrower than the pane and wraps
+        // long lines inside it (issue #56: opencode split the 82-character
+        // issue path at a hyphen across two bordered rows, so a substring
+        // match on the viewport never saw it and the paste counted as lost).
+        // The width is well under the pool's issue path, so the echo target
+        // is guaranteed to wrap.
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          wrapWidth: 24,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        expect(run.interrupts.map((i) => i.kind)).not.toContain("crash");
+        // The wrapped viewport never held the issue path contiguously.
+        const issuePath = join(poolDir, "issues", "01-t.md");
+        expect(issuePath.length).toBeGreaterThan(24);
+        // One paste, verified first time: no clear, no retry, no fallback.
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        expect(sends).toHaveLength(4);
+        expect(sends[2].params.text as string).toContain(issuePath);
+        expect(sends[3].params.keys).toEqual(["enter"]);
+        expect(fake.submitted).toHaveLength(1);
+        expect(fake.submitted[0].split("\n").at(-1)).toBe(issuePath);
+      }, 20000);
+
+      it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("verifies the fallback's echo when the viewport wraps the prompt-file path", async () => {
+        const poolDir = makePool(poolFor(harness));
+        const { command } = harnessStub(poolDir, {
+          outcome: doneOutcome,
+          hold: true,
+        });
+        // Three lost pastes force the file-referencing fallback, whose echo
+        // target is the prompt file's path: longer than the box, so it wraps
+        // too (issue #56: the 73-character path in a 72-column box).
+        const fake = await startFakeHerdr({
+          rendered: readyFrame(harness),
+          dropInputs: 3,
+          wrapWidth: 24,
+        });
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("done");
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        const promptFile = join(poolDir, "runs", "01.outcome.prompt.txt");
+        expect(sends).toHaveLength(10);
+        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
+        expect(sends[9].params.keys).toEqual(["enter"]);
+        expect(fake.submitted).toEqual([`/implement ${promptFile}`]);
       }, 20000);
 
       it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("submits one clean prompt when a landed paste's echo is unseen", async () => {

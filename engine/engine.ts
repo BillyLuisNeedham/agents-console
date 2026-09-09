@@ -5642,10 +5642,35 @@ async function paneShows(
     const text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
       () => "",
     );
-    if (targets.some((target) => text.includes(target))) return true;
+    if (targets.some((target) => viewportShows(text, target))) return true;
     await sleep(PROMPT_ECHO_POLL_MS);
   }
   return false;
+}
+
+// What a row break inside a TUI's input box puts between the two halves of
+// a wrapped line: the newline, the padding on both rows, and the box-drawing
+// or block glyphs of the box border (U+2500–U+259F).
+const VIEWPORT_WRAP_CHROME = /[\s\u2500-\u259F]+/g;
+
+/**
+ * Whether one rendered viewport shows the target, tolerating the TUI's soft
+ * wrap. A TUI draws its input area as a box narrower than the pane and breaks
+ * a long line inside it at a hyphen, a slash, or a space, so a long echo
+ * target — the issue path the typed prompt ends with, or the fallback's
+ * prompt-file path — lands split across two bordered rows, and a plain
+ * substring match never sees a paste that did land (issue #56, live opencode
+ * under herdr: the 82-character issue path wrapped at a hyphen, and the
+ * 73-character prompt-file path in a 72-column box; every attempt then
+ * "never landed"). Dropping everything a row break can insert from both the
+ * viewport and the target reassembles a wrapped path, while a target that was
+ * never typed still cannot appear: the characters must all be there, in order,
+ * with nothing but chrome between them.
+ */
+function viewportShows(text: string, target: string): boolean {
+  if (text.includes(target)) return true;
+  const wanted = target.replace(VIEWPORT_WRAP_CHROME, "");
+  return wanted !== "" && text.replace(VIEWPORT_WRAP_CHROME, "").includes(wanted);
 }
 
 /**
