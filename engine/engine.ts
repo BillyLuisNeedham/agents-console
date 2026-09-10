@@ -5316,31 +5316,56 @@ const ATTEMPT_COMPLETE_POLL_MS = 250;
 const SPAWN_INTERACTIVE_READY_FAILED = -3;
 const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
 
+// Whether a spawn's code is one of the engine's own: the harness never ran
+// (or never took its prompt), as opposed to a code the harness exited with.
+function isBotchedSpawnCode(code: number): boolean {
+  return (
+    code === SPAWN_INTERACTIVE_READY_FAILED ||
+    code === SPAWN_INTERACTIVE_PROMPT_FAILED
+  );
+}
+
 function sleep(ms: number): Promise<null> {
   return new Promise((resolve) => setTimeout(() => resolve(null), ms));
 }
 
 /**
  * The ADR-0016 wrapper shell the attempt's pane runs, as one line of bash:
- * `script -eqfc '<interactive argv>' <stream-file>` — script allocates the
- * PTY the TUI requires, passes the session through to the pane live, and
- * records both directions to the attempt's Stream file (the typescript the
- * derived log comes from). `-e` makes script's own exit status the child's,
- * so the trailing exit-code write carries the harness's code, not script's
- * unconditional 0. The trailing exit-code write stays, firing whenever the
- * TUI eventually exits, for crash forensics; there is no `exit`, because the
- * pane stays open after the attempt completes for the operator to read and
- * steer. The pane's shell is bash (herdr spawns bash panes).
+ * the interactive argv under `script`, which allocates the PTY the TUI
+ * requires, passes the session through to the pane live, and records both
+ * directions to the attempt's Stream file (the typescript the derived log
+ * comes from). `-e` makes script's own exit status the child's, so the
+ * trailing exit-code write carries the harness's code, not script's
+ * unconditional 0; `-q` drops script's own start and end banners. The
+ * recording form is the platform's, because the two `script`s disagree on
+ * how the command arrives (issue #58): util-linux's takes it as one string
+ * after `-c` and flushes on `-f`, so Linux runs
+ * `script -eqfc '<argv>' <stream-file>`; BSD's, which macOS ships, has no
+ * `-c` — the command's words follow the file — and flushes on `-F`, so
+ * darwin runs `script -eqF <stream-file> <argv words>`, each word quoted so
+ * bash hands script exactly the argv. `-e` and `-q` are common to both. The
+ * trailing exit-code write stays, firing whenever the TUI eventually exits,
+ * for crash forensics; there is no `exit`, because the pane stays open after
+ * the attempt completes for the operator to read and steer. The pane's
+ * shell is the operator's login shell (ADR-0014: zsh on a Mac), so the line
+ * uses only what every POSIX shell reads the same way, single quotes and
+ * `$?`, and needs no `bash -c` of its own. Exported for the per-platform
+ * shape test: neither form fails until it reaches a real pane.
  */
-function interactiveWrapper(argv: string[], ctx: SpawnContext): string {
+export function interactiveWrapper(
+  argv: string[],
+  ctx: SpawnContext,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const command = argv.map(shellQuote).join(" ");
   // Terminal-backed attempts always carry a Stream path (the typescript);
   // the log path is the defensive fallback for a malformed context.
-  return (
-    `script -eqfc ${shellQuote(command)} ` +
-    `${shellQuote(ctx.streamPath ?? ctx.logPath)}; ` +
-    `echo $? > ${shellQuote(ctx.exitCodePath)}`
-  );
+  const file = shellQuote(ctx.streamPath ?? ctx.logPath);
+  const record =
+    platform === "darwin"
+      ? `script -eqF ${file} ${command}`
+      : `script -eqfc ${shellQuote(command)} ${file}`;
+  return `${record}; echo $? > ${shellQuote(ctx.exitCodePath)}`;
 }
 
 // One POSIX-safe single-quote: the quoted text cannot touch the surrounding
@@ -5392,8 +5417,9 @@ async function sendWrapperToPane(
  * event, then run the interactive session — readiness, prompt delivery, and
  * completion on the attempt's Outcome. Resolves with an exit code exactly
  * like `spawnToLog`, so every spawn site's exit handling is unchanged: 0 on
- * a valid Outcome, the wrapper's code on pane loss without one, and the
- * engine's negative botched-spawn codes. The pane runs `interactiveArgv`
+ * a valid Outcome, the wrapper's code on pane loss without one or on a
+ * harness that exited before its TUI came up, and the engine's negative
+ * botched-spawn codes. The pane runs `interactiveArgv`
  * (the TUI) wrapped in `script`; a headless fallback always runs
  * `batchArgv`. `recordSpawned` runs only once the spawn's terminal outcome
  * is known: a `pane.send_input` failure falls back to headless BEFORE the
@@ -5433,8 +5459,13 @@ async function spawnWithTerminal(
  * typed prompt, echo verification, retry, file-reference fallback), then the
  * wait for the attempt's Outcome. A botched delivery closes the pane so the
  * operator is not left a silently idle tab and resolves with the engine's
- * negative code; the tailer always drains the transcript it has so the crash
- * log carries what the pane showed.
+ * negative code. A harness that exited on its own before the TUI came up
+ * resolves with its code and keeps its pane, the way every crashed
+ * attempt's tab stays open (ADR-0014): the pane shows why it died, and when
+ * `script` itself refused to run (issue #58) the pane is the only place
+ * that shows it, the Stream file having never been created. The tailer
+ * always drains the transcript it has so the crash log carries what the
+ * pane showed.
  */
 async function awaitInteractiveSpawn(
   socketPath: string,
@@ -5448,7 +5479,9 @@ async function awaitInteractiveSpawn(
   try {
     const failure = await deliverPrompt(socketPath, paneId, ctx);
     if (failure !== undefined) {
-      void closePane(socketPath, paneId).catch(() => {});
+      if (isBotchedSpawnCode(failure)) {
+        void closePane(socketPath, paneId).catch(() => {});
+      }
       return failure;
     }
     return await awaitOutcomeOrPaneEnd(
@@ -5496,11 +5529,20 @@ async function deliverPromptInner(
 ): Promise<number | undefined> {
   const descriptor = defaultHarnessDescriptors[ctx.harness];
   if (!descriptor) return undefined;
-  if (
-    !(await waitForReadiness(socketPath, paneId, ctx.harness, descriptor.readyPattern))
-  ) {
-    return SPAWN_INTERACTIVE_READY_FAILED;
-  }
+  const readiness = await waitForReadiness(
+    socketPath,
+    paneId,
+    ctx.harness,
+    descriptor.readyPattern,
+    ctx.exitCodePath,
+  );
+  // The harness exited before its TUI came up: the wrapper's exit-code file
+  // holds its code, and that code, not a botched-spawn sentinel, is the
+  // attempt's ending, exactly as a headless spawn that died on launch
+  // reports (a 0 with no Outcome lands on the spawn sites' missing-outcome
+  // path).
+  if (readiness === "exited") return readExitCode(ctx.exitCodePath);
+  if (readiness !== "ready") return SPAWN_INTERACTIVE_READY_FAILED;
   const prompt = descriptor.promptShaping.interactive(ctx);
   // The fallback's prompt file, written by the engine so the path is known
   // to both sides; named from the outcome path so N parallel attempts never
@@ -5550,6 +5592,11 @@ async function deliverPromptInner(
   return SPAWN_INTERACTIVE_PROMPT_FAILED;
 }
 
+// How the readiness wait ended: the ready frame confirmed, the wrapper's
+// exit-code file appeared (the harness exited first), the pane ended with no
+// file behind it, or the timeout.
+type Readiness = "ready" | "exited" | "pane-ended" | "timed-out";
+
 /**
  * Wait for the harness's ready frame on the pane's rendered content: the
  * ready pattern on READINESS_CONFIRMATIONS consecutive reads, with empty
@@ -5557,15 +5604,27 @@ async function deliverPromptInner(
  * discounted as a boot flicker (prototype findings). claude's first-run
  * trust dialog is answered inside the wait, paced so the keys land. A pane
  * that ends before the TUI comes up is a botched spawn, failed fast rather
- * than polled to the timeout; a lost pane-end subscription (an old daemon,
- * or a restart) just stops the watch and keeps polling the content.
+ * than polled to the timeout, and so is a wrapper that finishes before it:
+ * the exit-code file appearing means `script` has already returned — the
+ * harness died on launch (a binary the pane cannot find, a wrapper the
+ * platform's `script` rejects: issue #58) — and the pane is sitting at its
+ * shell prompt, which never ends on its own, so without the file watch the
+ * wait ran to its timeout and reported a TUI that "never became ready" over
+ * a harness that had exited with a code of its own. The file is fresh: the
+ * wrapper send removed any earlier attempt's. A pane end is checked against
+ * the file too, since the two can land together (a shell that exits with
+ * the wrapper, an operator closing a dead tab) and the harness's own code
+ * is the truer ending of the two (ADR-0014: neither observation trusted
+ * alone). A lost pane-end subscription (an old daemon, or a restart) just
+ * stops the watch and keeps polling the content.
  */
 async function waitForReadiness(
   socketPath: string,
   paneId: string,
   harness: string,
   readyPattern: string,
-): Promise<boolean> {
+  exitCodePath: string,
+): Promise<Readiness> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS;
   let stable = 0;
   let lost = false;
@@ -5573,6 +5632,7 @@ async function waitForReadiness(
   const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
   try {
     while (Date.now() < deadline) {
+      if (existsSync(exitCodePath)) return "exited";
       let text: string;
       if (lost) {
         text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
@@ -5591,7 +5651,7 @@ async function waitForReadiness(
             lost = true;
             continue;
           }
-          return false;
+          return existsSync(exitCodePath) ? "exited" : "pane-ended";
         }
         text = settled.text;
       }
@@ -5601,10 +5661,10 @@ async function waitForReadiness(
       } else {
         stable = text.includes(readyPattern) ? stable + 1 : 0;
       }
-      if (stable >= READINESS_CONFIRMATIONS) return true;
+      if (stable >= READINESS_CONFIRMATIONS) return "ready";
       await sleep(READINESS_POLL_MS);
     }
-    return false;
+    return "timed-out";
   } finally {
     controller.abort();
   }
