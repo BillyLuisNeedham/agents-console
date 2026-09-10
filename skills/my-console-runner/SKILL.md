@@ -325,12 +325,16 @@ Leave these alone rather than rediscovering them:
 - Line-1 markers are dual-written alongside the sqlite checkpoint and are the truth on conflict,
   so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
-- The pool config is parsed once, at boot. An edit to `console.json` — a new assignment, or
-  `terminal: herdr` — only takes effect on a restart. A restart is otherwise cheap: markers and
-  the checkpoint are the truth, so ticket state and a pending interrupt both survive it. What
-  does not survive is an attempt in flight: killing the server kills its harness, and the
-  engine schedules a fresh attempt at boot, discarding whatever the killed one had done. Never
-  restart a pool that is `running` without saying so first.
+- The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
+  super-step boundary (ADR-0017): an edit lands on any ticket with no Attempt in flight — a
+  fresh Spawn, a checkpoint resume, a ticket Review sent back, one that has never run — at its
+  next boundary, no restart needed. `roster`, `agents`, `selection`, `terminal`, and `port` stay
+  exactly as they were at boot; an edit to any of those, `terminal: herdr` included, only takes
+  effect on a restart. A restart is otherwise cheap: markers and the checkpoint are the truth,
+  so ticket state and a pending interrupt both survive it. What does not survive is an attempt
+  in flight: killing the server kills its harness, and the engine schedules a fresh attempt at
+  boot, discarding whatever the killed one had done. Never restart a pool that is `running`
+  without saying so first.
 
 ---
 

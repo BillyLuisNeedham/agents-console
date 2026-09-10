@@ -36,6 +36,7 @@ const EVENT_KINDS = [
   "review-reject",
   "spawn-adopted",
   "spawn-rejected",
+  "reassigned",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];
