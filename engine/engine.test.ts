@@ -34,6 +34,7 @@ import {
 } from "./pool.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
+import { processIsLive } from "./children.ts";
 import {
   defaultHarnessDescriptors,
   type SpawnContext,
@@ -10861,5 +10862,200 @@ describe("accept/process split", () => {
     expect(resumed.interrupts.map((i) => i.kind)).toEqual(["review"]);
     expect(resumed.final.tickets["01"]).toBe("done");
     expect(readQueuedAnswers(poolDir).answers[0]?.processedAt).not.toBeNull();
+  });
+});
+
+// Headless orphans (ADR-0017, issue #65): a headless attempt is the engine's
+// child, tracked from spawn to exit; a shutdown stops it and its own children
+// as one process group, and a boot that finds a previous engine's attempt
+// still running in its worktree stops it before scheduling the re-run.
+describe("headless orphans", () => {
+  interface EventLine {
+    at: string;
+    attempt: number;
+    kind: string;
+    payload: Record<string, unknown>;
+  }
+
+  function readEventsFile(poolDir: string, id: string): EventLine[] {
+    const path = join(poolDir, "runs", `${id}.events.jsonl`);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as EventLine);
+  }
+
+  // A harness that never finishes on its own: it forks a sleeper (the
+  // grandchild a real harness's tool calls are) and records both pids.
+  function lingeringHarness(poolDir: string): Record<string, HarnessCommand> {
+    const script = join(poolDir, "linger.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        'sleep 60 &',
+        'echo $! > "$1/grandchild.pid"',
+        "wait",
+        "",
+      ].join("\n"),
+    );
+    return { stub: () => ["bash", script, poolDir] };
+  }
+
+  function grandchildPid(poolDir: string): number | null {
+    const path = join(poolDir, "grandchild.pid");
+    if (!existsSync(path)) return null;
+    const text = readFileSync(path, "utf8").trim();
+    return text === "" ? null : Number(text);
+  }
+
+  it("shutdown stops a running attempt with its grandchildren, records the stop, and raises no crash interrupt", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const run = startPool({ poolDir, harnesses: lingeringHarness(poolDir) });
+    await waitFor(
+      () =>
+        readEventsFile(poolDir, "01").some(
+          (e) => e.kind === "spawned" && typeof e.payload.pid === "number",
+        ) && grandchildPid(poolDir) !== null,
+    );
+    const spawned = readEventsFile(poolDir, "01").find((e) => e.kind === "spawned")!;
+    const pid = spawned.payload.pid as number;
+    const grandchild = grandchildPid(poolDir)!;
+    expect(processIsLive(pid)).toBe(true);
+    expect(processIsLive(grandchild)).toBe(true);
+
+    await run.shutdown(1_000);
+
+    // The group went with the harness: the sleeper it forked is gone too.
+    expect(processIsLive(pid)).toBe(false);
+    await waitFor(() => !processIsLive(grandchild), 2_000);
+    // The stop is on the ticket log as what it was, not as a harness failure.
+    const kinds = readEventsFile(poolDir, "01").map((e) => e.kind);
+    expect(kinds).toEqual(["scheduled", "spawned", "exited", "crash"]);
+    const crash = readEventsFile(poolDir, "01").find((e) => e.kind === "crash")!;
+    expect(crash.payload.reason).toBe("harness stopped by engine shutdown (exited 143)");
+    // No crash interrupt: the super-step joined under shutdown and the
+    // ticket is left in-progress for the next boot to reset.
+    expect(run.interrupts).toEqual([]);
+    expect(run.final.log).toContain(
+      "engine shutdown: super-step joined; no crash interrupts raised and nothing more scheduled",
+    );
+    expect(loadPoolMarkers(join(poolDir, "issues"))[0]!.status).toBe("in-progress");
+
+    // The relaunch: nothing is alive, so the ticket resets with the plain
+    // note and re-runs to the review gate.
+    const rig = stubHarness({ "01": { status: "done" } });
+    const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(restarted.phase).toBe("quiescent");
+    expect(restarted.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(rig.spawnOrder).toEqual(["01"]);
+    const issue = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issue).toContain("No agent from that process was found still running at this boot");
+    expect(issue).not.toContain("was found still running in the working tree");
+    // The relaunch's own spawn is not an orphan: the earlier attempt's pid
+    // was recorded, then closed by its exited event.
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "crash"),
+    ).toHaveLength(1);
+  });
+
+  it("boot stops a previous engine's attempt still running in its worktree, then re-runs the ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=in-progress -->" },
+      ],
+      config: stubConfig,
+    });
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    const worktree = join(poolDir, "wt-01");
+    mkdirSync(worktree);
+    // The orphan: a process group nobody owns, working in the recorded cwd,
+    // exactly what an untrapped kill of the previous server leaves behind.
+    const orphan = Bun.spawn(["bash", "-c", "sleep 60 & wait"], {
+      cwd: worktree,
+      detached: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      appendEvent(join(poolDir, "runs"), "01", {
+        at: new Date().toISOString(),
+        attempt: 1,
+        kind: "spawned",
+        payload: { argv: ["bash"], cwd: worktree, branch: null, pid: orphan.pid },
+      });
+
+      const rig = stubHarness({ "01": { status: "done" } });
+      const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+      expect(processIsLive(orphan.pid)).toBe(false);
+      expect(run.phase).toBe("quiescent");
+      expect(rig.spawnOrder).toEqual(["01"]);
+      const events = readEventsFile(poolDir, "01");
+      const crashAt = events.findIndex((e) => e.kind === "crash");
+      const respawnAt = events.findIndex(
+        (e, i) => i > 0 && e.kind === "spawned",
+      );
+      // The stop is recorded on attempt 1 before attempt 2 spawns.
+      expect(crashAt).toBeGreaterThan(0);
+      expect(crashAt).toBeLessThan(respawnAt);
+      expect(events[crashAt]!.attempt).toBe(1);
+      expect(events[crashAt]!.payload.reason).toBe(
+        `orphan attempt (pid ${orphan.pid}) from a previous engine process was still running at boot; stopped by the engine`,
+      );
+      expect(run.final.log).toContain(
+        `ticket 01: orphan attempt 1 (pid ${orphan.pid}) stopped at boot`,
+      );
+      const issue = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+      expect(issue).toContain(
+        `attempt 1 (pid ${orphan.pid}) was found still running in the working tree`,
+      );
+    } finally {
+      try {
+        process.kill(-orphan.pid, "SIGKILL");
+      } catch {
+        // already stopped, which is the point
+      }
+    }
+  });
+
+  it("a recorded pid that is alive but working elsewhere is a reused pid, not an orphan", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=in-progress -->" },
+      ],
+      config: stubConfig,
+    });
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    const worktree = join(poolDir, "wt-01");
+    mkdirSync(worktree);
+    // This test process is alive, and its cwd is not the recorded worktree.
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { argv: ["bash"], cwd: worktree, branch: null, pid: process.pid },
+    });
+
+    const rig = stubHarness({ "01": { status: "done" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnOrder).toEqual(["01"]);
+    expect(
+      readEventsFile(poolDir, "01").filter((e) => e.kind === "crash"),
+    ).toEqual([]);
+    expect(run.final.log).toContain(
+      "ticket 01: marker was in-progress with no live agent; back to ready",
+    );
+    const issue = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
+    expect(issue).toContain("No agent from that process was found still running at this boot");
   });
 });
