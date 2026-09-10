@@ -5662,10 +5662,13 @@ const VIEWPORT_WRAP_CHROME = /[\s\u2500-\u259F]+/g;
  * substring match never sees a paste that did land (issue #56, live opencode
  * under herdr: the 82-character issue path wrapped at a hyphen, and the
  * 73-character prompt-file path in a 72-column box; every attempt then
- * "never landed"). Dropping everything a row break can insert from both the
- * viewport and the target reassembles a wrapped path, while a target that was
- * never typed still cannot appear: the characters must all be there, in order,
- * with nothing but chrome between them.
+ * "never landed"). claude and cursor collapse a long paste to their
+ * `Pasted text` marker, which fits on one row, but cursor hard-wraps the
+ * fallback command's path the same way (verified live), so the tolerance
+ * covers every harness's fallback. Dropping everything a row break can
+ * insert from both the viewport and the target reassembles a wrapped path,
+ * while a target that was never typed still cannot appear: the characters
+ * must all be there, in order, with nothing but chrome between them.
  */
 function viewportShows(text: string, target: string): boolean {
   if (text.includes(target)) return true;
