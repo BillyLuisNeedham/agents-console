@@ -21,7 +21,9 @@ import {
   LOG_CHUNK_BYTES,
   resolveTerminalPane,
   spawnedPaneAllowlist,
+  TERMINAL_MIN_BUN_VERSION,
   TERMINAL_PEEK_LINES,
+  terminalRuntimeRefusal,
   terminalSpawnRefusal,
   type PoolServer,
   type PoolServerOptions,
@@ -3176,5 +3178,40 @@ describe("currentAttemptPaneIds", () => {
       payload: { pane_id: "pane-2b" },
     });
     expect(currentAttemptPaneIds(runsDir, two)).toEqual({ "02": "pane-2b" });
+  });
+});
+
+describe("terminalRuntimeRefusal", () => {
+  // Issue #61: Bun 1.2.13 segfaulted inside its event loop a few hundred
+  // milliseconds into a terminal-backed boot, with the same pool booting
+  // clean headless. The terminal path refuses the runtime with a line of
+  // its own; headless pools are never refused, being the workaround.
+  it("refuses a terminal-backed pool on a Bun below the floor", () => {
+    const refusal = terminalRuntimeRefusal({ terminal: "herdr" }, "1.2.13");
+    expect(refusal).toContain("Bun 1.2.13");
+    expect(refusal).toContain(TERMINAL_MIN_BUN_VERSION);
+    expect(refusal).toContain("issue #61");
+    expect(refusal).toContain("headless");
+  });
+
+  it("boots a terminal-backed pool on the floor and above", () => {
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, TERMINAL_MIN_BUN_VERSION)).toBeNull();
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, "1.3.14")).toBeNull();
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, "1.4.2")).toBeNull();
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, "2.0.0")).toBeNull();
+  });
+
+  it("never refuses a headless pool", () => {
+    expect(terminalRuntimeRefusal({}, "1.2.13")).toBeNull();
+    expect(terminalRuntimeRefusal({ port: 8787 }, "1.0.0")).toBeNull();
+  });
+
+  it("never refuses on a version it cannot read", () => {
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, "")).toBeNull();
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, "canary")).toBeNull();
+  });
+
+  it("boots on this test run's own Bun", () => {
+    expect(terminalRuntimeRefusal({ terminal: "herdr" }, Bun.version)).toBeNull();
   });
 });
