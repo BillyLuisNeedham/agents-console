@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ATTEMPT_TAB_LABEL_MAX,
   attemptTabLabel,
+  closeTab,
   herdrRpc,
   openAttemptTab,
   waitForPaneEnd,
@@ -133,11 +134,74 @@ describe("waitForPaneEnd", () => {
     expect(fake.requests[0]).toEqual({
       method: "events.subscribe",
       params: {
-        subscriptions: [{ type: "pane.exited" }, { type: "pane.closed" }],
+        subscriptions: [
+          { type: "pane.exited" },
+          { type: "pane.closed" },
+          { type: "tab.closed" },
+        ],
       },
     });
     fake.pushEvent("pane_exited", { pane_id: "pane-1" });
     expect(await ending).toBe("exited");
+  });
+
+  it("settles closed when the pane's tab is closed", async () => {
+    // Issue #61: `tab.close` pushes one `tab_closed` and no `pane_closed`
+    // for the panes it took (verified against herdr 0.8.2), so a wait that
+    // only listened for pane events parked for good when the operator
+    // closed an attempt's tab. The tab event names no pane, so the wait
+    // re-reads the listing and settles on the pane's absence.
+    const fake = await startFakeHerdr();
+    const tab = await openAttemptTab(fake.socketPath, "01 · Tab", "/work/tree");
+    const ending = waitForPaneEnd(fake.socketPath, tab.paneId);
+    await subscribedAndChecked(fake);
+    await closeTab(fake.socketPath, tab.tabId);
+    expect(await ending).toBe("closed");
+  });
+
+  it("keeps waiting through another tab's close", async () => {
+    // Every subscriber sees every tab's close; only the listing says whose
+    // pane went with it.
+    const fake = await startFakeHerdr();
+    const mine = await openAttemptTab(fake.socketPath, "01 · Mine", "/work/tree");
+    const other = await openAttemptTab(fake.socketPath, "02 · Other", "/work/tree");
+    const ending = waitForPaneEnd(fake.socketPath, mine.paneId);
+    await subscribedAndChecked(fake);
+    await closeTab(fake.socketPath, other.tabId);
+    await until(
+      "the listing re-read after the other tab's close",
+      () => fake.requests.filter((r) => r.method === "pane.list").length >= 4,
+    );
+    let settled = false;
+    void ending.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    fake.pushEvent("pane_exited", { pane_id: mine.paneId });
+    expect(await ending).toBe("exited");
+  });
+
+  it("settles lost at once when released mid-connect, and still lets go of the socket", async () => {
+    // Issue #61: a release that lands before the connect completes must not
+    // destroy a socket the runtime is still connecting. The wait resolves
+    // immediately and the socket is torn down from its own connect callback,
+    // so the daemon sees the subscriber arrive and leave.
+    const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
+    const release = new AbortController();
+    const ending = waitForPaneEnd(fake.socketPath, "pane-1", release.signal);
+    release.abort();
+    expect(await ending).toBe("lost");
+    await until("the connection come and go", () => fake.connections === 1);
+    await until("the subscriber go", () => fake.subscribers === 0);
+  });
+
+  it("resolves lost without connecting when released before it starts", async () => {
+    const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
+    const release = new AbortController();
+    release.abort();
+    expect(await waitForPaneEnd(fake.socketPath, "pane-1", release.signal)).toBe("lost");
+    expect(fake.connections).toBe(0);
   });
 
   it("settles closed when the pane vanished without exiting", async () => {

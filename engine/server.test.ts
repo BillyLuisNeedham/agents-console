@@ -2794,20 +2794,18 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     const connections = new Set<import("node:net").Socket>();
     const firePaneEnd = (paneId: string, event: "pane_exited" | "pane_closed"): void => {
       panes.delete(paneId);
-      // herdr pushes every pane's events to every subscriber; the engine
-      // filters by pane id. A subscriber whose wait already settled has
-      // closed its end, so prune before broadcasting.
+      broadcast(event, { pane_id: paneId, workspace_id: "w1" });
+    };
+    // herdr pushes every event to every subscriber; the engine filters. A
+    // subscriber whose wait already settled has closed its end, so prune
+    // before broadcasting.
+    const broadcast = (event: string, data: Record<string, unknown>): void => {
       for (const sub of [...subscribers]) {
         if (sub.destroyed || !sub.writable) {
           subscribers.splice(subscribers.indexOf(sub), 1);
           continue;
         }
-        sub.write(
-          JSON.stringify({
-            event,
-            data: { type: event, pane_id: paneId, workspace_id: "w1" },
-          }) + "\n",
-        );
+        sub.write(JSON.stringify({ event, data: { type: event, ...data } }) + "\n");
       }
     };
     const server = createServer((socket) => {
@@ -2892,7 +2890,15 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
           respond({ type: "ok" });
           firePaneEnd(String(msg.params.pane_id), "pane_closed");
         } else if (msg.method === "tab.close") {
+          // A closed tab takes its panes silently (verified herdr 0.8.2,
+          // issue #61): they leave the listing and one `tab_closed` goes
+          // out, with no `pane_closed` for any of them.
+          const tabId = String(msg.params.tab_id ?? "");
+          for (const [paneId, pane] of [...panes.entries()]) {
+            if (pane.tabId === tabId) panes.delete(paneId);
+          }
           respond({ type: "ok" });
+          broadcast("tab_closed", { tab_id: tabId, workspace_id: "w1" });
         } else {
           respond({});
         }
