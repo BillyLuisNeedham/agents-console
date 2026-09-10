@@ -145,4 +145,18 @@ describe("spawn namespace reservation", () => {
     // so every pre-existing call site's behavior is unchanged.
     expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket or known Conversation/);
   });
+
+  // The Conversations ADR: a pool that is nothing but Conversations has an
+  // empty issues/ legitimately, from its very first boot, not the mistake
+  // the bare throw exists to catch.
+  it("returns an empty list for an empty issues/ when allowEmptyIssues is set", () => {
+    const dir = poolWithFiles({});
+    expect(loadPoolMarkers(dir, undefined, { allowEmptyIssues: true })).toEqual([]);
+  });
+
+  it("still throws for an empty issues/ without allowEmptyIssues, matching every existing caller", () => {
+    const dir = poolWithFiles({});
+    expect(() => loadPoolMarkers(dir)).toThrow(/no Issue files/);
+    expect(() => loadPoolMarkers(dir, new Set(["conv-1"]))).toThrow(/no Issue files/);
+  });
 });

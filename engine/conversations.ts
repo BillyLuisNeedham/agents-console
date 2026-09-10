@@ -600,6 +600,13 @@ export async function startConversation(
       payload: { reason: `TUI never became ready (${readiness})` },
     });
     await tailer.finish().catch(() => {});
+    // Unlike ADR-0014's ordinary crashed-attempt rule (leave the pane open,
+    // its content is the evidence), no runtime is ever created for this
+    // Conversation — it never joins session.conversations — so the Console
+    // has no way to close this tab itself and it would sit open forever.
+    // The Stream file already captured whatever the pane showed (started
+    // just above), so there's no evidence lost by closing it here.
+    closeAttemptTabs(session, id);
     conversationEndedHook?.(session, id, { branch: worktree.branch, crashed: true });
     // Same reasoning as the success path below: this launch never touches
     // the drive loop (startConversation is called directly off the

@@ -244,44 +244,70 @@ function harnessDescriptorFor(runtime: ConversationRuntime) {
  * confirms). Claims the whole queue up front (a synchronous splice, before
  * any await), so a concurrent trigger — the poller's own waiting check
  * racing an enqueueNotice that fired mid-tick — can never double-deliver. A
- * delivery that fails to echo (typeVerified resolves false) stops the drain
- * and puts the undelivered remainder back at the front of the queue for the
- * next trigger to retry, rather than skipping ahead or losing it.
+ * delivery that fails to echo (typeVerified resolves false) *or throws* (a
+ * herdr RPC failure: a daemon blip, a socket error) stops the drain and
+ * puts the undelivered remainder back at the front of the queue for the
+ * next trigger to retry, rather than skipping ahead or losing it. Both
+ * callers fire this with a bare `void` (raising a Notice, or the poller's
+ * own waiting check, must never become async just to wait on delivery), so
+ * this function itself must never reject: an uncaught rejection from a
+ * `void`-launched promise is an unhandled rejection Bun can escalate to a
+ * process crash, and the surrounding caller's own try/catch (tickConversation)
+ * cannot catch it either — a `void` call's later rejection runs outside
+ * that synchronous frame. Every failure, from typeVerified itself or from
+ * anything around it (a Conversation's record briefly unreadable), is
+ * therefore caught here, logged once as this attempt's own "notice" event,
+ * and turned into "still queued" rather than an exception.
  */
 export async function deliverQueuedNotices(session: Session, id: string): Promise<void> {
-  const runtime = session.conversations.get(id);
-  if (!runtime || runtime.ending || !runtime.paneId || runtime.notices.length === 0) return;
-  const descriptor = harnessDescriptorFor(runtime);
-  const queue = runtime.notices.splice(0);
-  for (let i = 0; i < queue.length; i++) {
-    const notice = queue[i];
-    const echoTargets = [descriptor?.echoPattern, notice.text].filter(
-      (t): t is string => typeof t === "string" && t.length > 0,
-    );
-    const delivered = await typeVerified(
-      session.herdrSocket,
-      runtime.paneId,
-      notice.text,
-      echoTargets,
-      descriptor?.clearKeys ?? [],
-    );
-    const payload = { kind: notice.kind, delivered };
-    appendEvent(session.runsDir, notice.from, {
-      at: nowIso(),
-      attempt: lastAttempt(session.runsDir, notice.from),
-      kind: "notice" as TicketEventKind,
-      payload: { ...payload, to: notice.to },
-    });
-    appendEvent(session.runsDir, id, {
-      at: nowIso(),
-      attempt: lastAttempt(session.runsDir, id),
-      kind: "notice" as TicketEventKind,
-      payload: { ...payload, from: notice.from },
-    });
-    if (!delivered) {
-      runtime.notices.unshift(...queue.slice(i));
-      return;
+  try {
+    const runtime = session.conversations.get(id);
+    if (!runtime || runtime.ending || !runtime.paneId || runtime.notices.length === 0) return;
+    const descriptor = harnessDescriptorFor(runtime);
+    const queue = runtime.notices.splice(0);
+    for (let i = 0; i < queue.length; i++) {
+      const notice = queue[i];
+      const echoTargets = [descriptor?.echoPattern, notice.text].filter(
+        (t): t is string => typeof t === "string" && t.length > 0,
+      );
+      let delivered = false;
+      let error: string | undefined;
+      try {
+        delivered = await typeVerified(
+          session.herdrSocket,
+          runtime.paneId,
+          notice.text,
+          echoTargets,
+          descriptor?.clearKeys ?? [],
+        );
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+      }
+      const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
+      appendEvent(session.runsDir, notice.from, {
+        at: nowIso(),
+        attempt: lastAttempt(session.runsDir, notice.from),
+        kind: "notice" as TicketEventKind,
+        payload: { ...payload, to: notice.to },
+      });
+      appendEvent(session.runsDir, id, {
+        at: nowIso(),
+        attempt: lastAttempt(session.runsDir, id),
+        kind: "notice" as TicketEventKind,
+        payload: { ...payload, from: notice.from },
+      });
+      if (!delivered) {
+        runtime.notices.unshift(...queue.slice(i));
+        return;
+      }
     }
+  } catch {
+    // Belt and braces beyond the per-notice catch above: anything else
+    // that could throw here (harnessDescriptorFor's file read, a runtime
+    // that vanished mid-drain) must still never escape as an unhandled
+    // rejection. Nothing to queue back in this outer case since the queue
+    // was already claimed by the inner splice; the next enqueue or waiting
+    // read starts a fresh drain.
   }
 }
 

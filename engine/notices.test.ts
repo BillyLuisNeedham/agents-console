@@ -242,12 +242,20 @@ function startFakeHerdr(): Promise<{
   socketPath: string;
   panes: Map<string, FakePane>;
   close: () => Promise<void>;
+  // A one-shot switch: the next pane.send_input call answers with an RPC
+  // error instead of applying the input, simulating a herdr daemon blip
+  // mid-delivery. Cleared automatically once spent.
+  failNextSendInput: () => void;
+  // Delays every future tab.create response by this many ms (0 = none).
+  setTabCreateDelayMs: (ms: number) => void;
 }> {
   let minted = 0;
   const panes = new Map<string, FakePane>();
   const subscribers: Socket[] = [];
   const connections = new Set<Socket>();
   const procs: ReturnType<typeof Bun.spawn>[] = [];
+  let failNext = false;
+  let tabCreateDelayMs = 0;
 
   const broadcast = (event: string, data: Record<string, unknown>): void => {
     for (const sub of [...subscribers]) {
@@ -294,7 +302,15 @@ function startFakeHerdr(): Promise<{
           booted: false,
           inputArea: "",
         });
-        respond({ tab: { tab_id: tabId } });
+        // Delayed on demand (tabCreateDelayMs), so a test can hold a
+        // startConversation call open long enough to interleave a second
+        // one before the first's Conversation record ever lands on disk —
+        // the id-collision window the reservation set closes.
+        if (tabCreateDelayMs > 0) {
+          setTimeout(() => respond({ tab: { tab_id: tabId } }), tabCreateDelayMs);
+        } else {
+          respond({ tab: { tab_id: tabId } });
+        }
       } else if (msg.method === "pane.list") {
         respond({
           panes: [...panes.entries()]
@@ -310,6 +326,16 @@ function startFakeHerdr(): Promise<{
           : "";
         respond({ read: { text: visible, revision: 0, truncated: false } });
       } else if (msg.method === "pane.send_input") {
+        if (failNext) {
+          failNext = false;
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              error: { code: -32000, message: "simulated herdr daemon blip" },
+            }) + "\n",
+          );
+          return;
+        }
         const pane = panes.get(String(msg.params.pane_id));
         if (pane) {
           if (typeof msg.params.text === "string") {
@@ -386,6 +412,12 @@ function startFakeHerdr(): Promise<{
             for (const conn of connections) conn.destroy();
             server.close(() => res());
           }),
+        failNextSendInput: () => {
+          failNext = true;
+        },
+        setTabCreateDelayMs: (ms: number) => {
+          tabCreateDelayMs = ms;
+        },
       }),
     );
   });
@@ -577,6 +609,53 @@ describe("Conversation spawn.json adoption", () => {
       await fake.close();
     }
   }, 20000);
+
+  it("reserves a spawn id for an in-flight kind:'conversation' start, so a second adoption before it lands on disk cannot reuse it", async () => {
+    const poolDir = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { convo: () => ["cat"] },
+        herdrSocket: fake.socketPath,
+      });
+      const parent = await run.startConversation({ title: "Parent" });
+
+      // Slows every future tab.create (the children's own launches, not
+      // the parent's, already open): without the id reservation, the
+      // second proposal's adoption call would recompute its counter from
+      // disk alone, see no record for the first child yet (its
+      // startConversationImpl is still awaiting this delayed tab.create),
+      // and mint the same `<parent>-spawn-1` id again.
+      fake.setTabCreateDelayMs(3000);
+
+      writeSpawnJson(poolDir, parent.id, [
+        { title: "First child", body: BODY, kind: "conversation" },
+      ]);
+      await waitFor(() => !existsSync(spawnJsonPath(poolDir, parent.id)));
+
+      writeSpawnJson(poolDir, parent.id, [
+        { title: "Second child", body: BODY, kind: "conversation" },
+      ]);
+      await waitFor(() => !existsSync(spawnJsonPath(poolDir, parent.id)));
+
+      const firstFile = join(poolDir, "conversations", `${parent.id}-spawn-1.md`);
+      const secondFile = join(poolDir, "conversations", `${parent.id}-spawn-2.md`);
+      await waitFor(() => existsSync(firstFile) && existsSync(secondFile), 15000);
+      expect(readFileSync(firstFile, "utf8")).toContain("# First child");
+      expect(readFileSync(secondFile, "utf8")).toContain("# Second child");
+
+      await run.endConversation(`${parent.id}-spawn-1`).catch(() => {});
+      await run.endConversation(`${parent.id}-spawn-2`).catch(() => {});
+      await run.endConversation(parent.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 25000);
 });
 
 describe("Notice delivery", () => {
@@ -649,6 +728,75 @@ describe("Notice delivery", () => {
       // never the notice text — the notice's own content is what the
       // "notice" event and its text carry, checked structurally above
       // rather than by re-reading pane state that has already moved on.
+      await run.endConversation(view.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 25000);
+
+  it("survives a herdr RPC failure during delivery: the Notice stays queued and is retried, never lost", async () => {
+    // Same shape as the checkpoint delivery test above. The one difference:
+    // the fake's very next pane.send_input answers with an RPC error,
+    // simulating a daemon blip exactly where typeVerified calls
+    // paneSendInput inside deliverQueuedNotices. Both call sites of
+    // deliverQueuedNotices use a bare `void`, so an unhandled rejection
+    // here would either crash the process or at least never be caught by
+    // this test — the assertions below (a "notice" event with
+    // delivered:false rather than an uncaught exception, followed by a
+    // later delivered:true once the fake stops failing) are the proof that
+    // never happens.
+    const poolDir = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "stub-model" },
+        assign: { "conv-1-spawn-1": { harness: "stub", model: "stub-model" } },
+        terminal: "herdr",
+      },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const stub = stubHarness(poolDir, {
+        "conv-1-spawn-1": { status: "checkpoint", brief: "Needs your input." },
+      });
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { claude: () => ["cat"], stub },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Talk" });
+      const childId = `${view.id}-spawn-1`;
+      writeSpawnJson(poolDir, view.id, [{ title: "Checkpointing child", body: BODY }]);
+      await waitFor(() => existsSync(join(poolDir, "issues", `${childId}.md`)));
+      await waitFor(() => readEvents(join(poolDir, "runs"), childId).some((e) => e.kind === "checkpoint"));
+
+      // Armed well before the Conversation can possibly read waiting (three
+      // ticks away, ~6s): the delivery attempt that fires the moment it
+      // does is the one that hits this.
+      fake.failNextSendInput();
+
+      await waitFor(() =>
+        readEvents(join(poolDir, "runs"), childId).some(
+          (e) => e.kind === "notice" && e.payload.delivered === false,
+        ),
+      );
+      const failedAttempt = readEvents(join(poolDir, "runs"), childId).find(
+        (e) => e.kind === "notice" && e.payload.delivered === false,
+      )!;
+      expect(typeof failedAttempt.payload.error).toBe("string");
+      // Never dropped: a failed delivery is a retry candidate, not an
+      // orphan or a queued-at-End loss.
+      expect(readEvents(join(poolDir, "runs"), childId).some((e) => e.kind === "notice-dropped")).toBe(
+        false,
+      );
+
+      // The next waiting tick (the fake no longer fails) retries and lands.
+      await waitFor(() =>
+        readEvents(join(poolDir, "runs"), childId).some(
+          (e) => e.kind === "notice" && e.payload.delivered === true,
+        ),
+      );
+
       await run.endConversation(view.id).catch(() => {});
       await run.shutdown(0);
     } finally {

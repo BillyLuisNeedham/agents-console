@@ -131,6 +131,7 @@ async function startFakeHerdr(): Promise<{
   socketPath: string;
   close: () => Promise<void>;
   endPane: (paneId: string) => void;
+  panes: Map<string, FakePane>;
 }> {
   let minted = 0;
   const panes = new Map<string, FakePane>();
@@ -266,6 +267,7 @@ async function startFakeHerdr(): Promise<{
         server.close(() => resolve());
       }),
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
+    panes,
   };
 }
 
@@ -565,6 +567,78 @@ describe("Conversation ending", () => {
       expect(existsSync(worktreePathFor(poolDir, view.id))).toBe(true);
       const events = readEvents(join(poolDir, "runs"), view.id);
       expect(events.some((e) => e.kind === "crash")).toBe(true);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+describe("Conversation-only pool boot", () => {
+  it("boots a pool with an empty issues/ once a conversations/ directory exists, and serves a snapshot", async () => {
+    const poolDir = mkdtempSync(join(tmpdir(), "conv-only-pool-"));
+    tempDirs.push(poolDir);
+    mkdirSync(join(poolDir, "issues"), { recursive: true });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    // Status "ended": no live pane, no herdr fake required at all — this
+    // test is purely about startPool tolerating zero Tickets.
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
+        "model=stub-model drivers=implement -->\n\n# Talk\n\n\n",
+    );
+
+    const run = startPool({ poolDir, harnesses: {} });
+    await run.settled;
+
+    expect(["done", "quiescent", "stalled"]).toContain(run.phase);
+    expect(run.final.tickets).toEqual({});
+    expect(run.snapshots.length).toBeGreaterThan(0);
+    expect(run.snapshots.at(-1)!.state.tickets).toEqual({});
+
+    await run.shutdown(0);
+  });
+
+  it("still refuses a genuinely empty pool (no issues/ content, no conversations/ directory) with the original error", () => {
+    const poolDir = mkdtempSync(join(tmpdir(), "conv-only-pool-empty-"));
+    tempDirs.push(poolDir);
+    mkdirSync(join(poolDir, "issues"), { recursive: true });
+    expect(() => startPool({ poolDir, harnesses: {} })).toThrow(/no Issue files/);
+  });
+});
+
+describe("Conversation launch failure", () => {
+  it("closes the tab when the TUI never becomes ready, so nothing is left open with no runtime to close it", async () => {
+    // harness "claude" has a real descriptor (readyPattern "Claude Code v"),
+    // so startConversation's readiness wait actually runs (unlike convo/
+    // stub, which have none and skip it outright) — overridden here to run
+    // `false`, a real binary that exits immediately, so the wrapper's exit-
+    // code file appears almost at once and waitForReadiness returns
+    // "exited" within one poll tick rather than running to its 60s
+    // timeout.
+    const poolDir = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: { defaults: { harness: "claude", model: "stub-model" }, terminal: "herdr" },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { claude: () => ["false"] },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Doomed" });
+      expect(view.status).toBe("crashed");
+      // No runtime was ever registered for a crash-at-launch (it never
+      // reaches session.conversations.set), so the view itself carries no
+      // paneId; the spawned event (written before the readiness wait) is
+      // the only record of which pane this was.
+      const spawned = readEvents(join(poolDir, "runs"), view.id).find((e) => e.kind === "spawned");
+      const paneId = spawned!.payload.pane_id as string;
+      expect(typeof paneId).toBe("string");
+
+      await waitFor(() => fake.panes.get(paneId)?.alive === false);
 
       await run.shutdown(0);
     } finally {

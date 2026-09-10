@@ -360,6 +360,14 @@ interface RunOptions {
   // The herdr daemon socket for terminal-backed attempts. Tests point this
   // at a fake socket; the default is the daemon's path on this machine.
   herdrSocket?: string;
+  // The Conversations ADR: force-allow an empty issues/ (no Tickets at
+  // all) even when the pool has no conversations/ directory yet either —
+  // startPool already infers this on its own once a conversations/
+  // directory exists (see loadPoolMarkers's own allowEmptyIssues), so this
+  // is only for a caller that wants a Ticket-less pool to boot before its
+  // first Conversation has ever started (a test, or a future
+  // start-empty-then-add-a-Conversation flow).
+  allowEmptyIssues?: boolean;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -644,6 +652,15 @@ export interface Session {
   // crashed Conversation is removed; its record on disk (conversations.ts's
   // loadConversations) is the only trace of it from then on.
   conversations: Map<string, ConversationRuntime>;
+  // Ids reserved for a `kind: "conversation"` spawn proposal whose
+  // startConversationImpl call is still in flight (fire-and-forget: the
+  // adoption boundary never awaits it). combinedSpawnCounters folds this in
+  // alongside the on-disk Conversation records so a second adoption call
+  // landing before the first Conversation's record has actually been
+  // written (writeConversation happens well into startConversation, after
+  // the herdr tab opens) can never mint the same `<parent>-spawn-N` id
+  // twice. Cleared once that call settles, success or failure.
+  reservedConversationIds: Set<string>;
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -659,7 +676,16 @@ export function startPool(options: RunOptions): PoolRun {
   const poolDir = options.poolDir;
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir));
+  // A pool with a conversations/ directory (even an empty one, since the
+  // directory only ever gets created by the first Conversation ever
+  // started there) has proven it is not the "accidental empty pool"
+  // mistake the bare throw exists to catch, so an empty issues/ boots like
+  // any other pool with zero ready Tickets. The `allowEmptyIssues` option
+  // covers the one case that can't infer itself: a Conversation-capable
+  // pool before its very first Conversation has ever started.
+  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir), {
+    allowEmptyIssues: options.allowEmptyIssues || existsSync(join(poolDir, "conversations")),
+  });
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
@@ -719,6 +745,7 @@ export function startPool(options: RunOptions): PoolRun {
     children: new ChildTracker(),
     orphans: [],
     conversations: new Map(),
+    reservedConversationIds: new Set(),
   };
 
   rehydrate(session);
@@ -5249,6 +5276,17 @@ function combinedSpawnCounters(session: Session): Map<string, number> {
     if (!spawn) continue;
     counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
   }
+  // A kind:"conversation" proposal already adopted this tick (or a still
+  // in-flight one from an earlier adoptSpawnProposals call) may not have
+  // its record on disk yet — startConversationImpl writes it well after
+  // opening the herdr tab, and is never awaited here — so a reserved id
+  // counts the same as an on-disk one, or a second call could mint the
+  // same `<parent>-spawn-N` before the first's write ever lands.
+  for (const reserved of session.reservedConversationIds) {
+    const spawn = parseSpawnId(reserved);
+    if (!spawn) continue;
+    counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
+  }
   return counters;
 }
 
@@ -5369,24 +5407,31 @@ export function adoptSpawnProposals(session: Session): void {
         // disposition a malformed proposal gets; the child Conversation
         // itself joins conversationViews() (or is recorded crashed) once its
         // own launch settles, same as an operator-started one racing the
-        // snapshot stream.
+        // snapshot stream. The id is reserved (and released once this
+        // settles, either way) so a second adoptSpawnProposals call before
+        // this Conversation's own record hits disk cannot mint it again.
+        session.reservedConversationIds.add(id);
         void startConversationImpl(session, {
           id,
           title: proposal.title.trim(),
           opening: proposal.body,
           assign: proposal.assign,
           spawnedBy: parentId,
-        }).catch((err) => {
-          appendEvent(session.runsDir, parentId, {
-            at: new Date().toISOString(),
-            attempt: lastAttempt(session.runsDir, parentId),
-            kind: "spawn-rejected",
-            payload: {
-              title: proposal.title,
-              reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
+        })
+          .catch((err) => {
+            appendEvent(session.runsDir, parentId, {
+              at: new Date().toISOString(),
+              attempt: lastAttempt(session.runsDir, parentId),
+              kind: "spawn-rejected",
+              payload: {
+                title: proposal.title,
+                reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            });
+          })
+          .finally(() => {
+            session.reservedConversationIds.delete(id);
           });
-        });
       } else {
         writeSpawnTicket(session, parentId, id, proposal);
         wrote = true;

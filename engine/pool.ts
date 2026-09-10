@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TICKET_STATUSES = [
@@ -121,14 +121,31 @@ export function parseSpawnId(id: string): { parent: string; n: number } | null {
  * engine.ts), so the caller resolves and passes the set rather than this
  * module loading it itself.
  */
+export interface LoadPoolMarkersOptions {
+  // The Conversations ADR: a pool that is nothing but Conversations has no
+  // Tickets at all, ever, and that is not the "no Issue files yet" mistake
+  // the bare throw below exists to catch (a pool directory pointed at by
+  // accident, or set up wrong) — it is a legitimate empty ready set from the
+  // first boot on. The caller (engine.ts's startPool) sets this once it has
+  // established the pool actually has a conversations/ directory, or a
+  // caller (a test, a future "start with no tickets yet" flow) asks for it
+  // directly; pool.ts has no way to tell the two apart on its own since it
+  // only ever sees issuesDir.
+  allowEmptyIssues?: boolean;
+}
+
 export function loadPoolMarkers(
   issuesDir: string,
   knownParents?: Set<string>,
+  options?: LoadPoolMarkersOptions,
 ): TicketMarker[] {
-  const files = readdirSync(issuesDir)
-    .filter((file) => file.endsWith(".md"))
-    .sort();
+  const files = existsSync(issuesDir)
+    ? readdirSync(issuesDir)
+        .filter((file) => file.endsWith(".md"))
+        .sort()
+    : [];
   if (files.length === 0) {
+    if (options?.allowEmptyIssues) return [];
     throw new Error(`pool load: no Issue files in ${issuesDir}`);
   }
   const markers = files.map((file) => readMarker(join(issuesDir, file)));
