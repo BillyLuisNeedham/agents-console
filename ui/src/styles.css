@@ -1671,6 +1671,200 @@ body {
   padding: 1px 8px;
 }
 
+/* ------------------------------------------------------------ Conversations */
+
+/* A Conversation card (ADR-0017/issue #60): the same node-card shell as a
+   ticket, no status-colored border of its own (a Conversation has no
+   pass/fail lifecycle) except once it ends or crashes. */
+.conversation-card-ended {
+  border-color: var(--status-done);
+  opacity: 0.7;
+}
+
+.conversation-card-crashed {
+  border-color: var(--interrupt);
+}
+
+.conversation-turn-waiting {
+  color: var(--status-running);
+  font-weight: 700;
+}
+
+.conversation-turn-working {
+  color: var(--text-dim);
+}
+
+.conversation-card-title {
+  font-weight: 600;
+}
+
+.conversation-card-last-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-end-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.conversation-end-failure {
+  font-size: 10px;
+}
+
+/* The Detail's End form: the same interrupt-box shell, in the neutral
+   border rather than the interrupt red, since ending a Conversation is an
+   ordinary operator action, not an answer to something the engine raised. */
+.conversation-end-box {
+  border-color: var(--border);
+  background: var(--bg-panel-2);
+}
+
+.conversation-detail-last-line {
+  margin: 4px 0;
+}
+
+/* The Conversations tray: same anchor chrome as Needs input, docked to the
+   right so the two trays never overlap. */
+.conversations-tray {
+  position: fixed;
+  top: 60px;
+  right: 0;
+  z-index: 20;
+  width: 300px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  box-shadow: -4px 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+.conversations-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conversations-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.conversations-new-toggle {
+  flex-shrink: 0;
+}
+
+.conversations-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.conversations-field {
+  width: 100%;
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.conversations-field:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.conversations-field:disabled {
+  opacity: 0.5;
+}
+
+textarea.conversations-field {
+  resize: vertical;
+  min-height: 48px;
+}
+
+.conversations-assign-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.conversations-assign-row .conversations-field {
+  flex: 1 1 80px;
+  min-width: 0;
+}
+
+.conversations-failure {
+  font-size: 11px;
+}
+
+.conversations-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.conversations-row-id {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0;
+  text-align: left;
+  flex-shrink: 0;
+}
+
+.conversations-row-id:hover {
+  text-decoration: underline;
+}
+
+.conversations-turn {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.conversations-turn-waiting {
+  color: var(--status-running);
+}
+
+.conversations-turn-working {
+  color: var(--text-dim);
+}
+
+.conversations-idle {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* A waiting Conversation's row in the Needs input tray: no interrupt kind
+   or note, just the waiting cue and the open-in-herdr action. */
+.needs-input-row-conversation .needs-input-waiting {
+  flex: 1;
+}
+
 /* ------------------------------------------------------- flow highlight */
 
 /* The selection and its one-hop flow neighbourhood. Placed last so a

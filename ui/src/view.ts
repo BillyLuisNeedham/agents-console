@@ -11,6 +11,8 @@
 import {
   flowNeighbourhood,
   nextNodeSelection,
+  type ConversationNeedsInputRow,
+  type ConversationTrayRow,
   type DetailTab,
   type DetailTabView,
   type DetailView,
@@ -24,7 +26,11 @@ import {
 } from "./project";
 import { restoreLogScroll } from "./log-pane";
 import { Canvas } from "./canvas";
-import { Detail } from "./detail";
+import {
+  ConversationsTray,
+  type ConversationsOptions,
+} from "./conversations";
+import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
@@ -52,6 +58,12 @@ export interface AppModel {
   logPane: LogPaneView | null;
   /** The Needs input tray's rows: every card holding an unresolved interrupt. */
   needsInput: NeedsInputRow[];
+  /** Needs input's Conversation rows: live Conversations waiting on the operator. */
+  conversationsNeedsInput: ConversationNeedsInputRow[];
+  /** The Conversations tray's rows, already sorted. */
+  conversationsTray: ConversationTrayRow[];
+  /** The pool's default Assignment, shown as the New Conversation form's placeholders. */
+  conversationDefaults: { harness?: string; model?: string; drivers?: string };
 }
 
 export interface Handlers {
@@ -65,10 +77,12 @@ export interface Handlers {
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 
-export type ConsoleViewOptions = NeedsInputOptions & {
-  /** "Open in herdr": focus the attempt's pane; resolves false on failure. */
-  onFocusTerminal: (ticketId: string) => Promise<boolean>;
-};
+export type ConsoleViewOptions = NeedsInputOptions &
+  ConversationsOptions & {
+    /** "Open in herdr": focus a ticket's or a Conversation's pane; both are
+     *  the same server-side seam, keyed by id. Resolves false on failure. */
+    onFocusTerminal: (id: string) => Promise<boolean>;
+  };
 
 /**
  * The per-session view state: one instance created by the bootstrap, holding
@@ -85,6 +99,8 @@ export class ConsoleView {
   });
   private readonly drawers = new Drawers();
   private readonly needsInput: NeedsInputTray;
+  private readonly conversationsTray: ConversationsTray;
+  private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   // The selection survives the rebuild (snapshots never close the panel or
   // lose the selection); its one-hop flow neighbourhood is recomputed from
   // the model's edges on every render, so a live snapshot re-derives the
@@ -93,11 +109,23 @@ export class ConsoleView {
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
 
   constructor(options: ConsoleViewOptions) {
+    this.onFocusTerminal = options.onFocusTerminal;
+    this.conversationsTray = new ConversationsTray(options);
     this.canvas = new Canvas({
       onCardTap: (nodeId) => this.selectNode(nodeId),
       onFocusTerminal: options.onFocusTerminal,
+      onNewConversation: () => this.conversationsTray.openForm(),
+      onEndConversation: (conversationId) => {
+        void this.conversationsTray.endConversation(conversationId);
+      },
     });
     this.needsInput = new NeedsInputTray(options);
+  }
+
+  /** The Conversations store's per-conversation End state, for the pool
+   *  projection's endings map (mirrors the terminal store's `.state()`). */
+  conversationEndState(): Record<string, { ending: boolean; failure: string | null }> {
+    return this.conversationsTray.endState();
   }
 
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
@@ -110,6 +138,9 @@ export class ConsoleView {
     this.detail.pruneDrafts(pendingInterrupts);
     this.needsInput.pruneDrafts(pendingInterrupts);
     this.needsInput.pruneFailures(pendingInterrupts);
+    this.conversationsTray.pruneEndFailures(
+      new Set(model.conversationsTray.map((row) => row.id)),
+    );
     const noteFocus = this.detail.captureNoteFocus();
     const trayFocus = this.needsInput.captureNoteFocus();
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
@@ -118,13 +149,25 @@ export class ConsoleView {
       inflow: new Set(hood.inflow),
       outflow: new Set(hood.outflow),
     };
+    const detailHandlers: DetailHandlers = {
+      ...handlers,
+      onEndConversation: (conversationId: string, closing?: string) => {
+        void this.conversationsTray.endConversation(conversationId, closing);
+      },
+      onFocusConversationTerminal: (conversationId: string) =>
+        this.onFocusTerminal(conversationId),
+    };
     const content = h(
       "div",
       { class: "content" },
       this.canvas.render(model, selection),
       model.detail ? this.detail.renderHandle() : null,
-      this.detail.render(model, handlers),
-      this.needsInput.render(model.needsInput, {
+      this.detail.render(model, detailHandlers),
+      this.needsInput.render(model.needsInput, model.conversationsNeedsInput, {
+        onSelect: (cardId) => this.selectNode(cardId),
+        onFocusConversation: (conversationId) => this.onFocusTerminal(conversationId),
+      }),
+      this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),
       }),
     );

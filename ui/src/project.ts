@@ -126,13 +126,65 @@ export interface PoolTicketState {
 
 export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
 
+// ---------------------------------------------------------------------------
+// Conversations (issue #60): an open-ended talk beside the pool's Tickets.
+// Wire format on the snapshot, mirroring PoolTicketState's split from its
+// card view model (ConversationCardView, below).
+// ---------------------------------------------------------------------------
+
+export type ConversationStatus = "live" | "ended" | "crashed";
+export type TurnState = "working" | "waiting";
+
+export interface ConversationTurnView {
+  state: TurnState;
+  /** The last line the pane showed above its input box; "" before any Turn. */
+  lastLine: string;
+  /** Set once the Turn state settles on `waiting`; null while `working`. */
+  idleSince: string | null;
+}
+
+export interface PoolConversationState {
+  id: string;
+  title: string;
+  status: ConversationStatus;
+  /** The parent Conversation's id that spawned this one; null for an
+   *  operator-started Conversation. */
+  spawnedBy: string | null;
+  assignment: PoolTicketAssignment;
+  /** The herdr pane id, present while the Conversation is live. */
+  paneId: string | null;
+  /** The Conversation's own branch; null before it has committed anything. */
+  branch: string | null;
+  turn: ConversationTurnView;
+  /** Ticket and Conversation ids this Conversation has spawned. */
+  children: string[];
+}
+
 interface PoolState {
   tickets: PoolTicketState[];
+  /** Absent on an older server's snapshot; the projection reads it as []. */
+  conversations?: PoolConversationState[];
   log: string[];
   outcomes: Record<string, PoolOutcome>;
   interrupts: PoolInterrupt[];
   queuedAnswers: PoolQueuedAnswer[];
   config: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Conversation wire types (served by /api/conversations and /conversations/end)
+// ---------------------------------------------------------------------------
+
+export interface StartConversationAssignment {
+  harness?: string;
+  model?: string;
+  drivers?: string;
+}
+
+export interface StartConversationRequest {
+  title: string;
+  opening?: string;
+  assign?: StartConversationAssignment;
 }
 
 export interface PoolSnapshot {
@@ -716,7 +768,35 @@ export interface UtilityCardView {
   y: number;
 }
 
-export type PoolCardView = TicketCardView | UtilityCardView;
+/** The End action's in-flight/failure state for one Conversation, shared by
+ *  the card and Detail (both call the same seam). */
+export interface ConversationEndView {
+  ending: boolean;
+  failure: string | null;
+}
+
+export interface ConversationCardView {
+  kind: "conversation";
+  id: string;
+  conversationId: string;
+  title: string;
+  status: ConversationStatus;
+  spawnedBy: string | null;
+  assignment: PoolTicketAssignment;
+  paneId: string | null;
+  branch: string | null;
+  turn: ConversationTurnView;
+  /** "4m", "1h 12m"; null while the Turn state is `working` (no idleSince). */
+  idleAge: string | null;
+  /** The card's terminal surface, reused from ticket cards; present while
+   *  the Conversation is live and carries a pane id. */
+  terminal: TerminalSurfaceView | null;
+  endView: ConversationEndView;
+  x: number;
+  y: number;
+}
+
+export type PoolCardView = TicketCardView | UtilityCardView | ConversationCardView;
 
 interface PoolView {
   seq: number;
@@ -733,6 +813,7 @@ interface PoolView {
 export const START_CARD_ID = "START";
 export const REVIEW_CARD_ID = "REVIEW";
 const TICKET_PREFIX = "ticket:";
+const CONVERSATION_PREFIX = "conversation:";
 
 export function ticketCardId(ticketId: string): string {
   return `${TICKET_PREFIX}${ticketId}`;
@@ -740,6 +821,14 @@ export function ticketCardId(ticketId: string): string {
 
 export function isTicketCardId(id: string): boolean {
   return id.startsWith(TICKET_PREFIX);
+}
+
+export function conversationCardId(conversationId: string): string {
+  return `${CONVERSATION_PREFIX}${conversationId}`;
+}
+
+export function isConversationCardId(id: string): boolean {
+  return id.startsWith(CONVERSATION_PREFIX);
 }
 
 // There is one pool per server, so a card's stored position is keyed by its
@@ -775,15 +864,36 @@ export function ticketDepth(
   return deepest + 1;
 }
 
-/** Default positions: START above, tickets layered by dependency depth, REVIEW below. */
+/**
+ * Default positions: START above, the Conversations lane (if any) directly
+ * below it, tickets layered by dependency depth below that, REVIEW at its
+ * fixed spot. Conversations exist beside tickets, not in the dependency
+ * graph, so they lay out as one row, centered like a ticket depth-0 row;
+ * their presence pushes every ticket row down by one row height, so the
+ * lane never overlaps the ticket layers.
+ */
 function layoutPool(
   tickets: PoolTicketState[],
+  conversations: PoolConversationState[] = [],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
 ): Record<string, Point> {
   const positions: Record<string, Point> = {};
   positions[startId] = { x: LAYOUT.centerX, y: LAYOUT.startY };
   positions[reviewId] = { x: LAYOUT.centerX, y: LAYOUT.reviewY };
+
+  const hasConversations = conversations.length > 0;
+  if (hasConversations) {
+    const offset = ((conversations.length - 1) * LAYOUT.colGap) / 2;
+    conversations.forEach((conversation, index) => {
+      positions[conversationCardId(conversation.id)] = {
+        x: LAYOUT.centerX - offset + index * LAYOUT.colGap,
+        y: LAYOUT.startY + LAYOUT.rowH,
+      };
+    });
+  }
+  const ticketBaseY =
+    LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.rowH : 0);
 
   const byDepth = new Map<number, PoolTicketState[]>();
   for (const ticket of tickets) {
@@ -797,7 +907,7 @@ function layoutPool(
     row.forEach((ticket, index) => {
       positions[ticketCardId(ticket.id)] = {
         x: LAYOUT.centerX - offset + index * LAYOUT.colGap,
-        y: LAYOUT.startY + LAYOUT.rowH + depth * LAYOUT.rowH,
+        y: ticketBaseY + depth * LAYOUT.rowH,
       };
     });
   }
@@ -819,6 +929,33 @@ export function projectPoolEdges(
       edges.push({ source: ticketCardId(blocker), target });
     }
     edges.push({ source: target, target: reviewId });
+  }
+  return edges;
+}
+
+/**
+ * Edges from a Conversation card to what it spawned: the ids in its
+ * `children` (ADR-0017), each resolved against the pool's live tickets and
+ * Conversations to the right prefix. A child id that names neither (a race
+ * between the snapshot and the spawn, or a spawn that failed validation)
+ * draws no edge rather than a dangling one.
+ */
+export function projectConversationEdges(
+  conversations: PoolConversationState[],
+  tickets: PoolTicketState[],
+): TopologyEdge[] {
+  const ticketIds = new Set(tickets.map((t) => t.id));
+  const conversationIds = new Set(conversations.map((c) => c.id));
+  const edges: TopologyEdge[] = [];
+  for (const conversation of conversations) {
+    const source = conversationCardId(conversation.id);
+    for (const childId of conversation.children) {
+      if (ticketIds.has(childId)) {
+        edges.push({ source, target: ticketCardId(childId) });
+      } else if (conversationIds.has(childId)) {
+        edges.push({ source, target: conversationCardId(childId) });
+      }
+    }
   }
   return edges;
 }
@@ -916,6 +1053,59 @@ function projectTicket(
   };
 }
 
+/**
+ * The idle age readout ("4m", "1h 12m") from a Turn's `idleSince`: null while
+ * the Turn is `working` (no idleSince yet) or the timestamp fails to parse.
+ */
+export function conversationIdleAge(
+  idleSince: string | null,
+  now: number,
+): string | null {
+  if (!idleSince) return null;
+  const at = Date.parse(idleSince);
+  if (Number.isNaN(at)) return null;
+  const s = Math.max(0, Math.floor((now - at) / 1000));
+  const m = Math.floor(s / 60);
+  if (m < 1) return `${s}s`;
+  const h = Math.floor(m / 60);
+  if (h < 1) return `${m}m`;
+  return `${h}h ${m % 60}m`;
+}
+
+/** The End action's view for a Conversation id; the default before any End
+ *  has ever been attempted this session. */
+export function projectConversationEnd(
+  state: ConversationEndView | undefined,
+): ConversationEndView {
+  return state ?? { ending: false, failure: null };
+}
+
+function projectConversation(
+  conversation: PoolConversationState,
+  pos: Point,
+  terminal: TerminalSurfaceView | undefined,
+  endings: Record<string, ConversationEndView>,
+  now: number,
+): ConversationCardView {
+  return {
+    kind: "conversation",
+    id: conversationCardId(conversation.id),
+    conversationId: conversation.id,
+    title: conversation.title,
+    status: conversation.status,
+    spawnedBy: conversation.spawnedBy,
+    assignment: conversation.assignment,
+    paneId: conversation.paneId,
+    branch: conversation.branch,
+    turn: conversation.turn,
+    idleAge: conversationIdleAge(conversation.turn.idleSince, now),
+    terminal: projectTerminalSurface(conversation.paneId, terminal),
+    endView: projectConversationEnd(endings[conversation.id]),
+    x: pos.x,
+    y: pos.y,
+  };
+}
+
 // A utility card can carry an interrupt too: the engine's final Review is
 // raised with the review card's id, so it is answered where the run ends.
 function projectUtility(
@@ -941,11 +1131,22 @@ export function projectPool(
   vitals: Record<string, VitalsState> = {},
   terminal: Record<string, TerminalSurfaceView> = {},
   now: number = Date.now(),
+  conversationEndings: Record<string, ConversationEndView> = {},
 ): PoolView {
   const tickets = snapshot.state.tickets;
-  const positions = layoutPool(tickets);
+  const conversations = snapshot.state.conversations ?? [];
+  const positions = layoutPool(tickets, conversations);
   const cards: PoolCardView[] = [
     projectUtility(START_CARD_ID, "start", snapshot.state, positions[START_CARD_ID]),
+    ...conversations.map((conversation) =>
+      projectConversation(
+        conversation,
+        positions[conversationCardId(conversation.id)],
+        terminal[conversation.id],
+        conversationEndings,
+        now,
+      ),
+    ),
     ...tickets.map((ticket) =>
       projectTicket(
         ticket,
@@ -963,9 +1164,91 @@ export function projectPool(
     seq: snapshot.seq,
     phase: snapshot.phase,
     cards,
-    edges: projectPoolEdges(tickets),
+    edges: [
+      ...projectPoolEdges(tickets),
+      ...projectConversationEdges(conversations, tickets),
+    ],
     log: snapshot.state.log,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Conversations tray and Needs input rows
+// ---------------------------------------------------------------------------
+
+export interface ConversationTrayRow {
+  id: string;
+  cardId: string;
+  title: string;
+  status: ConversationStatus;
+  turn: ConversationTurnView;
+  idleAge: string | null;
+}
+
+/**
+ * The Conversations tray's rows: every live Conversation, sorted waiting-on-
+ * you first, then longest idle (oldest idleSince first). A Conversation
+ * `working` on a Turn has no idleSince and sorts after every waiting one,
+ * and after every other working one (arrival order is as good as any).
+ * Ended and crashed Conversations stay off the tray; they are done and read
+ * from their card or Detail, not the operator's work queue.
+ */
+export function projectConversationsTray(
+  conversations: PoolConversationState[],
+  now: number = Date.now(),
+): ConversationTrayRow[] {
+  const rows = conversations
+    .filter((c) => c.status === "live")
+    .map((c) => ({
+      id: c.id,
+      cardId: conversationCardId(c.id),
+      title: c.title,
+      status: c.status,
+      turn: c.turn,
+      idleAge: conversationIdleAge(c.turn.idleSince, now),
+    }));
+  return rows.sort((a, b) => {
+    const aWaiting = a.turn.state === "waiting" ? 0 : 1;
+    const bWaiting = b.turn.state === "waiting" ? 0 : 1;
+    if (aWaiting !== bWaiting) return aWaiting - bWaiting;
+    const aIdle = a.turn.idleSince
+      ? Date.parse(a.turn.idleSince)
+      : Number.POSITIVE_INFINITY;
+    const bIdle = b.turn.idleSince
+      ? Date.parse(b.turn.idleSince)
+      : Number.POSITIVE_INFINITY;
+    return aIdle - bIdle;
+  });
+}
+
+/** One row the Needs input tray gains for a Conversation waiting on the
+ *  operator: no interrupt to answer, so no form; the row's action is
+ *  opening the herdr pane, not an answer. */
+export interface ConversationNeedsInputRow {
+  cardId: string;
+  conversationId: string;
+  label: string;
+  title: string;
+}
+
+/**
+ * Needs input's Conversation rows: every live Conversation whose Turn state
+ * is `waiting`, in Conversation order (the same order the lane and the tray
+ * use). A Notice queued for delivery does not change this: the Conversation
+ * only counts as needing the operator once its own Turn is waiting.
+ */
+export function projectConversationsNeedsInput(
+  snapshot: PoolSnapshot,
+): ConversationNeedsInputRow[] {
+  const conversations = snapshot.state.conversations ?? [];
+  return conversations
+    .filter((c) => c.status === "live" && c.turn.state === "waiting")
+    .map((c) => ({
+      cardId: conversationCardId(c.id),
+      conversationId: c.id,
+      label: c.id,
+      title: c.title,
+    }));
 }
 
 export function projectLog(raw: unknown): string[] {
@@ -973,6 +1256,24 @@ export function projectLog(raw: unknown): string[] {
     return [];
   }
   return (raw as { log: unknown[] }).log.filter((line): line is string => typeof line === "string");
+}
+
+/**
+ * The pool's default Assignment, read from the snapshot's `config` for the
+ * New Conversation form's placeholders (the same defaults `startConversation`
+ * falls back to when the operator leaves a field blank). A guess at the
+ * wire shape: `config.harness` / `config.model` / `config.drivers`, read
+ * only when they are strings, so an older or differently-shaped config
+ * degrades to no placeholder rather than a crash.
+ */
+export function poolAssignmentDefaults(
+  config: Record<string, unknown>,
+): StartConversationAssignment {
+  const defaults: StartConversationAssignment = {};
+  if (typeof config.harness === "string") defaults.harness = config.harness;
+  if (typeof config.model === "string") defaults.model = config.model;
+  if (typeof config.drivers === "string") defaults.drivers = config.drivers;
+  return defaults;
 }
 
 export function statusLabel(status: PoolStatus, mergePending = false): string {
@@ -1069,15 +1370,37 @@ interface UtilityDetailView {
   interrupt: InterruptView | null;
 }
 
-export type DetailView = TicketDetailView | UtilityDetailView;
+/** The Conversation Detail: the card's facts at full size, for the terminal
+ *  peek, timeline, and End form the Detail renders around them. */
+export interface ConversationDetailView {
+  kind: "conversation";
+  conversationId: string;
+  title: string;
+  status: ConversationStatus;
+  spawnedBy: string | null;
+  assignment: PoolTicketAssignment;
+  paneId: string | null;
+  branch: string | null;
+  turn: ConversationTurnView;
+  idleAge: string | null;
+  terminal: TerminalSurfaceView | null;
+  endView: ConversationEndView;
+}
+
+export type DetailView = TicketDetailView | UtilityDetailView | ConversationDetailView;
 
 /** The Detail for a selected card, or null when the card is not in the pool. */
 export function projectDetail(
   snapshot: PoolSnapshot,
   cardId: string,
   grades: Record<string, GradeView> = {},
+  terminal: Record<string, TerminalSurfaceView> = {},
+  now: number = Date.now(),
+  conversationEndings: Record<string, ConversationEndView> = {},
 ): DetailView | null {
-  const card = projectPool(snapshot, grades).cards.find((c) => c.id === cardId);
+  const card = projectPool(snapshot, grades, {}, terminal, now, conversationEndings).cards.find(
+    (c) => c.id === cardId,
+  );
   if (!card) return null;
   if (card.kind === "ticket") {
     return {
@@ -1091,6 +1414,22 @@ export function projectDetail(
       outcome: card.outcome,
       interrupt: card.interrupt,
       winner: card.grade?.winner ?? null,
+    };
+  }
+  if (card.kind === "conversation") {
+    return {
+      kind: "conversation",
+      conversationId: card.conversationId,
+      title: card.title,
+      status: card.status,
+      spawnedBy: card.spawnedBy,
+      assignment: card.assignment,
+      paneId: card.paneId,
+      branch: card.branch,
+      turn: card.turn,
+      idleAge: card.idleAge,
+      terminal: card.terminal,
+      endView: card.endView,
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };
@@ -1126,6 +1465,7 @@ export interface NeedsInputRow {
 export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
   const rows: NeedsInputRow[] = [];
   for (const card of projectPool(snapshot).cards) {
+    if (card.kind === "conversation") continue;
     if (!card.interrupt) continue;
     rows.push(
       card.kind === "ticket"

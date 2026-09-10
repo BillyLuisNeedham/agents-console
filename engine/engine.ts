@@ -61,10 +61,19 @@ import {
   listPaneIds,
   openAttemptTab,
   paneSendInput,
-  peekPane,
-  waitForPaneEnd,
 } from "./herdr.ts";
 import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
+import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
+import {
+  answerConversationMerge,
+  conversationViews,
+  crashStaleLiveConversationsAtBoot,
+  endConversation as endConversationImpl,
+  startConversation as startConversationImpl,
+  type ConversationRuntime,
+  type ConversationView,
+  type StartConversationRequest,
+} from "./conversations.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import {
   StreamLineBuffer,
@@ -91,6 +100,16 @@ import {
 } from "./worktrees.ts";
 
 export type { HarnessCommand } from "./spawn.ts";
+// Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
+// keeps working now that the wrapper-shape logic lives in pane-session.ts.
+export { interactiveWrapper } from "./pane-session.ts";
+export type {
+  ConversationRecord,
+  ConversationStatus,
+  ConversationView,
+  StartConversationRequest,
+  TurnState,
+} from "./conversations.ts";
 
 // The attempt's result, written by the agent as JSON at the outcome path its
 // prompt names and read by the engine at attempt exit. `status` is the
@@ -225,7 +244,9 @@ export const REVIEW_TICKET_ID = "REVIEW";
 // it waits.
 export const PERSISTENCE_TICKET_ID = "PERSISTENCE";
 
-interface Interrupt {
+// Exported so conversations.ts (Workstream A) can construct and raise the
+// Conversation-flavoured merge interrupts it reuses this shape for.
+export interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
@@ -298,6 +319,9 @@ export interface PoolSnapshot {
   // derivation travels with the state it belongs to, so the server and the UI
   // render it without re-deriving.
   assignments: Record<string, AssignmentView>;
+  // Every Conversation the pool knows about (conversations.ts), live or not:
+  // the second collection beside tickets (the Conversations ADR).
+  conversations: ConversationView[];
 }
 
 interface RunOptions {
@@ -343,6 +367,10 @@ export interface PoolRun {
    * signal handler does, after this resolves.
    */
   shutdown: (graceMs?: number) => Promise<void>;
+  /** Start a Conversation (conversations.ts); throws when the pool is not terminal-backed. */
+  startConversation: (req: StartConversationRequest) => Promise<ConversationView>;
+  /** End a Conversation the operator is done with (conversations.ts). */
+  endConversation: (id: string, closing?: string) => Promise<void>;
 }
 
 const reduceTickets = (
@@ -531,7 +559,9 @@ interface SettleWaiter {
   reject: (error: unknown) => void;
 }
 
-interface Session {
+// Exported so conversations.ts (Workstream A) can take it as a parameter;
+// the interface itself stays engine.ts's, unchanged in shape for tickets.
+export interface Session {
   poolDir: string;
   issuesDir: string;
   runsDir: string;
@@ -585,6 +615,11 @@ interface Session {
   // Headless orphans rehydrate found still alive from a previous engine
   // process, stopped by reapHeadlessOrphans before the first scheduling.
   orphans: HeadlessOrphan[];
+  // Live Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // beside-tickets.md): tracked only while running, keyed by id. An ended or
+  // crashed Conversation is removed; its record on disk (conversations.ts's
+  // loadConversations) is the only trace of it from then on.
+  conversations: Map<string, ConversationRuntime>;
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -651,9 +686,14 @@ export function startPool(options: RunOptions): PoolRun {
     mergeChain: Promise.resolve(),
     children: new ChildTracker(),
     orphans: [],
+    conversations: new Map(),
   };
 
   rehydrate(session);
+  // Conversations do not resume (the Conversations ADR): any recorded live
+  // at boot has an unknown pane fate and no runtime entry will ever track
+  // it again, so it crashes now rather than sitting unreachable.
+  crashStaleLiveConversationsAtBoot(session);
   // Boot reconciliation, awaited by the drive before its first scheduling:
   // terminal-backed orphans are re-adopted or crashed (ADR-0014), headless
   // orphans are stopped (ADR-0017), so no ticket is ever spawned into a
@@ -734,6 +774,8 @@ function makeHandle(session: Session): PoolRun {
     },
     close: () => closeStore(session),
     shutdown: (graceMs) => shutdownSession(session, graceMs),
+    startConversation: (req) => startConversationImpl(session, req),
+    endConversation: (id, closing) => endConversationImpl(session, id, closing),
   };
   return handle;
 }
@@ -867,7 +909,7 @@ function assignmentViewOf(assignment: Assignment): AssignmentView {
 // reportDriveDeath. Each carries the store's pending answers at emit
 // time, and every markProcessed is followed by an emit, so the merged queue
 // in the snapshot stream never goes stale.
-function emitSnapshot(session: Session, phase: RunPhase): void {
+export function emitSnapshot(session: Session, phase: RunPhase): void {
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
@@ -876,6 +918,7 @@ function emitSnapshot(session: Session, phase: RunPhase): void {
     assignments: Object.fromEntries(
       [...session.assignments].map(([id, a]) => [id, assignmentViewOf(a)]),
     ),
+    conversations: conversationViews(session),
   };
   session.snapshots.push(snapshot);
   session.onSnapshot?.(snapshot);
@@ -2144,6 +2187,16 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     });
     return;
   }
+  // A Conversation id never appears in session.markers (it has no Issue
+  // file), so its merge-conflict / merge-approval answers are routed here,
+  // before the marker lookup below would throw on it.
+  if (
+    (interrupt.kind === "merge-conflict" || interrupt.kind === "merge-approval") &&
+    session.conversations.has(record.ticketId)
+  ) {
+    answerConversationMerge(session, record.ticketId, interrupt, record.approve);
+    return;
+  }
   const marker = session.markers.find((m) => m.id === record.ticketId);
   if (!marker) {
     throw new Error(
@@ -2348,8 +2401,13 @@ function readResolverResult(
 // reproduces the conflict in the parked worktree, stages a resolution without
 // committing, and the engine routes the result. A resolved attempt becomes an
 // approval interrupt (authority stays with the human); a failed or absent one
-// takes the manual path with the failure noted.
-async function handleMergeConflict(
+// takes the manual path with the failure noted. Exported so
+// conversations.ts (Workstream A) can reuse it verbatim for a Conversation's
+// conflicted End, with a TicketMarker-shaped record synthesized from the
+// Conversation's id, file and branch: the function reads only `marker.id`
+// (for worktreePathFor/branchFor) and `marker.file`/`marker.title` (surfaced
+// in the resolver's prompt), never the pool's own markers array.
+export async function handleMergeConflict(
   session: Session,
   marker: TicketMarker,
   result: MergeResult,
@@ -4435,7 +4493,10 @@ function rejectReview(
   session.state = { ...session.state, outcomes };
 }
 
-function raiseInterrupt(session: Session, interrupt: Interrupt): void {
+// Exported so conversations.ts (Workstream A) can raise its own
+// Conversation-flavoured interrupts (merge-conflict, merge-approval) the
+// same way every ticket interrupt is raised.
+export function raiseInterrupt(session: Session, interrupt: Interrupt): void {
   if (
     session.state.interrupts.some(
       (i) => i.ticketId === interrupt.ticketId && i.kind === interrupt.kind,
@@ -4449,6 +4510,17 @@ function raiseInterrupt(session: Session, interrupt: Interrupt): void {
       `interrupt raised for ${interrupt.ticketId} (${interrupt.kind})` +
         (interrupt.kind === "deadlock" ? `: ${interrupt.body}` : ""),
     ],
+  });
+}
+
+// The minimal write conversations.ts (Workstream A) needs to resolve one of
+// its own interrupts without engine.ts exporting applyUpdate/PoolUpdate
+// wholesale: drop the interrupt and add one log line, exactly what every
+// ticket-side approve/reject/resume does inline.
+export function clearInterrupt(session: Session, interrupt: Interrupt, log: string): void {
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [log],
   });
 }
 
@@ -4794,9 +4866,12 @@ function closeAttemptTab(
  * attempt's: the merge-conflict merge paths (resumeMerge, approveMerge)
  * cannot know which attempt's branch they are merging — the resolver is the
  * latest attempt, the merged work an earlier one — and by merge time every
- * tab the ticket opened is done.
+ * tab the ticket opened is done. Exported so conversations.ts (Workstream A)
+ * can close every tab a Conversation's own launch and any resolver run
+ * (handleMergeConflict) opened under its id, the same reasoning applying:
+ * ending time cannot know whether a resolver ran.
  */
-function closeAttemptTabs(session: Session, ticketId: string): void {
+export function closeAttemptTabs(session: Session, ticketId: string): void {
   if (session.state.config.terminal !== "herdr") return;
   for (const spawned of readEvents(session.runsDir, ticketId)) {
     if (
@@ -5495,31 +5570,6 @@ function endWriteStream(
   });
 }
 
-// The pane-read line count for readiness and echo polling: a freshly spawned
-// pane renders mostly blank rows above its prompt, so a small read returns
-// empty (prototype finding); 200 lines covers the TUI's input area and the
-// recent transcript whatever the pane's height.
-const INTERACTIVE_PANE_READ_LINES = 200;
-// Readiness requires the ready pattern on this many consecutive reads,
-// ~this far apart: a single match can be a boot flicker, and empty reads
-// are not ready (prototype finding).
-const READINESS_CONFIRMATIONS = 3;
-const READINESS_POLL_MS = 500;
-// A TUI that cannot reach its ready frame within this bound is botched: the
-// engine closes the pane and the attempt surfaces as a failure, never a
-// silently idle tab.
-const READINESS_TIMEOUT_MS = 60_000;
-// claude's first-run trust dialog marks a directory claude has not seen;
-// the "No, exit" button label names it, and answering it needs pacing — a
-// key sent too early is dropped (prototype finding).
-const TRUST_DIALOG_PATTERN = "No, exit";
-const TRUST_DIALOG_SETTLE_MS = 1_500;
-const TRUST_DIALOG_KEY_GAP_MS = 500;
-// How many times the engine types the full prompt before the file-referencing
-// fallback, and how long an echo verification may wait per attempt.
-const PROMPT_TYPED_ATTEMPTS = 3;
-const PROMPT_ECHO_POLL_MS = 250;
-const PROMPT_ECHO_TIMEOUT_MS = 2_000;
 // The completion poll's cadence: how often a terminal-backed attempt checks
 // whether its Outcome has appeared.
 const ATTEMPT_COMPLETE_POLL_MS = 250;
@@ -5541,88 +5591,6 @@ function isBotchedSpawnCode(code: number): boolean {
 
 function sleep(ms: number): Promise<null> {
   return new Promise((resolve) => setTimeout(() => resolve(null), ms));
-}
-
-/**
- * The ADR-0016 wrapper shell the attempt's pane runs, as one line of bash:
- * the interactive argv under `script`, which allocates the PTY the TUI
- * requires, passes the session through to the pane live, and records both
- * directions to the attempt's Stream file (the typescript the derived log
- * comes from). `-e` makes script's own exit status the child's, so the
- * trailing exit-code write carries the harness's code, not script's
- * unconditional 0; `-q` drops script's own start and end banners. The
- * recording form is the platform's, because the two `script`s disagree on
- * how the command arrives (issue #58): util-linux's takes it as one string
- * after `-c` and flushes on `-f`, so Linux runs
- * `script -eqfc '<argv>' <stream-file>`; BSD's, which macOS ships, has no
- * `-c` — the command's words follow the file — and flushes on `-F`, so
- * darwin runs `script -eqF <stream-file> <argv words>`, each word quoted so
- * bash hands script exactly the argv. `-e` and `-q` are common to both. The
- * trailing exit-code write stays, firing whenever the TUI eventually exits,
- * for crash forensics; there is no `exit`, because the pane stays open after
- * the attempt completes for the operator to read and steer. The pane's
- * shell is the operator's login shell (ADR-0014: zsh on a Mac), so the line
- * uses only what every POSIX shell reads the same way, single quotes and
- * `$?`, and needs no `bash -c` of its own. Exported for the per-platform
- * shape test: neither form fails until it reaches a real pane.
- */
-export function interactiveWrapper(
-  argv: string[],
-  ctx: SpawnContext,
-  platform: NodeJS.Platform = process.platform,
-): string {
-  const command = argv.map(shellQuote).join(" ");
-  // Terminal-backed attempts always carry a Stream path (the typescript);
-  // the log path is the defensive fallback for a malformed context.
-  const file = shellQuote(ctx.streamPath ?? ctx.logPath);
-  const record =
-    platform === "darwin"
-      ? `script -eqF ${file} ${command}`
-      : `script -eqfc ${shellQuote(command)} ${file}`;
-  return `${record}; echo $? > ${shellQuote(ctx.exitCodePath)}`;
-}
-
-// One POSIX-safe single-quote: the quoted text cannot touch the surrounding
-// shell, whatever the harness argv carries.
-function shellQuote(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Send the attempt's wrapper to its pane (ADR-0014), the send half of a
- * terminal-backed spawn. Text and Enter travel in separate `pane.send_input`
- * calls: herdr treats a literal newline in text as pasted data, not a submit
- * (verified), and `agent prompt` sends text then Enter for the same reason.
- * Resolves with `undefined` once the pane carries the wrapper. On failure —
- * the daemon died after the tab opened, or rejected the input: exactly the
- * ADR's headless-fallback case — closes whatever half-started pane remains
- * (best-effort: it kills a wrapper that false-alarm Enter loss may actually
- * have started) and resolves with the error message, so the caller records
- * the fallback on the spawned event and runs the attempt headless instead of
- * failing the spawn: one attempt's terminal trouble must never take the
- * drive down with it.
- */
-async function sendWrapperToPane(
-  socketPath: string,
-  paneId: string,
-  argv: string[],
-  ctx: SpawnContext,
-): Promise<string | undefined> {
-  // The exit-code file must not carry a previous attempt's code, and the
-  // tailer must not read a stale Stream file's bytes before script creates
-  // it fresh.
-  rmSync(ctx.exitCodePath, { force: true });
-  if (ctx.streamPath) rmSync(ctx.streamPath, { force: true });
-  try {
-    await paneSendInput(socketPath, paneId, {
-      text: interactiveWrapper(argv, ctx),
-    });
-    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
-    return undefined;
-  } catch (err) {
-    void closePane(socketPath, paneId).catch(() => {});
-    return err instanceof Error ? err.message : String(err);
-  }
 }
 
 /**
@@ -5788,178 +5756,26 @@ async function deliverPromptInner(
   // A harness with no verified clear sequence cannot safely re-paste: a
   // false-negative echo would concatenate. One attempt, then a loud fail.
   // Clear keys are not sent before the first paste: opencode's ctrl+c
-  // exits on empty input (prototype/tui-clear-input/FINDINGS.md).
-  const attempts = clearKeys.length > 0 ? PROMPT_TYPED_ATTEMPTS : 1;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) {
-      await paneSendInput(socketPath, paneId, { keys: clearKeys });
-    }
-    await paneSendInput(socketPath, paneId, { text: prompt });
-    if (await paneShows(socketPath, paneId, echoTargets)) {
-      await paneSendInput(socketPath, paneId, { keys: ["enter"] });
-      return undefined;
-    }
-    // The paste did not land in the input area (the prototype's false-ready
-    // paste loss), or it landed and the echo missed it. With clear keys
-    // the next iteration empties the input first; without, we fail now.
+  // exits on empty input (prototype/tui-clear-input/FINDINGS.md). The
+  // retry-with-clear loop and its echo verification are pane-session.ts's
+  // typeVerified (extracted so a Conversation's opening Turn can use the
+  // same mechanics).
+  if (await typeVerified(socketPath, paneId, prompt, echoTargets, clearKeys)) {
+    return undefined;
   }
   if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
   // Full-prompt pasting failed: the file-referencing fallback, short enough
   // to survive any input-buffer cap (prototype finding, all three harnesses).
   // The command carries the attempt's own driver, so a grader, resolver, or
   // head-to-head judge falls back to its own skill, not the ticket driver's.
+  // One un-retried attempt: the pane was just cleared, so typeVerified needs
+  // no clear keys of its own here.
   const fallback = `/${ctx.driver} ${promptFile}`;
   await paneSendInput(socketPath, paneId, { keys: clearKeys });
-  await paneSendInput(socketPath, paneId, { text: fallback });
-  if (await paneShows(socketPath, paneId, [promptFile])) {
-    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
+  if (await typeVerified(socketPath, paneId, fallback, [promptFile], [])) {
     return undefined;
   }
   return SPAWN_INTERACTIVE_PROMPT_FAILED;
-}
-
-// How the readiness wait ended: the ready frame confirmed, the wrapper's
-// exit-code file appeared (the harness exited first), the pane ended with no
-// file behind it, or the timeout.
-type Readiness = "ready" | "exited" | "pane-ended" | "timed-out";
-
-/**
- * Wait for the harness's ready frame on the pane's rendered content: the
- * ready pattern on READINESS_CONFIRMATIONS consecutive reads, with empty
- * reads not ready (a fresh pane renders mostly blank) and a single match
- * discounted as a boot flicker (prototype findings). claude's first-run
- * trust dialog is answered inside the wait, paced so the keys land. A pane
- * that ends before the TUI comes up is a botched spawn, failed fast rather
- * than polled to the timeout, and so is a wrapper that finishes before it:
- * the exit-code file appearing means `script` has already returned — the
- * harness died on launch (a binary the pane cannot find, a wrapper the
- * platform's `script` rejects: issue #58) — and the pane is sitting at its
- * shell prompt, which never ends on its own, so without the file watch the
- * wait ran to its timeout and reported a TUI that "never became ready" over
- * a harness that had exited with a code of its own. The file is fresh: the
- * wrapper send removed any earlier attempt's. A pane end is checked against
- * the file too, since the two can land together (a shell that exits with
- * the wrapper, an operator closing a dead tab) and the harness's own code
- * is the truer ending of the two (ADR-0014: neither observation trusted
- * alone). A lost pane-end subscription (an old daemon, or a restart) just
- * stops the watch and keeps polling the content.
- */
-async function waitForReadiness(
-  socketPath: string,
-  paneId: string,
-  harness: string,
-  readyPattern: string,
-  exitCodePath: string,
-): Promise<Readiness> {
-  const deadline = Date.now() + READINESS_TIMEOUT_MS;
-  let stable = 0;
-  let lost = false;
-  const controller = new AbortController();
-  const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
-  try {
-    while (Date.now() < deadline) {
-      if (existsSync(exitCodePath)) return "exited";
-      let text: string;
-      if (lost) {
-        text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
-          () => "",
-        );
-      } else {
-        const settled = await Promise.race([
-          peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).then(
-            (t) => ({ text: t }) as const,
-            () => ({ text: "" }) as const,
-          ),
-          paneEnd.then((end) => ({ end }) as const),
-        ]);
-        if ("end" in settled) {
-          if (settled.end === "lost") {
-            lost = true;
-            continue;
-          }
-          return existsSync(exitCodePath) ? "exited" : "pane-ended";
-        }
-        text = settled.text;
-      }
-      if (harness === "claude" && text.includes(TRUST_DIALOG_PATTERN)) {
-        await answerTrustDialog(socketPath, paneId);
-        stable = 0;
-      } else {
-        stable = text.includes(readyPattern) ? stable + 1 : 0;
-      }
-      if (stable >= READINESS_CONFIRMATIONS) return "ready";
-      await sleep(READINESS_POLL_MS);
-    }
-    return "timed-out";
-  } finally {
-    controller.abort();
-  }
-}
-
-/**
- * Answer claude's first-run trust dialog (prototype finding): settle so the
- * dialog's controls render, move the selection to "Yes, I trust this
- * folder" with down, and confirm with enter. Sending a key before the
- * dialog settles is dropped, so the steps are paced.
- */
-async function answerTrustDialog(
-  socketPath: string,
-  paneId: string,
-): Promise<void> {
-  await sleep(TRUST_DIALOG_SETTLE_MS);
-  await paneSendInput(socketPath, paneId, { keys: ["down"] }).catch(() => {});
-  await sleep(TRUST_DIALOG_KEY_GAP_MS);
-  await paneSendInput(socketPath, paneId, { keys: ["enter"] }).catch(() => {});
-}
-
-/**
- * Whether the pane's rendered content shows any of the targets within the
- * echo timeout: the paste-echo verification. A pane read that fails (a
- * daemon blip mid-poll) is treated as not shown, so the delivery loop retries
- * instead of throwing the drive down.
- */
-async function paneShows(
-  socketPath: string,
-  paneId: string,
-  targets: string[],
-): Promise<boolean> {
-  const deadline = Date.now() + PROMPT_ECHO_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
-      () => "",
-    );
-    if (targets.some((target) => viewportShows(text, target))) return true;
-    await sleep(PROMPT_ECHO_POLL_MS);
-  }
-  return false;
-}
-
-// What a row break inside a TUI's input box puts between the two halves of
-// a wrapped line: the newline, the padding on both rows, and the box-drawing
-// or block glyphs of the box border (U+2500–U+259F).
-const VIEWPORT_WRAP_CHROME = /[\s\u2500-\u259F]+/g;
-
-/**
- * Whether one rendered viewport shows the target, tolerating the TUI's soft
- * wrap. A TUI draws its input area as a box narrower than the pane and breaks
- * a long line inside it at a hyphen, a slash, or a space, so a long echo
- * target — the issue path the typed prompt ends with, or the fallback's
- * prompt-file path — lands split across two bordered rows, and a plain
- * substring match never sees a paste that did land (issue #56, live opencode
- * under herdr: the 82-character issue path wrapped at a hyphen, and the
- * 73-character prompt-file path in a 72-column box; every attempt then
- * "never landed"). claude and cursor collapse a long paste to their
- * `Pasted text` marker, which fits on one row, but cursor hard-wraps the
- * fallback command's path the same way (verified live), so the tolerance
- * covers every harness's fallback. Dropping everything a row break can
- * insert from both the viewport and the target reassembles a wrapped path,
- * while a target that was never typed still cannot appear: the characters
- * must all be there, in order, with nothing but chrome between them.
- */
-function viewportShows(text: string, target: string): boolean {
-  if (text.includes(target)) return true;
-  const wanted = target.replace(VIEWPORT_WRAP_CHROME, "");
-  return wanted !== "" && text.replace(VIEWPORT_WRAP_CHROME, "").includes(wanted);
 }
 
 /**
@@ -6130,9 +5946,11 @@ async function readExitCode(path: string): Promise<number> {
  * (TranscriptLineBuffer). Terminal-backed attempts never derive stream-json
  * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
  * derivation. Polls by positioned reads; `finish` drains the tail, flushes
- * the line buffer, and ends the log stream.
+ * the line buffer, and ends the log stream. Exported so conversations.ts
+ * (Workstream A) can derive a Conversation's own log from its pane the same
+ * way a ticket attempt's is derived.
  */
-function startPaneStreamTail(
+export function startPaneStreamTail(
   streamPath: string,
   logPath: string,
 ): { finish: () => Promise<void> } {

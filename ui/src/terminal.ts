@@ -68,17 +68,24 @@ export class TerminalSurface {
   }
 
   /**
-   * The snapshot cadence: prune to the tickets whose current attempt is
-   * terminal-backed (a paneId on the enriched snapshot), reset entries whose
-   * attempt re-spawned under a new pane id, and peek each once, so a freshly
-   * spawned attempt's surface fills as soon as its snapshot lands rather
-   * than after up to 2s.
+   * The snapshot cadence: prune to the tickets and Conversations whose
+   * current attempt is terminal-backed (a paneId on the enriched snapshot),
+   * reset entries whose attempt re-spawned under a new pane id, and peek
+   * each once, so a freshly spawned attempt's surface fills as soon as its
+   * snapshot lands rather than after up to 2s. A live Conversation carries
+   * its pane the same way a running ticket attempt does, keyed by its own
+   * id: the server accepts `?ticket=<conv-id>` for peek/focus unchanged.
    */
   update(snapshot: PoolSnapshot | null): void {
     const paneOf = new Map<string, string>();
     for (const ticket of snapshot?.state.tickets ?? []) {
       if (typeof ticket.paneId === "string" && ticket.paneId !== "") {
         paneOf.set(ticket.id, ticket.paneId);
+      }
+    }
+    for (const conversation of snapshot?.state.conversations ?? []) {
+      if (typeof conversation.paneId === "string" && conversation.paneId !== "") {
+        paneOf.set(conversation.id, conversation.paneId);
       }
     }
     for (const [id, entry] of [...this.entries]) {
