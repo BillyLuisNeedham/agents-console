@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  poolAssignmentDefaults,
   checkpointNotice,
   clampDetailWidth,
   clampDrawersHeight,
@@ -2476,5 +2477,21 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
     });
+  });
+});
+
+describe("poolAssignmentDefaults", () => {
+  it("reads the pool's Assignment defaults from config.defaults", () => {
+    expect(
+      poolAssignmentDefaults({
+        defaults: { harness: "claude", model: "opus", drivers: "implement" },
+        terminal: "herdr",
+      }),
+    ).toEqual({ harness: "claude", model: "opus", drivers: "implement" });
+  });
+
+  it("returns nothing when the pool sets no defaults", () => {
+    expect(poolAssignmentDefaults({})).toEqual({});
+    expect(poolAssignmentDefaults({ harness: "claude" })).toEqual({});
   });
 });

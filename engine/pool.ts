@@ -109,7 +109,22 @@ export function parseSpawnId(id: string): { parent: string; n: number } | null {
   return { parent: match[1], n: Number(match[2]) };
 }
 
-export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
+/**
+ * `loadPoolMarkers`'s optional third argument: the ids of every Conversation
+ * the pool knows about (engine/conversations.ts's loadConversations, called
+ * by engine.ts before this so a ticket spawned mid-Conversation survives a
+ * restart). A ticket's `spawned-by` may name one of these the same way it
+ * names a ticket id (the Conversations ADR): Conversations spawn Tickets
+ * through the same propose-and-adopt seam ADR-0010 gave Tickets, so the
+ * reserved `-spawn-` namespace's parent is not always a ticket in `markers`.
+ * pool.ts has no import on conversations.ts (that would cycle back through
+ * engine.ts), so the caller resolves and passes the set rather than this
+ * module loading it itself.
+ */
+export function loadPoolMarkers(
+  issuesDir: string,
+  knownParents?: Set<string>,
+): TicketMarker[] {
   const files = readdirSync(issuesDir)
     .filter((file) => file.endsWith(".md"))
     .sort();
@@ -138,10 +153,13 @@ export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
           `${spawn.parent} in its marker`,
       );
     }
-    if (!markers.some((m) => m.id === marker.spawnedBy)) {
+    if (
+      !markers.some((m) => m.id === marker.spawnedBy) &&
+      !knownParents?.has(marker.spawnedBy)
+    ) {
       throw new Error(
         `pool load: ${marker.file}: spawned-by '${marker.spawnedBy}' ` +
-          "names no ticket in the pool",
+          "names no ticket or known Conversation in the pool",
       );
     }
   }

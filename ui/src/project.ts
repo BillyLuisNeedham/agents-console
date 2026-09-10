@@ -1269,10 +1269,15 @@ export function projectLog(raw: unknown): string[] {
 export function poolAssignmentDefaults(
   config: Record<string, unknown>,
 ): StartConversationAssignment {
+  // The pool's console.json nests its Assignment defaults under `defaults`;
+  // the form shows them as placeholders so a blank field means "pool default".
+  const nested = config.defaults;
+  const source: Record<string, unknown> =
+    nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
   const defaults: StartConversationAssignment = {};
-  if (typeof config.harness === "string") defaults.harness = config.harness;
-  if (typeof config.model === "string") defaults.model = config.model;
-  if (typeof config.drivers === "string") defaults.drivers = config.drivers;
+  if (typeof source.harness === "string") defaults.harness = source.harness;
+  if (typeof source.model === "string") defaults.model = source.model;
+  if (typeof source.drivers === "string") defaults.drivers = source.drivers;
   return defaults;
 }
 

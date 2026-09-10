@@ -1,4 +1,4 @@
-import type { Outcome } from "./engine.ts";
+import { SPAWN_BODY_MIN_CHARS, type Outcome } from "./engine.ts";
 
 interface ResolverPromptParts {
   id: string;
@@ -165,6 +165,52 @@ export function buildHeadToHeadPrompt(parts: HeadToHeadPromptParts): string {
       "merge nothing: the pick in this file is your only output.",
   ];
   return sections.join("\n");
+}
+
+/**
+ * The teaching conversations.ts appends to a Conversation's opening Turn (or
+ * types alone when there is none, so the mechanism is learned either way):
+ * how to propose Spawns mid-conversation (the Conversations ADR). A
+ * Conversation has no driver, no chain, no roster and no Outcome file the
+ * ordinary buildPrompt assembles around, so this is deliberately
+ * self-contained rather than a section spliced into that prompt. The floor
+ * on a proposal's body (SPAWN_BODY_MIN_CHARS, engine.ts) and the per-file cap
+ * (5, engine/notices.ts's poller reusing SPAWN_MAX_PER_ATTEMPT) are named
+ * literally here so the two surfaces cannot drift; prompt.test.ts pins both
+ * against their exported constants the way it already does for buildPrompt.
+ */
+export function buildConversationTeaching(spawnPath: string): string {
+  return [
+    "---",
+    "",
+    "You can start follow-up work without leaving this conversation. Write " +
+      `JSON to ${spawnPath}: {"spawn": [...]}, one entry per follow-up, each ` +
+      'shaped {"title": "...", "body": "...", "blockedBy": ["id", ...], ' +
+      '"kind": "ticket" or "conversation", "assign": {"harness": "...", ' +
+      '"model": "...", "drivers": "..."}}.',
+    "",
+    `The body needs at least ${SPAWN_BODY_MIN_CHARS} characters of intent for a fresh agent to ` +
+      'work from. "blockedBy" is optional and may only name Tickets, never ' +
+      'another Conversation (an entry naming one is dropped and logged). ' +
+      '"kind" defaults to "ticket"; "conversation" starts a new open-ended ' +
+      'talk instead of a Ticket. "assign" is optional; when absent the ' +
+      "follow-up inherits this Conversation's own Assignment.",
+    "",
+    "The engine polls for this file, reads it, and deletes it once read: " +
+      "write it whenever you like, mid-conversation, not only once. Caps: " +
+      "5 entries honored per file written; unlike a Ticket's own spawns " +
+      "there is no run-wide cap on what a Conversation spawns.",
+    "",
+    "A spawned Ticket reports back here as a Turn typed into this " +
+      "conversation once it ends (done, or checkpoint with its Brief) and " +
+      "you are next idle: its id, title, outcome, branch, and a diff " +
+      "summary. A spawned Conversation reports back the same way once the " +
+      "operator ends it: its branch and the operator's closing note, if " +
+      "any. Both inform only; you cannot answer either one's own Interrupt.",
+    "",
+    "You never write pool state yourself: no ticket files, no ids, no " +
+      "statuses, no status markers. You propose; the engine writes.",
+  ].join("\n");
 }
 
 interface PromptParts {

@@ -59,6 +59,8 @@ import {
   spawnEnv,
   type SpawnContext,
 } from "./spawn.ts";
+import { buildConversationTeaching } from "./prompt.ts";
+import type { Notice } from "./notices.ts";
 import {
   clearInterrupt,
   closeAttemptTabs,
@@ -239,20 +241,11 @@ interface ConversationTurn {
   lastText: string;
 }
 
-/**
- * Workstream A's placeholder for engine/notices.ts's `Notice` (Workstream B
- * owns that module and its shape is fixed by the plan's shared contracts:
- * `{ to; from; kind: "ticket-ended" | "conversation-ended"; text }`). Defined
- * here, not invented independently, so `ConversationRuntime.notices` is
- * already typed the way B's queue expects; when notices.ts lands, B should
- * re-export its own `Notice` from there (or this one) rather than keep two.
- */
-export interface Notice {
-  to: string;
-  from: string;
-  kind: "ticket-ended" | "conversation-ended";
-  text: string;
-}
+// Notice's canonical definition now lives in engine/notices.ts (Workstream
+// B); re-exported here so every existing import of it from conversations.ts
+// (A's own code, and anything written against A's placeholder before B
+// landed) keeps working unchanged.
+export type { Notice } from "./notices.ts";
 
 export interface ConversationRuntime {
   id: string;
@@ -401,6 +394,16 @@ export interface StartConversationRequest {
   opening?: string;
   assign?: { harness?: string; model?: string; drivers?: string };
   spawnedBy?: string;
+  // The spawn poller (engine/notices.ts's adoptSpawnProposals path)
+  // precomputes a collision-free id shared across a parent's ticket-spawn
+  // and Conversation-spawn counters before calling this: the two are
+  // otherwise numbered independently (nextConversationSpawnId below only
+  // counts existing Conversation records) and could mint the same
+  // `<parent>-spawn-N` a sibling ticket spawn already claimed. When given,
+  // used verbatim instead of computing one. Absent for every operator-
+  // started call (the Console form) and every existing direct test, whose
+  // id keeps coming from nextConversationId/nextConversationSpawnId.
+  id?: string;
 }
 
 function resolveConversationAssignment(
@@ -492,9 +495,11 @@ export async function startConversation(
   }
   const dir = conversationsDir(session.poolDir);
   const existing = loadConversations(dir);
-  const id = req.spawnedBy
-    ? nextConversationSpawnId(req.spawnedBy, existing)
-    : nextConversationId(existing);
+  const id =
+    req.id ??
+    (req.spawnedBy
+      ? nextConversationSpawnId(req.spawnedBy, existing)
+      : nextConversationId(existing));
   const { harness, model, drivers } = resolveConversationAssignment(session, req, existing);
   const worktree = prepareWorktree(session.cwd, id);
   const file = conversationFile(session.poolDir, id);
@@ -599,14 +604,24 @@ export async function startConversation(
     return conversationViewOf(session, { ...record, status: "crashed" }, loadConversations(dir));
   }
 
-  if (opening.trim()) {
-    const echoTargets = [descriptor?.echoPattern, opening].filter(
+  {
+    // The spawn-teaching paragraph (Workstream B, prompt.ts) always lands,
+    // appended to the opening Turn when there is one; typed alone otherwise,
+    // so an agent given no opening still learns the propose-and-adopt
+    // mechanism before the operator's first real Turn. spawnPath mirrors
+    // outcomeFileName's convention (engine.ts) for a Conversation's own
+    // proposal channel: `<id>.spawn.json` beside its `.outcome.json`,
+    // polled by notices.ts's per-Conversation poller.
+    const spawnPath = join(session.runsDir, `${id}.spawn.json`);
+    const teaching = buildConversationTeaching(spawnPath);
+    const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
+    const echoTargets = [descriptor?.echoPattern, opening.trim() || teaching].filter(
       (t): t is string => typeof t === "string" && t.length > 0,
     );
     // Best-effort: a paste that never lands is not fatal for a Conversation
     // the way it is for a ticket's driver prompt (no fixed skill to fall
     // back to), and the operator watching the pane can retype it.
-    await typeVerified(session.herdrSocket, tab.paneId, opening, echoTargets, descriptor?.clearKeys ?? []);
+    await typeVerified(session.herdrSocket, tab.paneId, toType, echoTargets, descriptor?.clearKeys ?? []);
   }
 
   session.conversations.set(id, runtime);
@@ -635,8 +650,10 @@ function markConversationCrashed(session: Session, runtime: ConversationRuntime,
     payload: { reason: `pane lost without End (${ending})` },
   });
   closeAttemptTabs(session, runtime.id);
-  session.conversations.delete(runtime.id);
+  // Same reordering as finishConversationEnd, same reason: B's hook needs
+  // runtime.notices before it is gone.
   conversationEndedHook?.(session, runtime.id, { branch: runtime.worktree.branch, crashed: true });
+  session.conversations.delete(runtime.id);
   emitSnapshot(session, session.settledPhase ?? "running");
 }
 
@@ -653,12 +670,17 @@ function finishConversationEnd(session: Session, runtime: ConversationRuntime, m
     payload: { closing: runtime.closing ?? null, by: "operator", merged },
   });
   closeAttemptTabs(session, runtime.id);
-  session.conversations.delete(runtime.id);
+  // The hook fires while the runtime is still in session.conversations (the
+  // delete follows it, deliberately reordered from A's original): B's hook
+  // reads runtime.notices to drop and log whatever never delivered, and
+  // session.conversations.get(id) would already be empty-handed the other
+  // way round.
   conversationEndedHook?.(session, runtime.id, {
     branch: runtime.worktree.branch,
     closing: runtime.closing,
     crashed: false,
   });
+  session.conversations.delete(runtime.id);
 }
 
 /**

@@ -247,8 +247,12 @@ async function paneShows(
 
 // What a row break inside a TUI's input box puts between the two halves of a
 // wrapped line: the newline, the padding on both rows, and the box-drawing or
-// block glyphs of the box border (U+2500-U+259F).
-const VIEWPORT_WRAP_CHROME = /[\s─-▟]+/g;
+// block glyphs of the box border (U+2500-U+259F). Exported for turn-state.ts
+// (Workstream B): the same chrome that can split a wrapped echo target also
+// pads a rendered line around its real content, so the last-line extraction
+// for turn state strips it the same way rather than defining a second regex
+// that could drift from this one.
+export const VIEWPORT_WRAP_CHROME = /[\s─-▟]+/g;
 
 /**
  * Whether one rendered viewport shows the target, tolerating the TUI's soft

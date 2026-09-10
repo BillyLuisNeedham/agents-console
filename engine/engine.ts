@@ -69,11 +69,16 @@ import {
   conversationViews,
   crashStaleLiveConversationsAtBoot,
   endConversation as endConversationImpl,
+  loadConversations,
   startConversation as startConversationImpl,
   type ConversationRuntime,
   type ConversationView,
   type StartConversationRequest,
 } from "./conversations.ts";
+import {
+  notifyConversationOfCheckpoint,
+  notifyConversationOfTicketDone,
+} from "./notices.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import {
   StreamLineBuffer,
@@ -125,6 +130,20 @@ export interface SpawnProposal {
   title: string;
   body: string;
   blockedBy?: string[];
+  // The Conversations ADR's extension: what the proposal becomes. Absent
+  // means "ticket", ADR-0010's original and only shape, so an ordinary
+  // attempt's outcome.spawn entries need no change. "conversation" starts a
+  // child Conversation instead of writing a ticket file (adoptSpawnProposals
+  // below); a Ticket's own outcome may propose one too, not only a
+  // Conversation's spawn.json (the seam is shared).
+  kind?: "ticket" | "conversation";
+  // The child's Assignment, when the proposer wants something other than
+  // its own. Absent inherits: resolveSpawnedTicketAssignment for a ticket,
+  // conversations.ts's resolveConversationAssignment for a Conversation.
+  // An unknown assign.harness drops the whole proposal at adoption time
+  // (adoptSpawnProposals), the same disposition an unknown blockedBy id
+  // gets, since neither can be checked here where no Session exists yet.
+  assign?: { harness?: string; model?: string; drivers?: string };
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -144,10 +163,15 @@ const SPAWN_MAX_PER_RUN = 20;
 
 // One attempt's surviving proposals, buffered between the moment an outcome
 // becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
-// selection's winner) and the boundary that adopts them.
-interface PendingSpawn {
+// selection's winner) and the boundary that adopts them. `origin` is the
+// Conversations ADR's addition: "conversation" is a Conversation's own
+// spawn.json batch (engine/notices.ts's poller), which bypasses the per-run
+// cap (spec: "no run-wide cap for Conversation Spawns") but keeps the
+// per-proposal cap; every ticket-outcome push stays "ticket".
+export interface PendingSpawn {
   parentId: string;
   proposals: SpawnProposal[];
+  origin: "ticket" | "conversation";
 }
 
 export interface Outcome {
@@ -635,7 +659,7 @@ export function startPool(options: RunOptions): PoolRun {
   const poolDir = options.poolDir;
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  const markers = loadPoolMarkers(issuesDir);
+  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir));
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
@@ -645,8 +669,16 @@ export function startPool(options: RunOptions): PoolRun {
   // Assignment resolution for every marker on disk: ordinary tickets resolve
   // from the config, engine-written ones (grader, head-to-head, spawned)
   // inherit from the ticket they belong to, and spawn chains resolve however
-  // deep they nest.
+  // deep they nest. Conversation ids are seeded first (the Conversations
+  // ADR): a Ticket spawned mid-Conversation in a prior run has its
+  // spawned-by name a Conversation, not another ticket, and
+  // resolveUnseenAssignments below needs that id already resolvable the same
+  // way it needs a grader's build ticket resolved before the grader.
   const assignments = new Map<string, Assignment>();
+  for (const rec of loadConversations(join(poolDir, "conversations"))) {
+    if (!rec.harness || !rec.model) continue;
+    assignments.set(rec.id, { harness: rec.harness, model: rec.model, drivers: rec.drivers });
+  }
   resolveUnseenAssignments(markers, assignments, config, harnesses);
 
   const session: Session = {
@@ -1021,6 +1053,11 @@ async function driveLoop(session: Session): Promise<void> {
       marker: TicketMarker;
       result: MergeResult;
       attempt: number;
+      // The working branch's tip just before this merge ran (the
+      // Conversations ADR): captured so a ticket-ended Notice's diff summary
+      // can be computed after the fact, once mergeTicket has already removed
+      // the ticket's own branch. Empty in a headless pool (git unavailable).
+      beforeSha: string;
     }[] = [];
     let mergeQueue: Promise<void> = session.mergeChain;
     const results = await Promise.all(
@@ -1046,6 +1083,7 @@ async function driveLoop(session: Session): Promise<void> {
             session.pendingSpawns.push({
               parentId: marker.id,
               proposals: result.spawnProposals,
+              origin: "ticket",
             });
           }
           if (plan.verify) {
@@ -1061,10 +1099,19 @@ async function driveLoop(session: Session): Promise<void> {
           }
           if (result.plan.worktree && result.status === "done") {
             mergeQueue = mergeQueue.then(() => {
+              // Captured just before the merge, inside the serialized chain:
+              // HEAD may have moved since this ticket's attempt exited (an
+              // earlier sibling's merge in the same super-step), so this is
+              // the range mergeTicket is actually about to add, not
+              // whatever HEAD was when the outer async callback started.
+              const beforeSha = session.git
+                ? git(session.cwd, ["rev-parse", "HEAD"]).out
+                : "";
               merges.push({
                 marker,
                 result: mergeTicket(session, marker, result.plan.worktree!),
                 attempt: result.plan.attempt,
+                beforeSha,
               });
             });
             // Publish the tail at every extension, not once after the await:
@@ -1121,6 +1168,12 @@ async function driveLoop(session: Session): Promise<void> {
           payload: {},
         });
         closeAttemptTab(session, merge.marker.id, merge.attempt);
+        notifyConversationOfTicketDone(
+          session,
+          merge.marker,
+          branchFor(session.cwd, merge.marker.id),
+          merge.beforeSha ? `${merge.beforeSha}..HEAD` : null,
+        );
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${merge.marker.id}: merged ${branchFor(session.cwd, merge.marker.id)} ` +
@@ -2100,7 +2153,11 @@ function acceptAnswer(
 // queued record waits for the drive loop's boundary drain. The kick is
 // separate from acceptance so the answer path's waiter exists before an idle
 // drain can settle it.
-function kickProcessing(session: Session): void {
+// Exported so engine/notices.ts's Conversation spawn-proposal poller can
+// drive an idle engine the same way an answer's acceptance does (the
+// Conversations ADR: a Conversation's spawn.json is adopted outside the
+// drive loop's own boundary when nothing else will reach one).
+export function kickProcessing(session: Session): void {
   if (session.driving) return;
   drainAnswers(session);
   startDrive(session);
@@ -2159,7 +2216,7 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -2279,6 +2336,7 @@ function resumeMerge(
     path: worktreePathFor(session.cwd, marker.id),
     branch,
   };
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, branch);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
@@ -2307,6 +2365,7 @@ function resumeMerge(
     payload: {},
   });
   closeAttemptTabs(session, marker.id);
+  notifyConversationOfTicketDone(session, marker, branch, beforeSha ? `${beforeSha}..HEAD` : null);
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -2611,6 +2670,7 @@ function approveMerge(
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, worktree.branch);
   if (!result.ok) {
     appendEvent(session.runsDir, marker.id, {
@@ -2641,6 +2701,12 @@ function approveMerge(
     payload: {},
   });
   closeAttemptTabs(session, marker.id);
+  notifyConversationOfTicketDone(
+    session,
+    marker,
+    worktree.branch,
+    beforeSha ? `${beforeSha}..HEAD` : null,
+  );
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -3048,7 +3114,7 @@ async function runGraders(
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   const buildAssignment = session.assignments.get(build.id)!;
   let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
@@ -3507,6 +3573,7 @@ function resolveLoneAttempt(
         session.pendingSpawns.push({
           parentId: marker.id,
           proposals: outcome.outcome.spawn,
+          origin: "ticket",
         });
       }
     }
@@ -3612,6 +3679,7 @@ function completeLoneAttempt(
       session.pendingSpawns.push({
         parentId: marker.id,
         proposals: outcome.outcome.spawn,
+        origin: "ticket",
       });
     }
   }
@@ -3975,6 +4043,7 @@ function completeSelection(
       session.pendingSpawns.push({
         parentId: marker.id,
         proposals: outcome.outcome.spawn,
+        origin: "ticket",
       });
     }
   }
@@ -4130,7 +4199,7 @@ async function runHeadToHead(
     };
   });
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
   // (ticket 01) via the shared engine-run helper: the run spawns the judge
@@ -4615,13 +4684,20 @@ function raiseCheckpoint(
   marker: TicketMarker,
   attempt: number,
 ): void {
-  raiseInterrupt(session, checkpointInterrupt(marker));
+  const interrupt = checkpointInterrupt(marker);
+  raiseInterrupt(session, interrupt);
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt,
     kind: "checkpoint",
     payload: {},
   });
+  // The Conversations ADR: every raiseCheckpoint call site (attempt exit,
+  // the lone-attempt and grade-flag paths, the adoption-recovery rebuild)
+  // funnels through here, so one hook covers all of them without a second
+  // call site to remember. interrupt.body is the same extractBrief(marker
+  // .file) read the interrupt itself carries; reused rather than re-read.
+  notifyConversationOfCheckpoint(session, marker, interrupt.body);
 }
 
 // "## Brief" and "## Brief, written by the engine" both head a Brief
@@ -4973,11 +5049,14 @@ function readOutcomeResult(path: string): OutcomeResult {
 // match against this exported constant.
 export const SPAWN_BODY_MIN_CHARS = 20;
 
-// Per-proposal spawn validation (ADR-0010): the well-formed entries come back
-// as proposals, the malformed ones as rejections carrying their index and a
-// reason. The outcome itself stays valid either way; the boundary decides
-// what gets adopted and what gets logged.
-function validateSpawnProposals(
+// Per-proposal spawn validation (ADR-0010, extended by the Conversations
+// ADR's kind/assign): the well-formed entries come back as proposals, the
+// malformed ones as rejections carrying their index and a reason. The
+// outcome itself stays valid either way; the boundary decides what gets
+// adopted and what gets logged. Exported so engine/notices.ts's Conversation
+// spawn-proposal poller validates its own spawn.json batches against exactly
+// this shape rather than a hand-rolled second copy.
+export function validateSpawnProposals(
   raw: unknown,
 ): { proposals: SpawnProposal[]; rejections: SpawnRejection[] } {
   if (raw === undefined) return { proposals: [], rejections: [] };
@@ -5021,10 +5100,41 @@ function validateSpawnProposals(
       });
       return;
     }
+    const kindRaw = proposal.kind;
+    if (kindRaw !== undefined && kindRaw !== "ticket" && kindRaw !== "conversation") {
+      rejections.push({
+        index,
+        reason: `proposal's kind must be "ticket" or "conversation", got '${String(kindRaw)}'`,
+      });
+      return;
+    }
+    const assignRaw = proposal.assign;
+    let assign: SpawnProposal["assign"];
+    if (assignRaw !== undefined) {
+      if (typeof assignRaw !== "object" || assignRaw === null || Array.isArray(assignRaw)) {
+        rejections.push({ index, reason: "proposal's assign is not an object" });
+        return;
+      }
+      const a = assignRaw as Record<string, unknown>;
+      const badField = (["harness", "model", "drivers"] as const).find(
+        (field) => a[field] !== undefined && typeof a[field] !== "string",
+      );
+      if (badField) {
+        rejections.push({ index, reason: `proposal's assign.${badField} is not a string` });
+        return;
+      }
+      assign = {
+        ...(typeof a.harness === "string" ? { harness: a.harness } : {}),
+        ...(typeof a.model === "string" ? { model: a.model } : {}),
+        ...(typeof a.drivers === "string" ? { drivers: a.drivers } : {}),
+      };
+    }
     proposals.push({
       title: proposal.title,
       body: proposal.body,
       ...(blockedBy !== undefined ? { blockedBy } : {}),
+      ...(kindRaw !== undefined ? { kind: kindRaw as "ticket" | "conversation" } : {}),
+      ...(assign !== undefined ? { assign } : {}),
     });
   });
   return { proposals, rejections };
@@ -5102,36 +5212,99 @@ function spawnCounters(markers: TicketMarker[]): Map<string, number> {
   return counters;
 }
 
-// The boundary's spawn adoption (ADR-0010): every buffered proposal is
-// validated against the pool as the boundary found it, the accepted ones are
-// written as ordinary ticket files, and the pool's markers and assignments
-// reload so the drive loop schedules them like any other ticket. Validation
-// is per proposal, never per attempt: a dropped proposal logs its reason on
-// the proposing ticket's log (a spawn-rejected event) and the attempt's own
-// result stands. The caps bound the blast radius (5 per attempt, 20 per
-// run): overflow truncates and logs, never fails. Writing the files is the
-// commit point; a crash after them but before the reload leaves the adopted
-// tickets in the pool for the next start, ids stable.
-function adoptSpawnProposals(session: Session): void {
+// The Conversations ADR's extension: a parent's ticket-spawns and
+// Conversation-spawns share one `<parent>-spawn-N` namespace (both are
+// "what this parent spawned"), so the counter that hands out the next N must
+// see both kinds of existing child or the two could mint the same id (a
+// ticket `x-spawn-1` already on disk, a Conversation `x-spawn-1` about to be
+// created from a separate proposal). parseSpawnId's regex is id-shape-only,
+// so it works unchanged on a Conversation's own `<parent>-spawn-N` id.
+function combinedSpawnCounters(session: Session): Map<string, number> {
+  const counters = spawnCounters(session.markers);
+  for (const rec of loadConversations(join(session.poolDir, "conversations"))) {
+    const spawn = parseSpawnId(rec.id);
+    if (!spawn) continue;
+    counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
+  }
+  return counters;
+}
+
+// The ids of every Conversation the pool has ever recorded (live, ended, or
+// crashed): the Conversations ADR's "known parent" set threaded through
+// loadPoolMarkers so a Ticket whose spawned-by names a Conversation survives
+// the reload the way one whose spawned-by names a Ticket always has, and
+// through adoptSpawnProposals's blockedBy check so a proposal blocked on a
+// Conversation is rejected with a reason naming that specifically, not
+// folded into "names tickets outside the pool".
+function knownConversationIds(poolDir: string): Set<string> {
+  return new Set(loadConversations(join(poolDir, "conversations")).map((r) => r.id));
+}
+
+// The boundary's spawn adoption (ADR-0010, extended by the Conversations
+// ADR): every buffered proposal is validated against the pool as the
+// boundary found it, the accepted ones are written as ordinary ticket files
+// or started as Conversations, and the pool's markers and assignments
+// reload so the drive loop schedules the ticket ones like any other. Every
+// aspect of that stays per proposal, never per batch: a dropped proposal
+// logs its reason on the proposing parent's log (a spawn-rejected event) and
+// the parent's own result stands. The per-proposal cap (5) always applies;
+// the per-run cap (20) is skipped for a Conversation's own spawn.json batch
+// (spec: "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn
+// still counts against it, `origin: "ticket"`, whatever kind its entries
+// request). Writing the files is the commit point; a crash after them but
+// before the reload leaves the adopted tickets in the pool for the next
+// start, ids stable. Exported so engine/notices.ts's Conversation
+// spawn-proposal poller can call this directly when the engine is idle
+// (nothing else would reach this boundary for it otherwise).
+export function adoptSpawnProposals(session: Session): void {
   if (session.pendingSpawns.length === 0) return;
   const pending = session.pendingSpawns.splice(0);
   // Membership validates against the markers as the boundary found them, so
   // a proposal naming another proposal's future id drops as unknown: the
   // agent never proposes ids and cannot know one.
   const knownIds = new Set(session.markers.map((m) => m.id));
-  const counters = spawnCounters(session.markers);
+  const knownConvIds = knownConversationIds(session.poolDir);
+  const counters = combinedSpawnCounters(session);
   const log: string[] = [];
   let wrote = false;
 
-  for (const { parentId, proposals } of pending) {
+  for (const { parentId, proposals, origin } of pending) {
     const accepted: SpawnProposal[] = [];
     for (const proposal of proposals) {
-      const unknown = (proposal.blockedBy ?? []).filter(
-        (id) => !knownIds.has(id),
+      const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
+        knownConvIds.has(id),
       );
-      if (unknown.length > 0) {
-        const reason =
-          `blockedBy names tickets outside the pool: ${unknown.join(", ")}`;
+      const unknownTickets = (proposal.blockedBy ?? []).filter(
+        (id) => !knownIds.has(id) && !knownConvIds.has(id),
+      );
+      if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
+        const reasons: string[] = [];
+        if (conversationBlockers.length > 0) {
+          reasons.push(
+            `blockedBy names Conversations, which cannot block a ticket: ` +
+              conversationBlockers.join(", "),
+          );
+        }
+        if (unknownTickets.length > 0) {
+          reasons.push(
+            `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
+          );
+        }
+        const reason = reasons.join("; ");
+        appendEvent(session.runsDir, parentId, {
+          at: new Date().toISOString(),
+          attempt: lastAttempt(session.runsDir, parentId),
+          kind: "spawn-rejected",
+          payload: { title: proposal.title, reason },
+        });
+        log.push(
+          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
+            `rejected: ${reason}`,
+        );
+        continue;
+      }
+      if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
+        const reason = `assign.harness names unknown harness '${proposal.assign.harness}'`;
         appendEvent(session.runsDir, parentId, {
           at: new Date().toISOString(),
           attempt: lastAttempt(session.runsDir, parentId),
@@ -5146,24 +5319,57 @@ function adoptSpawnProposals(session: Session): void {
       }
       accepted.push(proposal);
     }
-    // The per-attempt cap honors the first five survivors; the per-run cap
-    // truncates whatever the run has no room left for.
+    // The per-proposal cap honors the first five survivors, always. The
+    // per-run cap truncates whatever the run has no room left for, but only
+    // for a Ticket's own outcome.spawn: a Conversation's spawn.json has none.
     let truncated = 0;
     let honored = accepted.slice(0, SPAWN_MAX_PER_ATTEMPT);
     truncated += accepted.length - honored.length;
-    const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
-    if (honored.length > room) {
-      truncated += honored.length - room;
-      honored = honored.slice(0, room);
+    if (origin !== "conversation") {
+      const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
+      if (honored.length > room) {
+        truncated += honored.length - room;
+        honored = honored.slice(0, room);
+      }
     }
     const adopted: string[] = [];
     for (const proposal of honored) {
       const n = (counters.get(parentId) ?? 0) + 1;
       counters.set(parentId, n);
       const id = `${parentId}-spawn-${n}`;
-      writeSpawnTicket(session, parentId, id, proposal);
+      if (proposal.kind === "conversation") {
+        // Fire-and-forget: startConversation opens a herdr tab and waits up
+        // to 60s for the TUI's ready frame (pane-session.ts's
+        // READINESS_TIMEOUT_MS), and this boundary is synchronous by
+        // ADR-0010's own contract (write-then-reload, never awaited). A
+        // launch failure is logged on the proposing parent, the same
+        // disposition a malformed proposal gets; the child Conversation
+        // itself joins conversationViews() (or is recorded crashed) once its
+        // own launch settles, same as an operator-started one racing the
+        // snapshot stream.
+        void startConversationImpl(session, {
+          id,
+          title: proposal.title.trim(),
+          opening: proposal.body,
+          assign: proposal.assign,
+          spawnedBy: parentId,
+        }).catch((err) => {
+          appendEvent(session.runsDir, parentId, {
+            at: new Date().toISOString(),
+            attempt: lastAttempt(session.runsDir, parentId),
+            kind: "spawn-rejected",
+            payload: {
+              title: proposal.title,
+              reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          });
+        });
+      } else {
+        writeSpawnTicket(session, parentId, id, proposal);
+        wrote = true;
+      }
       adopted.push(id);
-      session.spawnedThisRun += 1;
+      if (origin !== "conversation") session.spawnedThisRun += 1;
     }
     if (adopted.length > 0 || truncated > 0) {
       appendEvent(session.runsDir, parentId, {
@@ -5174,7 +5380,6 @@ function adoptSpawnProposals(session: Session): void {
       });
     }
     if (adopted.length > 0) {
-      wrote = true;
       log.push(
         `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
           (truncated > 0
@@ -5198,7 +5403,7 @@ function adoptSpawnProposals(session: Session): void {
   // hand-written ticket in: markers reload, unseen ids resolve their
   // assignments (parent inheritance), and the tickets channel folds them in
   // at their on-disk statuses.
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
