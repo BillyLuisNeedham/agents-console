@@ -363,6 +363,34 @@ describe("Conversation launch", () => {
       await fake.close();
     }
   });
+
+  it("emits a snapshot carrying the Conversation the moment it starts, with no other pool activity to piggyback on", async () => {
+    // startConversation is called directly off the PoolRun handle, never
+    // through kickProcessing/the drive loop, so with no ticket work
+    // running nothing else would ever tell the snapshot stream this
+    // Conversation exists — the assertion below must hold synchronously
+    // once startConversation resolves, not eventually.
+    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+      });
+      const before = run.snapshots.length;
+      const view = await run.startConversation({ title: "Plan" });
+
+      expect(run.snapshots.length).toBeGreaterThan(before);
+      expect(
+        run.snapshots.some((s) => s.conversations.some((c) => c.id === view.id && c.status === "live")),
+      ).toBe(true);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
 });
 
 describe("Conversation ending", () => {
@@ -385,6 +413,28 @@ describe("Conversation ending", () => {
       const ended = events.find((e) => e.kind === "ended")!;
       expect(ended.payload.closing).toBe("all done here");
       expect(ended.payload.merged).toBe(false);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("emits a snapshot reflecting the ending the moment End resolves", async () => {
+    // endConversation is a direct PoolRun call too (not through the drive
+    // loop), so the same "nothing else would tell the stream" reasoning as
+    // the start test above applies to its ending.
+    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: fake.socketPath });
+      const view = await run.startConversation({ title: "Idle chat" });
+      const before = run.snapshots.length;
+      await run.endConversation(view.id, "all done here");
+
+      expect(run.snapshots.length).toBeGreaterThan(before);
+      const last = run.snapshots.at(-1)!;
+      expect(last.conversations.find((c) => c.id === view.id)?.status).toBe("ended");
 
       await run.shutdown(0);
     } finally {

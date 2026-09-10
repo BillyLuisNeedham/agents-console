@@ -601,6 +601,11 @@ export async function startConversation(
     });
     await tailer.finish().catch(() => {});
     conversationEndedHook?.(session, id, { branch: worktree.branch, crashed: true });
+    // Same reasoning as the success path below: this launch never touches
+    // the drive loop (startConversation is called directly off the
+    // PoolRun handle, not through kickProcessing), so nothing else would
+    // ever tell the snapshot stream this Conversation existed at all.
+    emitSnapshot(session, session.settledPhase ?? "running");
     return conversationViewOf(session, { ...record, status: "crashed" }, loadConversations(dir));
   }
 
@@ -627,6 +632,13 @@ export async function startConversation(
   session.conversations.set(id, runtime);
   watchForCrash(session, runtime);
   conversationPoller?.(session, id);
+  // startConversation is called directly off the PoolRun handle (the
+  // server route, or a fire-and-forget spawn adoption), never through
+  // kickProcessing/the drive loop, so nothing else emits a snapshot that
+  // would tell GET /api/conversations or the SSE stream this Conversation
+  // now exists; a pool with no other ticket activity in flight could
+  // otherwise go arbitrarily long before the next unrelated emit.
+  emitSnapshot(session, session.settledPhase ?? "running");
 
   return conversationViewOf(session, record, loadConversations(dir));
 }
@@ -681,6 +693,17 @@ function finishConversationEnd(session: Session, runtime: ConversationRuntime, m
     crashed: false,
   });
   session.conversations.delete(runtime.id);
+  // The one place every ending path converges (endConversation's no-commit
+  // fast path and its merge-chain success, plus resumeConversationMerge,
+  // approveConversationMerge and rejectConversationMerge below, all call
+  // this instead of duplicating the ending): none of those callers run
+  // inside the drive loop (endConversation is a direct PoolRun call; the
+  // merge answers route through processAnswer/kickProcessing, which only
+  // emits once a fresh drive actually starts or reaches its next boundary,
+  // not synchronously), so this is the single spot that guarantees the
+  // snapshot stream sees the ending promptly, mirroring
+  // markConversationCrashed's own emit just above.
+  emitSnapshot(session, session.settledPhase ?? "running");
 }
 
 /**

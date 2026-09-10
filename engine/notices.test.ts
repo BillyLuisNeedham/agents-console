@@ -177,11 +177,18 @@ const doneTicket = (id: string) =>
 interface StubBehaviour {
   status?: "done" | "checkpoint";
   brief?: string;
+  // A verify fan-out's grader ticket needs a grade in its own outcome
+  // (engine.ts's Grade shape); unset for every ordinary (non-grader) id.
+  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
 }
 
 // A headless bash stub, in engine.test.ts's own style, so a ticket a
 // Conversation spawns can finish instantly without needing its own herdr
-// pane: only the Conversation itself is terminal-backed.
+// pane: only the Conversation itself is terminal-backed. Any id matching
+// the engine's own `<build>-grader-N` naming defaults to a passing grade
+// when not given its own behaviour, so a verify:1 ticket's automatic
+// grader ticket flows through without every such test needing to spell it
+// out.
 function stubHarness(poolDir: string, behaviour: Record<string, StubBehaviour>): HarnessCommand {
   const stubPath = join(poolDir, "stub-harness.sh");
   writeFileSync(
@@ -196,12 +203,16 @@ function stubHarness(poolDir: string, behaviour: Record<string, StubBehaviour>):
     ].join("\n"),
   );
   return (ctx) => {
-    const b = behaviour[ctx.id] ?? { status: "done" };
+    const b = behaviour[ctx.id] ??
+      (/-grader-\d+$/.test(ctx.id)
+        ? { grade: { score: 8, verdict: "pass" as const, reasons: "default grade" } }
+        : { status: "done" as const });
     const outcome = JSON.stringify({
       status: b.status ?? "done",
       summary: `summary-${ctx.id}`,
       commitSha: null,
       ...(b.brief !== undefined ? { brief: b.brief } : {}),
+      ...(b.grade !== undefined ? { grade: b.grade } : {}),
     });
     return ["bash", stubPath, ctx.outcomePath, outcome];
   };
@@ -638,6 +649,58 @@ describe("Notice delivery", () => {
       // never the notice text — the notice's own content is what the
       // "notice" event and its text carry, checked structurally above
       // rather than by re-reading pane state that has already moved on.
+      await run.endConversation(view.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 25000);
+
+  it("delivers a done-Notice for a verify:1 spawned Ticket too (completeLoneAttempt, not only the unverified path)", async () => {
+    // Same shape as the checkpoint test above, but the spawned child runs
+    // under verify:1: one attempt, one engine-written grader ticket (the
+    // stub defaults every "<build>-grader-N" id to a passing grade), and
+    // resolveLoneAttempt's pass path (completeLoneAttempt) is a different
+    // code path from the unverified done merge the run-cap/kind tests
+    // exercise — it needed its own notifyConversationOfTicketDone hook.
+    const poolDir = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "stub-model" },
+        assign: { "conv-1-spawn-1": { harness: "stub", model: "stub-model", verify: 1 } },
+        terminal: "herdr",
+      },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const stub = stubHarness(poolDir, {});
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { claude: () => ["cat"], stub },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Talk" });
+      expect(view.id).toBe("conv-1");
+
+      writeSpawnJson(poolDir, view.id, [{ title: "Verified child", body: BODY }]);
+      const childId = `${view.id}-spawn-1`;
+      await waitFor(() => existsSync(join(poolDir, "issues", `${childId}.md`)));
+      await waitFor(() => {
+        const markerText = readFileSync(join(poolDir, "issues", `${childId}.md`), "utf8");
+        return markerText.includes("status=done");
+      });
+
+      await waitFor(
+        () => run.snapshots.at(-1)?.conversations.find((c) => c.id === view.id)?.turn.state === "waiting",
+      );
+      await waitFor(() =>
+        readEvents(join(poolDir, "runs"), childId).some(
+          (e) => e.kind === "notice" && e.payload.delivered === true,
+        ),
+      );
+      const childNotice = readEvents(join(poolDir, "runs"), childId).find((e) => e.kind === "notice")!;
+      expect(childNotice.payload).toMatchObject({ to: view.id, kind: "ticket-ended", delivered: true });
+
       await run.endConversation(view.id).catch(() => {});
       await run.shutdown(0);
     } finally {

@@ -1954,6 +1954,12 @@ function recordAdoptedExit(
       branch: branchFor(session.cwd, ticketId),
     };
     const next = session.mergeChain.then(async () => {
+      // Captured inside the serialized chain, right before the merge: HEAD
+      // may have moved since this ticket's attempt was adopted (another
+      // merge landing first), and mergeTicket removes this branch on
+      // success, so the range for a done-Notice's diff summary has to be
+      // taken here or not at all.
+      const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
       const merge = mergeTicket(session, marker, worktree);
       if (merge.ok) {
         appendEvent(session.runsDir, ticketId, {
@@ -1963,6 +1969,12 @@ function recordAdoptedExit(
           payload: {},
         });
         closeAttemptTab(session, ticketId, attempt);
+        notifyConversationOfTicketDone(
+          session,
+          marker,
+          branchFor(session.cwd, ticketId),
+          beforeSha ? `${beforeSha}..HEAD` : null,
+        );
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${ticketId}: adopted attempt ${attempt} merged ` +
@@ -3637,6 +3649,11 @@ function completeLoneAttempt(
       `ticket ${marker.id}: attempt ${attempt} passed grading; ticket done`,
     ],
   };
+  // Captured before mergeTicket runs (it removes the worktree and its
+  // branch on success), the same reasoning as the drive loop's own merges:
+  // a verify ticket spawned by a Conversation still gets a done-Notice with
+  // a real diff summary, not just the fan-out's un-verified sibling.
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   if (session.git) {
     const worktree = result.plan.worktree ?? {
       path: worktreePathFor(session.cwd, marker.id, attempt),
@@ -3666,6 +3683,12 @@ function completeLoneAttempt(
       payload: {},
     });
     closeAttemptTab(session, marker.id, attempt);
+    notifyConversationOfTicketDone(
+      session,
+      marker,
+      branchFor(session.cwd, marker.id, attempt),
+      beforeSha ? `${beforeSha}..HEAD` : null,
+    );
     update.log = [
       `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
         `${branchFor(session.cwd, marker.id, attempt)} onto the working branch`,
