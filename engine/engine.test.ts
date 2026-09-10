@@ -16,6 +16,7 @@ import {
   PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
   engineSpawnSet,
+  interactiveWrapper,
   resolveAssignment,
   runPool,
   startPool,
@@ -39,6 +40,13 @@ import {
 } from "./spawn.ts";
 
 const tempDirs: string[] = [];
+
+// The `script` invocation ADR-0016's wrapper opens with, in the form the
+// host's script(1) accepts (issue #58): util-linux's `-c` string form on
+// Linux, BSD's file-then-words form on macOS. The fake herdr runs the
+// wrapper under the host's real script, so the suite runs on both.
+const SCRIPT_RECORD_PREFIX =
+  process.platform === "darwin" ? "script -eqF " : "script -eqfc ";
 
 afterEach(() => {
   while (tempDirs.length > 0) {
@@ -201,15 +209,20 @@ interface FakeHerdrRequest {
   // that issue #56 found).
   // The fake executes only the pane's FIRST Enter as bash — the wrapper — and
   // treats every later Enter as the TUI consuming input, matching how a real
-  // pane hands control to the harness. Test-only controls simulate the
-  // orphans boot reconciliation must handle: a pane with no process behind
-  // it, and its later end.
+  // pane hands control to the harness. By default the pane ends when the
+  // wrapper's bash exits, the shorthand the ending tests rely on; a real
+  // herdr pane holds a shell, so a wrapper that exits leaves the pane alive
+  // at its prompt and no pane end ever fires. `holdPane` models that, for
+  // the harness-died-on-launch case (issue #58). Test-only controls
+  // simulate the orphans boot reconciliation must handle: a pane with no
+  // process behind it, and its later end.
   async function startExecutingFakeHerdr(options?: {
     breakSubscriptions?: boolean;
     rendered?: string;
     dropInputs?: number;
     hideInputs?: number;
     wrapWidth?: number;
+    holdPane?: boolean;
   }): Promise<{
     socketPath: string;
     requests: FakeHerdrRequest[];
@@ -225,6 +238,7 @@ interface FakeHerdrRequest {
     const defaultDropInputs = options?.dropInputs ?? 0;
     const defaultHideInputs = options?.hideInputs ?? 0;
     const wrapWidth = options?.wrapWidth;
+    const holdPane = options?.holdPane === true;
     // The input area as pane.read shows it: verbatim, or drawn as a bordered
     // box that wraps each line at `wrapWidth` columns.
     const renderInput = (inputArea: string): string => {
@@ -376,9 +390,11 @@ interface FakeHerdrRequest {
               });
               pane.proc = proc;
               procs.push(proc);
-              void proc.exited.then(() =>
-                firePaneEnd(String(msg.params.pane_id), "pane_exited"),
-              );
+              void proc.exited.then(() => {
+                if (!holdPane) {
+                  firePaneEnd(String(msg.params.pane_id), "pane_exited");
+                }
+              });
             } else if (pane.booted) {
               pane.inputArea = "";
               pane.hideEcho = false;
@@ -5018,14 +5034,14 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     const wrapper = fake.requests.find(
       (r) => r.method === "pane.send_input" && typeof r.params.text === "string",
     )!.params.text as string;
-    // ADR-0016's wrapper: the interactive command wrapped in
-    // `script -eqfc '<cmd>' <stream-file>` (the PTY that supplies the session
-    // and the typescript the log derives from; `-e` makes script's exit the
-    // harness's), the trailing exit-code write for crash forensics, and no
-    // `exit` — the pane stays open after the attempt completes. The
-    // terminal-backed path streams to the attempt's Stream file whatever the
-    // harness's stream mode.
-    expect(wrapper).toContain("script -eqfc ");
+    // ADR-0016's wrapper: the interactive command wrapped in `script` (the
+    // PTY that supplies the session and the typescript the log derives
+    // from; `-e` makes script's exit the harness's) in the host platform's
+    // form, the trailing exit-code write for crash forensics, and no `exit`
+    // — the pane stays open after the attempt completes. The terminal-backed
+    // path streams to the attempt's Stream file whatever the harness's
+    // stream mode.
+    expect(wrapper).toContain(SCRIPT_RECORD_PREFIX);
     expect(wrapper).toContain(".stream.jsonl'");
     expect(wrapper).toMatch(/; echo \$\? > .*\.exitcode'$/);
     expect(wrapper).not.toContain("2>&1 | tee");
@@ -5037,6 +5053,72 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     const exited = readEventLines(poolDir, "01").find((e) => e.kind === "exited")!;
     expect(exited.payload.code).toBe(0);
   }, 15000);
+
+  it("hands each platform's script(1) the argv it expects once the pane's shell has parsed the wrapper (issue #58)", () => {
+    // Neither form of the wrapper fails until it reaches a real pane: GNU
+    // script's `-c '<cmd>'` form is what BSD script (macOS) rejected at
+    // once with `illegal option -- f`, leaving the tab at an idle prompt.
+    // So the shape is pinned as script itself sees it: a stand-in script(1)
+    // on PATH records its argv, and the wrapper runs under a shell exactly
+    // as the pane would run it (bash here; the line is POSIX quoting and
+    // `$?`, which the operator's login shell — zsh on a Mac, ADR-0014 —
+    // reads the same way).
+    const dir = mkdtempSync(join(tmpdir(), "wrapper-"));
+    tempDirs.push(dir);
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    const recorder = join(binDir, "script");
+    writeFileSync(
+      recorder,
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$@" > "$RECORDED_ARGV"',
+        "exit 3",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(recorder, 0o755);
+    const streamPath = join(dir, "28.stream.jsonl");
+    const ctx = {
+      streamPath,
+      logPath: join(dir, "28.log"),
+      exitCodePath: join(dir, "28.exitcode"),
+    } as SpawnContext;
+    // Words with a space and a quote, so the quoting is exercised too.
+    const argv = ["agent", "--model", "grok 4.6", "it's"];
+    const scriptArgv = (platform: NodeJS.Platform): string[] => {
+      const recorded = join(dir, `${platform}.argv`);
+      rmSync(ctx.exitCodePath, { force: true });
+      const result = Bun.spawnSync(
+        ["bash", "-c", interactiveWrapper(argv, ctx, platform)],
+        {
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH ?? ""}`,
+            RECORDED_ARGV: recorded,
+          },
+        },
+      );
+      expect(result.exitCode).toBe(0);
+      // The trailing write carried script's own status (the harness's,
+      // under `-e`), on both platforms.
+      expect(readFileSync(ctx.exitCodePath, "utf8").trim()).toBe("3");
+      return readFileSync(recorded, "utf8").split("\n").slice(0, -1);
+    };
+    // BSD script (macOS): the file, then the command's words, verbatim.
+    expect(scriptArgv("darwin")).toEqual(["-eqF", streamPath, ...argv]);
+    // util-linux script: the command as one shell string after -c, then
+    // the file.
+    expect(scriptArgv("linux")).toEqual([
+      "-eqfc",
+      "'agent' '--model' 'grok 4.6' 'it'\\''s'",
+      streamPath,
+    ]);
+    // The default is the host's own form.
+    expect(interactiveWrapper(argv, ctx)).toBe(
+      interactiveWrapper(argv, ctx, process.platform),
+    );
+  });
 
   it("captures the session in the script typescript Stream file and derives the ANSI-stripped log from it", async () => {
     const poolDir = makePool({
@@ -5401,7 +5483,8 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
   // The command stub, harness-agnostic: optionally waits for a trigger file,
   // prints an output line, writes the outcome, then optionally holds the pane
-  // open the way a real TUI stays alive after the agent declares done.
+  // open the way a real TUI stays alive after the agent declares done, and
+  // exits with `exitCode` (0 unless the test wants a harness that dies).
   function harnessStub(
     poolDir: string,
     opts: {
@@ -5409,6 +5492,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
       hold?: boolean;
       waitFor?: string;
       output?: string;
+      exitCode?: number;
     } = {},
   ): { stubPath: string; command: HarnessCommand } {
     const stubPath = join(poolDir, "tui-stub.sh");
@@ -5431,7 +5515,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
           ? [`printf '%s' '${opts.outcome}' > "$outcome"`]
           : []),
         ...(opts.hold ? ["sleep 30"] : []),
-        "exit 0",
+        `exit ${opts.exitCode ?? 0}`,
         "",
       ].join("\n"),
     );
@@ -5458,6 +5542,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
     dropInputs?: number;
     hideInputs?: number;
     wrapWidth?: number;
+    holdPane?: boolean;
   }): ReturnType<typeof startExecutingFakeHerdr> {
     return startExecutingFakeHerdr(options);
   }
@@ -5500,7 +5585,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         // The send sequence: wrapper text + enter, then the typed driver
         // prompt text + enter. Nothing else is sent.
         expect(sends).toHaveLength(4);
-        expect(sends[0].params.text as string).toContain("script -eqfc ");
+        expect(sends[0].params.text as string).toContain(SCRIPT_RECORD_PREFIX);
         expect(sends[1].params.keys).toEqual(["enter"]);
         const prompt = sends[2].params.text as string;
         const issuePath = join(poolDir, "issues", "01-t.md");
@@ -5624,7 +5709,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         // Wrapper pair, three lost full-prompt pastes with a clear before
         // each retry and before the fallback, then the fallback and Enter.
         expect(sends).toHaveLength(10);
-        expect(sends[0].params.text as string).toContain("script -eqfc ");
+        expect(sends[0].params.text as string).toContain(SCRIPT_RECORD_PREFIX);
         expect(sends[1].params.keys).toEqual(["enter"]);
         const issuePath = join(poolDir, "issues", "01-t.md");
         expect(
@@ -5878,17 +5963,24 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
       it("surfaces a botched spawn (TUI never ready) as a failure, not an idle tab", async () => {
         const poolDir = makePool(poolFor(harness));
-        // The stub exits immediately and the fake never renders the ready
-        // frame, so the TUI never comes up; the pane ends during the
-        // readiness wait.
-        const { command } = harnessStub(poolDir, {});
+        // The stub holds the pane the way a TUI that never paints its ready
+        // frame does, and the fake never renders one; the pane then ends
+        // during the readiness wait (the operator closed the tab), with no
+        // exit code behind it.
+        const { command } = harnessStub(poolDir, { hold: true });
         const fake = await startFakeHerdr();
 
-        const run = await runPool({
+        const running = runPool({
           poolDir,
           harnesses: { [harness]: command },
           herdrSocket: fake.socketPath,
         });
+        await until(
+          () => fake.requests.filter((r) => r.method === "pane.read").length >= 2,
+          "the readiness poll",
+        );
+        fake.endPane("pane-1");
+        const run = await running;
 
         expect(run.final.tickets["01"]).toBe("in-progress");
         expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
@@ -5903,6 +5995,43 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         const closes = fake.requests.filter((r) => r.method === "pane.close");
         expect(closes.length).toBeGreaterThan(0);
         await fake.close();
+      }, 20000);
+
+      it("fails fast with the harness's own exit code when it dies before its TUI comes up (issue #58)", async () => {
+        const poolDir = makePool(poolFor(harness));
+        // The harness dies on launch with a code of its own — a wrapper the
+        // platform's script rejects, a binary the pane cannot find — and the
+        // pane keeps its shell afterwards, the way a real herdr pane does:
+        // no pane end, no ready frame, nothing for the readiness wait to see
+        // but the exit-code file the wrapper wrote.
+        const { command } = harnessStub(poolDir, { exitCode: 3 });
+        const fake = await startFakeHerdr({ holdPane: true });
+        const started = Date.now();
+
+        const run = await runPool({
+          poolDir,
+          harnesses: { [harness]: command },
+          herdrSocket: fake.socketPath,
+        });
+        const elapsed = Date.now() - started;
+        await fake.close();
+
+        expect(run.final.tickets["01"]).toBe("in-progress");
+        expect(run.interrupts.map((i) => i.kind)).toEqual(["crash"]);
+        const crash = readEventLines(poolDir, "01").find((e) => e.kind === "crash")!;
+        // The harness's code, not the engine's "never became ready", and
+        // at once rather than after the readiness timeout (60s).
+        expect(crash.payload.code).toBe(3);
+        expect(crash.payload.reason).toBe("harness exited 3");
+        expect(elapsed).toBeLessThan(10_000);
+        // Nothing was typed into the shell the wrapper left behind: the
+        // wrapper pair and no more.
+        const sends = fake.requests.filter((r) => r.method === "pane.send_input");
+        expect(sends).toHaveLength(2);
+        expect(fake.submitted).toEqual([]);
+        // The pane stays open: it is a crashed attempt's tab (ADR-0014) and
+        // holds the only record of why the harness died.
+        expect(fake.requests.some((r) => r.method === "pane.close")).toBe(false);
       }, 20000);
     });
   }
