@@ -38,6 +38,7 @@ import {
   type AssignmentView,
   type HarnessCommand,
   type InterruptKind,
+  type PoolConfig,
   type PoolRun,
   type PoolSnapshot,
   type RunPhase,
@@ -1067,8 +1068,59 @@ function acquirePoolLock(poolDir: string, registryPath: string): void {
   );
 }
 
+/**
+ * The oldest Bun a terminal-backed pool boots on. Bun 1.2.13 on macOS
+ * segfaulted inside its event loop's poll dispatch a few hundred
+ * milliseconds into a `terminal: "herdr"` boot (issue #61), the same pool
+ * booting clean headless. The crash was not reproduced on Linux under
+ * 1.2.13 or 1.3.14, so this floor is not a verified fix: the trace sits in
+ * the runtime rather than the engine, bun.report's own advice was to
+ * upgrade, and 1.2.x separately fails the engine's own suite, so the
+ * terminal path refuses a runtime it is not tested on with a line of its
+ * own instead of letting it crash without one. A crash on a newer Bun is a
+ * new trace, not this floor's business.
+ */
+export const TERMINAL_MIN_BUN_VERSION = "1.3.0";
+
+/**
+ * Why a terminal-backed pool cannot boot on this runtime, or null when it
+ * can. Headless pools are never refused: the fault is on the terminal path
+ * alone, and running headless is exactly the workaround (issue #61).
+ */
+export function terminalRuntimeRefusal(
+  config: PoolConfig,
+  bunVersion: string,
+): string | null {
+  if (config.terminal !== "herdr") return null;
+  if (!versionBelow(bunVersion, TERMINAL_MIN_BUN_VERSION)) return null;
+  return (
+    `terminal-backed pools need Bun ${TERMINAL_MIN_BUN_VERSION} or newer ` +
+    `(this is Bun ${bunVersion}): Bun 1.2.13 segfaulted inside its event ` +
+    `loop on the terminal-backed boot (issue #61). Run \`bun upgrade\`, or ` +
+    `drop "terminal" from console.json to run the pool headless.`
+  );
+}
+
+// Numeric dotted-version comparison; an unparseable version is not below
+// anything, so an unexpected runtime string never refuses a boot.
+function versionBelow(version: string, floor: string): boolean {
+  const parse = (v: string): number[] | null => {
+    const match = /^(\d+)\.(\d+)\.(\d+)/.exec(v.trim());
+    return match ? match.slice(1, 4).map(Number) : null;
+  };
+  const have = parse(version);
+  const want = parse(floor);
+  if (!have || !want) return false;
+  for (let i = 0; i < 3; i++) {
+    if (have[i] !== want[i]) return have[i] < want[i];
+  }
+  return false;
+}
+
 export function createPoolServer(options: PoolServerOptions): PoolServer {
   const poolDir = resolve(options.poolDir);
+  const refusal = terminalRuntimeRefusal(readConfig(poolDir), Bun.version);
+  if (refusal !== null) throw new Error(refusal);
   const registryPath = options.registryPath ?? defaultRegistryPath();
   acquirePoolLock(poolDir, registryPath);
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");

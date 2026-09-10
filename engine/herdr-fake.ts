@@ -60,8 +60,11 @@ export async function stopFakeHerdrs(): Promise<void> {
  * A fake herdr daemon speaking the real wire shape: one JSON line in, one
  * JSON line out, per connection. `tab.create` mints a tab id and a root pane;
  * `pane.list` serves the created panes plus any foreign panes the test seeds
- * (live-agent panes the pool must never touch). Any other method, or a method
- * in `fail`, answers with a herdr-style error body.
+ * (live-agent panes the pool must never touch); `tab.close` drops the tab's
+ * panes from the listing and pushes only `tab_closed`, `pane.close` drops
+ * the pane and pushes `pane_closed`, the daemon's own asymmetry (verified
+ * against herdr 0.8.2, issue #61). Any other method, or a method in `fail`,
+ * answers with a herdr-style error body.
  *
  * `events.subscribe` is the exception to one-line-out: the daemon
  * acknowledges it and then holds the connection open as the subscriber's
@@ -84,6 +87,10 @@ export function startFakeHerdr(options?: {
   const panes: FakePane[] = [...(options?.foreignPanes ?? [])];
   const listOnly = options?.listOnly ? [...options.listOnly] : null;
   const subscribers = new Set<Socket>();
+  const push = (event: string, data: Record<string, unknown>): void => {
+    const line = JSON.stringify({ event, data: { type: event, ...data } }) + "\n";
+    for (const socket of subscribers) socket.write(line);
+  };
   const server = createServer((socket) => {
     connections += 1;
     let buf = "";
@@ -117,6 +124,31 @@ export function startFakeHerdr(options?: {
           response = { id: msg.id, result: { tab: { tab_id } } };
         } else if (msg.method === "pane.list") {
           response = { id: msg.id, result: { panes: listOnly ?? panes } };
+        } else if (msg.method === "tab.close") {
+          // A closed tab takes its panes silently (verified herdr 0.8.2,
+          // issue #61): the listing drops them and one `tab_closed` goes
+          // out, with no `pane_closed` for any of them.
+          const tabId = String(msg.params.tab_id ?? "");
+          for (const list of [panes, listOnly]) {
+            if (!list) continue;
+            for (let at = list.length - 1; at >= 0; at--) {
+              if (list[at].tab_id === tabId) list.splice(at, 1);
+            }
+          }
+          socket.end(JSON.stringify({ id: msg.id, result: { type: "ok" } }) + "\n");
+          push("tab_closed", { tab_id: tabId, workspace_id: "w1" });
+          return;
+        } else if (msg.method === "pane.close") {
+          // A closed pane announces itself (verified herdr 0.8.2).
+          const paneId = String(msg.params.pane_id ?? "");
+          for (const list of [panes, listOnly]) {
+            if (!list) continue;
+            const at = list.findIndex((p) => p.pane_id === paneId);
+            if (at !== -1) list.splice(at, 1);
+          }
+          socket.end(JSON.stringify({ id: msg.id, result: { type: "ok" } }) + "\n");
+          push("pane_closed", { pane_id: paneId, workspace_id: "w1" });
+          return;
         } else {
           response = {
             id: msg.id,
@@ -146,8 +178,7 @@ export function startFakeHerdr(options?: {
           return subscribers.size;
         },
         pushEvent(event, data) {
-          const line = JSON.stringify({ event, data }) + "\n";
-          for (const socket of subscribers) socket.write(line);
+          push(event, data);
         },
         hangUpSubscribers() {
           for (const socket of subscribers) socket.end();

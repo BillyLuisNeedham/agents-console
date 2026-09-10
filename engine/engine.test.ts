@@ -283,20 +283,18 @@ interface FakeHerdrRequest {
       pane.alive = false;
       pane.proc?.kill();
     }
-    // herdr pushes every pane's events to every subscriber; the engine
-    // filters by pane id. A subscriber whose wait already settled has
-    // closed its end, so prune before broadcasting.
+    broadcast(event, { pane_id: paneId, workspace_id: "w1" });
+  };
+  // herdr pushes every event to every subscriber; the engine filters. A
+  // subscriber whose wait already settled has closed its end, so prune
+  // before broadcasting.
+  const broadcast = (event: string, data: Record<string, unknown>): void => {
     for (const sub of [...subscribers]) {
       if (sub.destroyed || !sub.writable) {
         subscribers.splice(subscribers.indexOf(sub), 1);
         continue;
       }
-      sub.write(
-        JSON.stringify({
-          event,
-          data: { type: event, pane_id: paneId, workspace_id: "w1" },
-        }) + "\n",
-      );
+      sub.write(JSON.stringify({ event, data: { type: event, ...data } }) + "\n");
     }
   };
   const server = createServer((socket) => {
@@ -426,7 +424,17 @@ interface FakeHerdrRequest {
         respond({ type: "ok" });
         firePaneEnd(paneId, "pane_closed");
       } else if (msg.method === "tab.close") {
+        // A closed tab takes its panes silently (verified herdr 0.8.2,
+        // issue #61): they leave the listing and one `tab_closed` goes out,
+        // with no `pane_closed` for any of them.
+        const tabId = String(msg.params.tab_id ?? "");
+        for (const pane of panes.values()) {
+          if (pane.tabId !== tabId) continue;
+          pane.alive = false;
+          pane.proc?.kill();
+        }
         respond({ type: "ok" });
+        broadcast("tab_closed", { tab_id: tabId, workspace_id: "w1" });
       } else {
         respond({});
       }
@@ -4623,7 +4631,8 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
     });
     // The harness ran inside the pane: the wrapper line was sent as text,
     // Enter as a key, and the pane's end was awaited on an events.subscribe
-    // stream matching pane_exited and pane_closed.
+    // stream matching pane_exited, pane_closed and tab_closed (the last
+    // because a closed tab takes its panes without a pane event, issue #61).
     const sends = fake.requests.filter((r) => r.method === "pane.send_input");
     expect(sends).toHaveLength(2);
     expect(typeof sends[0].params.text).toBe("string");
@@ -4635,6 +4644,7 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
     expect(subscriptions[0].params.subscriptions).toEqual([
       { type: "pane.exited" },
       { type: "pane.closed" },
+      { type: "tab.closed" },
     ]);
     const spawned = readEventLines(poolDir, "01").find(
       (e) => e.kind === "spawned",

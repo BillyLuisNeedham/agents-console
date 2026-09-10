@@ -39,6 +39,11 @@ interface HerdrResponse {
 // connection even completes, silently dropping the request.
 const liveSockets = new Set<ReturnType<typeof connect>>();
 
+// How long a call waits on the daemon before giving up on it: every RPC's
+// watchdog, and the grace a settled pane-end wait gives a connect that has
+// not completed before destroying the socket anyway.
+const CONNECT_GRACE_MS = 10_000;
+
 /**
  * One JSON-RPC request over a fresh unix-socket connection. Resolves with the
  * `result` object; rejects with the herdr `error` body when the call fails,
@@ -60,7 +65,7 @@ export function herdrRpc(
       liveSockets.delete(sock);
       sock.destroy();
       reject(new Error(`herdr rpc timed out (${method})`));
-    }, 10_000);
+    }, CONNECT_GRACE_MS);
     const finish = (err: Error | null, result?: unknown): void => {
       if (settled) return;
       settled = true;
@@ -266,18 +271,30 @@ export type PaneEnd = "exited" | "closed" | "lost";
 
 /**
  * Wait until the pane is gone, on herdr's `events.subscribe`: one connection
- * subscribes to `pane.exited` and `pane.closed` (verified live against herdr
- * 0.8.2; `events.wait` only supports agent-status matches, so a subscription
- * is the only event channel) and the first matching event settles the wait.
- * The daemon pushes every pane's events to every subscriber, so the filter is
- * client-side. Three backstops close the gaps a subscription cannot see: the
- * socket ending, erroring or closing settles "lost"; a pane already absent
- * from `pane.list` when the subscription ack lands settles "exited" (its end
- * predated the subscription, so no event will ever arrive); and the optional
- * release signal settles "lost" for a caller that found the attempt's ending
- * somewhere else and wants its connection back. The liveness check runs only
- * after the ack, so an end can never slip between the check and the daemon
- * registering the subscription.
+ * subscribes to `pane.exited`, `pane.closed` and `tab.closed` (verified live
+ * against herdr 0.8.2; `events.wait` only supports agent-status matches, so
+ * a subscription is the only event channel) and the first matching event
+ * settles the wait. The daemon pushes every pane's events to every
+ * subscriber, so the filter is client-side. Three backstops close the gaps a
+ * subscription cannot see: the socket ending, erroring or closing settles
+ * "lost"; a pane already absent from `pane.list` when the subscription ack
+ * lands settles "exited" (its end predated the subscription, so no event
+ * will ever arrive); and the optional release signal settles "lost" for a
+ * caller that found the attempt's ending somewhere else and wants its
+ * connection back. The liveness check runs only after the ack, so an end can
+ * never slip between the check and the daemon registering the subscription.
+ *
+ * `tab.closed` is subscribed because a closed tab takes its panes silently
+ * (verified against herdr 0.8.2, issue #61): `tab.close` pushes one
+ * `tab_closed` carrying the tab id and no `pane_closed` for any pane in it,
+ * while `pane.close` does push `pane_closed`. The event carries no pane id,
+ * so a `tab_closed` for any tab re-checks `pane.list`: the pane gone from
+ * the listing settles "closed", the pane still listed was another tab's.
+ * The daemon drops the panes from its listing before it answers
+ * `tab.close`, and pushes `tab_closed` tens of milliseconds after that
+ * answer (verified six of six live closes), so the re-read never sees the
+ * pane it is about to lose. Without that, an operator closing an attempt's
+ * tab left this wait parked for good.
  *
  * "lost" says only that this observation is over, never that the attempt is:
  * the pane may still be running and the daemon merely unreachable. What a
@@ -288,6 +305,14 @@ export type PaneEnd = "exited" | "closed" | "lost";
  * settle it parks it: an attempt that had finished and written its exit code
  * was left reading `running` for 98 minutes on a wait that nothing could
  * reach. A peer's FIN raises "end", so "end" settles too.
+ *
+ * The socket is torn down only once its connect has completed or failed. A
+ * release that lands while the connect is still in flight resolves the wait
+ * at once but leaves the socket to be destroyed from its own connect (or
+ * error) callback: destroying a socket whose connect is pending is the one
+ * lifecycle this module ever ran that the runtime's event loop was not
+ * asked to survive, and the terminal-backed boot that segfaulted Bun inside
+ * its poll dispatch (issue #61) is the reason the module no longer runs it.
  */
 export function waitForPaneEnd(
   socketPath: string,
@@ -295,39 +320,78 @@ export function waitForPaneEnd(
   releaseSignal?: AbortSignal,
 ): Promise<PaneEnd> {
   return new Promise<PaneEnd>((resolve) => {
+    if (releaseSignal?.aborted) {
+      resolve("lost");
+      return;
+    }
     let settled = false;
+    let connecting = true;
+    let connectGrace: ReturnType<typeof setTimeout> | null = null;
     const sock = connect(socketPath);
     liveSockets.add(sock);
     let buf = "";
     const onRelease = (): void => settle("lost");
-    const release = (): void => {
-      releaseSignal?.removeEventListener("abort", onRelease);
+    const teardown = (): void => {
+      if (connectGrace !== null) clearTimeout(connectGrace);
+      connectGrace = null;
       liveSockets.delete(sock);
       sock.destroy();
+    };
+    const connected = (): void => {
+      connecting = false;
+      if (connectGrace !== null) clearTimeout(connectGrace);
+      connectGrace = null;
     };
     const settle = (end: PaneEnd): void => {
       if (settled) return;
       settled = true;
-      release();
+      releaseSignal?.removeEventListener("abort", onRelease);
+      if (connecting) {
+        // Settled mid-connect: the connect callback tears the socket down.
+        // A connect that never completes (a socket file whose daemon is
+        // wedged) would otherwise hold the socket forever, so the same
+        // watchdog herdrRpc keeps bounds the wait for it; past that, the
+        // connect is hung, not pending, and destroying it is the way out.
+        connectGrace = setTimeout(teardown, CONNECT_GRACE_MS);
+      } else {
+        teardown();
+      }
       resolve(end);
     };
-    if (releaseSignal?.aborted) {
-      settle("lost");
-      return;
-    }
+    // The pane's absence from the listing is the end the subscription cannot
+    // report: one that predated the ack, or one a closed tab took silently.
+    const settleIfUnlisted = (end: PaneEnd): void => {
+      void listPaneIds(socketPath)
+        .then((ids) => {
+          if (!ids.includes(paneId)) settle(end);
+        })
+        .catch(() => {});
+    };
     releaseSignal?.addEventListener("abort", onRelease, { once: true });
     sock.on("connect", () => {
+      connected();
+      if (settled) {
+        // Released while the connect was in flight: the wait has already
+        // resolved, and the socket is torn down now that it exists.
+        teardown();
+        return;
+      }
       sock.write(
         JSON.stringify({
           id: "1",
           method: "events.subscribe",
           params: {
-            subscriptions: [{ type: "pane.exited" }, { type: "pane.closed" }],
+            subscriptions: [
+              { type: "pane.exited" },
+              { type: "pane.closed" },
+              { type: "tab.closed" },
+            ],
           },
         }) + "\n",
       );
     });
     sock.on("data", (d) => {
+      if (settled) return;
       buf += d.toString();
       let newline: number;
       while ((newline = buf.indexOf("\n")) !== -1) {
@@ -342,12 +406,12 @@ export function waitForPaneEnd(
         if (typeof msg.event !== "string") {
           // The subscription ack: from here the daemon will push this pane's
           // ends, so only an end that predated the subscription can be
-          // missed, and the liveness check below covers exactly that.
-          void listPaneIds(socketPath)
-            .then((ids) => {
-              if (!ids.includes(paneId)) settle("exited");
-            })
-            .catch(() => {});
+          // missed, and the liveness check covers exactly that.
+          settleIfUnlisted("exited");
+          continue;
+        }
+        if (msg.event === "tab_closed") {
+          settleIfUnlisted("closed");
           continue;
         }
         if (msg.data?.pane_id !== paneId) continue; // another pane's event
@@ -356,8 +420,15 @@ export function waitForPaneEnd(
       }
     });
     sock.on("end", () => settle("lost"));
-    sock.on("error", () => settle("lost"));
-    sock.on("close", () => settle("lost"));
+    sock.on("error", () => {
+      connected();
+      settle("lost");
+    });
+    sock.on("close", () => {
+      connected();
+      liveSockets.delete(sock);
+      settle("lost");
+    });
   });
 }
 
