@@ -65,6 +65,7 @@ import {
   waitForPaneEnd,
 } from "./herdr.ts";
 import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
+import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import {
   StreamLineBuffer,
   TranscriptLineBuffer,
@@ -334,6 +335,14 @@ export interface PoolRun {
   accept: (ticketId: string, note?: string, approve?: boolean) => void;
   settled: Promise<PoolRun>;
   close: () => void;
+  /**
+   * Stop the run's headless attempts (ADR-0017): TERM to each child's
+   * process group, a grace, then KILL; wait for the drive to join the
+   * super-step (bounded, since a terminal-backed attempt is not stopped);
+   * then close the store. The engine itself does not exit here; the server's
+   * signal handler does, after this resolves.
+   */
+  shutdown: (graceMs?: number) => Promise<void>;
 }
 
 const reduceTickets = (
@@ -570,6 +579,12 @@ interface Session {
   // loop or from an adopted attempt's finalize, chains onto this so two
   // merges never run their git work concurrently on the main checkout.
   mergeChain: Promise<void>;
+  // The headless children of this engine process (ADR-0017), tracked from
+  // spawn to exit so a shutdown can stop every one of them.
+  children: ChildTracker;
+  // Headless orphans rehydrate found still alive from a previous engine
+  // process, stopped by reapHeadlessOrphans before the first scheduling.
+  orphans: HeadlessOrphan[];
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -634,10 +649,19 @@ export function startPool(options: RunOptions): PoolRun {
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
     mergeChain: Promise.resolve(),
+    children: new ChildTracker(),
+    orphans: [],
   };
 
   rehydrate(session);
-  session.terminalReconcile = reconcileTerminalAttempts(session);
+  // Boot reconciliation, awaited by the drive before its first scheduling:
+  // terminal-backed orphans are re-adopted or crashed (ADR-0014), headless
+  // orphans are stopped (ADR-0017), so no ticket is ever spawned into a
+  // worktree its previous attempt is still writing.
+  session.terminalReconcile = Promise.all([
+    reconcileTerminalAttempts(session),
+    reapHeadlessOrphans(session),
+  ]).then(() => undefined);
   const handle = makeHandle(session);
   session.handle = handle;
   startDrive(session);
@@ -709,8 +733,39 @@ function makeHandle(session: Session): PoolRun {
       return nextSettle(session);
     },
     close: () => closeStore(session),
+    shutdown: (graceMs) => shutdownSession(session, graceMs),
   };
   return handle;
+}
+
+// How long shutdown waits for the drive to join its super-step after the
+// children are stopped. Bounded because a terminal-backed attempt is left
+// running (its pane outlives the engine and boot re-adopts it, ADR-0014), so
+// a super-step holding one never joins, and a merge hold polls forever.
+const SHUTDOWN_SETTLE_WAIT_MS = 3_000;
+
+// Shutdown (ADR-0017): stop every headless child, let the drive join the
+// super-step it was in (each stopped attempt's exit handling records the
+// stop on its ticket log, and the loop raises no crash interrupts and
+// schedules nothing once stopping), then close the store. A ticket whose
+// attempt was stopped is left in-progress with no interrupt, which is
+// exactly what the next boot resets to ready.
+async function shutdownSession(
+  session: Session,
+  graceMs?: number,
+): Promise<void> {
+  session.children.stopping = true;
+  await session.children.stopAll(graceMs);
+  if (session.driving) {
+    await Promise.race([
+      nextSettle(session).then(
+        () => undefined,
+        () => undefined,
+      ),
+      Bun.sleep(SHUTDOWN_SETTLE_WAIT_MS),
+    ]);
+  }
+  closeStore(session);
 }
 
 function nextSettle(session: Session): Promise<PoolRun> {
@@ -937,6 +992,7 @@ async function driveLoop(session: Session): Promise<void> {
             issuesDir: session.issuesDir,
             harnesses: session.harnesses,
             herdrSocket: session.herdrSocket,
+            children: session.children,
           },
           plan,
         ).then((result) => {
@@ -1039,6 +1095,20 @@ async function driveLoop(session: Session): Promise<void> {
           merge.attempt,
         );
       }
+    }
+    if (session.children.stopping) {
+      // Shutdown (ADR-0017): this super-step joined after its headless
+      // attempts were stopped. Each stop is on its ticket's log already; no
+      // crash interrupt is raised for them, so the next boot resets those
+      // tickets to ready instead of waiting on a human, and nothing more is
+      // scheduled or graded.
+      session.state = applyUpdate(session.state, {
+        log: [
+          "engine shutdown: super-step joined; no crash interrupts raised " +
+            "and nothing more scheduled",
+        ],
+      });
+      break;
     }
     for (const result of results) {
       if (result.status === "in-progress") {
@@ -1183,9 +1253,27 @@ const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
 const ENGINE_RESET_NOTE =
   `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
   "The engine process stopped while this ticket was in-progress (killed, " +
-  "crashed, or the machine restarted), so the work is part done at best " +
+  "crashed, or the machine restarted). No agent from that process was " +
+  "found still running at this boot, so the work is part done at best " +
   "and the agent left no brief. The ticket is back to ready; read the " +
   "working tree before it runs again.\n";
+
+// The note for a ticket whose previous attempt was found still running at
+// boot (ADR-0017): the engine stops it before scheduling anything, so the
+// next attempt never shares the worktree with it.
+function engineOrphanNote(orphans: { attempt: number; pid: number }[]): string {
+  const who = orphans
+    .map((o) => `attempt ${o.attempt} (pid ${o.pid})`)
+    .join(" and ");
+  return (
+    `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
+    "The engine process stopped while this ticket was in-progress, and at " +
+    `the next boot ${who} was found still running in the working tree. ` +
+    "The engine stopped it before scheduling anything, so the work is part " +
+    "done at best and the agent left no brief. The ticket is back to ready; " +
+    "read the working tree before it runs again.\n"
+  );
+}
 
 // Rehydration: the last checkpoint restores the run's channels, but the
 // line-1 markers are the truth for ticket statuses and win on any
@@ -1219,13 +1307,36 @@ function rehydrate(session: Session): void {
   const interrupted = new Set(session.state.interrupts.map((i) => i.ticketId));
   for (const marker of session.markers) {
     if (marker.status === "in-progress" && !interrupted.has(marker.id)) {
+      // A headless attempt of the previous engine process may still be
+      // running (ADR-0017): its spawned event's pid proves it. The note says
+      // which it was; reapHeadlessOrphans stops it before the first
+      // scheduling. A terminal-backed attempt records no pid and keeps the
+      // plain note, which reconcileTerminalAttempts strips on re-adoption.
+      const orphans = headlessOrphans(session, marker.id);
       writeMarkerStatus(marker.file, "ready");
-      appendFileSync(marker.file, ENGINE_RESET_NOTE);
-      marker.status = "ready";
-      log.push(
-        `ticket ${marker.id}: marker was in-progress with no live agent; ` +
-          "back to ready",
+      appendFileSync(
+        marker.file,
+        orphans.length > 0 ? engineOrphanNote(orphans) : ENGINE_RESET_NOTE,
       );
+      marker.status = "ready";
+      if (orphans.length > 0) {
+        for (const orphan of orphans) {
+          session.orphans.push({ marker, ...orphan });
+        }
+        log.push(
+          `ticket ${marker.id}: marker was in-progress and ` +
+            orphans
+              .map((o) => `attempt ${o.attempt} (pid ${o.pid})`)
+              .join(", ") +
+            " is still running from the previous engine process; stopping " +
+            "it before scheduling, ticket back to ready",
+        );
+      } else {
+        log.push(
+          `ticket ${marker.id}: marker was in-progress with no live agent; ` +
+            "back to ready",
+        );
+      }
     }
   }
   session.state = applyUpdate(session.state, {
@@ -1290,6 +1401,95 @@ function rehydrate(session: Session): void {
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Headless boot reconciliation (ADR-0017)
+// ---------------------------------------------------------------------------
+
+interface HeadlessOrphan {
+  marker: TicketMarker;
+  attempt: number;
+  pid: number;
+  cwd: string;
+}
+
+// The headless attempts a previous engine process spawned and never saw
+// exit, still alive: every spawned event carrying a pid (headless spawns
+// record one; terminal-backed spawns record a pane id instead) with no
+// exited or crash event for the same attempt after it, whose pid is live in
+// the attempt's spawn cwd. A live pid working elsewhere is a reused pid, not
+// an orphan. A verify fan-out can leave several per ticket.
+function headlessOrphans(
+  session: Session,
+  ticketId: string,
+): Omit<HeadlessOrphan, "marker">[] {
+  const events = readEvents(session.runsDir, ticketId);
+  const found: Omit<HeadlessOrphan, "marker">[] = [];
+  events.forEach((event, i) => {
+    if (event.kind !== "spawned") return;
+    const pid = event.payload.pid;
+    const cwd = event.payload.cwd;
+    if (typeof pid !== "number" || typeof cwd !== "string") return;
+    const ended = events.some(
+      (other, j) =>
+        j > i &&
+        other.attempt === event.attempt &&
+        (other.kind === "exited" || other.kind === "crash"),
+    );
+    if (ended) return;
+    if (!orphanIsLive(pid, cwd)) return;
+    found.push({ attempt: event.attempt, pid, cwd });
+  });
+  return found;
+}
+
+/**
+ * Stop the headless orphans rehydrate found (ADR-0017), each with the same
+ * TERM-grace-KILL a shutdown uses, and record the crash on the ticket's log
+ * so the attempt no longer reads as running. Awaited by the drive before its
+ * first scheduling, so the re-run never lands in a worktree the orphan is
+ * still writing. Never rejects: an orphan that survives even KILL (not ours
+ * to signal) is logged and the pool carries on as it did before this existed.
+ */
+async function reapHeadlessOrphans(session: Session): Promise<void> {
+  const orphans = session.orphans.splice(0);
+  if (orphans.length === 0) return;
+  await Promise.all(
+    orphans.map(async (orphan) => {
+      let gone = false;
+      try {
+        gone = await stopOrphan(orphan.pid);
+      } catch {
+        gone = false;
+      }
+      const id = orphan.marker.id;
+      appendEvent(session.runsDir, id, {
+        at: new Date().toISOString(),
+        attempt: orphan.attempt,
+        kind: "crash",
+        payload: {
+          code: null,
+          reason: gone
+            ? `orphan attempt (pid ${orphan.pid}) from a previous engine ` +
+              "process was still running at boot; stopped by the engine"
+            : `orphan attempt (pid ${orphan.pid}) from a previous engine ` +
+              "process was still running at boot and survived the engine's stop",
+          logTail: [],
+          outcomeExists: existsSync(
+            join(session.runsDir, outcomeFileName(id, null)),
+          ),
+          pid: orphan.pid,
+        },
+      });
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${id}: orphan attempt ${orphan.attempt} (pid ${orphan.pid}) ` +
+            (gone ? "stopped at boot" : "could not be stopped at boot"),
+        ],
+      });
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2280,10 +2480,11 @@ async function runResolver(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The resolver's completion: its outcome file holds a result the moment
     // the resolver writes it, without waiting for the TUI to exit.
     (path) => readResolverResult(path) !== null,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(session.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: lastAttempt(session.runsDir, marker.id),
@@ -2294,6 +2495,7 @@ async function runResolver(
           worktree.branch,
           terminal,
           terminalError,
+          pid,
         ),
       }),
   );
@@ -2303,7 +2505,8 @@ async function runResolver(
   }
   const reason =
     exitCode !== 0
-      ? exitCrashReason(
+      ? attemptCrashReason(
+          session.children,
           exitCode,
           ctx.exitCodePath,
           "resolver",
@@ -3059,16 +3262,17 @@ async function runGrader(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The grader's completion: a usable grade (or a definite refusal of
     // one) the moment the grader writes its outcome, without waiting for the
     // TUI to exit.
     (path) => readGraderResult(path).ok,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(runsDir, gid, {
         at: new Date().toISOString(),
         attempt: graderAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
       }),
   );
   // The grader's exit facts (ADR-0012), on the grade path and the crash
@@ -3077,7 +3281,8 @@ async function runGrader(
   const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    const reason = exitCrashReason(
+    const reason = attemptCrashReason(
+      session.children,
       exitCode,
       ctx.exitCodePath,
       "harness",
@@ -3986,18 +4191,19 @@ async function runHeadToHead(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The judge's completion: a pick (or tie, or a definite unusable
     // refusal) the moment it writes its outcome, without waiting for the
     // TUI to exit.
     (path) =>
       readHeadToHeadVerdict(path, [top.attempt, runnerUp.attempt]).kind !==
       "unusable",
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(runsDir, h2hId, {
         at: new Date().toISOString(),
         attempt: h2hAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
       }),
   );
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
@@ -4011,7 +4217,8 @@ async function runHeadToHead(
   if (exitCode !== 0) {
     verdict = {
       kind: "unusable",
-      reason: exitCrashReason(
+      reason: attemptCrashReason(
+        session.children,
         exitCode,
         ctx.exitCodePath,
         "harness",
@@ -4413,6 +4620,7 @@ interface TicketEnv {
   issuesDir: string;
   harnesses: Record<string, HarnessCommand>;
   herdrSocket: string;
+  children: ChildTracker;
 }
 
 interface TicketPlan {
@@ -4517,7 +4725,8 @@ async function openAttemptTerminal(
  * inherited parent's, with their values. Terminal-backed spawns add pane_id
  * (and terminal_error on a headless fallback, whenever it happened: the tab
  * refusing to open or the wrapper refusing to send), per ADR-0014 and
- * ADR-0015.
+ * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
+ * boot reconciliation checks for an orphan of a dead engine process.
  */
 function spawnedPayload(
   argv: string[],
@@ -4525,6 +4734,7 @@ function spawnedPayload(
   branch: string | null,
   terminal?: AttemptTerminal,
   terminalError?: string,
+  pid?: number,
 ): Record<string, unknown> {
   return {
     argv: elidePromptArgv(argv, ctx.body),
@@ -4532,6 +4742,7 @@ function spawnedPayload(
     branch,
     commitSha: commitShaAt(ctx.cwd),
     env: engineEnvSet(spawnEnv(ctx.cwd)),
+    ...(pid !== undefined ? { pid } : {}),
     ...(terminal
       ? {
           // A mid-flight fallback (the wrapper could not be sent to the pane)
@@ -5109,10 +5320,11 @@ async function runTicket(
     interactiveArgv,
     argv,
     ctx,
+    env.children,
     // The attempt's completion: a valid Outcome the moment it appears,
     // without waiting for the TUI to exit (ADR-0016).
     (path) => readOutcomeResult(path).ok,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(env.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: plan.attempt,
@@ -5123,6 +5335,7 @@ async function runTicket(
           plan.worktree?.branch ?? null,
           terminal,
           terminalError,
+          pid,
         ),
       }),
   );
@@ -5151,7 +5364,8 @@ async function runTicket(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
-    crashReason = exitCrashReason(
+    crashReason = attemptCrashReason(
+      env.children,
       exitCode,
       ctx.exitCodePath,
       "harness",
@@ -5435,12 +5649,20 @@ async function spawnWithTerminal(
   interactiveArgv: string[],
   batchArgv: string[],
   ctx: SpawnContext,
+  children: ChildTracker,
   completed: (outcomePath: string) => boolean,
-  recordSpawned: (terminalError: string | undefined, argv: string[]) => void,
+  recordSpawned: (
+    terminalError: string | undefined,
+    argv: string[],
+    pid?: number,
+  ) => void,
 ): Promise<number> {
+  // A headless spawn records once the child exists, so the event carries
+  // its pid (ADR-0017); the callback runs before the first byte is pumped.
   if (!terminal?.paneId) {
-    recordSpawned(undefined, batchArgv);
-    return spawnToLog(batchArgv, ctx);
+    return spawnToLog(batchArgv, ctx, children, (pid) =>
+      recordSpawned(undefined, batchArgv, pid),
+    );
   }
   const terminalError = await sendWrapperToPane(
     socketPath,
@@ -5448,8 +5670,12 @@ async function spawnWithTerminal(
     interactiveArgv,
     ctx,
   );
-  recordSpawned(terminalError, terminalError !== undefined ? batchArgv : interactiveArgv);
-  if (terminalError !== undefined) return spawnToLog(batchArgv, ctx);
+  if (terminalError !== undefined) {
+    return spawnToLog(batchArgv, ctx, children, (pid) =>
+      recordSpawned(terminalError, batchArgv, pid),
+    );
+  }
+  recordSpawned(undefined, interactiveArgv);
   return awaitInteractiveSpawn(socketPath, terminal.paneId, ctx, completed);
 }
 
@@ -5842,6 +6068,24 @@ export function exitCrashReason(
   return `${subject} exited ${code}`;
 }
 
+// The crash reason for an attempt's non-zero exit, naming a shutdown stop
+// as what it was (ADR-0017): a headless child the engine stopped exits on
+// the signal, and "exited 143" would read as the harness's own failure.
+// Terminal-backed attempts are never stopped, and the negative sentinels
+// are the engine's own codes, so both keep the ordinary reason.
+function attemptCrashReason(
+  children: ChildTracker,
+  code: number,
+  exitCodePath: string,
+  subject: string,
+  paneId: string | null,
+): string {
+  if (children.stopping && paneId === null && code > 0) {
+    return `${subject} stopped by engine shutdown (exited ${code})`;
+  }
+  return exitCrashReason(code, exitCodePath, subject, paneId);
+}
+
 // How the pool log names the ending in passing, where the line is about the
 // marker and the code is one clause of it. A real code is the shell's own
 // status and reads as one; a sentinel is not a status at all, so it says what
@@ -5979,17 +6223,24 @@ function startPaneStreamTail(
 async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
+  children: ChildTracker,
+  onSpawn?: (pid: number) => void,
 ): Promise<number> {
   // The child env comes from spawnEnv, the same builder the spawned event's
   // env facts derive from, so the event cannot drift from what the child
-  // actually ran under (ADR-0012).
+  // actually ran under (ADR-0012). The child leads its own process group
+  // (ADR-0017): a stop signals the group, so the harness's own children go
+  // with it instead of surviving as the orphans an untrapped kill left.
   const proc = Bun.spawn(argv, {
     cwd: ctx.cwd,
     env: spawnEnv(ctx.cwd),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: true,
   });
+  children.track({ pid: proc.pid, exited: proc.exited });
+  onSpawn?.(proc.pid);
   // A streamed harness (ADR-0012) also tees every stdout chunk verbatim to
   // the attempt's Stream file, live as bytes arrive; both files open at
   // spawn, so a tail on either shows activity from the first chunk.

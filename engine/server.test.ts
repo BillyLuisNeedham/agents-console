@@ -3215,3 +3215,100 @@ describe("terminalRuntimeRefusal", () => {
     expect(terminalRuntimeRefusal({ terminal: "herdr" }, Bun.version)).toBeNull();
   });
 });
+
+// The CLI's shutdown (ADR-0017, issue #65): a SIGTERM to the real server
+// process stops its headless attempts before it exits and releases the pool
+// lock, so a relaunch neither races the attempt in its worktree nor trips
+// over a stale lock.
+describe("server shutdown on signal", () => {
+  it("SIGTERM stops the running attempt and its grandchildren, releases server.pid, and exits 0", async () => {
+    const poolDir = makePool(
+      [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" }],
+      { defaults: { harness: "claude", model: "stub-model" } },
+    );
+    // A fake `claude` ahead of the real one on PATH: the CLI only knows the
+    // default harnesses, and the child inherits the server's environment.
+    const bin = join(poolDir, "bin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "claude"),
+      ["#!/usr/bin/env bash", "sleep 60 &", `echo $! > "${poolDir}/grandchild.pid"`, "wait", ""].join("\n"),
+    );
+    spawnSync("chmod", ["+x", join(bin, "claude")]);
+    const events = join(poolDir, "runs", "01.events.jsonl");
+    const server = Bun.spawn(
+      [
+        process.execPath,
+        "run",
+        join(import.meta.dir, "server.ts"),
+        "--pool",
+        poolDir,
+        "--port",
+        "0",
+        "--registry",
+        join(poolDir, "fleet.json"),
+      ],
+      {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const live = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    let pid = 0;
+    let grandchild = 0;
+    try {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (existsSync(events) && existsSync(join(poolDir, "grandchild.pid"))) {
+          const spawned = readFileSync(events, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { kind: string; payload: { pid?: number } })
+            .find((e) => e.kind === "spawned");
+          const g = readFileSync(join(poolDir, "grandchild.pid"), "utf8").trim();
+          if (spawned?.payload.pid && g !== "") {
+            pid = spawned.payload.pid;
+            grandchild = Number(g);
+            break;
+          }
+        }
+        await Bun.sleep(50);
+      }
+      expect(pid).toBeGreaterThan(0);
+      expect(live(pid)).toBe(true);
+      expect(live(grandchild)).toBe(true);
+      expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
+
+      server.kill("SIGTERM");
+      const code = await server.exited;
+
+      expect(code).toBe(0);
+      expect(live(pid)).toBe(false);
+      expect(live(grandchild)).toBe(false);
+      expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+      const stdout = await new Response(server.stdout).text();
+      expect(stdout).toContain("SIGTERM: stopping attempts, then exiting");
+      const recorded = readFileSync(events, "utf8");
+      expect(recorded).toContain("harness stopped by engine shutdown (exited 143)");
+    } finally {
+      server.kill("SIGKILL");
+      for (const p of [pid, grandchild]) {
+        if (p > 0) {
+          try {
+            process.kill(-p, "SIGKILL");
+          } catch {
+            // gone
+          }
+        }
+      }
+    }
+  });
+});

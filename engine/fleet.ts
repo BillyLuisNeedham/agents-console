@@ -1,10 +1,11 @@
 /**
  * The fleet registry: a machine-wide JSON file recording every live console
  * server, so any of them can be found by pool directory. Servers upsert their
- * own entry after binding; hygiene is entirely prune-on-read. There is no
- * server-side exit handler, because cleanup under kill -9 would be
- * unreliable, so a dead pid or a deleted pool directory only drops from view
- * on the next read.
+ * own entry after binding; hygiene is entirely prune-on-read. The server's
+ * signal handler (ADR-0017) stops attempts and releases the pool lock but
+ * never touches the registry, because cleanup under kill -9 would be
+ * unreliable anyway, so a dead pid or a deleted pool directory only drops
+ * from view on the next read.
  */
 
 import {

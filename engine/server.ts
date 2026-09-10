@@ -148,6 +148,12 @@ export interface PoolServer {
   settled: () => Promise<EnrichedSnapshot>;
   url: string;
   close: () => Promise<void>;
+  /**
+   * The orderly stop (ADR-0017): stop the run's headless attempts, stop
+   * serving, release the pool lock. The CLI's signal handler calls this and
+   * exits after it; in-process callers may call it directly.
+   */
+  shutdown: (graceMs?: number) => Promise<void>;
 }
 
 /** The pool's ticket metadata, as the engine parses it from the Issue files. */
@@ -1069,6 +1075,17 @@ function acquirePoolLock(poolDir: string, registryPath: string): void {
 }
 
 /**
+ * Release the pool lock on an orderly shutdown, only if it still names this
+ * process: a relaunch that already reclaimed the pool must keep its lock. A
+ * crash still leaves the file, and the next boot's stale-lock check clears
+ * it, exactly as before.
+ */
+function releasePoolLock(poolDir: string): void {
+  if (readLockedPid(poolDir) !== process.pid) return;
+  rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+}
+
+/**
  * The oldest Bun a terminal-backed pool boots on. Bun 1.2.13 on macOS
  * segfaulted inside its event loop's poll dispatch a few hundred
  * milliseconds into a `terminal: "herdr"` boot (issue #61), the same pool
@@ -1579,6 +1596,15 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       await server.stop(true);
       currentRun?.close();
     },
+    shutdown: async (graceMs) => {
+      // The attempts stop first, while the run's own exit handling can still
+      // record each stop; serving stops next so no answer arrives into a
+      // closing run; the lock goes last, once nothing of this process still
+      // owns the pool.
+      if (currentRun) await currentRun.shutdown(graceMs);
+      await server.stop(true);
+      releasePoolLock(poolDir);
+    },
   };
 }
 
@@ -1613,7 +1639,40 @@ function runServerCli(): void {
   void server.start().then(() => {
     console.log(`pool server on ${server.url} (${poolDir})`);
   });
+  installShutdownHandlers(server);
 }
+
+/**
+ * Trap SIGTERM and SIGINT (ADR-0017): an untrapped kill left every headless
+ * harness running under init, and the relaunch raced them in their own
+ * worktrees (issue #65). The handler stops the attempts, releases the pool,
+ * and exits; a second signal during the stop is ignored rather than
+ * cutting the stop short, and a stop that hangs past its bound exits anyway
+ * so the operator is never left with a server that will not die.
+ */
+function installShutdownHandlers(server: PoolServer): void {
+  let stopping = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal}: stopping attempts, then exiting`);
+    const bound = setTimeout(() => process.exit(1), SHUTDOWN_HARD_LIMIT_MS);
+    void server.shutdown().then(
+      () => process.exit(0),
+      (err) => {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      },
+    );
+    bound.unref();
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+}
+
+// Well past the children's TERM grace plus the drive's settle wait: a stop
+// that has not finished by then is stuck on something the exit will free.
+const SHUTDOWN_HARD_LIMIT_MS = 15_000;
 
 if (import.meta.main) {
   runServerCli();
