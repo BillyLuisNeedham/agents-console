@@ -75,8 +75,12 @@ A named, machine-local bundle of a pool's behavioural config — harness, model,
 _Avoid_: profile, template
 
 **Assignment**:
-The harness, model, and drivers a ticket runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. Every ticket card shows its Assignment.
+The harness, model, and drivers an Attempt runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
 _Avoid_: config (that's the raw file the Assignment is resolved from), profile
+
+**Config reload**:
+The engine's re-read of the Pool config file at a super-step boundary. Only the assignment slice reloads (defaults, assign, resolver); roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
+_Avoid_: hot reload (implies a watcher; there is none), restart
 
 **Detail**:
 The Console's right-hand panel for the selected node card — its status, channels, and pending interrupt at full size. Mirrors the card's interrupt form; both stay live. Resizable by dragging its left edge; can expand to fill the Console window.
