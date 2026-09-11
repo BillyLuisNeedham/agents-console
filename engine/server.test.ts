@@ -31,7 +31,8 @@ import {
 import { readFleetEntries } from "./fleet.ts";
 import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
-import { branchFor, worktreePathFor } from "./worktrees.ts";
+import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
+import { readConversation } from "./conversations.ts";
 
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
@@ -3213,5 +3214,473 @@ describe("terminalRuntimeRefusal", () => {
 
   it("boots on this test run's own Bun", () => {
     expect(terminalRuntimeRefusal({ terminal: "herdr" }, Bun.version)).toBeNull();
+  });
+});
+
+// The CLI's shutdown (ADR-0017, issue #65): a SIGTERM to the real server
+// process stops its headless attempts before it exits and releases the pool
+// lock, so a relaunch neither races the attempt in its worktree nor trips
+// over a stale lock.
+describe("server shutdown on signal", () => {
+  it("SIGTERM stops the running attempt and its grandchildren, releases server.pid, and exits 0", async () => {
+    const poolDir = makePool(
+      [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" }],
+      { defaults: { harness: "claude", model: "stub-model" } },
+    );
+    // A fake `claude` ahead of the real one on PATH: the CLI only knows the
+    // default harnesses, and the child inherits the server's environment.
+    const bin = join(poolDir, "bin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "claude"),
+      ["#!/usr/bin/env bash", "sleep 60 &", `echo $! > "${poolDir}/grandchild.pid"`, "wait", ""].join("\n"),
+    );
+    spawnSync("chmod", ["+x", join(bin, "claude")]);
+    const events = join(poolDir, "runs", "01.events.jsonl");
+    const server = Bun.spawn(
+      [
+        process.execPath,
+        "run",
+        join(import.meta.dir, "server.ts"),
+        "--pool",
+        poolDir,
+        "--port",
+        "0",
+        "--registry",
+        join(poolDir, "fleet.json"),
+      ],
+      {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const live = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    let pid = 0;
+    let grandchild = 0;
+    try {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (existsSync(events) && existsSync(join(poolDir, "grandchild.pid"))) {
+          const spawned = readFileSync(events, "utf8")
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { kind: string; payload: { pid?: number } })
+            .find((e) => e.kind === "spawned");
+          const g = readFileSync(join(poolDir, "grandchild.pid"), "utf8").trim();
+          if (spawned?.payload.pid && g !== "") {
+            pid = spawned.payload.pid;
+            grandchild = Number(g);
+            break;
+          }
+        }
+        await Bun.sleep(50);
+      }
+      expect(pid).toBeGreaterThan(0);
+      expect(live(pid)).toBe(true);
+      expect(live(grandchild)).toBe(true);
+      expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
+
+      server.kill("SIGTERM");
+      const code = await server.exited;
+
+      expect(code).toBe(0);
+      expect(live(pid)).toBe(false);
+      expect(live(grandchild)).toBe(false);
+      expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+      const stdout = await new Response(server.stdout).text();
+      expect(stdout).toContain("SIGTERM: stopping attempts, then exiting");
+      const recorded = readFileSync(events, "utf8");
+      expect(recorded).toContain("harness stopped by engine shutdown (exited 143)");
+    } finally {
+      server.kill("SIGKILL");
+      for (const p of [pid, grandchild]) {
+        if (p > 0) {
+          try {
+            process.kill(-p, "SIGKILL");
+          } catch {
+            // gone
+          }
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conversations (issue #60): /api/conversations, /api/conversations/end, and
+// the terminal/events/log endpoints accepting a Conversation id.
+// ---------------------------------------------------------------------------
+
+describe("conversation endpoints", () => {
+  const fakeServers: import("node:net").Server[] = [];
+
+  afterEach(async () => {
+    while (fakeServers.length > 0) {
+      const server = fakeServers.pop()!;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  /** A git-backed pool (Conversations need their own worktree and branch),
+   *  with one already-done ticket so loadPoolMarkers never sees an empty
+   *  issues/ directory. `terminal: herdr` unless overridden. */
+  function makeConvoPool(config: Partial<PoolConfig> = {}): string {
+    const poolDir = makePool(
+      [{ file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" }],
+      { terminal: "herdr", defaults: { harness: "convo", model: "m" }, ...config },
+    );
+    const git = (args: string[]) => spawnSync("git", args, { cwd: poolDir, stdio: "ignore" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    return poolDir;
+  }
+
+  // A conversational "harness" with no defaultHarnessDescriptors entry (`cat`,
+  // which just holds the pane open reading stdin): startConversation's
+  // readiness wait is skipped entirely, the same trick conversations.test.ts
+  // uses, so these tests exercise the HTTP routes without depending on any
+  // harness's ready pattern.
+  const convoHarnesses: Record<string, HarnessCommand> = { convo: () => ["cat"] };
+
+  /**
+   * A herdr fake that actually runs what a pane is sent, in the style of
+   * conversations.test.ts's startFakeHerdr: real enough for
+   * startConversation's full launch (tab.create, the wrapper's paste +
+   * Enter, pane.read, pane.close, tab.close) to complete and record a real
+   * pane id, which is what the terminal and list/create/end routes need to
+   * be exercised for real rather than against hand-seeded events.
+   */
+  function startLaunchFakeHerdr(): Promise<{ socketPath: string; close: () => Promise<void> }> {
+    let minted = 0;
+    interface FakePane {
+      tabId: string;
+      cwd: string;
+      alive: boolean;
+      buffer: string;
+      booted: boolean;
+      inputArea: string;
+      proc?: ReturnType<typeof Bun.spawn>;
+    }
+    const panes = new Map<string, FakePane>();
+    const procs: ReturnType<typeof Bun.spawn>[] = [];
+    const connections = new Set<import("node:net").Socket>();
+    const server = createServer((socket) => {
+      connections.add(socket);
+      socket.on("close", () => connections.delete(socket));
+      let buf = "";
+      socket.on("data", (d) => {
+        buf += d.toString();
+        if (!buf.includes("\n")) return;
+        const msg = JSON.parse(buf.slice(0, buf.indexOf("\n"))) as {
+          id: string;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        const respond = (result: unknown): void => {
+          socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
+        };
+        if (msg.method === "tab.create") {
+          minted += 1;
+          const tabId = `tab-${minted}`;
+          const paneId = `pane-${minted}`;
+          panes.set(paneId, {
+            tabId,
+            cwd: String(msg.params.cwd ?? "/"),
+            alive: true,
+            buffer: "",
+            booted: false,
+            inputArea: "",
+          });
+          respond({ tab: { tab_id: tabId } });
+        } else if (msg.method === "pane.list") {
+          respond({
+            panes: [...panes.entries()]
+              .filter(([, p]) => p.alive)
+              .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id })),
+          });
+        } else if (msg.method === "pane.read") {
+          const pane = panes.get(String(msg.params.pane_id));
+          const visible = pane ? (pane.booted ? pane.inputArea : pane.buffer) : "";
+          respond({ read: { text: visible, revision: 0, truncated: false } });
+        } else if (msg.method === "pane.send_input") {
+          const pane = panes.get(String(msg.params.pane_id));
+          if (pane) {
+            if (typeof msg.params.text === "string") {
+              if (!pane.booted) pane.buffer += msg.params.text;
+              else pane.inputArea += msg.params.text;
+            }
+            if (Array.isArray(msg.params.keys) && msg.params.keys.includes("enter")) {
+              if (pane.booted) {
+                pane.inputArea = "";
+              } else {
+                const command = pane.buffer;
+                pane.buffer = "";
+                pane.booted = true;
+                const proc = Bun.spawn(["bash", "-c", command], {
+                  cwd: pane.cwd,
+                  stdin: "ignore",
+                  stdout: "ignore",
+                  stderr: "ignore",
+                });
+                pane.proc = proc;
+                procs.push(proc);
+              }
+            }
+          }
+          respond({});
+        } else if (msg.method === "events.subscribe") {
+          socket.write(JSON.stringify({ id: msg.id, result: { type: "subscription_started" } }) + "\n");
+        } else if (msg.method === "pane.close") {
+          const paneId = String(msg.params.pane_id ?? "");
+          const pane = panes.get(paneId);
+          if (pane) {
+            pane.alive = false;
+            pane.proc?.kill();
+          }
+          respond({ type: "ok" });
+        } else if (msg.method === "tab.close") {
+          const tabId = String(msg.params.tab_id ?? "");
+          for (const pane of panes.values()) {
+            if (pane.tabId !== tabId) continue;
+            pane.alive = false;
+            pane.proc?.kill();
+          }
+          respond({ type: "ok" });
+        } else {
+          respond({});
+        }
+      });
+    });
+    fakeServers.push(server);
+    const dir = mkdtempSync(join(tmpdir(), "conv-server-herdr-"));
+    tempDirs.push(dir);
+    const socketPath = join(dir, "herdr.sock");
+    return new Promise((resolve, reject) => {
+      server.on("error", reject);
+      server.listen(socketPath, () =>
+        resolve({
+          socketPath,
+          close: () =>
+            new Promise<void>((res) => {
+              for (const proc of procs) proc.kill();
+              for (const conn of connections) conn.destroy();
+              server.close(() => res());
+            }),
+        }),
+      );
+    });
+  }
+
+  function startConvoServer(poolDir: string, herdrSocket: string): PoolServer {
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      distDir: "/nonexistent",
+      registryPath: fleetRegistry(poolDir),
+      herdrSocket,
+      harnesses: convoHarnesses,
+    });
+    servers.push(server);
+    return server;
+  }
+
+  it("refuses to start a conversation on a headless pool with a 409 naming the reason", async () => {
+    const poolDir = makeConvoPool({ terminal: undefined });
+    const server = await startServer(poolDir, convoHarnesses);
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "A talk" }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    // The Console's client (ui/src/client.ts startConversation) reads the
+    // failure text off `reason`, not `error`.
+    expect(body.reason).toContain("not terminal-backed");
+  });
+
+  it("rejects a missing title with 400 before ever touching the engine", async () => {
+    const poolDir = makeConvoPool();
+    const server = await startServer(poolDir, convoHarnesses);
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opening: "hi" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).reason).toContain("title is required");
+  });
+
+  it("ending an unknown conversation id is a 404", async () => {
+    const poolDir = makeConvoPool();
+    const server = await startServer(poolDir, convoHarnesses);
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/conversations/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "conv-nope" }),
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json()).reason).toContain("no live conversation");
+  });
+
+  it("create, then end, round trip through the HTTP routes", async () => {
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+    await server.start();
+    await server.settled();
+
+    const createRes = await fetch(`${server.url}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Plan the rollout", opening: "hello agent" }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = (await createRes.json()).conversation;
+    expect(created.status).toBe("live");
+    expect(created.title).toBe("Plan the rollout");
+    expect(typeof created.paneId).toBe("string");
+    expect(created.assignment).toEqual({ harness: "convo", model: "m", drivers: "implement" });
+
+    // Confirmed on disk, the same proof conversations.test.ts uses: the
+    // route really drove the engine's startConversation, not a stub.
+    expect(readConversation(join(poolDir, "conversations", `${created.id}.md`)).status).toBe(
+      "live",
+    );
+
+    const endRes = await fetch(`${server.url}/api/conversations/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: created.id, closing: "thanks, that's everything" }),
+    });
+    expect(endRes.status).toBe(202);
+    expect("snapshot" in (await endRes.json())).toBe(true);
+
+    expect(readConversation(join(poolDir, "conversations", `${created.id}.md`)).status).toBe(
+      "ended",
+    );
+    expect(existsSync(worktreePathFor(poolDir, created.id))).toBe(false);
+    expect(branchExists(poolDir, created.id)).toBe(false);
+
+    await fake.close();
+  });
+
+  it("the list endpoint reflects a Conversation once any snapshot re-derives it", async () => {
+    // engine/conversations.ts's startConversation and finishConversationEnd
+    // (unlike markConversationCrashed) never call emitSnapshot themselves, so
+    // the server's cached `latest` — what GET /api/conversations serves —
+    // only picks up a Conversation's current state on the next snapshot from
+    // something else. Answering the pool's review gate is a convenient,
+    // already-proven way to force one more snapshot (see the "pool server"
+    // tests above); conversationViews(session) is recomputed fresh at every
+    // emit regardless of what changed, so that snapshot picks up the
+    // Conversation that exists by then. This exercises the real, current
+    // behaviour rather than an idealised one: see the final report for the
+    // suggested engine-side fix (an emitSnapshot call alongside
+    // markConversationCrashed's).
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+    await server.start();
+    await server.settled();
+
+    const beforeAny = await (await fetch(`${server.url}/api/conversations`)).json();
+    expect(beforeAny.conversations).toEqual([]);
+
+    const created = await server.startConversation({ title: "Watch it land" });
+    await server.answer(REVIEW_TICKET_ID, "approve");
+
+    const afterAnswer = await (await fetch(`${server.url}/api/conversations`)).json();
+    expect(afterAnswer.conversations.map((c: { id: string }) => c.id)).toContain(created.id);
+
+    await server.endConversation(created.id);
+    await fake.close();
+  });
+
+  it("peek and focus resolve a Conversation's recorded pane, and refuse once it never spawned", async () => {
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+    await server.start();
+    await server.settled();
+
+    const created = await server.startConversation({ title: "Peek me" });
+
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=${created.id}`);
+    expect(peek.status).toBe(200);
+    expect((await peek.json()).paneId).toBe(created.paneId);
+
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=${created.id}`, {
+      method: "POST",
+    });
+    expect(focus.status).toBe(200);
+
+    // An unknown id (never a ticket, never a Conversation) is the same
+    // clean no-pane 404 as a headless or finished ticket.
+    const unknown = await fetch(`${server.url}/api/terminal/peek?ticket=nope`);
+    expect(unknown.status).toBe(404);
+
+    await server.endConversation(created.id);
+    await fake.close();
+  });
+
+  it("the events endpoint accepts a Conversation id the same way it accepts a ticket id", async () => {
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+    await server.start();
+    await server.settled();
+
+    const created = await server.startConversation({ title: "Talk it through" });
+
+    const res = await fetch(`${server.url}/api/events?ticket=${created.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.events.some((e: { kind: string }) => e.kind === "spawned")).toBe(true);
+
+    const unknown = await fetch(`${server.url}/api/events?ticket=nope`);
+    expect(unknown.status).toBe(404);
+
+    await server.endConversation(created.id);
+    await fake.close();
+  });
+
+  it("PoolServer exposes startConversation/endConversation directly, guarded before the pool starts", async () => {
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+
+    await expect(server.startConversation({ title: "Too early" })).rejects.toThrow(
+      "pool not started",
+    );
+    await expect(server.endConversation("conv-1")).rejects.toThrow("pool not started");
+
+    await server.start();
+    await server.settled();
+    const created = await server.startConversation({ title: "Direct call" });
+    expect(created.status).toBe("live");
+    await server.endConversation(created.id, "done via direct call");
+    expect(readConversation(join(poolDir, "conversations", `${created.id}.md`)).status).toBe(
+      "ended",
+    );
+
+    await fake.close();
   });
 });

@@ -300,8 +300,11 @@ One action, in order:
    ```
 
 Report the URL and the log path, and name the absent spend cap: an unattended run spends until
-the pool stops. To stop the server later, kill the pid in `runs/server.pid`; the engine writes it
-when it claims the pool.
+the pool stops. To stop the server later, send SIGTERM to the pid in `runs/server.pid` (a plain
+`kill`); the engine writes that file when it claims the pool. The server stops every headless
+attempt it spawned before it exits and removes the pid file itself (ADR-0017). Never `kill -9` a
+pool server with attempts in flight: that skips the stop, and the attempts run on as orphans
+until the next boot finds and stops them.
 
 Then stop. The run from here is the human's: tickets spawn real harnesses, checkpoints arrive as
 interrupts, and the first launch of a pool is theirs to watch.
@@ -326,15 +329,19 @@ Leave these alone rather than rediscovering them:
   so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
-  super-step boundary (ADR-0017): an edit lands on any ticket with no Attempt in flight — a
+  super-step boundary (ADR-0018): an edit lands on any ticket with no Attempt in flight — a
   fresh Spawn, a checkpoint resume, a ticket Review sent back, one that has never run — at its
   next boundary, no restart needed. `roster`, `agents`, `selection`, `terminal`, and `port` stay
   exactly as they were at boot; an edit to any of those, `terminal: herdr` included, only takes
   effect on a restart. A restart is otherwise cheap: markers and the checkpoint are the truth,
-  so ticket state and a pending interrupt both survive it. What does not survive is an attempt
-  in flight: killing the server kills its harness, and the engine schedules a fresh attempt at
-  boot, discarding whatever the killed one had done. Never restart a pool that is `running`
-  without saying so first.
+  so ticket state and a pending interrupt both survive it. What does not survive is a headless
+  attempt in flight: stopping the server stops its harness (and everything the harness forked),
+  and the engine schedules a fresh attempt at boot, which reuses the parked worktree and so
+  reads whatever the stopped one had done. If a server died without stopping its attempts
+  (`kill -9`, a crash), the next boot finds any attempt still running in its worktree, stops
+  it, and only then schedules (ADR-0017). A terminal-backed attempt is the exception: its pane
+  outlives the server and the boot re-adopts it (ADR-0014). Never restart a pool that is
+  `running` without saying so first.
 
 ---
 

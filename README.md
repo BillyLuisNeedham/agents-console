@@ -30,6 +30,11 @@ on disk. One Console server binds one pool at a time. A pool directory holds:
 - `console.json`: optional config, pins the port and per-ticket assignments
 - `runs/`: created by the engine, holds checkpoints, per-ticket event logs, and
   the rotated attempt logs
+- `conversations/`: one markdown file per Conversation, created when the first
+  one starts. A Conversation is an open-ended talk with one agent in a herdr
+  tab; it may Spawn tickets and other Conversations mid-run, and is told in a
+  Notice when a spawned ticket ends. Requires `terminal: herdr` in
+  `console.json` (see `docs/adr/0017-conversations-beside-tickets.md`)
 
 ## Run
 

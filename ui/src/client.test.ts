@@ -7,7 +7,7 @@ import {
   STREAM_HEARTBEAT_MS,
   STREAM_SILENCE_FACTOR,
 } from "./client";
-import type { PoolSnapshot } from "./project";
+import type { PoolConversationState, PoolSnapshot } from "./project";
 
 // The client's stream seam: a fake fetch feeding controllable byte streams,
 // and fake timers to drive the silence watchdog, so the self-healing behavior
@@ -419,5 +419,115 @@ describe("refetchStateOnVisible", () => {
     s.fire();
     await flush();
     expect(rendered).toEqual([]);
+  });
+});
+
+describe("PoolClient Conversations routes (issue #60)", () => {
+  /** A fetch stub that records every call and answers with one fixed JSON
+   *  response, in the shape the real fetch Response exposes. */
+  function jsonFetch(status: number, body: unknown) {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: () => Promise.resolve(body),
+      } as unknown as Response);
+    }) as unknown as typeof globalThis.fetch;
+    return { fetch, calls };
+  }
+
+  it("lists conversations from GET /api/conversations", async () => {
+    const conversation: PoolConversationState = {
+      id: "conv-1",
+      title: "plan the migration",
+      status: "live",
+      spawnedBy: null,
+      assignment: { harness: null, model: null, drivers: "implement" },
+      paneId: "pane-9",
+      branch: null,
+      turn: { state: "waiting", lastLine: "what next?", idleSince: null },
+      children: [],
+    };
+    const { fetch, calls } = jsonFetch(200, { conversations: [conversation] });
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    const conversations = await client.listConversations();
+    expect(calls[0]!.url).toBe("/api/conversations");
+    expect(calls[0]!.init).toBeUndefined();
+    expect(conversations).toEqual([conversation]);
+  });
+
+  it("starts a Conversation with POST /api/conversations, body and shape intact", async () => {
+    const conversation: PoolConversationState = {
+      id: "conv-2",
+      title: "new one",
+      status: "live",
+      spawnedBy: null,
+      assignment: { harness: "claude", model: null, drivers: "implement" },
+      paneId: "pane-1",
+      branch: null,
+      turn: { state: "working", lastLine: "", idleSince: null },
+      children: [],
+    };
+    const { fetch, calls } = jsonFetch(201, { conversation });
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    const result = await client.startConversation({
+      title: "new one",
+      opening: "let's start",
+      assign: { harness: "claude" },
+    });
+    expect(calls[0]!.url).toBe("/api/conversations");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({
+      title: "new one",
+      opening: "let's start",
+      assign: { harness: "claude" },
+    });
+    expect(result).toEqual(conversation);
+  });
+
+  it("surfaces a 409's reason as the thrown Error's message", async () => {
+    const { fetch } = jsonFetch(409, { reason: "pool is not terminal-backed" });
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    await expect(client.startConversation({ title: "x" })).rejects.toThrow(
+      "pool is not terminal-backed",
+    );
+  });
+
+  it("falls back to a generic message when a failed start carries no reason", async () => {
+    const { fetch } = jsonFetch(400, {});
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    await expect(client.startConversation({ title: "x" })).rejects.toThrow(
+      "start conversation failed: 400",
+    );
+  });
+
+  it("ends a Conversation with POST /api/conversations/end, body and returned snapshot intact", async () => {
+    const snapshot = snap(9);
+    const { fetch, calls } = jsonFetch(202, { snapshot });
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    const result = await client.endConversation("conv-1", "wrapping up");
+    expect(calls[0]!.url).toBe("/api/conversations/end");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({
+      id: "conv-1",
+      closing: "wrapping up",
+    });
+    expect(result).toEqual(snapshot);
+  });
+
+  it("throws on a failed end", async () => {
+    const { fetch } = jsonFetch(404, {});
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    await expect(client.endConversation("conv-1")).rejects.toThrow(
+      "end conversation failed: 404",
+    );
   });
 });

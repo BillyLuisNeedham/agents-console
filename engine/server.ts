@@ -36,13 +36,16 @@ import {
   startPool,
   UNASSIGNED_ASSIGNMENT_VIEW,
   type AssignmentView,
+  type ConversationView,
   type HarnessCommand,
   type InterruptKind,
   type PoolConfig,
   type PoolRun,
   type PoolSnapshot,
   type RunPhase,
+  type StartConversationRequest,
 } from "./engine.ts";
+import { loadConversations, type ConversationRecord } from "./conversations.ts";
 import {
   attemptLogName,
   attemptStreamName,
@@ -131,6 +134,10 @@ interface EnrichedSnapshot {
   poolName: string;
   state: {
     tickets: EnrichedTicketState[];
+    /** Every Conversation the pool knows about (issue #60), passed through
+     *  from the engine's own snapshot verbatim: conversationViewOf already
+     *  builds the wire shape the UI wants, so there is nothing to enrich. */
+    conversations: ConversationView[];
     log: string[];
     outcomes: Record<string, { summary: string; commitSha: string | null }>;
     interrupts: { ticketId: string; kind: InterruptKind; body: string }[];
@@ -148,6 +155,22 @@ export interface PoolServer {
   settled: () => Promise<EnrichedSnapshot>;
   url: string;
   close: () => Promise<void>;
+  /**
+   * The orderly stop (ADR-0017): stop the run's headless attempts, stop
+   * serving, release the pool lock. The CLI's signal handler calls this and
+   * exits after it; in-process callers may call it directly.
+   */
+  shutdown: (graceMs?: number) => Promise<void>;
+  /** Start a Conversation (issue #60), for tests that would rather call
+   *  through than round-trip HTTP. Throws "pool not started" before the
+   *  first start(), and whatever the engine's startConversation throws
+   *  otherwise (not terminal-backed, no git, unknown harness, ...) — the
+   *  same errors the POST route maps to a 409. */
+  startConversation: (req: StartConversationRequest) => Promise<ConversationView>;
+  /** End a Conversation (issue #60), for tests. Throws "pool not started" or
+   *  whatever the engine's endConversation throws (no live conversation
+   *  with that id). */
+  endConversation: (id: string, closing?: string) => Promise<void>;
 }
 
 /** The pool's ticket metadata, as the engine parses it from the Issue files. */
@@ -252,6 +275,7 @@ function enrich(
         },
         ...(paneIds[m.id] !== undefined ? { paneId: paneIds[m.id] } : {}),
       })),
+      conversations: snapshot.conversations,
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
       interrupts: snapshot.state.interrupts,
@@ -790,14 +814,19 @@ export function resolveTerminalPane(
 
 /**
  * Every pane id this pool recorded on a `spawned` event, across its
- * tickets: the allowlist behind the spawned-only guard. Derived from pool
- * state at request time rather than held in memory, so a server restart
- * neither widens it (forgetting a spawn) nor narrows it (protecting a pane
- * that is legitimately gone); the prototype's per-process Set did both.
+ * tickets and its Conversations alike (issue #60: a Conversation's launch
+ * records `pane_id`/`tab_id` on a `spawned` event on its own
+ * `runs/<conv-id>.events.jsonl`, the same file naming a ticket's attempt
+ * uses, so this needs nothing but the id to find it): the allowlist behind
+ * the spawned-only guard. Derived from pool state at request time rather
+ * than held in memory, so a server restart neither widens it (forgetting a
+ * spawn) nor narrows it (protecting a pane that is legitimately gone); the
+ * prototype's per-process Set did both. Takes anything with an `id` — a
+ * `TicketMarker` or a `ConversationRecord` — since only the id is read.
  */
 export function spawnedPaneAllowlist(
   runsDir: string,
-  meta: TicketMarker[],
+  meta: { id: string }[],
 ): Set<string> {
   const allowlist = new Set<string>();
   for (const marker of meta) {
@@ -1069,6 +1098,17 @@ function acquirePoolLock(poolDir: string, registryPath: string): void {
 }
 
 /**
+ * Release the pool lock on an orderly shutdown, only if it still names this
+ * process: a relaunch that already reclaimed the pool must keep its lock. A
+ * crash still leaves the file, and the next boot's stale-lock check clears
+ * it, exactly as before.
+ */
+function releasePoolLock(poolDir: string): void {
+  if (readLockedPid(poolDir) !== process.pid) return;
+  rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+}
+
+/**
  * The oldest Bun a terminal-backed pool boots on. Bun 1.2.13 on macOS
  * segfaulted inside its event loop's poll dispatch a few hundred
  * milliseconds into a `terminal: "herdr"` boot (issue #61), the same pool
@@ -1130,6 +1170,15 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   let meta = loadMeta(poolDir);
   let ticketIds = knownTicketIds(meta);
+  // Conversation ids (issue #60), read the same way ticket meta is: from
+  // disk on every snapshot and every terminal request, so a Conversation
+  // that just started is known before its next engine snapshot lands. The
+  // conversations directory does not exist on a pool with none yet, and
+  // loadConversations reads that as [] rather than throwing.
+  let conversationRecords: ConversationRecord[] = loadConversations(
+    join(poolDir, "conversations"),
+  );
+  let conversationIds = new Set(conversationRecords.map((c) => c.id));
   const poolName = poolDir.split("/").slice(-2).join("/");
 
   // A short in-memory cache per ticket id absorbs the client's rapid repeat
@@ -1161,6 +1210,21 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     } catch {
       // Keep the last-known-good meta.
     }
+    try {
+      conversationRecords = loadConversations(join(poolDir, "conversations"));
+    } catch {
+      // Keep the last-known-good records.
+    }
+    // Union in whatever the live snapshot already knows: a Conversation
+    // that started this instant is on disk before its record here is
+    // re-read (writeConversation happens before the herdr tab opens), so
+    // this is belt-and-braces rather than the primary source, matching how
+    // `ticketIds` trusts the disk read as the ground truth.
+    const fromSnapshot = latest?.state.conversations.map((c) => c.id) ?? [];
+    conversationIds = new Set([
+      ...conversationRecords.map((c) => c.id),
+      ...fromSnapshot,
+    ]);
   }
 
   let latest: EnrichedSnapshot | null = null;
@@ -1264,18 +1328,45 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return run.settled.then(() => latest!);
   };
 
-  // The shared first half of both terminal endpoints: the ticket-id -> pane
-  // translation and the spawned-only guard. Unknown tickets take the same
-  // "no pane" answer as headless, finished, and never-spawned ones, so the
-  // endpoints never reveal which ticket ids exist and every no-pane case is
-  // one shape. The 403 guard cannot trip on well-formed pool state (the
-  // translation and the allowlist read the same events); it is the
-  // belt-and-braces refusal for corrupted state.
+  // Conversations (issue #60): thin proxies onto the engine's own
+  // startConversation/endConversation, exposed both as PoolServer methods
+  // (for tests that would rather call through than round-trip HTTP) and
+  // behind the two POST routes below. "pool not started" mirrors `answer`'s
+  // "pool not started" guard above: neither route is reachable before the
+  // first /api/start in practice (the CLI calls it at boot), but a test or
+  // a client racing ahead of it gets a clear error instead of a null
+  // dereference.
+  async function startConversation(
+    req: StartConversationRequest,
+  ): Promise<ConversationView> {
+    const run = currentRun;
+    if (!run) throw new Error("pool not started");
+    return run.startConversation(req);
+  }
+
+  async function endConversation(id: string, closing?: string): Promise<void> {
+    const run = currentRun;
+    if (!run) throw new Error("pool not started");
+    return run.endConversation(id, closing);
+  }
+
+  // The shared first half of both terminal endpoints: the id (a ticket's or,
+  // since issue #60, a Conversation's) -> pane translation and the
+  // spawned-only guard. Unknown ids take the same "no pane" answer as
+  // headless, finished, and never-spawned ones, so the endpoints never
+  // reveal which ids exist and every no-pane case is one shape. The 403
+  // guard cannot trip on well-formed pool state (the translation and the
+  // allowlist read the same events); it is the belt-and-braces refusal for
+  // corrupted state. `resolveTerminalPane` and `spawnedPaneAllowlist` need
+  // nothing Conversation-specific: a Conversation's launch records
+  // `pane_id`/`tab_id` on a `spawned` event the same way an attempt's does,
+  // on `runs/<conv-id>.events.jsonl`, so passing the id (or the id plus the
+  // combined ticket+Conversation record list below) through unchanged works.
   function resolveTerminalRequest(ticketId: string):
     | { ok: true; paneId: string }
     | { ok: false; status: number; error: string } {
     refreshMeta();
-    if (!ticketIds.has(ticketId)) {
+    if (!ticketIds.has(ticketId) && !conversationIds.has(ticketId)) {
       return {
         ok: false,
         status: 404,
@@ -1291,7 +1382,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       };
     }
     const refusal = terminalSpawnRefusal(
-      spawnedPaneAllowlist(join(poolDir, "runs"), meta),
+      spawnedPaneAllowlist(join(poolDir, "runs"), [...meta, ...conversationRecords]),
       paneId,
     );
     if (refusal !== null) {
@@ -1353,7 +1444,13 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         if (pathname === "/api/events") {
           const ticketId = url.searchParams.get("ticket") ?? "";
           refreshMeta();
-          if (!ticketIds.has(ticketId)) {
+          // A Conversation id (issue #60) is accepted here too: its events
+          // ride the same `runs/<id>.events.jsonl` file a ticket's do, so
+          // readTicketEvents needs nothing Conversation-specific. `spec`
+          // comes back "" for a Conversation (meta has no entry for it) —
+          // the Detail's Conversation view has its own opening Turn to show
+          // and never reads this field the way a ticket's Detail does.
+          if (!ticketIds.has(ticketId) && !conversationIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
           return Response.json(readTicketEvents(poolDir, ticketId, meta));
@@ -1367,7 +1464,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         if (pathname === "/api/log") {
           const ticketId = url.searchParams.get("ticket") ?? "";
           refreshMeta();
-          if (!ticketIds.has(ticketId)) {
+          // A Conversation id works unchanged here too: startConversation
+          // names its log/Stream files `<id>.log` / `<id>.stream.jsonl` —
+          // exactly attemptLogName/attemptStreamName's current-attempt
+          // name — and records one `spawned` event at attempt 1, so
+          // listAttemptLogs derives the same single "implement" row a
+          // terminal-backed ticket attempt gets, with the derived
+          // (ANSI-stripped) log or the raw Stream file behind `stream=1`.
+          if (!ticketIds.has(ticketId) && !conversationIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
           const runsDir = join(poolDir, "runs");
@@ -1404,6 +1508,90 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const range = await readLogRange(join(runsDir, file), offset, end);
           return Response.json({ ...range, attempts });
+        }
+
+        // Conversations (issue #60): list, start, end. The Console's client
+        // reads a 409's failure reason off a `reason` field (ui/src/client.ts
+        // `startConversation`), not `error` — the shape every other route in
+        // this file uses — so these three routes reply with `reason` to
+        // match the shipped UI rather than this file's own convention.
+        if (pathname === "/api/conversations" && req.method === "GET") {
+          return Response.json({ conversations: latest?.state.conversations ?? [] });
+        }
+
+        if (pathname === "/api/conversations" && req.method === "POST") {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const title = typeof fields.title === "string" ? fields.title : "";
+          if (!title.trim()) {
+            return Response.json({ reason: "title is required" }, { status: 400 });
+          }
+          const opening = typeof fields.opening === "string" ? fields.opening : undefined;
+          const rawAssign =
+            fields.assign && typeof fields.assign === "object"
+              ? (fields.assign as Record<string, unknown>)
+              : undefined;
+          const stringField = (value: unknown): string | undefined =>
+            typeof value === "string" ? value : undefined;
+          const assign = rawAssign
+            ? {
+                harness: stringField(rawAssign.harness),
+                model: stringField(rawAssign.model),
+                drivers: stringField(rawAssign.drivers),
+              }
+            : undefined;
+          try {
+            const conversation = await startConversation({ title, opening, assign });
+            return Response.json({ conversation }, { status: 201 });
+          } catch (err) {
+            // Every refusal the engine's startConversation throws (not
+            // terminal-backed, no git checkout, unknown harness, no
+            // harness/model resolved, the herdr tab failing to open) reads
+            // as a 409: the request was well-formed, the pool just cannot
+            // host a Conversation right now.
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
+        if (pathname === "/api/conversations/end" && req.method === "POST") {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const id = typeof fields.id === "string" ? fields.id : "";
+          if (!id) {
+            return Response.json({ reason: "id is required" }, { status: 400 });
+          }
+          const closing = typeof fields.closing === "string" ? fields.closing : undefined;
+          try {
+            await endConversation(id, closing);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            // The engine's endConversation throws this exact prefix for both
+            // an id it has never heard of and one that already ended: either
+            // way there is no live Conversation to end, which is what a 404
+            // means everywhere else in this file (an unknown ticket id).
+            // Anything else (a merge-chain failure the engine already logs
+            // and recovers from) is a 409, not a client error.
+            const status = message.includes("no live conversation") ? 404 : 409;
+            return Response.json({ reason: message }, { status });
+          }
+          refreshMeta();
+          return Response.json(
+            { snapshot: latest ? withMergePending(latest, poolDir) : null },
+            { status: 202 },
+          );
         }
 
         if (pathname === "/api/activity") {
@@ -1574,10 +1762,21 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     start,
     answer,
     settled,
+    startConversation,
+    endConversation,
     url: `http://localhost:${server.port}`,
     close: async () => {
       await server.stop(true);
       currentRun?.close();
+    },
+    shutdown: async (graceMs) => {
+      // The attempts stop first, while the run's own exit handling can still
+      // record each stop; serving stops next so no answer arrives into a
+      // closing run; the lock goes last, once nothing of this process still
+      // owns the pool.
+      if (currentRun) await currentRun.shutdown(graceMs);
+      await server.stop(true);
+      releasePoolLock(poolDir);
     },
   };
 }
@@ -1613,7 +1812,40 @@ function runServerCli(): void {
   void server.start().then(() => {
     console.log(`pool server on ${server.url} (${poolDir})`);
   });
+  installShutdownHandlers(server);
 }
+
+/**
+ * Trap SIGTERM and SIGINT (ADR-0017): an untrapped kill left every headless
+ * harness running under init, and the relaunch raced them in their own
+ * worktrees (issue #65). The handler stops the attempts, releases the pool,
+ * and exits; a second signal during the stop is ignored rather than
+ * cutting the stop short, and a stop that hangs past its bound exits anyway
+ * so the operator is never left with a server that will not die.
+ */
+function installShutdownHandlers(server: PoolServer): void {
+  let stopping = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal}: stopping attempts, then exiting`);
+    const bound = setTimeout(() => process.exit(1), SHUTDOWN_HARD_LIMIT_MS);
+    void server.shutdown().then(
+      () => process.exit(0),
+      (err) => {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      },
+    );
+    bound.unref();
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+}
+
+// Well past the children's TERM grace plus the drive's settle wait: a stop
+// that has not finished by then is stuck on something the exit will free.
+const SHUTDOWN_HARD_LIMIT_MS = 15_000;
 
 if (import.meta.main) {
   runServerCli();

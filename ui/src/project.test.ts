@@ -2,10 +2,18 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  poolAssignmentDefaults,
   checkpointNotice,
   clampDetailWidth,
   clampDrawersHeight,
   bulkResumeRows,
+  conversationCardId,
+  conversationIdleAge,
+  isConversationCardId,
+  projectConversationEdges,
+  projectConversationEnd,
+  projectConversationsNeedsInput,
+  projectConversationsTray,
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
   DRAWER_MAX_VH,
@@ -51,6 +59,8 @@ import {
   VITALS_IDLE_MS,
   VITALS_MAX_SAMPLES,
   zoomAtCursor,
+  type ConversationCardView,
+  type PoolConversationState,
   type PoolSnapshot,
   type PoolStatus,
   type PoolTicketState,
@@ -75,6 +85,24 @@ function ticket(
     blockedBy: [],
     status: "ready",
     assignment: { harness: null, model: null, drivers: "implement" },
+    ...overrides,
+  };
+}
+
+function conversation(
+  id: string,
+  overrides: Partial<PoolConversationState> = {},
+): PoolConversationState {
+  return {
+    id,
+    title: `conversation ${id}`,
+    status: "live",
+    spawnedBy: null,
+    assignment: { harness: null, model: null, drivers: "implement" },
+    paneId: null,
+    branch: null,
+    turn: { state: "working", lastLine: "", idleSince: null },
+    children: [],
     ...overrides,
   };
 }
@@ -2171,5 +2199,299 @@ describe("projectPool terminal surface", () => {
     const view = projectPool(snap, {}, {}, terminal);
     expect(cardOf(view, "01")?.terminal).toBeNull();
     expect(cardOf(view, "02")?.terminal).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conversations (issue #60)
+// ---------------------------------------------------------------------------
+
+describe("conversationCardId / isConversationCardId", () => {
+  it("prefixes conversation ids and leaves other ids alone", () => {
+    expect(conversationCardId("conv-1")).toBe("conversation:conv-1");
+    expect(isConversationCardId("conversation:conv-1")).toBe(true);
+    expect(isConversationCardId("ticket:01")).toBe(false);
+    expect(isConversationCardId(START_CARD_ID)).toBe(false);
+  });
+});
+
+describe("conversationIdleAge", () => {
+  const now = Date.parse("2026-09-10T12:00:00.000Z");
+
+  it("is null while there is no idleSince (still working)", () => {
+    expect(conversationIdleAge(null, now)).toBeNull();
+  });
+
+  it("is null for an unparseable timestamp", () => {
+    expect(conversationIdleAge("not a date", now)).toBeNull();
+  });
+
+  it("renders seconds, minutes, and hours+minutes at the right scale", () => {
+    expect(conversationIdleAge(new Date(now - 45_000).toISOString(), now)).toBe("45s");
+    expect(conversationIdleAge(new Date(now - 4 * 60_000).toISOString(), now)).toBe("4m");
+    expect(
+      conversationIdleAge(new Date(now - (72 * 60_000)).toISOString(), now),
+    ).toBe("1h 12m");
+  });
+});
+
+describe("projectConversationEnd", () => {
+  it("defaults to not-ending with no failure when the store holds no entry", () => {
+    expect(projectConversationEnd(undefined)).toEqual({ ending: false, failure: null });
+  });
+
+  it("passes the store's entry through verbatim", () => {
+    expect(projectConversationEnd({ ending: true, failure: null })).toEqual({
+      ending: true,
+      failure: null,
+    });
+    expect(projectConversationEnd({ ending: false, failure: "pool resume failed: 500" })).toEqual(
+      { ending: false, failure: "pool resume failed: 500" },
+    );
+  });
+});
+
+describe("projectPool with Conversations", () => {
+  it("lists Conversations right after START, ahead of every ticket", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A")],
+        conversations: [conversation("conv-1"), conversation("conv-2")],
+      },
+    });
+    const view = projectPool(snap);
+    expect(view.cards.map((c) => c.id)).toEqual([
+      START_CARD_ID,
+      "conversation:conv-1",
+      "conversation:conv-2",
+      "ticket:A",
+      REVIEW_CARD_ID,
+    ]);
+  });
+
+  it("projects a Conversation card's facts, terminal surface, and End view", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [
+          conversation("conv-1", {
+            title: "plan the migration",
+            paneId: "pane-9",
+            branch: "conv/conv-1",
+            spawnedBy: null,
+            turn: { state: "waiting", lastLine: "what next?", idleSince: null },
+          }),
+        ],
+      },
+    });
+    const terminal = {
+      "conv-1": { paneId: "pane-9", status: "live" as const, text: "hi", justFocused: false },
+    };
+    const endings = { "conv-1": { ending: true, failure: null } };
+    const view = projectPool(snap, {}, {}, terminal, Date.now(), endings);
+    const card = view.cards.find(
+      (c): c is ConversationCardView => c.kind === "conversation",
+    );
+    expect(card?.conversationId).toBe("conv-1");
+    expect(card?.title).toBe("plan the migration");
+    expect(card?.branch).toBe("conv/conv-1");
+    expect(card?.turn).toEqual({ state: "waiting", lastLine: "what next?", idleSince: null });
+    expect(card?.terminal).toEqual({
+      paneId: "pane-9",
+      status: "live",
+      text: "hi",
+      justFocused: false,
+    });
+    expect(card?.endView).toEqual({ ending: true, failure: null });
+  });
+
+  it("keeps ticket rows untouched with no Conversations (backward-compatible snapshot)", () => {
+    const snap = snapshot({ state: { tickets: [ticket("A")] } });
+    const view = projectPool(snap);
+    expect(view.cards.map((c) => c.id)).toEqual([START_CARD_ID, "ticket:A", REVIEW_CARD_ID]);
+  });
+});
+
+describe("layout: the Conversations lane shifts ticket rows down", () => {
+  it("pushes every ticket row down by one lane's worth of height when Conversations exist", () => {
+    const without = projectPool(snapshot({ state: { tickets: [ticket("A")] } }));
+    const withConvo = projectPool(
+      snapshot({
+        state: { tickets: [ticket("A")], conversations: [conversation("conv-1")] },
+      }),
+    );
+    const startY = without.cards.find((c) => c.id === START_CARD_ID)!.y;
+    const laneY = withConvo.cards.find((c) => c.id === "conversation:conv-1")!.y;
+    const ticketYWithout = without.cards.find((c) => c.id === "ticket:A")!.y;
+    const ticketYWith = withConvo.cards.find((c) => c.id === "ticket:A")!.y;
+    // The lane sits one row below START; every ticket row shifts down by
+    // exactly that same lane height, so the two gaps match.
+    const laneHeight = laneY - startY;
+    expect(laneHeight).toBeGreaterThan(0);
+    expect(ticketYWith - ticketYWithout).toBe(laneHeight);
+  });
+
+  it("lays out multiple Conversations as one centered row, like a ticket depth", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [],
+          conversations: [conversation("conv-1"), conversation("conv-2")],
+        },
+      }),
+    );
+    const a = view.cards.find((c) => c.id === "conversation:conv-1")!;
+    const b = view.cards.find((c) => c.id === "conversation:conv-2")!;
+    expect(a.y).toBe(b.y);
+    expect(a.x).not.toBe(b.x);
+  });
+});
+
+describe("projectConversationEdges", () => {
+  it("draws an edge from a Conversation to each spawned ticket and conversation", () => {
+    const tickets = [ticket("A")];
+    const conversations = [
+      conversation("conv-1", { children: ["A", "conv-2"] }),
+      conversation("conv-2"),
+    ];
+    const edges = projectConversationEdges(conversations, tickets);
+    expect(edges).toContainEqual({ source: "conversation:conv-1", target: "ticket:A" });
+    expect(edges).toContainEqual({
+      source: "conversation:conv-1",
+      target: "conversation:conv-2",
+    });
+  });
+
+  it("drops a child id that names neither a live ticket nor a live conversation", () => {
+    const conversations = [conversation("conv-1", { children: ["ghost"] })];
+    expect(projectConversationEdges(conversations, [])).toEqual([]);
+  });
+
+  it("is empty with no Conversations", () => {
+    expect(projectConversationEdges([], [ticket("A")])).toEqual([]);
+  });
+});
+
+describe("projectConversationsTray", () => {
+  const now = Date.parse("2026-09-10T12:00:00.000Z");
+
+  it("sorts waiting-on-you Conversations before working ones", () => {
+    const rows = projectConversationsTray(
+      [
+        conversation("conv-1", { turn: { state: "working", lastLine: "", idleSince: null } }),
+        conversation("conv-2", {
+          turn: { state: "waiting", lastLine: "", idleSince: new Date(now - 1000).toISOString() },
+        }),
+      ],
+      now,
+    );
+    expect(rows.map((r) => r.id)).toEqual(["conv-2", "conv-1"]);
+  });
+
+  it("among waiting Conversations, sorts longest idle first", () => {
+    const rows = projectConversationsTray(
+      [
+        conversation("conv-1", {
+          turn: { state: "waiting", lastLine: "", idleSince: new Date(now - 1_000).toISOString() },
+        }),
+        conversation("conv-2", {
+          turn: { state: "waiting", lastLine: "", idleSince: new Date(now - 60_000).toISOString() },
+        }),
+      ],
+      now,
+    );
+    expect(rows.map((r) => r.id)).toEqual(["conv-2", "conv-1"]);
+  });
+
+  it("excludes ended and crashed Conversations", () => {
+    const rows = projectConversationsTray([
+      conversation("conv-1", { status: "ended" }),
+      conversation("conv-2", { status: "crashed" }),
+      conversation("conv-3", { status: "live" }),
+    ]);
+    expect(rows.map((r) => r.id)).toEqual(["conv-3"]);
+  });
+});
+
+describe("projectConversationsNeedsInput", () => {
+  it("includes only live Conversations whose Turn state is waiting", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [
+          conversation("conv-1", {
+            title: "plan the migration",
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+          }),
+          conversation("conv-2", { turn: { state: "working", lastLine: "", idleSince: null } }),
+          conversation("conv-3", {
+            status: "ended",
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+          }),
+        ],
+      },
+    });
+    const rows = projectConversationsNeedsInput(snap);
+    expect(rows).toEqual([
+      {
+        cardId: "conversation:conv-1",
+        conversationId: "conv-1",
+        label: "conv-1",
+        title: "plan the migration",
+      },
+    ]);
+  });
+
+  it("is empty with no Conversations", () => {
+    expect(projectConversationsNeedsInput(snapshot())).toEqual([]);
+  });
+});
+
+describe("projectDetail for a Conversation card", () => {
+  it("carries the same facts as the card, at full size", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [
+          conversation("conv-1", {
+            title: "plan the migration",
+            branch: "conv/conv-1",
+            spawnedBy: "conv-0",
+            turn: { state: "waiting", lastLine: "what next?", idleSince: null },
+          }),
+        ],
+      },
+    });
+    const detail = projectDetail(snap, "conversation:conv-1");
+    expect(detail).toEqual({
+      kind: "conversation",
+      conversationId: "conv-1",
+      title: "plan the migration",
+      status: "live",
+      spawnedBy: "conv-0",
+      assignment: { harness: null, model: null, drivers: "implement" },
+      paneId: null,
+      branch: "conv/conv-1",
+      turn: { state: "waiting", lastLine: "what next?", idleSince: null },
+      idleAge: null,
+      terminal: null,
+      endView: { ending: false, failure: null },
+    });
+  });
+});
+
+describe("poolAssignmentDefaults", () => {
+  it("reads the pool's Assignment defaults from config.defaults", () => {
+    expect(
+      poolAssignmentDefaults({
+        defaults: { harness: "claude", model: "opus", drivers: "implement" },
+        terminal: "herdr",
+      }),
+    ).toEqual({ harness: "claude", model: "opus", drivers: "implement" });
+  });
+
+  it("returns nothing when the pool sets no defaults", () => {
+    expect(poolAssignmentDefaults({})).toEqual({});
+    expect(poolAssignmentDefaults({ harness: "claude" })).toEqual({});
   });
 });

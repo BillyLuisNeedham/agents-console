@@ -12,8 +12,11 @@ import { Vitals } from "./vitals";
 import {
   joinStreamFiles,
   phaseLabel,
+  poolAssignmentDefaults,
   POOL_TAB_COLORS,
   poolStatus,
+  projectConversationsNeedsInput,
+  projectConversationsTray,
   projectDetail,
   projectDetailTabs,
   projectLogPane,
@@ -103,6 +106,9 @@ const consoleView = new ConsoleView({
     client.answer(ticketId, action, note).then(setSnapshot),
   onChange: () => render(),
   onFocusTerminal: (ticketId) => terminal.focus(ticketId),
+  onStart: (request) => client.startConversation(request),
+  onEnd: (conversationId, closing) =>
+    client.endConversation(conversationId, closing).then(setSnapshot),
 });
 
 // The latest grade per ticket, for the card summaries. Module scope so a
@@ -196,17 +202,41 @@ function selectedTicket(snapshot: PoolSnapshot, selectedId: string | null): stri
   return card?.kind === "ticket" ? card.ticketId : null;
 }
 
-function applyTimeline(ticketId: string, response: TicketEventsResponse): void {
+/**
+ * The id the events endpoint is fetched for: a ticket's or a Conversation's,
+ * since /api/events?ticket=<id> accepts either (a Conversation's timeline
+ * reuses the same path). Null when the selection is neither, or nothing is
+ * selected.
+ */
+function selectedEventsId(snapshot: PoolSnapshot, selectedId: string | null): string | null {
+  if (!selectedId) return null;
+  const card = projectPool(snapshot, grades).cards.find((c) => c.id === selectedId);
+  if (card?.kind === "ticket") return card.ticketId;
+  if (card?.kind === "conversation") return card.conversationId;
+  return null;
+}
+
+function applyTimeline(id: string, response: TicketEventsResponse): void {
   const card = state.snapshot
     ? projectPool(state.snapshot, grades).cards.find(
-        (c) => c.kind === "ticket" && c.ticketId === ticketId,
+        (c) =>
+          (c.kind === "ticket" && c.ticketId === id) ||
+          (c.kind === "conversation" && c.conversationId === id),
       )
     : undefined;
-  timelineState.ticketId = ticketId;
-  timelineState.view = projectTimeline(
-    response,
-    card?.kind === "ticket" ? card.status : "ready",
-  );
+  timelineState.ticketId = id;
+  // A Conversation's status has no direct PoolStatus equivalent; `live` reads
+  // as `in-progress` for the timeline's running-attempt marker, anything
+  // else as `done` (nothing left running).
+  const status =
+    card?.kind === "ticket"
+      ? card.status
+      : card?.kind === "conversation"
+        ? card.status === "live"
+          ? "in-progress"
+          : "done"
+        : "ready";
+  timelineState.view = projectTimeline(response, status);
 }
 
 /**
@@ -223,33 +253,42 @@ function openLogPane(ticketId: string): void {
 }
 
 async function loadTimeline(): Promise<void> {
-  const ticketId = state.snapshot
-    ? selectedTicket(state.snapshot, state.selectedId)
-    : null;
-  if (!ticketId) {
+  const id = state.snapshot ? selectedEventsId(state.snapshot, state.selectedId) : null;
+  if (!id) {
     timelineState.ticketId = null;
     timelineState.view = null;
     logPane.reset();
     render();
     return;
   }
-  timelineState.ticketId = ticketId;
+  // The raw log pane tails a ticket attempt's log file; a Conversation's
+  // timeline reuses the same events fetch, but not the log pane (its own
+  // log-tailing story is not part of this surface yet).
+  const isTicket = state.snapshot
+    ? selectedTicket(state.snapshot, state.selectedId) === id
+    : false;
+  timelineState.ticketId = id;
   try {
-    const response = await client.getEvents(ticketId);
+    const response = await client.getEvents(id);
     // A newer selection may have landed while the fetch was out.
-    if (timelineState.ticketId === ticketId) {
-      applyTimeline(ticketId, response);
+    if (timelineState.ticketId === id) {
+      applyTimeline(id, response);
+      if (!isTicket) {
+        logPane.reset();
+        render();
+        return;
+      }
       // The snapshot cadence doubles as the liveness signal: a newly selected
       // ticket opens its pane, and an already-open pane follows the tail.
-      if (logPane.state.ticketId !== ticketId) {
-        openLogPane(ticketId);
+      if (logPane.state.ticketId !== id) {
+        openLogPane(id);
       } else {
-        void logPane.follow(ticketId, timelineState.view);
+        void logPane.follow(id, timelineState.view);
         render();
       }
     }
   } catch {
-    if (timelineState.ticketId === ticketId) {
+    if (timelineState.ticketId === id) {
       timelineState.view = null;
       render();
     }
@@ -257,21 +296,46 @@ async function loadTimeline(): Promise<void> {
 }
 
 function model(): AppModel {
+  const conversationEndings = consoleView.conversationEndState();
   const view = state.snapshot
-    ? projectPool(state.snapshot, grades, vitals.state(), terminal.state())
+    ? projectPool(
+        state.snapshot,
+        grades,
+        vitals.state(),
+        terminal.state(),
+        Date.now(),
+        conversationEndings,
+      )
     : null;
   const detail =
     state.snapshot && state.selectedId
-      ? projectDetail(state.snapshot, state.selectedId, grades)
+      ? projectDetail(
+          state.snapshot,
+          state.selectedId,
+          grades,
+          terminal.state(),
+          Date.now(),
+          conversationEndings,
+        )
       : null;
   const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
+  // The events fetch (and so the timeline) covers a selected Conversation
+  // too, reusing /api/events?ticket=<id>; the raw log pane below it stays
+  // ticket-only.
+  const detailEventsId =
+    detail?.kind === "ticket"
+      ? detail.ticketId
+      : detail?.kind === "conversation"
+        ? detail.conversationId
+        : null;
   const isCurrent =
-    detailTicketId !== null && timelineState.ticketId === detailTicketId;
+    detailEventsId !== null && timelineState.ticketId === detailEventsId;
   const logIsCurrent =
     detailTicketId !== null && logPane.state.ticketId === detailTicketId;
   // The timeline joins the log pane's attempt listing (the /api/log response's
   // per-attempt Stream file resolution), so each attempt row knows its Stream
-  // file. A pane for another ticket (or no pane yet) contributes no listing.
+  // file. A pane for another ticket (or no pane yet, or a Conversation, which
+  // has no log pane) contributes no listing.
   const timeline =
     isCurrent && timelineState.view
       ? joinStreamFiles(
@@ -322,6 +386,15 @@ function model(): AppModel {
         )
       : null,
     needsInput: state.snapshot ? projectNeedsInput(state.snapshot) : [],
+    conversationsNeedsInput: state.snapshot
+      ? projectConversationsNeedsInput(state.snapshot)
+      : [],
+    conversationsTray: state.snapshot
+      ? projectConversationsTray(state.snapshot.state.conversations ?? [])
+      : [],
+    conversationDefaults: state.snapshot
+      ? poolAssignmentDefaults(state.snapshot.state.config)
+      : {},
   };
 }
 

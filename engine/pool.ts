@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TICKET_STATUSES = [
@@ -109,11 +109,43 @@ export function parseSpawnId(id: string): { parent: string; n: number } | null {
   return { parent: match[1], n: Number(match[2]) };
 }
 
-export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
-  const files = readdirSync(issuesDir)
-    .filter((file) => file.endsWith(".md"))
-    .sort();
+/**
+ * `loadPoolMarkers`'s optional third argument: the ids of every Conversation
+ * the pool knows about (engine/conversations.ts's loadConversations, called
+ * by engine.ts before this so a ticket spawned mid-Conversation survives a
+ * restart). A ticket's `spawned-by` may name one of these the same way it
+ * names a ticket id (the Conversations ADR): Conversations spawn Tickets
+ * through the same propose-and-adopt seam ADR-0010 gave Tickets, so the
+ * reserved `-spawn-` namespace's parent is not always a ticket in `markers`.
+ * pool.ts has no import on conversations.ts (that would cycle back through
+ * engine.ts), so the caller resolves and passes the set rather than this
+ * module loading it itself.
+ */
+export interface LoadPoolMarkersOptions {
+  // The Conversations ADR: a pool that is nothing but Conversations has no
+  // Tickets at all, ever, and that is not the "no Issue files yet" mistake
+  // the bare throw below exists to catch (a pool directory pointed at by
+  // accident, or set up wrong) — it is a legitimate empty ready set from the
+  // first boot on. The caller (engine.ts's startPool) sets this once it has
+  // established the pool actually has a conversations/ directory, or a
+  // caller (a test, a future "start with no tickets yet" flow) asks for it
+  // directly; pool.ts has no way to tell the two apart on its own since it
+  // only ever sees issuesDir.
+  allowEmptyIssues?: boolean;
+}
+
+export function loadPoolMarkers(
+  issuesDir: string,
+  knownParents?: Set<string>,
+  options?: LoadPoolMarkersOptions,
+): TicketMarker[] {
+  const files = existsSync(issuesDir)
+    ? readdirSync(issuesDir)
+        .filter((file) => file.endsWith(".md"))
+        .sort()
+    : [];
   if (files.length === 0) {
+    if (options?.allowEmptyIssues) return [];
     throw new Error(`pool load: no Issue files in ${issuesDir}`);
   }
   const markers = files.map((file) => readMarker(join(issuesDir, file)));
@@ -138,10 +170,13 @@ export function loadPoolMarkers(issuesDir: string): TicketMarker[] {
           `${spawn.parent} in its marker`,
       );
     }
-    if (!markers.some((m) => m.id === marker.spawnedBy)) {
+    if (
+      !markers.some((m) => m.id === marker.spawnedBy) &&
+      !knownParents?.has(marker.spawnedBy)
+    ) {
       throw new Error(
         `pool load: ${marker.file}: spawned-by '${marker.spawnedBy}' ` +
-          "names no ticket in the pool",
+          "names no ticket or known Conversation in the pool",
       );
     }
   }

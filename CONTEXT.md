@@ -75,7 +75,7 @@ A named, machine-local bundle of a pool's behavioural config — harness, model,
 _Avoid_: profile, template
 
 **Assignment**:
-The harness, model, and drivers an Attempt runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0017 (`docs/adr/0017-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
+The harness, model, and drivers an Attempt runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket rather than the pool defaults. A ticket with neither defaults nor an assign entry is unassigned. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
 _Avoid_: config (that's the raw file the Assignment is resolved from), profile
 
 **Config reload**:
@@ -101,6 +101,10 @@ _Avoid_: exit code (a crash signal, not a result), status marker (the engine own
 **Attempt ending**:
 The observation that an Attempt is over. Headless, that is the harness's child exiting. A Terminal-backed attempt has no child, so its ending is whichever of three forms is observed first: herdr reporting the pane's end, the attempt's exit code landing on disk, or the pane found gone with no exit code behind it, which is a crash. The forms are raced, never ranked, because each is blind where another sees; only the exit code landing does not depend on the daemon still talking to us. Recorded in the fifth amendment to ADR-0014, "Attempts may run terminal-backed in herdr panes".
 _Avoid_: exit (one form of an ending, not the ending), timeout (there is none; liveness is the signal), completion (an ending may be a crash), Outcome (the attempt's account of its result; an ending only says it stopped)
+
+**Orphan attempt**:
+An Attempt whose engine stopped while it ran. A headless orphan is stopped by the engine: at shutdown when the engine can, or at the next boot when a recorded process is found still alive in the ticket's worktree. A terminal-backed orphan lives on in its herdr pane and is re-adopted at boot instead. The engine never schedules a new Attempt into a worktree an orphan is still writing. Introduced by ADR-0017 (`docs/adr/0017-headless-orphans-are-killed-not-adopted.md`), closing issue #65.
+_Avoid_: zombie (a zombie is dead; an orphan is alive and working), leaked process, stray agent
 
 **Merge hold**:
 The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
@@ -133,6 +137,18 @@ _Avoid_: action items, task list, notification center
 **Spawn**:
 A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32.
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
+
+**Conversation**:
+An open-ended talk between the operator and one agent, living in a Pool beside its Tickets. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
+_Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
+
+**Turn**:
+One exchange in a Conversation: something said to the agent, or the agent's reply. The operator types Turns in the herdr tab; the engine types a Turn when a spawned Ticket ends. A Conversation is always either waiting on the operator or working on a Turn.
+_Avoid_: message (a chat term), prompt (that is only the first Turn), super-step (that is the engine's round, not the talk's)
+
+**Notice**:
+The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
+_Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
 
 ## Verification
 

@@ -61,10 +61,25 @@ import {
   listPaneIds,
   openAttemptTab,
   paneSendInput,
-  peekPane,
-  waitForPaneEnd,
 } from "./herdr.ts";
 import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
+import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
+import {
+  answerConversationMerge,
+  conversationViews,
+  crashStaleLiveConversationsAtBoot,
+  endConversation as endConversationImpl,
+  loadConversations,
+  startConversation as startConversationImpl,
+  type ConversationRuntime,
+  type ConversationView,
+  type StartConversationRequest,
+} from "./conversations.ts";
+import {
+  notifyConversationOfCheckpoint,
+  notifyConversationOfTicketDone,
+} from "./notices.ts";
+import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import {
   StreamLineBuffer,
   TranscriptLineBuffer,
@@ -90,6 +105,16 @@ import {
 } from "./worktrees.ts";
 
 export type { HarnessCommand } from "./spawn.ts";
+// Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
+// keeps working now that the wrapper-shape logic lives in pane-session.ts.
+export { interactiveWrapper } from "./pane-session.ts";
+export type {
+  ConversationRecord,
+  ConversationStatus,
+  ConversationView,
+  StartConversationRequest,
+  TurnState,
+} from "./conversations.ts";
 
 // The attempt's result, written by the agent as JSON at the outcome path its
 // prompt names and read by the engine at attempt exit. `status` is the
@@ -105,6 +130,20 @@ export interface SpawnProposal {
   title: string;
   body: string;
   blockedBy?: string[];
+  // The Conversations ADR's extension: what the proposal becomes. Absent
+  // means "ticket", ADR-0010's original and only shape, so an ordinary
+  // attempt's outcome.spawn entries need no change. "conversation" starts a
+  // child Conversation instead of writing a ticket file (adoptSpawnProposals
+  // below); a Ticket's own outcome may propose one too, not only a
+  // Conversation's spawn.json (the seam is shared).
+  kind?: "ticket" | "conversation";
+  // The child's Assignment, when the proposer wants something other than
+  // its own. Absent inherits: resolveSpawnedTicketAssignment for a ticket,
+  // conversations.ts's resolveConversationAssignment for a Conversation.
+  // An unknown assign.harness drops the whole proposal at adoption time
+  // (adoptSpawnProposals), the same disposition an unknown blockedBy id
+  // gets, since neither can be checked here where no Session exists yet.
+  assign?: { harness?: string; model?: string; drivers?: string };
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -124,10 +163,15 @@ const SPAWN_MAX_PER_RUN = 20;
 
 // One attempt's surviving proposals, buffered between the moment an outcome
 // becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
-// selection's winner) and the boundary that adopts them.
-interface PendingSpawn {
+// selection's winner) and the boundary that adopts them. `origin` is the
+// Conversations ADR's addition: "conversation" is a Conversation's own
+// spawn.json batch (engine/notices.ts's poller), which bypasses the per-run
+// cap (spec: "no run-wide cap for Conversation Spawns") but keeps the
+// per-proposal cap; every ticket-outcome push stays "ticket".
+export interface PendingSpawn {
   parentId: string;
   proposals: SpawnProposal[];
+  origin: "ticket" | "conversation";
 }
 
 export interface Outcome {
@@ -224,7 +268,9 @@ export const REVIEW_TICKET_ID = "REVIEW";
 // it waits.
 export const PERSISTENCE_TICKET_ID = "PERSISTENCE";
 
-interface Interrupt {
+// Exported so conversations.ts (Workstream A) can construct and raise the
+// Conversation-flavoured merge interrupts it reuses this shape for.
+export interface Interrupt {
   ticketId: string;
   kind: InterruptKind;
   body: string;
@@ -254,7 +300,7 @@ interface PoolUpdate {
   interrupts?: Interrupt[];
   reviewApproved?: boolean;
   // The sanctioned way to replace the assignment slice of the live config
-  // (ADR-0017), applied at the super-step boundary only. Every other channel
+  // (ADR-0018), applied at the super-step boundary only. Every other channel
   // is additive/merged; config is a wholesale replacement, matching how a
   // reload always replaces defaults/assign/resolver whole rather than
   // merging field-wise with the previous reload.
@@ -303,6 +349,9 @@ export interface PoolSnapshot {
   // derivation travels with the state it belongs to, so the server and the UI
   // render it without re-deriving.
   assignments: Record<string, AssignmentView>;
+  // Every Conversation the pool knows about (conversations.ts), live or not:
+  // the second collection beside tickets (the Conversations ADR).
+  conversations: ConversationView[];
 }
 
 interface RunOptions {
@@ -317,6 +366,14 @@ interface RunOptions {
   // The herdr daemon socket for terminal-backed attempts. Tests point this
   // at a fake socket; the default is the daemon's path on this machine.
   herdrSocket?: string;
+  // The Conversations ADR: force-allow an empty issues/ (no Tickets at
+  // all) even when the pool has no conversations/ directory yet either —
+  // startPool already infers this on its own once a conversations/
+  // directory exists (see loadPoolMarkers's own allowEmptyIssues), so this
+  // is only for a caller that wants a Ticket-less pool to boot before its
+  // first Conversation has ever started (a test, or a future
+  // start-empty-then-add-a-Conversation flow).
+  allowEmptyIssues?: boolean;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -340,6 +397,18 @@ export interface PoolRun {
   accept: (ticketId: string, note?: string, approve?: boolean) => void;
   settled: Promise<PoolRun>;
   close: () => void;
+  /**
+   * Stop the run's headless attempts (ADR-0017): TERM to each child's
+   * process group, a grace, then KILL; wait for the drive to join the
+   * super-step (bounded, since a terminal-backed attempt is not stopped);
+   * then close the store. The engine itself does not exit here; the server's
+   * signal handler does, after this resolves.
+   */
+  shutdown: (graceMs?: number) => Promise<void>;
+  /** Start a Conversation (conversations.ts); throws when the pool is not terminal-backed. */
+  startConversation: (req: StartConversationRequest) => Promise<ConversationView>;
+  /** End a Conversation the operator is done with (conversations.ts). */
+  endConversation: (id: string, closing?: string) => Promise<void>;
 }
 
 const reduceTickets = (
@@ -528,7 +597,9 @@ interface SettleWaiter {
   reject: (error: unknown) => void;
 }
 
-interface Session {
+// Exported so conversations.ts (Workstream A) can take it as a parameter;
+// the interface itself stays engine.ts's, unchanged in shape for tickets.
+export interface Session {
   poolDir: string;
   issuesDir: string;
   runsDir: string;
@@ -576,7 +647,7 @@ interface Session {
   // loop or from an adopted attempt's finalize, chains onto this so two
   // merges never run their git work concurrently on the main checkout.
   mergeChain: Promise<void>;
-  // ADR-0017's config reload: the raw console.json text last considered at a
+  // ADR-0018's config reload: the raw console.json text last considered at a
   // super-step boundary, whether it was accepted, rejected, or found
   // unchanged. Comparing against this (not against the last *accepted* text)
   // is what makes an unchanged file a true no-op and keeps the same bad
@@ -584,6 +655,26 @@ interface Session {
   // startPool to the boot read, so the first boundary is a no-op unless the
   // file changed since boot.
   lastConfigText: string | null;
+  // The headless children of this engine process (ADR-0017), tracked from
+  // spawn to exit so a shutdown can stop every one of them.
+  children: ChildTracker;
+  // Headless orphans rehydrate found still alive from a previous engine
+  // process, stopped by reapHeadlessOrphans before the first scheduling.
+  orphans: HeadlessOrphan[];
+  // Live Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // beside-tickets.md): tracked only while running, keyed by id. An ended or
+  // crashed Conversation is removed; its record on disk (conversations.ts's
+  // loadConversations) is the only trace of it from then on.
+  conversations: Map<string, ConversationRuntime>;
+  // Ids reserved for a `kind: "conversation"` spawn proposal whose
+  // startConversationImpl call is still in flight (fire-and-forget: the
+  // adoption boundary never awaits it). combinedSpawnCounters folds this in
+  // alongside the on-disk Conversation records so a second adoption call
+  // landing before the first Conversation's record has actually been
+  // written (writeConversation happens well into startConversation, after
+  // the herdr tab opens) can never mint the same `<parent>-spawn-N` id
+  // twice. Cleared once that call settles, success or failure.
+  reservedConversationIds: Set<string>;
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -599,11 +690,20 @@ export function startPool(options: RunOptions): PoolRun {
   const poolDir = options.poolDir;
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  const markers = loadPoolMarkers(issuesDir);
+  // A pool with a conversations/ directory (even an empty one, since the
+  // directory only ever gets created by the first Conversation ever
+  // started there) has proven it is not the "accidental empty pool"
+  // mistake the bare throw exists to catch, so an empty issues/ boots like
+  // any other pool with zero ready Tickets. The `allowEmptyIssues` option
+  // covers the one case that can't infer itself: a Conversation-capable
+  // pool before its very first Conversation has ever started.
+  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir), {
+    allowEmptyIssues: options.allowEmptyIssues || existsSync(join(poolDir, "conversations")),
+  });
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
-  // The reload's baseline (ADR-0017): the exact bytes readConfig just parsed,
+  // The reload's baseline (ADR-0018): the exact bytes readConfig just parsed,
   // so the first boundary reload is a no-op unless the file changes after
   // boot, matching every later boundary's unchanged-file no-op.
   const lastConfigText = readOptional(join(poolDir, "console.json"));
@@ -613,8 +713,16 @@ export function startPool(options: RunOptions): PoolRun {
   // Assignment resolution for every marker on disk: ordinary tickets resolve
   // from the config, engine-written ones (grader, head-to-head, spawned)
   // inherit from the ticket they belong to, and spawn chains resolve however
-  // deep they nest.
+  // deep they nest. Conversation ids are seeded first (the Conversations
+  // ADR): a Ticket spawned mid-Conversation in a prior run has its
+  // spawned-by name a Conversation, not another ticket, and
+  // resolveUnseenAssignments below needs that id already resolvable the same
+  // way it needs a grader's build ticket resolved before the grader.
   const assignments = new Map<string, Assignment>();
+  for (const rec of loadConversations(join(poolDir, "conversations"))) {
+    if (!rec.harness || !rec.model) continue;
+    assignments.set(rec.id, { harness: rec.harness, model: rec.model, drivers: rec.drivers });
+  }
   resolveUnseenAssignments(markers, assignments, config, harnesses);
 
   const session: Session = {
@@ -653,10 +761,25 @@ export function startPool(options: RunOptions): PoolRun {
     adopted: new Map(),
     mergeChain: Promise.resolve(),
     lastConfigText,
+    children: new ChildTracker(),
+    orphans: [],
+    conversations: new Map(),
+    reservedConversationIds: new Set(),
   };
 
   rehydrate(session);
-  session.terminalReconcile = reconcileTerminalAttempts(session);
+  // Conversations do not resume (the Conversations ADR): any recorded live
+  // at boot has an unknown pane fate and no runtime entry will ever track
+  // it again, so it crashes now rather than sitting unreachable.
+  crashStaleLiveConversationsAtBoot(session);
+  // Boot reconciliation, awaited by the drive before its first scheduling:
+  // terminal-backed orphans are re-adopted or crashed (ADR-0014), headless
+  // orphans are stopped (ADR-0017), so no ticket is ever spawned into a
+  // worktree its previous attempt is still writing.
+  session.terminalReconcile = Promise.all([
+    reconcileTerminalAttempts(session),
+    reapHeadlessOrphans(session),
+  ]).then(() => undefined);
   const handle = makeHandle(session);
   session.handle = handle;
   startDrive(session);
@@ -728,8 +851,41 @@ function makeHandle(session: Session): PoolRun {
       return nextSettle(session);
     },
     close: () => closeStore(session),
+    shutdown: (graceMs) => shutdownSession(session, graceMs),
+    startConversation: (req) => startConversationImpl(session, req),
+    endConversation: (id, closing) => endConversationImpl(session, id, closing),
   };
   return handle;
+}
+
+// How long shutdown waits for the drive to join its super-step after the
+// children are stopped. Bounded because a terminal-backed attempt is left
+// running (its pane outlives the engine and boot re-adopts it, ADR-0014), so
+// a super-step holding one never joins, and a merge hold polls forever.
+const SHUTDOWN_SETTLE_WAIT_MS = 3_000;
+
+// Shutdown (ADR-0017): stop every headless child, let the drive join the
+// super-step it was in (each stopped attempt's exit handling records the
+// stop on its ticket log, and the loop raises no crash interrupts and
+// schedules nothing once stopping), then close the store. A ticket whose
+// attempt was stopped is left in-progress with no interrupt, which is
+// exactly what the next boot resets to ready.
+async function shutdownSession(
+  session: Session,
+  graceMs?: number,
+): Promise<void> {
+  session.children.stopping = true;
+  await session.children.stopAll(graceMs);
+  if (session.driving) {
+    await Promise.race([
+      nextSettle(session).then(
+        () => undefined,
+        () => undefined,
+      ),
+      Bun.sleep(SHUTDOWN_SETTLE_WAIT_MS),
+    ]);
+  }
+  closeStore(session);
 }
 
 function nextSettle(session: Session): Promise<PoolRun> {
@@ -831,7 +987,7 @@ function assignmentViewOf(assignment: Assignment): AssignmentView {
 // reportDriveDeath. Each carries the store's pending answers at emit
 // time, and every markProcessed is followed by an emit, so the merged queue
 // in the snapshot stream never goes stale.
-function emitSnapshot(session: Session, phase: RunPhase): void {
+export function emitSnapshot(session: Session, phase: RunPhase): void {
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
@@ -840,6 +996,7 @@ function emitSnapshot(session: Session, phase: RunPhase): void {
     assignments: Object.fromEntries(
       [...session.assignments].map(([id, a]) => [id, assignmentViewOf(a)]),
     ),
+    conversations: conversationViews(session),
   };
   session.snapshots.push(snapshot);
   session.onSnapshot?.(snapshot);
@@ -855,7 +1012,7 @@ async function driveLoop(session: Session): Promise<void> {
   await session.terminalReconcile;
   for (;;) {
     reconcileDeadlocks(session);
-    // Config reload (ADR-0017): the assignment slice of console.json
+    // Config reload (ADR-0018): the assignment slice of console.json
     // re-reads here, before the answer drain and spawn adoption below, so
     // both see the reloaded config for whatever they schedule this
     // super-step.
@@ -947,6 +1104,11 @@ async function driveLoop(session: Session): Promise<void> {
       marker: TicketMarker;
       result: MergeResult;
       attempt: number;
+      // The working branch's tip just before this merge ran (the
+      // Conversations ADR): captured so a ticket-ended Notice's diff summary
+      // can be computed after the fact, once mergeTicket has already removed
+      // the ticket's own branch. Empty in a headless pool (git unavailable).
+      beforeSha: string;
     }[] = [];
     let mergeQueue: Promise<void> = session.mergeChain;
     const results = await Promise.all(
@@ -961,6 +1123,7 @@ async function driveLoop(session: Session): Promise<void> {
             issuesDir: session.issuesDir,
             harnesses: session.harnesses,
             herdrSocket: session.herdrSocket,
+            children: session.children,
           },
           plan,
         ).then((result) => {
@@ -971,6 +1134,7 @@ async function driveLoop(session: Session): Promise<void> {
             session.pendingSpawns.push({
               parentId: marker.id,
               proposals: result.spawnProposals,
+              origin: "ticket",
             });
           }
           if (plan.verify) {
@@ -986,10 +1150,19 @@ async function driveLoop(session: Session): Promise<void> {
           }
           if (result.plan.worktree && result.status === "done") {
             mergeQueue = mergeQueue.then(() => {
+              // Captured just before the merge, inside the serialized chain:
+              // HEAD may have moved since this ticket's attempt exited (an
+              // earlier sibling's merge in the same super-step), so this is
+              // the range mergeTicket is actually about to add, not
+              // whatever HEAD was when the outer async callback started.
+              const beforeSha = session.git
+                ? git(session.cwd, ["rev-parse", "HEAD"]).out
+                : "";
               merges.push({
                 marker,
                 result: mergeTicket(session, marker, result.plan.worktree!),
                 attempt: result.plan.attempt,
+                beforeSha,
               });
             });
             // Publish the tail at every extension, not once after the await:
@@ -1046,6 +1219,12 @@ async function driveLoop(session: Session): Promise<void> {
           payload: {},
         });
         closeAttemptTab(session, merge.marker.id, merge.attempt);
+        notifyConversationOfTicketDone(
+          session,
+          merge.marker,
+          branchFor(session.cwd, merge.marker.id),
+          merge.beforeSha ? `${merge.beforeSha}..HEAD` : null,
+        );
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${merge.marker.id}: merged ${branchFor(session.cwd, merge.marker.id)} ` +
@@ -1063,6 +1242,20 @@ async function driveLoop(session: Session): Promise<void> {
           merge.attempt,
         );
       }
+    }
+    if (session.children.stopping) {
+      // Shutdown (ADR-0017): this super-step joined after its headless
+      // attempts were stopped. Each stop is on its ticket's log already; no
+      // crash interrupt is raised for them, so the next boot resets those
+      // tickets to ready instead of waiting on a human, and nothing more is
+      // scheduled or graded.
+      session.state = applyUpdate(session.state, {
+        log: [
+          "engine shutdown: super-step joined; no crash interrupts raised " +
+            "and nothing more scheduled",
+        ],
+      });
+      break;
     }
     for (const result of results) {
       if (result.status === "in-progress") {
@@ -1207,9 +1400,27 @@ const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
 const ENGINE_RESET_NOTE =
   `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
   "The engine process stopped while this ticket was in-progress (killed, " +
-  "crashed, or the machine restarted), so the work is part done at best " +
+  "crashed, or the machine restarted). No agent from that process was " +
+  "found still running at this boot, so the work is part done at best " +
   "and the agent left no brief. The ticket is back to ready; read the " +
   "working tree before it runs again.\n";
+
+// The note for a ticket whose previous attempt was found still running at
+// boot (ADR-0017): the engine stops it before scheduling anything, so the
+// next attempt never shares the worktree with it.
+function engineOrphanNote(orphans: { attempt: number; pid: number }[]): string {
+  const who = orphans
+    .map((o) => `attempt ${o.attempt} (pid ${o.pid})`)
+    .join(" and ");
+  return (
+    `\n---\n\n${ENGINE_BRIEF_HEADING}\n\n` +
+    "The engine process stopped while this ticket was in-progress, and at " +
+    `the next boot ${who} was found still running in the working tree. ` +
+    "The engine stopped it before scheduling anything, so the work is part " +
+    "done at best and the agent left no brief. The ticket is back to ready; " +
+    "read the working tree before it runs again.\n"
+  );
+}
 
 // Rehydration: the last checkpoint restores the run's channels, but the
 // line-1 markers are the truth for ticket statuses and win on any
@@ -1243,13 +1454,36 @@ function rehydrate(session: Session): void {
   const interrupted = new Set(session.state.interrupts.map((i) => i.ticketId));
   for (const marker of session.markers) {
     if (marker.status === "in-progress" && !interrupted.has(marker.id)) {
+      // A headless attempt of the previous engine process may still be
+      // running (ADR-0017): its spawned event's pid proves it. The note says
+      // which it was; reapHeadlessOrphans stops it before the first
+      // scheduling. A terminal-backed attempt records no pid and keeps the
+      // plain note, which reconcileTerminalAttempts strips on re-adoption.
+      const orphans = headlessOrphans(session, marker.id);
       writeMarkerStatus(marker.file, "ready");
-      appendFileSync(marker.file, ENGINE_RESET_NOTE);
-      marker.status = "ready";
-      log.push(
-        `ticket ${marker.id}: marker was in-progress with no live agent; ` +
-          "back to ready",
+      appendFileSync(
+        marker.file,
+        orphans.length > 0 ? engineOrphanNote(orphans) : ENGINE_RESET_NOTE,
       );
+      marker.status = "ready";
+      if (orphans.length > 0) {
+        for (const orphan of orphans) {
+          session.orphans.push({ marker, ...orphan });
+        }
+        log.push(
+          `ticket ${marker.id}: marker was in-progress and ` +
+            orphans
+              .map((o) => `attempt ${o.attempt} (pid ${o.pid})`)
+              .join(", ") +
+            " is still running from the previous engine process; stopping " +
+            "it before scheduling, ticket back to ready",
+        );
+      } else {
+        log.push(
+          `ticket ${marker.id}: marker was in-progress with no live agent; ` +
+            "back to ready",
+        );
+      }
     }
   }
   session.state = applyUpdate(session.state, {
@@ -1314,6 +1548,95 @@ function rehydrate(session: Session): void {
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Headless boot reconciliation (ADR-0017)
+// ---------------------------------------------------------------------------
+
+interface HeadlessOrphan {
+  marker: TicketMarker;
+  attempt: number;
+  pid: number;
+  cwd: string;
+}
+
+// The headless attempts a previous engine process spawned and never saw
+// exit, still alive: every spawned event carrying a pid (headless spawns
+// record one; terminal-backed spawns record a pane id instead) with no
+// exited or crash event for the same attempt after it, whose pid is live in
+// the attempt's spawn cwd. A live pid working elsewhere is a reused pid, not
+// an orphan. A verify fan-out can leave several per ticket.
+function headlessOrphans(
+  session: Session,
+  ticketId: string,
+): Omit<HeadlessOrphan, "marker">[] {
+  const events = readEvents(session.runsDir, ticketId);
+  const found: Omit<HeadlessOrphan, "marker">[] = [];
+  events.forEach((event, i) => {
+    if (event.kind !== "spawned") return;
+    const pid = event.payload.pid;
+    const cwd = event.payload.cwd;
+    if (typeof pid !== "number" || typeof cwd !== "string") return;
+    const ended = events.some(
+      (other, j) =>
+        j > i &&
+        other.attempt === event.attempt &&
+        (other.kind === "exited" || other.kind === "crash"),
+    );
+    if (ended) return;
+    if (!orphanIsLive(pid, cwd)) return;
+    found.push({ attempt: event.attempt, pid, cwd });
+  });
+  return found;
+}
+
+/**
+ * Stop the headless orphans rehydrate found (ADR-0017), each with the same
+ * TERM-grace-KILL a shutdown uses, and record the crash on the ticket's log
+ * so the attempt no longer reads as running. Awaited by the drive before its
+ * first scheduling, so the re-run never lands in a worktree the orphan is
+ * still writing. Never rejects: an orphan that survives even KILL (not ours
+ * to signal) is logged and the pool carries on as it did before this existed.
+ */
+async function reapHeadlessOrphans(session: Session): Promise<void> {
+  const orphans = session.orphans.splice(0);
+  if (orphans.length === 0) return;
+  await Promise.all(
+    orphans.map(async (orphan) => {
+      let gone = false;
+      try {
+        gone = await stopOrphan(orphan.pid);
+      } catch {
+        gone = false;
+      }
+      const id = orphan.marker.id;
+      appendEvent(session.runsDir, id, {
+        at: new Date().toISOString(),
+        attempt: orphan.attempt,
+        kind: "crash",
+        payload: {
+          code: null,
+          reason: gone
+            ? `orphan attempt (pid ${orphan.pid}) from a previous engine ` +
+              "process was still running at boot; stopped by the engine"
+            : `orphan attempt (pid ${orphan.pid}) from a previous engine ` +
+              "process was still running at boot and survived the engine's stop",
+          logTail: [],
+          outcomeExists: existsSync(
+            join(session.runsDir, outcomeFileName(id, null)),
+          ),
+          pid: orphan.pid,
+        },
+      });
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${id}: orphan attempt ${orphan.attempt} (pid ${orphan.pid}) ` +
+            (gone ? "stopped at boot" : "could not be stopped at boot"),
+        ],
+      });
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1682,6 +2005,12 @@ function recordAdoptedExit(
       branch: branchFor(session.cwd, ticketId),
     };
     const next = session.mergeChain.then(async () => {
+      // Captured inside the serialized chain, right before the merge: HEAD
+      // may have moved since this ticket's attempt was adopted (another
+      // merge landing first), and mergeTicket removes this branch on
+      // success, so the range for a done-Notice's diff summary has to be
+      // taken here or not at all.
+      const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
       const merge = mergeTicket(session, marker, worktree);
       if (merge.ok) {
         appendEvent(session.runsDir, ticketId, {
@@ -1691,6 +2020,12 @@ function recordAdoptedExit(
           payload: {},
         });
         closeAttemptTab(session, ticketId, attempt);
+        notifyConversationOfTicketDone(
+          session,
+          marker,
+          branchFor(session.cwd, ticketId),
+          beforeSha ? `${beforeSha}..HEAD` : null,
+        );
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${ticketId}: adopted attempt ${attempt} merged ` +
@@ -1881,7 +2216,11 @@ function acceptAnswer(
 // queued record waits for the drive loop's boundary drain. The kick is
 // separate from acceptance so the answer path's waiter exists before an idle
 // drain can settle it.
-function kickProcessing(session: Session): void {
+// Exported so engine/notices.ts's Conversation spawn-proposal poller can
+// drive an idle engine the same way an answer's acceptance does (the
+// Conversations ADR: a Conversation's spawn.json is adopted outside the
+// drive loop's own boundary when nothing else will reach one).
+export function kickProcessing(session: Session): void {
   if (session.driving) return;
   drainAnswers(session);
   startDrive(session);
@@ -1940,7 +2279,7 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -1966,6 +2305,16 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
           "the drive retries the checkpoint write",
       ],
     });
+    return;
+  }
+  // A Conversation id never appears in session.markers (it has no Issue
+  // file), so its merge-conflict / merge-approval answers are routed here,
+  // before the marker lookup below would throw on it.
+  if (
+    (interrupt.kind === "merge-conflict" || interrupt.kind === "merge-approval") &&
+    session.conversations.has(record.ticketId)
+  ) {
+    answerConversationMerge(session, record.ticketId, interrupt, record.approve);
     return;
   }
   const marker = session.markers.find((m) => m.id === record.ticketId);
@@ -2050,6 +2399,7 @@ function resumeMerge(
     path: worktreePathFor(session.cwd, marker.id),
     branch,
   };
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, branch);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
@@ -2078,6 +2428,7 @@ function resumeMerge(
     payload: {},
   });
   closeAttemptTabs(session, marker.id);
+  notifyConversationOfTicketDone(session, marker, branch, beforeSha ? `${beforeSha}..HEAD` : null);
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -2172,8 +2523,13 @@ function readResolverResult(
 // reproduces the conflict in the parked worktree, stages a resolution without
 // committing, and the engine routes the result. A resolved attempt becomes an
 // approval interrupt (authority stays with the human); a failed or absent one
-// takes the manual path with the failure noted.
-async function handleMergeConflict(
+// takes the manual path with the failure noted. Exported so
+// conversations.ts (Workstream A) can reuse it verbatim for a Conversation's
+// conflicted End, with a TicketMarker-shaped record synthesized from the
+// Conversation's id, file and branch: the function reads only `marker.id`
+// (for worktreePathFor/branchFor) and `marker.file`/`marker.title` (surfaced
+// in the resolver's prompt), never the pool's own markers array.
+export async function handleMergeConflict(
   session: Session,
   marker: TicketMarker,
   result: MergeResult,
@@ -2304,10 +2660,11 @@ async function runResolver(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The resolver's completion: its outcome file holds a result the moment
     // the resolver writes it, without waiting for the TUI to exit.
     (path) => readResolverResult(path) !== null,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(session.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: lastAttempt(session.runsDir, marker.id),
@@ -2318,6 +2675,7 @@ async function runResolver(
           worktree.branch,
           terminal,
           terminalError,
+          pid,
         ),
       }),
   );
@@ -2327,7 +2685,8 @@ async function runResolver(
   }
   const reason =
     exitCode !== 0
-      ? exitCrashReason(
+      ? attemptCrashReason(
+          session.children,
           exitCode,
           ctx.exitCodePath,
           "resolver",
@@ -2374,6 +2733,7 @@ function approveMerge(
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, worktree.branch);
   if (!result.ok) {
     appendEvent(session.runsDir, marker.id, {
@@ -2404,6 +2764,12 @@ function approveMerge(
     payload: {},
   });
   closeAttemptTabs(session, marker.id);
+  notifyConversationOfTicketDone(
+    session,
+    marker,
+    worktree.branch,
+    beforeSha ? `${beforeSha}..HEAD` : null,
+  );
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
     log: [
@@ -2579,7 +2945,7 @@ function resolveSpawnedTicketAssignment(
   };
 }
 
-// The shared resolution pass (ADR-0010, ADR-0017): resolves every marker id
+// The shared resolution pass (ADR-0010, ADR-0018): resolves every marker id
 // not already present in `assignments`, so the caller decides what counts as
 // already resolved. At boot (resolveUnseenAssignments below) that is nothing,
 // starting from an empty map. At a config reload (resolveBoundaryAssignments
@@ -2662,7 +3028,7 @@ function resolveUnseenAssignments(
 }
 
 // ---------------------------------------------------------------------------
-// Config reload (ADR-0017)
+// Config reload (ADR-0018)
 // ---------------------------------------------------------------------------
 
 // The three keys the reload touches. Everything else on PoolConfig
@@ -2719,7 +3085,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
   });
 }
 
-// The super-step boundary's config reload (ADR-0017): re-reads console.json,
+// The super-step boundary's config reload (ADR-0018): re-reads console.json,
 // and when its assignment slice (defaults, assign, resolver) changed, dry-run
 // resolves every reassignable ticket before committing anything. "Reassignable"
 // is every marker except a ticket with an Attempt in flight across the
@@ -2727,7 +3093,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
 // (session.adopted): the drive loop always awaits a super-step's ordinary
 // attempts in full before looping back here, so nothing else can still be
 // running at this seam. A done ticket is reassignable too, by the letter of
-// ADR-0017: it simply resolves to whatever the new config would have given
+// ADR-0018: it simply resolves to whatever the new config would have given
 // it, the same as any other not-in-flight ticket, which is what lets a
 // grader, head-to-head, or spawned ticket adopted after it finished inherit
 // the post-reload value rather than the value frozen at its own now-past
@@ -2988,7 +3354,7 @@ async function runGraders(
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   const buildAssignment = session.assignments.get(build.id)!;
   let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
@@ -3260,16 +3626,17 @@ async function runGrader(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The grader's completion: a usable grade (or a definite refusal of
     // one) the moment the grader writes its outcome, without waiting for the
     // TUI to exit.
     (path) => readGraderResult(path).ok,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(runsDir, gid, {
         at: new Date().toISOString(),
         attempt: graderAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
       }),
   );
   // The grader's exit facts (ADR-0012), on the grade path and the crash
@@ -3278,7 +3645,8 @@ async function runGrader(
   const outcomeExists = existsSync(graderOutcomePath);
   const result = readGraderResult(graderOutcomePath);
   if (exitCode !== 0) {
-    const reason = exitCrashReason(
+    const reason = attemptCrashReason(
+      session.children,
       exitCode,
       ctx.exitCodePath,
       "harness",
@@ -3445,6 +3813,7 @@ function resolveLoneAttempt(
         session.pendingSpawns.push({
           parentId: marker.id,
           proposals: outcome.outcome.spawn,
+          origin: "ticket",
         });
       }
     }
@@ -3508,6 +3877,11 @@ function completeLoneAttempt(
       `ticket ${marker.id}: attempt ${attempt} passed grading; ticket done`,
     ],
   };
+  // Captured before mergeTicket runs (it removes the worktree and its
+  // branch on success), the same reasoning as the drive loop's own merges:
+  // a verify ticket spawned by a Conversation still gets a done-Notice with
+  // a real diff summary, not just the fan-out's un-verified sibling.
+  const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   if (session.git) {
     const worktree = result.plan.worktree ?? {
       path: worktreePathFor(session.cwd, marker.id, attempt),
@@ -3537,6 +3911,12 @@ function completeLoneAttempt(
       payload: {},
     });
     closeAttemptTab(session, marker.id, attempt);
+    notifyConversationOfTicketDone(
+      session,
+      marker,
+      branchFor(session.cwd, marker.id, attempt),
+      beforeSha ? `${beforeSha}..HEAD` : null,
+    );
     update.log = [
       `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
         `${branchFor(session.cwd, marker.id, attempt)} onto the working branch`,
@@ -3550,6 +3930,7 @@ function completeLoneAttempt(
       session.pendingSpawns.push({
         parentId: marker.id,
         proposals: outcome.outcome.spawn,
+        origin: "ticket",
       });
     }
   }
@@ -3913,6 +4294,7 @@ function completeSelection(
       session.pendingSpawns.push({
         parentId: marker.id,
         proposals: outcome.outcome.spawn,
+        origin: "ticket",
       });
     }
   }
@@ -4068,7 +4450,7 @@ async function runHeadToHead(
     };
   });
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
   // (ticket 01) via the shared engine-run helper: the run spawns the judge
@@ -4187,18 +4569,19 @@ async function runHeadToHead(
     interactiveArgv,
     argv,
     ctx,
+    session.children,
     // The judge's completion: a pick (or tie, or a definite unusable
     // refusal) the moment it writes its outcome, without waiting for the
     // TUI to exit.
     (path) =>
       readHeadToHeadVerdict(path, [top.attempt, runnerUp.attempt]).kind !==
       "unusable",
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(runsDir, h2hId, {
         at: new Date().toISOString(),
         attempt: h2hAttempt,
         kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError),
+        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
       }),
   );
   // The judge's exit facts (ADR-0012): the log tail and whether an outcome
@@ -4212,7 +4595,8 @@ async function runHeadToHead(
   if (exitCode !== 0) {
     verdict = {
       kind: "unusable",
-      reason: exitCrashReason(
+      reason: attemptCrashReason(
+        session.children,
         exitCode,
         ctx.exitCodePath,
         "harness",
@@ -4429,7 +4813,10 @@ function rejectReview(
   session.state = { ...session.state, outcomes };
 }
 
-function raiseInterrupt(session: Session, interrupt: Interrupt): void {
+// Exported so conversations.ts (Workstream A) can raise its own
+// Conversation-flavoured interrupts (merge-conflict, merge-approval) the
+// same way every ticket interrupt is raised.
+export function raiseInterrupt(session: Session, interrupt: Interrupt): void {
   if (
     session.state.interrupts.some(
       (i) => i.ticketId === interrupt.ticketId && i.kind === interrupt.kind,
@@ -4443,6 +4830,17 @@ function raiseInterrupt(session: Session, interrupt: Interrupt): void {
       `interrupt raised for ${interrupt.ticketId} (${interrupt.kind})` +
         (interrupt.kind === "deadlock" ? `: ${interrupt.body}` : ""),
     ],
+  });
+}
+
+// The minimal write conversations.ts (Workstream A) needs to resolve one of
+// its own interrupts without engine.ts exporting applyUpdate/PoolUpdate
+// wholesale: drop the interrupt and add one log line, exactly what every
+// ticket-side approve/reject/resume does inline.
+export function clearInterrupt(session: Session, interrupt: Interrupt, log: string): void {
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [log],
   });
 }
 
@@ -4537,13 +4935,20 @@ function raiseCheckpoint(
   marker: TicketMarker,
   attempt: number,
 ): void {
-  raiseInterrupt(session, checkpointInterrupt(marker));
+  const interrupt = checkpointInterrupt(marker);
+  raiseInterrupt(session, interrupt);
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt,
     kind: "checkpoint",
     payload: {},
   });
+  // The Conversations ADR: every raiseCheckpoint call site (attempt exit,
+  // the lone-attempt and grade-flag paths, the adoption-recovery rebuild)
+  // funnels through here, so one hook covers all of them without a second
+  // call site to remember. interrupt.body is the same extractBrief(marker
+  // .file) read the interrupt itself carries; reused rather than re-read.
+  notifyConversationOfCheckpoint(session, marker, interrupt.body);
 }
 
 // "## Brief" and "## Brief, written by the engine" both head a Brief
@@ -4614,6 +5019,7 @@ interface TicketEnv {
   issuesDir: string;
   harnesses: Record<string, HarnessCommand>;
   herdrSocket: string;
+  children: ChildTracker;
 }
 
 interface TicketPlan {
@@ -4718,7 +5124,8 @@ async function openAttemptTerminal(
  * inherited parent's, with their values. Terminal-backed spawns add pane_id
  * (and terminal_error on a headless fallback, whenever it happened: the tab
  * refusing to open or the wrapper refusing to send), per ADR-0014 and
- * ADR-0015.
+ * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
+ * boot reconciliation checks for an orphan of a dead engine process.
  */
 function spawnedPayload(
   argv: string[],
@@ -4726,6 +5133,7 @@ function spawnedPayload(
   branch: string | null,
   terminal?: AttemptTerminal,
   terminalError?: string,
+  pid?: number,
 ): Record<string, unknown> {
   return {
     argv: elidePromptArgv(argv, ctx.body),
@@ -4733,6 +5141,7 @@ function spawnedPayload(
     branch,
     commitSha: commitShaAt(ctx.cwd),
     env: engineEnvSet(spawnEnv(ctx.cwd)),
+    ...(pid !== undefined ? { pid } : {}),
     ...(terminal
       ? {
           // A mid-flight fallback (the wrapper could not be sent to the pane)
@@ -4784,9 +5193,12 @@ function closeAttemptTab(
  * attempt's: the merge-conflict merge paths (resumeMerge, approveMerge)
  * cannot know which attempt's branch they are merging — the resolver is the
  * latest attempt, the merged work an earlier one — and by merge time every
- * tab the ticket opened is done.
+ * tab the ticket opened is done. Exported so conversations.ts (Workstream A)
+ * can close every tab a Conversation's own launch and any resolver run
+ * (handleMergeConflict) opened under its id, the same reasoning applying:
+ * ending time cannot know whether a resolver ran.
  */
-function closeAttemptTabs(session: Session, ticketId: string): void {
+export function closeAttemptTabs(session: Session, ticketId: string): void {
   if (session.state.config.terminal !== "herdr") return;
   for (const spawned of readEvents(session.runsDir, ticketId)) {
     if (
@@ -4888,11 +5300,14 @@ function readOutcomeResult(path: string): OutcomeResult {
 // match against this exported constant.
 export const SPAWN_BODY_MIN_CHARS = 20;
 
-// Per-proposal spawn validation (ADR-0010): the well-formed entries come back
-// as proposals, the malformed ones as rejections carrying their index and a
-// reason. The outcome itself stays valid either way; the boundary decides
-// what gets adopted and what gets logged.
-function validateSpawnProposals(
+// Per-proposal spawn validation (ADR-0010, extended by the Conversations
+// ADR's kind/assign): the well-formed entries come back as proposals, the
+// malformed ones as rejections carrying their index and a reason. The
+// outcome itself stays valid either way; the boundary decides what gets
+// adopted and what gets logged. Exported so engine/notices.ts's Conversation
+// spawn-proposal poller validates its own spawn.json batches against exactly
+// this shape rather than a hand-rolled second copy.
+export function validateSpawnProposals(
   raw: unknown,
 ): { proposals: SpawnProposal[]; rejections: SpawnRejection[] } {
   if (raw === undefined) return { proposals: [], rejections: [] };
@@ -4936,10 +5351,41 @@ function validateSpawnProposals(
       });
       return;
     }
+    const kindRaw = proposal.kind;
+    if (kindRaw !== undefined && kindRaw !== "ticket" && kindRaw !== "conversation") {
+      rejections.push({
+        index,
+        reason: `proposal's kind must be "ticket" or "conversation", got '${String(kindRaw)}'`,
+      });
+      return;
+    }
+    const assignRaw = proposal.assign;
+    let assign: SpawnProposal["assign"];
+    if (assignRaw !== undefined) {
+      if (typeof assignRaw !== "object" || assignRaw === null || Array.isArray(assignRaw)) {
+        rejections.push({ index, reason: "proposal's assign is not an object" });
+        return;
+      }
+      const a = assignRaw as Record<string, unknown>;
+      const badField = (["harness", "model", "drivers"] as const).find(
+        (field) => a[field] !== undefined && typeof a[field] !== "string",
+      );
+      if (badField) {
+        rejections.push({ index, reason: `proposal's assign.${badField} is not a string` });
+        return;
+      }
+      assign = {
+        ...(typeof a.harness === "string" ? { harness: a.harness } : {}),
+        ...(typeof a.model === "string" ? { model: a.model } : {}),
+        ...(typeof a.drivers === "string" ? { drivers: a.drivers } : {}),
+      };
+    }
     proposals.push({
       title: proposal.title,
       body: proposal.body,
       ...(blockedBy !== undefined ? { blockedBy } : {}),
+      ...(kindRaw !== undefined ? { kind: kindRaw as "ticket" | "conversation" } : {}),
+      ...(assign !== undefined ? { assign } : {}),
     });
   });
   return { proposals, rejections };
@@ -5017,36 +5463,110 @@ function spawnCounters(markers: TicketMarker[]): Map<string, number> {
   return counters;
 }
 
-// The boundary's spawn adoption (ADR-0010): every buffered proposal is
-// validated against the pool as the boundary found it, the accepted ones are
-// written as ordinary ticket files, and the pool's markers and assignments
-// reload so the drive loop schedules them like any other ticket. Validation
-// is per proposal, never per attempt: a dropped proposal logs its reason on
-// the proposing ticket's log (a spawn-rejected event) and the attempt's own
-// result stands. The caps bound the blast radius (5 per attempt, 20 per
-// run): overflow truncates and logs, never fails. Writing the files is the
-// commit point; a crash after them but before the reload leaves the adopted
-// tickets in the pool for the next start, ids stable.
-function adoptSpawnProposals(session: Session): void {
+// The Conversations ADR's extension: a parent's ticket-spawns and
+// Conversation-spawns share one `<parent>-spawn-N` namespace (both are
+// "what this parent spawned"), so the counter that hands out the next N must
+// see both kinds of existing child or the two could mint the same id (a
+// ticket `x-spawn-1` already on disk, a Conversation `x-spawn-1` about to be
+// created from a separate proposal). parseSpawnId's regex is id-shape-only,
+// so it works unchanged on a Conversation's own `<parent>-spawn-N` id.
+function combinedSpawnCounters(session: Session): Map<string, number> {
+  const counters = spawnCounters(session.markers);
+  for (const rec of loadConversations(join(session.poolDir, "conversations"))) {
+    const spawn = parseSpawnId(rec.id);
+    if (!spawn) continue;
+    counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
+  }
+  // A kind:"conversation" proposal already adopted this tick (or a still
+  // in-flight one from an earlier adoptSpawnProposals call) may not have
+  // its record on disk yet — startConversationImpl writes it well after
+  // opening the herdr tab, and is never awaited here — so a reserved id
+  // counts the same as an on-disk one, or a second call could mint the
+  // same `<parent>-spawn-N` before the first's write ever lands.
+  for (const reserved of session.reservedConversationIds) {
+    const spawn = parseSpawnId(reserved);
+    if (!spawn) continue;
+    counters.set(spawn.parent, Math.max(counters.get(spawn.parent) ?? 0, spawn.n));
+  }
+  return counters;
+}
+
+// The ids of every Conversation the pool has ever recorded (live, ended, or
+// crashed): the Conversations ADR's "known parent" set threaded through
+// loadPoolMarkers so a Ticket whose spawned-by names a Conversation survives
+// the reload the way one whose spawned-by names a Ticket always has, and
+// through adoptSpawnProposals's blockedBy check so a proposal blocked on a
+// Conversation is rejected with a reason naming that specifically, not
+// folded into "names tickets outside the pool".
+function knownConversationIds(poolDir: string): Set<string> {
+  return new Set(loadConversations(join(poolDir, "conversations")).map((r) => r.id));
+}
+
+// The boundary's spawn adoption (ADR-0010, extended by the Conversations
+// ADR): every buffered proposal is validated against the pool as the
+// boundary found it, the accepted ones are written as ordinary ticket files
+// or started as Conversations, and the pool's markers and assignments
+// reload so the drive loop schedules the ticket ones like any other. Every
+// aspect of that stays per proposal, never per batch: a dropped proposal
+// logs its reason on the proposing parent's log (a spawn-rejected event) and
+// the parent's own result stands. The per-proposal cap (5) always applies;
+// the per-run cap (20) is skipped for a Conversation's own spawn.json batch
+// (spec: "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn
+// still counts against it, `origin: "ticket"`, whatever kind its entries
+// request). Writing the files is the commit point; a crash after them but
+// before the reload leaves the adopted tickets in the pool for the next
+// start, ids stable. Exported so engine/notices.ts's Conversation
+// spawn-proposal poller can call this directly when the engine is idle
+// (nothing else would reach this boundary for it otherwise).
+export function adoptSpawnProposals(session: Session): void {
   if (session.pendingSpawns.length === 0) return;
   const pending = session.pendingSpawns.splice(0);
   // Membership validates against the markers as the boundary found them, so
   // a proposal naming another proposal's future id drops as unknown: the
   // agent never proposes ids and cannot know one.
   const knownIds = new Set(session.markers.map((m) => m.id));
-  const counters = spawnCounters(session.markers);
+  const knownConvIds = knownConversationIds(session.poolDir);
+  const counters = combinedSpawnCounters(session);
   const log: string[] = [];
   let wrote = false;
 
-  for (const { parentId, proposals } of pending) {
+  for (const { parentId, proposals, origin } of pending) {
     const accepted: SpawnProposal[] = [];
     for (const proposal of proposals) {
-      const unknown = (proposal.blockedBy ?? []).filter(
-        (id) => !knownIds.has(id),
+      const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
+        knownConvIds.has(id),
       );
-      if (unknown.length > 0) {
-        const reason =
-          `blockedBy names tickets outside the pool: ${unknown.join(", ")}`;
+      const unknownTickets = (proposal.blockedBy ?? []).filter(
+        (id) => !knownIds.has(id) && !knownConvIds.has(id),
+      );
+      if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
+        const reasons: string[] = [];
+        if (conversationBlockers.length > 0) {
+          reasons.push(
+            `blockedBy names Conversations, which cannot block a ticket: ` +
+              conversationBlockers.join(", "),
+          );
+        }
+        if (unknownTickets.length > 0) {
+          reasons.push(
+            `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
+          );
+        }
+        const reason = reasons.join("; ");
+        appendEvent(session.runsDir, parentId, {
+          at: new Date().toISOString(),
+          attempt: lastAttempt(session.runsDir, parentId),
+          kind: "spawn-rejected",
+          payload: { title: proposal.title, reason },
+        });
+        log.push(
+          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
+            `rejected: ${reason}`,
+        );
+        continue;
+      }
+      if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
+        const reason = `assign.harness names unknown harness '${proposal.assign.harness}'`;
         appendEvent(session.runsDir, parentId, {
           at: new Date().toISOString(),
           attempt: lastAttempt(session.runsDir, parentId),
@@ -5061,24 +5581,64 @@ function adoptSpawnProposals(session: Session): void {
       }
       accepted.push(proposal);
     }
-    // The per-attempt cap honors the first five survivors; the per-run cap
-    // truncates whatever the run has no room left for.
+    // The per-proposal cap honors the first five survivors, always. The
+    // per-run cap truncates whatever the run has no room left for, but only
+    // for a Ticket's own outcome.spawn: a Conversation's spawn.json has none.
     let truncated = 0;
     let honored = accepted.slice(0, SPAWN_MAX_PER_ATTEMPT);
     truncated += accepted.length - honored.length;
-    const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
-    if (honored.length > room) {
-      truncated += honored.length - room;
-      honored = honored.slice(0, room);
+    if (origin !== "conversation") {
+      const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
+      if (honored.length > room) {
+        truncated += honored.length - room;
+        honored = honored.slice(0, room);
+      }
     }
     const adopted: string[] = [];
     for (const proposal of honored) {
       const n = (counters.get(parentId) ?? 0) + 1;
       counters.set(parentId, n);
       const id = `${parentId}-spawn-${n}`;
-      writeSpawnTicket(session, parentId, id, proposal);
+      if (proposal.kind === "conversation") {
+        // Fire-and-forget: startConversation opens a herdr tab and waits up
+        // to 60s for the TUI's ready frame (pane-session.ts's
+        // READINESS_TIMEOUT_MS), and this boundary is synchronous by
+        // ADR-0010's own contract (write-then-reload, never awaited). A
+        // launch failure is logged on the proposing parent, the same
+        // disposition a malformed proposal gets; the child Conversation
+        // itself joins conversationViews() (or is recorded crashed) once its
+        // own launch settles, same as an operator-started one racing the
+        // snapshot stream. The id is reserved (and released once this
+        // settles, either way) so a second adoptSpawnProposals call before
+        // this Conversation's own record hits disk cannot mint it again.
+        session.reservedConversationIds.add(id);
+        void startConversationImpl(session, {
+          id,
+          title: proposal.title.trim(),
+          opening: proposal.body,
+          assign: proposal.assign,
+          spawnedBy: parentId,
+        })
+          .catch((err) => {
+            appendEvent(session.runsDir, parentId, {
+              at: new Date().toISOString(),
+              attempt: lastAttempt(session.runsDir, parentId),
+              kind: "spawn-rejected",
+              payload: {
+                title: proposal.title,
+                reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            });
+          })
+          .finally(() => {
+            session.reservedConversationIds.delete(id);
+          });
+      } else {
+        writeSpawnTicket(session, parentId, id, proposal);
+        wrote = true;
+      }
       adopted.push(id);
-      session.spawnedThisRun += 1;
+      if (origin !== "conversation") session.spawnedThisRun += 1;
     }
     if (adopted.length > 0 || truncated > 0) {
       appendEvent(session.runsDir, parentId, {
@@ -5089,7 +5649,6 @@ function adoptSpawnProposals(session: Session): void {
       });
     }
     if (adopted.length > 0) {
-      wrote = true;
       log.push(
         `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
           (truncated > 0
@@ -5113,7 +5672,7 @@ function adoptSpawnProposals(session: Session): void {
   // hand-written ticket in: markers reload, unseen ids resolve their
   // assignments (parent inheritance), and the tickets channel folds them in
   // at their on-disk statuses.
-  session.markers = loadPoolMarkers(session.issuesDir);
+  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -5310,10 +5869,11 @@ async function runTicket(
     interactiveArgv,
     argv,
     ctx,
+    env.children,
     // The attempt's completion: a valid Outcome the moment it appears,
     // without waiting for the TUI to exit (ADR-0016).
     (path) => readOutcomeResult(path).ok,
-    (terminalError, argvUsed) =>
+    (terminalError, argvUsed, pid) =>
       appendEvent(env.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt: plan.attempt,
@@ -5324,6 +5884,7 @@ async function runTicket(
           plan.worktree?.branch ?? null,
           terminal,
           terminalError,
+          pid,
         ),
       }),
   );
@@ -5352,7 +5913,8 @@ async function runTicket(
   let status: TicketStatus = "in-progress";
   let crashReason: string | null = null;
   if (exitCode !== 0) {
-    crashReason = exitCrashReason(
+    crashReason = attemptCrashReason(
+      env.children,
       exitCode,
       ctx.exitCodePath,
       "harness",
@@ -5482,31 +6044,6 @@ function endWriteStream(
   });
 }
 
-// The pane-read line count for readiness and echo polling: a freshly spawned
-// pane renders mostly blank rows above its prompt, so a small read returns
-// empty (prototype finding); 200 lines covers the TUI's input area and the
-// recent transcript whatever the pane's height.
-const INTERACTIVE_PANE_READ_LINES = 200;
-// Readiness requires the ready pattern on this many consecutive reads,
-// ~this far apart: a single match can be a boot flicker, and empty reads
-// are not ready (prototype finding).
-const READINESS_CONFIRMATIONS = 3;
-const READINESS_POLL_MS = 500;
-// A TUI that cannot reach its ready frame within this bound is botched: the
-// engine closes the pane and the attempt surfaces as a failure, never a
-// silently idle tab.
-const READINESS_TIMEOUT_MS = 60_000;
-// claude's first-run trust dialog marks a directory claude has not seen;
-// the "No, exit" button label names it, and answering it needs pacing — a
-// key sent too early is dropped (prototype finding).
-const TRUST_DIALOG_PATTERN = "No, exit";
-const TRUST_DIALOG_SETTLE_MS = 1_500;
-const TRUST_DIALOG_KEY_GAP_MS = 500;
-// How many times the engine types the full prompt before the file-referencing
-// fallback, and how long an echo verification may wait per attempt.
-const PROMPT_TYPED_ATTEMPTS = 3;
-const PROMPT_ECHO_POLL_MS = 250;
-const PROMPT_ECHO_TIMEOUT_MS = 2_000;
 // The completion poll's cadence: how often a terminal-backed attempt checks
 // whether its Outcome has appeared.
 const ATTEMPT_COMPLETE_POLL_MS = 250;
@@ -5528,88 +6065,6 @@ function isBotchedSpawnCode(code: number): boolean {
 
 function sleep(ms: number): Promise<null> {
   return new Promise((resolve) => setTimeout(() => resolve(null), ms));
-}
-
-/**
- * The ADR-0016 wrapper shell the attempt's pane runs, as one line of bash:
- * the interactive argv under `script`, which allocates the PTY the TUI
- * requires, passes the session through to the pane live, and records both
- * directions to the attempt's Stream file (the typescript the derived log
- * comes from). `-e` makes script's own exit status the child's, so the
- * trailing exit-code write carries the harness's code, not script's
- * unconditional 0; `-q` drops script's own start and end banners. The
- * recording form is the platform's, because the two `script`s disagree on
- * how the command arrives (issue #58): util-linux's takes it as one string
- * after `-c` and flushes on `-f`, so Linux runs
- * `script -eqfc '<argv>' <stream-file>`; BSD's, which macOS ships, has no
- * `-c` — the command's words follow the file — and flushes on `-F`, so
- * darwin runs `script -eqF <stream-file> <argv words>`, each word quoted so
- * bash hands script exactly the argv. `-e` and `-q` are common to both. The
- * trailing exit-code write stays, firing whenever the TUI eventually exits,
- * for crash forensics; there is no `exit`, because the pane stays open after
- * the attempt completes for the operator to read and steer. The pane's
- * shell is the operator's login shell (ADR-0014: zsh on a Mac), so the line
- * uses only what every POSIX shell reads the same way, single quotes and
- * `$?`, and needs no `bash -c` of its own. Exported for the per-platform
- * shape test: neither form fails until it reaches a real pane.
- */
-export function interactiveWrapper(
-  argv: string[],
-  ctx: SpawnContext,
-  platform: NodeJS.Platform = process.platform,
-): string {
-  const command = argv.map(shellQuote).join(" ");
-  // Terminal-backed attempts always carry a Stream path (the typescript);
-  // the log path is the defensive fallback for a malformed context.
-  const file = shellQuote(ctx.streamPath ?? ctx.logPath);
-  const record =
-    platform === "darwin"
-      ? `script -eqF ${file} ${command}`
-      : `script -eqfc ${shellQuote(command)} ${file}`;
-  return `${record}; echo $? > ${shellQuote(ctx.exitCodePath)}`;
-}
-
-// One POSIX-safe single-quote: the quoted text cannot touch the surrounding
-// shell, whatever the harness argv carries.
-function shellQuote(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Send the attempt's wrapper to its pane (ADR-0014), the send half of a
- * terminal-backed spawn. Text and Enter travel in separate `pane.send_input`
- * calls: herdr treats a literal newline in text as pasted data, not a submit
- * (verified), and `agent prompt` sends text then Enter for the same reason.
- * Resolves with `undefined` once the pane carries the wrapper. On failure —
- * the daemon died after the tab opened, or rejected the input: exactly the
- * ADR's headless-fallback case — closes whatever half-started pane remains
- * (best-effort: it kills a wrapper that false-alarm Enter loss may actually
- * have started) and resolves with the error message, so the caller records
- * the fallback on the spawned event and runs the attempt headless instead of
- * failing the spawn: one attempt's terminal trouble must never take the
- * drive down with it.
- */
-async function sendWrapperToPane(
-  socketPath: string,
-  paneId: string,
-  argv: string[],
-  ctx: SpawnContext,
-): Promise<string | undefined> {
-  // The exit-code file must not carry a previous attempt's code, and the
-  // tailer must not read a stale Stream file's bytes before script creates
-  // it fresh.
-  rmSync(ctx.exitCodePath, { force: true });
-  if (ctx.streamPath) rmSync(ctx.streamPath, { force: true });
-  try {
-    await paneSendInput(socketPath, paneId, {
-      text: interactiveWrapper(argv, ctx),
-    });
-    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
-    return undefined;
-  } catch (err) {
-    void closePane(socketPath, paneId).catch(() => {});
-    return err instanceof Error ? err.message : String(err);
-  }
 }
 
 /**
@@ -5636,12 +6091,20 @@ async function spawnWithTerminal(
   interactiveArgv: string[],
   batchArgv: string[],
   ctx: SpawnContext,
+  children: ChildTracker,
   completed: (outcomePath: string) => boolean,
-  recordSpawned: (terminalError: string | undefined, argv: string[]) => void,
+  recordSpawned: (
+    terminalError: string | undefined,
+    argv: string[],
+    pid?: number,
+  ) => void,
 ): Promise<number> {
+  // A headless spawn records once the child exists, so the event carries
+  // its pid (ADR-0017); the callback runs before the first byte is pumped.
   if (!terminal?.paneId) {
-    recordSpawned(undefined, batchArgv);
-    return spawnToLog(batchArgv, ctx);
+    return spawnToLog(batchArgv, ctx, children, (pid) =>
+      recordSpawned(undefined, batchArgv, pid),
+    );
   }
   const terminalError = await sendWrapperToPane(
     socketPath,
@@ -5649,8 +6112,12 @@ async function spawnWithTerminal(
     interactiveArgv,
     ctx,
   );
-  recordSpawned(terminalError, terminalError !== undefined ? batchArgv : interactiveArgv);
-  if (terminalError !== undefined) return spawnToLog(batchArgv, ctx);
+  if (terminalError !== undefined) {
+    return spawnToLog(batchArgv, ctx, children, (pid) =>
+      recordSpawned(terminalError, batchArgv, pid),
+    );
+  }
+  recordSpawned(undefined, interactiveArgv);
   return awaitInteractiveSpawn(socketPath, terminal.paneId, ctx, completed);
 }
 
@@ -5763,178 +6230,26 @@ async function deliverPromptInner(
   // A harness with no verified clear sequence cannot safely re-paste: a
   // false-negative echo would concatenate. One attempt, then a loud fail.
   // Clear keys are not sent before the first paste: opencode's ctrl+c
-  // exits on empty input (prototype/tui-clear-input/FINDINGS.md).
-  const attempts = clearKeys.length > 0 ? PROMPT_TYPED_ATTEMPTS : 1;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) {
-      await paneSendInput(socketPath, paneId, { keys: clearKeys });
-    }
-    await paneSendInput(socketPath, paneId, { text: prompt });
-    if (await paneShows(socketPath, paneId, echoTargets)) {
-      await paneSendInput(socketPath, paneId, { keys: ["enter"] });
-      return undefined;
-    }
-    // The paste did not land in the input area (the prototype's false-ready
-    // paste loss), or it landed and the echo missed it. With clear keys
-    // the next iteration empties the input first; without, we fail now.
+  // exits on empty input (prototype/tui-clear-input/FINDINGS.md). The
+  // retry-with-clear loop and its echo verification are pane-session.ts's
+  // typeVerified (extracted so a Conversation's opening Turn can use the
+  // same mechanics).
+  if (await typeVerified(socketPath, paneId, prompt, echoTargets, clearKeys)) {
+    return undefined;
   }
   if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
   // Full-prompt pasting failed: the file-referencing fallback, short enough
   // to survive any input-buffer cap (prototype finding, all three harnesses).
   // The command carries the attempt's own driver, so a grader, resolver, or
   // head-to-head judge falls back to its own skill, not the ticket driver's.
+  // One un-retried attempt: the pane was just cleared, so typeVerified needs
+  // no clear keys of its own here.
   const fallback = `/${ctx.driver} ${promptFile}`;
   await paneSendInput(socketPath, paneId, { keys: clearKeys });
-  await paneSendInput(socketPath, paneId, { text: fallback });
-  if (await paneShows(socketPath, paneId, [promptFile])) {
-    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
+  if (await typeVerified(socketPath, paneId, fallback, [promptFile], [])) {
     return undefined;
   }
   return SPAWN_INTERACTIVE_PROMPT_FAILED;
-}
-
-// How the readiness wait ended: the ready frame confirmed, the wrapper's
-// exit-code file appeared (the harness exited first), the pane ended with no
-// file behind it, or the timeout.
-type Readiness = "ready" | "exited" | "pane-ended" | "timed-out";
-
-/**
- * Wait for the harness's ready frame on the pane's rendered content: the
- * ready pattern on READINESS_CONFIRMATIONS consecutive reads, with empty
- * reads not ready (a fresh pane renders mostly blank) and a single match
- * discounted as a boot flicker (prototype findings). claude's first-run
- * trust dialog is answered inside the wait, paced so the keys land. A pane
- * that ends before the TUI comes up is a botched spawn, failed fast rather
- * than polled to the timeout, and so is a wrapper that finishes before it:
- * the exit-code file appearing means `script` has already returned — the
- * harness died on launch (a binary the pane cannot find, a wrapper the
- * platform's `script` rejects: issue #58) — and the pane is sitting at its
- * shell prompt, which never ends on its own, so without the file watch the
- * wait ran to its timeout and reported a TUI that "never became ready" over
- * a harness that had exited with a code of its own. The file is fresh: the
- * wrapper send removed any earlier attempt's. A pane end is checked against
- * the file too, since the two can land together (a shell that exits with
- * the wrapper, an operator closing a dead tab) and the harness's own code
- * is the truer ending of the two (ADR-0014: neither observation trusted
- * alone). A lost pane-end subscription (an old daemon, or a restart) just
- * stops the watch and keeps polling the content.
- */
-async function waitForReadiness(
-  socketPath: string,
-  paneId: string,
-  harness: string,
-  readyPattern: string,
-  exitCodePath: string,
-): Promise<Readiness> {
-  const deadline = Date.now() + READINESS_TIMEOUT_MS;
-  let stable = 0;
-  let lost = false;
-  const controller = new AbortController();
-  const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
-  try {
-    while (Date.now() < deadline) {
-      if (existsSync(exitCodePath)) return "exited";
-      let text: string;
-      if (lost) {
-        text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
-          () => "",
-        );
-      } else {
-        const settled = await Promise.race([
-          peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).then(
-            (t) => ({ text: t }) as const,
-            () => ({ text: "" }) as const,
-          ),
-          paneEnd.then((end) => ({ end }) as const),
-        ]);
-        if ("end" in settled) {
-          if (settled.end === "lost") {
-            lost = true;
-            continue;
-          }
-          return existsSync(exitCodePath) ? "exited" : "pane-ended";
-        }
-        text = settled.text;
-      }
-      if (harness === "claude" && text.includes(TRUST_DIALOG_PATTERN)) {
-        await answerTrustDialog(socketPath, paneId);
-        stable = 0;
-      } else {
-        stable = text.includes(readyPattern) ? stable + 1 : 0;
-      }
-      if (stable >= READINESS_CONFIRMATIONS) return "ready";
-      await sleep(READINESS_POLL_MS);
-    }
-    return "timed-out";
-  } finally {
-    controller.abort();
-  }
-}
-
-/**
- * Answer claude's first-run trust dialog (prototype finding): settle so the
- * dialog's controls render, move the selection to "Yes, I trust this
- * folder" with down, and confirm with enter. Sending a key before the
- * dialog settles is dropped, so the steps are paced.
- */
-async function answerTrustDialog(
-  socketPath: string,
-  paneId: string,
-): Promise<void> {
-  await sleep(TRUST_DIALOG_SETTLE_MS);
-  await paneSendInput(socketPath, paneId, { keys: ["down"] }).catch(() => {});
-  await sleep(TRUST_DIALOG_KEY_GAP_MS);
-  await paneSendInput(socketPath, paneId, { keys: ["enter"] }).catch(() => {});
-}
-
-/**
- * Whether the pane's rendered content shows any of the targets within the
- * echo timeout: the paste-echo verification. A pane read that fails (a
- * daemon blip mid-poll) is treated as not shown, so the delivery loop retries
- * instead of throwing the drive down.
- */
-async function paneShows(
-  socketPath: string,
-  paneId: string,
-  targets: string[],
-): Promise<boolean> {
-  const deadline = Date.now() + PROMPT_ECHO_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
-      () => "",
-    );
-    if (targets.some((target) => viewportShows(text, target))) return true;
-    await sleep(PROMPT_ECHO_POLL_MS);
-  }
-  return false;
-}
-
-// What a row break inside a TUI's input box puts between the two halves of
-// a wrapped line: the newline, the padding on both rows, and the box-drawing
-// or block glyphs of the box border (U+2500–U+259F).
-const VIEWPORT_WRAP_CHROME = /[\s\u2500-\u259F]+/g;
-
-/**
- * Whether one rendered viewport shows the target, tolerating the TUI's soft
- * wrap. A TUI draws its input area as a box narrower than the pane and breaks
- * a long line inside it at a hyphen, a slash, or a space, so a long echo
- * target — the issue path the typed prompt ends with, or the fallback's
- * prompt-file path — lands split across two bordered rows, and a plain
- * substring match never sees a paste that did land (issue #56, live opencode
- * under herdr: the 82-character issue path wrapped at a hyphen, and the
- * 73-character prompt-file path in a 72-column box; every attempt then
- * "never landed"). claude and cursor collapse a long paste to their
- * `Pasted text` marker, which fits on one row, but cursor hard-wraps the
- * fallback command's path the same way (verified live), so the tolerance
- * covers every harness's fallback. Dropping everything a row break can
- * insert from both the viewport and the target reassembles a wrapped path,
- * while a target that was never typed still cannot appear: the characters
- * must all be there, in order, with nothing but chrome between them.
- */
-function viewportShows(text: string, target: string): boolean {
-  if (text.includes(target)) return true;
-  const wanted = target.replace(VIEWPORT_WRAP_CHROME, "");
-  return wanted !== "" && text.replace(VIEWPORT_WRAP_CHROME, "").includes(wanted);
 }
 
 /**
@@ -6043,6 +6358,24 @@ export function exitCrashReason(
   return `${subject} exited ${code}`;
 }
 
+// The crash reason for an attempt's non-zero exit, naming a shutdown stop
+// as what it was (ADR-0017): a headless child the engine stopped exits on
+// the signal, and "exited 143" would read as the harness's own failure.
+// Terminal-backed attempts are never stopped, and the negative sentinels
+// are the engine's own codes, so both keep the ordinary reason.
+function attemptCrashReason(
+  children: ChildTracker,
+  code: number,
+  exitCodePath: string,
+  subject: string,
+  paneId: string | null,
+): string {
+  if (children.stopping && paneId === null && code > 0) {
+    return `${subject} stopped by engine shutdown (exited ${code})`;
+  }
+  return exitCrashReason(code, exitCodePath, subject, paneId);
+}
+
 // How the pool log names the ending in passing, where the line is about the
 // marker and the code is one clause of it. A real code is the shell's own
 // status and reads as one; a sentinel is not a status at all, so it says what
@@ -6087,9 +6420,11 @@ async function readExitCode(path: string): Promise<number> {
  * (TranscriptLineBuffer). Terminal-backed attempts never derive stream-json
  * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
  * derivation. Polls by positioned reads; `finish` drains the tail, flushes
- * the line buffer, and ends the log stream.
+ * the line buffer, and ends the log stream. Exported so conversations.ts
+ * (Workstream A) can derive a Conversation's own log from its pane the same
+ * way a ticket attempt's is derived.
  */
-function startPaneStreamTail(
+export function startPaneStreamTail(
   streamPath: string,
   logPath: string,
 ): { finish: () => Promise<void> } {
@@ -6180,17 +6515,24 @@ function startPaneStreamTail(
 async function spawnToLog(
   argv: string[],
   ctx: SpawnContext,
+  children: ChildTracker,
+  onSpawn?: (pid: number) => void,
 ): Promise<number> {
   // The child env comes from spawnEnv, the same builder the spawned event's
   // env facts derive from, so the event cannot drift from what the child
-  // actually ran under (ADR-0012).
+  // actually ran under (ADR-0012). The child leads its own process group
+  // (ADR-0017): a stop signals the group, so the harness's own children go
+  // with it instead of surviving as the orphans an untrapped kill left.
   const proc = Bun.spawn(argv, {
     cwd: ctx.cwd,
     env: spawnEnv(ctx.cwd),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: true,
   });
+  children.track({ pid: proc.pid, exited: proc.exited });
+  onSpawn?.(proc.pid);
   // A streamed harness (ADR-0012) also tees every stdout chunk verbatim to
   // the attempt's Stream file, live as bytes arrive; both files open at
   // spawn, so a tail on either shows activity from the first chunk.

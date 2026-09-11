@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { SPAWN_BODY_MIN_CHARS } from "./engine.ts";
-import { buildHeadToHeadPrompt, buildPrompt } from "./prompt.ts";
+import { buildConversationTeaching, buildHeadToHeadPrompt, buildPrompt } from "./prompt.ts";
 
 function prompt(): string {
   return buildPrompt({
@@ -77,6 +77,54 @@ describe("buildPrompt spawn teaching", () => {
     expect(spawned).toBe(
       prompt().replace("/01.outcome.json", "/01-spawn-1.outcome.json"),
     );
+  });
+});
+
+describe("buildConversationTeaching", () => {
+  const spawnPath = "/tmp/pool/runs/conv-1.spawn.json";
+
+  it("names the spawn.json path and the proposal shape, including kind and assign", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain(spawnPath);
+    expect(body).toContain('"spawn"');
+    expect(body).toContain('"title"');
+    expect(body).toContain('"body"');
+    expect(body).toContain('"blockedBy"');
+    expect(body).toContain('"kind"');
+    expect(body).toContain('"assign"');
+  });
+
+  it("names the same body floor the engine's validator enforces", () => {
+    expect(buildConversationTeaching(spawnPath)).toContain(
+      `at least ${SPAWN_BODY_MIN_CHARS} characters`,
+    );
+  });
+
+  it("states blockedBy may only name Tickets and that a Conversation entry is dropped", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain("may only name Tickets, never");
+    expect(body).toContain("another Conversation");
+    expect(body).toContain("dropped and logged");
+  });
+
+  it("documents the per-file cap of five and that there is no run-wide cap", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain("5 entries honored per file");
+    expect(body).toContain("no run-wide cap");
+  });
+
+  it("documents that a spawned Ticket and a spawned Conversation both report back as a Turn", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain("reports back here as a Turn");
+    expect(body).toContain("branch, and a diff");
+    expect(body).toContain("its branch and the operator's closing note");
+    expect(body).toContain("cannot answer either one's own Interrupt");
+  });
+
+  it("states the standing rule: agents propose, the engine writes pool state", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain("You never write pool state");
+    expect(body).toContain("You propose; the engine writes.");
   });
 });
 

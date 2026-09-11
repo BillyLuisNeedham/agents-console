@@ -116,4 +116,47 @@ describe("spawn namespace reservation", () => {
     });
     expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket/);
   });
+
+  // The Conversations ADR (docs/adr/0017-conversations-beside-tickets.md):
+  // a Ticket may be spawned by a Conversation as well as by another Ticket,
+  // and a Conversation's own record lives outside issues/ entirely (engine/
+  // conversations.ts), so loadPoolMarkers cannot see it in `markers` the way
+  // it sees a parent ticket. The caller (engine.ts's startPool and every
+  // reload site) passes the known Conversation ids it loaded separately.
+  it("accepts a spawn ticket whose spawned-by names a known Conversation, not a ticket", () => {
+    const dir = poolWithFiles({
+      "conv-1-spawn-1.md":
+        "<!-- state: id=conv-1-spawn-1 blocked-by=none status=ready spawned-by=conv-1 -->\n\n# From a Conversation\n\nbody\n",
+    });
+    const markers = loadPoolMarkers(dir, new Set(["conv-1"]));
+    expect(markers.map((m) => m.id)).toEqual(["conv-1-spawn-1"]);
+    expect(markers[0].spawnedBy).toBe("conv-1");
+  });
+
+  it("still rejects that same ticket when the Conversation id is not in the known set", () => {
+    const dir = poolWithFiles({
+      "conv-1-spawn-1.md":
+        "<!-- state: id=conv-1-spawn-1 blocked-by=none status=ready spawned-by=conv-1 -->\n\n# From a Conversation\n\nbody\n",
+    });
+    expect(() => loadPoolMarkers(dir, new Set(["conv-2"]))).toThrow(
+      /names no ticket or known Conversation/,
+    );
+    // The old caller shape (no third argument at all) fails the same way,
+    // so every pre-existing call site's behavior is unchanged.
+    expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket or known Conversation/);
+  });
+
+  // The Conversations ADR: a pool that is nothing but Conversations has an
+  // empty issues/ legitimately, from its very first boot, not the mistake
+  // the bare throw exists to catch.
+  it("returns an empty list for an empty issues/ when allowEmptyIssues is set", () => {
+    const dir = poolWithFiles({});
+    expect(loadPoolMarkers(dir, undefined, { allowEmptyIssues: true })).toEqual([]);
+  });
+
+  it("still throws for an empty issues/ without allowEmptyIssues, matching every existing caller", () => {
+    const dir = poolWithFiles({});
+    expect(() => loadPoolMarkers(dir)).toThrow(/no Issue files/);
+    expect(() => loadPoolMarkers(dir, new Set(["conv-1"]))).toThrow(/no Issue files/);
+  });
 });

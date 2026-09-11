@@ -14,7 +14,10 @@ import type {
 const POLL_MS = 5;
 const CONFIRM_MS = 5;
 
-function snap(panes: Record<string, string | undefined>): PoolSnapshot {
+function snap(
+  panes: Record<string, string | undefined>,
+  conversationPanes: Record<string, string | undefined> = {},
+): PoolSnapshot {
   return {
     seq: 1,
     phase: "running",
@@ -27,6 +30,17 @@ function snap(panes: Record<string, string | undefined>): PoolSnapshot {
         status: "in-progress",
         assignment: { harness: null, model: null, drivers: "implement" },
         ...(paneId === undefined ? {} : { paneId }),
+      })),
+      conversations: Object.entries(conversationPanes).map(([id, paneId]) => ({
+        id,
+        title: `conversation ${id}`,
+        status: "live" as const,
+        spawnedBy: null,
+        assignment: { harness: null, model: null, drivers: "implement" },
+        paneId: paneId ?? null,
+        branch: null,
+        turn: { state: "working" as const, lastLine: "", idleSince: null },
+        children: [],
       })),
       log: [],
       outcomes: {},
@@ -206,5 +220,57 @@ describe("TerminalSurface store", () => {
     expect(await h.store.focus("01")).toBe(false);
     h.store.dispose();
     expect(h.focused).toEqual([]);
+  });
+
+  it("polls a live Conversation's pane, keyed by conversation id, alongside ticket panes", async () => {
+    const peeked: string[] = [];
+    const store = new TerminalSurface({
+      peek: (id) => {
+        peeked.push(id);
+        return Promise.resolve(peekResponse(`output for ${id}`));
+      },
+      focus: () => Promise.resolve(),
+      onChange: () => {},
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({ "01": "pane-ticket" }, { "conv-1": "pane-conv" }));
+    expect(peeked).toEqual(["01", "conv-1"]);
+    await ticks();
+    store.dispose();
+    expect(store.state()["conv-1"]).toMatchObject({ paneId: "pane-conv", status: "live" });
+  });
+
+  it("stops polling a Conversation the moment it leaves the snapshot (ended or crashed)", async () => {
+    const store = new TerminalSurface({
+      peek: (id) => Promise.resolve(peekResponse(`output for ${id}`)),
+      focus: () => Promise.resolve(),
+      onChange: () => {},
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({}, { "conv-1": "pane-conv" }));
+    await ticks();
+    store.update(snap({}, { "conv-1": undefined }));
+    expect(store.state()["conv-1"]).toBeUndefined();
+    store.dispose();
+  });
+
+  it("focuses a Conversation's pane by its own id", async () => {
+    const focused: string[] = [];
+    const store = new TerminalSurface({
+      peek: (id) => Promise.resolve(peekResponse(`output for ${id}`)),
+      focus: (id) => {
+        focused.push(id);
+        return Promise.resolve();
+      },
+      onChange: () => {},
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({}, { "conv-1": "pane-conv" }));
+    expect(await store.focus("conv-1")).toBe(true);
+    store.dispose();
+    expect(focused).toEqual(["conv-1"]);
   });
 });

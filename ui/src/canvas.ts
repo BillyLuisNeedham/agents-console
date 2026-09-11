@@ -19,6 +19,7 @@ import {
   VITALS_MAX_SAMPLES,
   zoomAtCursor,
   type CardBox,
+  type ConversationCardView,
   type EdgeMode,
   type InterruptView,
   type Point,
@@ -155,6 +156,12 @@ function interruptDot(interrupt: InterruptView): HTMLElement {
   });
 }
 
+/** The Turn state badge's word: "waiting on you" outranks "agent working"
+ *  as the operator's cue, matching the Conversations tray's own wording. */
+function conversationTurnLabel(state: "working" | "waiting"): string {
+  return state === "waiting" ? "waiting on you" : "agent working";
+}
+
 type Drag =
   | {
       kind: "node";
@@ -217,13 +224,22 @@ export class Canvas {
   private drag: Drag | null = null;
   private readonly onCardTap: (nodeId: string) => void;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
+  private readonly onNewConversation: () => void;
+  private readonly onEndConversation: (conversationId: string) => void;
 
   constructor(options: {
     onCardTap: (nodeId: string) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
+    /** The header's "New Conversation" button: opens the Conversations tray's form. */
+    onNewConversation: () => void;
+    /** A Conversation card's End button. Fire-and-forget: the Conversations
+     *  store tracks the in-flight/failure state the card reads back. */
+    onEndConversation: (conversationId: string) => void;
   }) {
     this.onCardTap = options.onCardTap;
     this.onFocusTerminal = options.onFocusTerminal;
+    this.onNewConversation = options.onNewConversation;
+    this.onEndConversation = options.onEndConversation;
     if (typeof window !== "undefined") {
       window.addEventListener("pointerup", (event) => this.endDrag(event));
       window.addEventListener("pointercancel", (event) => this.endDrag(event));
@@ -524,8 +540,91 @@ export class Canvas {
     );
   }
 
+  // A Conversation card (ADR-0017): title, Assignment, the Turn state badge
+  // (waiting on you / agent working), the last line said, idle age, status
+  // once ended or crashed, the same read-only terminal peek ticket cards
+  // carry, and an End button. No blockers, no grade, no Vitals: a
+  // Conversation is not a Ticket and holds no attempt.
+  private renderConversationCard(
+    card: ConversationCardView,
+    selection: CanvasSelection,
+  ): HTMLElement {
+    const pos = this.posOf(card);
+    const head = h(
+      "div",
+      { class: "node-card-head" },
+      h("span", { class: "node-card-id" }, card.conversationId),
+      h(
+        "span",
+        { class: `node-card-state conversation-turn-${card.turn.state}` },
+        card.status === "live" ? conversationTurnLabel(card.turn.state) : card.status,
+      ),
+    );
+    const body: (Node | string | null)[] = [
+      renderAssignmentBadge(card.assignment),
+      h("div", { class: "card-text conversation-card-title" }, card.title),
+    ];
+    if (card.status === "live") {
+      body.push(
+        h(
+          "div",
+          { class: "dim conversation-card-last-line" },
+          card.turn.lastLine || "(no Turn yet)",
+        ),
+      );
+      if (card.idleAge) {
+        body.push(h("div", { class: "dim conversation-card-idle" }, `idle ${card.idleAge}`));
+      }
+    } else if (card.branch) {
+      body.push(h("div", { class: "dim conversation-card-branch" }, `branch ${card.branch}`));
+    }
+    if (card.terminal) {
+      body.push(
+        renderTerminalSurface(card.terminal, {
+          onFocus: () => this.onFocusTerminal(card.conversationId),
+        }),
+      );
+    }
+    if (card.status === "live") {
+      body.push(
+        h(
+          "div",
+          { class: "conversation-end-row" },
+          h(
+            "button",
+            {
+              class: "btn btn-danger conversation-end",
+              type: "button",
+              disabled: card.endView.ending,
+              title: card.endView.failure ?? "end this conversation",
+              onclick: () => this.onEndConversation(card.conversationId),
+            },
+            card.endView.ending ? "ending..." : "End",
+          ),
+          card.endView.failure
+            ? h("span", { class: "error-inline conversation-end-failure" }, card.endView.failure)
+            : null,
+        ),
+      );
+    }
+    return h(
+      "div",
+      {
+        class:
+          `node-card conversation-card conversation-card-${card.status}` +
+          this.flowClass(card.id, selection),
+        "data-node-id": card.id,
+        "data-conversation-id": card.conversationId,
+        style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
+      },
+      head,
+      h("div", { class: "node-card-body" }, ...body),
+    );
+  }
+
   private renderCard(card: PoolCardView, selection: CanvasSelection): HTMLElement {
     if (card.kind === "ticket") return this.renderTicketCard(card, selection);
+    if (card.kind === "conversation") return this.renderConversationCard(card, selection);
     return this.renderUtilityCard(card, selection);
   }
 
@@ -583,6 +682,15 @@ export class Canvas {
           "button",
           { class: "btn", title: "reset pan and zoom", onclick: () => this.resetView() },
           "reset",
+        ),
+        h(
+          "button",
+          {
+            class: "btn btn-primary canvas-new-conversation",
+            title: "start a new Conversation",
+            onclick: () => this.onNewConversation(),
+          },
+          "New Conversation",
         ),
         h(
           "button",
