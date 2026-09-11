@@ -5,14 +5,12 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ACTIVITY_CACHE_TTL_MS,
@@ -33,6 +31,7 @@ import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
 import { readConversation } from "./conversations.ts";
+import { makeTempDir } from "./tmp.ts";
 
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
@@ -67,7 +66,7 @@ function makePool(
   tickets: { file: string; marker: string }[],
   config: Partial<PoolConfig> = {},
 ): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+  const poolDir = makeTempDir("pool-server-");
   tempDirs.push(poolDir);
   return makePoolInto(poolDir, tickets, config);
 }
@@ -252,7 +251,7 @@ describe("pool server", () => {
       ["repo/.scratch/tickets", ".scratch/tickets"],
     ];
     for (const [rel, expected] of shapes) {
-      const root = mkdtempSync(join(tmpdir(), "pool-name-"));
+      const root = makeTempDir("pool-name-");
       tempDirs.push(root);
       const poolDir = makePoolInto(join(root, rel), [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -788,7 +787,7 @@ describe("ticket events endpoint", () => {
   });
 
   it("serves the ticket's spec text alongside its events", async () => {
-    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    const poolDir = makeTempDir("pool-server-");
     tempDirs.push(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
@@ -1064,7 +1063,7 @@ describe("merge pending enrichment", () => {
   function makeGitPool(
     tickets: { file: string; marker: string }[],
   ): { root: string; poolDir: string; run: (args: string[]) => void } {
-    const root = mkdtempSync(join(tmpdir(), "pool-git-"));
+    const root = makeTempDir("pool-git-");
     tempDirs.push(root);
     const poolDir = join(root, "pool");
     makePoolInto(poolDir, tickets, {});
@@ -1234,7 +1233,7 @@ describe("ticket body endpoint", () => {
   });
 
   it("strips the line-1 state marker from the served body", async () => {
-    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    const poolDir = makeTempDir("pool-server-");
     tempDirs.push(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
@@ -1707,7 +1706,7 @@ describe("ticket activity endpoint", () => {
 
   /** A real temporary git repo, to be an attempt's recorded worktree. */
   function makeGitRepo(seed: Record<string, string> = {}): string {
-    const dir = mkdtempSync(join(tmpdir(), "activity-worktree-"));
+    const dir = makeTempDir("activity-worktree-");
     tempDirs.push(dir);
     const run = (args: string[]): void => {
       const probe = Bun.spawnSync(["git", "-C", dir, ...args], {
@@ -1959,7 +1958,7 @@ function makeLockedPool(): string {
  * never spawns a real harness, with a harness name that resolves.
  */
 function makeCliPool(): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-cli-"));
+  const poolDir = makeTempDir("pool-cli-");
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   writeFileSync(
@@ -2177,7 +2176,7 @@ describe("pinned pool ports", () => {
 
   it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
     const held = await holdPort();
-    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    const holderPool = makeTempDir("pool-holder-");
     tempDirs.push(holderPool);
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     const registryPath = join(poolDir, "pools.json");
@@ -2230,7 +2229,7 @@ describe("pinned pool ports", () => {
 
   it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
     const held = await holdPort();
-    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    const holderPool = makeTempDir("pool-holder-");
     tempDirs.push(holderPool);
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
     const registryPath = join(poolDir, "pools.json");
@@ -2550,7 +2549,7 @@ describe("terminal endpoints", () => {
       });
     });
     fakeServers.push(server);
-    const dir = mkdtempSync(join(tmpdir(), "herdr-terminal-"));
+    const dir = makeTempDir("herdr-terminal-");
     tempDirs.push(dir);
     fake.socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
@@ -2919,7 +2918,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
           server.close(() => resolve());
         }),
     });
-    const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+    const dir = makeTempDir("herdr-fake-");
     tempDirs.push(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
@@ -3097,7 +3096,7 @@ describe("currentAttemptPaneIds", () => {
   // (the headless fallback) clears an earlier attempt's pane.
 
   function runsWith(events: Record<string, { attempt: number; pane_id?: unknown }[]>): string {
-    const runsDir = join(mkdtempSync(join(tmpdir(), "pane-ids-")), "runs");
+    const runsDir = join(makeTempDir("pane-ids-"), "runs");
     tempDirs.push(join(runsDir, ".."));
     mkdirSync(runsDir, { recursive: true });
     for (const [id, list] of Object.entries(events)) {
@@ -3463,7 +3462,7 @@ describe("conversation endpoints", () => {
       });
     });
     fakeServers.push(server);
-    const dir = mkdtempSync(join(tmpdir(), "conv-server-herdr-"));
+    const dir = makeTempDir("conv-server-herdr-");
     tempDirs.push(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {

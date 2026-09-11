@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { makeTempDir } from "./tmp.ts";
 import {
   attemptBranches,
   branchFor,
@@ -24,7 +24,7 @@ interface GitProbe {
 }
 
 function makeRepo(): { root: string; git: (args: string[]) => GitProbe } {
-  const root = mkdtempSync(join(tmpdir(), "wt-"));
+  const root = makeTempDir("wt-");
   tempDirs.push(root);
   const git = (args: string[]): GitProbe => {
     const probe = Bun.spawnSync(["git", "-C", root, ...args], {
@@ -48,7 +48,7 @@ function makeRepo(): { root: string; git: (args: string[]) => GitProbe } {
 function secondCheckout(
   repo: ReturnType<typeof makeRepo>,
 ): { root: string; git: (args: string[]) => GitProbe } {
-  const base = mkdtempSync(join(tmpdir(), "wt-"));
+  const base = makeTempDir("wt-");
   tempDirs.push(base);
   const root = join(base, "checkout");
   const probe = Bun.spawnSync(

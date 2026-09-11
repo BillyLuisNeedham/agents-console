@@ -9,6 +9,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -673,7 +674,7 @@ interface AdoptedAttempt {
 }
 
 export function startPool(options: RunOptions): PoolRun {
-  const poolDir = options.poolDir;
+  const poolDir = canonicalDir(options.poolDir);
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
   // A pool with a conversations/ directory (even an empty one, since the
@@ -6505,6 +6506,27 @@ function readOptional(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
 }
 
+/**
+ * A directory in its canonical spelling, symlinks resolved. The pool
+ * directory reaches the engine however the caller spelled it, while
+ * `git rev-parse --show-toplevel` always answers with the physical path, so
+ * on any pool behind a symlink (a symlinked repos dir, /tmp on macOS, a
+ * network mount alias) the two disagree and every path derived by relating
+ * one to the other — the seed copy `planTicket` writes into an attempt
+ * worktree above all — lands outside the tree it was meant for. Resolved
+ * once where the pool dir enters, so the derivation sites downstream all
+ * share a single spelling rather than each defending itself.
+ */
+export function canonicalDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    // Nothing on disk to resolve yet: hand back what we were given and let
+    // the caller's own read fail with its own message.
+    return dir;
+  }
+}
+
 export function repoRootOf(poolDir: string): string {
   const probe = Bun.spawnSync({
     cmd: ["git", "-C", poolDir, "rev-parse", "--show-toplevel"],
@@ -6513,7 +6535,7 @@ export function repoRootOf(poolDir: string): string {
   });
   if (probe.exitCode === 0) {
     const root = probe.stdout.toString().trim();
-    if (root) return root;
+    if (root) return canonicalDir(root);
   }
-  return poolDir;
+  return canonicalDir(poolDir);
 }

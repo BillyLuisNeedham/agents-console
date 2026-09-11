@@ -2,12 +2,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { startPool, type HarnessCommand, type PoolConfig, type PoolRun } from "./engine.ts";
@@ -17,6 +15,7 @@ import {
   diffStatSummary,
   ticketEndedNoticeText,
 } from "./notices.ts";
+import { makeTempDir } from "./tmp.ts";
 
 const tempDirs: string[] = [];
 
@@ -98,7 +97,7 @@ describe("conversationEndedNoticeText", () => {
 
 describe("diffStatSummary", () => {
   function gitRepo(): string {
-    const dir = mkdtempSync(join(tmpdir(), "notices-diff-"));
+    const dir = makeTempDir("notices-diff-");
     tempDirs.push(dir);
     const git = (args: string[]) =>
       Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
@@ -138,7 +137,7 @@ interface PoolSpec {
 }
 
 function makePool(spec: PoolSpec): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "notices-pool-"));
+  const poolDir = makeTempDir("notices-pool-");
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   for (const ticket of spec.tickets) {
@@ -396,7 +395,7 @@ function startFakeHerdr(): Promise<{
       }
     });
   });
-  const dir = mkdtempSync(join(tmpdir(), "notices-herdr-fake-"));
+  const dir = makeTempDir("notices-herdr-fake-");
   tempDirs.push(dir);
   const socketPath = join(dir, "herdr.sock");
   return new Promise((resolve, reject) => {
