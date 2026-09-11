@@ -238,6 +238,8 @@ interface ConversationTurn {
   // here so its poller has somewhere to keep it between polls; A never reads
   // it.
   stableReads: number;
+  // The previous read's transcript region (TurnStateResult.transcript), the
+  // text deriveTurnState compares the next read against.
   lastText: string;
 }
 

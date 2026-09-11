@@ -146,7 +146,10 @@ export function loadPoolMarkers(
     : [];
   if (files.length === 0) {
     if (options?.allowEmptyIssues) return [];
-    throw new Error(`pool load: no Issue files in ${issuesDir}`);
+    throw new Error(
+      `pool load: no Issue files in ${issuesDir} (a pool meant to host only ` +
+        "Conversations opts in by having a conversations/ directory)",
+    );
   }
   const markers = files.map((file) => readMarker(join(issuesDir, file)));
   const seen = new Set<string>();

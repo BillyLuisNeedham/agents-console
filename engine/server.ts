@@ -33,6 +33,7 @@ import {
   readConfig,
   REVIEW_TICKET_ID,
   repoRootOf,
+  loadPoolTickets,
   startPool,
   UNASSIGNED_ASSIGNMENT_VIEW,
   type AssignmentView,
@@ -60,7 +61,6 @@ import {
   upsertFleetEntry,
 } from "./fleet.ts";
 import {
-  loadPoolMarkers,
   MARKER_RE,
   type TicketMarker,
   type TicketStatus,
@@ -173,9 +173,12 @@ export interface PoolServer {
   endConversation: (id: string, closing?: string) => Promise<void>;
 }
 
-/** The pool's ticket metadata, as the engine parses it from the Issue files. */
+/** The pool's ticket metadata, as the engine parses it from the Issue files —
+ *  the engine's own load (loadPoolTickets), so the server accepts exactly the
+ *  pools the engine does: an empty issues/ on a pool with a conversations/
+ *  directory, and a Ticket whose spawned-by names a Conversation (issue #71). */
 function loadMeta(poolDir: string): TicketMarker[] {
-  return loadPoolMarkers(join(poolDir, "issues"));
+  return loadPoolTickets(poolDir);
 }
 
 // The events that close an attempt for good: a resolver run records no exited
