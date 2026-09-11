@@ -157,12 +157,13 @@ export class ConsoleView {
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),
     };
-    const content = h(
+    // The two trays overlay the canvas column, not the window: anchored to
+    // its edges they stay clear of the Detail beside it, however wide the
+    // operator drags that (issue #70).
+    const canvasColumn = h(
       "div",
-      { class: "content" },
+      { class: "canvas-column" },
       this.canvas.render(model, selection),
-      model.detail ? this.detail.renderHandle() : null,
-      this.detail.render(model, detailHandlers),
       this.needsInput.render(model.needsInput, model.conversationsNeedsInput, {
         onSelect: (cardId) => this.selectNode(cardId),
         onFocusConversation: (conversationId) => this.onFocusTerminal(conversationId),
@@ -170,6 +171,13 @@ export class ConsoleView {
       this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),
       }),
+    );
+    const content = h(
+      "div",
+      { class: "content" },
+      canvasColumn,
+      model.detail ? this.detail.renderHandle() : null,
+      this.detail.render(model, detailHandlers),
     );
     root.replaceChildren(
       h("div", { class: "shell" }, content, this.drawers.render(model, handlers)),
