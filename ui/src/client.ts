@@ -6,7 +6,17 @@
  * only; this module is the only code that talks to the server.
  */
 
-import type { GradeView, PoolSnapshot, TerminalPeekResponse, TicketActivityResponse, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "./project";
+import type {
+  GradeView,
+  PoolConversationState,
+  PoolSnapshot,
+  StartConversationRequest,
+  TerminalPeekResponse,
+  TicketActivityResponse,
+  TicketBodyResponse,
+  TicketEventsResponse,
+  TicketLogResponse,
+} from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -235,6 +245,57 @@ export class PoolClient {
       { method: "POST" },
     );
     if (!res.ok) throw new Error(`terminal focus failed: ${res.status}`);
+  }
+
+  /** Every Conversation on the pool (live, ended, and crashed), for a
+   *  standalone refresh outside the snapshot stream. */
+  async listConversations(): Promise<PoolConversationState[]> {
+    const res = await fetch(`${this.base}/api/conversations`);
+    if (!res.ok) throw new Error(`list conversations failed: ${res.status}`);
+    const body = await res.json();
+    return body?.conversations ?? [];
+  }
+
+  /**
+   * Start a Conversation (ADR-0017). 409 with a reason when the pool is not
+   * terminal-backed; the reason (or a generic message) becomes the thrown
+   * Error's message, which the New Conversation form shows inline.
+   */
+  async startConversation(
+    request: StartConversationRequest,
+  ): Promise<PoolConversationState> {
+    const res = await fetch(`${this.base}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const reason =
+        body && typeof (body as { reason?: unknown }).reason === "string"
+          ? (body as { reason: string }).reason
+          : null;
+      throw new Error(reason ?? `start conversation failed: ${res.status}`);
+    }
+    const body = await res.json();
+    return body.conversation;
+  }
+
+  /**
+   * End a Conversation, with an optional closing line. Returns the snapshot
+   * the pool server hands back with the request (202): the Conversation may
+   * still be merging or crashed-detection in flight, so the caller renders
+   * from it the same way it renders any other snapshot.
+   */
+  async endConversation(id: string, closing?: string): Promise<PoolSnapshot> {
+    const res = await fetch(`${this.base}/api/conversations/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, closing }),
+    });
+    if (!res.ok) throw new Error(`end conversation failed: ${res.status}`);
+    const body = await res.json();
+    return body.snapshot;
   }
 
   /**

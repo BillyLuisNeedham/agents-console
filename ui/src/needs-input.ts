@@ -20,7 +20,12 @@
 
 import type { NoteFocus } from "./detail";
 import { h } from "./dom";
-import { bulkResumeRows, type InterruptAction, type NeedsInputRow } from "./project";
+import {
+  bulkResumeRows,
+  type ConversationNeedsInputRow,
+  type InterruptAction,
+  type NeedsInputRow,
+} from "./project";
 
 /**
  * The tray's answer seam: resolves when the engine accepts the answer,
@@ -43,6 +48,9 @@ export interface NeedsInputOptions {
 export interface NeedsInputHandlers {
   /** A row's ticket id was clicked: select that card and open its Detail. */
   onSelect: (cardId: string) => void;
+  /** A waiting Conversation row's action: focus its pane in herdr. Resolves
+   *  false on any failure, matching the card's terminal surface seam. */
+  onFocusConversation: (conversationId: string) => Promise<boolean>;
 }
 
 /** One row's failed answer: the action a retry refires, and why it failed. */
@@ -198,8 +206,13 @@ export class NeedsInputTray {
    * Every unresolved interrupt lists, one row per card, in the projection's
    * card order.
    */
-  render(rows: NeedsInputRow[], handlers: NeedsInputHandlers): HTMLElement | null {
-    if (rows.length === 0) return null;
+  render(
+    rows: NeedsInputRow[],
+    conversationRows: ConversationNeedsInputRow[],
+    handlers: NeedsInputHandlers,
+  ): HTMLElement | null {
+    const total = rows.length + conversationRows.length;
+    if (total === 0) return null;
     if (this.collapsed) {
       return h(
         "button",
@@ -211,7 +224,7 @@ export class NeedsInputTray {
             this.onChange();
           },
         },
-        `needs input · ${rows.length}`,
+        `needs input · ${total}`,
       );
     }
     const bulk = bulkResumeRows(rows);
@@ -221,7 +234,7 @@ export class NeedsInputTray {
       h(
         "div",
         { class: "needs-input-head" },
-        h("span", { class: "needs-input-count" }, `needs input · ${rows.length}`),
+        h("span", { class: "needs-input-count" }, `needs input · ${total}`),
         h(
           "div",
           { class: "needs-input-head-actions" },
@@ -251,7 +264,45 @@ export class NeedsInputTray {
           ),
         ),
       ),
+      ...conversationRows.map((row) => this.renderConversationRow(row, handlers)),
       ...rows.flatMap((row) => this.renderRow(row, handlers)),
+    );
+  }
+
+  // A Conversation waiting on the operator: no interrupt, so no form. The
+  // row's action opens the pane in herdr; a click on its id still selects
+  // the card and opens the Detail, the same navigation every row offers.
+  private renderConversationRow(
+    row: ConversationNeedsInputRow,
+    handlers: NeedsInputHandlers,
+  ): HTMLElement {
+    return h(
+      "div",
+      { class: "needs-input-row needs-input-row-conversation" },
+      h(
+        "button",
+        {
+          class: "needs-input-id",
+          title: row.title,
+          onclick: () => handlers.onSelect(row.cardId),
+        },
+        row.label,
+      ),
+      h("span", { class: "needs-input-waiting" }, "waiting on you"),
+      h(
+        "div",
+        { class: "needs-input-actions" },
+        h(
+          "button",
+          {
+            class: "btn btn-primary",
+            onclick: () => {
+              void handlers.onFocusConversation(row.conversationId);
+            },
+          },
+          "open in herdr",
+        ),
+      ),
     );
   }
 

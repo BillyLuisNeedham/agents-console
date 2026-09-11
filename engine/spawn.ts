@@ -75,6 +75,16 @@ export interface HarnessDescriptor {
   // bare prompt glyph is deliberately not used: the pane's own bash prompt
   // collides with it.
   readyPattern: string;
+  // The pane-rendered pattern that marks the TUI idle, waiting on the
+  // operator (the Conversations ADR's Turn state, engine/turn-state.ts):
+  // present on 2 consecutive stable reads with unchanged text means
+  // "waiting", per deriveTurnState. Defaults to readyPattern via
+  // idlePatternFor below, which is only correct when readyPattern is itself
+  // an idle-only signal (opencode's and cursor's placeholders, observed only
+  // at the boot ready frame); a harness whose readyPattern is a persistent
+  // header visible while working too (claude's "Claude Code v") must set its
+  // own. See each harness's comment below for the evidence and its limits.
+  idlePattern?: string;
   // The pane-rendered pattern that confirms a pasted prompt landed in the
   // input area. claude and cursor collapse a long paste to a
   // `[Pasted text #N +N lines]` marker, so the engine matches that; opencode
@@ -161,6 +171,16 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       ...(ctx.agents ? ["--agents", ctx.agents] : []),
     ],
     readyPattern: "Claude Code v",
+    // claude's ready-frame header (prototype/tui-prompt-paste/FINDINGS.md
+    // section 1) stays on screen while the agent works, so it cannot double
+    // as an idle signal. The same findings record the ready frame's "empty
+    // input prompt `❯`" and warn it is unsafe for *readiness* only because
+    // the pane's own bash prompt is also `❯` before the TUI has come up; once
+    // a Conversation is confirmed ready (this pane is the TUI, not a shell)
+    // that collision cannot recur, so the bare glyph is a safe idle marker
+    // for an ongoing Conversation: present only when the input box is empty
+    // and claude is not mid-turn.
+    idlePattern: "❯",
     // claude collapses a long paste to `[Pasted text #N +N lines]` in the
     // input area before Enter (prototype finding); the engine matches that
     // marker to confirm the paste landed.
@@ -187,6 +207,16 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     ],
     interactiveArgv: (ctx) => ["opencode", "--model", ctx.model, "--auto"],
     readyPattern: "Ask anything",
+    // Unlike claude's, opencode's readyPattern is documented (same findings,
+    // section 1) as "the first-boot placeholder" that "disappears once a
+    // session has history" — it would never match again after the opening
+    // Turn, wedging every later idle read as "working" forever. No ongoing
+    // mid-session idle frame was captured by the prototype spike, so this
+    // falls back to the ready frame's other static chrome, the footer's
+    // `ctrl+p commands` hint; UNVERIFIED beyond the boot frame, same
+    // provisional standing as claude's empty clearKeys below, pending an
+    // operator confirming it against a live multi-turn opencode session.
+    idlePattern: "ctrl+p commands",
     promptShaping: opencodeShaping,
     streamMode: "raw",
     clearKeys: ["ctrl+c"],
@@ -215,6 +245,17 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       "--trust",
     ],
     readyPattern: "Cursor Agent",
+    // cursor's header, like claude's, is a persistent banner rather than an
+    // idle-only frame (findings section 1 describes it alongside the
+    // version line and footer, with no note that it disappears while
+    // working). The same section records the ready frame's input
+    // placeholder, `→ Plan, search, build anything`; used here without the
+    // arrow glyph (not reliably captured through peekPane's text mode) as
+    // the idle marker for an empty input box, on the same reasoning as
+    // claude's bare `❯`. Captured only at the boot ready frame, not
+    // confirmed present after later turns — flag alongside opencode's if it
+    // proves wrong live.
+    idlePattern: "Plan, search, build anything",
     // cursor collapses a long paste to `[Pasted text #N +N lines]` the same
     // way claude does (prototype finding).
     echoPattern: "Pasted text",
@@ -283,6 +324,18 @@ export function elidePromptArgv(argv: string[], body: string): string[] {
   return argv.map((arg) =>
     arg.includes(body) ? arg.replace(body, PROMPT_PLACEHOLDER) : arg,
   );
+}
+
+/**
+ * A descriptor's idle pattern (the Conversations ADR's Turn state,
+ * engine/turn-state.ts): the descriptor's own when set, else its
+ * readyPattern, matching HarnessDescriptor.idlePattern's documented default.
+ * A custom harness with neither field set has no descriptor at all (spawn.ts
+ * only defines them for the three defaults), so callers resolve through this
+ * function rather than reading the field directly.
+ */
+export function idlePatternFor(descriptor: HarnessDescriptor): string {
+  return descriptor.idlePattern ?? descriptor.readyPattern;
 }
 
 /**

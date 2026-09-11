@@ -18,6 +18,7 @@ import {
   parseStoredDetailWidth,
   statusLabel,
   ticketBodyHtml,
+  type ConversationDetailView,
   type DetailTab,
   type DetailTabView,
   type DetailView,
@@ -27,6 +28,7 @@ import {
   type TimelineView,
 } from "./project";
 import { noteLogScroll } from "./log-pane";
+import { renderTerminalSurface } from "./terminal";
 import { h } from "./dom";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -52,6 +54,11 @@ export interface DetailHandlers {
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
+  /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
+   *  Conversations store tracks the in-flight/failure state on `endView`. */
+  onEndConversation: (conversationId: string, closing?: string) => void;
+  /** "Open in herdr" on a Conversation's terminal peek. */
+  onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
 }
 
 /** A note textarea's focus, captured before a rebuild and restored after. */
@@ -74,6 +81,11 @@ export class Detail {
   // (siblings keep running while an interrupt waits) never wipes a note
   // being typed. Drafts are pruned when their interrupt resolves.
   private readonly drafts = new Map<string, string>();
+  // A Conversation's closing-line draft, keyed by conversation id: separate
+  // from the interrupt drafts above, which are pruned against pending
+  // ticket ids on every render and would otherwise wipe this on the next
+  // snapshot.
+  private readonly conversationEndDrafts = new Map<string, string>();
   private readonly onClose: () => void;
 
   constructor(options: { onClose: () => void }) {
@@ -159,7 +171,12 @@ export class Detail {
     } else {
       detail.style.width = `${clampDetailWidth(this.width, currentMaxPx())}px`;
     }
-    const title = view.kind === "ticket" ? view.ticketId : view.label;
+    const title =
+      view.kind === "ticket"
+        ? view.ticketId
+        : view.kind === "conversation"
+          ? view.conversationId
+          : view.label;
     const fullscreenToggle = h("button", {
       class: "btn detail-fullscreen-toggle",
       onclick: () => this.toggleFullscreen(),
@@ -183,7 +200,9 @@ export class Detail {
       ),
       view.kind === "ticket"
         ? this.renderTicketDetail(view, model, handlers)
-        : this.renderUtilityDetail(view, handlers),
+        : view.kind === "conversation"
+          ? this.renderConversationDetail(view, model, handlers)
+          : this.renderUtilityDetail(view, handlers),
     );
     return detail;
   }
@@ -586,6 +605,121 @@ export class Detail {
     );
   }
 
+  // The Conversation Detail (ADR-0017): the card's facts at full size,
+  // the terminal peek, the timeline (from the same /api/events?ticket=<id>
+  // path a ticket uses), and End with an optional closing-line textarea.
+  private renderConversationDetail(
+    detail: ConversationDetailView,
+    model: DetailModel,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const panel = h(
+      "div",
+      { class: "detail-body conversation-detail" },
+      h("div", { class: "dim" }, "assignment"),
+      h(
+        "div",
+        { class: "card-text" },
+        [detail.assignment.harness, detail.assignment.model, detail.assignment.drivers]
+          .filter((field): field is string => Boolean(field))
+          .join(" · ") || "unassigned",
+      ),
+      h("div", { class: "dim" }, "status"),
+      h(
+        "div",
+        { class: `detail-status conversation-turn-${detail.turn.state}` },
+        detail.status === "live"
+          ? conversationTurnLabel(detail.turn.state)
+          : detail.status,
+      ),
+    );
+    if (detail.status === "live") {
+      panel.append(
+        h(
+          "div",
+          { class: "dim conversation-detail-last-line" },
+          detail.turn.lastLine || "(no Turn yet)",
+        ),
+      );
+      if (detail.idleAge) {
+        panel.append(h("div", { class: "dim" }, `idle ${detail.idleAge}`));
+      }
+    } else if (detail.branch) {
+      panel.append(h("div", { class: "dim" }, `branch ${detail.branch}`));
+    }
+    if (detail.terminal) {
+      panel.append(
+        renderTerminalSurface(detail.terminal, {
+          onFocus: () => handlers.onFocusConversationTerminal(detail.conversationId),
+        }),
+      );
+    }
+    if (model.timeline) {
+      panel.append(
+        this.renderTimelineSection(
+          detail.conversationId,
+          model.timeline,
+          model.logPane,
+          handlers,
+          null,
+        ),
+      );
+    }
+    if (model.logPane && !model.logPane.neverRun) {
+      panel.append(this.renderLogPane(model.logPane, detail.conversationId, handlers));
+    }
+    if (detail.status === "live") {
+      panel.append(this.renderConversationEnd(detail, handlers));
+    }
+    return panel;
+  }
+
+  // End with an optional closing line: the operator's word to the
+  // Conversation's parent (a Notice) or simply a record of why it ended.
+  // Disables while the store's endView says a request is already out.
+  private renderConversationEnd(
+    detail: ConversationDetailView,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const closing = h("textarea", {
+      class: "interrupt-note",
+      placeholder: "closing note (optional)",
+      rows: 2,
+      disabled: detail.endView.ending,
+    }) as HTMLTextAreaElement;
+    closing.value = this.conversationEndDrafts.get(detail.conversationId) ?? "";
+    closing.addEventListener("input", () => {
+      this.conversationEndDrafts.set(detail.conversationId, closing.value);
+    });
+    const box = h(
+      "div",
+      { class: "interrupt-box conversation-end-box" },
+      closing,
+      h(
+        "div",
+        { class: "interrupt-actions" },
+        h(
+          "button",
+          {
+            class: "btn btn-danger",
+            disabled: detail.endView.ending,
+            onclick: () => {
+              handlers.onEndConversation(
+                detail.conversationId,
+                closing.value.trim() || undefined,
+              );
+            },
+          },
+          detail.endView.ending ? "ending..." : "End",
+        ),
+      ),
+    );
+    if (detail.endView.failure) {
+      box.append(h("div", { class: "error-inline" }, detail.endView.failure));
+    }
+    return box;
+  }
+
   private renderUtilityDetail(
     detail: Extract<DetailView, { kind: "utility" }>,
     handlers: DetailHandlers,
@@ -704,6 +838,11 @@ function currentMaxPx(): number {
 function canvasHeaderBottom(): number {
   const header = document.querySelector<HTMLElement>(".canvas-header");
   return header ? header.getBoundingClientRect().bottom : 0;
+}
+
+/** Mirrors canvas.ts's own copy: the Turn state badge's word. */
+function conversationTurnLabel(state: "working" | "waiting"): string {
+  return state === "waiting" ? "waiting on you" : "agent working";
 }
 
 function formatEventTime(iso: string): string {

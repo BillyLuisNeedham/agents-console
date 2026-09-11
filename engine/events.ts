@@ -36,6 +36,17 @@ const EVENT_KINDS = [
   "review-reject",
   "spawn-adopted",
   "spawn-rejected",
+  // Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // beside-tickets.md): "ended" is an operator-ended Conversation's closing
+  // record (merged, ended with no commits, or ended with its branch parked
+  // on a rejected merge-approval); "notice" is a Turn the engine typed into
+  // a waiting parent Conversation reporting something it spawned finishing;
+  // "notice-dropped" is a Notice that never delivered (the parent ended or
+  // crashed first, or the queue was still non-empty at End) and is logged on
+  // the child's own file instead.
+  "ended",
+  "notice",
+  "notice-dropped",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];
