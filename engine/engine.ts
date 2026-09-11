@@ -369,10 +369,9 @@ interface RunOptions {
   // The Conversations ADR: force-allow an empty issues/ (no Tickets at
   // all) even when the pool has no conversations/ directory yet either —
   // startPool already infers this on its own once a conversations/
-  // directory exists (see loadPoolMarkers's own allowEmptyIssues), so this
-  // is only for a caller that wants a Ticket-less pool to boot before its
-  // first Conversation has ever started (a test, or a future
-  // start-empty-then-add-a-Conversation flow).
+  // directory exists (see loadPoolTickets), so this is only for a caller
+  // that wants a Ticket-less pool to boot before its first Conversation has
+  // ever started and before the directory exists (a test).
   allowEmptyIssues?: boolean;
 }
 
@@ -690,16 +689,7 @@ export function startPool(options: RunOptions): PoolRun {
   const poolDir = options.poolDir;
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  // A pool with a conversations/ directory (even an empty one, since the
-  // directory only ever gets created by the first Conversation ever
-  // started there) has proven it is not the "accidental empty pool"
-  // mistake the bare throw exists to catch, so an empty issues/ boots like
-  // any other pool with zero ready Tickets. The `allowEmptyIssues` option
-  // covers the one case that can't infer itself: a Conversation-capable
-  // pool before its very first Conversation has ever started.
-  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir), {
-    allowEmptyIssues: options.allowEmptyIssues || existsSync(join(poolDir, "conversations")),
-  });
+  const markers = loadPoolTickets(poolDir, options.allowEmptyIssues);
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
@@ -2279,7 +2269,7 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -3354,7 +3344,7 @@ async function runGraders(
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const buildAssignment = session.assignments.get(build.id)!;
   let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
@@ -4450,7 +4440,7 @@ async function runHeadToHead(
     };
   });
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
   // (ticket 01) via the shared engine-run helper: the run spawns the judge
@@ -5502,6 +5492,34 @@ function knownConversationIds(poolDir: string): Set<string> {
   return new Set(loadConversations(join(poolDir, "conversations")).map((r) => r.id));
 }
 
+/**
+ * The pool's Tickets as every reader loads them: startPool, each boundary
+ * reload, and the server's pre-flight and per-snapshot meta (issue #71,
+ * where the server's own bare loadPoolMarkers call refused the empty issues/
+ * startPool would have accepted, so a Conversation-only pool could never
+ * boot through the one entry point an operator has). Two rules ride along
+ * with the parse, and they belong to every load or none:
+ *
+ * - The pool's recorded Conversations are the known parents, so a Ticket a
+ *   Conversation spawned survives the load the way one a Ticket spawned
+ *   always has (see knownConversationIds).
+ * - A pool with a conversations/ directory (even an empty one — the
+ *   operator creates it to say "this pool hosts Conversations", and the
+ *   first Conversation ever started there creates it too) has proven it is
+ *   not the "accidental empty pool" mistake loadPoolMarkers's bare throw
+ *   exists to catch, so an empty issues/ loads as zero Tickets. That also
+ *   keeps a boundary reload from throwing on a Conversation-only pool whose
+ *   Conversations have only ever spawned more Conversations. The
+ *   `allowEmptyIssues` flag covers the one case that can't infer itself: a
+ *   caller that wants a Ticket-less pool to boot before its first
+ *   Conversation has ever started and before the directory exists (a test).
+ */
+export function loadPoolTickets(poolDir: string, allowEmptyIssues = false): TicketMarker[] {
+  return loadPoolMarkers(join(poolDir, "issues"), knownConversationIds(poolDir), {
+    allowEmptyIssues: allowEmptyIssues || existsSync(join(poolDir, "conversations")),
+  });
+}
+
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
 // ADR): every buffered proposal is validated against the pool as the
 // boundary found it, the accepted ones are written as ordinary ticket files
@@ -5672,7 +5690,7 @@ export function adoptSpawnProposals(session: Session): void {
   // hand-written ticket in: markers reload, unseen ids resolve their
   // assignments (parent inheritance), and the tickets channel folds them in
   // at their on-disk statuses.
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,

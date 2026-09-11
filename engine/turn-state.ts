@@ -8,6 +8,18 @@
  * pane and what to do once the state changes (emit a snapshot, deliver a
  * queued Notice). Kept pure and free of engine.ts/conversations.ts imports so
  * its rules are trivial to table-test.
+ *
+ * A pane read is two regions (issue #71): the transcript, and below it the
+ * TUI's chrome — the input box and whatever footer the harness draws under
+ * it. Only the transcript says anything about the Turn: the footer carries
+ * live counters (claude's statusline ticks its usage and cost, its mode row
+ * changes with the operator's settings) that move while the agent sits idle,
+ * and it is what a bottom-up scan for "the last thing said" finds first.
+ * So the split is made once, by transcriptOf, and both the stability
+ * comparison and the last-line extraction work on the transcript alone; the
+ * idle pattern is still looked for in the whole read, since every harness's
+ * idle marker lives in the chrome (claude's `❯` prompt, cursor's input
+ * placeholder, opencode's footer hint).
  */
 
 import type { TurnState } from "./conversations.ts";
@@ -20,7 +32,17 @@ import { VIEWPORT_WRAP_CHROME } from "./pane-session.ts";
 // reused here rather than invented twice.
 export const IDLE_STABLE_READS = 2;
 
+// How far above the input box's bottom border transcriptOf looks for its top
+// border. An empty input box is one content row on claude (`❯ ` between two
+// rules) and three on opencode (a padding row, the placeholder, the model
+// line, all `┃`-prefixed); a typed draft grows it a row per line. Past this
+// many rows the box is treated as having no top border in view, so a border
+// row much further up (a rendered table's edge) is never mistaken for it.
+export const INPUT_BOX_MAX_ROWS = 8;
+
 export interface TurnStatePrev {
+  // The previous read's transcript (TurnStateResult.transcript), not its
+  // raw pane text: the poller stores what deriveTurnState hands back.
   text: string;
   state: TurnState;
   stableReads: number;
@@ -32,33 +54,93 @@ export interface TurnStateResult {
   // Carried back to the caller so it can hand the same shape in as `prev` on
   // the next read; deriveTurnState itself holds nothing between calls.
   stableReads: number;
+  // The transcript region this read was judged on, for the caller to store
+  // as the next read's `prev.text`.
+  transcript: string;
   // Whether `state` or `lastLine` moved since `prev` — the poller's signal to
   // emit a snapshot rather than silently updating the runtime and waiting for
   // some other reason to publish one.
   changed: boolean;
 }
 
+function isBlank(row: string): boolean {
+  return row.trim() === "";
+}
+
+// A border row: box-drawing and block glyphs only (claude's `────` rules,
+// opencode's `╹▀▀▀▀` bottom edge and its bare `┃` padding row), which is
+// exactly what VIEWPORT_WRAP_CHROME strips to nothing. A blank row is not a
+// border: the padding a fixed-size read adds below the chrome, and the empty
+// row a TUI leaves above its input box, must not anchor the split.
+function isBorder(row: string): boolean {
+  return !isBlank(row) && row.replace(VIEWPORT_WRAP_CHROME, "") === "";
+}
+
 /**
- * Last non-empty line "above the input box after stripping viewport chrome":
- * scan the pane's rendered lines from the bottom, stripping each of
- * VIEWPORT_WRAP_CHROME's whitespace-and-box-drawing runs (the same regex
- * viewportShows uses to tolerate a wrapped echo target), and return the
- * first that still has content once stripped. A TUI's input box renders as
- * bordered rows of box-drawing characters with padding, which strip to
- * nothing and are skipped; the trailing blank rows a fixed-size pane read
- * pads out below the real content are already empty. What survives is
- * whatever text row sits highest among the ones scanned, which in practice
- * is the transcript line the operator would actually read as "the last
- * thing said" — an unverified heuristic (no live TUI capture pins this
- * exactly), documented here rather than assumed silently.
+ * The transcript region of a pane read: every row above the TUI's input
+ * box. The box is located structurally rather than by any harness-specific
+ * text, from a live capture of claude 2.1.267 (idle and mid-turn) and
+ * opencode 1.18.29 (idle), both of which draw it the same way: a border row
+ * closes it at the bottom, its content rows sit above that, and a border row
+ * opens it at the top; the footer (claude's statusline and mode row,
+ * opencode's `tab agents  ctrl+p commands` and version line) renders below
+ * the bottom border, never inside or above the box. So: the lowest border
+ * row in the read is the bottom edge, the *highest* border row within
+ * INPUT_BOX_MAX_ROWS above it is the top edge, and everything above the top
+ * edge is transcript. Highest, not nearest: opencode pads the inside of its
+ * box with bare `┃` rows, which are border rows too, and the nearest one
+ * would leave the placeholder above the cut. The cost is that a border row
+ * the transcript itself ends with inside that reach (a rendered table's
+ * bottom edge, a markdown rule) is taken as the top edge instead, which
+ * drops that static tail from the transcript and moves lastLine up a row or
+ * two; stability is unaffected. With no border row anywhere (a read that
+ * caught no chrome at all) the whole read is transcript; with a bottom edge
+ * but no other in reach, the bottom edge alone is the split. cursor is
+ * inferred to fit the same rule from the prototype's description of its
+ * bordered input (prototype/tui-prompt-paste/FINDINGS.md); not captured
+ * live.
  */
-export function extractLastLine(text: string): string {
-  const lines = text.split("\n");
+export function transcriptOf(text: string): string {
+  const rows = text.split("\n");
+  let bottom = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (isBorder(rows[i])) {
+      bottom = i;
+      break;
+    }
+  }
+  if (bottom < 0) return text;
+  let top = bottom;
+  for (let j = bottom - 1; j >= Math.max(0, bottom - INPUT_BOX_MAX_ROWS); j--) {
+    if (isBorder(rows[j])) top = j;
+  }
+  return rows.slice(0, top).join("\n");
+}
+
+// The last row of an already-split transcript that still has content once
+// VIEWPORT_WRAP_CHROME's whitespace-and-box-drawing runs are collapsed:
+// what the operator would read as "the last thing said" (claude's
+// `✻ Sautéed for 1s · done 2:35 PM` once a turn ends, its `✢ Sautéing…`
+// spinner row mid-turn, both verified live). A transcript that ends in a
+// rendered table's bottom edge skips that edge and returns the table's last
+// content row, collapsed.
+function lastLineOf(transcript: string): string {
+  const lines = transcript.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const stripped = lines[i].replace(VIEWPORT_WRAP_CHROME, " ").trim();
     if (stripped !== "") return stripped;
   }
   return "";
+}
+
+/**
+ * The last content line of a raw pane read's transcript region: transcriptOf
+ * then the bottom-up scan above. Before issue #71 this scanned the whole
+ * read and so always returned claude's mode row (`-- INSERT -- ⏵⏵ auto mode
+ * on ...`), the lowest text in every frame.
+ */
+export function extractLastLine(text: string): string {
+  return lastLineOf(transcriptOf(text));
 }
 
 const FRESH: TurnStatePrev = { text: "", state: "working", stableReads: 0 };
@@ -67,16 +149,18 @@ const FRESH: TurnStatePrev = { text: "", state: "working", stableReads: 0 };
  * One turn-state read. `prev` is the previous call's result reshaped as
  * input (null for the very first read of a freshly launched Conversation,
  * treated identically to a prior empty read: working, unstable, nothing
- * said yet). Any change in the pane's rendered text — the agent streaming,
- * the operator typing, a Notice just delivered — resets the idle count and
- * marks the turn `working`, whatever it was before: only a text-stable pane
- * can be idle. Once text stops changing, `idlePattern`'s presence is
+ * said yet). Any change in the pane's transcript region — the agent
+ * streaming, the operator typing, a Notice just delivered — resets the idle
+ * count and marks the turn `working`, whatever it was before: only a
+ * transcript-stable pane can be idle. Chrome-only movement (a statusline
+ * counter ticking under the input box) is not a change at all. Once the
+ * transcript stops changing, `idlePattern`'s presence in the whole read is
  * checked each read; IDLE_STABLE_READS consecutive stable-and-idle reads
  * flip the state to `waiting`, and it stays there (through further
- * stable-and-idle reads) until the text changes again. A text-stable pane
+ * stable-and-idle reads) until the transcript changes again. A stable pane
  * whose idle pattern is absent (a dialog, a crash in progress) never
  * reaches `waiting` and resets its stable-idle count the same way an
- * outright text change would; it simply holds `prev.state` for the state
+ * outright change would; it simply holds `prev.state` for the state
  * itself, so a Conversation already `waiting` does not flap back to
  * `working` on a read that is stable but not (yet) idle, and one already
  * `working` does not flip early.
@@ -87,10 +171,11 @@ export function deriveTurnState(
   idlePattern: string,
 ): TurnStateResult {
   const p = prev ?? FRESH;
-  const lastLine = extractLastLine(text);
-  if (text !== p.text) {
-    const changed = p.state !== "working" || lastLine !== extractLastLine(p.text);
-    return { state: "working", lastLine, stableReads: 0, changed };
+  const transcript = transcriptOf(text);
+  const lastLine = lastLineOf(transcript);
+  if (transcript !== p.text) {
+    const changed = p.state !== "working" || lastLine !== lastLineOf(p.text);
+    return { state: "working", lastLine, stableReads: 0, transcript, changed };
   }
   const idle = idlePattern.length > 0 && text.includes(idlePattern);
   // Mirrors waitForReadiness's own stable-count rule (pane-session.ts): a
@@ -101,5 +186,5 @@ export function deriveTurnState(
   const stableReads = idle ? p.stableReads + 1 : 0;
   const state: TurnState =
     idle && stableReads >= IDLE_STABLE_READS ? "waiting" : p.state;
-  return { state, lastLine, stableReads, changed: state !== p.state };
+  return { state, lastLine, stableReads, transcript, changed: state !== p.state };
 }

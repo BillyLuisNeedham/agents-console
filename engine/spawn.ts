@@ -177,9 +177,14 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     // input prompt `❯`" and warn it is unsafe for *readiness* only because
     // the pane's own bash prompt is also `❯` before the TUI has come up; once
     // a Conversation is confirmed ready (this pane is the TUI, not a shell)
-    // that collision cannot recur, so the bare glyph is a safe idle marker
-    // for an ongoing Conversation: present only when the input box is empty
-    // and claude is not mid-turn.
+    // that collision cannot recur. A live capture of claude 2.1.267 (issue
+    // #71) shows the glyph is not an idle-only marker either: the input box
+    // keeps its `❯` while the agent works, and each operator turn is echoed
+    // into the transcript with one. So for claude this pattern is a "the TUI
+    // is up" guard, and idleness rests on deriveTurnState's transcript
+    // stability (turn-state.ts): mid-turn the spinner row (`✢ Sautéing…`)
+    // redraws every read, and once the turn ends the transcript holds
+    // still.
     idlePattern: "❯",
     // claude collapses a long paste to `[Pasted text #N +N lines]` in the
     // input area before Enter (prototype finding); the engine matches that

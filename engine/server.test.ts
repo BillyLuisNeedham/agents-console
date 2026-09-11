@@ -194,6 +194,59 @@ async function startServer(
 }
 
 describe("pool server", () => {
+  // Issue #71: the server's own pre-flight meta load refused an empty
+  // issues/ that startPool would have accepted, so a Conversation-only pool
+  // exited 1 at "pool load: no Issue files" before the engine ever ran.
+  it("boots a Conversation-only pool: empty issues/ beside a conversations/ directory", async () => {
+    const poolDir = makePool([]);
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const first = await server.start();
+    expect(first.state.tickets).toEqual([]);
+    // Zero Tickets settles at the review gate ("every ticket is done"), the
+    // engine's existing behaviour for a Ticket-less pool (conversations.test.ts
+    // accepts the same); what matters here is that the server got that far.
+    const snapshot = await server.settled();
+    expect(["quiescent", "done"]).toContain(snapshot.phase);
+    expect(snapshot.state.tickets).toEqual([]);
+  });
+
+  it("still refuses a pool with an empty issues/ and no conversations/ directory, naming the opt-in", () => {
+    const poolDir = makePool([]);
+    expect(() =>
+      createPoolServer({
+        poolDir,
+        port: 0,
+        harnesses: stubHarness({}),
+        distDir: "/nonexistent",
+        registryPath: fleetRegistry(poolDir),
+      }),
+    ).toThrow(/no Issue files.*conversations\/ directory/);
+  });
+
+  // The same shared load carries the pool's Conversations as known parents:
+  // before it, a Ticket a Conversation had spawned failed the server's own
+  // parse ("spawned-by names no ticket") and never reached the Console.
+  it("loads a Ticket whose spawned-by names a Conversation into the served meta", async () => {
+    const poolDir = makePool([
+      {
+        file: "conv-1-spawn-1.md",
+        marker: "<!-- state: id=conv-1-spawn-1 blocked-by=none status=done spawned-by=conv-1 -->",
+      },
+    ]);
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
+        "model=m drivers=implement -->\n\n# Talk\n\n\n",
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const snapshot = await server.start();
+    expect(snapshot.state.tickets.map((t) => t.id)).toEqual(["conv-1-spawn-1"]);
+  });
+
   it("drives a pool to the review gate and serves the enriched state", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },

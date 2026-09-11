@@ -158,5 +158,8 @@ describe("spawn namespace reservation", () => {
     const dir = poolWithFiles({});
     expect(() => loadPoolMarkers(dir)).toThrow(/no Issue files/);
     expect(() => loadPoolMarkers(dir, new Set(["conv-1"]))).toThrow(/no Issue files/);
+    // The refusal names the opt-in (issue #71), since the operator's only
+    // entry point surfaces this message verbatim.
+    expect(() => loadPoolMarkers(dir)).toThrow(/conversations\/ directory/);
   });
 });
