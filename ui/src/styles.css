@@ -87,6 +87,18 @@ body {
   min-height: 0;
 }
 
+/* The canvas plus its two overlay trays. It is the trays' containing block,
+   so they dock to the canvas's own edges and give way to the Detail beside
+   it instead of covering it. */
+.canvas-column {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .dim {
   color: var(--text-dim);
   font-size: 11px;
@@ -659,29 +671,43 @@ body {
   color: var(--interrupt);
 }
 
+/* One row, never two: the card's height stays predictable for the canvas
+   layout, so the attach chip gives way instead of wrapping under the jump
+   button. The chip's command text is what shrinks (with an ellipsis); the
+   pane id, the part the operator has to type, always shows whole. */
 .terminal-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.terminal-focus {
+  flex: 0 0 auto;
 }
 
 .terminal-chip {
   display: inline-flex;
   align-items: baseline;
   gap: 0;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  white-space: nowrap;
 }
 
 .terminal-chip-cmd {
   font-family: var(--mono);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .terminal-chip-pane {
   color: var(--accent);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .terminal-note {
@@ -1334,6 +1360,14 @@ body {
   white-space: pre-wrap;
 }
 
+.timeline-reassigned {
+  margin: 2px 0 4px 8px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* --------------------------------------------------------- raw log pane */
 
 .log-pane {
@@ -1504,15 +1538,15 @@ body {
 
 /* ------------------------------------------------------ needs input tray */
 
-/* The Needs input tray: a fixed overlay on the left listing every ticket
-   with an unresolved Interrupt, the operator's work queue. Collapsible to
-   a badge carrying the count; tray and badge hide entirely at zero pending.
-   It overlays the canvas and the drawers but sits under a fullscreen
-   Detail, which is a deliberate whole-window act. Tray and badge share the
-   anchor chrome and the header typography below. */
+/* The Needs input tray: an overlay on the canvas column's left listing every
+   ticket with an unresolved Interrupt, the operator's work queue. Collapsible
+   to a badge carrying the count; tray and badge hide entirely at zero pending.
+   It overlays the canvas but sits under a fullscreen Detail, which is a
+   deliberate whole-window act. Tray and badge share the anchor chrome and the
+   header typography below. */
 .needs-input-tray,
 .needs-input-badge {
-  position: fixed;
+  position: absolute;
   top: 60px;
   left: 0;
   z-index: 20;
@@ -1525,7 +1559,7 @@ body {
 
 .needs-input-tray {
   width: 300px;
-  max-height: calc(100vh - 160px);
+  max-height: calc(100% - 100px);
   overflow-y: auto;
   padding: 10px;
   display: flex;
@@ -1728,14 +1762,15 @@ body {
 }
 
 /* The Conversations tray: same anchor chrome as Needs input, docked to the
-   right so the two trays never overlap. */
+   canvas column's right so the two trays never overlap, and so an open
+   Detail pushes it left rather than sitting underneath it. */
 .conversations-tray {
-  position: fixed;
+  position: absolute;
   top: 60px;
   right: 0;
   z-index: 20;
   width: 300px;
-  max-height: calc(100vh - 160px);
+  max-height: calc(100% - 100px);
   overflow-y: auto;
   padding: 10px;
   display: flex;

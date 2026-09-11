@@ -3536,6 +3536,274 @@ describe("channels", () => {
   });
 });
 
+describe("config reload (ADR-0018)", () => {
+  it("reassigns a not-yet-run ticket edited between super-steps, with a reassigned event on its log", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        // 01's assignment is already resolved when it spawns; this edit can
+        // only reach 02 if the boundary before 02's super-step re-reads it.
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ defaults: { harness: "stub", model: "model-b" } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawned["01"].model).toBe("model-a");
+    expect(rig.spawned["02"].model).toBe("model-b");
+    expect(
+      run.final.log.some((line) => line === "config reloaded: defaults"),
+    ).toBe(true);
+
+    const reassigned = readEventLines(poolDir, "02").filter(
+      (e) => e.kind === "reassigned",
+    );
+    expect(reassigned).toHaveLength(1);
+    expect(reassigned[0]!.payload).toEqual({
+      from: { harness: "stub", model: "model-a", drivers: "implement" },
+      to: { harness: "stub", model: "model-b", drivers: "implement" },
+    });
+    // 01 is done and will never run again, but it was not in flight at the
+    // boundary either, so it re-resolves like any other reassignable ticket
+    // (ADR-0018 excludes only an Attempt in flight) — the point being that
+    // its Assignment record still serves as the correct, up-to-date basis a
+    // later spawn or grader inherits from.
+    expect(
+      readEventLines(poolDir, "01").some((e) => e.kind === "reassigned"),
+    ).toBe(true);
+  });
+
+  it("keeps an in-flight Attempt's Assignment despite an edit, then uses the new config once resumed", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(first.phase).toBe("quiescent");
+    expect(rig.spawnList[0]!.model).toBe("model-a");
+
+    // Edited while the ticket sits at its checkpoint: no Attempt is in
+    // flight, but the checkpointed attempt itself never moved.
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ defaults: { harness: "stub", model: "model-b" } }),
+    );
+
+    const done = await approveReview(await first.resume("01"));
+
+    expect(done.phase).toBe("done");
+    expect(rig.spawnList).toHaveLength(2);
+    expect(rig.spawnList[1]!.model).toBe("model-b");
+
+    const reassigned = readEventLines(poolDir, "01").filter(
+      (e) => e.kind === "reassigned",
+    );
+    expect(reassigned).toHaveLength(1);
+    expect(reassigned[0]!.payload).toEqual({
+      from: { harness: "stub", model: "model-a", drivers: "implement" },
+      to: { harness: "stub", model: "model-b", drivers: "implement" },
+    });
+  });
+
+  it("honours a console.json edit made after a Spawn is adopted but before it becomes ready to run", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness({
+      "01": {
+        spawn: [
+          {
+            title: "Follow-up",
+            body: "Do some more follow-up work here.",
+            blockedBy: ["02"],
+          },
+        ],
+      },
+      "02": { statuses: ["checkpoint", "done"] },
+    });
+
+    const paused = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(paused.phase).toBe("quiescent");
+    // Adopted (written to the pool) at this boundary, but blocked on 02, so
+    // it has not run yet.
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain("status=ready");
+    expect(rig.spawned["01-spawn-1"]).toBeUndefined();
+
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ defaults: { harness: "stub", model: "model-b" } }),
+    );
+
+    const done = await approveReview(await paused.resume("02"));
+
+    expect(done.phase).toBe("done");
+    expect(rig.spawned["01-spawn-1"]).toBeDefined();
+    expect(rig.spawned["01-spawn-1"].model).toBe("model-b");
+  });
+
+  it("rejects invalid JSON, keeps the previous config, and logs the cause exactly once across boundaries", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        readyTicket("03", "02"),
+      ],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(join(poolDir, "console.json"), "{ not json");
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    // Both later tickets ran on the pre-edit config: the bad content never
+    // applied at either boundary that saw it.
+    expect(rig.spawned["02"].model).toBe("model-a");
+    expect(rig.spawned["03"].model).toBe("model-a");
+    const rejections = run.final.log.filter((line) =>
+      line.startsWith("config reload rejected"),
+    );
+    expect(rejections).toHaveLength(1);
+  });
+
+  it("rejects an otherwise-valid edit atomically when one assign entry names an unknown harness", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({
+              defaults: { harness: "stub", model: "model-b" },
+              assign: { "02": { harness: "no-such-harness" } },
+            }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    // The whole reload rejected: 02 kept its pre-edit Assignment, the valid
+    // defaults.model change included.
+    expect(rig.spawned["02"].model).toBe("model-a");
+    const rejections = run.final.log.filter((line) =>
+      line.startsWith("config reload rejected"),
+    );
+    expect(rejections).toHaveLength(1);
+    expect(
+      readEventLines(poolDir, "02").some((e) => e.kind === "reassigned"),
+    ).toBe(false);
+  });
+
+  it("never lets port, terminal, or roster move under a live run, even when console.json changes them", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: {
+        defaults: { harness: "stub", model: "model-a" },
+        port: 4100,
+        roster: "- deepseek: general-purpose subagent",
+      },
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({
+              defaults: { harness: "stub", model: "model-b" },
+              port: 9999,
+              terminal: "herdr",
+              roster: "- someone else",
+            }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    // The reassignable slice moved...
+    expect(rig.spawned["02"].model).toBe("model-b");
+    // ...but port/terminal/roster stayed exactly as booted: had terminal
+    // actually flipped to herdr with no fake daemon configured, this run
+    // could not have completed headless.
+    expect(run.final.config.port).toBe(4100);
+    expect(run.final.config.terminal).toBeUndefined();
+    expect(run.final.config.roster).toBe(
+      "- deepseek: general-purpose subagent",
+    );
+  });
+
+  it("treats an unchanged console.json as a no-op: no log line, no reassigned events", async () => {
+    const config: PoolConfig = {
+      defaults: { harness: "stub", model: "model-a" },
+    };
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config,
+    });
+    const rig = stubHarness({});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          // Rewritten byte-for-byte identical to what's already on disk
+          // (makePool serializes config the same way).
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify(config, null, 2),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(
+      run.final.log.some((line) => line.startsWith("config reloaded")),
+    ).toBe(false);
+    expect(
+      run.final.log.some((line) => line.startsWith("config reload rejected")),
+    ).toBe(false);
+    expect(
+      readEventLines(poolDir, "02").some((e) => e.kind === "reassigned"),
+    ).toBe(false);
+  });
+});
+
 describe("glued prompt", () => {
   it("glues AGENT.md, chain, and roster in run.sh's shape, without a driver line", async () => {
     const poolDir = makePool({

@@ -300,6 +300,12 @@ interface PoolUpdate {
   outcomes?: Record<string, Outcome>;
   interrupts?: Interrupt[];
   reviewApproved?: boolean;
+  // The sanctioned way to replace the assignment slice of the live config
+  // (ADR-0018), applied at the super-step boundary only. Every other channel
+  // is additive/merged; config is a wholesale replacement, matching how a
+  // reload always replaces defaults/assign/resolver whole rather than
+  // merging field-wise with the previous reload.
+  config?: PoolConfig;
 }
 
 // The phases a run reports. `dead` is terminal and distinct from the closing
@@ -364,10 +370,9 @@ interface RunOptions {
   // The Conversations ADR: force-allow an empty issues/ (no Tickets at
   // all) even when the pool has no conversations/ directory yet either —
   // startPool already infers this on its own once a conversations/
-  // directory exists (see loadPoolMarkers's own allowEmptyIssues), so this
-  // is only for a caller that wants a Ticket-less pool to boot before its
-  // first Conversation has ever started (a test, or a future
-  // start-empty-then-add-a-Conversation flow).
+  // directory exists (see loadPoolTickets), so this is only for a caller
+  // that wants a Ticket-less pool to boot before its first Conversation has
+  // ever started and before the directory exists (a test).
   allowEmptyIssues?: boolean;
 }
 
@@ -438,7 +443,7 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
     interrupts: update.interrupts
       ? reduceInterrupts(state.interrupts, update.interrupts)
       : state.interrupts,
-    config: state.config,
+    config: update.config ?? state.config,
     reviewApproved: update.reviewApproved ?? state.reviewApproved,
   };
 }
@@ -642,6 +647,14 @@ export interface Session {
   // loop or from an adopted attempt's finalize, chains onto this so two
   // merges never run their git work concurrently on the main checkout.
   mergeChain: Promise<void>;
+  // ADR-0018's config reload: the raw console.json text last considered at a
+  // super-step boundary, whether it was accepted, rejected, or found
+  // unchanged. Comparing against this (not against the last *accepted* text)
+  // is what makes an unchanged file a true no-op and keeps the same bad
+  // content from logging twice. Null means no file was there. Seeded at
+  // startPool to the boot read, so the first boundary is a no-op unless the
+  // file changed since boot.
+  lastConfigText: string | null;
   // The headless children of this engine process (ADR-0017), tracked from
   // spawn to exit so a shutdown can stop every one of them.
   children: ChildTracker;
@@ -677,19 +690,14 @@ export function startPool(options: RunOptions): PoolRun {
   const poolDir = canonicalDir(options.poolDir);
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  // A pool with a conversations/ directory (even an empty one, since the
-  // directory only ever gets created by the first Conversation ever
-  // started there) has proven it is not the "accidental empty pool"
-  // mistake the bare throw exists to catch, so an empty issues/ boots like
-  // any other pool with zero ready Tickets. The `allowEmptyIssues` option
-  // covers the one case that can't infer itself: a Conversation-capable
-  // pool before its very first Conversation has ever started.
-  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir), {
-    allowEmptyIssues: options.allowEmptyIssues || existsSync(join(poolDir, "conversations")),
-  });
+  const markers = loadPoolTickets(poolDir, options.allowEmptyIssues);
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
+  // The reload's baseline (ADR-0018): the exact bytes readConfig just parsed,
+  // so the first boundary reload is a no-op unless the file changes after
+  // boot, matching every later boundary's unchanged-file no-op.
+  const lastConfigText = readOptional(join(poolDir, "console.json"));
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const cwd = repoRootOf(poolDir);
 
@@ -743,6 +751,7 @@ export function startPool(options: RunOptions): PoolRun {
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
     mergeChain: Promise.resolve(),
+    lastConfigText,
     children: new ChildTracker(),
     orphans: [],
     conversations: new Map(),
@@ -994,6 +1003,11 @@ async function driveLoop(session: Session): Promise<void> {
   await session.terminalReconcile;
   for (;;) {
     reconcileDeadlocks(session);
+    // Config reload (ADR-0018): the assignment slice of console.json
+    // re-reads here, before the answer drain and spawn adoption below, so
+    // both see the reloaded config for whatever they schedule this
+    // super-step.
+    reloadConfigAtBoundary(session);
     // The super-step boundary: answers accepted while the previous
     // super-step was in flight are applied now, in submission order, after
     // that super-step's join and persistence and before this one's
@@ -2256,7 +2270,7 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -2922,16 +2936,27 @@ function resolveSpawnedTicketAssignment(
   };
 }
 
-// Resolution for marker ids the assignment map does not know yet: ordinary
-// tickets resolve from the config; grader and head-to-head ids resolve from
-// their build ticket's assignment (a stale engine card on disk never fails
-// pool start, and an engine-run judge inherits its builder with zero new
-// config); spawned ids resolve from their spawned-by parent, iterating until
-// the map stops growing so a spawn chain (01-spawn-1-spawn-1) resolves
-// however deep it nests. loadPoolMarkers guarantees a spawned id's parent
-// exists, so only a forged spawned-by cycle can leave an id unresolved, and
-// that fails here with a clear error instead of an undefined crash later.
-function resolveUnseenAssignments(
+// The shared resolution pass (ADR-0010, ADR-0018): resolves every marker id
+// not already present in `assignments`, so the caller decides what counts as
+// already resolved. At boot (resolveUnseenAssignments below) that is nothing,
+// starting from an empty map. At a config reload (resolveBoundaryAssignments
+// below) it is every in-flight id, seeded with its frozen Assignment so an
+// Attempt already running never sees its Assignment move. Ordinary tickets
+// resolve from the config; grader and head-to-head ids resolve from their
+// build ticket's assignment (a stale engine card on disk never fails pool
+// start, and an engine-run judge inherits its builder with zero new config);
+// spawned ids resolve from their spawned-by parent, iterating until the map
+// stops growing so a spawn chain (01-spawn-1-spawn-1) resolves however deep
+// it nests, and a not-yet-resolved parent (in-flight and frozen, or simply
+// later in file order) is waited for rather than treated as absent. Every
+// resolution in the pass reads the same `config`, so a build ticket frozen by
+// an in-flight Attempt hands its graders the pre-reload Assignment, exactly
+// as a ticket resolved this pass hands its spawns the post-reload one.
+// loadPoolMarkers guarantees a spawned id's parent exists, so only a forged
+// spawned-by cycle (or every id in a cycle being simultaneously in-flight,
+// which cannot happen) can leave an id unresolved, and that fails here with a
+// clear error instead of an undefined crash later.
+function resolveAssignmentsInto(
   markers: TicketMarker[],
   assignments: Map<string, Assignment>,
   config: PoolConfig,
@@ -2976,9 +3001,175 @@ function resolveUnseenAssignments(
   const unresolved = markers.filter((m) => !assignments.has(m.id));
   if (unresolved.length > 0) {
     throw new Error(
-      `pool load: cannot resolve assignments for ` +
+      `pool config: cannot resolve assignments for ` +
         `${unresolved.map((m) => m.id).join(", ")} (a spawned-by cycle?)`,
     );
+  }
+}
+
+// Resolution for marker ids the assignment map does not know yet, run once
+// at pool start against an empty map.
+function resolveUnseenAssignments(
+  markers: TicketMarker[],
+  assignments: Map<string, Assignment>,
+  config: PoolConfig,
+  harnesses: Record<string, HarnessCommand>,
+): void {
+  resolveAssignmentsInto(markers, assignments, config, harnesses);
+}
+
+// ---------------------------------------------------------------------------
+// Config reload (ADR-0018)
+// ---------------------------------------------------------------------------
+
+// The three keys the reload touches. Everything else on PoolConfig
+// (roster, agents, selection, terminal, port) stays exactly as it was at
+// boot, whatever the file says, for the life of the run.
+const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver"] as const;
+
+// Parses only the assignment slice out of a console.json body: defaults,
+// assign, resolver. Deliberately does not validate selection or terminal
+// (readConfig's job, boot-only) — an edit to a field the reload never
+// touches must never block an otherwise-good defaults/assign/resolver edit.
+function parseConfigSlice(
+  raw: string,
+  poolDir: string,
+): Pick<PoolConfig, "defaults" | "assign" | "resolver"> {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `pool config: ${join(poolDir, "console.json")} must be a JSON object`,
+    );
+  }
+  return {
+    defaults: parsed.defaults,
+    assign: parsed.assign,
+    resolver: parsed.resolver,
+  };
+}
+
+// Which of the three slice keys actually changed, by value: a file rewritten
+// byte-for-byte differently but with the same defaults/assign/resolver (say,
+// only its port changed) reloads nothing and logs nothing.
+function changedSliceKeys(previous: PoolConfig, next: PoolConfig): string[] {
+  return CONFIG_SLICE_KEYS.filter(
+    (key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]),
+  );
+}
+
+// The wire-shaped record a `reassigned` event's from/to carries: AssignmentView
+// plus verify, since a ticket's reassignment forensics are incomplete without
+// it even though verify sits outside the Assignment concept proper.
+function assignmentEventPayload(
+  assignment: Assignment,
+): { harness: string | null; model: string | null; drivers: string; verify?: number } {
+  return {
+    ...assignmentViewOf(assignment),
+    ...(assignment.verify != null ? { verify: assignment.verify } : {}),
+  };
+}
+
+function logConfigReloadRejected(session: Session, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  session.state = applyUpdate(session.state, {
+    log: [`config reload rejected: ${message}`],
+  });
+}
+
+// The super-step boundary's config reload (ADR-0018): re-reads console.json,
+// and when its assignment slice (defaults, assign, resolver) changed, dry-run
+// resolves every reassignable ticket before committing anything. "Reassignable"
+// is every marker except a ticket with an Attempt in flight across the
+// boundary — today that is only a terminal-backed attempt re-adopted at boot
+// (session.adopted): the drive loop always awaits a super-step's ordinary
+// attempts in full before looping back here, so nothing else can still be
+// running at this seam. A done ticket is reassignable too, by the letter of
+// ADR-0018: it simply resolves to whatever the new config would have given
+// it, the same as any other not-in-flight ticket, which is what lets a
+// grader, head-to-head, or spawned ticket adopted after it finished inherit
+// the post-reload value rather than the value frozen at its own now-past
+// run. A parse failure or a resolution failure (unknown harness, bad verify)
+// rejects the whole reload atomically: the previous config stands, and one
+// pool-log line names the cause. The same raw file content is never logged
+// twice, whether it was accepted, rejected, or simply unchanged:
+// session.lastConfigText tracks the last text considered at any boundary, so
+// an unchanged file costs nothing beyond the one read.
+function reloadConfigAtBoundary(session: Session): void {
+  const raw = readOptional(join(session.poolDir, "console.json"));
+  if (raw === session.lastConfigText) return;
+  session.lastConfigText = raw;
+
+  let slice: Pick<PoolConfig, "defaults" | "assign" | "resolver">;
+  try {
+    slice = raw === null ? {} : parseConfigSlice(raw, session.poolDir);
+  } catch (error) {
+    logConfigReloadRejected(session, error);
+    return;
+  }
+
+  const candidate: PoolConfig = {
+    ...session.state.config,
+    defaults: slice.defaults,
+    assign: slice.assign,
+    resolver: slice.resolver,
+  };
+  const changed = changedSliceKeys(session.state.config, candidate);
+  if (changed.length === 0) return;
+
+  // The dry run: seed every in-flight ticket's frozen Assignment so the pass
+  // never recomputes it, then resolve everything else fresh against the
+  // candidate. A throw here (unknown harness, bad verify, a forged
+  // spawned-by cycle) leaves session.assignments and session.state.config
+  // untouched — the candidate map is scratch until this call returns clean.
+  const resolved = new Map<string, Assignment>();
+  for (const id of session.adopted.keys()) {
+    const frozen = session.assignments.get(id);
+    if (frozen) resolved.set(id, frozen);
+  }
+  try {
+    resolveAssignmentsInto(session.markers, resolved, candidate, session.harnesses);
+  } catch (error) {
+    logConfigReloadRejected(session, error);
+    return;
+  }
+
+  // Accepted: commit the candidate config and the freshly resolved
+  // assignments together, then record a `reassigned` event on every ticket
+  // whose resolved Assignment (harness/model/drivers — the Assignment
+  // proper, not verify) moved. In-flight tickets were seeded from their own
+  // prior entry above, so `before` and `after` are always identical there
+  // and nothing is ever logged for them.
+  const previous = session.assignments;
+  session.assignments = resolved;
+  session.state = applyUpdate(session.state, {
+    config: candidate,
+    log: [`config reloaded: ${changed.join(", ")}`],
+  });
+  for (const marker of session.markers) {
+    const before = previous.get(marker.id);
+    const after = resolved.get(marker.id);
+    if (!before || !after) continue;
+    if (
+      before.harness === after.harness &&
+      before.model === after.model &&
+      before.drivers === after.drivers
+    ) {
+      continue;
+    }
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      // lastAttempt, not nextAttempt: a reassigned event tags the ticket's
+      // current state, the way spawn-adopted and spawn-rejected already do,
+      // rather than reserving an attempt slot no real run will ever fill —
+      // that would shift every later attempt number the moment a boundary
+      // reloads with nothing ready to run yet.
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "reassigned",
+      payload: {
+        from: assignmentEventPayload(before),
+        to: assignmentEventPayload(after),
+      },
+    });
   }
 }
 
@@ -3154,7 +3345,7 @@ async function runGraders(
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const buildAssignment = session.assignments.get(build.id)!;
   let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
@@ -4250,7 +4441,7 @@ async function runHeadToHead(
     };
   });
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
   // (ticket 01) via the shared engine-run helper: the run spawns the judge
@@ -5302,6 +5493,34 @@ function knownConversationIds(poolDir: string): Set<string> {
   return new Set(loadConversations(join(poolDir, "conversations")).map((r) => r.id));
 }
 
+/**
+ * The pool's Tickets as every reader loads them: startPool, each boundary
+ * reload, and the server's pre-flight and per-snapshot meta (issue #71,
+ * where the server's own bare loadPoolMarkers call refused the empty issues/
+ * startPool would have accepted, so a Conversation-only pool could never
+ * boot through the one entry point an operator has). Two rules ride along
+ * with the parse, and they belong to every load or none:
+ *
+ * - The pool's recorded Conversations are the known parents, so a Ticket a
+ *   Conversation spawned survives the load the way one a Ticket spawned
+ *   always has (see knownConversationIds).
+ * - A pool with a conversations/ directory (even an empty one — the
+ *   operator creates it to say "this pool hosts Conversations", and the
+ *   first Conversation ever started there creates it too) has proven it is
+ *   not the "accidental empty pool" mistake loadPoolMarkers's bare throw
+ *   exists to catch, so an empty issues/ loads as zero Tickets. That also
+ *   keeps a boundary reload from throwing on a Conversation-only pool whose
+ *   Conversations have only ever spawned more Conversations. The
+ *   `allowEmptyIssues` flag covers the one case that can't infer itself: a
+ *   caller that wants a Ticket-less pool to boot before its first
+ *   Conversation has ever started and before the directory exists (a test).
+ */
+export function loadPoolTickets(poolDir: string, allowEmptyIssues = false): TicketMarker[] {
+  return loadPoolMarkers(join(poolDir, "issues"), knownConversationIds(poolDir), {
+    allowEmptyIssues: allowEmptyIssues || existsSync(join(poolDir, "conversations")),
+  });
+}
+
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
 // ADR): every buffered proposal is validated against the pool as the
 // boundary found it, the accepted ones are written as ordinary ticket files
@@ -5472,7 +5691,7 @@ export function adoptSpawnProposals(session: Session): void {
   // hand-written ticket in: markers reload, unseen ids resolve their
   // assignments (parent inheritance), and the tickets channel folds them in
   // at their on-disk statuses.
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,

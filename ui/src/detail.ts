@@ -391,6 +391,10 @@ export class Detail {
             const grade = gradeFromPayload(event.payload);
             if (grade) row.append(renderGrade(grade));
           }
+          if (event.kind === "reassigned") {
+            const text = reassignmentFromPayload(event.payload);
+            if (text) row.append(h("div", { class: "timeline-reassigned" }, text));
+          }
         }
       }
       body.append(row);
@@ -873,6 +877,27 @@ function gradeFromPayload(payload: Record<string, unknown>): GradeDetail | null 
     return null;
   }
   return { score, verdict, reasons };
+}
+
+// A config reload's `reassigned` event (ADR-0018), as one readable line: "harness
+// / model → harness / model". A field the config leaves unassigned reads as
+// "unassigned", matching how the card badge reads a null Assignment field.
+// Anything not shaped like a from/to Assignment record (a foreign or torn
+// line) renders nothing beyond the plain event row above it — never throws,
+// so an event kind this build does not fully understand still shows its
+// timestamp instead of breaking the timeline.
+function reassignmentFromPayload(payload: Record<string, unknown>): string | null {
+  const describe = (side: unknown): string | null => {
+    if (typeof side !== "object" || side === null) return null;
+    const { harness, model } = side as Record<string, unknown>;
+    if (harness !== null && typeof harness !== "string") return null;
+    if (model !== null && typeof model !== "string") return null;
+    return `${harness ?? "unassigned"} / ${model ?? "unassigned"}`;
+  };
+  const from = describe((payload as Record<string, unknown>).from);
+  const to = describe((payload as Record<string, unknown>).to);
+  if (from === null || to === null) return null;
+  return `reassigned: ${from} → ${to}`;
 }
 
 // One grade under its attempt's graded event: the score and verdict on one

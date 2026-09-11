@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  LAYOUT,
   poolAssignmentDefaults,
   checkpointNotice,
   clampDetailWidth,
@@ -2312,6 +2313,71 @@ describe("projectPool with Conversations", () => {
   });
 });
 
+describe("layout: a row's pitch fits its tallest card", () => {
+  const rowY = (view: ReturnType<typeof projectPool>, id: string) =>
+    view.cards.find((c) => c.id === id)!.y;
+
+  it("keeps the plain row grid for headless tickets (#70)", () => {
+    const tickets = [ticket("A"), ticket("B", { blockedBy: ["A"] }), ticket("C", { blockedBy: ["B"] })];
+    const view = projectPool(snapshot({ state: { tickets } }));
+    expect(rowY(view, "ticket:B") - rowY(view, "ticket:A")).toBe(LAYOUT.rowH);
+    expect(rowY(view, "ticket:C") - rowY(view, "ticket:B")).toBe(LAYOUT.rowH);
+    expect(rowY(view, REVIEW_CARD_ID)).toBe(LAYOUT.reviewY);
+  });
+
+  it("gives a row the terminal pitch while any ticket in it runs a pane-backed attempt", () => {
+    const tickets = [
+      ticket("A", { status: "in-progress", paneId: "w17:p2" }),
+      ticket("A2"),
+      ticket("B", { blockedBy: ["A"] }),
+      ticket("C", { blockedBy: ["B"] }),
+    ];
+    const view = projectPool(snapshot({ state: { tickets } }));
+    // The depth-0 row holds the pane-backed ticket, so the row below starts
+    // a terminal pitch further down; the headless rows below keep rowH.
+    expect(rowY(view, "ticket:A2")).toBe(rowY(view, "ticket:A"));
+    expect(rowY(view, "ticket:B") - rowY(view, "ticket:A")).toBe(LAYOUT.terminalRowH);
+    expect(rowY(view, "ticket:C") - rowY(view, "ticket:B")).toBe(LAYOUT.rowH);
+    expect(LAYOUT.terminalRowH).toBeGreaterThan(LAYOUT.rowH);
+  });
+
+  it("settles a row back to the plain pitch once its attempt ends", () => {
+    const running = projectPool(
+      snapshot({
+        state: {
+          tickets: [ticket("A", { status: "in-progress", paneId: "w17:p2" }), ticket("B", { blockedBy: ["A"] })],
+        },
+      }),
+    );
+    const done = projectPool(
+      snapshot({
+        state: { tickets: [ticket("A", { status: "done" }), ticket("B", { blockedBy: ["A"] })] },
+      }),
+    );
+    expect(rowY(running, "ticket:B") - rowY(running, "ticket:A")).toBe(LAYOUT.terminalRowH);
+    expect(rowY(done, "ticket:B") - rowY(done, "ticket:A")).toBe(LAYOUT.rowH);
+  });
+
+  it("keeps REVIEW below the last row when tall rows push past its fixed spot", () => {
+    const chain: PoolTicketState[] = [];
+    for (let i = 0; i < 4; i++) {
+      chain.push(
+        ticket(`T${i}`, {
+          status: "in-progress",
+          paneId: `w1:p${i}`,
+          blockedBy: i === 0 ? [] : [`T${i - 1}`],
+        }),
+      );
+    }
+    const view = projectPool(
+      snapshot({ state: { tickets: chain, conversations: [conversation("conv-1")] } }),
+    );
+    const lastY = rowY(view, "ticket:T3");
+    expect(lastY).toBeGreaterThan(LAYOUT.reviewY - LAYOUT.terminalRowH);
+    expect(rowY(view, REVIEW_CARD_ID)).toBe(lastY + LAYOUT.terminalRowH);
+  });
+});
+
 describe("layout: the Conversations lane shifts ticket rows down", () => {
   it("pushes every ticket row down by one lane's worth of height when Conversations exist", () => {
     const without = projectPool(snapshot({ state: { tickets: [ticket("A")] } }));
@@ -2324,11 +2390,13 @@ describe("layout: the Conversations lane shifts ticket rows down", () => {
     const laneY = withConvo.cards.find((c) => c.id === "conversation:conv-1")!.y;
     const ticketYWithout = without.cards.find((c) => c.id === "ticket:A")!.y;
     const ticketYWith = withConvo.cards.find((c) => c.id === "ticket:A")!.y;
-    // The lane sits one row below START; every ticket row shifts down by
-    // exactly that same lane height, so the two gaps match.
-    const laneHeight = laneY - startY;
-    expect(laneHeight).toBeGreaterThan(0);
-    expect(ticketYWith - ticketYWithout).toBe(laneHeight);
+    // The lane sits one row below START; every ticket row shifts down by the
+    // lane's own height, which is the tall pitch a live Conversation card
+    // (terminal peek, End row) needs, not the plain ticket row height.
+    expect(laneY - startY).toBe(LAYOUT.rowH);
+    expect(ticketYWith - ticketYWithout).toBe(LAYOUT.conversationLaneH);
+    expect(ticketYWith - laneY).toBe(LAYOUT.conversationLaneH);
+    expect(LAYOUT.conversationLaneH).toBeGreaterThan(LAYOUT.rowH);
   });
 
   it("lays out multiple Conversations as one centered row, like a ticket depth", () => {
