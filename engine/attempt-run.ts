@@ -1,0 +1,1283 @@
+/**
+ * The Attempt-run module (ADR-0014, amended): the one code path every spawn
+ * site in the engine runs an Attempt through. A Ticket attempt, the merge
+ * resolver, a grader, the head-to-head judge and a Conversation each hand
+ * this module a parameter list (`AttemptSpec`) and the pool facts it needs
+ * (`AttemptEnv`), and the module owns everything the five sites used to
+ * repeat: clearing the stale result, naming and rotating the attempt's
+ * files through the events module (ADR-0003), building the one
+ * `SpawnContext`, deciding terminal-backed once, opening the herdr tab or
+ * spawning headless, recording the `spawned` event, tailing the Stream file
+ * into the derived log (ADR-0012, ADR-0016), waiting for readiness and
+ * delivering the prompt, racing the Attempt ending against the result file,
+ * reading the result, deriving the crash reason, and recording `exited` and
+ * `crash` on the Ticket log.
+ *
+ * The seam is split in two so a Conversation, which never ends on a result
+ * file, can use the launch half alone: `launchAttempt` runs from the stale
+ * result clear to the delivered prompt and returns a handle, `awaitAttempt`
+ * takes the handle to the exit facts, and `runAttempt` is both plus the log
+ * events. What stays with the callers is deliberate: marker status writes
+ * (three role rules under ADR-0005), tab close (per-role triggers), and the
+ * role's own events.
+ */
+
+import {
+  closeSync,
+  createWriteStream,
+  existsSync,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  type WriteStream,
+} from "node:fs";
+import { once } from "node:events";
+import { join } from "node:path";
+import {
+  appendEvent,
+  attemptExitCodeName,
+  attemptLogName,
+  attemptOutcomeName,
+  attemptStreamName,
+  lastAttemptOfKind,
+  type AttemptLogName,
+  type TicketEventKind,
+} from "./events.ts";
+import type { TicketStatus } from "./pool.ts";
+import {
+  defaultHarnessDescriptors,
+  elidePromptArgv,
+  engineEnvSet,
+  harnessCommandFor,
+  harnessStreamMode,
+  interactiveHarnessCommand,
+  spawnEnv,
+  type HarnessCommand,
+  type SpawnContext,
+} from "./spawn.ts";
+import {
+  attemptTabLabel,
+  closePane,
+  openAttemptTab,
+  paneSendInput,
+} from "./herdr.ts";
+import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
+import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
+import type { ChildTracker } from "./children.ts";
+import {
+  StreamLineBuffer,
+  TranscriptLineBuffer,
+  deriveStreamLine,
+} from "./streamlog.ts";
+import { commitShaAt } from "./worktrees.ts";
+
+// ---------------------------------------------------------------------------
+// The interface
+// ---------------------------------------------------------------------------
+
+/**
+ * The pool facts an Attempt runs against, modelled on the narrowed
+ * environment `runTicket` already took instead of the whole session.
+ * `terminalBacked` is the one place the pool's terminal setting is decided
+ * (ADR-0014): every site reads the flag, none of them the config.
+ */
+export interface AttemptEnv {
+  runsDir: string;
+  harnesses: Record<string, HarnessCommand>;
+  herdrSocket: string;
+  children: ChildTracker;
+  terminalBacked: boolean;
+  agents?: string;
+}
+
+/**
+ * What genuinely varies between the five spawn sites. `R` is the shape of a
+ * valid result as the site's validator returns it; it appears only in the
+ * `exited` status rule, so a launch-only caller can leave it defaulted.
+ */
+export interface AttemptSpec<R extends { ok: true } = { ok: true }> {
+  /** The Ticket (or Conversation) id the log and the files are keyed by. */
+  id: string;
+  /** The canonical Issue file the driver line hands the agent. */
+  issuePath: string;
+  /** The tab label's title. */
+  title: string;
+  /** The prompt body. */
+  body: string;
+  driver: string;
+  harness: string;
+  model: string;
+  /** Where the harness runs. */
+  cwd: string;
+  /** The branch fact the `spawned` event records; null in the main checkout. */
+  branch: string | null;
+  /** The attempt number the events key off; the caller allocates it. */
+  attempt: number;
+  /** The free variables of the attempt's file names (events module). */
+  naming: AttemptLogName;
+  /**
+   * Whether the well-known log rotates before this run writes it, keyed on
+   * the last exited attempt. A verify candidate writes an attempt-numbered
+   * log directly and never rotates; the resolver rotates before it appends
+   * the `resolver` event its rotation keys on, so it rotates at its own
+   * site and passes "none" here; a Conversation has exactly one attempt.
+   */
+  rotate: "exited" | "none";
+  /**
+   * What happens when the pool is terminal-backed and the tab cannot be
+   * opened or the wrapper cannot be sent: "headless" runs the batch command
+   * with the error on the `spawned` event (ADR-0014); "none" fails the
+   * launch, for a Conversation that is a TUI or nothing (ADR-0018).
+   */
+  fallback: "headless" | "none";
+  /**
+   * How the prompt reaches a terminal-backed pane: "driver" is the
+   * descriptor's interactive shaping (the `/driver <issue>` line, echo
+   * verified on the issue reference, with the file-referencing fallback);
+   * "plain" types the body verbatim, echo verified on `echo`, with no driver
+   * line and no fallback (a Conversation's opening Turn).
+   */
+  prompt: { kind: "driver" } | { kind: "plain"; echo: string };
+  /** The subject a crash reason names: "harness exited 3", "resolver exited 3". */
+  crashSubject: "harness" | "resolver";
+  /**
+   * Which events the run appends to the Ticket log: "full" records
+   * `spawned`, `exited` and `crash`, with `exitedStatus` giving the exited
+   * event's status on a clean exit with a valid result (in-progress on any
+   * crash), and `resultEvents` naming the events a valid result itself
+   * carries (a ticket Outcome's rejected spawn proposals), appended before
+   * `exited` so the log reads in the order the attempt produced them;
+   * "spawned-only" records the spawn and nothing after, the resolver's and
+   * a Conversation's contract.
+   */
+  events:
+    | {
+        kind: "full";
+        exitedStatus: (result: R) => TicketStatus;
+        resultEvents?: (result: R) => Array<{ kind: TicketEventKind; payload: Record<string, unknown> }>;
+      }
+    | { kind: "spawned-only" };
+}
+
+/** A result file that could not be read as a valid result, with the reason the crash event carries. */
+export interface ReadFailure {
+  ok: false;
+  reason: string;
+}
+
+/** A site's result validator: the parsed JSON to a valid result or a failure. */
+export type ResultValidator<R extends { ok: true }> = (
+  parsed: unknown,
+) => R | ReadFailure;
+
+/** The follow-file tailer deriving a pane's log from its Stream file. */
+export interface PaneTailer {
+  finish: () => Promise<void>;
+}
+
+interface AttemptHandleBase {
+  env: AttemptEnv;
+  spec: AttemptSpec<any>;
+  ctx: SpawnContext;
+  /** The pane the attempt runs in; null when headless (pool or fallback). */
+  paneId: string | null;
+  tabId: string | null;
+}
+
+/**
+ * A launched Attempt: `live` once the harness is running and its prompt has
+ * landed (or it runs headless), `ended` when the harness died before its
+ * TUI came up (with its own exit code, the pane kept) or the launch was
+ * botched (the engine's negative code, the pane closed). An ended handle
+ * carries no tailer: the launch drained it, so the derived log is complete.
+ */
+export type AttemptHandle =
+  | (AttemptHandleBase & {
+      kind: "live";
+      /** The headless child's pid (ADR-0017); absent in a pane. */
+      pid?: number;
+      /** The headless child's exit, already in flight; null in a pane. */
+      headlessExit: Promise<number> | null;
+      tailer: PaneTailer | null;
+    })
+  | (AttemptHandleBase & { kind: "ended"; code: number });
+
+/** The exit facts every site reads (ADR-0012), plus the result. */
+export interface AttemptFacts {
+  code: number;
+  logTail: string[];
+  outcomeExists: boolean;
+  paneId: string | null;
+  tabId: string | null;
+  logPath: string;
+  outcomePath: string;
+  exitCodePath: string;
+}
+
+/**
+ * One Attempt's ending: `ok` exactly when the harness exited 0 and the
+ * result file validated; otherwise the crash reason by today's rule (a
+ * non-zero code wins over the file's contents; else the validator's
+ * reason). The result rides on the crash branch too, because a valid
+ * Outcome beside a non-zero code is still a fact a site records.
+ */
+export type AttemptRun<R extends { ok: true }> = AttemptFacts &
+  (
+    | { ok: true; result: R; crashReason: null }
+    | { ok: false; result: R | ReadFailure; crashReason: string }
+  );
+
+// ---------------------------------------------------------------------------
+// Naming and the result reader
+// ---------------------------------------------------------------------------
+
+/**
+ * One attempt's Stream file path (ADR-0012, amended by ADR-0016 for the
+ * terminal-backed path), or null when headless and the harness is raw: the
+ * file's mode follows the pool. A terminal-backed attempt always gets a
+ * Stream file, the `script` typescript capturing the whole session,
+ * whatever the harness's stream mode, because the derived log comes from
+ * it. A headless attempt's Stream file is the harness's structured stream,
+ * which only stream-mode harnesses (claude, cursor) produce; raw harnesses
+ * keep the old passthrough log. Verify attempts write attempt-numbered
+ * Stream files directly, exactly as their logs do, so N parallel attempts
+ * never share a path.
+ */
+export function attemptStreamPath(
+  runsDir: string,
+  ticketId: string,
+  harness: string,
+  attempt: number | null,
+  resolver: boolean,
+  terminal: boolean,
+): string | null {
+  if (terminal || harnessStreamMode(harness) === "stream") {
+    return join(runsDir, attemptStreamName(ticketId, attempt, resolver));
+  }
+  return null;
+}
+
+/**
+ * Attempt rotation on re-run (ADR 0002): before a new attempt writes, an
+ * existing well-known log moves to its attempt-numbered name so a re-run
+ * never destroys the ticket's history, and its Stream file rotates with it
+ * (ADR-0012). The number is the attempt the events file recorded for the run
+ * that wrote the file: the last exited implement (or engine-run) attempt for
+ * the base log, the last resolver run for the resolver log. Implement logs
+ * key on "exited" rather than "spawned" because a resolver run records a
+ * spawned event of its own (ADR-0012) and never an exited one, so "exited"
+ * still names exactly the run that wrote the file. A pre-feature log
+ * (written before events existed) rotates to attempt-0. The names come from
+ * the events module's naming contract.
+ */
+export function rotateAttemptLog(
+  runsDir: string,
+  ticketId: string,
+  wellKnownPath: string,
+  kind: TicketEventKind,
+): void {
+  const resolver = kind === "resolver";
+  const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
+  if (existsSync(wellKnownPath)) {
+    renameSync(
+      wellKnownPath,
+      join(runsDir, attemptLogName(ticketId, attempt, resolver)),
+    );
+  }
+  // The Stream file was written by the run that wrote the log, so it
+  // rotates under the same attempt number. Rotated independently of the
+  // log: a stream-only leftover (a run that died before any log line
+  // derived) must still rotate.
+  const wellKnownStream = join(
+    runsDir,
+    attemptStreamName(ticketId, null, resolver),
+  );
+  if (existsSync(wellKnownStream)) {
+    renameSync(
+      wellKnownStream,
+      join(runsDir, attemptStreamName(ticketId, attempt, resolver)),
+    );
+  }
+}
+
+/**
+ * The one result reader (ADR-0005: the result file is the only ending
+ * signal). The preamble is shared by every site, a missing file and an
+ * unparseable one having the same two reasons everywhere; what a valid
+ * result looks like is the site's validator, so an Outcome, a resolution, a
+ * grade and a verdict read through the one path without agreeing on shape.
+ */
+export function readAttemptResult<R extends { ok: true }>(
+  path: string,
+  validate: ResultValidator<R>,
+): R | ReadFailure {
+  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { ok: false, reason: "outcome is not parseable JSON" };
+  }
+  return validate(parsed);
+}
+
+// The exit facts' log tail (ADR-0012): the last ~20 lines of the attempt's
+// log, so the events file alone shows how the attempt ended. A missing or
+// unreadable log reads as no lines, never as an error: the fact is the
+// empty tail.
+const LOG_TAIL_LINES = 20;
+
+export function readLogTail(logPath: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(logPath, "utf8");
+  } catch {
+    return [];
+  }
+  const lines = text.split("\n");
+  // A trailing newline ends the file, it does not open an empty line.
+  if (lines.at(-1) === "") lines.pop();
+  return lines.slice(-LOG_TAIL_LINES);
+}
+
+// ---------------------------------------------------------------------------
+// The three operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Launch one Attempt: from the stale result clear to the delivered prompt.
+ * Throws only for a pool config error (an assignment the harness table
+ * cannot serve) or, with `fallback: "none"`, a terminal that could not be
+ * had: the error names which half failed (`could not open a herdr tab` or
+ * `could not deliver the launch command`) so the caller can prefix its own
+ * contract's words.
+ */
+export async function launchAttempt<R extends { ok: true }>(
+  env: AttemptEnv,
+  spec: AttemptSpec<R>,
+): Promise<AttemptHandle> {
+  const { id, naming } = spec;
+  const logPath = join(
+    env.runsDir,
+    attemptLogName(id, naming.attempt, naming.resolver),
+  );
+  if (spec.rotate === "exited") {
+    rotateAttemptLog(env.runsDir, id, logPath, "exited");
+  }
+  const outcomePath = join(
+    env.runsDir,
+    attemptOutcomeName(id, naming.attempt, naming.resolver),
+  );
+  // Every attempt starts with no result: a file a previous attempt left
+  // behind would be read as this attempt's result, honoring a stale status.
+  rmSync(outcomePath, { force: true });
+  const ctx: SpawnContext = {
+    id,
+    issuePath: spec.issuePath,
+    body: spec.body,
+    driver: spec.driver,
+    harness: spec.harness,
+    model: spec.model,
+    agents: env.agents,
+    logPath,
+    streamPath: attemptStreamPath(
+      env.runsDir,
+      id,
+      spec.harness,
+      naming.attempt,
+      naming.resolver,
+      env.terminalBacked,
+    ),
+    outcomePath,
+    exitCodePath: join(
+      env.runsDir,
+      attemptExitCodeName(id, naming.attempt, naming.resolver),
+    ),
+    cwd: spec.cwd,
+  };
+  const command = harnessCommandFor(env.harnesses, spec, id);
+  const batchArgv = (): string[] => command(ctx);
+  const recordSpawned = (
+    argv: string[],
+    terminal: AttemptTerminal | undefined,
+    terminalError?: string,
+    pid?: number,
+  ): void =>
+    appendEvent(env.runsDir, id, {
+      at: new Date().toISOString(),
+      attempt: spec.attempt,
+      kind: "spawned",
+      payload: spawnedPayload(argv, ctx, spec.branch, terminal, terminalError, pid),
+    });
+  const headless = (
+    terminal: AttemptTerminal | undefined,
+    terminalError?: string,
+  ): AttemptHandle => {
+    // A headless spawn records once the child exists, so the event carries
+    // its pid (ADR-0017); the callback runs before the first byte is pumped.
+    const argv = batchArgv();
+    let pid: number | undefined;
+    const headlessExit = spawnToLog(argv, ctx, env.children, (spawnedPid) => {
+      pid = spawnedPid;
+      recordSpawned(argv, terminal, terminalError, spawnedPid);
+    });
+    return {
+      kind: "live",
+      env,
+      spec,
+      ctx,
+      paneId: null,
+      tabId: null,
+      ...(pid !== undefined ? { pid } : {}),
+      headlessExit,
+      tailer: null,
+    };
+  };
+
+  if (!env.terminalBacked) {
+    if (spec.fallback === "none") {
+      throw new Error("the pool is not terminal-backed");
+    }
+    return headless(undefined);
+  }
+  // A terminal-backed attempt opens its own named herdr tab before the
+  // spawn is recorded, so the spawned event can carry the recovered pane id
+  // (ADR-0014, ADR-0015); the event is recorded once the wrapper send's
+  // outcome is known, so a mid-flight fallback records pane_id null plus
+  // terminal_error instead of the dead pane.
+  const terminal = await openAttemptTerminal(
+    env.herdrSocket,
+    id,
+    spec.title,
+    spec.cwd,
+  );
+  if (terminal.paneId === null || terminal.tabId === null) {
+    if (spec.fallback === "none") {
+      throw new Error(`could not open a herdr tab: ${terminal.error}`);
+    }
+    return headless(terminal);
+  }
+  const interactiveArgv = interactiveHarnessCommand(env.harnesses, spec.harness)(ctx);
+  const terminalError = await sendWrapperToPane(
+    env.herdrSocket,
+    terminal.paneId,
+    interactiveArgv,
+    ctx,
+  );
+  if (terminalError !== undefined) {
+    if (spec.fallback === "none") {
+      throw new Error(`could not deliver the launch command: ${terminalError}`);
+    }
+    return headless(terminal, terminalError);
+  }
+  recordSpawned(interactiveArgv, terminal);
+  // The session half of a terminal-backed spawn (ADR-0016): the tailer on
+  // the attempt's typescript Stream file, then prompt delivery (readiness
+  // wait, typed prompt, echo verification, retry, file-reference fallback).
+  // A botched delivery closes the pane so the operator is not left a
+  // silently idle tab and ends with the engine's negative code. A harness
+  // that exited on its own before the TUI came up ends with its code and
+  // keeps its pane, the way every crashed attempt's tab stays open
+  // (ADR-0014): the pane shows why it died, and when `script` itself
+  // refused to run (issue #58) the pane is the only place that shows it,
+  // the Stream file having never been created. The tailer always drains the
+  // transcript it has so the crash log carries what the pane showed.
+  const tailer = ctx.streamPath
+    ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
+    : null;
+  const failure = await deliverPrompt(env.herdrSocket, terminal.paneId, ctx, spec.prompt);
+  if (failure !== undefined) {
+    if (isBotchedSpawnCode(failure)) {
+      void closePane(env.herdrSocket, terminal.paneId).catch(() => {});
+    }
+    if (tailer) await tailer.finish().catch(() => {});
+    return {
+      kind: "ended",
+      env,
+      spec,
+      ctx,
+      paneId: terminal.paneId,
+      tabId: terminal.tabId,
+      code: failure,
+    };
+  }
+  return {
+    kind: "live",
+    env,
+    spec,
+    ctx,
+    paneId: terminal.paneId,
+    tabId: terminal.tabId,
+    headlessExit: null,
+    tailer,
+  };
+}
+
+/**
+ * Wait for a launched Attempt's ending and read its result. A live pane
+ * races the Attempt ending against the result file (ADR-0016: the attempt
+ * ends on a valid result without requiring pane exit); a headless child is
+ * its exit; an ended handle skips the wait. The tailer, if any, is drained
+ * before the log tail is read, so the exit facts are complete.
+ */
+export async function awaitAttempt<R extends { ok: true }>(
+  handle: AttemptHandle,
+  validate: ResultValidator<R>,
+): Promise<AttemptRun<R>> {
+  const { env, spec, ctx } = handle;
+  let code: number;
+  if (handle.kind === "ended") {
+    code = handle.code;
+  } else if (handle.headlessExit !== null) {
+    code = await handle.headlessExit;
+  } else {
+    try {
+      code = await awaitOutcomeOrPaneEnd(
+        env.herdrSocket,
+        handle.paneId!,
+        ctx.exitCodePath,
+        ctx.outcomePath,
+        // The attempt's completion: a valid result the moment it appears,
+        // without waiting for the TUI to exit (ADR-0016).
+        (path) => readAttemptResult(path, validate).ok,
+      );
+    } finally {
+      if (handle.tailer) await handle.tailer.finish().catch(() => {});
+    }
+  }
+  const result = readAttemptResult(ctx.outcomePath, validate);
+  // The exit facts (ADR-0012), computed the moment the attempt exits: the
+  // log is closed by now, so the tail is complete, and the result file's
+  // existence is the fact that distinguishes "agent never wrote its
+  // outcome" from "outcome was invalid".
+  const facts: AttemptFacts = {
+    code,
+    logTail: readLogTail(ctx.logPath),
+    outcomeExists: existsSync(ctx.outcomePath),
+    paneId: handle.paneId,
+    tabId: handle.tabId,
+    logPath: ctx.logPath,
+    outcomePath: ctx.outcomePath,
+    exitCodePath: ctx.exitCodePath,
+  };
+  if (code !== 0) {
+    return {
+      ...facts,
+      ok: false,
+      result,
+      crashReason: attemptCrashReason(
+        env.children,
+        code,
+        ctx.exitCodePath,
+        spec.crashSubject,
+        handle.paneId,
+      ),
+    };
+  }
+  if (!result.ok) return { ...facts, ok: false, result, crashReason: result.reason };
+  return { ...facts, ok: true, result, crashReason: null };
+}
+
+/**
+ * One Attempt end to end: launch, await, and (with full events) the
+ * `exited` event on every ending and the `crash` event on a bad one, with
+ * the payloads the Ticket log has always carried. A crash is recorded the
+ * moment the attempt exits, not at the end of the super-step, so the log
+ * stops masquerading a dead attempt as running work; the crash interrupt
+ * itself is still the caller's, raised at its own boundary.
+ */
+export async function runAttempt<R extends { ok: true }>(
+  env: AttemptEnv,
+  spec: AttemptSpec<R>,
+  validate: ResultValidator<R>,
+): Promise<AttemptRun<R>> {
+  const handle = await launchAttempt(env, spec);
+  const run = await awaitAttempt(handle, validate);
+  if (spec.events.kind === "full") {
+    const status: TicketStatus = run.ok
+      ? spec.events.exitedStatus(run.result)
+      : "in-progress";
+    const { code, logTail, outcomeExists } = run;
+    for (const event of run.ok ? (spec.events.resultEvents?.(run.result) ?? []) : []) {
+      appendEvent(env.runsDir, spec.id, {
+        at: new Date().toISOString(),
+        attempt: spec.attempt,
+        ...event,
+      });
+    }
+    appendEvent(env.runsDir, spec.id, {
+      at: new Date().toISOString(),
+      attempt: spec.attempt,
+      kind: "exited",
+      payload: { code, status, logTail, outcomeExists },
+    });
+    if (!run.ok) {
+      appendEvent(env.runsDir, spec.id, {
+        at: new Date().toISOString(),
+        attempt: spec.attempt,
+        kind: "crash",
+        payload: { code, reason: run.crashReason, logTail, outcomeExists },
+      });
+    }
+  }
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// The terminal half: tab, wrapper, spawned payload
+// ---------------------------------------------------------------------------
+
+/**
+ * The terminal facts a terminal-backed spawn adds to the `spawned` event's
+ * payload (ADR-0014, ADR-0015): the pane id the attempt's named tab was
+ * recovered to and the tab id that pane lives in (the tab id is what merge
+ * cleanup closes the terminal by), and, when the tab could not be opened, the
+ * error that stopped it. Both ids are null on that fallback path: the attempt
+ * runs headless and the ticket log carries why.
+ */
+interface AttemptTerminal {
+  paneId: string | null;
+  tabId: string | null;
+  error?: string;
+}
+
+/**
+ * Open the attempt's named herdr tab for a terminal-backed spawn. Never
+ * throws: herdr is optional (ADR-0014), so a missing or misbehaving daemon
+ * falls the spawn back to headless and the failure lands on the spawned
+ * event, where the ticket log shows it.
+ */
+async function openAttemptTerminal(
+  socketPath: string,
+  id: string,
+  title: string,
+  cwd: string,
+): Promise<AttemptTerminal> {
+  try {
+    const tab = await openAttemptTab(
+      socketPath,
+      attemptTabLabel(id, title),
+      cwd,
+    );
+    return { paneId: tab.paneId, tabId: tab.tabId };
+  } catch (err) {
+    return {
+      paneId: null,
+      tabId: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * The `spawned` event's payload (ADR-0012): the facts that would have
+ * diagnosed a wrong-commit or wrong-place spawn from one line. The argv
+ * carries the prompt body elided; the commit SHA resolves from the spawn cwd
+ * at spawn time (null when git is unavailable or the cwd is not a checkout);
+ * env is the keys the engine set on the child environment beyond the
+ * inherited parent's, with their values. Terminal-backed spawns add pane_id
+ * (and terminal_error on a headless fallback, whenever it happened: the tab
+ * refusing to open or the wrapper refusing to send), per ADR-0014 and
+ * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
+ * boot reconciliation checks for an orphan of a dead engine process.
+ */
+function spawnedPayload(
+  argv: string[],
+  ctx: SpawnContext,
+  branch: string | null,
+  terminal?: AttemptTerminal,
+  terminalError?: string,
+  pid?: number,
+): Record<string, unknown> {
+  return {
+    argv: elidePromptArgv(argv, ctx.body),
+    cwd: ctx.cwd,
+    branch,
+    commitSha: commitShaAt(ctx.cwd),
+    env: engineEnvSet(spawnEnv(ctx.cwd)),
+    ...(pid !== undefined ? { pid } : {}),
+    ...(terminal
+      ? {
+          // A mid-flight fallback (the wrapper could not be sent to the pane)
+          // nulls both ids and carries its own error, exactly the shape of
+          // the tab.create fallback: the attempt runs headless, and the log
+          // must never point at the dead pane the fallback closed.
+          pane_id: terminalError !== undefined ? null : terminal.paneId,
+          tab_id: terminalError !== undefined ? null : terminal.tabId,
+          ...(terminal.error !== undefined || terminalError !== undefined
+            ? { terminal_error: terminalError ?? terminal.error }
+            : {}),
+        }
+      : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Prompt delivery and the completion wait
+// ---------------------------------------------------------------------------
+
+// The completion poll's cadence: how often a terminal-backed attempt checks
+// whether its result has appeared.
+const ATTEMPT_COMPLETE_POLL_MS = 250;
+// The engine's own negative "exit codes" for a botched interactive spawn,
+// mapped to human reasons by exitCrashReason. They are deliberately not
+// codes a harness can exit with, and stay clear of EXIT_CODE_UNREADABLE and
+// EXIT_CODE_PANE_GONE, the ending wait's own sentinels.
+const SPAWN_INTERACTIVE_READY_FAILED = -3;
+const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
+
+// Whether a spawn's code is one of the engine's own: the harness never ran
+// (or never took its prompt), as opposed to a code the harness exited with.
+function isBotchedSpawnCode(code: number): boolean {
+  return (
+    code === SPAWN_INTERACTIVE_READY_FAILED ||
+    code === SPAWN_INTERACTIVE_PROMPT_FAILED
+  );
+}
+
+function sleep(ms: number): Promise<null> {
+  return new Promise((resolve) => setTimeout(() => resolve(null), ms));
+}
+
+/**
+ * The prompt delivery half of a terminal-backed spawn (ADR-0016): wait for
+ * the harness's ready frame, type the prompt, verify the echo, retry on a
+ * lost paste, and (for a driver prompt) fall back to a short
+ * file-referencing command when full-prompt pasting fails. Resolves
+ * `undefined` once the prompt is in; a botched delivery resolves with the
+ * engine's negative code; a harness that exited before its TUI came up
+ * resolves with its own code. A custom harness (no descriptor) declares no
+ * TUI: a driver prompt types nothing (its command runs as-is under the
+ * script wrapper and its result or pane end decides the attempt), and a
+ * plain prompt skips the readiness wait but is still typed, the operator's
+ * words being the point.
+ */
+async function deliverPrompt(
+  socketPath: string,
+  paneId: string,
+  ctx: SpawnContext,
+  prompt: AttemptSpec["prompt"],
+): Promise<number | undefined> {
+  try {
+    return await deliverPromptInner(socketPath, paneId, ctx, prompt);
+  } catch {
+    // A send failed mid-delivery (the daemon died after the wrapper was
+    // sent): the prompt never landed. One attempt's terminal trouble must
+    // never take the drive down, so this surfaces as the botched-spawn
+    // failure rather than a throw.
+    return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  }
+}
+
+async function deliverPromptInner(
+  socketPath: string,
+  paneId: string,
+  ctx: SpawnContext,
+  prompt: AttemptSpec["prompt"],
+): Promise<number | undefined> {
+  const descriptor = defaultHarnessDescriptors[ctx.harness];
+  if (!descriptor && prompt.kind === "driver") return undefined;
+  if (descriptor) {
+    const readiness = await waitForReadiness(
+      socketPath,
+      paneId,
+      ctx.harness,
+      descriptor.readyPattern,
+      ctx.exitCodePath,
+    );
+    // The harness exited before its TUI came up: the wrapper's exit-code
+    // file holds its code, and that code, not a botched-spawn sentinel, is
+    // the attempt's ending, exactly as a headless spawn that died on launch
+    // reports (a 0 with no result lands on the missing-outcome path).
+    if (readiness === "exited") return readExitCode(ctx.exitCodePath);
+    if (readiness !== "ready") return SPAWN_INTERACTIVE_READY_FAILED;
+  }
+  const clearKeys = descriptor?.clearKeys ?? [];
+  if (prompt.kind === "plain") {
+    const echoTargets = [descriptor?.echoPattern, prompt.echo].filter(
+      (target): target is string => typeof target === "string" && target.length > 0,
+    );
+    if (await typeVerified(socketPath, paneId, ctx.body, echoTargets, clearKeys)) {
+      return undefined;
+    }
+    return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  }
+  const shaped = descriptor!.promptShaping.interactive(ctx);
+  // The fallback's prompt file, written by the engine so the path is known
+  // to both sides; named from the result path so N parallel attempts never
+  // share one. It carries the issue reference the primary prompt's driver
+  // line would have carried, then the body, so the agent the fallback
+  // reaches still starts on the right ticket.
+  const promptFile = ctx.outcomePath.replace(/\.json$/, ".prompt.txt");
+  writeFileSync(promptFile, `${ctx.issuePath}\n\n${ctx.body}`);
+  const echoTargets = [
+    descriptor!.echoPattern,
+    // The issue reference rides every known TUI's prompt, so it is the
+    // harness-agnostic echo signal (claude and cursor also collapse the
+    // paste to their echoPattern marker).
+    ctx.issuePath,
+  ].filter((target): target is string => typeof target === "string");
+  // A harness with no verified clear sequence cannot safely re-paste: a
+  // false-negative echo would concatenate. One attempt, then a loud fail.
+  // Clear keys are not sent before the first paste: opencode's ctrl+c
+  // exits on empty input (prototype/tui-clear-input/FINDINGS.md). The
+  // retry-with-clear loop and its echo verification are pane-session.ts's
+  // typeVerified.
+  if (await typeVerified(socketPath, paneId, shaped, echoTargets, clearKeys)) {
+    return undefined;
+  }
+  if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  // Full-prompt pasting failed: the file-referencing fallback, short enough
+  // to survive any input-buffer cap (prototype finding, all three harnesses).
+  // The command carries the attempt's own driver, so a grader, resolver, or
+  // head-to-head judge falls back to its own skill, not the ticket driver's.
+  // One un-retried attempt: the pane was just cleared, so typeVerified needs
+  // no clear keys of its own here.
+  const fallback = `/${ctx.driver} ${promptFile}`;
+  await paneSendInput(socketPath, paneId, { keys: clearKeys });
+  if (await typeVerified(socketPath, paneId, fallback, [promptFile], [])) {
+    return undefined;
+  }
+  return SPAWN_INTERACTIVE_PROMPT_FAILED;
+}
+
+/**
+ * The completion wait of a terminal-backed spawn (ADR-0016, on ADR-0014's
+ * raced endings): the attempt ends on a valid result without requiring pane
+ * exit, since a TUI deliberately stays alive after the agent declares done,
+ * so the result poll races the attempt's ending (attempt-ending.ts races
+ * herdr's pane end against the wrapper's exit-code file, and a pane that
+ * vanishes from the listing with no file behind it is the pane's own crash),
+ * and the loser is released so one attempt costs the pool no subscription
+ * and no timer once it is over. Exported for the boot-adopted attempt's
+ * finalize (engine.ts), which waits on a pane it never launched.
+ */
+export async function awaitOutcomeOrPaneEnd(
+  socketPath: string,
+  paneId: string,
+  exitCodePath: string,
+  outcomePath: string,
+  completed: (path: string) => boolean,
+): Promise<number> {
+  const release = new AbortController();
+  try {
+    const ending = await Promise.race([
+      waitForAttemptEnding(socketPath, paneId, exitCodePath, release.signal),
+      outcomeCompleted(outcomePath, completed, release.signal),
+    ]);
+    // The result may have been written a moment before the ending landed;
+    // confirm before reading the ending as a crash.
+    if (ending === "outcome" || completed(outcomePath)) return 0;
+    // A pane that left the listing has already been given the ending's grace
+    // window to write its file and did not, so there is nothing to read and
+    // nothing to wait for: reading anyway buys only the retry's two seconds
+    // and then the wrong words, blaming a wrapper that never got to run.
+    if (ending === "pane-gone") return EXIT_CODE_PANE_GONE;
+    // The exit-code file is written before the shell exits, so it is already
+    // there in the normal case; the retry only covers a daemon that reaps
+    // the pane ahead of the wrapper's last write.
+    return readExitCode(exitCodePath);
+  } finally {
+    release.abort();
+  }
+}
+
+// The result half of the completion race: resolves once the attempt's
+// completion predicate holds, polling at the completion cadence. Once the
+// race is lost it stops polling and never settles, collected with the race.
+async function outcomeCompleted(
+  outcomePath: string,
+  completed: (path: string) => boolean,
+  release: AbortSignal,
+): Promise<"outcome"> {
+  while (!release.aborted) {
+    if (completed(outcomePath)) return "outcome";
+    await sleep(ATTEMPT_COMPLETE_POLL_MS);
+  }
+  return new Promise(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Exit codes and crash reasons
+// ---------------------------------------------------------------------------
+
+// No exit code ever arrived: the wrapper's file was missing or unparseable
+// after every retry. A shell exit status is 0-255, so a negative can never
+// collide with a real one, which is what makes it usable as the signal.
+const EXIT_CODE_UNREADABLE = -1;
+
+// The pane left herdr's listing and the ending's grace window passed with no
+// file behind it (attempt-ending.ts): the attempt is over and its exit status
+// is not recoverable from anywhere. Its own value for the same reason as
+// EXIT_CODE_UNREADABLE, and distinct from it because the two want different
+// words: nothing here is the wrapper's doing.
+const EXIT_CODE_PANE_GONE = -2;
+
+// The crash reason for a non-zero exit, whose causes want different words. A
+// real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
+// fate is unknown and the pane wrapper is the thing to look at;
+// EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
+// their faults and is why it names the pane instead; the SPAWN_INTERACTIVE
+// codes are the engine's own botched interactive spawn, where the harness
+// never ran at all. The distinction is worth a helper: an unparseable file
+// reported itself as `exited 1` on attempts that had in fact succeeded, and
+// read as a harness fault until the file itself was inspected (ADR-0014's
+// amendment). `paneId` is not optional so that a new crash site has to say
+// whether it has a pane at all; a headless attempt has none and can never
+// end this way.
+export function exitCrashReason(
+  code: number,
+  exitCodePath: string,
+  subject: string,
+  paneId: string | null,
+): string {
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "TUI never became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "prompt never landed";
+  }
+  if (code === EXIT_CODE_UNREADABLE) {
+    return (
+      `${subject} exit code unreadable: the pane wrapper never wrote a ` +
+      `usable ${exitCodePath}`
+    );
+  }
+  if (code === EXIT_CODE_PANE_GONE) {
+    return (
+      `${subject} pane gone: ${paneId ?? "the pane"} left herdr's listing ` +
+      `and no exit code was written to ${exitCodePath}`
+    );
+  }
+  return `${subject} exited ${code}`;
+}
+
+// The crash reason for an attempt's non-zero exit, naming a shutdown stop
+// as what it was (ADR-0017): a headless child the engine stopped exits on
+// the signal, and "exited 143" would read as the harness's own failure.
+// Terminal-backed attempts are never stopped, and the negative sentinels
+// are the engine's own codes, so both keep the ordinary reason.
+function attemptCrashReason(
+  children: ChildTracker,
+  code: number,
+  exitCodePath: string,
+  subject: string,
+  paneId: string | null,
+): string {
+  if (children.stopping && paneId === null && code > 0) {
+    return `${subject} stopped by engine shutdown (exited ${code})`;
+  }
+  return exitCrashReason(code, exitCodePath, subject, paneId);
+}
+
+// How the pool log names the ending in passing, where the line is about the
+// marker and the code is one clause of it. A real code is the shell's own
+// status and reads as one; a sentinel is not a status at all, so it says what
+// happened instead of printing a number no shell produced. Templating it
+// unconditionally put `exited -2` on the same line as a crash reason whose
+// whole purpose is to report that no exit status was ever observed, which
+// described one attempt two contradictory ways in a single breath.
+export function exitedPhrase(code: number): string {
+  if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
+  if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
+  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
+    return "ended before its TUI became ready";
+  }
+  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
+    return "ended before its prompt landed";
+  }
+  return `exited ${code}`;
+}
+
+// Read the wrapper-written exit code, retrying briefly for a reaping race,
+// and translating a missing or malformed file into EXIT_CODE_UNREADABLE: the
+// attempt still ended (pane killed, daemon lost) and the crash path is the
+// right ending, but it says which happened.
+async function readExitCode(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const parsed = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
+      if (Number.isFinite(parsed)) return parsed;
+    } catch {
+      // not there yet
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return EXIT_CODE_UNREADABLE;
+}
+
+// ---------------------------------------------------------------------------
+// The Stream file: the pane tailer and the headless pump
+// ---------------------------------------------------------------------------
+
+// Once the harness child has exited, its stdout/stderr pumps get this long to
+// drain whatever is still in flight before the streams are torn down. A
+// grandchild that inherits the child's pipe and outlives it holds the write
+// end open, so EOF never arrives and an unbounded pump would park the drive
+// forever on a child that is already gone.
+const SPAWN_PUMP_GRACE_MS = 2_000;
+
+// A drain wait that cannot reject: a write stream an error is destroying
+// never drains, and that failure is recorded by the stream's error
+// listener, never by the pump's wait.
+function drainWait(stream: WriteStream): Promise<unknown> {
+  return once(stream, "drain").catch(() => {});
+}
+
+// The teardown write streams get at spawn end: end() on a stream an error
+// already destroyed throws ERR_STREAM_DESTROYED, so the destroyed check
+// skips it, and end's own write failure is recorded through onError rather
+// than thrown. Shared by the headless spawn's pumps and the terminal-backed
+// spawn's follow-file tailer.
+function endWriteStream(
+  stream: WriteStream,
+  onError: (error: unknown) => void,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (stream.destroyed) {
+      resolve();
+      return;
+    }
+    try {
+      stream.end((error: Error | null | undefined) => {
+        if (error) onError(error);
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/**
+ * The follow-file tailer (ADR-0014, amended by ADR-0016): reads the pane's
+ * `script` typescript Stream file as it grows and derives the attempt log
+ * from it line by line, stripping the ANSI and control noise so the log is
+ * the readable transcript of the whole session, operator input included
+ * (TranscriptLineBuffer). Terminal-backed attempts never derive stream-json
+ * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
+ * derivation. Polls by positioned reads; `finish` drains the tail, flushes
+ * the line buffer, and ends the log stream. Exported for the boot-adopted
+ * attempt's finalize (engine.ts), which tails a pane it never launched.
+ */
+export function startPaneStreamTail(
+  streamPath: string,
+  logPath: string,
+): PaneTailer {
+  const log = createWriteStream(logPath);
+  let streamError: unknown = null;
+  log.on("error", (error) => {
+    if (streamError === null) streamError = error;
+  });
+  const writeDerivedLine = async (line: string): Promise<void> => {
+    if (log.destroyed) return;
+    if (!log.write(`${line}\n`)) await drainWait(log);
+  };
+  let buffer = new TranscriptLineBuffer();
+  let offset = 0;
+  let fd: number | null = null;
+  let stepping = false;
+  const chunk = new Uint8Array(64 * 1024);
+  // One poll step: open the file once script has created it, then read
+  // everything new since the last offset through the line buffer.
+  // Concurrent ticks are skipped, never interleaved: a step awaits its log
+  // writes under backpressure, and two steps running at once could write
+  // the derived log out of order.
+  const step = async (): Promise<void> => {
+    if (stepping) return;
+    stepping = true;
+    try {
+      if (fd === null) {
+        try {
+          fd = openSync(streamPath, "r");
+        } catch {
+          return; // script has not created the file yet
+        }
+        offset = 0;
+        buffer = new TranscriptLineBuffer();
+      }
+      let size: number;
+      try {
+        size = fstatSync(fd).size;
+      } catch {
+        return;
+      }
+      if (size < offset) {
+        // The file was replaced (a re-run truncated it): re-read from scratch.
+        offset = 0;
+        buffer = new TranscriptLineBuffer();
+      }
+      while (offset < size) {
+        let read: number;
+        try {
+          read = readSync(fd, chunk, 0, chunk.length, offset);
+        } catch {
+          return;
+        }
+        if (read <= 0) return;
+        offset += read;
+        for (const line of buffer.push(chunk.subarray(0, read))) {
+          await writeDerivedLine(line);
+        }
+      }
+    } finally {
+      stepping = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void step().catch(() => {});
+  }, PANE_TAIL_POLL_MS);
+  const finish = async (): Promise<void> => {
+    clearInterval(timer);
+    await step().catch(() => {});
+    for (const line of buffer.flush()) await writeDerivedLine(line);
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already gone
+      }
+    }
+    await endWriteStream(log, (error) => {
+      if (streamError === null) streamError = error;
+    });
+    // A log the engine cannot write is a real failure, same as the headless
+    // spawn's rethrow.
+    if (streamError !== null) throw streamError;
+  };
+  return { finish };
+}
+
+async function spawnToLog(
+  argv: string[],
+  ctx: SpawnContext,
+  children: ChildTracker,
+  onSpawn?: (pid: number) => void,
+): Promise<number> {
+  // The child env comes from spawnEnv, the same builder the spawned event's
+  // env facts derive from, so the event cannot drift from what the child
+  // actually ran under (ADR-0012). The child leads its own process group
+  // (ADR-0017): a stop signals the group, so the harness's own children go
+  // with it instead of surviving as the orphans an untrapped kill left.
+  const proc = Bun.spawn(argv, {
+    cwd: ctx.cwd,
+    env: spawnEnv(ctx.cwd),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  });
+  children.track({ pid: proc.pid, exited: proc.exited });
+  onSpawn?.(proc.pid);
+  // A streamed harness (ADR-0012) also tees every stdout chunk verbatim to
+  // the attempt's Stream file, live as bytes arrive; both files open at
+  // spawn, so a tail on either shows activity from the first chunk.
+  const tee = ctx.streamPath ? createWriteStream(ctx.streamPath) : null;
+  // Both streams land in one log writer in arrival order, and land live,
+  // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
+  // is still running, and a crash log reads in the order the output
+  // happened. Stream mode writes derived lines instead of raw bytes
+  // (assistant text verbatim, one `[tool] Name: summary` line per tool
+  // call); raw mode writes the chunk itself, exactly as before.
+  const log = createWriteStream(ctx.logPath);
+  // A failing write stream errors and destroys itself, and an unlistened
+  // 'error' event escapes as an unhandled failure far from its cause. Both
+  // streams report into one first-error capture here: the spawn fails on it
+  // after teardown (a log the engine cannot write is a real failure, and
+  // still kills the spawn), while the destruction itself can no longer
+  // reject the teardown, because every writer and the end calls below check
+  // the streams first.
+  let streamError: unknown = null;
+  const noteStreamError = (error: unknown): void => {
+    if (streamError === null) streamError = error;
+  };
+  log.on("error", noteStreamError);
+  if (tee) tee.on("error", noteStreamError);
+  const exited = proc.exited;
+  const writeDerivedLine = async (line: string): Promise<void> => {
+    const text = deriveStreamLine(line) ?? line;
+    if (text === "") return;
+    if (log.destroyed) return;
+    if (!log.write(`${text}\n`)) await drainWait(log);
+  };
+  // Each pump reads through an explicit reader so the child-exit grace can
+  // cancel the read from outside: the for-await loop used before locks the
+  // stream against exactly that teardown. A pump that drains before the
+  // grace expires (the normal case: the pipe closes with the child) clears
+  // its own timer, so clean spawns are untouched by the bound.
+  //
+  // In stream mode stdout carries the structured stream: its chunks tee
+  // verbatim to the Stream file and derive the log line by line. stderr
+  // feeds the same deriver without teeing, so plain-text diagnostics pass
+  // through to the log. Raw mode writes the chunk itself, exactly as
+  // before. Per-stream buffers: a partial line from one stream never merges
+  // with the other's.
+  type PumpMode = "stream" | "diagnostics" | "raw";
+  const pump = (stream: ReadableStream<Uint8Array>, mode: PumpMode) => {
+    const reader = stream.getReader();
+    const buffer = mode === "raw" ? null : new StreamLineBuffer();
+    // One error boundary for the whole pump: a pump failure settles this
+    // promise instead of rejecting it, so both pumps always settle before
+    // the teardown below runs, and a stream destroyed mid-write can never
+    // reject the spawn through a multiplexed Promise.all whose sibling pump
+    // is still unwinding. Every failure is recorded through the same
+    // first-error capture the streams' error listeners feed, so a genuine
+    // failure still fails the spawn at the rethrow after teardown; the
+    // destruction itself is never a rejection, because a destroyed writer
+    // fails writes silently and the end calls below skip it.
+    const reading = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            for (const line of buffer?.flush() ?? []) await writeDerivedLine(line);
+            return;
+          }
+          if (mode === "stream" && tee && !tee.destroyed && !tee.write(value)) {
+            await drainWait(tee);
+          }
+          if (buffer) {
+            for (const line of buffer.push(value)) await writeDerivedLine(line);
+          } else if (!log.destroyed && !log.write(value)) {
+            await drainWait(log);
+          }
+        }
+      } catch (error) {
+        noteStreamError(error);
+      }
+    })();
+    void exited
+      .then(() => {
+        const timer = setTimeout(() => {
+          void reader.cancel().catch(() => {});
+        }, SPAWN_PUMP_GRACE_MS);
+        void reading.then(
+          () => clearTimeout(timer),
+          () => clearTimeout(timer),
+        );
+      })
+      .catch(() => {});
+    return reading;
+  };
+  const [exitCode] = await Promise.all([
+    exited,
+    pump(proc.stdout, tee ? "stream" : "raw"),
+    pump(proc.stderr, tee ? "diagnostics" : "raw"),
+  ]);
+  // The teardown the pumps can never reject, shared with the terminal-backed
+  // tailer: end() on a stream an error already destroyed throws
+  // ERR_STREAM_DESTROYED, so the destroyed check skips it, and end's own
+  // write failure is recorded rather than thrown, leaving the boundary below
+  // as the spawn's only rejection path.
+  await endWriteStream(log, noteStreamError);
+  if (tee) await endWriteStream(tee, noteStreamError);
+  // The spawn still fails on a genuine write failure, exactly as a
+  // rejecting pump did before the boundary existed; the destruction itself
+  // is not one.
+  if (streamError !== null) throw streamError;
+  return exitCode;
+}

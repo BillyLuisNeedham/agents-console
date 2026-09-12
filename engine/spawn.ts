@@ -311,6 +311,37 @@ export function interactiveHarnessCommand(
   return command;
 }
 
+/**
+ * The batch command an attempt's assignment resolves to, or the pool config
+ * error naming the ticket and the fix: a missing harness or model (an
+ * unassigned ticket with no defaults, ADR-0013) or a harness name the table
+ * does not carry. Fired at spawn time rather than at load so the
+ * misconfiguration renders on the canvas first and the run dies naming the
+ * ticket. Lives beside the harness table it reads so the Attempt-run module
+ * and the engine's assignment paths share the one check.
+ */
+export function harnessCommandFor(
+  harnesses: Record<string, HarnessCommand>,
+  assignment: { harness?: string; model?: string },
+  ticketId: string,
+): HarnessCommand {
+  if (!assignment.harness || !assignment.model) {
+    throw new Error(
+      `pool config: ticket ${ticketId} has no ` +
+        `${assignment.harness ? "model" : "harness"} ` +
+        `(set one in console.json assign or defaults)`,
+    );
+  }
+  const command = harnesses[assignment.harness];
+  if (!command) {
+    throw new Error(
+      `pool config: ticket ${ticketId} names unknown harness '${assignment.harness}'. ` +
+        `Known: ${Object.keys(harnesses).sort().join(", ")}`,
+    );
+  }
+  return command;
+}
+
 // The placeholder an argv element carries in a spawned event's facts where
 // the prompt body sat (ADR-0012): the event records how the agent was
 // invoked, and the prompt is the one wall of text it must not carry. The

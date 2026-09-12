@@ -87,7 +87,7 @@ The Console's right-hand panel for the selected node card — its status, channe
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
 
 **Attempt**:
-One run of a ticket by a harness, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects.
+One run of a harness on behalf of a Ticket or a Conversation, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects; a Conversation has exactly one, ended by the operator or by a crash.
 _Avoid_: run (that's the whole thread), execution, job
 
 **Terminal-backed attempt**:

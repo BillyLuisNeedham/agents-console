@@ -1,30 +1,22 @@
 import {
   appendFileSync,
-  closeSync,
   copyFileSync,
-  createWriteStream,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
-  readSync,
   realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
-  type WriteStream,
 } from "node:fs";
-import { once } from "node:events";
 import { homedir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import {
   appendEvent,
   attemptExitCodeName,
   attemptLogName,
-  attemptStreamName,
+  attemptOutcomeName,
   lastAttempt,
-  lastAttemptOfKind,
   nextAttempt,
   readEvents,
   type TicketEventKind,
@@ -44,27 +36,28 @@ import {
 } from "./pool.ts";
 import { buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
-  defaultHarnessDescriptors,
   defaultHarnesses,
-  elidePromptArgv,
-  engineEnvSet,
-  harnessStreamMode,
-  interactiveHarnessCommand,
-  spawnEnv,
   type HarnessCommand,
-  type SpawnContext,
 } from "./spawn.ts";
 import {
   HERDR_SOCKET_DEFAULT,
-  attemptTabLabel,
   closePane,
   closeTab,
   listPaneIds,
-  openAttemptTab,
-  paneSendInput,
 } from "./herdr.ts";
-import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
-import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
+import {
+  attemptStreamPath,
+  awaitOutcomeOrPaneEnd,
+  exitCrashReason,
+  exitedPhrase,
+  readAttemptResult,
+  readLogTail,
+  rotateAttemptLog,
+  runAttempt,
+  startPaneStreamTail,
+  type AttemptEnv,
+  type ReadFailure,
+} from "./attempt-run.ts";
 import {
   answerConversationMerge,
   conversationViews,
@@ -82,18 +75,12 @@ import {
 } from "./notices.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import {
-  StreamLineBuffer,
-  TranscriptLineBuffer,
-  deriveStreamLine,
-} from "./streamlog.ts";
-import {
   branchExists,
   branchFor,
   branchLandedInto,
   commitMerge,
   attemptBranches,
   currentBranch,
-  commitShaAt,
   discardWorktree,
   git,
   gitAvailable,
@@ -186,39 +173,6 @@ export interface Outcome {
   // present and empty, the key was there and nothing survived schema
   // validation; populated, the well-formed proposals riding to the boundary.
   spawn?: SpawnProposal[];
-}
-
-// One attempt's outcome file name. The solo path keeps the well-known name;
-// a verify fan-out writes per attempt, so N parallel outcomes never collide
-// and each grader can bind to one attempt's file (ticket 03).
-function outcomeFileName(ticketId: string, attempt: number | null): string {
-  return attempt === null
-    ? `${ticketId}.outcome.json`
-    : `${ticketId}.attempt-${attempt}.outcome.json`;
-}
-
-// One attempt's Stream file path (ADR-0012, amended by ADR-0016 for the
-// terminal-backed path), or null when headless and the harness is raw: the
-// file's mode follows the pool. A terminal-backed attempt always gets a
-// Stream file — the `script` typescript capturing the whole session,
-// whatever the harness's stream mode — because the derived log comes from
-// it. A headless attempt's Stream file is the harness's structured stream,
-// which only stream-mode harnesses (claude, cursor) produce; raw harnesses
-// keep the old passthrough log. Verify attempts write attempt-numbered
-// Stream files directly, exactly as their logs do, so N parallel attempts
-// never share a path.
-function attemptStreamPath(
-  runsDir: string,
-  ticketId: string,
-  harness: string,
-  attempt: number | null,
-  resolver: boolean,
-  terminal: boolean,
-): string | null {
-  if (terminal || harnessStreamMode(harness) === "stream") {
-    return join(runsDir, attemptStreamName(ticketId, attempt, resolver));
-  }
-  return null;
 }
 
 interface TicketAssignment {
@@ -1109,12 +1063,9 @@ async function driveLoop(session: Session): Promise<void> {
           snapshot,
           session.assignments.get(marker.id)!,
           {
+            ...attemptEnvOf(session, snapshot.config),
             poolDir: session.poolDir,
-            runsDir: session.runsDir,
             issuesDir: session.issuesDir,
-            harnesses: session.harnesses,
-            herdrSocket: session.herdrSocket,
-            children: session.children,
           },
           plan,
         ).then((result) => {
@@ -1528,8 +1479,9 @@ function rehydrate(session: Session): void {
   const recovered: Record<string, Outcome> = {};
   for (const marker of session.markers) {
     if (marker.status !== "done") continue;
-    const read = readOutcomeResult(
-      join(session.runsDir, outcomeFileName(marker.id, null)),
+    const read = readAttemptResult(
+      join(session.runsDir, attemptOutcomeName(marker.id, null, false)),
+      validateOutcome,
     );
     if (read.ok) recovered[marker.id] = read.outcome;
   }
@@ -1615,7 +1567,7 @@ async function reapHeadlessOrphans(session: Session): Promise<void> {
               "process was still running at boot and survived the engine's stop",
           logTail: [],
           outcomeExists: existsSync(
-            join(session.runsDir, outcomeFileName(id, null)),
+            join(session.runsDir, attemptOutcomeName(id, null, false)),
           ),
           pid: orphan.pid,
         },
@@ -1693,7 +1645,7 @@ function terminalAdoptable(
  * asked changes nothing about the pool's ordinary recovery.
  */
 async function reconcileTerminalAttempts(session: Session): Promise<void> {
-  if (session.state.config.terminal !== "herdr") return;
+  if (!attemptEnvOf(session).terminalBacked) return;
   let live: string[];
   try {
     live = await listPaneIds(session.herdrSocket);
@@ -1737,7 +1689,7 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
           reason: "attempt pane gone at boot reconciliation",
           logTail: [],
           outcomeExists: existsSync(
-            join(session.runsDir, outcomeFileName(marker.id, null)),
+            join(session.runsDir, attemptOutcomeName(marker.id, null, false)),
           ),
         },
       });
@@ -1875,7 +1827,7 @@ async function finalizeAdoptedAttempt(
     session.runsDir,
     attemptExitCodeName(ticketId, null, false),
   );
-  const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
+  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
   const tailer = streamPath ? startPaneStreamTail(streamPath, logPath) : null;
   try {
     // The adopted attempt ends on its Outcome without requiring pane exit,
@@ -1889,7 +1841,7 @@ async function finalizeAdoptedAttempt(
       adopted.paneId,
       exitCodePath,
       outcomePath,
-      (path) => readOutcomeResult(path).ok,
+      (path) => readAttemptResult(path, validateOutcome).ok,
     );
     // Abandoned while waiting (the human answered): the answer path owns
     // the ticket now and this finalize records nothing further.
@@ -1929,8 +1881,8 @@ function recordAdoptedExit(
   paneId: string,
 ): void {
   const ticketId = marker.id;
-  const outcomePath = join(session.runsDir, outcomeFileName(ticketId, null));
-  const outcome = readOutcomeResult(outcomePath);
+  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
+  const outcome = readAttemptResult(outcomePath, validateOutcome);
   const outcomeExists = existsSync(outcomePath);
   const logTail = readLogTail(logPath);
   let status: TicketStatus = "in-progress";
@@ -2494,20 +2446,22 @@ function readIssueRunner(
   return { harness: fields.get("harness"), model: fields.get("model") };
 }
 
-function readResolverResult(
-  path: string,
-): { resolved: boolean; note?: string } | null {
-  if (!existsSync(path)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed?.resolved !== "boolean") return null;
-    return {
-      resolved: parsed.resolved,
-      note: typeof parsed.note === "string" ? parsed.note : undefined,
-    };
-  } catch {
-    return null;
+// The resolver's result: a `resolved` boolean and an optional note. Not an
+// Outcome (no status, no summary): the resolver's ending is an approval or a
+// manual-merge interrupt, never a ticket status. The Attempt-run module's
+// reader supplies the missing-file and unparseable preamble.
+function validateResolution(
+  parsed: unknown,
+): { ok: true; resolved: boolean; note?: string } | ReadFailure {
+  const result = parsed as { resolved?: unknown; note?: unknown } | null;
+  if (typeof result?.resolved !== "boolean") {
+    return { ok: false, reason: "resolver outcome has no resolved boolean" };
   }
+  return {
+    ok: true,
+    resolved: result.resolved,
+    ...(typeof result.note === "string" ? { note: result.note } : {}),
+  };
 }
 
 // A conflict hands the conflicted state to the resolver agent: the resolver
@@ -2580,23 +2534,25 @@ async function runResolver(
   resolver: ResolverSpec,
   result: MergeResult,
 ): Promise<ResolverAttempt> {
-  const outcomePath = join(session.runsDir, `${marker.id}.resolver.json`);
-  // As in runTicket: the resolver starts with no outcome, so a stale file
-  // from a previous resolver run can never pass for this run's result.
-  rmSync(outcomePath, { force: true });
-  const logPath = join(session.runsDir, attemptLogName(marker.id, null, true));
-  rotateAttemptLog(session.runsDir, marker.id, logPath, "resolver");
-  const streamPath = attemptStreamPath(
+  // The resolver's files carry the resolver suffix, the result included,
+  // all named through the events module (ADR-0003). The resolver event
+  // below is this run's attempt bump, and it is also what the resolver
+  // log's rotation keys on, so the well-known log rotates here, before the
+  // event lands, or the previous run's log would take this run's number.
+  const attempt = nextAttempt(session.runsDir, marker.id);
+  rotateAttemptLog(
     session.runsDir,
     marker.id,
-    resolver.harness,
-    null,
-    true,
-    session.state.config.terminal === "herdr",
+    join(session.runsDir, attemptLogName(marker.id, null, true)),
+    "resolver",
+  );
+  const outcomePath = join(
+    session.runsDir,
+    attemptOutcomeName(marker.id, null, true),
   );
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
-    attempt: nextAttempt(session.runsDir, marker.id),
+    attempt,
     kind: "resolver",
     payload: { files: result.conflicted, cwd: worktree.path, branch: worktree.branch },
   });
@@ -2608,85 +2564,41 @@ async function runResolver(
     files: result.conflicted,
     outcomePath,
   });
-  const ctx: SpawnContext = {
-    id: marker.id,
-    issuePath: marker.file,
-    body: prompt,
-    driver: RESOLVER_DRIVER,
-    harness: resolver.harness,
-    model: resolver.model,
-    agents: session.state.config.agents,
-    logPath,
-    streamPath,
-    outcomePath,
-    exitCodePath: join(
-      session.runsDir,
-      attemptExitCodeName(marker.id, null, true),
-    ),
-    cwd: worktree.path,
-  };
-  const argv = session.harnesses[resolver.harness](ctx);
-  // The resolver's spawn carries the same facts as every other spawn site
-  // (ADR-0012); the resolver event above stays the run's own record.
-  // Terminal-backed pools open the resolver its own named tab too: every
-  // spawn site shares one code path (ADR-0014), and a terminal-backed pool
-  // hands the pane the interactive TUI while the headless fallback keeps
-  // the batch command (ADR-0016).
-  const terminal =
-    session.state.config.terminal === "herdr"
-      ? await openAttemptTerminal(
-          session.herdrSocket,
-          marker.id,
-          marker.title,
-          ctx.cwd,
-        )
-      : undefined;
-  const interactiveArgv =
-    session.state.config.terminal === "herdr"
-      ? interactiveHarnessCommand(session.harnesses, resolver.harness)(ctx)
-      : argv;
-  const exitCode = await spawnWithTerminal(
-    session.herdrSocket,
-    terminal,
-    interactiveArgv,
-    argv,
-    ctx,
-    session.children,
-    // The resolver's completion: its outcome file holds a result the moment
-    // the resolver writes it, without waiting for the TUI to exit.
-    (path) => readResolverResult(path) !== null,
-    (terminalError, argvUsed, pid) =>
-      appendEvent(session.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt: lastAttempt(session.runsDir, marker.id),
-        kind: "spawned",
-        payload: spawnedPayload(
-          argvUsed,
-          ctx,
-          worktree.branch,
-          terminal,
-          terminalError,
-          pid,
-        ),
-      }),
+  // The resolver's run is the Attempt-run module's (ADR-0014): every spawn
+  // site shares one code path, and a terminal-backed pool opens the
+  // resolver its own named tab too. The resolver event above stays the
+  // run's own record; it records no exited or crash event, as before.
+  const run = await runAttempt(
+    attemptEnvOf(session),
+    {
+      id: marker.id,
+      issuePath: marker.file,
+      title: marker.title,
+      body: prompt,
+      driver: RESOLVER_DRIVER,
+      harness: resolver.harness,
+      model: resolver.model,
+      cwd: worktree.path,
+      branch: worktree.branch,
+      attempt,
+      naming: { attempt: null, resolver: true },
+      rotate: "none",
+      fallback: "headless",
+      prompt: { kind: "driver" },
+      crashSubject: "resolver",
+      events: { kind: "spawned-only" },
+    },
+    validateResolution,
   );
-  const outcome = readResolverResult(outcomePath);
-  if (exitCode === 0 && outcome?.resolved) {
-    return { resolved: true, note: outcome.note || "(resolver gave no note)" };
+  if (run.ok && run.result.resolved) {
+    return { resolved: true, note: run.result.note || "(resolver gave no note)" };
   }
-  const reason =
-    exitCode !== 0
-      ? attemptCrashReason(
-          session.children,
-          exitCode,
-          ctx.exitCodePath,
-          "resolver",
-          terminal?.paneId ?? null,
-        )
-      : outcome
-        ? outcome.note || "resolver reported no resolution"
-        : "resolver produced no resolution";
-  return { resolved: false, note: reason };
+  const note = !run.ok && run.code !== 0
+    ? run.crashReason
+    : run.result.ok
+      ? run.result.note || "resolver reported no resolution"
+      : "resolver produced no resolution";
+  return { resolved: false, note };
 }
 
 function approvalInterrupt(
@@ -3173,60 +3085,25 @@ function reloadConfigAtBoundary(session: Session): void {
   }
 }
 
-// The harness command for an assignment at its point of use: a spawn site.
-// Resolution is total (an unassigned ticket resolves to empty harness and
-// model and renders nulls on the wire), so the pool config error for it
-// fires here, at the spawn that cannot run, instead of at pool load: the
-// misconfiguration renders on the canvas first, and the run dies naming the
-// ticket and the fix.
-function harnessCommandFor(
-  harnesses: Record<string, HarnessCommand>,
-  assignment: Assignment,
-  ticketId: string,
-): HarnessCommand {
-  if (!assignment.harness || !assignment.model) {
-    throw new Error(
-      `pool config: ticket ${ticketId} has no ` +
-        `${assignment.harness ? "model" : "harness"} ` +
-        `(set one in console.json assign or defaults)`,
-    );
-  }
-  const command = harnesses[assignment.harness];
-  if (!command) {
-    throw new Error(
-      `pool config: ticket ${ticketId} names unknown harness '${assignment.harness}'. ` +
-        `Known: ${Object.keys(harnesses).sort().join(", ")}`,
-    );
-  }
-  return command;
-}
-
 // The grader's outcome: the standard contract plus a validated grade.
 // Anything that is not a valid grade is unusable rather than a low score or
 // a silent pass, so a broken grader can never decide the build ticket's
 // fate (the re-spawn that follows is ticket 07's machinery). A checkpoint
 // outcome is unusable too: the grader's contract is one done outcome
-// carrying its grade, and the engine never honors a grader's pause.
-function readGraderResult(
-  path: string,
-): { ok: true; outcome: Outcome; grade: Grade } | { ok: false; reason: string } {
-  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
-  let parsed: {
-    grade?: { score?: unknown; verdict?: unknown; reasons?: unknown };
-  };
-  try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return { ok: false, reason: "outcome is not parseable JSON" };
-  }
-  // The standard outcome validation, run against the one parse this reader
-  // already holds.
+// carrying its grade, and the engine never honors a grader's pause. The
+// Attempt-run module's reader supplies the missing-file and unparseable
+// preamble; this validates one parse.
+function validateGrade(
+  parsed: unknown,
+): { ok: true; outcome: Outcome; grade: Grade } | ReadFailure {
   const base = validateOutcome(parsed);
   if (!base.ok) return base;
   if (base.outcome.status !== "done") {
     return { ok: false, reason: "grader outcome is a checkpoint, not a grade" };
   }
-  const grade = parsed?.grade;
+  const grade = (
+    parsed as { grade?: { score?: unknown; verdict?: unknown; reasons?: unknown } }
+  )?.grade;
   if (typeof grade !== "object" || grade === null) {
     return { ok: false, reason: "outcome carries no grade object" };
   }
@@ -3302,7 +3179,7 @@ function writeGraderTicket(
   attempt: number,
 ): void {
   const gid = graderIdFor(build.id, index);
-  const outcomePath = join(session.runsDir, outcomeFileName(build.id, attempt));
+  const outcomePath = join(session.runsDir, attemptOutcomeName(build.id, attempt, false));
   const diffPath = join(session.runsDir, `${gid}.diff.patch`);
   const logPath = join(session.runsDir, `${gid}.trim.log`);
   const body =
@@ -3540,21 +3417,11 @@ async function runGrader(
 ): Promise<GraderRun> {
   const gid = grader.id;
   const runsDir = session.runsDir;
-  // As in runTicket: the grader starts with no outcome, so a stale file
-  // from a previous grading round can never pass for this round's result.
-  const graderOutcomePath = join(runsDir, outcomeFileName(gid, null));
-  rmSync(graderOutcomePath, { force: true });
-  const logPath = join(runsDir, attemptLogName(gid, null, false));
-  rotateAttemptLog(runsDir, gid, logPath, "exited");
-  const streamPath = attemptStreamPath(
+  const graderOutcomePath = join(runsDir, attemptOutcomeName(gid, null, false));
+  const attemptOutcomePath = join(
     runsDir,
-    gid,
-    assignment.harness,
-    null,
-    false,
-    session.state.config.terminal === "herdr",
+    attemptOutcomeName(build.id, attempt, false),
   );
-  const attemptOutcomePath = join(runsDir, outcomeFileName(build.id, attempt));
   const diffPath = join(runsDir, `${gid}.diff.patch`);
   const trimPath = join(runsDir, `${gid}.trim.log`);
   writeFileSync(diffPath, attemptDiff(session, build.id, attempt));
@@ -3578,119 +3445,53 @@ async function runGrader(
     logPath: trimPath,
     graderOutcomePath,
   });
-  const ctx: SpawnContext = {
-    id: gid,
-    issuePath: grader.file,
-    body: prompt,
-    driver: GRADER_DRIVER,
-    harness: assignment.harness,
-    model: assignment.model,
-    agents: session.state.config.agents,
-    logPath,
-    streamPath,
-    outcomePath: graderOutcomePath,
-    exitCodePath: join(runsDir, attemptExitCodeName(gid, null, false)),
-    cwd: session.cwd,
-  };
-  const argv = harnessCommandFor(session.harnesses, assignment, gid)(ctx);
-  const terminal =
-    session.state.config.terminal === "herdr"
-      ? await openAttemptTerminal(
-          session.herdrSocket,
-          grader.id,
-          grader.title,
-          ctx.cwd,
-        )
-      : undefined;
-  const interactiveArgv =
-    session.state.config.terminal === "herdr"
-      ? interactiveHarnessCommand(session.harnesses, assignment.harness)(ctx)
-      : argv;
   // The grader ticket's own attempt number for this round: the scheduled
   // event runGraders appended bumped lastAttempt to this round's number, so
   // the value read here (before this round's spawned append) is the one the
-  // spawned event and the verdict-landed tab close both key off.
+  // events and the verdict-landed tab close both key off.
   const graderAttempt = lastAttempt(runsDir, gid);
-  const exitCode = await spawnWithTerminal(
-    session.herdrSocket,
-    terminal,
-    interactiveArgv,
-    argv,
-    ctx,
-    session.children,
-    // The grader's completion: a usable grade (or a definite refusal of
-    // one) the moment the grader writes its outcome, without waiting for the
-    // TUI to exit.
-    (path) => readGraderResult(path).ok,
-    (terminalError, argvUsed, pid) =>
-      appendEvent(runsDir, gid, {
-        at: new Date().toISOString(),
-        attempt: graderAttempt,
-        kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
-      }),
+  // The grader's run is the Attempt-run module's (ADR-0014): the exited
+  // status on a usable grade is done, and the crash reason on the failure
+  // path is the run's (a dead harness, or the grade the validator refused).
+  const run = await runAttempt(
+    attemptEnvOf(session),
+    {
+      id: gid,
+      issuePath: grader.file,
+      title: grader.title,
+      body: prompt,
+      driver: GRADER_DRIVER,
+      harness: assignment.harness,
+      model: assignment.model,
+      cwd: session.cwd,
+      branch: null,
+      attempt: graderAttempt,
+      naming: { attempt: null, resolver: false },
+      rotate: "exited",
+      fallback: "headless",
+      prompt: { kind: "driver" },
+      crashSubject: "harness",
+      events: { kind: "full", exitedStatus: () => "done" },
+    },
+    validateGrade,
   );
-  // The grader's exit facts (ADR-0012), on the grade path and the crash
-  // path alike: the log tail and whether the grader wrote an outcome at all.
-  const logTail = readLogTail(logPath);
-  const outcomeExists = existsSync(graderOutcomePath);
-  const result = readGraderResult(graderOutcomePath);
-  if (exitCode !== 0) {
-    const reason = attemptCrashReason(
-      session.children,
-      exitCode,
-      ctx.exitCodePath,
-      "harness",
-      terminal?.paneId ?? null,
-    );
-    recordGraderFailure(
-      session,
-      build,
-      grader,
-      attempt,
-      graderAttempt,
-      exitCode,
-      reason,
-      logTail,
-      outcomeExists,
-      emit,
-    );
-    return { ok: false, reason };
-  }
-  if (!result.ok) {
-    recordGraderFailure(
-      session,
-      build,
-      grader,
-      attempt,
-      graderAttempt,
-      exitCode,
-      result.reason,
-      logTail,
-      outcomeExists,
-      emit,
-    );
-    return { ok: false, reason: result.reason };
+  if (!run.ok) {
+    recordGraderFailure(session, build, grader, attempt, graderAttempt, run.crashReason, emit);
+    return { ok: false, reason: run.crashReason };
   }
   // A usable grade: the engine writes the grader's done status (ADR-0005:
   // the engine owns every status write) and copies the grade into the
   // graded attempt's record, a graded event on the build ticket's file.
   writeMarkerStatus(grader.file, "done");
   grader.status = "done";
-  appendEvent(runsDir, gid, {
-    at: new Date().toISOString(),
-    attempt: lastAttempt(runsDir, gid),
-    kind: "exited",
-    payload: { code: exitCode, status: "done", logTail, outcomeExists },
-  });
   appendEvent(runsDir, build.id, {
     at: new Date().toISOString(),
     attempt,
     kind: "graded",
     payload: {
-      score: result.grade.score,
-      verdict: result.grade.verdict,
-      reasons: result.grade.reasons,
+      score: run.result.grade.score,
+      verdict: run.result.grade.verdict,
+      reasons: run.result.grade.reasons,
     },
   });
   // The grader's tab never merges, so its role ends the moment the verdict
@@ -3699,45 +3500,31 @@ async function runGrader(
   closeAttemptTab(session, gid, graderAttempt);
   session.state = applyUpdate(session.state, {
     tickets: { [gid]: "done" },
-    outcomes: { [gid]: result.outcome },
+    outcomes: { [gid]: run.result.outcome },
     log: [
       `ticket ${build.id}: attempt ${attempt} graded: score ` +
-        `${result.grade.score}, verdict ${result.grade.verdict} ` +
+        `${run.result.grade.score}, verdict ${run.result.grade.verdict} ` +
         `(grader ${gid})`,
     ],
   });
   emit("running");
-  return { ok: true, grade: result.grade };
+  return { ok: true, grade: run.result.grade };
 }
 
 // A grader that exited non-zero or wrote no parseable grade decides nothing:
-// the crash lands on the grader ticket, its marker stays in-progress, and
-// the build ticket is untouched. The re-spawn rounds that follow, and the
-// bound that stops them, are runGraders' (ticket 07).
+// the crash lands on the grader ticket (the run recorded its exited and
+// crash events), its marker stays in-progress, and the build ticket is
+// untouched. The re-spawn rounds that follow, and the bound that stops
+// them, are runGraders' (ticket 07).
 function recordGraderFailure(
   session: Session,
   build: TicketMarker,
   grader: TicketMarker,
   attempt: number,
   graderAttempt: number,
-  exitCode: number,
   reason: string,
-  logTail: string[],
-  outcomeExists: boolean,
   emit: (phase: RunPhase) => void,
 ): void {
-  appendEvent(session.runsDir, grader.id, {
-    at: new Date().toISOString(),
-    attempt: graderAttempt,
-    kind: "exited",
-    payload: { code: exitCode, status: "in-progress", logTail, outcomeExists },
-  });
-  appendEvent(session.runsDir, grader.id, {
-    at: new Date().toISOString(),
-    attempt: graderAttempt,
-    kind: "crash",
-    payload: { code: exitCode, reason, logTail, outcomeExists },
-  });
   // Whatever marker status the grader agent wrote for itself, the engine
   // owns the write: a grader without a usable grade is never done.
   if (readMarker(grader.file).status !== "in-progress") {
@@ -3746,7 +3533,7 @@ function recordGraderFailure(
   // The failed round's tab is dead: the pane already exited and the re-spawn
   // opens a fresh tab, so the verdict-less close is the failure path's too.
   // The round's own attempt number comes from the caller, not a re-read:
-  // the exited and crash appends above must key off the same number or a
+  // the run's exited and crash appends keyed off the same number, and a
   // later round's events would shift the close onto the wrong tab.
   closeAttemptTab(session, grader.id, graderAttempt);
   session.state = applyUpdate(session.state, {
@@ -3780,8 +3567,9 @@ function resolveLoneAttempt(
   // A crashed attempt decided nothing; the crash interrupt raised at the
   // boundary owns the ticket and a resume re-runs it.
   if (result.status === "in-progress") return;
-  const outcome = readOutcomeResult(
-    join(session.runsDir, outcomeFileName(marker.id, attempt)),
+  const outcome = readAttemptResult(
+    join(session.runsDir, attemptOutcomeName(marker.id, attempt, false)),
+    validateOutcome,
   );
   if (result.status === "checkpoint") {
     // The attempt paused, so there is no done-claim and the agent's own
@@ -4276,8 +4064,9 @@ function completeSelection(
   // The winner's outcome becomes the ticket's, the way a solo done attempt's
   // does, so downstream prompts read what was actually selected. Its spawn
   // proposals ride to the boundary's adoption buffer with it.
-  const outcome = readOutcomeResult(
-    join(session.runsDir, outcomeFileName(marker.id, attempt)),
+  const outcome = readAttemptResult(
+    join(session.runsDir, attemptOutcomeName(marker.id, attempt, false)),
+    validateOutcome,
   );
   if (outcome.ok) {
     update.outcomes = { [marker.id]: outcome.outcome };
@@ -4341,28 +4130,25 @@ type HeadToHeadVerdict =
 // The head-to-head's outcome: the standard contract plus a `winner` naming
 // exactly one of the two candidate attempt numbers, or the string "tie" when
 // the judge genuinely cannot separate them. Anything else is unusable rather
-// than a guess: the deterministic fallback owns the decision then.
-function readHeadToHeadVerdict(
-  path: string,
+// than a guess: the deterministic fallback owns the decision then. The
+// Attempt-run module's reader supplies the missing-file and unparseable
+// preamble; this validates one parse.
+type UsableVerdict = Exclude<HeadToHeadVerdict, { kind: "unusable" }>;
+
+function validateVerdict(
+  parsed: unknown,
   candidates: [number, number],
-): HeadToHeadVerdict {
-  if (!existsSync(path)) return { kind: "unusable", reason: "no outcome written" };
-  let parsed: { winner?: unknown };
-  try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return { kind: "unusable", reason: "outcome is not parseable JSON" };
-  }
+): { ok: true; verdict: UsableVerdict } | ReadFailure {
   const base = validateOutcome(parsed);
-  if (!base.ok) return { kind: "unusable", reason: base.reason };
+  if (!base.ok) return base;
   if (base.outcome.status !== "done") {
     return {
-      kind: "unusable",
+      ok: false,
       reason: "head-to-head outcome is a checkpoint, not a pick",
     };
   }
-  if (parsed?.winner === "tie") return { kind: "tie", outcome: base.outcome };
-  const winner = parsed?.winner;
+  const winner = (parsed as { winner?: unknown })?.winner;
+  if (winner === "tie") return { ok: true, verdict: { kind: "tie", outcome: base.outcome } };
   const pick =
     typeof winner === "number" && Number.isInteger(winner)
       ? winner
@@ -4371,11 +4157,11 @@ function readHeadToHeadVerdict(
         : null;
   if (pick === null || !candidates.includes(pick)) {
     return {
-      kind: "unusable",
+      ok: false,
       reason: "outcome names no winner among the two attempts",
     };
   }
-  return { kind: "pick", attempt: pick, outcome: base.outcome };
+  return { ok: true, verdict: { kind: "pick", attempt: pick, outcome: base.outcome } };
 }
 
 // The head-to-head ticket file: a real ticket in the pool's directory with
@@ -4435,7 +4221,7 @@ async function runHeadToHead(
     return {
       attempt,
       grade: side.grade,
-      outcomePath: join(runsDir, outcomeFileName(build.id, attempt)),
+      outcomePath: join(runsDir, attemptOutcomeName(build.id, attempt, false)),
       diffPath: join(runsDir, `${h2hId}.attempt-${attempt}.diff.patch`),
       logPath: join(runsDir, `${h2hId}.attempt-${attempt}.trim.log`),
     };
@@ -4477,20 +4263,7 @@ async function runHeadToHead(
   writeMarkerStatus(judge.file, "in-progress");
   judge.status = "in-progress";
   emit("running");
-  // As in runGrader: the judge starts with no outcome, so a stale file from
-  // a previous round can never pass for this round's pick.
-  const h2hOutcomePath = join(runsDir, outcomeFileName(h2hId, null));
-  rmSync(h2hOutcomePath, { force: true });
-  const logPath = join(runsDir, attemptLogName(h2hId, null, false));
-  rotateAttemptLog(runsDir, h2hId, logPath, "exited");
-  const streamPath = attemptStreamPath(
-    runsDir,
-    h2hId,
-    assignment.harness,
-    null,
-    false,
-    session.state.config.terminal === "herdr",
-  );
+  const h2hOutcomePath = join(runsDir, attemptOutcomeName(h2hId, null, false));
   for (const side of sides) {
     writeFileSync(side.diffPath, attemptDiff(session, build.id, side.attempt));
     writeFileSync(
@@ -4522,103 +4295,37 @@ async function runHeadToHead(
     runnerUp: parts(sides[1]),
     outcomePath: h2hOutcomePath,
   });
-  const ctx: SpawnContext = {
-    id: h2hId,
-    issuePath: judge.file,
-    body: prompt,
-    driver: HEAD_TO_HEAD_DRIVER,
-    harness: assignment.harness,
-    model: assignment.model,
-    agents: session.state.config.agents,
-    logPath,
-    streamPath,
-    outcomePath: h2hOutcomePath,
-    exitCodePath: join(runsDir, attemptExitCodeName(h2hId, null, false)),
-    cwd: session.cwd,
-  };
-  const argv = harnessCommandFor(session.harnesses, assignment, h2hId)(ctx);
-  const terminal =
-    session.state.config.terminal === "herdr"
-      ? await openAttemptTerminal(
-          session.herdrSocket,
-          h2h.id,
-          h2h.title,
-          ctx.cwd,
-        )
-      : undefined;
   // This round's attempt number for the head-to-head ticket: the scheduled
   // append above bumped lastAttempt to it, so the value read here (before
-  // the spawned append) is the one the tab close keys off.
+  // the spawned append) is the one the events and the tab close key off.
   const h2hAttempt = lastAttempt(runsDir, h2hId);
-  const interactiveArgv =
-    session.state.config.terminal === "herdr"
-      ? interactiveHarnessCommand(session.harnesses, assignment.harness)(ctx)
-      : argv;
-  const exitCode = await spawnWithTerminal(
-    session.herdrSocket,
-    terminal,
-    interactiveArgv,
-    argv,
-    ctx,
-    session.children,
-    // The judge's completion: a pick (or tie, or a definite unusable
-    // refusal) the moment it writes its outcome, without waiting for the
-    // TUI to exit.
-    (path) =>
-      readHeadToHeadVerdict(path, [top.attempt, runnerUp.attempt]).kind !==
-      "unusable",
-    (terminalError, argvUsed, pid) =>
-      appendEvent(runsDir, h2hId, {
-        at: new Date().toISOString(),
-        attempt: h2hAttempt,
-        kind: "spawned",
-        payload: spawnedPayload(argvUsed, ctx, null, terminal, terminalError, pid),
-      }),
-  );
-  // The judge's exit facts (ADR-0012): the log tail and whether an outcome
-  // file exists, on the pick path and the unusable path alike.
-  const logTail = readLogTail(logPath);
-  const outcomeExists = existsSync(h2hOutcomePath);
-  let verdict = readHeadToHeadVerdict(h2hOutcomePath, [
-    top.attempt,
-    runnerUp.attempt,
-  ]);
-  if (exitCode !== 0) {
-    verdict = {
-      kind: "unusable",
-      reason: attemptCrashReason(
-        session.children,
-        exitCode,
-        ctx.exitCodePath,
-        "harness",
-        terminal?.paneId ?? null,
-      ),
-    };
-  }
-  appendEvent(runsDir, h2hId, {
-    at: new Date().toISOString(),
-    attempt: lastAttempt(runsDir, h2hId),
-    kind: "exited",
-    payload: {
-      code: exitCode,
-      status: verdict.kind === "unusable" ? "in-progress" : "done",
-      logTail,
-      outcomeExists,
+  // The judge's run is the Attempt-run module's (ADR-0014): the exited
+  // status on a usable pick is done, and the exit facts ride the run.
+  const run = await runAttempt(
+    attemptEnvOf(session),
+    {
+      id: h2hId,
+      issuePath: judge.file,
+      title: h2h.title,
+      body: prompt,
+      driver: HEAD_TO_HEAD_DRIVER,
+      harness: assignment.harness,
+      model: assignment.model,
+      cwd: session.cwd,
+      branch: null,
+      attempt: h2hAttempt,
+      naming: { attempt: null, resolver: false },
+      rotate: "exited",
+      fallback: "headless",
+      prompt: { kind: "driver" },
+      crashSubject: "harness",
+      events: { kind: "full", exitedStatus: () => "done" },
     },
-  });
-  if (verdict.kind === "unusable") {
-    appendEvent(runsDir, h2hId, {
-      at: new Date().toISOString(),
-      attempt: lastAttempt(runsDir, h2hId),
-      kind: "crash",
-      payload: {
-        code: exitCode,
-        reason: verdict.reason,
-        logTail,
-        outcomeExists,
-      },
-    });
-  }
+    (parsed) => validateVerdict(parsed, [top.attempt, runnerUp.attempt]),
+  );
+  const verdict: HeadToHeadVerdict = run.ok
+    ? run.result.verdict
+    : { kind: "unusable", reason: run.crashReason };
   writeMarkerStatus(judge.file, "done");
   judge.status = "done";
   // The judge's tab never merges: its role ends the moment the verdict is
@@ -4781,7 +4488,7 @@ function rejectReview(
     if (named.includes(marker.id)) {
       appendFileSync(marker.file, `\n## Review note\n\n${note?.trim() ?? ""}\n`);
     }
-    rmSync(join(session.runsDir, outcomeFileName(marker.id, null)), {
+    rmSync(join(session.runsDir, attemptOutcomeName(marker.id, null, false)), {
       force: true,
     });
   }
@@ -5004,13 +4711,30 @@ function stripBriefSections(text: string): string {
   return kept.join("\n");
 }
 
-interface TicketEnv {
+interface TicketEnv extends AttemptEnv {
   poolDir: string;
-  runsDir: string;
   issuesDir: string;
-  harnesses: Record<string, HarnessCommand>;
-  herdrSocket: string;
-  children: ChildTracker;
+}
+
+/**
+ * The Attempt-run module's environment for this session (ADR-0014): the one
+ * place the pool's terminal setting is decided. The drive loop passes the
+ * super-step's frozen config so every attempt of one step reads the same
+ * setting (ADR-0018's boundary reload); the other spawn sites and the
+ * Conversation start read the live one.
+ */
+export function attemptEnvOf(
+  session: Session,
+  config: PoolConfig = session.state.config,
+): AttemptEnv {
+  return {
+    runsDir: session.runsDir,
+    harnesses: session.harnesses,
+    herdrSocket: session.herdrSocket,
+    children: session.children,
+    terminalBacked: config.terminal === "herdr",
+    agents: config.agents,
+  };
 }
 
 interface TicketPlan {
@@ -5045,110 +4769,6 @@ interface TicketResult {
   outcomeExists: boolean;
 }
 
-// The exit facts' log tail (ADR-0012): the last ~20 lines of the attempt's
-// log, so the events file alone shows how the attempt ended. A missing or
-// unreadable log reads as no lines, never as an error: the fact is the
-// empty tail.
-const LOG_TAIL_LINES = 20;
-
-function readLogTail(logPath: string): string[] {
-  let text: string;
-  try {
-    text = readFileSync(logPath, "utf8");
-  } catch {
-    return [];
-  }
-  const lines = text.split("\n");
-  // A trailing newline ends the file, it does not open an empty line.
-  if (lines.at(-1) === "") lines.pop();
-  return lines.slice(-LOG_TAIL_LINES);
-}
-
-/**
- * The terminal facts a terminal-backed spawn adds to the `spawned` event's
- * payload (ADR-0014, ADR-0015): the pane id the attempt's named tab was
- * recovered to and the tab id that pane lives in (the tab id is what merge
- * cleanup closes the terminal by), and, when the tab could not be opened, the
- * error that stopped it. Both ids are null on that fallback path: the attempt
- * runs headless and the ticket log carries why.
- */
-interface AttemptTerminal {
-  paneId: string | null;
-  tabId: string | null;
-  error?: string;
-}
-
-/**
- * Open the attempt's named herdr tab for a terminal-backed spawn. Never
- * throws: herdr is optional (ADR-0014), so a missing or misbehaving daemon
- * falls the spawn back to headless and the failure lands on the spawned
- * event, where the ticket log shows it.
- */
-async function openAttemptTerminal(
-  socketPath: string,
-  id: string,
-  title: string,
-  cwd: string,
-): Promise<AttemptTerminal> {
-  try {
-    const tab = await openAttemptTab(
-      socketPath,
-      attemptTabLabel(id, title),
-      cwd,
-    );
-    return { paneId: tab.paneId, tabId: tab.tabId };
-  } catch (err) {
-    return {
-      paneId: null,
-      tabId: null,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-/**
- * The `spawned` event's payload (ADR-0012): the facts that would have
- * diagnosed a wrong-commit or wrong-place spawn from one line. The argv
- * carries the prompt body elided; the commit SHA resolves from the spawn cwd
- * at spawn time (null when git is unavailable or the cwd is not a checkout);
- * env is the keys the engine set on the child environment beyond the
- * inherited parent's, with their values. Terminal-backed spawns add pane_id
- * (and terminal_error on a headless fallback, whenever it happened: the tab
- * refusing to open or the wrapper refusing to send), per ADR-0014 and
- * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
- * boot reconciliation checks for an orphan of a dead engine process.
- */
-function spawnedPayload(
-  argv: string[],
-  ctx: SpawnContext,
-  branch: string | null,
-  terminal?: AttemptTerminal,
-  terminalError?: string,
-  pid?: number,
-): Record<string, unknown> {
-  return {
-    argv: elidePromptArgv(argv, ctx.body),
-    cwd: ctx.cwd,
-    branch,
-    commitSha: commitShaAt(ctx.cwd),
-    env: engineEnvSet(spawnEnv(ctx.cwd)),
-    ...(pid !== undefined ? { pid } : {}),
-    ...(terminal
-      ? {
-          // A mid-flight fallback (the wrapper could not be sent to the pane)
-          // nulls both ids and carries its own error, exactly the shape of
-          // the tab.create fallback below: the attempt runs headless, and
-          // the log must never point at the dead pane the fallback closed.
-          pane_id: terminalError !== undefined ? null : terminal.paneId,
-          tab_id: terminalError !== undefined ? null : terminal.tabId,
-          ...(terminal.error !== undefined || terminalError !== undefined
-            ? { terminal_error: terminalError ?? terminal.error }
-            : {}),
-        }
-      : {}),
-  };
-}
-
 /**
  * Close the attempt's herdr tab. For a merging attempt the trigger is the
  * ticket's merge (ADR-0014: exited panes persist until merge, then the
@@ -5156,8 +4776,8 @@ function spawnedPayload(
  * head-to-head judge, losing verify candidates) the trigger is the moment
  * their role ends: the verdict landing or the selection discarding them.
  * The tab id rides the attempt's spawned event, so no state is threaded
- * through the merge or grading paths; a missing id (headless pool,
- * headless fallback) leaves nothing to close. Best-effort and non-blocking:
+ * through the merge or grading paths and no config is consulted: a missing
+ * id (headless pool, headless fallback) leaves nothing to close. Best-effort and non-blocking:
  * closing a terminal must never fail or delay the engine, and a daemon that
  * has gone away, or that already reaped the exited tab (verified live:
  * herdr closes a tab whose shell ends), changes nothing about the ticket.
@@ -5167,7 +4787,6 @@ function closeAttemptTab(
   ticketId: string,
   attempt: number,
 ): void {
-  if (session.state.config.terminal !== "herdr") return;
   const spawned = readEvents(session.runsDir, ticketId).find(
     (event) =>
       event.kind === "spawned" &&
@@ -5190,7 +4809,6 @@ function closeAttemptTab(
  * ending time cannot know whether a resolver ran.
  */
 export function closeAttemptTabs(session: Session, ticketId: string): void {
-  if (session.state.config.terminal !== "herdr") return;
   for (const spawned of readEvents(session.runsDir, ticketId)) {
     if (
       spawned.kind !== "spawned" ||
@@ -5269,21 +4887,12 @@ function planTicket(
 // JSON is the only ending signal, and anything that is not exit code 0 with a
 // valid outcome is a crash. The crash reason distinguishes the classes in the
 // ticket log: a dead harness, an agent that never wrote its outcome, an
-// outcome that does not parse, and an outcome whose status is invalid.
+// outcome that does not parse, and an outcome whose status is invalid. The
+// reading itself is the Attempt-run module's (readAttemptResult); this is
+// the Outcome's validator.
 export type OutcomeResult =
   | { ok: true; outcome: Outcome; spawnRejections?: SpawnRejection[] }
-  | { ok: false; reason: string };
-
-function readOutcomeResult(path: string): OutcomeResult {
-  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return { ok: false, reason: "outcome is not parseable JSON" };
-  }
-  return validateOutcome(parsed);
-}
+  | ReadFailure;
 
 // A proposal's body must carry enough intent for a fresh agent to work from;
 // anything thinner is a note, not a ticket. The prompt teaching names the
@@ -5754,47 +5363,6 @@ function manualMergeInterrupt(
   };
 }
 
-// Attempt rotation on re-run (ADR 0002): before a new attempt writes, an
-// existing well-known log moves to its attempt-numbered name so a re-run
-// never destroys the ticket's history, and its Stream file rotates with it
-// (ADR-0012). The number is the attempt the events file recorded for the run
-// that wrote the file: the last exited implement (or engine-run) attempt for
-// the base log, the last resolver run for the resolver log. Implement logs
-// key on "exited" rather than "spawned" because a resolver run now records a
-// spawned event of its own (ADR-0012) and never an exited one, so "exited"
-// still names exactly the run that wrote the file. A pre-feature log
-// (written before events existed) rotates to attempt-0. The names come from
-// the events module's naming contract.
-function rotateAttemptLog(
-  runsDir: string,
-  ticketId: string,
-  wellKnownPath: string,
-  kind: TicketEventKind,
-): void {
-  const resolver = kind === "resolver";
-  const attempt = lastAttemptOfKind(runsDir, ticketId, kind);
-  if (existsSync(wellKnownPath)) {
-    renameSync(
-      wellKnownPath,
-      join(runsDir, attemptLogName(ticketId, attempt, resolver)),
-    );
-  }
-  // The Stream file was written by the run that wrote the log, so it
-  // rotates under the same attempt number. Rotated independently of the
-  // log: a stream-only leftover (a run that died before any log line
-  // derived) must still rotate.
-  const wellKnownStream = join(
-    runsDir,
-    attemptStreamName(ticketId, null, resolver),
-  );
-  if (existsSync(wellKnownStream)) {
-    renameSync(
-      wellKnownStream,
-      join(runsDir, attemptStreamName(ticketId, attempt, resolver)),
-    );
-  }
-}
-
 async function runTicket(
   marker: TicketMarker,
   snapshot: PoolState,
@@ -5803,30 +5371,14 @@ async function runTicket(
   plan: TicketPlan,
 ): Promise<TicketResult> {
   const [driver, ...chain] = assignment.drivers.split(/\s+/).filter(Boolean);
-  // A verify attempt writes its attempt-numbered log directly: N parallel
-  // attempts cannot share the well-known path, and the number is known at
-  // scheduling time. A solo attempt keeps the well-known path plus rotation.
-  const logPath = plan.verify
-    ? join(env.runsDir, attemptLogName(marker.id, plan.attempt, false))
-    : join(env.runsDir, attemptLogName(marker.id, null, false));
-  if (!plan.verify) {
-    rotateAttemptLog(env.runsDir, marker.id, logPath, "exited");
-  }
-  const streamPath = attemptStreamPath(
-    env.runsDir,
-    marker.id,
-    assignment.harness,
-    plan.verify ? plan.attempt : null,
-    false,
-    snapshot.config.terminal === "herdr",
-  );
+  // A verify attempt writes its attempt-numbered files directly: N parallel
+  // attempts cannot share the well-known paths, and the number is known at
+  // scheduling time. A solo attempt keeps the well-known paths plus rotation.
+  const naming = { attempt: plan.verify ? plan.attempt : null, resolver: false };
   const outcomePath = join(
     env.runsDir,
-    outcomeFileName(marker.id, plan.verify ? plan.attempt : null),
+    attemptOutcomeName(marker.id, naming.attempt, false),
   );
-  // Every attempt starts with no outcome: a file a previous attempt left
-  // behind would be read as this attempt's result, honoring a stale status.
-  rmSync(outcomePath, { force: true });
 
   const upstream = marker.blockedBy.flatMap((id) => {
     const outcome = snapshot.outcomes[id];
@@ -5845,164 +5397,79 @@ async function runTicket(
     outcomePath,
   });
 
-  const ctx: SpawnContext = {
-    id: marker.id,
-    issuePath: marker.file,
-    body: prompt,
-    driver,
-    harness: assignment.harness,
-    model: assignment.model,
-    agents: snapshot.config.agents,
-    logPath,
-    streamPath,
-    outcomePath,
-    exitCodePath: join(
-      env.runsDir,
-      attemptExitCodeName(marker.id, plan.verify ? plan.attempt : null, false),
-    ),
-    cwd: plan.cwd,
-  };
-  const argv = harnessCommandFor(env.harnesses, assignment, marker.id)(ctx);
-  // A terminal-backed attempt opens its own named herdr tab before the
-  // spawn is recorded, so the spawned event can carry the recovered pane id
-  // (ADR-0014, ADR-0015); the event is recorded by spawnWithTerminal once
-  // the wrapper send's outcome is known, so a mid-flight fallback records
-  // pane_id null + terminal_error instead of the dead pane. Headless spawns
-  // record no pane facts at all.
-  const terminal =
-    snapshot.config.terminal === "herdr"
-      ? await openAttemptTerminal(
-          env.herdrSocket,
-          marker.id,
-          marker.title,
-          plan.cwd,
-        )
-      : undefined;
-  const interactiveArgv =
-    snapshot.config.terminal === "herdr"
-      ? interactiveHarnessCommand(env.harnesses, assignment.harness)(ctx)
-      : argv;
-  const exitCode = await spawnWithTerminal(
-    env.herdrSocket,
-    terminal,
-    interactiveArgv,
-    argv,
-    ctx,
-    env.children,
-    // The attempt's completion: a valid Outcome the moment it appears,
-    // without waiting for the TUI to exit (ADR-0016).
-    (path) => readOutcomeResult(path).ok,
-    (terminalError, argvUsed, pid) =>
-      appendEvent(env.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt: plan.attempt,
-        kind: "spawned",
-        payload: spawnedPayload(
-          argvUsed,
-          ctx,
-          plan.worktree?.branch ?? null,
-          terminal,
-          terminalError,
-          pid,
-        ),
-      }),
+  // The attempt itself is the Attempt-run module's (ADR-0014): spawn,
+  // ending, result, and the exited and crash events on the ticket log. The
+  // exited status on a clean exit is the Outcome's own (done or checkpoint).
+  const run = await runAttempt(
+    env,
+    {
+      id: marker.id,
+      issuePath: marker.file,
+      title: marker.title,
+      body: prompt,
+      driver,
+      harness: assignment.harness,
+      model: assignment.model,
+      cwd: plan.cwd,
+      branch: plan.worktree?.branch ?? null,
+      attempt: plan.attempt,
+      naming,
+      rotate: plan.verify ? "none" : "exited",
+      fallback: "headless",
+      prompt: { kind: "driver" },
+      crashSubject: "harness",
+      events: {
+        kind: "full",
+        exitedStatus: (result) => result.outcome.status,
+        // Malformed spawn entries were dropped per proposal at validation
+        // (ADR-0010); each reason lands on the ticket's log at the exit that
+        // produced it, ahead of the exited event, for verify candidates and
+        // solo attempts alike.
+        resultEvents: (result) =>
+          (result.spawnRejections ?? []).map((rejection) => ({
+            kind: "spawn-rejected" as const,
+            payload: {
+              reason: rejection.reason,
+              ...(rejection.index !== undefined ? { index: rejection.index } : {}),
+            },
+          })),
+      },
+    },
+    validateOutcome,
   );
-
   // The ending comes from the outcome JSON alone (ADR-0005). On a clean exit
   // with a valid outcome the engine writes the final status to the canonical
   // Issue's marker itself; a marker the agent rewrote is never honored. A
   // verify candidate writes no status anywhere at its exit: the ticket is
   // in-progress until the whole fan-out has exited, and grading decides what
   // happens after (tickets 03 and 04).
-  const outcome = readOutcomeResult(outcomePath);
-  // Malformed spawn entries were dropped per proposal at validation
-  // (ADR-0010); each reason lands on the ticket's log here, at the exit that
-  // produced it, for verify candidates and solo attempts alike.
-  for (const rejection of outcome.ok ? (outcome.spawnRejections ?? []) : []) {
-    appendEvent(env.runsDir, marker.id, {
-      at: new Date().toISOString(),
-      attempt: plan.attempt,
-      kind: "spawn-rejected",
-      payload: {
-        reason: rejection.reason,
-        ...(rejection.index !== undefined ? { index: rejection.index } : {}),
-      },
-    });
-  }
   let status: TicketStatus = "in-progress";
-  let crashReason: string | null = null;
-  if (exitCode !== 0) {
-    crashReason = attemptCrashReason(
-      env.children,
-      exitCode,
-      ctx.exitCodePath,
-      "harness",
-      terminal?.paneId ?? null,
-    );
-  } else if (!outcome.ok) {
-    crashReason = outcome.reason;
-  } else {
-    status = outcome.outcome.status;
+  if (run.ok) {
+    status = run.result.outcome.status;
     if (!plan.verify) {
       writeMarkerStatus(marker.file, status);
       if (status === "checkpoint") {
         // Before the return: the drive loop raises the checkpoint's interrupt
         // from the Issue's Brief section the moment this attempt exits.
-        landCheckpointBrief(marker.file, outcome.outcome.brief);
+        landCheckpointBrief(marker.file, run.result.outcome.brief);
       }
     }
-  }
-  if (
-    crashReason !== null &&
-    !plan.verify &&
-    readMarker(marker.file).status !== "in-progress"
-  ) {
+  } else if (!plan.verify && readMarker(marker.file).status !== "in-progress") {
     writeMarkerStatus(marker.file, "in-progress");
-  }
-  // The exit facts (ADR-0012), computed the moment the attempt exits: the
-  // log is closed by now, so the tail is complete, and the outcome file's
-  // existence is the fact that distinguishes "agent never wrote its
-  // outcome" from "outcome was invalid".
-  const logTail = readLogTail(logPath);
-  const outcomeExists = existsSync(outcomePath);
-  appendEvent(env.runsDir, marker.id, {
-    at: new Date().toISOString(),
-    attempt: plan.attempt,
-    kind: "exited",
-    payload: { code: exitCode, status, logTail, outcomeExists },
-  });
-  // A crash is recorded the moment the attempt exits (the marker has already
-  // been corrected), not at the end of the super-step, so the ticket log
-  // stops masquerading a dead attempt as running work. The payload carries
-  // the exit code, the reason, and the same log tail and outcome fact the
-  // exited event carries, so the log alone distinguishes a dead harness from
-  // an agent that never wrote its outcome from an outcome that was invalid.
-  // Per-ticket event appends are concurrency-safe against siblings still in
-  // flight. The crash interrupt itself is still raised at the super-step
-  // boundary.
-  if (crashReason !== null) {
-    appendEvent(env.runsDir, marker.id, {
-      at: new Date().toISOString(),
-      attempt: plan.attempt,
-      kind: "crash",
-      payload: { code: exitCode, reason: crashReason, logTail, outcomeExists },
-    });
   }
 
   return {
     marker,
     status,
-    logPath,
-    exitCode,
+    logPath: run.logPath,
+    exitCode: run.code,
     plan,
     joinedAtExit: false,
-    logTail,
-    outcomePath,
-    outcomeExists,
+    logTail: run.logTail,
+    outcomePath: run.outcomePath,
+    outcomeExists: run.outcomeExists,
     spawnProposals:
-      outcome.ok && !plan.verify && crashReason === null
-        ? (outcome.outcome.spawn ?? [])
-        : undefined,
+      run.ok && !plan.verify ? (run.result.outcome.spawn ?? []) : undefined,
     update: {
       // A verify candidate moves only the pool log: the tickets and outcomes
       // channels are keyed by ticket id, and N attempts of one ticket would
@@ -6012,653 +5479,16 @@ async function runTicket(
       log: [
         plan.verify
           ? `ticket ${marker.id}: attempt ${plan.attempt} ` +
-            `${exitedPhrase(exitCode)} (${status})` +
-            (crashReason !== null ? `, crash: ${crashReason}` : "")
-          : `ticket ${marker.id}: ${exitedPhrase(exitCode)}, marker ${status}` +
-            (crashReason !== null ? `, crash: ${crashReason}` : ""),
+            `${exitedPhrase(run.code)} (${status})` +
+            (run.crashReason !== null ? `, crash: ${run.crashReason}` : "")
+          : `ticket ${marker.id}: ${exitedPhrase(run.code)}, marker ${status}` +
+            (run.crashReason !== null ? `, crash: ${run.crashReason}` : ""),
       ],
-      ...(outcome.ok && !plan.verify
-        ? { outcomes: { [marker.id]: outcome.outcome } }
+      ...(run.result.ok && !plan.verify
+        ? { outcomes: { [marker.id]: run.result.outcome } }
         : {}),
     },
   };
-}
-
-// Once the harness child has exited, its stdout/stderr pumps get this long to
-// drain whatever is still in flight before the streams are torn down. A
-// grandchild that inherits the child's pipe and outlives it holds the write
-// end open, so EOF never arrives and an unbounded pump would park the drive
-// forever on a child that is already gone.
-const SPAWN_PUMP_GRACE_MS = 2_000;
-
-// A drain wait that cannot reject: a write stream an error is destroying
-// never drains, and that failure is recorded by the stream's error
-// listener, never by the pump's wait.
-function drainWait(stream: WriteStream): Promise<unknown> {
-  return once(stream, "drain").catch(() => {});
-}
-
-// The teardown write streams get at spawn end: end() on a stream an error
-// already destroyed throws ERR_STREAM_DESTROYED, so the destroyed check
-// skips it, and end's own write failure is recorded through onError rather
-// than thrown. Shared by the headless spawn's pumps and the terminal-backed
-// spawn's follow-file tailer.
-function endWriteStream(
-  stream: WriteStream,
-  onError: (error: unknown) => void,
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (stream.destroyed) {
-      resolve();
-      return;
-    }
-    try {
-      stream.end((error: Error | null | undefined) => {
-        if (error) onError(error);
-        resolve();
-      });
-    } catch {
-      resolve();
-    }
-  });
-}
-
-// The completion poll's cadence: how often a terminal-backed attempt checks
-// whether its Outcome has appeared.
-const ATTEMPT_COMPLETE_POLL_MS = 250;
-// The engine's own negative "exit codes" for a botched interactive spawn,
-// mapped to human reasons by the spawn sites. They are deliberately not
-// codes a harness can exit with, and stay clear of EXIT_CODE_UNREADABLE and
-// EXIT_CODE_PANE_GONE, the ending wait's own sentinels.
-const SPAWN_INTERACTIVE_READY_FAILED = -3;
-const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
-
-// Whether a spawn's code is one of the engine's own: the harness never ran
-// (or never took its prompt), as opposed to a code the harness exited with.
-function isBotchedSpawnCode(code: number): boolean {
-  return (
-    code === SPAWN_INTERACTIVE_READY_FAILED ||
-    code === SPAWN_INTERACTIVE_PROMPT_FAILED
-  );
-}
-
-function sleep(ms: number): Promise<null> {
-  return new Promise((resolve) => setTimeout(() => resolve(null), ms));
-}
-
-/**
- * One terminal-backed spawn, end to end (ADR-0014, ADR-0015, amended by
- * ADR-0016): send the wrapper to the attempt's pane, record the spawned
- * event, then run the interactive session — readiness, prompt delivery, and
- * completion on the attempt's Outcome. Resolves with an exit code exactly
- * like `spawnToLog`, so every spawn site's exit handling is unchanged: 0 on
- * a valid Outcome, the wrapper's code on pane loss without one or on a
- * harness that exited before its TUI came up, and the engine's negative
- * botched-spawn codes. The pane runs `interactiveArgv`
- * (the TUI) wrapped in `script`; a headless fallback always runs
- * `batchArgv`. `recordSpawned` runs only once the spawn's terminal outcome
- * is known: a `pane.send_input` failure falls back to headless BEFORE the
- * event is recorded, and the error it receives lands on the event
- * (`pane_id: null` + `terminal_error`, the same shape as the tab.create
- * fallback), so the log never carries the dead pane id the fallback just
- * closed. Headless spawns — no terminal, or the tab itself could not be
- * opened — record and run exactly as a headless pool's spawn would.
- */
-async function spawnWithTerminal(
-  socketPath: string,
-  terminal: AttemptTerminal | undefined,
-  interactiveArgv: string[],
-  batchArgv: string[],
-  ctx: SpawnContext,
-  children: ChildTracker,
-  completed: (outcomePath: string) => boolean,
-  recordSpawned: (
-    terminalError: string | undefined,
-    argv: string[],
-    pid?: number,
-  ) => void,
-): Promise<number> {
-  // A headless spawn records once the child exists, so the event carries
-  // its pid (ADR-0017); the callback runs before the first byte is pumped.
-  if (!terminal?.paneId) {
-    return spawnToLog(batchArgv, ctx, children, (pid) =>
-      recordSpawned(undefined, batchArgv, pid),
-    );
-  }
-  const terminalError = await sendWrapperToPane(
-    socketPath,
-    terminal.paneId,
-    interactiveArgv,
-    ctx,
-  );
-  if (terminalError !== undefined) {
-    return spawnToLog(batchArgv, ctx, children, (pid) =>
-      recordSpawned(terminalError, batchArgv, pid),
-    );
-  }
-  recordSpawned(undefined, interactiveArgv);
-  return awaitInteractiveSpawn(socketPath, terminal.paneId, ctx, completed);
-}
-
-/**
- * The session half of a terminal-backed spawn (ADR-0016): the tailer on the
- * attempt's typescript Stream file, then prompt delivery (readiness wait,
- * typed prompt, echo verification, retry, file-reference fallback), then the
- * wait for the attempt's Outcome. A botched delivery closes the pane so the
- * operator is not left a silently idle tab and resolves with the engine's
- * negative code. A harness that exited on its own before the TUI came up
- * resolves with its code and keeps its pane, the way every crashed
- * attempt's tab stays open (ADR-0014): the pane shows why it died, and when
- * `script` itself refused to run (issue #58) the pane is the only place
- * that shows it, the Stream file having never been created. The tailer
- * always drains the transcript it has so the crash log carries what the
- * pane showed.
- */
-async function awaitInteractiveSpawn(
-  socketPath: string,
-  paneId: string,
-  ctx: SpawnContext,
-  completed: (outcomePath: string) => boolean,
-): Promise<number> {
-  const tailer = ctx.streamPath
-    ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
-    : null;
-  try {
-    const failure = await deliverPrompt(socketPath, paneId, ctx);
-    if (failure !== undefined) {
-      if (isBotchedSpawnCode(failure)) {
-        void closePane(socketPath, paneId).catch(() => {});
-      }
-      return failure;
-    }
-    return await awaitOutcomeOrPaneEnd(
-      socketPath,
-      paneId,
-      ctx.exitCodePath,
-      ctx.outcomePath,
-      completed,
-    );
-  } finally {
-    if (tailer) await tailer.finish().catch(() => {});
-  }
-}
-
-/**
- * The prompt delivery half of a terminal-backed spawn (ADR-0016): wait for
- * the harness's ready frame, type the driver prompt, verify the echo, retry
- * on a lost paste, and fall back to a short file-referencing command when
- * full-prompt pasting fails. Resolves `undefined` once the prompt is in; a
- * botched delivery resolves with the engine's negative code. A custom
- * harness (no descriptor) declares no TUI: its command runs as-is under the
- * script wrapper and its Outcome or pane end decides the attempt, so the
- * engine types nothing and resolves immediately.
- */
-async function deliverPrompt(
-  socketPath: string,
-  paneId: string,
-  ctx: SpawnContext,
-): Promise<number | undefined> {
-  try {
-    return await deliverPromptInner(socketPath, paneId, ctx);
-  } catch {
-    // A send failed mid-delivery (the daemon died after the wrapper was
-    // sent): the prompt never landed. One attempt's terminal trouble must
-    // never take the drive down, so this surfaces as the botched-spawn
-    // failure rather than a throw.
-    return SPAWN_INTERACTIVE_PROMPT_FAILED;
-  }
-}
-
-async function deliverPromptInner(
-  socketPath: string,
-  paneId: string,
-  ctx: SpawnContext,
-): Promise<number | undefined> {
-  const descriptor = defaultHarnessDescriptors[ctx.harness];
-  if (!descriptor) return undefined;
-  const readiness = await waitForReadiness(
-    socketPath,
-    paneId,
-    ctx.harness,
-    descriptor.readyPattern,
-    ctx.exitCodePath,
-  );
-  // The harness exited before its TUI came up: the wrapper's exit-code file
-  // holds its code, and that code, not a botched-spawn sentinel, is the
-  // attempt's ending, exactly as a headless spawn that died on launch
-  // reports (a 0 with no Outcome lands on the spawn sites' missing-outcome
-  // path).
-  if (readiness === "exited") return readExitCode(ctx.exitCodePath);
-  if (readiness !== "ready") return SPAWN_INTERACTIVE_READY_FAILED;
-  const prompt = descriptor.promptShaping.interactive(ctx);
-  // The fallback's prompt file, written by the engine so the path is known
-  // to both sides; named from the outcome path so N parallel attempts never
-  // share one. It carries the issue reference the primary prompt's driver
-  // line would have carried, then the body, so the agent the fallback
-  // reaches still starts on the right ticket.
-  const promptFile = ctx.outcomePath.replace(/\.json$/, ".prompt.txt");
-  writeFileSync(promptFile, `${ctx.issuePath}\n\n${ctx.body}`);
-  const echoTargets = [
-    descriptor.echoPattern,
-    // The issue reference rides every known TUI's prompt, so it is the
-    // harness-agnostic echo signal (claude and cursor also collapse the
-    // paste to their echoPattern marker).
-    ctx.issuePath,
-  ].filter((target): target is string => typeof target === "string");
-  const clearKeys = descriptor.clearKeys;
-  // A harness with no verified clear sequence cannot safely re-paste: a
-  // false-negative echo would concatenate. One attempt, then a loud fail.
-  // Clear keys are not sent before the first paste: opencode's ctrl+c
-  // exits on empty input (prototype/tui-clear-input/FINDINGS.md). The
-  // retry-with-clear loop and its echo verification are pane-session.ts's
-  // typeVerified (extracted so a Conversation's opening Turn can use the
-  // same mechanics).
-  if (await typeVerified(socketPath, paneId, prompt, echoTargets, clearKeys)) {
-    return undefined;
-  }
-  if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
-  // Full-prompt pasting failed: the file-referencing fallback, short enough
-  // to survive any input-buffer cap (prototype finding, all three harnesses).
-  // The command carries the attempt's own driver, so a grader, resolver, or
-  // head-to-head judge falls back to its own skill, not the ticket driver's.
-  // One un-retried attempt: the pane was just cleared, so typeVerified needs
-  // no clear keys of its own here.
-  const fallback = `/${ctx.driver} ${promptFile}`;
-  await paneSendInput(socketPath, paneId, { keys: clearKeys });
-  if (await typeVerified(socketPath, paneId, fallback, [promptFile], [])) {
-    return undefined;
-  }
-  return SPAWN_INTERACTIVE_PROMPT_FAILED;
-}
-
-/**
- * The completion wait of a terminal-backed spawn (ADR-0016, on ADR-0014's
- * raced endings): the attempt ends on a valid Outcome without requiring pane
- * exit — a TUI deliberately stays alive after the agent declares done — so
- * the outcome poll races the attempt's ending (attempt-ending.ts races
- * herdr's pane end against the wrapper's exit-code file, and a pane that
- * vanishes from the listing with no file behind it is the pane's own crash),
- * and the loser is released so one attempt costs the pool no subscription
- * and no timer once it is over.
- */
-async function awaitOutcomeOrPaneEnd(
-  socketPath: string,
-  paneId: string,
-  exitCodePath: string,
-  outcomePath: string,
-  completed: (path: string) => boolean,
-): Promise<number> {
-  const release = new AbortController();
-  try {
-    const ending = await Promise.race([
-      waitForAttemptEnding(socketPath, paneId, exitCodePath, release.signal),
-      outcomeCompleted(outcomePath, completed, release.signal),
-    ]);
-    // The Outcome may have been written a moment before the ending landed;
-    // confirm before reading the ending as a crash.
-    if (ending === "outcome" || completed(outcomePath)) return 0;
-    // A pane that left the listing has already been given the ending's grace
-    // window to write its file and did not, so there is nothing to read and
-    // nothing to wait for: reading anyway buys only the retry's two seconds
-    // and then the wrong words, blaming a wrapper that never got to run.
-    if (ending === "pane-gone") return EXIT_CODE_PANE_GONE;
-    // The exit-code file is written before the shell exits, so it is already
-    // there in the normal case; the retry only covers a daemon that reaps
-    // the pane ahead of the wrapper's last write.
-    return readExitCode(exitCodePath);
-  } finally {
-    release.abort();
-  }
-}
-
-// The outcome half of the completion race: resolves once the attempt's
-// completion predicate holds, polling at the completion cadence. Once the
-// race is lost it stops polling and never settles, collected with the race.
-async function outcomeCompleted(
-  outcomePath: string,
-  completed: (path: string) => boolean,
-  release: AbortSignal,
-): Promise<"outcome"> {
-  while (!release.aborted) {
-    if (completed(outcomePath)) return "outcome";
-    await sleep(ATTEMPT_COMPLETE_POLL_MS);
-  }
-  return new Promise(() => {});
-}
-
-// No exit code ever arrived: the wrapper's file was missing or unparseable
-// after every retry. A shell exit status is 0-255, so a negative can never
-// collide with a real one, which is what makes it usable as the signal.
-const EXIT_CODE_UNREADABLE = -1;
-
-// The pane left herdr's listing and the ending's grace window passed with no
-// file behind it (attempt-ending.ts): the attempt is over and its exit status
-// is not recoverable from anywhere. Its own value for the same reason as
-// EXIT_CODE_UNREADABLE, and distinct from it because the two want different
-// words: nothing here is the wrapper's doing.
-const EXIT_CODE_PANE_GONE = -2;
-
-// The crash reason for a non-zero exit, whose causes want different words. A
-// real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
-// fate is unknown and the pane wrapper is the thing to look at;
-// EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
-// their faults and is why it names the pane instead; the SPAWN_INTERACTIVE
-// codes are the engine's own botched interactive spawn, where the harness
-// never ran at all. The distinction is worth a helper: an unparseable file
-// reported itself as `exited 1` on attempts that had in fact succeeded, and
-// read as a harness fault until the file itself was inspected (ADR-0014's
-// amendment). `paneId` is not optional so that a new crash site has to say
-// whether it has a pane at all; a headless attempt has none and can never
-// end this way.
-export function exitCrashReason(
-  code: number,
-  exitCodePath: string,
-  subject: string,
-  paneId: string | null,
-): string {
-  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
-    return "TUI never became ready";
-  }
-  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
-    return "prompt never landed";
-  }
-  if (code === EXIT_CODE_UNREADABLE) {
-    return (
-      `${subject} exit code unreadable: the pane wrapper never wrote a ` +
-      `usable ${exitCodePath}`
-    );
-  }
-  if (code === EXIT_CODE_PANE_GONE) {
-    return (
-      `${subject} pane gone: ${paneId ?? "the pane"} left herdr's listing ` +
-      `and no exit code was written to ${exitCodePath}`
-    );
-  }
-  return `${subject} exited ${code}`;
-}
-
-// The crash reason for an attempt's non-zero exit, naming a shutdown stop
-// as what it was (ADR-0017): a headless child the engine stopped exits on
-// the signal, and "exited 143" would read as the harness's own failure.
-// Terminal-backed attempts are never stopped, and the negative sentinels
-// are the engine's own codes, so both keep the ordinary reason.
-function attemptCrashReason(
-  children: ChildTracker,
-  code: number,
-  exitCodePath: string,
-  subject: string,
-  paneId: string | null,
-): string {
-  if (children.stopping && paneId === null && code > 0) {
-    return `${subject} stopped by engine shutdown (exited ${code})`;
-  }
-  return exitCrashReason(code, exitCodePath, subject, paneId);
-}
-
-// How the pool log names the ending in passing, where the line is about the
-// marker and the code is one clause of it. A real code is the shell's own
-// status and reads as one; a sentinel is not a status at all, so it says what
-// happened instead of printing a number no shell produced. Templating it
-// unconditionally put `exited -2` on the same line as a crash reason whose
-// whole purpose is to report that no exit status was ever observed, which
-// described one attempt two contradictory ways in a single breath.
-export function exitedPhrase(code: number): string {
-  if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
-  if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
-  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
-    return "ended before its TUI became ready";
-  }
-  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
-    return "ended before its prompt landed";
-  }
-  return `exited ${code}`;
-}
-
-// Read the wrapper-written exit code, retrying briefly for a reaping race,
-// and translating a missing or malformed file into EXIT_CODE_UNREADABLE: the
-// attempt still ended (pane killed, daemon lost) and the crash path the
-// spawn sites already have is the right ending, but it says which happened.
-async function readExitCode(path: string): Promise<number> {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      const parsed = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
-      if (Number.isFinite(parsed)) return parsed;
-    } catch {
-      // not there yet
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  return EXIT_CODE_UNREADABLE;
-}
-
-/**
- * The follow-file tailer (ADR-0014, amended by ADR-0016): reads the pane's
- * `script` typescript Stream file as it grows and derives the attempt log
- * from it line by line, stripping the ANSI and control noise so the log is
- * the readable transcript of the whole session, operator input included
- * (TranscriptLineBuffer). Terminal-backed attempts never derive stream-json
- * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
- * derivation. Polls by positioned reads; `finish` drains the tail, flushes
- * the line buffer, and ends the log stream. Exported so conversations.ts
- * (Workstream A) can derive a Conversation's own log from its pane the same
- * way a ticket attempt's is derived.
- */
-export function startPaneStreamTail(
-  streamPath: string,
-  logPath: string,
-): { finish: () => Promise<void> } {
-  const log = createWriteStream(logPath);
-  let streamError: unknown = null;
-  log.on("error", (error) => {
-    if (streamError === null) streamError = error;
-  });
-  const writeDerivedLine = async (line: string): Promise<void> => {
-    if (log.destroyed) return;
-    if (!log.write(`${line}\n`)) await drainWait(log);
-  };
-  let buffer = new TranscriptLineBuffer();
-  let offset = 0;
-  let fd: number | null = null;
-  let stepping = false;
-  const chunk = new Uint8Array(64 * 1024);
-  // One poll step: open the file once script has created it, then read
-  // everything new since the last offset through the line buffer.
-  // Concurrent ticks are skipped, never interleaved: a step awaits its log
-  // writes under backpressure, and two steps running at once could write
-  // the derived log out of order.
-  const step = async (): Promise<void> => {
-    if (stepping) return;
-    stepping = true;
-    try {
-      if (fd === null) {
-        try {
-          fd = openSync(streamPath, "r");
-        } catch {
-          return; // script has not created the file yet
-        }
-        offset = 0;
-        buffer = new TranscriptLineBuffer();
-      }
-      let size: number;
-      try {
-        size = fstatSync(fd).size;
-      } catch {
-        return;
-      }
-      if (size < offset) {
-        // The file was replaced (a re-run truncated it): re-read from scratch.
-        offset = 0;
-        buffer = new TranscriptLineBuffer();
-      }
-      while (offset < size) {
-        let read: number;
-        try {
-          read = readSync(fd, chunk, 0, chunk.length, offset);
-        } catch {
-          return;
-        }
-        if (read <= 0) return;
-        offset += read;
-        for (const line of buffer.push(chunk.subarray(0, read))) {
-          await writeDerivedLine(line);
-        }
-      }
-    } finally {
-      stepping = false;
-    }
-  };
-  const timer = setInterval(() => {
-    void step().catch(() => {});
-  }, PANE_TAIL_POLL_MS);
-  const finish = async (): Promise<void> => {
-    clearInterval(timer);
-    await step().catch(() => {});
-    for (const line of buffer.flush()) await writeDerivedLine(line);
-    if (fd !== null) {
-      try {
-        closeSync(fd);
-      } catch {
-        // already gone
-      }
-    }
-    await endWriteStream(log, (error) => {
-      if (streamError === null) streamError = error;
-    });
-    // A log the engine cannot write is a real failure, same as the headless
-    // spawn's rethrow.
-    if (streamError !== null) throw streamError;
-  };
-  return { finish };
-}
-
-async function spawnToLog(
-  argv: string[],
-  ctx: SpawnContext,
-  children: ChildTracker,
-  onSpawn?: (pid: number) => void,
-): Promise<number> {
-  // The child env comes from spawnEnv, the same builder the spawned event's
-  // env facts derive from, so the event cannot drift from what the child
-  // actually ran under (ADR-0012). The child leads its own process group
-  // (ADR-0017): a stop signals the group, so the harness's own children go
-  // with it instead of surviving as the orphans an untrapped kill left.
-  const proc = Bun.spawn(argv, {
-    cwd: ctx.cwd,
-    env: spawnEnv(ctx.cwd),
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    detached: true,
-  });
-  children.track({ pid: proc.pid, exited: proc.exited });
-  onSpawn?.(proc.pid);
-  // A streamed harness (ADR-0012) also tees every stdout chunk verbatim to
-  // the attempt's Stream file, live as bytes arrive; both files open at
-  // spawn, so a tail on either shows activity from the first chunk.
-  const tee = ctx.streamPath ? createWriteStream(ctx.streamPath) : null;
-  // Both streams land in one log writer in arrival order, and land live,
-  // matching run.sh's `2>&1 | tee`: a log can be tailed while the harness
-  // is still running, and a crash log reads in the order the output
-  // happened. Stream mode writes derived lines instead of raw bytes
-  // (assistant text verbatim, one `[tool] Name: summary` line per tool
-  // call); raw mode writes the chunk itself, exactly as before.
-  const log = createWriteStream(ctx.logPath);
-  // A failing write stream errors and destroys itself, and an unlistened
-  // 'error' event escapes as an unhandled failure far from its cause. Both
-  // streams report into one first-error capture here: the spawn fails on it
-  // after teardown (a log the engine cannot write is a real failure, and
-  // still kills the spawn), while the destruction itself can no longer
-  // reject the teardown, because every writer and the end calls below check
-  // the streams first.
-  let streamError: unknown = null;
-  const noteStreamError = (error: unknown): void => {
-    if (streamError === null) streamError = error;
-  };
-  log.on("error", noteStreamError);
-  if (tee) tee.on("error", noteStreamError);
-  const exited = proc.exited;
-  const writeDerivedLine = async (line: string): Promise<void> => {
-    const text = deriveStreamLine(line) ?? line;
-    if (text === "") return;
-    if (log.destroyed) return;
-    if (!log.write(`${text}\n`)) await drainWait(log);
-  };
-  // Each pump reads through an explicit reader so the child-exit grace can
-  // cancel the read from outside: the for-await loop used before locks the
-  // stream against exactly that teardown. A pump that drains before the
-  // grace expires (the normal case: the pipe closes with the child) clears
-  // its own timer, so clean spawns are untouched by the bound.
-  //
-  // In stream mode stdout carries the structured stream: its chunks tee
-  // verbatim to the Stream file and derive the log line by line. stderr
-  // feeds the same deriver without teeing, so plain-text diagnostics pass
-  // through to the log. Raw mode writes the chunk itself, exactly as
-  // before. Per-stream buffers: a partial line from one stream never merges
-  // with the other's.
-  type PumpMode = "stream" | "diagnostics" | "raw";
-  const pump = (stream: ReadableStream<Uint8Array>, mode: PumpMode) => {
-    const reader = stream.getReader();
-    const buffer = mode === "raw" ? null : new StreamLineBuffer();
-    // One error boundary for the whole pump: a pump failure settles this
-    // promise instead of rejecting it, so both pumps always settle before
-    // the teardown below runs, and a stream destroyed mid-write can never
-    // reject the spawn through a multiplexed Promise.all whose sibling pump
-    // is still unwinding. Every failure is recorded through the same
-    // first-error capture the streams' error listeners feed, so a genuine
-    // failure still fails the spawn at the rethrow after teardown; the
-    // destruction itself is never a rejection, because a destroyed writer
-    // fails writes silently and the end calls below skip it.
-    const reading = (async () => {
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) {
-            for (const line of buffer?.flush() ?? []) await writeDerivedLine(line);
-            return;
-          }
-          if (mode === "stream" && tee && !tee.destroyed && !tee.write(value)) {
-            await drainWait(tee);
-          }
-          if (buffer) {
-            for (const line of buffer.push(value)) await writeDerivedLine(line);
-          } else if (!log.destroyed && !log.write(value)) {
-            await drainWait(log);
-          }
-        }
-      } catch (error) {
-        noteStreamError(error);
-      }
-    })();
-    void exited
-      .then(() => {
-        const timer = setTimeout(() => {
-          void reader.cancel().catch(() => {});
-        }, SPAWN_PUMP_GRACE_MS);
-        void reading.then(
-          () => clearTimeout(timer),
-          () => clearTimeout(timer),
-        );
-      })
-      .catch(() => {});
-    return reading;
-  };
-  const [exitCode] = await Promise.all([
-    exited,
-    pump(proc.stdout, tee ? "stream" : "raw"),
-    pump(proc.stderr, tee ? "diagnostics" : "raw"),
-  ]);
-  // The teardown the pumps can never reject, shared with the terminal-backed
-  // tailer: end() on a stream an error already destroyed throws
-  // ERR_STREAM_DESTROYED, so the destroyed check skips it, and end's own
-  // write failure is recorded rather than thrown, leaving the boundary below
-  // as the spawn's only rejection path.
-  await endWriteStream(log, noteStreamError);
-  if (tee) await endWriteStream(tee, noteStreamError);
-  // The spawn still fails on a genuine write failure, exactly as a
-  // rejecting pump did before the boundary existed; the destruction itself
-  // is not one.
-  if (streamError !== null) throw streamError;
-  return exitCode;
 }
 
 export function resolveAssignment(

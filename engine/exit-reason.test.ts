@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { exitCrashReason, exitedPhrase } from "./engine.ts";
+import { exitCrashReason, exitedPhrase } from "./attempt-run.ts";
 
 // The three causes of a non-zero exit read differently on purpose: a real code
 // blames the harness, an unreadable one points at the pane wrapper, and a pane

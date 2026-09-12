@@ -40,34 +40,22 @@ import {
   type WorktreeInfo,
 } from "./worktrees.ts";
 import { waitForAttemptEnding, type AttemptEnding } from "./attempt-ending.ts";
+import { closeTab } from "./herdr.ts";
 import {
-  attemptTabLabel,
-  closeTab,
-  openAttemptTab,
-} from "./herdr.ts";
-import {
-  sendWrapperToPane,
-  typeVerified,
-  waitForReadiness,
-  type WrapperContext,
-} from "./pane-session.ts";
-import {
-  defaultHarnessDescriptors,
-  elidePromptArgv,
-  engineEnvSet,
-  interactiveHarnessCommand,
-  spawnEnv,
-  type SpawnContext,
-} from "./spawn.ts";
+  exitCrashReason,
+  launchAttempt,
+  type AttemptHandle,
+  type PaneTailer,
+} from "./attempt-run.ts";
 import { buildConversationTeaching } from "./prompt.ts";
 import type { Notice } from "./notices.ts";
 import {
+  attemptEnvOf,
   clearInterrupt,
   closeAttemptTabs,
   emitSnapshot,
   handleMergeConflict,
   raiseInterrupt,
-  startPaneStreamTail,
   type AssignmentView,
   type Interrupt,
   type Session,
@@ -259,6 +247,11 @@ export interface ConversationRuntime {
   streamPath: string;
   logPath: string;
   turn: ConversationTurn;
+  // The follow-file tailer deriving the log from the pane's Stream file
+  // (ADR-0012), started by the launch and finished by End or crash so the
+  // derived log is complete; absent for a Conversation recovered without a
+  // launch (boot).
+  tailer?: PaneTailer | null;
   // Workstream B's queue: proposals from spawned work land here, delivered
   // as a Turn once the poller sees this Conversation waiting.
   notices: Notice[];
@@ -443,44 +436,26 @@ function resolveConversationAssignment(
   return { harness, model, drivers };
 }
 
-function conversationSpawnedPayload(
-  argv: string[],
-  body: string,
-  cwd: string,
-  branch: string,
-  paneId: string | null,
-  tabId: string | null,
-  terminalError?: string,
-): Record<string, unknown> {
-  return {
-    argv: elidePromptArgv(argv, body),
-    cwd,
-    branch,
-    env: engineEnvSet(spawnEnv(cwd)),
-    pane_id: terminalError !== undefined ? null : paneId,
-    tab_id: terminalError !== undefined ? null : tabId,
-    ...(terminalError !== undefined ? { terminal_error: terminalError } : {}),
-  };
-}
-
 /**
  * Start a Conversation: refuse a non-terminal pool, resolve its Assignment,
- * give it a worktree and branch, open its named herdr tab, send the
- * interactive harness under the ADR-0016 wrapper, wait for readiness, and
- * type the opening Turn (best-effort: a Conversation has no file-referencing
- * fallback the way a ticket's driver prompt does, since there is no fixed
- * skill to invoke — the operator is watching the pane and can always retype
- * by hand). Throws only when the pool cannot host a Conversation at all
- * (headless, no git) or the launch never got a pane; once the record exists
- * on disk it resolves even if the TUI never became ready, reporting the
- * Conversation crashed rather than losing the attempt to an unstructured
- * rejection.
+ * give it a worktree and branch, then launch it through the Attempt-run
+ * module (ADR-0014's one code path): the named herdr tab, the interactive
+ * harness under the ADR-0016 wrapper, the readiness wait, and the opening
+ * Turn typed verbatim and echo verified. A Conversation has no headless
+ * fallback (ADR-0018: it is a terminal-backed TUI or nothing), so a tab or
+ * a launch command that could not be had is a start failure. Throws only
+ * when the pool cannot host a Conversation at all (headless, no git) or the
+ * launch never got a running pane; once the record exists on disk it
+ * resolves even when the harness died before its TUI, the TUI never became
+ * ready, or the opening Turn never landed, reporting the Conversation
+ * crashed rather than losing the attempt to an unstructured rejection.
  */
 export async function startConversation(
   session: Session,
   req: StartConversationRequest,
 ): Promise<ConversationView> {
-  if (session.state.config.terminal !== "herdr") {
+  const env = attemptEnvOf(session);
+  if (!env.terminalBacked) {
     throw new Error(
       "conversation start: the pool is not terminal-backed (set " +
         'console.json terminal: "herdr")',
@@ -505,49 +480,50 @@ export async function startConversation(
   const { harness, model, drivers } = resolveConversationAssignment(session, req, existing);
   const worktree = prepareWorktree(session.cwd, id);
   const file = conversationFile(session.poolDir, id);
-  const logPath = join(session.runsDir, `${id}.log`);
-  const streamPath = join(session.runsDir, `${id}.stream.jsonl`);
-  const exitCodePath = join(session.runsDir, `${id}.exitcode`);
   const opening = req.opening ?? "";
+  // The spawn-teaching paragraph (Workstream B, prompt.ts) always lands,
+  // appended to the opening Turn when there is one; typed alone otherwise,
+  // so an agent given no opening still learns the propose-and-adopt
+  // mechanism before the operator's first real Turn. spawnPath mirrors the
+  // events module's outcome naming for a Conversation's own proposal
+  // channel: `<id>.spawn.json` beside its `.outcome.json`, polled by
+  // notices.ts's per-Conversation poller.
+  const spawnPath = join(session.runsDir, `${id}.spawn.json`);
+  const teaching = buildConversationTeaching(spawnPath);
+  const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
 
-  let tab: { tabId: string; paneId: string };
+  // The launch: one attempt, the well-known file names, no rotation, no
+  // headless fallback, the opening Turn as a plain prompt (no driver line:
+  // a Conversation has no skill to invoke and no file-referencing fallback,
+  // so a paste that never lands is a crash, not a silently empty pane), and
+  // only the spawned event on the log; the crash and ending events are the
+  // Conversation's own. `issuePath` points at the Conversation's record so
+  // a custom harness that renders it never points at nothing.
+  let launch: AttemptHandle;
   try {
-    tab = await openAttemptTab(session.herdrSocket, attemptTabLabel(id, req.title), worktree.path);
+    launch = await launchAttempt(env, {
+      id,
+      issuePath: file,
+      title: req.title,
+      body: toType,
+      driver: "converse",
+      harness,
+      model,
+      cwd: worktree.path,
+      branch: worktree.branch,
+      attempt: 1,
+      naming: { attempt: null, resolver: false },
+      rotate: "none",
+      fallback: "none",
+      prompt: { kind: "plain", echo: opening.trim() || teaching },
+      crashSubject: "harness",
+      events: { kind: "spawned-only" },
+    });
   } catch (err) {
     removeWorktree(session.cwd, worktree);
     throw new Error(
-      `conversation start: could not open a herdr tab: ` +
-        (err instanceof Error ? err.message : String(err)),
+      `conversation start: ${err instanceof Error ? err.message : String(err)}`,
     );
-  }
-
-  // A minimal SpawnContext: Conversations have no Issue file, no Outcome and
-  // no driver skill, but interactiveHarnessCommand and a custom harness both
-  // expect the full shape, so every field gets a coherent value even where a
-  // Conversation has no real use for it. `issuePath` points at the
-  // Conversation's own record, which does exist, so a harness that renders
-  // it in-pane (claude/cursor's interactive prompt shaping is not used here,
-  // but a custom harness might) never points at a missing file.
-  const ctx: SpawnContext = {
-    id,
-    issuePath: file,
-    body: opening,
-    driver: "converse",
-    harness,
-    model,
-    agents: session.state.config.agents,
-    logPath,
-    streamPath,
-    outcomePath: join(session.runsDir, `${id}.outcome.json`),
-    exitCodePath,
-    cwd: worktree.path,
-  };
-  const argv = interactiveHarnessCommand(session.harnesses, harness)(ctx);
-  const wrapperCtx: WrapperContext = { logPath, streamPath, exitCodePath };
-  const terminalError = await sendWrapperToPane(session.herdrSocket, tab.paneId, argv, wrapperCtx);
-  if (terminalError !== undefined) {
-    removeWorktree(session.cwd, worktree);
-    throw new Error(`conversation start: could not deliver the launch command: ${terminalError}`);
   }
 
   const record: ConversationRecord = {
@@ -562,52 +538,26 @@ export async function startConversation(
     drivers,
   };
   writeConversation(dir, record);
-  appendEvent(session.runsDir, id, {
-    at: nowIso(),
-    attempt: 1,
-    kind: "spawned" as TicketEventKind,
-    payload: conversationSpawnedPayload(argv, opening, worktree.path, worktree.branch, tab.paneId, tab.tabId),
-  });
 
-  const tailer = startPaneStreamTail(streamPath, logPath);
-  const descriptor = defaultHarnessDescriptors[harness];
-  const readiness = descriptor
-    ? await waitForReadiness(session.herdrSocket, tab.paneId, harness, descriptor.readyPattern, exitCodePath)
-    : "ready";
-
-  const runtime: ConversationRuntime = {
-    id,
-    file,
-    paneId: tab.paneId,
-    tabId: tab.tabId,
-    worktree,
-    exitCodePath,
-    streamPath,
-    logPath,
-    turn: { state: "working", lastLine: "", idleSince: null, stableReads: 0, lastText: "" },
-    notices: [],
-    ending: false,
-    release: new AbortController(),
-  };
-
-  if (readiness !== "ready") {
-    // The TUI never came up (or the harness exited before it did): the
-    // launch is over, but the record and worktree stay — crash, not
-    // rejection, matching every other pane-loss-without-End ending.
+  if (launch.kind === "ended") {
+    // The harness died before its TUI came up (its own exit code, ADR-0016),
+    // or the TUI never became ready or the opening Turn never landed (the
+    // engine's codes): the launch is over, but the record and worktree
+    // stay. A crash, not a rejection, matching every other
+    // pane-loss-without-End ending. The launch keeps a pane whose harness
+    // died on its own (ADR-0014's crashed-attempt rule), but this
+    // Conversation never joins session.conversations, so nothing else would
+    // ever close the tab: it goes here, as markConversationCrashed's does.
     writeConversationStatus(file, "crashed");
     appendEvent(session.runsDir, id, {
       at: nowIso(),
       attempt: 1,
       kind: "crash" as TicketEventKind,
-      payload: { reason: `TUI never became ready (${readiness})` },
+      payload: {
+        code: launch.code,
+        reason: exitCrashReason(launch.code, launch.ctx.exitCodePath, "harness", launch.paneId),
+      },
     });
-    await tailer.finish().catch(() => {});
-    // Unlike ADR-0014's ordinary crashed-attempt rule (leave the pane open,
-    // its content is the evidence), no runtime is ever created for this
-    // Conversation — it never joins session.conversations — so the Console
-    // has no way to close this tab itself and it would sit open forever.
-    // The Stream file already captured whatever the pane showed (started
-    // just above), so there's no evidence lost by closing it here.
     closeAttemptTabs(session, id);
     conversationEndedHook?.(session, id, { branch: worktree.branch, crashed: true });
     // Same reasoning as the success path below: this launch never touches
@@ -618,26 +568,21 @@ export async function startConversation(
     return conversationViewOf(session, { ...record, status: "crashed" }, loadConversations(dir));
   }
 
-  {
-    // The spawn-teaching paragraph (Workstream B, prompt.ts) always lands,
-    // appended to the opening Turn when there is one; typed alone otherwise,
-    // so an agent given no opening still learns the propose-and-adopt
-    // mechanism before the operator's first real Turn. spawnPath mirrors
-    // outcomeFileName's convention (engine.ts) for a Conversation's own
-    // proposal channel: `<id>.spawn.json` beside its `.outcome.json`,
-    // polled by notices.ts's per-Conversation poller.
-    const spawnPath = join(session.runsDir, `${id}.spawn.json`);
-    const teaching = buildConversationTeaching(spawnPath);
-    const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
-    const echoTargets = [descriptor?.echoPattern, opening.trim() || teaching].filter(
-      (t): t is string => typeof t === "string" && t.length > 0,
-    );
-    // Best-effort: a paste that never lands is not fatal for a Conversation
-    // the way it is for a ticket's driver prompt (no fixed skill to fall
-    // back to), and the operator watching the pane can retype it.
-    await typeVerified(session.herdrSocket, tab.paneId, toType, echoTargets, descriptor?.clearKeys ?? []);
-  }
-
+  const runtime: ConversationRuntime = {
+    id,
+    file,
+    paneId: launch.paneId,
+    tabId: launch.tabId,
+    worktree,
+    exitCodePath: launch.ctx.exitCodePath,
+    streamPath: launch.ctx.streamPath ?? join(session.runsDir, `${id}.stream.jsonl`),
+    logPath: launch.ctx.logPath,
+    turn: { state: "working", lastLine: "", idleSince: null, stableReads: 0, lastText: "" },
+    tailer: launch.tailer,
+    notices: [],
+    ending: false,
+    release: new AbortController(),
+  };
   session.conversations.set(id, runtime);
   watchForCrash(session, runtime);
   conversationPoller?.(session, id);
@@ -663,6 +608,8 @@ function watchForCrash(session: Session, runtime: ConversationRuntime): void {
 }
 
 function markConversationCrashed(session: Session, runtime: ConversationRuntime, ending: AttemptEnding): void {
+  // The pane is gone: drain the tailer so the derived log holds what it showed.
+  void runtime.tailer?.finish().catch(() => {});
   writeConversationStatus(runtime.file, "crashed");
   appendEvent(session.runsDir, runtime.id, {
     at: nowIso(),
@@ -731,6 +678,8 @@ export async function endConversation(session: Session, id: string, closing?: st
   runtime.closing = closing;
   runtime.release.abort();
   if (runtime.tabId) await closeTab(session.herdrSocket, runtime.tabId).catch(() => {});
+  // The talk is over: drain the tailer so the derived log is complete.
+  await runtime.tailer?.finish().catch(() => {});
 
   const target = currentBranch(session.cwd);
   const countProbe = git(session.cwd, ["rev-list", "--count", `${target}..${runtime.worktree.branch}`]);

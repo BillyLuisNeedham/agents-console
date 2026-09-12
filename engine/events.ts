@@ -120,6 +120,26 @@ export function attemptExitCodeName(
 }
 
 /**
+ * One attempt result file name, the naming contract extended to the Outcome
+ * (ADR-0005's ending signal): the well-known paths for the current attempt
+ * (`<id>.outcome.json`, `<id>.resolver.outcome.json`) and the
+ * attempt-numbered names a verify fan-out writes directly
+ * (`<id>.attempt-N.outcome.json`), so N parallel outcomes never collide and
+ * each grader binds to one attempt's file. Same free variables as
+ * `attemptLogName`, so the resolver's result sits beside its log, Stream and
+ * exit-code files under the same name rather than a hand-built one.
+ */
+export function attemptOutcomeName(
+  ticketId: string,
+  attempt: number | null,
+  resolver: boolean,
+): string {
+  const numbered = attempt === null ? "" : `.attempt-${attempt}`;
+  const suffix = resolver ? ".resolver" : "";
+  return `${ticketId}${numbered}${suffix}.outcome.json`;
+}
+
+/**
  * Match a file name against a ticket's Stream file naming contract, the four
  * shapes `attemptStreamName` produces. Round-trip through the naming function
  * keeps it the single authority, exactly as for `parseAttemptLogName`.

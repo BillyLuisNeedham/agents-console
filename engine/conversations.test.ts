@@ -79,11 +79,13 @@ interface FakePane {
 
 async function startFakeHerdr(): Promise<{
   socketPath: string;
+  requests: { method: string; params: Record<string, unknown> }[];
   close: () => Promise<void>;
   endPane: (paneId: string) => void;
   panes: Map<string, FakePane>;
 }> {
   let minted = 0;
+  const requests: { method: string; params: Record<string, unknown> }[] = [];
   const panes = new Map<string, FakePane>();
   const subscribers: Socket[] = [];
   const connections = new Set<Socket>();
@@ -119,6 +121,7 @@ async function startFakeHerdr(): Promise<{
         method: string;
         params: Record<string, unknown>;
       };
+      requests.push({ method: msg.method, params: msg.params });
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
@@ -209,6 +212,7 @@ async function startFakeHerdr(): Promise<{
   });
   return {
     socketPath,
+    requests,
     close: () =>
       new Promise<void>((resolve) => {
         for (const proc of procs) proc.kill();
@@ -559,14 +563,16 @@ describe("Conversation-only pool boot", () => {
 });
 
 describe("Conversation launch failure", () => {
-  it("closes the tab when the TUI never becomes ready, so nothing is left open with no runtime to close it", async () => {
+  it("ends the Conversation with the harness's own code when it dies before its TUI, and closes the tab", async () => {
     // harness "claude" has a real descriptor (readyPattern "Claude Code v"),
-    // so startConversation's readiness wait actually runs (unlike convo/
-    // stub, which have none and skip it outright) — overridden here to run
-    // `false`, a real binary that exits immediately, so the wrapper's exit-
-    // code file appears almost at once and waitForReadiness returns
-    // "exited" within one poll tick rather than running to its 60s
-    // timeout.
+    // so the launch's readiness wait actually runs (unlike convo/stub, which
+    // have none and skip it outright), overridden here to run `false`, a real
+    // binary that exits at once, so the wrapper's exit-code file appears
+    // within one poll tick rather than the wait running to its 60s timeout.
+    // ADR-0016: the harness's own code is the ending, at once. The launch
+    // itself leaves the pane alone (ADR-0014's crashed-attempt rule), and
+    // the Conversation, which nothing else could ever close, closes its own
+    // tab the way a later crash does.
     const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "claude", model: "stub-model" }, terminal: "herdr" },
@@ -580,15 +586,26 @@ describe("Conversation launch failure", () => {
       });
       const view = await run.startConversation({ title: "Doomed" });
       expect(view.status).toBe("crashed");
-      // No runtime was ever registered for a crash-at-launch (it never
-      // reaches session.conversations.set), so the view itself carries no
-      // paneId; the spawned event (written before the readiness wait) is
-      // the only record of which pane this was.
-      const spawned = readEvents(join(poolDir, "runs"), view.id).find((e) => e.kind === "spawned");
-      const paneId = spawned!.payload.pane_id as string;
-      expect(typeof paneId).toBe("string");
-
-      await waitFor(() => fake.panes.get(paneId)?.alive === false);
+      const rec = readConversation(join(poolDir, "conversations", `${view.id}.md`));
+      expect(rec.status).toBe("crashed");
+      // The spawned event (recorded before the readiness wait) names the
+      // pane; the crash carries the harness's code and names it too.
+      const events = readEvents(join(poolDir, "runs"), view.id);
+      const spawned = events.find((e) => e.kind === "spawned")!;
+      expect(typeof spawned.payload.pane_id).toBe("string");
+      expect(typeof spawned.payload.commitSha).toBe("string");
+      const crash = events.find((e) => e.kind === "crash")!;
+      expect(crash.payload).toEqual({ code: 1, reason: "harness exited 1" });
+      // Nothing was typed into the shell the wrapper left behind; the launch
+      // closed no pane, and the Conversation closed the tab once (the close
+      // is fire-and-forget, so it lands a tick after the start returns).
+      expect(fake.requests.filter((r) => r.method === "pane.send_input")).toHaveLength(2);
+      expect(fake.requests.some((r) => r.method === "pane.close")).toBe(false);
+      const deadline = Date.now() + 2000;
+      while (!fake.requests.some((r) => r.method === "tab.close") && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(fake.requests.filter((r) => r.method === "tab.close")).toHaveLength(1);
 
       await run.shutdown(0);
     } finally {
