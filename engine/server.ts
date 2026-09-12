@@ -56,6 +56,7 @@ import {
 } from "./events.ts";
 import {
   defaultRegistryPath,
+  pidIsLive,
   readFleetEntry,
   readFleetEntryByPort,
   upsertFleetEntry,
@@ -171,14 +172,6 @@ export interface PoolServer {
    *  whatever the engine's endConversation throws (no live conversation
    *  with that id). */
   endConversation: (id: string, closing?: string) => Promise<void>;
-}
-
-/** The pool's ticket metadata, as the engine parses it from the Issue files —
- *  the engine's own load (loadPoolTickets), so the server accepts exactly the
- *  pools the engine does: an empty issues/ on a pool with a conversations/
- *  directory, and a Ticket whose spawned-by names a Conversation (issue #71). */
-function loadMeta(poolDir: string): TicketMarker[] {
-  return loadPoolTickets(poolDir);
 }
 
 // The events that close an attempt for good: a resolver run records no exited
@@ -498,18 +491,6 @@ function listAttemptLogs(
   }));
 }
 
-/** Resolve an attempt number to its log file name, or null for an unknown attempt. */
-function attemptLogFile(
-  runsDir: string,
-  ticketId: string,
-  attempt: number,
-): string | null {
-  const found = listAttemptLogs(runsDir, ticketId).find(
-    (info) => info.attempt === attempt,
-  );
-  return found?.logFile ?? null;
-}
-
 /**
  * The UTF-8 length of the leading char at `index`, or 0 when `index` sits on a
  * continuation byte or past the buffer. Used to avoid splitting a multi-byte
@@ -598,15 +579,6 @@ interface ReconstructedAttempt {
   attempt: number;
   logFile: string;
   modifiedAt: string;
-}
-
-// The events endpoint answers for tickets the pool actually owns. Scoping to
-// the known ticket ids also keeps the lookup inside the pool's runs
-// directory: an arbitrary id can never walk out of it. The set tracks the
-// pool's issues directory (refreshed per snapshot and per request), so a
-// ticket the engine writes after boot is known the moment it lands.
-function knownTicketIds(meta: TicketMarker[]): Set<string> {
-  return new Set(meta.map((m) => m.id));
 }
 
 // Attempt logs are the four names the events module's naming contract
@@ -842,24 +814,6 @@ export function spawnedPaneAllowlist(
   return allowlist;
 }
 
-/**
- * The spawned-only refusal (the headline guard, user story 12): null when
- * the pane id is one this pool recorded on a spawned event, else the error
- * message the endpoint serves with its 403. Because the endpoints are
- * keyed by ticket id and the translation above only yields pane ids from
- * the pool's own events, normal traffic can never trip this; it exists so
- * a hand-corrupted events file still cannot point the Console at a pane
- * the pool did not spawn.
- */
-export function terminalSpawnRefusal(
-  allowlist: Set<string>,
-  paneId: string,
-): string | null {
-  return allowlist.has(paneId)
-    ? null
-    : `refusing: pane ${paneId} is not one this pool spawned`;
-}
-
 // ---------------------------------------------------------------------------
 // Grades endpoint
 // ---------------------------------------------------------------------------
@@ -992,15 +946,6 @@ function readLockedPid(poolDir: string): number | null {
   }
   const pid = Number(raw);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-
-function pidIsLive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
 }
 
 function isAddressInUse(err: unknown): boolean {
@@ -1171,8 +1116,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
   const streamHeartbeatMs =
     options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
-  let meta = loadMeta(poolDir);
-  let ticketIds = knownTicketIds(meta);
+  // The pool's ticket metadata, as the engine parses it from the Issue files —
+  // the engine's own load (loadPoolTickets), so the server accepts exactly the
+  // pools the engine does: an empty issues/ on a pool with a conversations/
+  // directory, and a Ticket whose spawned-by names a Conversation (issue #71).
+  // The id set scopes the ticket endpoints to ids the pool actually owns, and
+  // keeps every lookup inside the pool's runs directory: an arbitrary id can
+  // never walk out of it. Both track the issues directory (refreshed per
+  // snapshot and per request), so a ticket the engine writes after boot is
+  // known the moment it lands.
+  let meta = loadPoolTickets(poolDir);
+  let ticketIds = new Set(meta.map((m) => m.id));
   // Conversation ids (issue #60), read the same way ticket meta is: from
   // disk on every snapshot and every terminal request, so a Conversation
   // that just started is known before its next engine snapshot lands. The
@@ -1208,8 +1162,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // without a valid marker must never break snapshot delivery.
   function refreshMeta(): void {
     try {
-      meta = loadMeta(poolDir);
-      ticketIds = knownTicketIds(meta);
+      meta = loadPoolTickets(poolDir);
+      ticketIds = new Set(meta.map((m) => m.id));
     } catch {
       // Keep the last-known-good meta.
     }
@@ -1384,12 +1338,21 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         error: `no terminal-backed pane for ticket ${ticketId}`,
       };
     }
-    const refusal = terminalSpawnRefusal(
-      spawnedPaneAllowlist(join(poolDir, "runs"), [...meta, ...conversationRecords]),
-      paneId,
-    );
-    if (refusal !== null) {
-      return { ok: false, status: 403, error: refusal };
+    // The spawned-only refusal (the headline guard, user story 12): the
+    // translation above only yields pane ids from the pool's own events and
+    // the allowlist reads those same events, so well-formed state can never
+    // trip this; it exists so corrupted state still cannot point the Console
+    // at a pane the pool did not spawn.
+    if (
+      !spawnedPaneAllowlist(join(poolDir, "runs"), [...meta, ...conversationRecords]).has(
+        paneId,
+      )
+    ) {
+      return {
+        ok: false,
+        status: 403,
+        error: `refusing: pane ${paneId} is not one this pool spawned`,
+      };
     }
     return { ok: true, paneId };
   }
@@ -1496,9 +1459,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           const offset = rawOffset !== null && rawOffset !== "" ? Number(rawOffset) : 0;
           const end = rawEnd !== null && rawEnd !== "" ? Number(rawEnd) : undefined;
           const info = attempts.find((row) => row.attempt === attempt);
-          const file = wantsStream
-            ? (info?.streamFile ?? null)
-            : attemptLogFile(runsDir, ticketId, attempt);
+          const file = wantsStream ? (info?.streamFile ?? null) : (info?.logFile ?? null);
           if (!file) {
             return Response.json(
               {
@@ -1513,15 +1474,11 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           return Response.json({ ...range, attempts });
         }
 
-        // Conversations (issue #60): list, start, end. The Console's client
+        // Conversations (issue #60): start, end. The Console's client
         // reads a 409's failure reason off a `reason` field (ui/src/client.ts
         // `startConversation`), not `error` — the shape every other route in
-        // this file uses — so these three routes reply with `reason` to
+        // this file uses — so these routes reply with `reason` to
         // match the shipped UI rather than this file's own convention.
-        if (pathname === "/api/conversations" && req.method === "GET") {
-          return Response.json({ conversations: latest?.state.conversations ?? [] });
-        }
-
         if (pathname === "/api/conversations" && req.method === "POST") {
           let body: unknown;
           try {

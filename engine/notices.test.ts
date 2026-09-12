@@ -3,12 +3,11 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
-import { startPool, type HarnessCommand, type PoolConfig, type PoolRun } from "./engine.ts";
+import { startPool, type PoolConfig, type PoolRun } from "./engine.ts";
 import { readEvents } from "./events.ts";
 import {
   conversationEndedNoticeText,
@@ -16,13 +15,16 @@ import {
   ticketEndedNoticeText,
 } from "./notices.ts";
 import { makeTempDir } from "./tmp.ts";
+import {
+  cleanupPools,
+  makeGitPool,
+  makePool,
+  registerTempDir,
+  stubHarness,
+} from "./pool-fixture.ts";
 
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
-  }
+afterEach(async () => {
+  await cleanupPools();
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 12_000): Promise<void> {
@@ -98,7 +100,7 @@ describe("conversationEndedNoticeText", () => {
 describe("diffStatSummary", () => {
   function gitRepo(): string {
     const dir = makeTempDir("notices-diff-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const git = (args: string[]) =>
       Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
     git(["init", "-q", "-b", "main"]);
@@ -131,39 +133,6 @@ describe("diffStatSummary", () => {
 // adoption, and notice delivery through the real engine.
 // ---------------------------------------------------------------------------
 
-interface PoolSpec {
-  tickets: { file: string; marker: string; body?: string }[];
-  config?: PoolConfig;
-}
-
-function makePool(spec: PoolSpec): string {
-  const poolDir = makeTempDir("notices-pool-");
-  tempDirs.push(poolDir);
-  mkdirSync(join(poolDir, "issues"), { recursive: true });
-  for (const ticket of spec.tickets) {
-    writeFileSync(
-      join(poolDir, "issues", ticket.file),
-      `${ticket.marker}\n\n${ticket.body ?? "# body"}\n`,
-    );
-  }
-  if (spec.config) {
-    writeFileSync(join(poolDir, "console.json"), JSON.stringify(spec.config, null, 2));
-  }
-  return poolDir;
-}
-
-function makeGitPool(spec: PoolSpec): string {
-  const poolDir = makePool(spec);
-  const git = (args: string[]) =>
-    Bun.spawnSync(["git", ...args], { cwd: poolDir, stdout: "pipe", stderr: "pipe" });
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "user.email", "pool@test"]);
-  git(["config", "user.name", "pool"]);
-  git(["add", "-A"]);
-  git(["commit", "-qm", "init"]);
-  return poolDir;
-}
-
 const readyTicket = (id: string, blockedBy = "none") =>
   ({
     file: `${id}.md`,
@@ -172,50 +141,6 @@ const readyTicket = (id: string, blockedBy = "none") =>
 
 const doneTicket = (id: string) =>
   ({ file: `${id}.md`, marker: `<!-- state: id=${id} blocked-by=none status=done -->` }) as const;
-
-interface StubBehaviour {
-  status?: "done" | "checkpoint";
-  brief?: string;
-  // A verify fan-out's grader ticket needs a grade in its own outcome
-  // (engine.ts's Grade shape); unset for every ordinary (non-grader) id.
-  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
-}
-
-// A headless bash stub, in engine.test.ts's own style, so a ticket a
-// Conversation spawns can finish instantly without needing its own herdr
-// pane: only the Conversation itself is terminal-backed. Any id matching
-// the engine's own `<build>-grader-N` naming defaults to a passing grade
-// when not given its own behaviour, so a verify:1 ticket's automatic
-// grader ticket flows through without every such test needing to spell it
-// out.
-function stubHarness(poolDir: string, behaviour: Record<string, StubBehaviour>): HarnessCommand {
-  const stubPath = join(poolDir, "stub-harness.sh");
-  writeFileSync(
-    stubPath,
-    [
-      "#!/usr/bin/env bash",
-      "set -uo pipefail",
-      'outcome_path="$1"; outcome_json="$2"',
-      'printf \'%s\' "$outcome_json" > "$outcome_path"',
-      "exit 0",
-      "",
-    ].join("\n"),
-  );
-  return (ctx) => {
-    const b = behaviour[ctx.id] ??
-      (/-grader-\d+$/.test(ctx.id)
-        ? { grade: { score: 8, verdict: "pass" as const, reasons: "default grade" } }
-        : { status: "done" as const });
-    const outcome = JSON.stringify({
-      status: b.status ?? "done",
-      summary: `summary-${ctx.id}`,
-      commitSha: null,
-      ...(b.brief !== undefined ? { brief: b.brief } : {}),
-      ...(b.grade !== undefined ? { grade: b.grade } : {}),
-    });
-    return ["bash", stubPath, ctx.outcomePath, outcome];
-  };
-}
 
 interface FakePane {
   tabId: string;
@@ -396,7 +321,7 @@ function startFakeHerdr(): Promise<{
     });
   });
   const dir = makeTempDir("notices-herdr-fake-");
-  tempDirs.push(dir);
+  registerTempDir(dir);
   const socketPath = join(dir, "herdr.sock");
   return new Promise((resolve, reject) => {
     server.on("error", reject);
@@ -447,7 +372,7 @@ describe("Conversation spawn.json adoption", () => {
         marker: `<!-- state: id=01-spawn-${n} blocked-by=none status=done spawned-by=01 -->`,
       };
     });
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01"), ...spawnFiles],
       config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
     });
@@ -498,7 +423,7 @@ describe("Conversation spawn.json adoption", () => {
   }, 20000);
 
   it("drops a blockedBy entry naming a Conversation, with the reason logged on the proposing Conversation", async () => {
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
     });
@@ -538,7 +463,7 @@ describe("Conversation spawn.json adoption", () => {
   }, 20000);
 
   it("drops a proposal whose assign.harness is unknown", async () => {
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
     });
@@ -575,7 +500,7 @@ describe("Conversation spawn.json adoption", () => {
   }, 20000);
 
   it("starts a child Conversation for kind: 'conversation', inheriting the parent's Assignment", async () => {
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
     });
@@ -610,7 +535,7 @@ describe("Conversation spawn.json adoption", () => {
   }, 20000);
 
   it("reserves a spawn id for an in-flight kind:'conversation' start, so a second adoption before it lands on disk cannot reuse it", async () => {
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
     });
@@ -668,7 +593,7 @@ describe("Notice delivery", () => {
     // pool's first operator-started Conversation is always "conv-1", so its
     // first spawn is "conv-1-spawn-1"), so console.json's static per-id
     // assign can target it before the run even starts.
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: {
         defaults: { harness: "claude", model: "stub-model" },
@@ -680,7 +605,7 @@ describe("Notice delivery", () => {
     try {
       const stub = stubHarness(poolDir, {
         "conv-1-spawn-1": { status: "checkpoint", brief: "Needs your input." },
-      });
+      }).harnesses.stub;
       const run: PoolRun = startPool({
         poolDir,
         harnesses: { claude: () => ["cat"], stub },
@@ -745,7 +670,7 @@ describe("Notice delivery", () => {
     // delivered:false rather than an uncaught exception, followed by a
     // later delivered:true once the fake stops failing) are the proof that
     // never happens.
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: {
         defaults: { harness: "claude", model: "stub-model" },
@@ -757,7 +682,7 @@ describe("Notice delivery", () => {
     try {
       const stub = stubHarness(poolDir, {
         "conv-1-spawn-1": { status: "checkpoint", brief: "Needs your input." },
-      });
+      }).harnesses.stub;
       const run: PoolRun = startPool({
         poolDir,
         harnesses: { claude: () => ["cat"], stub },
@@ -810,7 +735,7 @@ describe("Notice delivery", () => {
     // resolveLoneAttempt's pass path (completeLoneAttempt) is a different
     // code path from the unverified done merge the run-cap/kind tests
     // exercise — it needed its own notifyConversationOfTicketDone hook.
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: {
         defaults: { harness: "claude", model: "stub-model" },
@@ -820,7 +745,7 @@ describe("Notice delivery", () => {
     });
     const fake = await startFakeHerdr();
     try {
-      const stub = stubHarness(poolDir, {});
+      const stub = stubHarness(poolDir, {}).harnesses.stub;
       const run: PoolRun = startPool({
         poolDir,
         harnesses: { claude: () => ["cat"], stub },
@@ -879,7 +804,7 @@ describe("Notice delivery", () => {
     );
     const stub = stubHarness(poolDir, {
       "conv-1-spawn-1": { status: "checkpoint", brief: "b" },
-    });
+    }).harnesses.stub;
     const run: PoolRun = startPool({ poolDir, harnesses: { stub } });
 
     await waitFor(() =>

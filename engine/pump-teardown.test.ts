@@ -15,22 +15,22 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   startPool,
   type HarnessCommand,
-  type PoolConfig,
   type PoolRun,
 } from "./engine.ts";
-
-const tempDirs: string[] = [];
+import {
+  STUB_DEFAULTS,
+  cleanupPools,
+  makePool,
+} from "./pool-fixture.ts";
 
 // The teardown failures the pinned bug produced. A genuine failure (the
 // drive reading files that are gone) may still kill the drive and reject
@@ -66,35 +66,23 @@ function expectNoTeardownArtifact(poolDir: string, settled: PoolRun | Error): vo
   }
 }
 
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
-  }
+afterEach(async () => {
+  await cleanupPools();
 });
 
 const MARKER = "<!-- state: id=01 blocked-by=none status=ready -->";
 
-function makePool(config: Partial<PoolConfig> = {}): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-pump-"));
-  tempDirs.push(poolDir);
-  mkdirSync(join(poolDir, "issues"), { recursive: true });
-  writeFileSync(join(poolDir, "issues", "01-a.md"), `${MARKER}\n\n# body\n`);
-  writeFileSync(
-    join(poolDir, "console.json"),
-    JSON.stringify(
-      { defaults: { harness: "stub", model: "m" }, ...config },
-      null,
-      2,
-    ),
-  );
-  return poolDir;
+function makeStubPool(): string {
+  return makePool({
+    tickets: [{ file: "01-a.md", marker: MARKER }],
+    config: STUB_DEFAULTS,
+  });
 }
 
 // A stub harness that leaves a grandchild holding the pipe: the grandchild
 // inherits stdout, keeps writing long after the child exited, so EOF never
 // reaches the pumps and the child-exit grace is what tears them down.
-function grandchildHarness(): Record<string, HarnessCommand> {
-  const poolDir = tempDirs[tempDirs.length - 1];
+function grandchildHarness(poolDir: string): Record<string, HarnessCommand> {
   const stubPath = join(poolDir, "grandchild-stub.sh");
   writeFileSync(
     stubPath,
@@ -129,8 +117,8 @@ async function waitFor(cond: () => boolean, what: string): Promise<void> {
 describe("spawn pump teardown", () => {
   it("settles a grandchild-holds-the-pipe spawn through the child-exit grace", async () => {
     for (let round = 0; round < 2; round++) {
-      const poolDir = makePool();
-      const run = startPool({ poolDir, harnesses: grandchildHarness() });
+      const poolDir = makeStubPool();
+      const run = startPool({ poolDir, harnesses: grandchildHarness(poolDir) });
       const settled = await run.settled;
       expect(settled.phase).toBe("quiescent");
       const log = readFileSync(join(poolDir, "runs", "01.log"), "utf8");
@@ -143,8 +131,8 @@ describe("spawn pump teardown", () => {
     "tears the pumps down without ERR_STREAM_DESTROYED when the pool dir goes away under them",
     async () => {
       for (let round = 0; round < 3; round++) {
-        const poolDir = makePool();
-        const run = startPool({ poolDir, harnesses: grandchildHarness() });
+        const poolDir = makeStubPool();
+        const run = startPool({ poolDir, harnesses: grandchildHarness(poolDir) });
         const logPath = join(poolDir, "runs", "01.log");
         await waitFor(
           () =>
@@ -170,7 +158,7 @@ describe("spawn pump teardown", () => {
     "never rejects the teardown when the attempt's log cannot be opened at all",
     async () => {
       for (let round = 0; round < 3; round++) {
-        const poolDir = makePool();
+        const poolDir = makeStubPool();
         // A broken symlink where the attempt's log should be: the write
         // stream's open fails, the stream is destroyed from birth, and the
         // pumps write into a dead writer for the whole attempt. This is the
@@ -180,7 +168,7 @@ describe("spawn pump teardown", () => {
         const logPath = join(poolDir, "runs", "01.log");
         mkdirSync(join(poolDir, "runs"), { recursive: true });
         symlinkSync("/nonexistent-dir-for-pump-test/log.txt", logPath);
-        const run = startPool({ poolDir, harnesses: grandchildHarness() });
+        const run = startPool({ poolDir, harnesses: grandchildHarness(poolDir) });
         expectNoTeardownArtifact(poolDir, await settleEither(run));
         // Room for any late rejection to surface; the runner fails the file
         // on an unhandled one, which is the pin itself.

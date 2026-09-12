@@ -247,15 +247,6 @@ export class PoolClient {
     if (!res.ok) throw new Error(`terminal focus failed: ${res.status}`);
   }
 
-  /** Every Conversation on the pool (live, ended, and crashed), for a
-   *  standalone refresh outside the snapshot stream. */
-  async listConversations(): Promise<PoolConversationState[]> {
-    const res = await fetch(`${this.base}/api/conversations`);
-    if (!res.ok) throw new Error(`list conversations failed: ${res.status}`);
-    const body = await res.json();
-    return body?.conversations ?? [];
-  }
-
   /**
    * Start a Conversation (ADR-0018). 409 with a reason when the pool is not
    * terminal-backed; the reason (or a generic message) becomes the thrown

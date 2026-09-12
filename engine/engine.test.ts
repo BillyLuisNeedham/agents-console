@@ -39,8 +39,17 @@ import {
   type SpawnContext,
 } from "./spawn.ts";
 import { makeTempDir } from "./tmp.ts";
-
-const tempDirs: string[] = [];
+import {
+  cleanupPools,
+  makeGitPool,
+  makePool,
+  registerTempDir,
+  stubHarness,
+  type GitPool,
+  type PoolSpec,
+  type StubBehaviour,
+  type StubRig,
+} from "./pool-fixture.ts";
 
 // The `script` invocation ADR-0016's wrapper opens with, in the form the
 // host's script(1) accepts (issue #58): util-linux's `-c` string form on
@@ -49,140 +58,9 @@ const tempDirs: string[] = [];
 const SCRIPT_RECORD_PREFIX =
   process.platform === "darwin" ? "script -eqF " : "script -eqfc ";
 
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
-  }
+afterEach(async () => {
+  await cleanupPools();
 });
-
-interface PoolSpec {
-  tickets: { file: string; marker: string; body?: string }[];
-  config?: PoolConfig;
-  agentMd?: string;
-}
-
-function makePool(spec: PoolSpec): string {
-  const poolDir = makeTempDir("pool-");
-  tempDirs.push(poolDir);
-  mkdirSync(join(poolDir, "issues"), { recursive: true });
-  for (const ticket of spec.tickets) {
-    writeFileSync(
-      join(poolDir, "issues", ticket.file),
-      `${ticket.marker}\n\n${ticket.body ?? "# body"}\n`,
-    );
-  }
-  if (spec.config) {
-    writeFileSync(
-      join(poolDir, "console.json"),
-      JSON.stringify(spec.config, null, 2),
-    );
-  }
-  if (spec.agentMd) {
-    writeFileSync(join(poolDir, "AGENT.md"), spec.agentMd);
-  }
-  return poolDir;
-}
-
-// The fake agent contract (ADR-0005): the stub signals its ending through the
-// outcome JSON it writes, never by editing the Issue marker. "done" and
-// "checkpoint" land in the outcome's status field; "keep" writes no outcome
-// (crash material); "ready" and "marker-done" sed the marker without writing
-// an outcome, the old protocol's misbehaviours the clean break must ignore.
-interface StubBehaviour {
-  status?: "done" | "checkpoint" | "ready" | "keep" | "marker-done";
-  statuses?: ("done" | "checkpoint" | "ready" | "keep" | "marker-done")[];
-  outcome?: { summary: string; commitSha: string | null } | null;
-  outcomeRaw?: string;
-  brief?: string;
-  spawn?: unknown;
-  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
-  winner?: number | string;
-  exitCode?: number;
-  exitCodes?: number[];
-}
-
-interface StubRig {
-  harnesses: Record<string, HarnessCommand>;
-  spawned: Record<string, SpawnContext>;
-  spawnOrder: string[];
-  // Every spawn context in spawn order, attempts included: a verify fan-out
-  // spawns one ticket id several times, which the keyed map cannot hold.
-  spawnList: SpawnContext[];
-}
-
-function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
-  const poolLocal = tempDirs[tempDirs.length - 1];
-  const stubPath = join(poolLocal, "stub-harness.sh");
-  writeFileSync(
-    stubPath,
-    [
-      "#!/usr/bin/env bash",
-      "set -uo pipefail",
-      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
-      'if [ "$status" = "ready" ] || [ "$status" = "marker-done" ]; then',
-      // In place on line 1, through awk rather than `sed -i`: BSD sed wants
-      // an argument after -i and GNU sed refuses one, so the sed form rewrote
-      // nothing on macOS and left its complaint in the attempt log.
-      '  awk -v s="${status#marker-}" \'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}\' "$issue" > "$issue.new"',
-      '  mv "$issue.new" "$issue"',
-      "fi",
-      'if [ -n "$outcome_json" ]; then',
-      '  printf \'%s\' "$outcome_json" > "$outcome_path"',
-      "fi",
-      'exit "$exit_code"',
-      "",
-    ].join("\n"),
-  );
-  const spawned: Record<string, SpawnContext> = {};
-  const spawnOrder: string[] = [];
-  const spawnList: SpawnContext[] = [];
-  const spawnCounts: Record<string, number> = {};
-  const stub: HarnessCommand = (ctx) => {
-    spawned[ctx.id] = ctx;
-    spawnOrder.push(ctx.id);
-    spawnList.push(ctx);
-    const n = spawnCounts[ctx.id] ?? 0;
-    spawnCounts[ctx.id] = n + 1;
-    // A grader id the engine wrote gets a default passing grade, so tests
-    // that do not care about grading still flow through it.
-    const b = behaviour[ctx.id] ??
-      (/-grader-\d+$/.test(ctx.id)
-        ? { grade: { score: 8, verdict: "pass", reasons: "default grade" } }
-        : {});
-    const status = b.statuses
-      ? b.statuses[Math.min(n, b.statuses.length - 1)]
-      : (b.status ?? "done");
-    const outcome =
-      b.outcomeRaw !== undefined
-        ? b.outcomeRaw
-        : b.outcome === null || status === "keep" || status === "ready" || status === "marker-done"
-          ? ""
-          : JSON.stringify({
-              status,
-              ...(b.outcome ?? {
-                summary: `summary-${ctx.id}`,
-                commitSha: `sha-${ctx.id}`,
-              }),
-              ...(b.brief !== undefined ? { brief: b.brief } : {}),
-              ...(b.spawn !== undefined ? { spawn: b.spawn } : {}),
-              ...(b.grade !== undefined ? { grade: b.grade } : {}),
-              ...(b.winner !== undefined ? { winner: b.winner } : {}),
-            });
-    const exitCode = b.exitCodes
-      ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
-      : (b.exitCode ?? 0);
-    return [
-      "bash",
-      stubPath,
-      ctx.issuePath,
-      status,
-      ctx.outcomePath,
-      outcome,
-      String(exitCode),
-    ];
-  };
-  return { harnesses: { stub }, spawned, spawnOrder, spawnList };
-}
 
 interface FakeHerdrRequest {
   method: string;
@@ -446,7 +324,7 @@ interface FakeHerdrRequest {
     });
   });
   const dir = makeTempDir("herdr-fake-");
-  tempDirs.push(dir);
+  registerTempDir(dir);
   const socketPath = join(dir, "herdr.sock");
   await new Promise<void>((resolve, reject) => {
     server.on("error", reject);
@@ -624,32 +502,6 @@ interface GitStubBehaviour {
   noiseFile?: string;
 }
 
-interface GitPool {
-  poolDir: string;
-  head: string;
-  git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
-}
-
-function makeGitPool(spec: PoolSpec, seed: Record<string, string> = {}): GitPool {
-  const poolDir = makePool(spec);
-  for (const [path, content] of Object.entries(seed)) {
-    writeFileSync(join(poolDir, path), content);
-  }
-  const git = (args: string[]) =>
-    Bun.spawnSync(["git", ...args], {
-      cwd: poolDir,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "user.email", "pool@test"]);
-  git(["config", "user.name", "pool"]);
-  git(["add", "-A"]);
-  git(["commit", "-qm", "init"]);
-  const head = git(["rev-parse", "HEAD"]).stdout.toString().trim();
-  return { poolDir, head, git };
-}
-
 function gitStubHarness(
   poolDir: string,
   behaviour: Record<string, GitStubBehaviour | GitStubBehaviour[]>,
@@ -794,14 +646,14 @@ describe("pool loading", () => {
       config: stubConfig,
     });
     await expect(
-      runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+      runPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses }),
     ).rejects.toThrow(/line-1 state marker/);
   });
 
   it("rejects a pool with no Issue files", async () => {
     const poolDir = makePool({ tickets: [], config: stubConfig });
     await expect(
-      runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+      runPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses }),
     ).rejects.toThrow(/no Issue files/);
   });
 
@@ -817,7 +669,7 @@ describe("pool loading", () => {
     // Resolution is total (the unassigned record rides the snapshot with
     // nulls), so the pool starts and the pool config error fires when the
     // ticket schedules, at the spawn that cannot run.
-    const run = startPool({ poolDir, harnesses: stubHarness({}).harnesses });
+    const run = startPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses });
     await expect(run.settled).rejects.toThrow(
       /pool config: ticket 01 has no harness/,
     );
@@ -851,7 +703,7 @@ describe("verify assignment", () => {
       const assignment = resolveAssignment(
         marker,
         config,
-        stubHarness({}).harnesses,
+        stubHarness(poolDir, {}).harnesses,
       );
       expect(assignment.verify).toBe(n);
     }
@@ -867,7 +719,7 @@ describe("verify assignment", () => {
     const assignment = resolveAssignment(
       marker,
       config,
-      stubHarness({}).harnesses,
+      stubHarness(poolDir, {}).harnesses,
     );
     expect(assignment.verify).toBeUndefined();
   });
@@ -877,7 +729,7 @@ describe("verify assignment", () => {
       tickets: [{ file: "01-a.md", marker: ready01 }],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -898,7 +750,7 @@ describe("verify assignment", () => {
         config,
       });
       await expect(
-        runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+        runPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses }),
       ).rejects.toThrow(/pool config: ticket 01 has invalid verify/);
     }
   });
@@ -915,7 +767,7 @@ describe("verify assignment", () => {
     const assignment = resolveAssignment(
       marker,
       config,
-      stubHarness({}).harnesses,
+      stubHarness(poolDir, {}).harnesses,
     );
     expect(assignment.verify).toBeUndefined();
   });
@@ -935,7 +787,7 @@ describe("verify assignment", () => {
     const assignment = resolveAssignment(
       marker,
       config,
-      stubHarness({}).harnesses,
+      stubHarness(poolDir, {}).harnesses,
     );
     expect(assignment.verify).toBeUndefined();
   });
@@ -950,7 +802,7 @@ describe("verify assignment", () => {
       config: withMystery,
     });
     const [marker] = loadPoolMarkers(join(poolDir, "issues"));
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     expect(
       resolveAssignment(marker, withMystery, rig.harnesses).verify,
@@ -1365,7 +1217,7 @@ describe("verify fan-out", () => {
       ],
       config: verifyConfig(2),
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { statuses: ["keep", "done"], exitCodes: [7, 0] },
     });
 
@@ -1933,7 +1785,7 @@ describe("verify grading", () => {
       ],
       config: verifyConfig(1),
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       // Runs 1-3 crash the grader; run 4, after the human resumed the build
       // ticket and the engine re-fanned-out, grades.
       "01-grader-1": {
@@ -2004,7 +1856,7 @@ describe("verify grading", () => {
     // The grader seds its own marker to done and writes no grade: the
     // engine owns the write and records a crash instead. Also pins grading
     // in a pool that does not run in git.
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01-grader-1": { status: "marker-done" },
     });
 
@@ -2254,7 +2106,7 @@ describe("lone attempt resolution", () => {
       tickets: [readyTicket("01")],
       config: verifyConfig(1),
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { status: "keep", exitCode: 4 },
     });
 
@@ -2276,7 +2128,7 @@ describe("lone attempt resolution", () => {
       tickets: [readyTicket("01")],
       config: verifyConfig(1),
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { status: "checkpoint", brief: "waiting on the API name" },
       "01-grader-1": {
         grade: { score: 0, verdict: "flag", reasons: "incomplete" },
@@ -3026,7 +2878,7 @@ describe("super-steps", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -3065,7 +2917,7 @@ describe("super-steps", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -3101,7 +2953,7 @@ describe("super-steps", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -3154,7 +3006,7 @@ describe("spawn pump teardown", () => {
         "",
       ].join("\n"),
     );
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses: Record<string, HarnessCommand> = {
       stub: (ctx) =>
         ctx.id === "01"
@@ -3213,7 +3065,7 @@ describe("ticket events", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     const resumed = await run.resume("01", "the name is Foo");
@@ -3279,7 +3131,7 @@ describe("ticket events", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { statuses: ["keep", "done"], exitCodes: [3, 0] },
     });
 
@@ -3329,7 +3181,7 @@ describe("ticket events", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
@@ -3371,7 +3223,7 @@ describe("ticket events", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -3475,7 +3327,7 @@ describe("channels", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { outcome: { summary: "built the schema", commitSha: "abc123" } },
     });
 
@@ -3504,7 +3356,7 @@ describe("channels", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -3528,7 +3380,7 @@ describe("channels", () => {
       ],
       config,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -3542,7 +3394,7 @@ describe("config reload (ADR-0018)", () => {
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: { defaults: { harness: "stub", model: "model-a" } },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         // 01's assignment is already resolved when it spawns; this edit can
@@ -3589,7 +3441,7 @@ describe("config reload (ADR-0018)", () => {
       tickets: [readyTicket("01")],
       config: { defaults: { harness: "stub", model: "model-a" } },
     });
-    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } });
 
     const first = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(first.phase).toBe("quiescent");
@@ -3623,7 +3475,7 @@ describe("config reload (ADR-0018)", () => {
       tickets: [readyTicket("01"), readyTicket("02")],
       config: { defaults: { harness: "stub", model: "model-a" } },
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": {
         spawn: [
           {
@@ -3665,7 +3517,7 @@ describe("config reload (ADR-0018)", () => {
       ],
       config: { defaults: { harness: "stub", model: "model-a" } },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         if (ctx.id === "01") {
@@ -3693,7 +3545,7 @@ describe("config reload (ADR-0018)", () => {
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: { defaults: { harness: "stub", model: "model-a" } },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         if (ctx.id === "01") {
@@ -3733,7 +3585,7 @@ describe("config reload (ADR-0018)", () => {
         roster: "- deepseek: general-purpose subagent",
       },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         if (ctx.id === "01") {
@@ -3774,7 +3626,7 @@ describe("config reload (ADR-0018)", () => {
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         if (ctx.id === "01") {
@@ -3820,7 +3672,7 @@ describe("glued prompt", () => {
       },
       agentMd: "# Runner agent instructions\n\nDo the thing.",
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -3857,7 +3709,7 @@ describe("glued prompt", () => {
       config: stubConfig,
       agentMd: "version one instructions",
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const harnesses = {
       stub: (ctx: SpawnContext) => {
         // 01's prompt is already built when its argv is assembled, so this
@@ -3886,7 +3738,7 @@ describe("glued prompt", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -4372,10 +4224,10 @@ describe("streamed logs at every spawn site", () => {
   ].join("\n");
 
   function streamedStub(
+    poolDir: string,
     behaviour: Record<string, { outcome?: unknown; exitCode?: number }> = {},
   ): { harnesses: Record<string, HarnessCommand>; spawned: Record<string, SpawnContext> } {
-    const poolLocal = tempDirs[tempDirs.length - 1];
-    const stubPath = join(poolLocal, "streamed-stub.sh");
+    const stubPath = join(poolDir, "streamed-stub.sh");
     writeFileSync(
       stubPath,
       [
@@ -4410,7 +4262,7 @@ describe("streamed logs at every spawn site", () => {
       tickets: [readyTicket("01")],
       config: { defaults: { harness: "claude", model: "claude-model" } },
     });
-    const rig = streamedStub({
+    const rig = streamedStub(poolDir, {
       "01": { outcome: { status: "done", summary: "built", commitSha: "sha" } },
     });
 
@@ -4451,7 +4303,7 @@ describe("streamed logs at every spawn site", () => {
       },
       "03": { workFile: "three.txt", commitMsg: "work-03" },
     });
-    const resolver = streamedStub({
+    const resolver = streamedStub(poolDir, {
       "02": { outcome: { resolved: true, note: "kept both lines" } },
     });
 
@@ -4483,7 +4335,7 @@ describe("streamed logs at every spawn site", () => {
         assign: { "01": { verify: 1 } },
       },
     });
-    const rig = streamedStub({
+    const rig = streamedStub(poolDir, {
       "01": { outcome: { status: "done", summary: "built", commitSha: "sha" } },
       "01-grader-1": {
         outcome: {
@@ -4535,7 +4387,7 @@ describe("streamed logs at every spawn site", () => {
       commitSha: null,
       grade: { score, verdict: "pass", reasons: "fine" },
     });
-    const rig = streamedStub({
+    const rig = streamedStub(poolDir, {
       "01": { outcome: { status: "done", summary: "one", commitSha: "sha-1" } },
       "01-grader-1": { outcome: grade(8) },
       "01-grader-2": { outcome: grade(7) },
@@ -4569,7 +4421,7 @@ describe("streamed logs at every spawn site", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { outcome: { summary: "raw work", commitSha: "sha" } },
     });
 
@@ -4656,7 +4508,7 @@ describe("spawn and exit facts", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -4880,7 +4732,7 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       ],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
 
     const run = await runPool({
@@ -4933,7 +4785,7 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       tickets: [{ ...readyTicket("01"), body: `# ${longTitle}\n\nticket body` }],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
 
     await runPool({
@@ -5236,7 +5088,7 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({
       poolDir,
@@ -5257,7 +5109,7 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({
       poolDir,
@@ -5303,7 +5155,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
 
     const run = await runPool({
@@ -5347,7 +5199,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     // `$?`, which the operator's login shell — zsh on a Mac, ADR-0014 —
     // reads the same way).
     const dir = makeTempDir("wrapper-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const binDir = join(dir, "bin");
     mkdirSync(binDir);
     const recorder = join(binDir, "script");
@@ -5463,7 +5315,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({ "01": { outcome: null, exitCode: 3 } });
+    const rig = stubHarness(poolDir, { "01": { outcome: null, exitCode: 3 } });
     const fake = await startFakeHerdr();
 
     const run = await runPool({
@@ -5486,7 +5338,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       tickets: [readyTicket("01")],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     // A daemon that drops every subscription (a restart mid-wait, or one
     // too old for events.subscribe): the wrapper's exit-code file is the
     // only end signal, and the attempt must still complete.
@@ -5575,7 +5427,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       kind: "spawned",
       payload: { pane_id: "pane-orphan", tab_id: "tab-orphan" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
 
     const run = await runPool({
@@ -5625,7 +5477,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       kind: "spawned",
       payload: { pane_id: "pane-ghost", tab_id: "tab-ghost" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
     fake.injectPane("pane-ghost");
 
@@ -5692,7 +5544,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       kind: "spawned",
       payload: { pane_id: "pane-ghost", tab_id: "tab-ghost" },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const fake = await startFakeHerdr();
     fake.injectPane("pane-ghost");
 
@@ -6364,7 +6216,7 @@ describe("checkpoints", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -6450,7 +6302,7 @@ describe("persist failures", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     // The first write attempt throws; the retry lands the row and the run
     // carries on as if nothing happened.
     const store = new FlakyStore(poolDir, 1);
@@ -6488,7 +6340,7 @@ describe("persist failures", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const store = new FlakyStore(poolDir, Infinity);
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
@@ -6531,7 +6383,7 @@ describe("persist failures", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const store = new FlakyStore(poolDir, Infinity);
 
     const first = await runPool({ poolDir, harnesses: rig.harnesses, store });
@@ -6559,7 +6411,7 @@ describe("persist failures", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const store = new FlakyStore(poolDir, Infinity);
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses, store });
@@ -6646,7 +6498,7 @@ describe("dead drives report themselves", () => {
     // The escape hatch still works: a fresh run on the same pool directory
     // rehydrates from the markers on disk (the dead attempt had marked the
     // ticket in-progress, so restart resets it to ready) and runs to done.
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const second = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(rig.spawnOrder).toEqual(["01"]);
     expect((await approveReview(second)).phase).toBe("done");
@@ -6673,7 +6525,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": {
         status: "checkpoint",
         brief: "1. did the first half\n2. human must pick a name",
@@ -6706,7 +6558,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "keep", exitCode: 1 } });
+    const rig = stubHarness(poolDir, { "01": { status: "keep", exitCode: 1 } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -6740,7 +6592,7 @@ describe("interrupts", () => {
     // no outcome: a crash with extra steps. The agent-written marker is
     // ignored (the clean break), so this re-spawns nothing and reaches a
     // human.
-    const rig = stubHarness({ "01": { status: "ready", exitCode: 0 } });
+    const rig = stubHarness(poolDir, { "01": { status: "ready", exitCode: 0 } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -6775,7 +6627,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -6813,7 +6665,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -6843,7 +6695,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { statuses: ["checkpoint", "done"] },
     });
 
@@ -6886,7 +6738,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { statuses: ["checkpoint", "done"], brief: "need a decision" },
     });
 
@@ -6920,7 +6772,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     await run.resume("01", "picked the name Foo");
@@ -6940,7 +6792,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -6961,7 +6813,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
@@ -6994,7 +6846,7 @@ describe("interrupts", () => {
     });
     const stuck = await runPool({
       poolDir: stuckDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness(stuckDir, { "01": { status: "checkpoint" } }).harnesses,
     });
 
     const cleanDir = makePool({
@@ -7008,7 +6860,7 @@ describe("interrupts", () => {
     });
     const clean = await runPool({
       poolDir: cleanDir,
-      harnesses: stubHarness({}).harnesses,
+      harnesses: stubHarness(cleanDir, {}).harnesses,
     });
 
     expect(stuck.phase).toBe("quiescent");
@@ -7033,7 +6885,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -7058,7 +6910,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["keep", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["keep", "done"] } });
 
     const first = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(first.interrupts[0]?.kind).toBe("crash");
@@ -7086,7 +6938,7 @@ describe("interrupts", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["keep", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["keep", "done"] } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts[0]?.kind).toBe("crash");
@@ -7127,7 +6979,7 @@ describe("outcome contract", () => {
 
   it("writes the done marker itself when the outcome says done", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -7141,7 +6993,7 @@ describe("outcome contract", () => {
 
   it("records a crash when the agent writes no outcome", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({ "01": { status: "keep" } });
+    const rig = stubHarness(poolDir, { "01": { status: "keep" } });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
     expect(run.interrupts[0]?.kind).toBe("crash");
@@ -7160,7 +7012,7 @@ describe("outcome contract", () => {
     // ticket and attempt 2 exits 0 writing nothing. The spawn-side delete
     // means the stale checkpoint file is gone, so this is a crash, not a
     // re-raised checkpoint carrying the old brief.
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { statuses: ["checkpoint", "keep"], brief: "pick a name" },
     });
 
@@ -7182,7 +7034,7 @@ describe("outcome contract", () => {
 
   it("records a crash when the outcome is not parseable", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({ "01": { outcomeRaw: "not json" } });
+    const rig = stubHarness(poolDir, { "01": { outcomeRaw: "not json" } });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
     expect(readEvents(poolDir, "01").at(-1)?.payload).toEqual({
@@ -7195,7 +7047,7 @@ describe("outcome contract", () => {
 
   it("records a crash when the outcome's status is invalid", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { outcomeRaw: '{"status":"dnoe","summary":"x","commitSha":null}' },
     });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
@@ -7210,7 +7062,7 @@ describe("outcome contract", () => {
 
   it("records a crash for a valid done outcome with a non-zero exit", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({ "01": { status: "done", exitCode: 1 } });
+    const rig = stubHarness(poolDir, { "01": { status: "done", exitCode: 1 } });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
     expect(run.interrupts[0]?.kind).toBe("crash");
@@ -7228,7 +7080,7 @@ describe("outcome contract", () => {
     // The old protocol's slip: the agent seds the marker to done but writes
     // no outcome. The clean break ignores the marker, records the crash, and
     // corrects the marker back to in-progress.
-    const rig = stubHarness({ "01": { status: "marker-done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "marker-done" } });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.phase).toBe("quiescent");
     expect(run.interrupts[0]?.kind).toBe("crash");
@@ -7238,7 +7090,7 @@ describe("outcome contract", () => {
 
   it("writes the checkpoint marker itself when the outcome says checkpoint", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { status: "checkpoint", brief: "pick a name" },
     });
 
@@ -7272,7 +7124,7 @@ describe("outcome contract", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { status: "checkpoint", brief: "fresh brief" },
     });
 
@@ -7293,7 +7145,7 @@ describe("outcome contract", () => {
 
   it("lands a placeholder Brief section when a checkpoint outcome has no brief", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -7318,7 +7170,7 @@ describe("outcome contract", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -7337,7 +7189,7 @@ describe("outcome contract", () => {
     const poolDir = oneTicket();
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({
+      harnesses: stubHarness(poolDir, {
         "01": { status: "checkpoint", brief: "pick a name" },
       }).harnesses,
     });
@@ -7348,7 +7200,7 @@ describe("outcome contract", () => {
     // but the marker and the Brief the engine landed are on disk, so
     // rehydration re-raises the interrupt from the Issue unchanged.
     rmSync(join(poolDir, "console.db"), { force: true });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const second = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(second.phase).toBe("quiescent");
@@ -7539,7 +7391,7 @@ describe("outcome spawn schema", () => {
     const spawn = [
       { title: "Follow up", body: goodBody, blockedBy: ["02"] },
     ];
-    const rig = stubHarness({ "01": { spawn } });
+    const rig = stubHarness(poolDir, { "01": { spawn } });
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -7558,7 +7410,7 @@ describe("outcome spawn schema", () => {
   it("keeps a done attempt's result when one spawn entry is malformed", async () => {
     const poolDir = oneTicket();
     const good = { title: "Follow up", body: goodBody };
-    const rig = stubHarness({ "01": { spawn: [good, { title: "Thin" }] } });
+    const rig = stubHarness(poolDir, { "01": { spawn: [good, { title: "Thin" }] } });
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -7578,7 +7430,7 @@ describe("outcome spawn schema", () => {
 
   it("raises the checkpoint interrupt unchanged when a checkpoint outcome carries spawn", async () => {
     const poolDir = oneTicket();
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": {
         status: "checkpoint",
         brief: "pick a name",
@@ -7615,7 +7467,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [proposal("After two", ["02"]), proposal("Anytime")] },
     });
 
@@ -7661,7 +7513,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [proposal("After two", ["02"])] },
     });
 
@@ -7685,7 +7537,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [proposal("Ghost", ["99"])] },
     });
 
@@ -7715,7 +7567,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [{ title: "Thin", body: "too thin" }] },
     });
 
@@ -7740,7 +7592,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": {
         spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`Number ${n}`)),
       },
@@ -7791,7 +7643,7 @@ describe("spawn adoption", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
       "02": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
       "03": { spawn: [1, 2, 3, 4, 5, 6, 7].map((n) => proposal(`N${n}`)) },
@@ -7834,7 +7686,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { spawn: [proposal("Child")] },
       "01-spawn-1": { spawn: [proposal("Grandchild")] },
     });
@@ -7937,7 +7789,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": { exitCode: 3, spawn: [proposal("From a crash")] },
     });
 
@@ -7955,7 +7807,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { spawn: [proposal("The real end")] } });
+    const rig = stubHarness(poolDir, { "01": { spawn: [proposal("The real end")] } });
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -7987,7 +7839,7 @@ describe("spawn adoption", () => {
     });
 
     await expect(
-      runPool({ poolDir, harnesses: stubHarness({}).harnesses }),
+      runPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses }),
     ).rejects.toThrow(/reserved/);
   });
 
@@ -8005,7 +7857,7 @@ describe("spawn adoption", () => {
       // No defaults: the spawned id resolves only through its parent.
       config: { assign: { "01": { harness: "stub", model: "stub-model" } } },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -8040,7 +7892,7 @@ describe("spawn adoption", () => {
         },
       },
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -8064,7 +7916,7 @@ describe("spawn adoption", () => {
       tickets: [readyTicket("01")],
       config: stubConfig,
     });
-    const rig = stubHarness({
+    const rig = stubHarness(poolDir, {
       "01": {
         status: "checkpoint",
         brief: "pick a name",
@@ -8131,7 +7983,7 @@ describe("final review", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -8162,7 +8014,7 @@ describe("final review", () => {
 
     const run = await runPool({
       poolDir,
-      harnesses: stubHarness({}).harnesses,
+      harnesses: stubHarness(poolDir, {}).harnesses,
     });
     const done = await run.approve(REVIEW_TICKET_ID, "looks right");
 
@@ -8173,7 +8025,7 @@ describe("final review", () => {
     );
     expect(done.final.log.at(-1)).toBe("pool done: every ticket reached done");
 
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(restarted.phase).toBe("done");
     expect(restarted.interrupts).toEqual([]);
@@ -8202,7 +8054,7 @@ describe("final review", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -8251,7 +8103,7 @@ describe("final review", () => {
 
     const run = await runPool({
       poolDir,
-      harnesses: stubHarness({}).harnesses,
+      harnesses: stubHarness(poolDir, {}).harnesses,
     });
 
     await expect(
@@ -8290,7 +8142,7 @@ describe("final review", () => {
 
     const run = await runPool({
       poolDir,
-      harnesses: stubHarness({}).harnesses,
+      harnesses: stubHarness(poolDir, {}).harnesses,
     });
 
     await expect(run.resume(REVIEW_TICKET_ID)).rejects.toThrow(
@@ -8308,7 +8160,7 @@ describe("final review", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -8345,7 +8197,7 @@ describe("final review", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
@@ -8403,7 +8255,7 @@ describe("durability", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { status: "checkpoint" } });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
     const disagreements: string[] = [];
 
     const run = await runPool({
@@ -8451,7 +8303,7 @@ describe("durability", () => {
     const first = await approveReview(
       await runPool({
         poolDir,
-        harnesses: stubHarness({}).harnesses,
+      harnesses: stubHarness(poolDir, {}).harnesses,
       }),
     );
     expect(first.phase).toBe("done");
@@ -8459,7 +8311,7 @@ describe("durability", () => {
     // run.sh reset 02: the marker on disk is the truth, the checkpoint's
     // done is stale, and the earlier review approval lapses with it.
     setMarker(poolDir, "02-b.md", "ready");
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const second = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
     );
@@ -8485,7 +8337,7 @@ describe("durability", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness(poolDir, { "01": { status: "checkpoint" } }).harnesses,
     });
     expect(first.phase).toBe("quiescent");
     first.close();
@@ -8493,7 +8345,7 @@ describe("durability", () => {
     // The human finished 01 by hand. The marker wins over the stored
     // checkpoint interrupt.
     setMarker(poolDir, "01-a.md", "done");
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const second = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
     );
@@ -8516,7 +8368,7 @@ describe("durability", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
@@ -8547,7 +8399,7 @@ describe("durability", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness(poolDir, { "01": { status: "checkpoint" } }).harnesses,
     });
     expect(first.phase).toBe("quiescent");
     first.close();
@@ -8555,7 +8407,7 @@ describe("durability", () => {
     // run.sh reset 01: the human answered on disk. The stored interrupt
     // must not linger into the next engine run.
     setMarker(poolDir, "01-a.md", "ready");
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const second = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
     );
@@ -8589,7 +8441,7 @@ describe("durability", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({
+      harnesses: stubHarness(poolDir, {
         "01": { status: "checkpoint", brief: "pick a name" },
       }).harnesses,
     });
@@ -8597,7 +8449,7 @@ describe("durability", () => {
     expect(first.final.tickets["03"]).toBe("done");
     first.close();
 
-    const rig = stubHarness({ "01": { status: "done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "done" } });
     const second = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(second.phase).toBe("quiescent");
@@ -8675,7 +8527,7 @@ describe("durability", () => {
       await proc.exited;
     }
 
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
     );
@@ -8715,7 +8567,7 @@ describe("durability", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const first = await runPool({ poolDir, harnesses: rig.harnesses });
 
@@ -8807,9 +8659,9 @@ describe("worktrees", () => {
       tickets: [readyTicket("01"), readyTicket("02")],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
     const linkBase = makeTempDir("pool-link-");
-    tempDirs.push(linkBase);
+    registerTempDir(linkBase);
     const linked = join(linkBase, "pool");
     symlinkSync(poolDir, linked);
 
@@ -8837,7 +8689,7 @@ describe("worktrees", () => {
       config: stubConfig,
     });
     const base = makeTempDir("pool-b-");
-    tempDirs.push(base);
+    registerTempDir(base);
     const poolB = join(base, "checkout");
     expect(
       git(["worktree", "add", poolB, "-b", "pool-b-main", "HEAD"]).exitCode,
@@ -10325,11 +10177,11 @@ describe("accept/process split", () => {
   // resumed ticket can hold its next super-step), and `sentinel` gives one
   // ticket its own release file.
   function blockingHarness(
+    poolDir: string,
     behaviour: Record<string, { statuses?: ("done" | "checkpoint" | "ready")[]; block?: boolean; blocks?: boolean[]; exitCode?: number; brief?: string; sentinel?: string }>,
     sentinel: string,
   ): StubRig {
-    const poolLocal = tempDirs[tempDirs.length - 1];
-    const stubPath = join(poolLocal, "blocking-stub.sh");
+    const stubPath = join(poolDir, "blocking-stub.sh");
     writeFileSync(
       stubPath,
       [
@@ -10398,6 +10250,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-04");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"] },
         "02": { statuses: ["checkpoint", "done"] },
@@ -10486,6 +10339,7 @@ describe("accept/process split", () => {
     const release = join(poolDir, "release-03");
     const hold = join(poolDir, "hold-resumed");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"], blocks: [false, true], sentinel: hold },
         "02": { statuses: ["checkpoint", "done"], blocks: [false, true], sentinel: hold },
@@ -10554,6 +10408,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-03");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"] },
         "03": { statuses: ["done"], block: true },
@@ -10595,7 +10450,7 @@ describe("accept/process split", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({});
+    const rig = stubHarness(poolDir, {});
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -10639,7 +10494,7 @@ describe("accept/process split", () => {
     });
     const first = await runPool({
       poolDir,
-      harnesses: stubHarness({ "01": { status: "checkpoint" } }).harnesses,
+      harnesses: stubHarness(poolDir, { "01": { status: "checkpoint" } }).harnesses,
     });
     expect(first.phase).toBe("quiescent");
     first.close();
@@ -10661,7 +10516,7 @@ describe("accept/process split", () => {
       at: new Date().toISOString(),
     });
 
-    const rig = stubHarness({ "01": { status: "done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "done" } });
     const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
 
     // The queued answer took effect without resubmission: 01 resumed and
@@ -10759,7 +10614,7 @@ describe("accept/process split", () => {
     // removes.
     writeFileSync(sentinel, "go");
 
-    const rig = stubHarness({ "01": { status: "done" }, "02": { status: "done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "done" }, "02": { status: "done" } });
     const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
 
     // The answered state was on disk before the kill: the restart rehydrates
@@ -10793,6 +10648,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-03");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"] },
         "02": { statuses: ["done"] },
@@ -10839,6 +10695,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
+      poolDir,
       {
         // 01 fails fast without writing an outcome; 02 holds the super-step
         // open until the sentinel lands.
@@ -10910,6 +10767,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
+      poolDir,
       {
         // 01 finishes done fast; 02 holds the super-step open until the
         // sentinel lands.
@@ -10964,6 +10822,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
+      poolDir,
       {
         // 01 checkpoints fast; 02 holds the super-step open until the sentinel.
         "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
@@ -11027,6 +10886,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"], brief: "pick a name" },
         "02": { statuses: ["done"], block: true },
@@ -11093,6 +10953,7 @@ describe("accept/process split", () => {
     });
     const sentinel = join(poolDir, "release-02");
     const rig = blockingHarness(
+      poolDir,
       {
         "01": { statuses: ["checkpoint", "done"] },
         "02": { statuses: ["done"], block: true },
@@ -11147,7 +11008,7 @@ describe("accept/process split", () => {
       ],
       config: stubConfig,
     });
-    const rig = stubHarness({ "01": { statuses: ["checkpoint", "done"] } });
+    const rig = stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     run.accept("01", "carry on");
@@ -11255,7 +11116,7 @@ describe("headless orphans", () => {
 
     // The relaunch: nothing is alive, so the ticket resets with the plain
     // note and re-runs to the review gate.
-    const rig = stubHarness({ "01": { status: "done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "done" } });
     const restarted = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(restarted.phase).toBe("quiescent");
     expect(restarted.interrupts.map((i) => i.kind)).toEqual(["review"]);
@@ -11297,7 +11158,7 @@ describe("headless orphans", () => {
         payload: { argv: ["bash"], cwd: worktree, branch: null, pid: orphan.pid },
       });
 
-      const rig = stubHarness({ "01": { status: "done" } });
+      const rig = stubHarness(poolDir, { "01": { status: "done" } });
       const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
       expect(processIsLive(orphan.pid)).toBe(false);
@@ -11349,7 +11210,7 @@ describe("headless orphans", () => {
       payload: { argv: ["bash"], cwd: worktree, branch: null, pid: process.pid },
     });
 
-    const rig = stubHarness({ "01": { status: "done" } });
+    const rig = stubHarness(poolDir, { "01": { status: "done" } });
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
     expect(run.phase).toBe("quiescent");

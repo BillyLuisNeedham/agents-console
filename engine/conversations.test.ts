@@ -4,7 +4,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,13 +25,16 @@ import {
 } from "./conversations.ts";
 import { readEvents } from "./events.ts";
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
+import {
+  cleanupPools,
+  makeGitPool,
+  makePool,
+  registerTempDir,
+  stubHarness,
+} from "./pool-fixture.ts";
 
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
-  }
+afterEach(async () => {
+  await cleanupPools();
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 8_000): Promise<void> {
@@ -41,45 +43,6 @@ async function waitFor(predicate: () => boolean, timeoutMs = 8_000): Promise<voi
     if (Date.now() > deadline) throw new Error("waitFor: timed out");
     await Bun.sleep(20);
   }
-}
-
-interface PoolSpec {
-  tickets: { file: string; marker: string; body?: string }[];
-  config?: PoolConfig;
-}
-
-function makePool(spec: PoolSpec): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "conv-pool-"));
-  tempDirs.push(poolDir);
-  mkdirSync(join(poolDir, "issues"), { recursive: true });
-  for (const ticket of spec.tickets) {
-    writeFileSync(
-      join(poolDir, "issues", ticket.file),
-      `${ticket.marker}\n\n${ticket.body ?? "# body"}\n`,
-    );
-  }
-  if (spec.config) {
-    writeFileSync(join(poolDir, "console.json"), JSON.stringify(spec.config, null, 2));
-  }
-  return poolDir;
-}
-
-// A git-backed pool, in the style of engine.test.ts's makeGitPool: Conversations
-// require a real checkout (their own worktree and branch), so every test that
-// starts one needs this instead of the headless makePool above.
-function makeGitPool(spec: PoolSpec, seed: Record<string, string> = {}): string {
-  const poolDir = makePool(spec);
-  for (const [path, content] of Object.entries(seed)) {
-    writeFileSync(join(poolDir, path), content);
-  }
-  const git = (args: string[]) =>
-    Bun.spawnSync(["git", ...args], { cwd: poolDir, stdout: "pipe", stderr: "pipe" });
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "user.email", "pool@test"]);
-  git(["config", "user.name", "pool"]);
-  git(["add", "-A"]);
-  git(["commit", "-qm", "init"]);
-  return poolDir;
 }
 
 function gitIn(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
@@ -94,19 +57,6 @@ const doneTicket = (id: string) =>
   ({ file: `${id}.md`, marker: `<!-- state: id=${id} blocked-by=none status=done -->` }) as const;
 
 const stubConfig: PoolConfig = { defaults: { harness: "stub", model: "stub-model" } };
-
-function stubHarness(): { harnesses: Record<string, HarnessCommand> } {
-  const poolLocal = tempDirs[tempDirs.length - 1];
-  const stubPath = join(poolLocal, "stub-harness.sh");
-  writeFileSync(
-    stubPath,
-    ["#!/usr/bin/env bash", 'printf \'{"status":"done","summary":"s","commitSha":null}\' > "$1"', "exit 0", ""].join(
-      "\n",
-    ),
-  );
-  const stub: HarnessCommand = (ctx) => ["bash", stubPath, ctx.outcomePath];
-  return { harnesses: { stub } };
-}
 
 // A minimal herdr fake: real wire shape (newline-delimited JSON-RPC, one
 // request per connection), and it actually runs what a pane is sent (the
@@ -251,7 +201,7 @@ async function startFakeHerdr(): Promise<{
     });
   });
   const dir = mkdtempSync(join(tmpdir(), "conv-herdr-fake-"));
-  tempDirs.push(dir);
+  registerTempDir(dir);
   const socketPath = join(dir, "herdr.sock");
   await new Promise<void>((resolve, reject) => {
     server.on("error", reject);
@@ -285,7 +235,7 @@ const convoConfig: PoolConfig = {
 describe("Conversation storage", () => {
   it("round-trips a marker through write and read, including a spawned-by id and a multi-word drivers chain", () => {
     const dir = mkdtempSync(join(tmpdir(), "conv-storage-"));
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const rec: ConversationRecord = {
       id: "conv-1",
       file: join(dir, "conv-1.md"),
@@ -314,7 +264,7 @@ describe("Conversation storage", () => {
 
   it("loadConversations reads none from a pool with no conversations/ directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "conv-storage-empty-"));
-    tempDirs.push(dir);
+    registerTempDir(dir);
     expect(loadConversations(join(dir, "conversations"))).toEqual([]);
   });
 });
@@ -322,7 +272,7 @@ describe("Conversation storage", () => {
 describe("Conversation launch refusal", () => {
   it("refuses to start on a pool that is not terminal-backed", async () => {
     const poolDir = makePool({ tickets: [doneTicket("01")], config: stubConfig });
-    const { harnesses } = stubHarness();
+    const { harnesses } = stubHarness(poolDir, {});
     const run = startPool({ poolDir, harnesses });
     await expect(run.startConversation({ title: "A talk" })).rejects.toThrow(
       /not terminal-backed/,
@@ -333,7 +283,7 @@ describe("Conversation launch refusal", () => {
 
 describe("Conversation launch", () => {
   it("opens a named herdr tab and types the opening Turn, verified by echo", async () => {
-    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const fake = await startFakeHerdr();
     try {
       const run: PoolRun = startPool({
@@ -372,7 +322,7 @@ describe("Conversation launch", () => {
     // running nothing else would ever tell the snapshot stream this
     // Conversation exists — the assertion below must hold synchronously
     // once startConversation resolves, not eventually.
-    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const fake = await startFakeHerdr();
     try {
       const run: PoolRun = startPool({
@@ -397,7 +347,7 @@ describe("Conversation launch", () => {
 
 describe("Conversation ending", () => {
   it("ends with no commits: worktree removed, status ended, no merge event", async () => {
-    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const fake = await startFakeHerdr();
     try {
       const run = startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: fake.socketPath });
@@ -426,7 +376,7 @@ describe("Conversation ending", () => {
     // endConversation is a direct PoolRun call too (not through the drive
     // loop), so the same "nothing else would tell the stream" reasoning as
     // the start test above applies to its ending.
-    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const fake = await startFakeHerdr();
     try {
       const run: PoolRun = startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: fake.socketPath });
@@ -445,7 +395,7 @@ describe("Conversation ending", () => {
   });
 
   it("ends with commits: merges the branch onto main and removes the worktree", async () => {
-    const poolDir = makeGitPool(
+    const { poolDir } = makeGitPool(
       { tickets: [doneTicket("01")], config: convoConfig },
       { "shared.txt": "base\n" },
     );
@@ -480,7 +430,7 @@ describe("Conversation ending", () => {
 
   it("a conflicted End raises the merge-approval interrupt under the conversation id once the resolver resolves it", async () => {
     const resolverStubPath = mkdtempSync(join(tmpdir(), "conv-resolver-"));
-    tempDirs.push(resolverStubPath);
+    registerTempDir(resolverStubPath);
     const scriptPath = join(resolverStubPath, "resolver.sh");
     writeFileSync(
       scriptPath,
@@ -498,7 +448,7 @@ describe("Conversation ending", () => {
     );
     const resolverHarness: HarnessCommand = (ctx) => ["bash", scriptPath, ctx.outcomePath, ctx.cwd];
 
-    const poolDir = makeGitPool(
+    const { poolDir } = makeGitPool(
       {
         tickets: [doneTicket("01")],
         config: { ...convoConfig, resolver: "resolver-stub" },
@@ -551,7 +501,7 @@ describe("Conversation ending", () => {
   });
 
   it("a pane closed without End crashes the conversation and keeps its branch", async () => {
-    const poolDir = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const fake = await startFakeHerdr();
     try {
       const run = startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: fake.socketPath });
@@ -578,7 +528,7 @@ describe("Conversation ending", () => {
 describe("Conversation-only pool boot", () => {
   it("boots a pool with an empty issues/ once a conversations/ directory exists, and serves a snapshot", async () => {
     const poolDir = mkdtempSync(join(tmpdir(), "conv-only-pool-"));
-    tempDirs.push(poolDir);
+    registerTempDir(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     mkdirSync(join(poolDir, "conversations"), { recursive: true });
     // Status "ended": no live pane, no herdr fake required at all — this
@@ -602,7 +552,7 @@ describe("Conversation-only pool boot", () => {
 
   it("still refuses a genuinely empty pool (no issues/ content, no conversations/ directory) with the original error", () => {
     const poolDir = mkdtempSync(join(tmpdir(), "conv-only-pool-empty-"));
-    tempDirs.push(poolDir);
+    registerTempDir(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     expect(() => startPool({ poolDir, harnesses: {} })).toThrow(/no Issue files/);
   });
@@ -617,7 +567,7 @@ describe("Conversation launch failure", () => {
     // code file appears almost at once and waitForReadiness returns
     // "exited" within one poll tick rather than running to its 60s
     // timeout.
-    const poolDir = makeGitPool({
+    const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
       config: { defaults: { harness: "claude", model: "stub-model" }, terminal: "herdr" },
     });
@@ -650,7 +600,7 @@ describe("Conversation launch failure", () => {
 describe("Conversation boot reconciliation", () => {
   it("crashes a Conversation recorded live at boot", async () => {
     const poolDir = makePool({ tickets: [readyTicket("01")], config: stubConfig });
-    const { harnesses } = stubHarness();
+    const { harnesses } = stubHarness(poolDir, {});
     const dir = join(poolDir, "conversations");
     writeConversation(dir, {
       id: "conv-1",

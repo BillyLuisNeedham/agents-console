@@ -220,22 +220,28 @@ export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   return events;
 }
 
+/** The highest recorded attempt, optionally only across events of one kind. */
+function maxAttempt(
+  events: TicketEvent[],
+  kind?: TicketEventKind,
+): number {
+  return events.reduce(
+    (max, event) =>
+      kind === undefined || event.kind === kind
+        ? Math.max(max, event.attempt)
+        : max,
+    0,
+  );
+}
+
 /** The attempt number for a ticket's next spawn: one past the highest attempt recorded. */
 export function nextAttempt(runsDir: string, ticketId: string): number {
-  return (
-    readEvents(runsDir, ticketId).reduce(
-      (max, event) => Math.max(max, event.attempt),
-      0,
-    ) + 1
-  );
+  return maxAttempt(readEvents(runsDir, ticketId)) + 1;
 }
 
 /** The ticket's latest recorded attempt, or 0 before anything has spawned. */
 export function lastAttempt(runsDir: string, ticketId: string): number {
-  return readEvents(runsDir, ticketId).reduce(
-    (max, event) => Math.max(max, event.attempt),
-    0,
-  );
+  return maxAttempt(readEvents(runsDir, ticketId));
 }
 
 /**
@@ -249,8 +255,5 @@ export function lastAttemptOfKind(
   ticketId: string,
   kind: TicketEventKind,
 ): number {
-  return readEvents(runsDir, ticketId).reduce(
-    (max, event) => (event.kind === kind ? Math.max(max, event.attempt) : max),
-    0,
-  );
+  return maxAttempt(readEvents(runsDir, ticketId), kind);
 }

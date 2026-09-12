@@ -54,7 +54,7 @@ function readRegistry(registryPath: string): FleetEntry[] {
   return raw.filter(isFleetEntry);
 }
 
-function pidIsLive(pid: number): boolean {
+export function pidIsLive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

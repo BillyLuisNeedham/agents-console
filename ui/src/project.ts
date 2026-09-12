@@ -172,7 +172,7 @@ interface PoolState {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation wire types (served by /api/conversations and /conversations/end)
+// Conversation wire types (served by POST /api/conversations and /conversations/end)
 // ---------------------------------------------------------------------------
 
 export interface StartConversationAssignment {

@@ -1,0 +1,225 @@
+/**
+ * The pool fixture the engine's suites share: one makePool, one makeGitPool,
+ * one stubHarness, one teardown, where each used to be copied per suite and
+ * the copies had already drifted (different temp-dir makers, different stub
+ * outcome shapes, an implicit "call makePool first" coupling through a
+ * module-level tempDirs array). Lives in its own module beside herdr-fake.ts
+ * rather than inside one suite for the same reason the fake does: one
+ * definition of the pool the tests assume, and importing it never drags
+ * another suite's cases into the importer's run.
+ *
+ * The registry is the module's own: every directory the fixture makes is
+ * registered, and cleanupPools drains it, so no suite keeps its own
+ * tempDirs array for pool dirs. Suite-local dirs (a fake herdr's socket
+ * dir, a wrapper's bin dir) join the same registry through registerTempDir.
+ */
+
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { HarnessCommand, PoolConfig } from "./engine.ts";
+import type { PoolServer } from "./server.ts";
+import type { SpawnContext } from "./spawn.ts";
+import { makeTempDir } from "./tmp.ts";
+
+const tempDirs: string[] = [];
+
+/** The console.json content the stub-driving suites boot with. */
+export const STUB_DEFAULTS = {
+  defaults: { harness: "stub", model: "m" },
+} satisfies PoolConfig;
+
+export interface PoolSpec {
+  tickets: { file: string; marker: string; body?: string }[];
+  config?: PoolConfig;
+  agentMd?: string;
+}
+
+/** A pool in a fresh temp dir: the Issue files, plus console.json iff the
+ *  spec carries a config and AGENT.md iff it carries agentMd. */
+export function makePool(spec: PoolSpec): string {
+  const poolDir = makeTempDir("pool-");
+  tempDirs.push(poolDir);
+  mkdirSync(join(poolDir, "issues"), { recursive: true });
+  for (const ticket of spec.tickets) {
+    writeFileSync(
+      join(poolDir, "issues", ticket.file),
+      `${ticket.marker}\n\n${ticket.body ?? "# body"}\n`,
+    );
+  }
+  if (spec.config) {
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify(spec.config, null, 2),
+    );
+  }
+  if (spec.agentMd) {
+    writeFileSync(join(poolDir, "AGENT.md"), spec.agentMd);
+  }
+  return poolDir;
+}
+
+export interface GitPool {
+  poolDir: string;
+  head: string;
+  git: (args: string[]) => { exitCode: number; stdout: Buffer; stderr: Buffer };
+}
+
+/** A pool that is also a real git checkout (Conversations and worktree
+ *  tests need one), with the seed files committed as the initial commit. */
+export function makeGitPool(
+  spec: PoolSpec,
+  seed: Record<string, string> = {},
+): GitPool {
+  const poolDir = makePool(spec);
+  for (const [path, content] of Object.entries(seed)) {
+    writeFileSync(join(poolDir, path), content);
+  }
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", ...args], {
+      cwd: poolDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "user.email", "pool@test"]);
+  git(["config", "user.name", "pool"]);
+  git(["add", "-A"]);
+  git(["commit", "-qm", "init"]);
+  const head = git(["rev-parse", "HEAD"]).stdout.toString().trim();
+  return { poolDir, head, git };
+}
+
+// The fake agent contract (ADR-0005): the stub signals its ending through the
+// outcome JSON it writes, never by editing the Issue marker. "done" and
+// "checkpoint" land in the outcome's status field; "keep" writes no outcome
+// (crash material); "ready" and "marker-done" sed the marker without writing
+// an outcome, the old protocol's misbehaviours the clean break must ignore.
+export interface StubBehaviour {
+  status?: "done" | "checkpoint" | "ready" | "keep" | "marker-done";
+  statuses?: ("done" | "checkpoint" | "ready" | "keep" | "marker-done")[];
+  outcome?: { summary: string; commitSha: string | null } | null;
+  outcomeRaw?: string;
+  brief?: string;
+  spawn?: unknown;
+  grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
+  winner?: number | string;
+  exitCode?: number;
+  exitCodes?: number[];
+}
+
+export interface StubRig {
+  harnesses: Record<string, HarnessCommand>;
+  spawned: Record<string, SpawnContext>;
+  spawnOrder: string[];
+  // Every spawn context in spawn order, attempts included: a verify fan-out
+  // spawns one ticket id several times, which the keyed map cannot hold.
+  spawnList: SpawnContext[];
+}
+
+/** A headless bash stub harness under the name "stub", recording every spawn
+ *  context it is invoked with. Takes the pool dir explicitly: the script it
+ *  writes must live inside the pool, and the old copies reached for it
+ *  through an implicit tempDirs[last] coupling instead. A grader id the
+ *  engine wrote gets a default passing grade, so tests that do not care
+ *  about grading still flow through it. */
+export function stubHarness(
+  poolDir: string,
+  behaviour: Record<string, StubBehaviour>,
+): StubRig {
+  const stubPath = join(poolDir, "stub-harness.sh");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -uo pipefail",
+      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
+      'if [ "$status" = "ready" ] || [ "$status" = "marker-done" ]; then',
+      // In place on line 1, through awk rather than `sed -i`: BSD sed wants
+      // an argument after -i and GNU sed refuses one, so the sed form rewrote
+      // nothing on macOS and left its complaint in the attempt log.
+      '  awk -v s="${status#marker-}" \'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}\' "$issue" > "$issue.new"',
+      '  mv "$issue.new" "$issue"',
+      "fi",
+      'if [ -n "$outcome_json" ]; then',
+      '  printf \'%s\' "$outcome_json" > "$outcome_path"',
+      "fi",
+      'exit "$exit_code"',
+      "",
+    ].join("\n"),
+  );
+  const spawned: Record<string, SpawnContext> = {};
+  const spawnOrder: string[] = [];
+  const spawnList: SpawnContext[] = [];
+  const spawnCounts: Record<string, number> = {};
+  const stub: HarnessCommand = (ctx) => {
+    spawned[ctx.id] = ctx;
+    spawnOrder.push(ctx.id);
+    spawnList.push(ctx);
+    const n = spawnCounts[ctx.id] ?? 0;
+    spawnCounts[ctx.id] = n + 1;
+    const b = behaviour[ctx.id] ??
+      (/-grader-\d+$/.test(ctx.id)
+        ? { grade: { score: 8, verdict: "pass", reasons: "default grade" } }
+        : {});
+    const status = b.statuses
+      ? b.statuses[Math.min(n, b.statuses.length - 1)]
+      : (b.status ?? "done");
+    const outcome =
+      b.outcomeRaw !== undefined
+        ? b.outcomeRaw
+        : b.outcome === null || status === "keep" || status === "ready" || status === "marker-done"
+          ? ""
+          : JSON.stringify({
+              status,
+              ...(b.outcome ?? {
+                summary: `summary-${ctx.id}`,
+                commitSha: `sha-${ctx.id}`,
+              }),
+              ...(b.brief !== undefined ? { brief: b.brief } : {}),
+              ...(b.spawn !== undefined ? { spawn: b.spawn } : {}),
+              ...(b.grade !== undefined ? { grade: b.grade } : {}),
+              ...(b.winner !== undefined ? { winner: b.winner } : {}),
+            });
+    const exitCode = b.exitCodes
+      ? b.exitCodes[Math.min(n, b.exitCodes.length - 1)]
+      : (b.exitCode ?? 0);
+    return [
+      "bash",
+      stubPath,
+      ctx.issuePath,
+      status,
+      ctx.outcomePath,
+      outcome,
+      String(exitCode),
+    ];
+  };
+  return { harnesses: { stub }, spawned, spawnOrder, spawnList };
+}
+
+/** A suite-local temp dir joins the registry, so cleanupPools drains it too. */
+export function registerTempDir(dir: string): void {
+  tempDirs.push(dir);
+}
+
+/** The pool's quiescence, bounded: a merge-held pool never settles by design
+ *  (ADR-0014), so the wait races settled against the 2 s beat. A drive that
+ *  died reports its death through settled()'s rejection, and by then the work
+ *  it was driving is over, so the cleanup still proceeds. */
+export async function settleOrBeat(server: PoolServer): Promise<void> {
+  await Promise.race([server.settled().catch(() => {}), Bun.sleep(2000)]);
+}
+
+/** Teardown for every suite: give each server its bounded settle, close it,
+ *  and drain the temp-dir registry. A test that ends right after an answer
+ *  leaves a fresh drive running its last attempt, and a directory removed
+ *  under that attempt makes its continuation read deleted files — the stray
+ *  ENOENT that fails whichever test runs next. */
+export async function cleanupPools(servers: PoolServer[] = []): Promise<void> {
+  for (const server of servers.splice(0)) {
+    await settleOrBeat(server);
+    await server.close();
+  }
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+}

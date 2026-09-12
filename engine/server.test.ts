@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -22,7 +23,6 @@ import {
   TERMINAL_MIN_BUN_VERSION,
   TERMINAL_PEEK_LINES,
   terminalRuntimeRefusal,
-  terminalSpawnRefusal,
   type PoolServer,
   type PoolServerOptions,
 } from "./server.ts";
@@ -32,43 +32,28 @@ import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
 import { readConversation } from "./conversations.ts";
 import { makeTempDir } from "./tmp.ts";
+import {
+  STUB_DEFAULTS,
+  cleanupPools,
+  makePool,
+  registerTempDir,
+  settleOrBeat,
+  stubHarness,
+} from "./pool-fixture.ts";
 
 const servers: PoolServer[] = [];
-const tempDirs: string[] = [];
 
 afterEach(async () => {
-  for (const server of servers.splice(0)) {
-    // The pool's true quiescence before the temp dir goes away: a test that
-    // ends right after an answer leaves a fresh drive running its last
-    // attempt, and a directory removed under that attempt makes its
-    // continuation read deleted files, the stray ENOENT that fails
-    // whichever test runs next. A drive that died reports its death through
-    // settled()'s rejection, and by then the work it was driving is over,
-    // so the cleanup still proceeds.
-    //
-    // A merge-held pool (ADR-0014) never settles by design: the hold keeps
-    // the drive alive, with no attempt in flight, until the merge lands. The
-    // settle wait therefore races a beat, so a held pool's cleanup proceeds
-    // (nothing is mid-run to read a deleted file) while a settling pool still
-    // gets its full quiescence before its directory goes away.
-    await Promise.race([
-      server.settled().catch(() => {}),
-      Bun.sleep(2000),
-    ]);
-    await server.close();
-  }
-  while (tempDirs.length > 0) {
-    rmSync(tempDirs.pop()!, { recursive: true, force: true });
-  }
+  await cleanupPools(servers);
 });
 
-function makePool(
+/** This suite's pools always carry a console.json with the stub defaults;
+ *  the fixture's makePool writes one only when handed a config. */
+function makeServerPool(
   tickets: { file: string; marker: string }[],
   config: Partial<PoolConfig> = {},
 ): string {
-  const poolDir = makeTempDir("pool-server-");
-  tempDirs.push(poolDir);
-  return makePoolInto(poolDir, tickets, config);
+  return makePool({ tickets, config: { ...STUB_DEFAULTS, ...config } });
 }
 
 /** Write a pool's issues and console.json into a directory the caller chose. */
@@ -92,42 +77,17 @@ function makePoolInto(
   return poolDir;
 }
 
-function stubHarness(behaviour: Record<string, ("done" | "checkpoint")[]>): Record<string, HarnessCommand> {
-  const poolLocal = tempDirs[tempDirs.length - 1];
-  const stubPath = join(poolLocal, "stub-harness.sh");
-  writeFileSync(
-    stubPath,
-    [
-      "#!/usr/bin/env bash",
-      "set -uo pipefail",
-      'status="$1"',
-      'printf \'{"status":"%s","summary":"smoke","commitSha":null}\' "$status" > "$2"',
-      "exit 0",
-      "",
-    ].join("\n"),
-  );
-  const counts: Record<string, number> = {};
-  const harness: HarnessCommand = (ctx) => {
-    const statuses = behaviour[ctx.id] ?? ["done"];
-    const n = counts[ctx.id] ?? 0;
-    counts[ctx.id] = n + 1;
-    const status = statuses[Math.min(n, statuses.length - 1)];
-    return ["bash", stubPath, status, ctx.outcomePath];
-  };
-  return { stub: harness };
-}
-
 // A stub harness whose blocked tickets hold their spawned script until the
 // sentinel file appears, so a test can keep a super-step in flight while it
 // answers an interrupt. Every other ticket takes the instant path. A
 // function sentinel resolves per ticket, so two tickets can block on their
 // own files and be released one at a time.
 function blockingHarness(
+  poolDir: string,
   behaviour: Record<string, { statuses?: ("done" | "checkpoint")[]; block?: boolean }>,
   sentinel: string | ((id: string) => string),
 ): Record<string, HarnessCommand> {
-  const poolLocal = tempDirs[tempDirs.length - 1];
-  const stubPath = join(poolLocal, "blocking-stub.sh");
+  const stubPath = join(poolDir, "blocking-stub.sh");
   writeFileSync(
     stubPath,
     [
@@ -197,9 +157,9 @@ describe("pool server", () => {
   // issues/ that startPool would have accepted, so a Conversation-only pool
   // exited 1 at "pool load: no Issue files" before the engine ever ran.
   it("boots a Conversation-only pool: empty issues/ beside a conversations/ directory", async () => {
-    const poolDir = makePool([]);
+    const poolDir = makeServerPool([]);
     mkdirSync(join(poolDir, "conversations"), { recursive: true });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const first = await server.start();
     expect(first.state.tickets).toEqual([]);
@@ -212,12 +172,12 @@ describe("pool server", () => {
   });
 
   it("still refuses a pool with an empty issues/ and no conversations/ directory, naming the opt-in", () => {
-    const poolDir = makePool([]);
+    const poolDir = makeServerPool([]);
     expect(() =>
       createPoolServer({
         poolDir,
         port: 0,
-        harnesses: stubHarness({}),
+        harnesses: stubHarness(poolDir, {}).harnesses,
         distDir: "/nonexistent",
         registryPath: fleetRegistry(poolDir),
       }),
@@ -228,7 +188,7 @@ describe("pool server", () => {
   // before it, a Ticket a Conversation had spawned failed the server's own
   // parse ("spawned-by names no ticket") and never reached the Console.
   it("loads a Ticket whose spawned-by names a Conversation into the served meta", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       {
         file: "conv-1-spawn-1.md",
         marker: "<!-- state: id=conv-1-spawn-1 blocked-by=none status=done spawned-by=conv-1 -->",
@@ -240,18 +200,18 @@ describe("pool server", () => {
       "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
         "model=m drivers=implement -->\n\n# Talk\n\n\n",
     );
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const snapshot = await server.start();
     expect(snapshot.state.tickets.map((t) => t.id)).toEqual(["conv-1-spawn-1"]);
   });
 
   it("drives a pool to the review gate and serves the enriched state", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     await server.start();
     const snapshot = await server.settled();
@@ -273,7 +233,7 @@ describe("pool server", () => {
   });
 
   it("carries the terminal dead phase on the snapshot when the drive dies", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
     // A harness command naming a binary that does not exist kills the drive
@@ -305,11 +265,11 @@ describe("pool server", () => {
     ];
     for (const [rel, expected] of shapes) {
       const root = makeTempDir("pool-name-");
-      tempDirs.push(root);
+      registerTempDir(root);
       const poolDir = makePoolInto(join(root, rel), [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ]);
-      const server = await startServer(poolDir, stubHarness({}));
+      const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
       const snapshot = await server.start();
       expect(snapshot.poolName).toBe(expected);
       // Let the drive settle before afterEach removes the pool dir: a drive
@@ -320,7 +280,7 @@ describe("pool server", () => {
   });
 
   it("serves each ticket's resolved assignment on the enriched snapshot", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
         { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
@@ -336,7 +296,7 @@ describe("pool server", () => {
         },
       },
     );
-    const stub = stubHarness({});
+    const stub = stubHarness(poolDir, {}).harnesses;
     const server = await startServer(poolDir, { ...stub, alt: stub.stub! });
 
     await server.start();
@@ -364,7 +324,7 @@ describe("pool server", () => {
   });
 
   it("renders an unassigned ticket with null harness and model, and dies naming the fix when it schedules", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
@@ -372,7 +332,7 @@ describe("pool server", () => {
       // a console.json without a defaults block.
       { defaults: {} },
     );
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     await server.start();
     await expect(server.settled()).rejects.toThrow(
@@ -392,10 +352,10 @@ describe("pool server", () => {
   });
 
   it("serves get state, start, and resume over HTTP", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    const server = await startServer(poolDir, stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses);
 
     await server.start();
     const first = await server.settled();
@@ -438,11 +398,11 @@ describe("pool server", () => {
   });
 
   it("acknowledges a retried answer with 202 and no duplicate; a stranger answer still 400s", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    const server = await startServer(poolDir, stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses);
     await server.start();
     const first = await server.settled();
     expect(first.state.interrupts[0]?.kind).toBe("checkpoint");
@@ -490,10 +450,10 @@ describe("pool server", () => {
   });
 
   it("answers 400 for a review reject that names no ticket, recording nothing", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await server.start();
     const first = await server.settled();
     expect(first.state.interrupts[0]?.kind).toBe("review");
@@ -552,7 +512,7 @@ describe("pool server", () => {
   });
 
   it("carries queued answers in the 202, /api/state, and SSE while a super-step is in flight", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
       { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
@@ -561,6 +521,7 @@ describe("pool server", () => {
     const server = await startServer(
       poolDir,
       blockingHarness(
+        poolDir,
         {
           "01": { statuses: ["checkpoint", "done"] },
           "03": { statuses: ["done"], block: true },
@@ -626,10 +587,10 @@ describe("pool server", () => {
   }, 15000);
 
   it("streams the latest snapshot to an SSE client on connect", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await server.start();
     await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
@@ -655,10 +616,10 @@ describe("pool server", () => {
   });
 
   it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    const server = await startServer(poolDir, stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses);
     await server.start();
     // The pool now waits at the checkpoint interrupt: the stream goes silent.
 
@@ -705,10 +666,10 @@ describe("pool server", () => {
   }, 25_000);
 
   it("pushes an SSE heartbeat comment frame on the snapshot stream", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}), {
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       streamHeartbeatMs: 40,
     });
     await server.start();
@@ -735,10 +696,10 @@ describe("pool server", () => {
   });
 
   it("opens the snapshot stream with a frame publishing the heartbeat interval", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}), {
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       streamHeartbeatMs: 40,
     });
     await server.start();
@@ -760,8 +721,8 @@ describe("ticket events endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("serves a ticket's parsed events after a run", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await server.start();
     await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
@@ -796,7 +757,7 @@ describe("ticket events endpoint", () => {
   });
 
   it("backfills reconstructed attempt rows for a ticket with no events file", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "first attempt output\n");
@@ -807,7 +768,7 @@ describe("ticket events endpoint", () => {
     utimesSync(join(runsDir, "01.log"), new Date(now - 60_000), new Date(now - 60_000));
     utimesSync(join(runsDir, "01.attempt-2.log"), new Date(now), new Date(now));
 
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     const res = await fetch(`${server.url}/api/events?ticket=01`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -832,8 +793,8 @@ describe("ticket events endpoint", () => {
   });
 
   it("rejects a ticket id the pool does not own", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/events?ticket=zzz`);
     expect(res.status).toBe(404);
@@ -841,7 +802,7 @@ describe("ticket events endpoint", () => {
 
   it("serves the ticket's spec text alongside its events", async () => {
     const poolDir = makeTempDir("pool-server-");
-    tempDirs.push(poolDir);
+    registerTempDir(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
       join(poolDir, "issues", "01-a.md"),
@@ -851,7 +812,7 @@ describe("ticket events endpoint", () => {
       join(poolDir, "console.json"),
       JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
     );
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await server.start();
     await server.settled();
 
@@ -866,8 +827,8 @@ describe("pool meta refresh", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("renders a ticket file added after boot as a card on the next snapshot", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({ "01": ["checkpoint", "done"] }));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses);
 
     await server.start();
     const first = await server.settled();
@@ -891,8 +852,8 @@ describe("pool meta refresh", () => {
   });
 
   it("accepts a late-arriving ticket id on the events and log endpoints", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     // No start: the server serves its boot state, and the ticket file plus
     // an attempt log land afterwards. Both endpoints answer for the late id
@@ -928,7 +889,7 @@ describe("grades endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("serves each ticket's latest grade, skipping tickets without one", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
     ]);
@@ -946,7 +907,7 @@ describe("grades endpoint", () => {
       kind: "graded",
       payload: { score: 8, verdict: "pass", reasons: "second" },
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     expect(res.status).toBe(200);
@@ -962,7 +923,7 @@ describe("grades endpoint", () => {
   });
 
   it("names the selected attempt as winner while its merge is still pending", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     appendEvent(runsDir, "01", {
@@ -983,7 +944,7 @@ describe("grades endpoint", () => {
       kind: "selected",
       payload: { score: 9, margin: 4, rule: "outright" },
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     const body = (await res.json()) as {
@@ -998,7 +959,7 @@ describe("grades endpoint", () => {
   });
 
   it("serves nothing when the selected winner's own grade is malformed", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     appendEvent(runsDir, "01", {
@@ -1019,7 +980,7 @@ describe("grades endpoint", () => {
       kind: "selected",
       payload: { score: 9, margin: 4, rule: "outright" },
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     const body = (await res.json()) as { grades: Record<string, unknown> };
@@ -1027,7 +988,7 @@ describe("grades endpoint", () => {
   });
 
   it("serves the merged attempt's grade when there is no selected event", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     appendEvent(runsDir, "01", {
@@ -1048,7 +1009,7 @@ describe("grades endpoint", () => {
       kind: "merged",
       payload: {},
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     const body = (await res.json()) as {
@@ -1063,7 +1024,7 @@ describe("grades endpoint", () => {
   });
 
   it("serves no grade for a graded event without reasons", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     appendEvent(runsDir, "01", {
@@ -1072,7 +1033,7 @@ describe("grades endpoint", () => {
       kind: "graded",
       payload: { score: 8, verdict: "pass" },
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     const body = (await res.json()) as { grades: Record<string, unknown> };
@@ -1080,7 +1041,7 @@ describe("grades endpoint", () => {
   });
 
   it("skips a graded event whose payload is malformed", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     appendEvent(runsDir, "01", {
@@ -1089,7 +1050,7 @@ describe("grades endpoint", () => {
       kind: "graded",
       payload: { score: "eight" },
     });
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/grades`);
     const body = (await res.json()) as { grades: Record<string, unknown> };
@@ -1113,11 +1074,11 @@ describe("merge pending enrichment", () => {
    * branch state, so a hand-made park is exactly what a conflicted merge
    * leaves behind.
    */
-  function makeGitPool(
+  function makeRepoWithPool(
     tickets: { file: string; marker: string }[],
   ): { root: string; poolDir: string; run: (args: string[]) => void } {
     const root = makeTempDir("pool-git-");
-    tempDirs.push(root);
+    registerTempDir(root);
     const poolDir = join(root, "pool");
     makePoolInto(poolDir, tickets, {});
     const run = (args: string[]): void => {
@@ -1158,9 +1119,9 @@ describe("merge pending enrichment", () => {
   }
 
   it("labels a done ticket whose parked branch has not landed, and drops the label once it lands", async () => {
-    const { root, poolDir, run } = makeGitPool([{ file: "01-a.md", marker: DONE_01 }]);
+    const { root, poolDir, run } = makeRepoWithPool([{ file: "01-a.md", marker: DONE_01 }]);
     parkBranch(root, run, "01");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     // The parked branch is exactly the merge hold (ADR-0014): the engine's
     // drive pauses on it rather than settling, so the label is read from the
     // first snapshot and the serve-time re-derivation, never from a settle.
@@ -1196,7 +1157,7 @@ describe("merge pending enrichment", () => {
   });
 
   it("reads the merge target as the working branch, so a feature branch holds a label main would clear", async () => {
-    const { root, poolDir, run } = makeGitPool([
+    const { root, poolDir, run } = makeRepoWithPool([
       { file: "01-a.md", marker: DONE_01 },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=done -->" },
     ]);
@@ -1214,7 +1175,7 @@ describe("merge pending enrichment", () => {
     run(["commit", "-qm", "feature"]);
     parkBranch(root, run, "01");
     run(["checkout", "-q", "feature/x"]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     // The hold stands here (both done tickets are unmerged into feature/x),
     // so the drive never settles; the labels are served from the first
     // snapshot's enrichment.
@@ -1231,9 +1192,9 @@ describe("merge pending enrichment", () => {
   });
 
   it("drops the label when the ticket reopens: a restart re-derives and the re-run's merge lands", async () => {
-    const { root, poolDir, run } = makeGitPool([{ file: "01-a.md", marker: DONE_01 }]);
+    const { root, poolDir, run } = makeRepoWithPool([{ file: "01-a.md", marker: DONE_01 }]);
     parkBranch(root, run, "01");
-    const first = await startServer(poolDir, stubHarness({}));
+    const first = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await first.start();
     expect((await ticketsOf(first))[0]).toMatchObject({
       status: "done",
@@ -1246,7 +1207,7 @@ describe("merge pending enrichment", () => {
     const file = join(poolDir, "issues", "01-a.md");
     writeFileSync(file, readFileSync(file, "utf8").replace("status=done", "status=ready"));
     rmSync(join(poolDir, "runs", "server.pid"));
-    const second = await startServer(poolDir, stubHarness({}));
+    const second = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     await second.start();
     await second.settled();
 
@@ -1264,8 +1225,8 @@ describe("ticket body endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("serves the ticket's body for an exact <id>.md file", async () => {
-    const poolDir = makePool([{ file: "01.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/ticket?id=01`);
     expect(res.status).toBe(200);
@@ -1275,8 +1236,8 @@ describe("ticket body endpoint", () => {
   });
 
   it("resolves an <id>-<slug>.md file by its prefix before the first '-'", async () => {
-    const poolDir = makePool([{ file: "01-ticket-body.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-ticket-body.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/ticket?id=01`);
     expect(res.status).toBe(200);
@@ -1287,7 +1248,7 @@ describe("ticket body endpoint", () => {
 
   it("strips the line-1 state marker from the served body", async () => {
     const poolDir = makeTempDir("pool-server-");
-    tempDirs.push(poolDir);
+    registerTempDir(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
       join(poolDir, "issues", "01-a.md"),
@@ -1297,7 +1258,7 @@ describe("ticket body endpoint", () => {
       join(poolDir, "console.json"),
       JSON.stringify({ defaults: { harness: "stub", model: "m" } }, null, 2),
     );
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/ticket?id=01`);
     const body = (await res.json()) as { id: string; body: string };
@@ -1306,8 +1267,8 @@ describe("ticket body endpoint", () => {
   });
 
   it("answers 404 for an id with no Issue file", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/ticket?id=zzz`);
     expect(res.status).toBe(404);
@@ -1320,11 +1281,11 @@ describe("ticket log endpoint", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("serves an attempt's log from a byte offset with the total size", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "0123456789abcdef\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=4`);
     expect(res.status).toBe(200);
@@ -1351,14 +1312,14 @@ describe("ticket log endpoint", () => {
   });
 
   it("strips ANSI escape sequences from the served content", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(
       join(runsDir, "01.log"),
       "line \u001b[31mred\u001b[0m text\n\u001b]0;title\u0007next\n",
     );
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
     const body = (await res.json()) as { content: string };
@@ -1366,12 +1327,12 @@ describe("ticket log endpoint", () => {
   });
 
   it("pages a log larger than one chunk through offsets", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     const big = "x".repeat(LOG_CHUNK_BYTES + 16) + "\n";
     writeFileSync(join(runsDir, "01.log"), big);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const first = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0`);
     const firstBody = (await first.json()) as {
@@ -1392,7 +1353,7 @@ describe("ticket log endpoint", () => {
   });
 
   it("does not split a multi-byte UTF-8 character across a chunk boundary", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // A two-byte char (é = U+00E9) whose first byte lands at the end of the
@@ -1400,7 +1361,7 @@ describe("ticket log endpoint", () => {
     // read brings the full char back and nothing decodes as U+FFFD.
     const lead = "a".repeat(LOG_CHUNK_BYTES - 1);
     writeFileSync(join(runsDir, "01.log"), lead + "é tail\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const first = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0`);
     const firstBody = (await first.json()) as {
@@ -1419,7 +1380,7 @@ describe("ticket log endpoint", () => {
   });
 
   it("does not split a multi-byte UTF-8 character at a range's head", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // é = U+00E9 is two bytes, at byte offsets 10 and 11. A tail-first open or
@@ -1427,7 +1388,7 @@ describe("ticket log endpoint", () => {
     // at byte 11 (a continuation byte) must drop the partial char and report
     // the adjusted offset, so the pane head never decodes as U+FFFD.
     writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=11`);
     const body = (await res.json()) as {
@@ -1444,11 +1405,11 @@ describe("ticket log endpoint", () => {
   });
 
   it("returns empty content for an offset at or past the end", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "short\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=100`);
     const body = (await res.json()) as { content: string; totalSize: number };
@@ -1457,11 +1418,11 @@ describe("ticket log endpoint", () => {
   });
 
   it("serves a bounded range when end is given, for load-earlier prefix reads", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "0123456789abcdef\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=4&end=10`);
     expect(res.status).toBe(200);
@@ -1478,12 +1439,12 @@ describe("ticket log endpoint", () => {
   });
 
   it("clamps a requested end to one chunk past the offset", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     const big = "x".repeat(LOG_CHUNK_BYTES + 16) + "\n";
     writeFileSync(join(runsDir, "01.log"), big);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(
       `${server.url}/api/log?ticket=01&attempt=1&offset=0&end=${big.length}`,
@@ -1494,13 +1455,13 @@ describe("ticket log endpoint", () => {
   });
 
   it("trims a partial UTF-8 character at a bounded range's end", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // é = U+00E9 is two bytes, at byte offsets 10 and 11: a range ending at 11
     // holds only the lead byte and must trim it.
     writeFileSync(join(runsDir, "01.log"), `${"a".repeat(10)}é tail\n`);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0&end=11`);
     const body = (await res.json()) as { content: string; nextOffset: number };
@@ -1510,28 +1471,23 @@ describe("ticket log endpoint", () => {
   });
 
   it("lists event-based attempts with their rotated log files and stream files", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // Implement attempt 1 rotated away, resolver attempt 2 current, implement
     // attempt 3 current.
-    writeFileSync(
-      join(runsDir, "01.events.jsonl"),
-      [
-        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 2, kind: "resolver", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 3, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 3, kind: "exited", payload: {} }),
-      ].join("\n") + "\n",
-    );
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "exited", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 2, kind: "resolver", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 3, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 3, kind: "exited", payload: {} });
     writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
     writeFileSync(join(runsDir, "01.resolver.log"), "resolver\n");
     writeFileSync(join(runsDir, "01.log"), "third\n");
     writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
     writeFileSync(join(runsDir, "01.resolver.stream.jsonl"), "stream-resolver\n");
     writeFileSync(join(runsDir, "01.stream.jsonl"), "stream-third\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=1`);
     expect(res.status).toBe(200);
@@ -1577,19 +1533,14 @@ describe("ticket log endpoint", () => {
   });
 
   it("serves an attempt's stream file through the same byte-range path", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
-    writeFileSync(
-      join(runsDir, "01.events.jsonl"),
-      [
-        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
-      ].join("\n") + "\n",
-    );
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "exited", payload: {} });
     writeFileSync(join(runsDir, "01.log"), "derived log\n");
     writeFileSync(join(runsDir, "01.stream.jsonl"), '{"type":"assistant"}\n');
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     // The well-known Stream file belongs to the current attempt; a stream
     // request reads it through the same ANSI-stripped, byte-ranged reader
@@ -1614,24 +1565,19 @@ describe("ticket log endpoint", () => {
   });
 
   it("answers 404 with a no-stream-file error for an attempt that has none", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // Attempt 1 streamed, attempt 2 (current) is a raw-harness run whose
     // only file is the derived log.
-    writeFileSync(
-      join(runsDir, "01.events.jsonl"),
-      [
-        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 1, kind: "exited", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 2, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 2, kind: "exited", payload: {} }),
-      ].join("\n") + "\n",
-    );
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "exited", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 2, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 2, kind: "exited", payload: {} });
     writeFileSync(join(runsDir, "01.attempt-1.log"), "one\n");
     writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
     writeFileSync(join(runsDir, "01.log"), "two\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const listing = await fetch(`${server.url}/api/log?ticket=01&attempt=2`);
     const listingBody = (await listing.json()) as {
@@ -1666,20 +1612,15 @@ describe("ticket log endpoint", () => {
   });
 
   it("serves a verify fan-out's current attempt through its attempt-numbered log", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     // A verify fan-out: three attempts, none ever holding the well-known
     // log path.
-    writeFileSync(
-      join(runsDir, "01.events.jsonl"),
-      [
-        JSON.stringify({ at: "t", attempt: 1, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 2, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 3, kind: "spawned", payload: {} }),
-        JSON.stringify({ at: "t", attempt: 3, kind: "exited", payload: {} }),
-      ].join("\n") + "\n",
-    );
+    appendEvent(runsDir, "01", { at: "t", attempt: 1, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 2, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 3, kind: "spawned", payload: {} });
+    appendEvent(runsDir, "01", { at: "t", attempt: 3, kind: "exited", payload: {} });
     writeFileSync(join(runsDir, "01.attempt-1.log"), "first\n");
     writeFileSync(join(runsDir, "01.attempt-2.log"), "second\n");
     writeFileSync(join(runsDir, "01.attempt-3.log"), "third\n");
@@ -1688,7 +1629,7 @@ describe("ticket log endpoint", () => {
     writeFileSync(join(runsDir, "01.attempt-1.stream.jsonl"), "stream-one\n");
     writeFileSync(join(runsDir, "01.attempt-2.stream.jsonl"), "stream-two\n");
     writeFileSync(join(runsDir, "01.attempt-3.stream.jsonl"), "stream-three\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=3`);
     expect(res.status).toBe(200);
@@ -1714,11 +1655,11 @@ describe("ticket log endpoint", () => {
   });
 
   it("defaults to the latest attempt when none is named", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "latest\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01`);
     const body = (await res.json()) as { content: string; attempts: unknown[] };
@@ -1727,19 +1668,19 @@ describe("ticket log endpoint", () => {
   });
 
   it("rejects an unknown attempt number", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "latest\n");
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=01&attempt=99`);
     expect(res.status).toBe(404);
   });
 
   it("rejects a ticket id the pool does not own", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/log?ticket=zzz&attempt=1`);
     expect(res.status).toBe(404);
@@ -1760,7 +1701,7 @@ describe("ticket activity endpoint", () => {
   /** A real temporary git repo, to be an attempt's recorded worktree. */
   function makeGitRepo(seed: Record<string, string> = {}): string {
     const dir = makeTempDir("activity-worktree-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const run = (args: string[]): void => {
       const probe = Bun.spawnSync(["git", "-C", dir, ...args], {
         stdout: "pipe",
@@ -1836,9 +1777,9 @@ describe("ticket activity endpoint", () => {
     writeFileSync(join(repo, "tracked-b.txt"), "keep\nextra\n");
     // untracked: +4
     writeFileSync(join(repo, "new-file.md"), "a\nb\nc\nd\n");
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     seedEvents(poolDir, "01", [spawnedIn(repo)]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const { status, body } = await getActivity(server);
     expect(status).toBe(200);
@@ -1857,9 +1798,9 @@ describe("ticket activity endpoint", () => {
     }
     // Over the per-file read cap: still a touched file, but no line counts.
     writeFileSync(join(repo, "big.bin"), "x".repeat(300 * 1024));
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     seedEvents(poolDir, "01", [spawnedIn(repo)]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const { body } = await getActivity(server);
     // big.bin sorts first, so it takes a slot and 99 small files fit under
@@ -1872,12 +1813,12 @@ describe("ticket activity endpoint", () => {
   });
 
   it("serves diff null for legacy events with no recorded cwd", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     seedEvents(poolDir, "01", [
       ev(1, "spawned"),
       ev(1, "exited", { code: 0, status: "done" }),
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const { status, body } = await getActivity(server);
     expect(status).toBe(200);
@@ -1887,8 +1828,8 @@ describe("ticket activity endpoint", () => {
   });
 
   it("serves an empty payload for a ticket with no events at all", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const { body } = await getActivity(server);
     expect(body).toEqual({
@@ -1901,8 +1842,8 @@ describe("ticket activity endpoint", () => {
   });
 
   it("404s an unknown ticket id", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const res = await fetch(`${server.url}/api/activity?ticket=zzz`);
     expect(res.status).toBe(404);
@@ -1910,7 +1851,7 @@ describe("ticket activity endpoint", () => {
 
   it("reports the attempt log's size and last write with the ticket's last event time", async () => {
     const repo = makeGitRepo({ "seed.txt": "seed\n" });
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const runsDir = join(poolDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, "01.log"), "hello\n");
@@ -1919,7 +1860,7 @@ describe("ticket activity endpoint", () => {
       spawnedIn(repo),
       ev(1, "exited", { code: 0, status: "done" }),
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const { body } = await getActivity(server);
     expect(body.log).toEqual({ size: 6, mtime: "1970-01-01T00:00:01.000Z" });
@@ -1928,7 +1869,7 @@ describe("ticket activity endpoint", () => {
   });
 
   it("reports running only while the latest attempt is live", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker },
       { file: "02-b.md", marker: marker.replace("id=01", "id=02") },
       { file: "03-c.md", marker: marker.replace("id=01", "id=03") },
@@ -1957,7 +1898,7 @@ describe("ticket activity endpoint", () => {
       ev(2, "resolver"),
       ev(2, "answered"),
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     expect((await getActivity(server, "01")).body.running).toBe(true);
     expect((await getActivity(server, "02")).body.running).toBe(false);
@@ -1967,9 +1908,9 @@ describe("ticket activity endpoint", () => {
 
   it("serves the cached payload for repeat requests inside the TTL", async () => {
     const repo = makeGitRepo({ "seed.txt": "seed\n" });
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     seedEvents(poolDir, "01", [spawnedIn(repo)]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     const first = await getActivity(server);
     expect(first.body.diff).toEqual({ added: 0, removed: 0, files: [] });
@@ -2001,7 +1942,7 @@ function deadPid(): number {
 }
 
 function makeLockedPool(): string {
-  return makePool([
+  return makeServerPool([
     { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
   ]);
 }
@@ -2012,7 +1953,7 @@ function makeLockedPool(): string {
  */
 function makeCliPool(): string {
   const poolDir = makeTempDir("pool-cli-");
-  tempDirs.push(poolDir);
+  registerTempDir(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   writeFileSync(
     join(poolDir, "issues", "01-a.md"),
@@ -2170,7 +2111,7 @@ async function freePort(): Promise<number> {
 describe("pinned pool ports", () => {
   it("binds the console.json port on every launch", async () => {
     const port = await freePort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port });
     const serverA = createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(serverA);
     expect(serverA.url).toBe(`http://localhost:${port}`);
@@ -2185,7 +2126,7 @@ describe("pinned pool ports", () => {
 
   it("a failed pinned bind clears the lock it claimed, so a retry can boot", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     let message = "";
     try {
       createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
@@ -2203,7 +2144,7 @@ describe("pinned pool ports", () => {
 
   it("refuses a busy console.json pin, naming the port", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     let message = "";
     try {
       createPoolServer({ poolDir, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
@@ -2216,7 +2157,7 @@ describe("pinned pool ports", () => {
 
   it("refuses a busy --port pin, naming the port", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }]);
     let message = "";
     try {
       createPoolServer({ poolDir, port: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
@@ -2230,8 +2171,8 @@ describe("pinned pool ports", () => {
   it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
     const held = await holdPort();
     const holderPool = makeTempDir("pool-holder-");
-    tempDirs.push(holderPool);
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
+    registerTempDir(holderPool);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     const registryPath = join(poolDir, "pools.json");
     writeFileSync(
       registryPath,
@@ -2253,7 +2194,7 @@ describe("pinned pool ports", () => {
 
   it("names a live holder's pool and pid when a second server boots into its pin", async () => {
     const port = await freePort();
-    const holderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    const holderPool = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port });
     const registryPath = fleetRegistry(holderPool);
     const holder = createPoolServer({
       poolDir: holderPool,
@@ -2264,7 +2205,7 @@ describe("pinned pool ports", () => {
     expect(holder.url).toBe(`http://localhost:${port}`);
     // The holder is a real, registered, live server. A second pool pinned to
     // the same port must fail naming the holder's pool directory and pid.
-    const contenderPool = makePool([{ file: "01-a.md", marker: portMarker }], { port });
+    const contenderPool = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port });
     let message = "";
     try {
       createPoolServer({
@@ -2283,8 +2224,8 @@ describe("pinned pool ports", () => {
   it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
     const held = await holdPort();
     const holderPool = makeTempDir("pool-holder-");
-    tempDirs.push(holderPool);
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    registerTempDir(holderPool);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }]);
     const registryPath = join(poolDir, "pools.json");
     writeFileSync(
       registryPath,
@@ -2336,7 +2277,7 @@ describe("pinned pool ports", () => {
     const configPort = await freePort();
     const flagPort = await freePort();
     expect(flagPort).not.toBe(configPort);
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: configPort });
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }], { port: configPort });
     const server = createPoolServer({ poolDir, port: flagPort, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).toBe(`http://localhost:${flagPort}`);
@@ -2344,7 +2285,7 @@ describe("pinned pool ports", () => {
 
   it("with no pin, binds the default port when it is free", async () => {
     const port = await freePort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }]);
     const server = createPoolServer({ poolDir, defaultPort: port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).toBe(`http://localhost:${port}`);
@@ -2352,7 +2293,7 @@ describe("pinned pool ports", () => {
 
   it("with no pin, hunts to the next free port when the default is busy", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }]);
     const server = createPoolServer({ poolDir, defaultPort: held.port, distDir: "/nonexistent", registryPath: fleetRegistry(poolDir) });
     servers.push(server);
     expect(server.url).not.toBe(`http://localhost:${held.port}`);
@@ -2362,7 +2303,7 @@ describe("pinned pool ports", () => {
 
   it("exits non-zero from the CLI when a --port pin is busy, naming the port", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: portMarker }]);
     const repoDir = join(import.meta.dir, "..");
     const child = Bun.spawn(
       ["bun", "run", "engine/server.ts", "--pool", poolDir, "--port", String(held.port)],
@@ -2380,7 +2321,7 @@ describe("fleet registration", () => {
   const marker = "<!-- state: id=01 blocked-by=none status=ready -->";
 
   it("upserts its entry in the registry after a successful bind", () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const registryPath = fleetRegistry(poolDir);
     const server = createPoolServer({
       poolDir,
@@ -2401,7 +2342,7 @@ describe("fleet registration", () => {
   });
 
   it("relaunching the same pool updates the entry rather than duplicating", async () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const registryPath = fleetRegistry(poolDir);
     const serverA = createPoolServer({
       poolDir,
@@ -2432,7 +2373,7 @@ describe("fleet registration", () => {
   });
 
   it("a corrupt registry file is recreated on write, not a boot failure", () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const registryPath = fleetRegistry(poolDir);
     writeFileSync(registryPath, "{ not json");
     const server = createPoolServer({
@@ -2446,7 +2387,7 @@ describe("fleet registration", () => {
   });
 
   it("an absent registry is created on write, not a boot failure", () => {
-    const poolDir = makePool([{ file: "01-a.md", marker }]);
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }]);
     const registryPath = join(poolDir, "nested", "pools.json");
     const server = createPoolServer({
       poolDir,
@@ -2460,7 +2401,7 @@ describe("fleet registration", () => {
 
   it("a failed bind registers nothing", async () => {
     const held = await holdPort();
-    const poolDir = makePool([{ file: "01-a.md", marker }], { port: held.port });
+    const poolDir = makeServerPool([{ file: "01-a.md", marker }], { port: held.port });
     const registryPath = fleetRegistry(poolDir);
     let message = "";
     try {
@@ -2603,7 +2544,7 @@ describe("terminal endpoints", () => {
     });
     fakeServers.push(server);
     const dir = makeTempDir("herdr-terminal-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     fake.socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
       server.on("error", reject);
@@ -2613,7 +2554,7 @@ describe("terminal endpoints", () => {
 
   /** A pool with three tickets; the caller writes the events each test needs. */
   function makeTerminalPool(): { poolDir: string; runsDir: string } {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
       { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
@@ -2711,18 +2652,13 @@ describe("terminal endpoints", () => {
       expect(String(request.params.pane_id)).not.toBe("pane-foreign");
     }
 
-    // The refusal behind the 403, at the unit seam: only pane ids the pool
-    // recorded on a spawned event pass. End to end the guard cannot trip on
-    // well-formed state (resolution and allowlist read the same events);
-    // it exists so corrupted state still cannot point the Console at a
-    // foreign pane.
+    // The allowlist behind the 403: only pane ids the pool recorded on a
+    // spawned event pass. End to end the guard cannot trip on well-formed
+    // state (resolution and allowlist read the same events); the "conversation
+    // endpoints" describe below trips it for real off corrupted pool state.
     const meta = [{ id: "01" }] as Parameters<typeof spawnedPaneAllowlist>[1];
     const allowlist = spawnedPaneAllowlist(runsDir, meta);
     expect([...allowlist].sort()).toEqual(["pane-1"]);
-    expect(terminalSpawnRefusal(allowlist, "pane-1")).toBeNull();
-    expect(terminalSpawnRefusal(allowlist, "pane-foreign")).toContain(
-      "not one this pool spawned",
-    );
   });
 
   it("answers unknown, headless, and finished tickets with a clean no-pane 404", async () => {
@@ -2972,7 +2908,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
         }),
     });
     const dir = makeTempDir("herdr-fake-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
       server.on("error", reject);
@@ -2981,7 +2917,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
   }
 
   it("exposes each terminal-backed ticket's paneId on the enriched snapshot", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
         { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
@@ -3003,6 +2939,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
       "03": join(poolDir, "release-03"),
     };
     const blocking = blockingHarness(
+      poolDir,
       { "02": { block: true }, "03": { block: true } },
       (id) => release[id as keyof typeof release]!,
     );
@@ -3050,20 +2987,17 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     expect(spawnedPane("03")).toBe(pane03);
     // Release the held attempts and let the drive reach quiescence before
     // teardown; a merge-held pool never settles by design, so the wait
-    // races the same beat the file-level cleanup uses.
+    // races the same beat the fixture's cleanup uses.
     writeFileSync(release["02"], "");
     writeFileSync(release["03"], "");
-    await Promise.race([
-      server.settled().catch(() => {}),
-      Bun.sleep(2000),
-    ]);
+    await settleOrBeat(server);
   });
 
   it("exposes no paneId on a headless pool", async () => {
-    const poolDir = makePool([
+    const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness({}));
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     await server.start();
     const snapshot = await server.settled();
@@ -3073,14 +3007,14 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
   });
 
   it("exposes no paneId when the daemon refused the tab and the attempt fell back to headless", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
       { terminal: "herdr" },
     );
     const fake = await startFakeHerdr({ fail: ["tab.create"] });
-    const server = await startServer(poolDir, stubHarness({}), {
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       herdrSocket: fake.socketPath,
     });
 
@@ -3103,7 +3037,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
   });
 
   it("exposes no paneId when the tab opened but the wrapper send was refused and the attempt fell back to headless", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
@@ -3113,7 +3047,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     // pane.send_input that would start the wrapper in it is refused, and the
     // spawn falls back to headless mid-flight.
     const fake = await startFakeHerdr({ fail: ["pane.send_input"] });
-    const server = await startServer(poolDir, stubHarness({}), {
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       herdrSocket: fake.socketPath,
     });
 
@@ -3150,7 +3084,7 @@ describe("currentAttemptPaneIds", () => {
 
   function runsWith(events: Record<string, { attempt: number; pane_id?: unknown }[]>): string {
     const runsDir = join(makeTempDir("pane-ids-"), "runs");
-    tempDirs.push(join(runsDir, ".."));
+    registerTempDir(join(runsDir, ".."));
     mkdirSync(runsDir, { recursive: true });
     for (const [id, list] of Object.entries(events)) {
       for (const event of list) {
@@ -3275,7 +3209,7 @@ describe("terminalRuntimeRefusal", () => {
 // over a stale lock.
 describe("server shutdown on signal", () => {
   it("SIGTERM stops the running attempt and its grandchildren, releases server.pid, and exits 0", async () => {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" }],
       { defaults: { harness: "claude", model: "stub-model" } },
     );
@@ -3385,7 +3319,7 @@ describe("conversation endpoints", () => {
    *  with one already-done ticket so loadPoolMarkers never sees an empty
    *  issues/ directory. `terminal: herdr` unless overridden. */
   function makeConvoPool(config: Partial<PoolConfig> = {}): string {
-    const poolDir = makePool(
+    const poolDir = makeServerPool(
       [{ file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" }],
       { terminal: "herdr", defaults: { harness: "convo", model: "m" }, ...config },
     );
@@ -3516,7 +3450,7 @@ describe("conversation endpoints", () => {
     });
     fakeServers.push(server);
     const dir = makeTempDir("conv-server-herdr-");
-    tempDirs.push(dir);
+    registerTempDir(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
       server.on("error", reject);
@@ -3634,38 +3568,6 @@ describe("conversation endpoints", () => {
     await fake.close();
   });
 
-  it("the list endpoint reflects a Conversation once any snapshot re-derives it", async () => {
-    // engine/conversations.ts's startConversation and finishConversationEnd
-    // (unlike markConversationCrashed) never call emitSnapshot themselves, so
-    // the server's cached `latest` — what GET /api/conversations serves —
-    // only picks up a Conversation's current state on the next snapshot from
-    // something else. Answering the pool's review gate is a convenient,
-    // already-proven way to force one more snapshot (see the "pool server"
-    // tests above); conversationViews(session) is recomputed fresh at every
-    // emit regardless of what changed, so that snapshot picks up the
-    // Conversation that exists by then. This exercises the real, current
-    // behaviour rather than an idealised one: see the final report for the
-    // suggested engine-side fix (an emitSnapshot call alongside
-    // markConversationCrashed's).
-    const poolDir = makeConvoPool();
-    const fake = await startLaunchFakeHerdr();
-    const server = startConvoServer(poolDir, fake.socketPath);
-    await server.start();
-    await server.settled();
-
-    const beforeAny = await (await fetch(`${server.url}/api/conversations`)).json();
-    expect(beforeAny.conversations).toEqual([]);
-
-    const created = await server.startConversation({ title: "Watch it land" });
-    await server.answer(REVIEW_TICKET_ID, "approve");
-
-    const afterAnswer = await (await fetch(`${server.url}/api/conversations`)).json();
-    expect(afterAnswer.conversations.map((c: { id: string }) => c.id)).toContain(created.id);
-
-    await server.endConversation(created.id);
-    await fake.close();
-  });
-
   it("peek and focus resolve a Conversation's recorded pane, and refuse once it never spawned", async () => {
     const poolDir = makeConvoPool();
     const fake = await startLaunchFakeHerdr();
@@ -3688,6 +3590,34 @@ describe("conversation endpoints", () => {
     // clean no-pane 404 as a headless or finished ticket.
     const unknown = await fetch(`${server.url}/api/terminal/peek?ticket=nope`);
     expect(unknown.status).toBe(404);
+
+    await server.endConversation(created.id);
+    await fake.close();
+  });
+
+  it("the spawned-only guard 403s a Conversation whose record is gone but whose events still name a pane", async () => {
+    const poolDir = makeConvoPool();
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
+    await server.start();
+    await server.settled();
+
+    const created = await server.startConversation({ title: "Corrupt me" });
+
+    // Corrupted pool state: the record file is gone, so the request's
+    // allowlist is built without this Conversation's events, while the id
+    // check still passes (the snapshot union knows the id) and the events
+    // file still resolves its pane. Resolution yields a pane the allowlist
+    // does not contain — exactly what the 403 exists for.
+    const recordFile = join(poolDir, "conversations", `${created.id}.md`);
+    renameSync(recordFile, `${recordFile}.bak`);
+    try {
+      const res = await fetch(`${server.url}/api/terminal/peek?ticket=${created.id}`);
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toContain("not one this pool spawned");
+    } finally {
+      renameSync(`${recordFile}.bak`, recordFile);
+    }
 
     await server.endConversation(created.id);
     await fake.close();

@@ -644,7 +644,7 @@ export async function startConversation(
   // startConversation is called directly off the PoolRun handle (the
   // server route, or a fire-and-forget spawn adoption), never through
   // kickProcessing/the drive loop, so nothing else emits a snapshot that
-  // would tell GET /api/conversations or the SSE stream this Conversation
+  // would tell the SSE stream this Conversation
   // now exists; a pool with no other ticket activity in flight could
   // otherwise go arbitrarily long before the next unrelated emit.
   emitSnapshot(session, session.settledPhase ?? "running");

@@ -32,15 +32,12 @@ import {
 } from "./project";
 import { ConsoleView, type AppModel } from "./view";
 import { TerminalSurface } from "./terminal";
-import { createPrototype, type Prototype } from "./prototype/index";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
 const root: HTMLElement = appRoot;
 
 const client = new PoolClient();
-
-let proto: Prototype | null = null;
 
 // The favicon: one reused link element whose href is a canvas-drawn dot in
 // the pool status color. The idle grey dot stands from page load, before the
@@ -137,6 +134,13 @@ const terminal = new TerminalSurface({
   peek: (ticketId) => client.peekTerminal(ticketId),
   focus: (ticketId) => client.focusTerminal(ticketId),
   onChange: () => render(),
+});
+
+// On a dev HMR re-execution this module runs again and builds fresh stores;
+// dispose the old ones or their poll timers double up.
+import.meta.hot?.dispose(() => {
+  vitals.dispose();
+  terminal.dispose();
 });
 
 function refreshGrades(): void {
@@ -442,7 +446,6 @@ function render(): void {
         });
     },
   });
-  proto?.afterRender(root);
 }
 
 function setSnapshot(snapshot: PoolSnapshot): void {
@@ -451,7 +454,6 @@ function setSnapshot(snapshot: PoolSnapshot): void {
   state.error = null;
   vitals.update(snapshot);
   terminal.update(snapshot);
-  proto?.update(snapshot);
   const status = poolStatus(snapshot);
   document.title = `${status.word} — ${snapshot.poolName}`;
   setFavicon(status.color);
@@ -466,7 +468,6 @@ function setSnapshot(snapshot: PoolSnapshot): void {
 }
 
 async function boot(): Promise<void> {
-  proto = createPrototype({ onNeedRender: () => render() });
   let snapshot: PoolSnapshot | null = null;
   try {
     snapshot = await client.getState();

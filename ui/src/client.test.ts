@@ -438,27 +438,6 @@ describe("PoolClient Conversations routes (issue #60)", () => {
     return { fetch, calls };
   }
 
-  it("lists conversations from GET /api/conversations", async () => {
-    const conversation: PoolConversationState = {
-      id: "conv-1",
-      title: "plan the migration",
-      status: "live",
-      spawnedBy: null,
-      assignment: { harness: null, model: null, drivers: "implement" },
-      paneId: "pane-9",
-      branch: null,
-      turn: { state: "waiting", lastLine: "what next?", idleSince: null },
-      children: [],
-    };
-    const { fetch, calls } = jsonFetch(200, { conversations: [conversation] });
-    globalThis.fetch = fetch;
-    const client = new PoolClient();
-    const conversations = await client.listConversations();
-    expect(calls[0]!.url).toBe("/api/conversations");
-    expect(calls[0]!.init).toBeUndefined();
-    expect(conversations).toEqual([conversation]);
-  });
-
   it("starts a Conversation with POST /api/conversations, body and shape intact", async () => {
     const conversation: PoolConversationState = {
       id: "conv-2",
