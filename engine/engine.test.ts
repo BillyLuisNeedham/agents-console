@@ -3,13 +3,12 @@ import { Database } from "bun:sqlite";
 import {
   chmodSync,
   existsSync,
-  mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import {
@@ -39,6 +38,7 @@ import {
   defaultHarnessDescriptors,
   type SpawnContext,
 } from "./spawn.ts";
+import { makeTempDir } from "./tmp.ts";
 
 const tempDirs: string[] = [];
 
@@ -62,7 +62,7 @@ interface PoolSpec {
 }
 
 function makePool(spec: PoolSpec): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-"));
+  const poolDir = makeTempDir("pool-");
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   for (const ticket of spec.tickets) {
@@ -120,7 +120,11 @@ function stubHarness(behaviour: Record<string, StubBehaviour>): StubRig {
       "set -uo pipefail",
       'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
       'if [ "$status" = "ready" ] || [ "$status" = "marker-done" ]; then',
-      '  sed -i "1s/status=[a-z-]*/status=${status#marker-}/" "$issue"',
+      // In place on line 1, through awk rather than `sed -i`: BSD sed wants
+      // an argument after -i and GNU sed refuses one, so the sed form rewrote
+      // nothing on macOS and left its complaint in the attempt log.
+      '  awk -v s="${status#marker-}" \'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}\' "$issue" > "$issue.new"',
+      '  mv "$issue.new" "$issue"',
       "fi",
       'if [ -n "$outcome_json" ]; then',
       '  printf \'%s\' "$outcome_json" > "$outcome_path"',
@@ -441,7 +445,7 @@ interface FakeHerdrRequest {
       }
     });
   });
-  const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+  const dir = makeTempDir("herdr-fake-");
   tempDirs.push(dir);
   const socketPath = join(dir, "herdr.sock");
   await new Promise<void>((resolve, reject) => {
@@ -3532,7 +3536,7 @@ describe("channels", () => {
   });
 });
 
-describe("config reload (ADR-0018)", () => {
+describe("config reload (ADR-0019)", () => {
   it("reassigns a not-yet-run ticket edited between super-steps, with a reassigned event on its log", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01"), readyTicket("02", "01")],
@@ -3572,7 +3576,7 @@ describe("config reload (ADR-0018)", () => {
     });
     // 01 is done and will never run again, but it was not in flight at the
     // boundary either, so it re-resolves like any other reassignable ticket
-    // (ADR-0018 excludes only an Attempt in flight) — the point being that
+    // (ADR-0019 excludes only an Attempt in flight) — the point being that
     // its Assignment record still serves as the correct, up-to-date basis a
     // later spawn or grader inherits from.
     expect(
@@ -5342,7 +5346,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     // as the pane would run it (bash here; the line is POSIX quoting and
     // `$?`, which the operator's login shell — zsh on a Mac, ADR-0014 —
     // reads the same way).
-    const dir = mkdtempSync(join(tmpdir(), "wrapper-"));
+    const dir = makeTempDir("wrapper-");
     tempDirs.push(dir);
     const binDir = join(dir, "bin");
     mkdirSync(binDir);
@@ -8790,6 +8794,39 @@ describe("worktrees", () => {
     ).toBe("");
   }, 15000);
 
+  it("runs a pool reached through a symlink, seeding each worktree from the canonical spelling", async () => {
+    // The pool dir as the caller spells it and the pool dir `git rev-parse
+    // --show-toplevel` reports are the same directory under two names
+    // whenever a symlink stands anywhere above it (a symlinked repos dir,
+    // /tmp on macOS, a network mount alias). planTicket seeds an attempt
+    // worktree at `relative(session.cwd, marker.file)`, which under two
+    // spellings climbs out of the worktree altogether: EACCES on macOS, the
+    // wrong directory elsewhere. The engine canonicalises the pool dir at
+    // load, so the symlinked spelling runs exactly like the direct one.
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = stubHarness({});
+    const linkBase = makeTempDir("pool-link-");
+    tempDirs.push(linkBase);
+    const linked = join(linkBase, "pool");
+    symlinkSync(poolDir, linked);
+
+    const run = await approveReview(
+      await runPool({ poolDir: linked, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toMatchObject({ "01": "done", "02": "done" });
+    // Both tickets ran in worktrees (two ready tickets never take the
+    // main-checkout path), each seeded with its own Issue.
+    for (const ctx of rig.spawnList) {
+      expect(ctx.issuePath.startsWith(`${poolDir}/`)).toBe(true);
+      expect(existsSync(ctx.issuePath)).toBe(true);
+    }
+  }, 15000);
+
   it("keeps two pools sharing one repo out of each other's worktrees and branches", async () => {
     // The live collision (2026-09-05): two pools on one repo share the
     // common git dir and the ref namespace, so bare ticket ids collided on
@@ -8799,7 +8836,7 @@ describe("worktrees", () => {
       tickets: [readyTicket("01"), readyTicket("02")],
       config: stubConfig,
     });
-    const base = mkdtempSync(join(tmpdir(), "pool-b-"));
+    const base = makeTempDir("pool-b-");
     tempDirs.push(base);
     const poolB = join(base, "checkout");
     expect(

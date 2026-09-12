@@ -329,7 +329,7 @@ Leave these alone rather than rediscovering them:
   so the pool on disk is always inspectable.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
-  super-step boundary (ADR-0018): an edit lands on any ticket with no Attempt in flight — a
+  super-step boundary (ADR-0019): an edit lands on any ticket with no Attempt in flight — a
   fresh Spawn, a checkpoint resume, a ticket Review sent back, one that has never run — at its
   next boundary, no restart needed. `roster`, `agents`, `selection`, `terminal`, and `port` stay
   exactly as they were at boot; an edit to any of those, `terminal: herdr` included, only takes

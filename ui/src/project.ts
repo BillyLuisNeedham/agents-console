@@ -837,10 +837,22 @@ export function layoutStorageKey(cardId: string): string {
   return cardId;
 }
 
-const LAYOUT = {
+/**
+ * Default layout metrics. Cards are content-sized (no CSS height), so a row's
+ * pitch has to leave room for the tallest card it can hold. Measured against
+ * the stylesheet at the 280px card width: a headless ticket card is ~116px
+ * (~160px with Vitals and a grade line), a terminal-backed ticket card ~255px,
+ * and a live Conversation card ~285px (~325px with a two-line title and an
+ * idle row). `rowH` fits the headless case; `terminalRowH` a row holding a
+ * pane-backed ticket; `conversationLaneH` the Conversations lane, whose live
+ * cards always carry a pane. Exported for the layout tests.
+ */
+export const LAYOUT = {
   centerX: 420,
   startY: 16,
   rowH: 200,
+  terminalRowH: 340,
+  conversationLaneH: 380,
   colGap: 320,
   reviewY: 1200,
 } as const;
@@ -866,11 +878,18 @@ export function ticketDepth(
 
 /**
  * Default positions: START above, the Conversations lane (if any) directly
- * below it, tickets layered by dependency depth below that, REVIEW at its
- * fixed spot. Conversations exist beside tickets, not in the dependency
- * graph, so they lay out as one row, centered like a ticket depth-0 row;
- * their presence pushes every ticket row down by one row height, so the
- * lane never overlaps the ticket layers.
+ * below it, tickets layered by dependency depth below that, REVIEW below the
+ * last layer (never above its fixed spot). Conversations exist beside
+ * tickets, not in the dependency graph, so they lay out as one row, centered
+ * like a ticket depth-0 row; their presence pushes every ticket row down by
+ * the lane's height, so the lane never overlaps the ticket layers.
+ *
+ * Each ticket row's pitch is the tallest card it can hold: `terminalRowH`
+ * while any ticket in it runs a pane-backed attempt (the card then carries
+ * the terminal surface), `rowH` otherwise. A headless pool therefore keeps
+ * the plain `rowH` grid throughout. The pitch follows the snapshot, so rows
+ * below a row settle back up once its attempts end; dragged positions are
+ * stored separately and never touched by this.
  */
 function layoutPool(
   tickets: PoolTicketState[],
@@ -880,7 +899,6 @@ function layoutPool(
 ): Record<string, Point> {
   const positions: Record<string, Point> = {};
   positions[startId] = { x: LAYOUT.centerX, y: LAYOUT.startY };
-  positions[reviewId] = { x: LAYOUT.centerX, y: LAYOUT.reviewY };
 
   const hasConversations = conversations.length > 0;
   if (hasConversations) {
@@ -893,25 +911,39 @@ function layoutPool(
     });
   }
   const ticketBaseY =
-    LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.rowH : 0);
+    LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.conversationLaneH : 0);
 
   const byDepth = new Map<number, PoolTicketState[]>();
+  let maxDepth = -1;
   for (const ticket of tickets) {
     const depth = ticketDepth(ticket.id, tickets);
     const row = byDepth.get(depth) ?? [];
     row.push(ticket);
     byDepth.set(depth, row);
+    maxDepth = Math.max(maxDepth, depth);
   }
-  for (const [depth, row] of byDepth) {
+  // Rows stack top-down, each starting where the previous one's pitch ends.
+  let rowY = ticketBaseY;
+  for (let depth = 0; depth <= maxDepth; depth++) {
+    const row = byDepth.get(depth) ?? [];
     const offset = ((row.length - 1) * LAYOUT.colGap) / 2;
     row.forEach((ticket, index) => {
       positions[ticketCardId(ticket.id)] = {
         x: LAYOUT.centerX - offset + index * LAYOUT.colGap,
-        y: ticketBaseY + depth * LAYOUT.rowH,
+        y: rowY,
       };
     });
+    rowY += rowPitch(row);
   }
+  positions[reviewId] = { x: LAYOUT.centerX, y: Math.max(LAYOUT.reviewY, rowY) };
   return positions;
+}
+
+/** A ticket row's vertical pitch: taller while any of its tickets runs a pane-backed attempt. */
+function rowPitch(row: PoolTicketState[]): number {
+  return row.some((ticket) => ticket.paneId !== undefined && ticket.paneId !== null)
+    ? LAYOUT.terminalRowH
+    : LAYOUT.rowH;
 }
 
 export function projectPoolEdges(
@@ -935,7 +967,7 @@ export function projectPoolEdges(
 
 /**
  * Edges from a Conversation card to what it spawned: the ids in its
- * `children` (ADR-0017), each resolved against the pool's live tickets and
+ * `children` (ADR-0018), each resolved against the pool's live tickets and
  * Conversations to the right prefix. A child id that names neither (a race
  * between the snapshot and the spawn, or a spawn that failed validation)
  * draws no edge rather than a dangling one.

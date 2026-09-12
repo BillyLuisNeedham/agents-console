@@ -257,7 +257,7 @@ export class PoolClient {
   }
 
   /**
-   * Start a Conversation (ADR-0017). 409 with a reason when the pool is not
+   * Start a Conversation (ADR-0018). 409 with a reason when the pool is not
    * terminal-backed; the reason (or a generic message) becomes the thrown
    * Error's message, which the New Conversation form shows inline.
    */

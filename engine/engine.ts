@@ -9,6 +9,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -300,7 +301,7 @@ interface PoolUpdate {
   interrupts?: Interrupt[];
   reviewApproved?: boolean;
   // The sanctioned way to replace the assignment slice of the live config
-  // (ADR-0018), applied at the super-step boundary only. Every other channel
+  // (ADR-0019), applied at the super-step boundary only. Every other channel
   // is additive/merged; config is a wholesale replacement, matching how a
   // reload always replaces defaults/assign/resolver whole rather than
   // merging field-wise with the previous reload.
@@ -369,10 +370,9 @@ interface RunOptions {
   // The Conversations ADR: force-allow an empty issues/ (no Tickets at
   // all) even when the pool has no conversations/ directory yet either —
   // startPool already infers this on its own once a conversations/
-  // directory exists (see loadPoolMarkers's own allowEmptyIssues), so this
-  // is only for a caller that wants a Ticket-less pool to boot before its
-  // first Conversation has ever started (a test, or a future
-  // start-empty-then-add-a-Conversation flow).
+  // directory exists (see loadPoolTickets), so this is only for a caller
+  // that wants a Ticket-less pool to boot before its first Conversation has
+  // ever started and before the directory exists (a test).
   allowEmptyIssues?: boolean;
 }
 
@@ -647,7 +647,7 @@ export interface Session {
   // loop or from an adopted attempt's finalize, chains onto this so two
   // merges never run their git work concurrently on the main checkout.
   mergeChain: Promise<void>;
-  // ADR-0018's config reload: the raw console.json text last considered at a
+  // ADR-0019's config reload: the raw console.json text last considered at a
   // super-step boundary, whether it was accepted, rejected, or found
   // unchanged. Comparing against this (not against the last *accepted* text)
   // is what makes an unchanged file a true no-op and keeps the same bad
@@ -661,7 +661,7 @@ export interface Session {
   // Headless orphans rehydrate found still alive from a previous engine
   // process, stopped by reapHeadlessOrphans before the first scheduling.
   orphans: HeadlessOrphan[];
-  // Live Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // Live Conversations (the Conversations ADR, docs/adr/0018-conversations-
   // beside-tickets.md): tracked only while running, keyed by id. An ended or
   // crashed Conversation is removed; its record on disk (conversations.ts's
   // loadConversations) is the only trace of it from then on.
@@ -687,23 +687,14 @@ interface AdoptedAttempt {
 }
 
 export function startPool(options: RunOptions): PoolRun {
-  const poolDir = options.poolDir;
+  const poolDir = canonicalDir(options.poolDir);
   const issuesDir = join(poolDir, "issues");
   const runsDir = join(poolDir, "runs");
-  // A pool with a conversations/ directory (even an empty one, since the
-  // directory only ever gets created by the first Conversation ever
-  // started there) has proven it is not the "accidental empty pool"
-  // mistake the bare throw exists to catch, so an empty issues/ boots like
-  // any other pool with zero ready Tickets. The `allowEmptyIssues` option
-  // covers the one case that can't infer itself: a Conversation-capable
-  // pool before its very first Conversation has ever started.
-  const markers = loadPoolMarkers(issuesDir, knownConversationIds(poolDir), {
-    allowEmptyIssues: options.allowEmptyIssues || existsSync(join(poolDir, "conversations")),
-  });
+  const markers = loadPoolTickets(poolDir, options.allowEmptyIssues);
   mkdirSync(runsDir, { recursive: true });
 
   const config = readConfig(poolDir);
-  // The reload's baseline (ADR-0018): the exact bytes readConfig just parsed,
+  // The reload's baseline (ADR-0019): the exact bytes readConfig just parsed,
   // so the first boundary reload is a no-op unless the file changes after
   // boot, matching every later boundary's unchanged-file no-op.
   const lastConfigText = readOptional(join(poolDir, "console.json"));
@@ -1012,7 +1003,7 @@ async function driveLoop(session: Session): Promise<void> {
   await session.terminalReconcile;
   for (;;) {
     reconcileDeadlocks(session);
-    // Config reload (ADR-0018): the assignment slice of console.json
+    // Config reload (ADR-0019): the assignment slice of console.json
     // re-reads here, before the answer drain and spawn adoption below, so
     // both see the reloaded config for whatever they schedule this
     // super-step.
@@ -2279,7 +2270,7 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (!interrupt) {
     throw new Error(`resume: no pending interrupt for ticket ${record.ticketId}`);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -2945,7 +2936,7 @@ function resolveSpawnedTicketAssignment(
   };
 }
 
-// The shared resolution pass (ADR-0010, ADR-0018): resolves every marker id
+// The shared resolution pass (ADR-0010, ADR-0019): resolves every marker id
 // not already present in `assignments`, so the caller decides what counts as
 // already resolved. At boot (resolveUnseenAssignments below) that is nothing,
 // starting from an empty map. At a config reload (resolveBoundaryAssignments
@@ -3028,7 +3019,7 @@ function resolveUnseenAssignments(
 }
 
 // ---------------------------------------------------------------------------
-// Config reload (ADR-0018)
+// Config reload (ADR-0019)
 // ---------------------------------------------------------------------------
 
 // The three keys the reload touches. Everything else on PoolConfig
@@ -3085,7 +3076,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
   });
 }
 
-// The super-step boundary's config reload (ADR-0018): re-reads console.json,
+// The super-step boundary's config reload (ADR-0019): re-reads console.json,
 // and when its assignment slice (defaults, assign, resolver) changed, dry-run
 // resolves every reassignable ticket before committing anything. "Reassignable"
 // is every marker except a ticket with an Attempt in flight across the
@@ -3093,7 +3084,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
 // (session.adopted): the drive loop always awaits a super-step's ordinary
 // attempts in full before looping back here, so nothing else can still be
 // running at this seam. A done ticket is reassignable too, by the letter of
-// ADR-0018: it simply resolves to whatever the new config would have given
+// ADR-0019: it simply resolves to whatever the new config would have given
 // it, the same as any other not-in-flight ticket, which is what lets a
 // grader, head-to-head, or spawned ticket adopted after it finished inherit
 // the post-reload value rather than the value frozen at its own now-past
@@ -3354,7 +3345,7 @@ async function runGraders(
   for (const [index, attempt] of attempts.entries()) {
     writeGraderTicket(session, build, index + 1, attempt);
   }
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const buildAssignment = session.assignments.get(build.id)!;
   let pending: PendingGrader[] = attempts.map((attempt, index) => {
     const marker = session.markers.find(
@@ -4450,7 +4441,7 @@ async function runHeadToHead(
     };
   });
   writeHeadToHeadTicket(session, build, [sides[0], sides[1]]);
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   const h2h = session.markers.find((m) => m.id === h2hId)!;
   // The selection run's spawn set routes through the one entry point
   // (ticket 01) via the shared engine-run helper: the run spawns the judge
@@ -5502,6 +5493,34 @@ function knownConversationIds(poolDir: string): Set<string> {
   return new Set(loadConversations(join(poolDir, "conversations")).map((r) => r.id));
 }
 
+/**
+ * The pool's Tickets as every reader loads them: startPool, each boundary
+ * reload, and the server's pre-flight and per-snapshot meta (issue #71,
+ * where the server's own bare loadPoolMarkers call refused the empty issues/
+ * startPool would have accepted, so a Conversation-only pool could never
+ * boot through the one entry point an operator has). Two rules ride along
+ * with the parse, and they belong to every load or none:
+ *
+ * - The pool's recorded Conversations are the known parents, so a Ticket a
+ *   Conversation spawned survives the load the way one a Ticket spawned
+ *   always has (see knownConversationIds).
+ * - A pool with a conversations/ directory (even an empty one — the
+ *   operator creates it to say "this pool hosts Conversations", and the
+ *   first Conversation ever started there creates it too) has proven it is
+ *   not the "accidental empty pool" mistake loadPoolMarkers's bare throw
+ *   exists to catch, so an empty issues/ loads as zero Tickets. That also
+ *   keeps a boundary reload from throwing on a Conversation-only pool whose
+ *   Conversations have only ever spawned more Conversations. The
+ *   `allowEmptyIssues` flag covers the one case that can't infer itself: a
+ *   caller that wants a Ticket-less pool to boot before its first
+ *   Conversation has ever started and before the directory exists (a test).
+ */
+export function loadPoolTickets(poolDir: string, allowEmptyIssues = false): TicketMarker[] {
+  return loadPoolMarkers(join(poolDir, "issues"), knownConversationIds(poolDir), {
+    allowEmptyIssues: allowEmptyIssues || existsSync(join(poolDir, "conversations")),
+  });
+}
+
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
 // ADR): every buffered proposal is validated against the pool as the
 // boundary found it, the accepted ones are written as ordinary ticket files
@@ -5672,7 +5691,7 @@ export function adoptSpawnProposals(session: Session): void {
   // hand-written ticket in: markers reload, unseen ids resolve their
   // assignments (parent inheritance), and the tickets channel folds them in
   // at their on-disk statuses.
-  session.markers = loadPoolMarkers(session.issuesDir, knownConversationIds(session.poolDir));
+  session.markers = loadPoolTickets(session.poolDir);
   resolveUnseenAssignments(
     session.markers,
     session.assignments,
@@ -6706,6 +6725,27 @@ function readOptional(path: string): string | null {
   return existsSync(path) ? readFileSync(path, "utf8") : null;
 }
 
+/**
+ * A directory in its canonical spelling, symlinks resolved. The pool
+ * directory reaches the engine however the caller spelled it, while
+ * `git rev-parse --show-toplevel` always answers with the physical path, so
+ * on any pool behind a symlink (a symlinked repos dir, /tmp on macOS, a
+ * network mount alias) the two disagree and every path derived by relating
+ * one to the other — the seed copy `planTicket` writes into an attempt
+ * worktree above all — lands outside the tree it was meant for. Resolved
+ * once where the pool dir enters, so the derivation sites downstream all
+ * share a single spelling rather than each defending itself.
+ */
+export function canonicalDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    // Nothing on disk to resolve yet: hand back what we were given and let
+    // the caller's own read fail with its own message.
+    return dir;
+  }
+}
+
 export function repoRootOf(poolDir: string): string {
   const probe = Bun.spawnSync({
     cmd: ["git", "-C", poolDir, "rev-parse", "--show-toplevel"],
@@ -6714,7 +6754,7 @@ export function repoRootOf(poolDir: string): string {
   });
   if (probe.exitCode === 0) {
     const root = probe.stdout.toString().trim();
-    if (root) return root;
+    if (root) return canonicalDir(root);
   }
-  return poolDir;
+  return canonicalDir(poolDir);
 }

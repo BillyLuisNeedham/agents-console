@@ -5,14 +5,12 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ACTIVITY_CACHE_TTL_MS,
@@ -33,6 +31,7 @@ import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
 import { readConversation } from "./conversations.ts";
+import { makeTempDir } from "./tmp.ts";
 
 const servers: PoolServer[] = [];
 const tempDirs: string[] = [];
@@ -67,7 +66,7 @@ function makePool(
   tickets: { file: string; marker: string }[],
   config: Partial<PoolConfig> = {},
 ): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+  const poolDir = makeTempDir("pool-server-");
   tempDirs.push(poolDir);
   return makePoolInto(poolDir, tickets, config);
 }
@@ -194,6 +193,59 @@ async function startServer(
 }
 
 describe("pool server", () => {
+  // Issue #71: the server's own pre-flight meta load refused an empty
+  // issues/ that startPool would have accepted, so a Conversation-only pool
+  // exited 1 at "pool load: no Issue files" before the engine ever ran.
+  it("boots a Conversation-only pool: empty issues/ beside a conversations/ directory", async () => {
+    const poolDir = makePool([]);
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const first = await server.start();
+    expect(first.state.tickets).toEqual([]);
+    // Zero Tickets settles at the review gate ("every ticket is done"), the
+    // engine's existing behaviour for a Ticket-less pool (conversations.test.ts
+    // accepts the same); what matters here is that the server got that far.
+    const snapshot = await server.settled();
+    expect(["quiescent", "done"]).toContain(snapshot.phase);
+    expect(snapshot.state.tickets).toEqual([]);
+  });
+
+  it("still refuses a pool with an empty issues/ and no conversations/ directory, naming the opt-in", () => {
+    const poolDir = makePool([]);
+    expect(() =>
+      createPoolServer({
+        poolDir,
+        port: 0,
+        harnesses: stubHarness({}),
+        distDir: "/nonexistent",
+        registryPath: fleetRegistry(poolDir),
+      }),
+    ).toThrow(/no Issue files.*conversations\/ directory/);
+  });
+
+  // The same shared load carries the pool's Conversations as known parents:
+  // before it, a Ticket a Conversation had spawned failed the server's own
+  // parse ("spawned-by names no ticket") and never reached the Console.
+  it("loads a Ticket whose spawned-by names a Conversation into the served meta", async () => {
+    const poolDir = makePool([
+      {
+        file: "conv-1-spawn-1.md",
+        marker: "<!-- state: id=conv-1-spawn-1 blocked-by=none status=done spawned-by=conv-1 -->",
+      },
+    ]);
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
+        "model=m drivers=implement -->\n\n# Talk\n\n\n",
+    );
+    const server = await startServer(poolDir, stubHarness({}));
+
+    const snapshot = await server.start();
+    expect(snapshot.state.tickets.map((t) => t.id)).toEqual(["conv-1-spawn-1"]);
+  });
+
   it("drives a pool to the review gate and serves the enriched state", async () => {
     const poolDir = makePool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -252,7 +304,7 @@ describe("pool server", () => {
       ["repo/.scratch/tickets", ".scratch/tickets"],
     ];
     for (const [rel, expected] of shapes) {
-      const root = mkdtempSync(join(tmpdir(), "pool-name-"));
+      const root = makeTempDir("pool-name-");
       tempDirs.push(root);
       const poolDir = makePoolInto(join(root, rel), [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -788,7 +840,7 @@ describe("ticket events endpoint", () => {
   });
 
   it("serves the ticket's spec text alongside its events", async () => {
-    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    const poolDir = makeTempDir("pool-server-");
     tempDirs.push(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
@@ -1064,7 +1116,7 @@ describe("merge pending enrichment", () => {
   function makeGitPool(
     tickets: { file: string; marker: string }[],
   ): { root: string; poolDir: string; run: (args: string[]) => void } {
-    const root = mkdtempSync(join(tmpdir(), "pool-git-"));
+    const root = makeTempDir("pool-git-");
     tempDirs.push(root);
     const poolDir = join(root, "pool");
     makePoolInto(poolDir, tickets, {});
@@ -1234,7 +1286,7 @@ describe("ticket body endpoint", () => {
   });
 
   it("strips the line-1 state marker from the served body", async () => {
-    const poolDir = mkdtempSync(join(tmpdir(), "pool-server-"));
+    const poolDir = makeTempDir("pool-server-");
     tempDirs.push(poolDir);
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     writeFileSync(
@@ -1707,7 +1759,7 @@ describe("ticket activity endpoint", () => {
 
   /** A real temporary git repo, to be an attempt's recorded worktree. */
   function makeGitRepo(seed: Record<string, string> = {}): string {
-    const dir = mkdtempSync(join(tmpdir(), "activity-worktree-"));
+    const dir = makeTempDir("activity-worktree-");
     tempDirs.push(dir);
     const run = (args: string[]): void => {
       const probe = Bun.spawnSync(["git", "-C", dir, ...args], {
@@ -1959,7 +2011,7 @@ function makeLockedPool(): string {
  * never spawns a real harness, with a harness name that resolves.
  */
 function makeCliPool(): string {
-  const poolDir = mkdtempSync(join(tmpdir(), "pool-cli-"));
+  const poolDir = makeTempDir("pool-cli-");
   tempDirs.push(poolDir);
   mkdirSync(join(poolDir, "issues"), { recursive: true });
   writeFileSync(
@@ -2177,7 +2229,7 @@ describe("pinned pool ports", () => {
 
   it("names the conflicting pool and pid on a busy pin when the registry knows the holder", async () => {
     const held = await holdPort();
-    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    const holderPool = makeTempDir("pool-holder-");
     tempDirs.push(holderPool);
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }], { port: held.port });
     const registryPath = join(poolDir, "pools.json");
@@ -2230,7 +2282,7 @@ describe("pinned pool ports", () => {
 
   it("exits non-zero from the CLI on a busy pin, naming the holder from the registry", async () => {
     const held = await holdPort();
-    const holderPool = mkdtempSync(join(tmpdir(), "pool-holder-"));
+    const holderPool = makeTempDir("pool-holder-");
     tempDirs.push(holderPool);
     const poolDir = makePool([{ file: "01-a.md", marker: portMarker }]);
     const registryPath = join(poolDir, "pools.json");
@@ -2550,7 +2602,7 @@ describe("terminal endpoints", () => {
       });
     });
     fakeServers.push(server);
-    const dir = mkdtempSync(join(tmpdir(), "herdr-terminal-"));
+    const dir = makeTempDir("herdr-terminal-");
     tempDirs.push(dir);
     fake.socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
@@ -2919,7 +2971,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
           server.close(() => resolve());
         }),
     });
-    const dir = mkdtempSync(join(tmpdir(), "herdr-fake-"));
+    const dir = makeTempDir("herdr-fake-");
     tempDirs.push(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {
@@ -3097,7 +3149,7 @@ describe("currentAttemptPaneIds", () => {
   // (the headless fallback) clears an earlier attempt's pane.
 
   function runsWith(events: Record<string, { attempt: number; pane_id?: unknown }[]>): string {
-    const runsDir = join(mkdtempSync(join(tmpdir(), "pane-ids-")), "runs");
+    const runsDir = join(makeTempDir("pane-ids-"), "runs");
     tempDirs.push(join(runsDir, ".."));
     mkdirSync(runsDir, { recursive: true });
     for (const [id, list] of Object.entries(events)) {
@@ -3463,7 +3515,7 @@ describe("conversation endpoints", () => {
       });
     });
     fakeServers.push(server);
-    const dir = mkdtempSync(join(tmpdir(), "conv-server-herdr-"));
+    const dir = makeTempDir("conv-server-herdr-");
     tempDirs.push(dir);
     const socketPath = join(dir, "herdr.sock");
     return new Promise((resolve, reject) => {

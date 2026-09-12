@@ -1,5 +1,5 @@
 /**
- * Notices (the Conversations ADR, docs/adr/0017-conversations-beside-
+ * Notices (the Conversations ADR, docs/adr/0018-conversations-beside-
  * tickets.md; CONTEXT.md: Notice): the Turn the engine types into a parent
  * Conversation when something it spawned ends. Owns the queue, the text a
  * Notice carries, delivery (typed into the pane once the parent is next
@@ -421,7 +421,9 @@ function tickConversation(session: Session, runtime: ConversationRuntime, id: st
           idlePattern,
         );
         const wasWorking = live.turn.state !== "waiting";
-        live.turn.lastText = text;
+        // The transcript region, not the raw read (issue #71): deriveTurnState
+        // judges stability on it, so it is what the next tick compares against.
+        live.turn.lastText = derived.transcript;
         live.turn.stableReads = derived.stableReads;
         live.turn.lastLine = derived.lastLine;
         live.turn.state = derived.state;

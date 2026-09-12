@@ -117,7 +117,7 @@ describe("spawn namespace reservation", () => {
     expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket/);
   });
 
-  // The Conversations ADR (docs/adr/0017-conversations-beside-tickets.md):
+  // The Conversations ADR (docs/adr/0018-conversations-beside-tickets.md):
   // a Ticket may be spawned by a Conversation as well as by another Ticket,
   // and a Conversation's own record lives outside issues/ entirely (engine/
   // conversations.ts), so loadPoolMarkers cannot see it in `markers` the way
@@ -158,5 +158,8 @@ describe("spawn namespace reservation", () => {
     const dir = poolWithFiles({});
     expect(() => loadPoolMarkers(dir)).toThrow(/no Issue files/);
     expect(() => loadPoolMarkers(dir, new Set(["conv-1"]))).toThrow(/no Issue files/);
+    // The refusal names the opt-in (issue #71), since the operator's only
+    // entry point surfaces this message verbatim.
+    expect(() => loadPoolMarkers(dir)).toThrow(/conversations\/ directory/);
   });
 });
