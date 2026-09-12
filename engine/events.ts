@@ -37,7 +37,7 @@ const EVENT_KINDS = [
   "spawn-adopted",
   "spawn-rejected",
   "reassigned",
-  // Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // Conversations (the Conversations ADR, docs/adr/0018-conversations-
   // beside-tickets.md): "ended" is an operator-ended Conversation's closing
   // record (merged, ended with no commits, or ended with its branch parked
   // on a rejected merge-approval); "notice" is a Turn the engine typed into

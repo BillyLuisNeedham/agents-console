@@ -117,7 +117,7 @@ describe("spawn namespace reservation", () => {
     expect(() => loadPoolMarkers(dir)).toThrow(/names no ticket/);
   });
 
-  // The Conversations ADR (docs/adr/0017-conversations-beside-tickets.md):
+  // The Conversations ADR (docs/adr/0018-conversations-beside-tickets.md):
   // a Ticket may be spawned by a Conversation as well as by another Ticket,
   // and a Conversation's own record lives outside issues/ entirely (engine/
   // conversations.ts), so loadPoolMarkers cannot see it in `markers` the way

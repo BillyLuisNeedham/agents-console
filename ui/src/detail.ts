@@ -609,7 +609,7 @@ export class Detail {
     );
   }
 
-  // The Conversation Detail (ADR-0017): the card's facts at full size,
+  // The Conversation Detail (ADR-0018): the card's facts at full size,
   // the terminal peek, the timeline (from the same /api/events?ticket=<id>
   // path a ticket uses), and End with an optional closing-line textarea.
   private renderConversationDetail(

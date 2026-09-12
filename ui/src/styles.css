@@ -1707,7 +1707,7 @@ body {
 
 /* ------------------------------------------------------------ Conversations */
 
-/* A Conversation card (ADR-0017/issue #60): the same node-card shell as a
+/* A Conversation card (ADR-0018/issue #60): the same node-card shell as a
    ticket, no status-colored border of its own (a Conversation has no
    pass/fail lifecycle) except once it ends or crashes. */
 .conversation-card-ended {

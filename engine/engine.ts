@@ -661,7 +661,7 @@ export interface Session {
   // Headless orphans rehydrate found still alive from a previous engine
   // process, stopped by reapHeadlessOrphans before the first scheduling.
   orphans: HeadlessOrphan[];
-  // Live Conversations (the Conversations ADR, docs/adr/0017-conversations-
+  // Live Conversations (the Conversations ADR, docs/adr/0018-conversations-
   // beside-tickets.md): tracked only while running, keyed by id. An ended or
   // crashed Conversation is removed; its record on disk (conversations.ts's
   // loadConversations) is the only trace of it from then on.

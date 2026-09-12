@@ -1,7 +1,7 @@
 /**
  * Conversations (issue #60, docs/specs/2026-09-10-conversations.md,
- * docs/adr/0017-conversations-beside-tickets.md — note that ADR number
- * collides with the pre-existing 0017-headless-orphans-are-killed-not-
+ * docs/adr/0018-conversations-beside-tickets.md — note that ADR number
+ * was renumbered from 0017 after colliding with 0017-headless-orphans-are-killed-not-
  * adopted.md in this tree; "the Conversations ADR" below always means the
  * former): an open-ended talk between the operator and one agent, living in
  * a Pool beside its Tickets. A Conversation has an Assignment fixed at

@@ -540,7 +540,7 @@ export class Canvas {
     );
   }
 
-  // A Conversation card (ADR-0017): title, Assignment, the Turn state badge
+  // A Conversation card (ADR-0018): title, Assignment, the Turn state badge
   // (waiting on you / agent working), the last line said, idle age, status
   // once ended or crashed, the same read-only terminal peek ticket cards
   // carry, and an End button. No blockers, no grade, no Vitals: a

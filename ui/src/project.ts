@@ -967,7 +967,7 @@ export function projectPoolEdges(
 
 /**
  * Edges from a Conversation card to what it spawned: the ids in its
- * `children` (ADR-0017), each resolved against the pool's live tickets and
+ * `children` (ADR-0018), each resolved against the pool's live tickets and
  * Conversations to the right prefix. A child id that names neither (a race
  * between the snapshot and the spawn, or a spawn that failed validation)
  * draws no edge rather than a dangling one.

@@ -1,5 +1,5 @@
 /**
- * Turn-state derivation (the Conversations ADR, docs/adr/0017-conversations-
+ * Turn-state derivation (the Conversations ADR, docs/adr/0018-conversations-
  * beside-tickets.md; CONTEXT.md: Turn): a Conversation is always either
  * `working` (its agent is acting, or nobody has looked yet) or `waiting` (on
  * the operator). Detected purely from two consecutive pane reads, with no
