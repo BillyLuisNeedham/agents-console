@@ -9,7 +9,6 @@
  */
 
 import {
-  flowNeighbourhood,
   nextNodeSelection,
   type ConversationNeedsInputRow,
   type ConversationTrayRow,
@@ -22,8 +21,8 @@ import {
   type PoolCardView,
   type PoolPhase,
   type TimelineView,
-  type TopologyEdge,
 } from "./project";
+import { flowNeighbourhood, type TopologyEdge } from "./geometry";
 import { restoreLogScroll } from "./log-pane";
 import { Canvas } from "./canvas";
 import {

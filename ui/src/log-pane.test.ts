@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from "bun:test";
 import { LogPane, type LogChunk } from "./log-pane";
-import { LOG_TAIL_BYTES, type TimelineView } from "./project";
+import type { TimelineView } from "./project";
+
+// The byte window the pane pages by, mirroring the pool server's chunk size.
+const LOG_TAIL_BYTES = 64 * 1024;
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -343,6 +346,29 @@ describe("LogPane.loadEarlier", () => {
     fake.pending[4].resolve(chunk("two", 0, 7, 7));
     await flush();
     expect(pane.state.content).toBe("two");
+  });
+
+  it("drops a slow open when the same attempt was re-opened underneath it", async () => {
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const first = pane.open("01", 1, false);
+    // A re-open of the very same attempt begins a newer window while the
+    // first open's probe is still out.
+    const second = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 300, 300, 300));
+    fake.pending[1].resolve(chunk("", 300, 300, 300));
+    await flush();
+    // The first open's probe answer is stale: it fetches no further. Only
+    // the second open reads the window, so the content cannot double-append.
+    expect(fake.calls).toHaveLength(3);
+    fake.pending[2].resolve(chunk("tail", 0, 250, 300));
+    await flush();
+    expect(pane.state.content).toBe("tail");
+    fake.pending[3].resolve(chunk("grew", 250, 300, 300));
+    await first;
+    await second;
+    await flush();
+    expect(pane.state.content).toBe("tailgrew");
   });
 });
 

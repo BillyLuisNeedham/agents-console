@@ -67,6 +67,10 @@ _Avoid_: project, workspace, queue
 Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail. One Console process serves exactly one Pool; running several pools means several Consoles, each on its own port.
 _Avoid_: dashboard, Studio (the LangGraph UI it replaces)
 
+**Console session**:
+The Console's client-side owner of the snapshot, selection, caches and stale-answer guards across snapshot cycles. It runs the snapshot-to-cards derivation once per cycle; renderers read its projected model and decode nothing themselves. Not a harness session (a harness's own resumable unit) and not a Conversation (which is a Pool citizen with no finish line).
+_Avoid_: session (ambiguous with the harness's), view model (too generic)
+
 **Fleet**:
 The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
 

@@ -13,11 +13,13 @@
 import {
   checkpointNotice,
   clampDetailWidth,
+  conversationTurnLabel,
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
   parseStoredDetailWidth,
   statusLabel,
   ticketBodyHtml,
+  UNASSIGNED_LABEL,
   type ConversationDetailView,
   type DetailTab,
   type DetailTabView,
@@ -25,6 +27,7 @@ import {
   type InterruptAction,
   type InterruptView,
   type LogPaneView,
+  type TimelineGradeView,
   type TimelineView,
 } from "./project";
 import { noteLogScroll } from "./log-pane";
@@ -384,16 +387,12 @@ export class Detail {
               "div",
               { class: "timeline-event" },
               h("span", { class: "timeline-event-kind" }, event.kind),
-              h("span", { class: "dim timeline-event-at" }, formatEventTime(event.at)),
+              h("span", { class: "dim timeline-event-at" }, event.timeLabel),
             ),
           );
-          if (event.kind === "graded") {
-            const grade = gradeFromPayload(event.payload);
-            if (grade) row.append(renderGrade(grade));
-          }
-          if (event.kind === "reassigned") {
-            const text = reassignmentFromPayload(event.payload);
-            if (text) row.append(h("div", { class: "timeline-reassigned" }, text));
+          if (event.grade) row.append(renderGrade(event.grade));
+          if (event.reassignment) {
+            row.append(h("div", { class: "timeline-reassigned" }, event.reassignment));
           }
         }
       }
@@ -626,7 +625,7 @@ export class Detail {
         { class: "card-text" },
         [detail.assignment.harness, detail.assignment.model, detail.assignment.drivers]
           .filter((field): field is string => Boolean(field))
-          .join(" · ") || "unassigned",
+          .join(" · ") || UNASSIGNED_LABEL,
       ),
       h("div", { class: "dim" }, "status"),
       h(
@@ -844,66 +843,10 @@ function canvasHeaderBottom(): number {
   return header ? header.getBoundingClientRect().bottom : 0;
 }
 
-/** Mirrors canvas.ts's own copy: the Turn state badge's word. */
-function conversationTurnLabel(state: "working" | "waiting"): string {
-  return state === "waiting" ? "waiting on you" : "agent working";
-}
-
-function formatEventTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour12: false });
-}
-
-/** A grade as the timeline shows it under its attempt's graded event: the
- *  full payload, reasons included. The card's GradeView is the summary
- *  shape; this is the record. */
-interface GradeDetail {
-  score: number;
-  verdict: string;
-  reasons: string;
-}
-
-/** The graded event's payload as a grade, or null when a field is missing or
- *  mistyped. The engine writes all three fields, so a null here means a torn
- *  or foreign line, and the timeline falls back to the plain event row. */
-function gradeFromPayload(payload: Record<string, unknown>): GradeDetail | null {
-  const { score, verdict, reasons } = payload;
-  if (
-    typeof score !== "number" ||
-    typeof verdict !== "string" ||
-    typeof reasons !== "string"
-  ) {
-    return null;
-  }
-  return { score, verdict, reasons };
-}
-
-// A config reload's `reassigned` event (ADR-0018), as one readable line: "harness
-// / model → harness / model". A field the config leaves unassigned reads as
-// "unassigned", matching how the card badge reads a null Assignment field.
-// Anything not shaped like a from/to Assignment record (a foreign or torn
-// line) renders nothing beyond the plain event row above it — never throws,
-// so an event kind this build does not fully understand still shows its
-// timestamp instead of breaking the timeline.
-function reassignmentFromPayload(payload: Record<string, unknown>): string | null {
-  const describe = (side: unknown): string | null => {
-    if (typeof side !== "object" || side === null) return null;
-    const { harness, model } = side as Record<string, unknown>;
-    if (harness !== null && typeof harness !== "string") return null;
-    if (model !== null && typeof model !== "string") return null;
-    return `${harness ?? "unassigned"} / ${model ?? "unassigned"}`;
-  };
-  const from = describe((payload as Record<string, unknown>).from);
-  const to = describe((payload as Record<string, unknown>).to);
-  if (from === null || to === null) return null;
-  return `reassigned: ${from} → ${to}`;
-}
-
 // One grade under its attempt's graded event: the score and verdict on one
 // line, the grader's reasons below. This is the "why the winner won" record,
 // read from the same append-only events file after the run has ended.
-function renderGrade(grade: GradeDetail): HTMLElement {
+function renderGrade(grade: TimelineGradeView): HTMLElement {
   return h(
     "div",
     { class: "timeline-grade" },

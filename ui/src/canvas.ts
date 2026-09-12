@@ -10,27 +10,31 @@
 
 import {
   checkpointNotice,
+  conversationTurnLabel,
+  statusLabel,
+  UNASSIGNED_LABEL,
+  VITALS_MAX_SAMPLES,
+  type ConversationCardView,
+  type InterruptView,
+  type PoolCardView,
+  type PoolTicketAssignment,
+  type TicketCardView,
+  type UtilityCardView,
+  type VitalsView,
+} from "./project";
+import {
   edgePath,
   layoutStorageKey,
   mergeLayout,
   parseStoredLayout,
-  statusLabel,
   strokeWidthForZoom,
-  VITALS_MAX_SAMPLES,
   zoomAtCursor,
   type CardBox,
-  type ConversationCardView,
   type EdgeMode,
-  type InterruptView,
   type Point,
-  type PoolCardView,
-  type PoolTicketAssignment,
-  type TicketCardView,
   type TopologyEdge,
-  type UtilityCardView,
   type ViewTransform,
-  type VitalsView,
-} from "./project";
+} from "./geometry";
 import { h } from "./dom";
 import { renderTerminalSurface } from "./terminal";
 
@@ -118,7 +122,7 @@ function renderAssignmentBadge(assignment: PoolTicketAssignment): HTMLElement {
   const badge = h("div", { class: "assignment-badge" });
   if (assignment.harness === null && assignment.model === null) {
     badge.classList.add("assignment-badge-unassigned");
-    badge.append("unassigned");
+    badge.append(UNASSIGNED_LABEL);
   } else {
     const fields: { class: string; value: string }[] = [];
     if (assignment.harness) {
@@ -154,12 +158,6 @@ function interruptDot(interrupt: InterruptView): HTMLElement {
       ? `answered · waiting · ${interrupt.kind}`
       : `interrupt · ${interrupt.kind}`,
   });
-}
-
-/** The Turn state badge's word: "waiting on you" outranks "agent working"
- *  as the operator's cue, matching the Conversations tray's own wording. */
-function conversationTurnLabel(state: "working" | "waiting"): string {
-  return state === "waiting" ? "waiting on you" : "agent working";
 }
 
 type Drag =

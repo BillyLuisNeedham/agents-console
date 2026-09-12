@@ -2,9 +2,11 @@
  * Log pane: the ticket log's byte-window state machine, one deep module for
  * the Console's most delicate behavior. The pane opens an attempt's raw log
  * tail-first, tails it live on the snapshot cadence, and prepends earlier
- * windows on demand. Two guards define it: a clicked attempt is never
- * switched away from (attempt-stay), and a slow fetch answering after a newer
- * selection never clobbers the newer pane (stale-selection). The fetch is
+ * windows on demand. Three guards define it: a clicked attempt is never
+ * switched away from (attempt-stay), a slow fetch answering after a newer
+ * selection never clobbers the newer pane (stale-selection), and a fetch
+ * answering after a newer window began — even a re-open of the same attempt —
+ * is dropped by the shared stale-answer generation guard. The fetch is
  * injected at construction, so the guards run under unit tests with fake
  * fetches; the scroll pin and the prepend anchor live here too, so the view
  * only renders and the bootstrap only drives.
@@ -18,6 +20,7 @@ import {
   selectLogAttempt,
   type TimelineView,
 } from "./project";
+import { StaleGuard } from "./guard";
 
 // ---------------------------------------------------------------------------
 // Injected fetch seam
@@ -52,6 +55,10 @@ export type LogFetch = (
   end?: number,
   stream?: boolean,
 ) => Promise<LogChunk>;
+
+// The pane has one window at a time, so its stale-answer guard lives under
+// a single key.
+const WINDOW_KEY = "window";
 
 export interface LogPaneOptions {
   fetch: LogFetch;
@@ -89,6 +96,12 @@ export class LogPane {
 
   private readonly fetchChunk: LogFetch;
   private readonly onChange: () => void;
+  // The stale-answer half of the stale-selection guard: every window reset
+  // (open, reset) begins a new generation, so a fetch answered after one is
+  // dropped even when it names the very ticket, attempt and variant still
+  // showing (a re-open of the same attempt would otherwise double-append).
+  private readonly guard = new StaleGuard();
+  private windowToken = 0;
   private tailInFlight = false;
   private earlierInFlight = false;
 
@@ -117,6 +130,7 @@ export class LogPane {
     stream = false,
   ): Promise<void> {
     this.resetWindow(ticketId);
+    const token = this.windowToken;
     this.state.attempt = attempt;
     this.state.clicked = clicked;
     this.state.stream = stream;
@@ -130,7 +144,7 @@ export class LogPane {
         undefined,
         stream,
       );
-      if (!this.isCurrent(ticketId, attempt, stream)) return;
+      if (!this.isCurrent(ticketId, attempt, stream, token)) return;
       const chunk = await this.fetchChunk(
         ticketId,
         attempt,
@@ -138,7 +152,7 @@ export class LogPane {
         undefined,
         stream,
       );
-      if (!this.isCurrent(ticketId, attempt, stream)) return;
+      if (!this.isCurrent(ticketId, attempt, stream, token)) return;
       this.note(chunk);
       this.state.content = chunk.content;
       this.state.firstOffset = chunk.offset;
@@ -146,9 +160,9 @@ export class LogPane {
       this.state.totalSize = chunk.totalSize;
       this.onChange();
       // The attempt may have grown while the open fetched.
-      void this.tail(ticketId, attempt, stream);
+      void this.tail(ticketId, attempt, stream, token);
     } catch {
-      this.fail(ticketId, attempt, stream);
+      this.fail(ticketId, attempt, stream, token);
     }
   }
 
@@ -226,7 +240,8 @@ export class LogPane {
    */
   async loadEarlier(ticketId: string, attempt: number): Promise<void> {
     if (this.earlierInFlight) return;
-    if (!this.isCurrent(ticketId, attempt, this.state.stream)) return;
+    const token = this.windowToken;
+    if (!this.isCurrent(ticketId, attempt, this.state.stream, token)) return;
     const from = earlierLogOffset(this.state.firstOffset);
     if (from === null) return;
     this.earlierInFlight = true;
@@ -238,14 +253,14 @@ export class LogPane {
         this.state.firstOffset,
         this.state.stream,
       );
-      if (!this.isCurrent(ticketId, attempt, this.state.stream)) return;
+      if (!this.isCurrent(ticketId, attempt, this.state.stream, token)) return;
       this.note(chunk);
       captureLogAnchor();
       this.state.content = chunk.content + this.state.content;
       this.state.firstOffset = chunk.offset;
       this.onChange();
     } catch {
-      this.fail(ticketId, attempt, this.state.stream);
+      this.fail(ticketId, attempt, this.state.stream, token);
     } finally {
       this.earlierInFlight = false;
     }
@@ -260,9 +275,10 @@ export class LogPane {
     ticketId: string,
     attempt: number,
     stream: boolean,
+    token: number = this.windowToken,
   ): Promise<void> {
     if (this.tailInFlight) return;
-    if (!this.isCurrent(ticketId, attempt, stream)) return;
+    if (!this.isCurrent(ticketId, attempt, stream, token)) return;
     this.tailInFlight = true;
     try {
       while (logTailOffset(this.state.offset, this.state.totalSize) !== null) {
@@ -274,7 +290,7 @@ export class LogPane {
           undefined,
           stream,
         );
-        if (!this.isCurrent(ticketId, attempt, stream)) return;
+        if (!this.isCurrent(ticketId, attempt, stream, token)) return;
         this.note(chunk);
         this.state.content += chunk.content;
         this.state.offset = chunk.nextOffset;
@@ -283,15 +299,20 @@ export class LogPane {
         if (chunk.nextOffset <= from) break;
       }
     } catch {
-      this.fail(ticketId, attempt, stream);
+      this.fail(ticketId, attempt, stream, token);
     } finally {
       this.tailInFlight = false;
     }
   }
 
   /** A failed fetch marks the pane, but only while it is still selected. */
-  private fail(ticketId: string, attempt: number, stream: boolean): void {
-    if (this.isCurrent(ticketId, attempt, stream)) {
+  private fail(
+    ticketId: string,
+    attempt: number,
+    stream: boolean,
+    token: number,
+  ): void {
+    if (this.isCurrent(ticketId, attempt, stream, token)) {
       this.state.error = `log fetch failed: ${ticketId}:${attempt}`;
       this.onChange();
     }
@@ -299,15 +320,19 @@ export class LogPane {
 
   /**
    * The stale-selection guard: an answer lands only while the pane still
-   * shows the same ticket, attempt, and variant, so an in-flight log tail
-   * never appends into a view the user has switched to the Stream file.
+   * shows the same ticket, attempt, and variant and the fetching operation's
+   * token is still the window's generation, so an in-flight log tail never
+   * appends into a view the user has switched away from, or re-opened
+   * underneath it.
    */
   private isCurrent(
     ticketId: string,
     attempt: number,
     stream: boolean,
+    token: number,
   ): boolean {
     return (
+      this.guard.isCurrent(WINDOW_KEY, token) &&
       this.state.ticketId === ticketId &&
       this.state.attempt === attempt &&
       this.state.stream === stream
@@ -321,6 +346,7 @@ export class LogPane {
   }
 
   private resetWindow(ticketId: string | null): void {
+    this.windowToken = this.guard.begin(WINDOW_KEY);
     if (ticketId !== this.state.ticketId) this.state.attempts = [];
     this.state.ticketId = ticketId;
     this.state.attempt = null;

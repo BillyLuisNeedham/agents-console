@@ -8,12 +8,32 @@ import {
   type NeedsInputFailure,
 } from "./needs-input";
 import {
-  interruptForm,
   projectNeedsInput,
   type InterruptAction,
+  type InterruptView,
   type NeedsInputRow,
   type PoolSnapshot,
 } from "./project";
+
+// The form shapes the resume-all tests need: the single-action resume form
+// for the resume kinds, the two-action approve/reject form for review. The
+// projection's own mapping is pinned by project.test.ts through
+// projectNeedsInput; these fixtures only need the distinction.
+function form(kind: string): InterruptView["form"] {
+  if (kind === "review" || kind === "merge-approval") {
+    return {
+      title: kind,
+      actions: [
+        { action: "approve", label: "approve", tone: "primary" },
+        { action: "reject", label: "reject", tone: "danger" },
+      ],
+    };
+  }
+  return {
+    title: kind,
+    actions: [{ action: "resume", label: "resume", tone: "primary" }],
+  };
+}
 
 function row(ticketId: string, kind: string, queued = false): NeedsInputRow {
   return {
@@ -26,7 +46,7 @@ function row(ticketId: string, kind: string, queued = false): NeedsInputRow {
       kind,
       body: "",
       queued,
-      form: interruptForm({ ticketId, kind, body: "" }),
+      form: form(kind),
     },
   };
 }
