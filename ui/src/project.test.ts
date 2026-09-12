@@ -2,65 +2,38 @@
 
 import { describe, expect, it } from "bun:test";
 import {
-  LAYOUT,
   poolAssignmentDefaults,
   checkpointNotice,
   clampDetailWidth,
   clampDrawersHeight,
   bulkResumeRows,
-  conversationCardId,
-  conversationIdleAge,
-  isConversationCardId,
-  projectConversationEdges,
-  projectConversationEnd,
   projectConversationsNeedsInput,
   projectConversationsTray,
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
-  DRAWER_MAX_VH,
-  DRAWER_MIN_VH,
   earlierLogOffset,
-  edgePath,
-  flowNeighbourhood,
   initialLogWindow,
-  interruptForm,
-  isTicketCardId,
   joinStreamFiles,
-  layoutStorageKey,
-  LOG_BOTTOM_SLACK_PX,
-  LOG_TAIL_BYTES,
   logAtBottom,
   logTailOffset,
-  mergeLayout,
   nextNodeSelection,
   parseStoredDetailWidth,
-  parseStoredLayout,
   phaseLabel,
   poolStatus,
   projectDetail,
-  projectDetailTab,
   projectDetailTabs,
-  projectLog,
   projectLogPane,
   projectNeedsInput,
   projectPool,
-  projectPoolEdges,
   projectTimeline,
-  REVIEW_CARD_ID,
   selectLogAttempt,
-  START_CARD_ID,
   statusLabel,
-  strokeWidthForZoom,
-  ticketCardId,
   ticketBodyHtml,
-  ticketDepth,
   projectVitals,
   pushVitalsSample,
-  VITALS_FRESH_MS,
-  VITALS_IDLE_MS,
   VITALS_MAX_SAMPLES,
-  zoomAtCursor,
   type ConversationCardView,
+  type NeedsInputRow,
   type PoolConversationState,
   type PoolSnapshot,
   type PoolStatus,
@@ -75,6 +48,27 @@ import {
   type TimelineView,
   type VitalsState,
 } from "./project";
+
+// The values the folded internals carried: the utility card ids, the wire
+// contract's byte window, the layout metrics, and the vitals thresholds.
+// The tests pin them directly, against the public projections.
+const START_CARD_ID = "START";
+const REVIEW_CARD_ID = "REVIEW";
+const LOG_TAIL_BYTES = 64 * 1024;
+const LOG_BOTTOM_SLACK_PX = 24;
+const DRAWER_MIN_VH = 15;
+const DRAWER_MAX_VH = 80;
+const VITALS_FRESH_MS = 10_000;
+const VITALS_IDLE_MS = 60_000;
+const LAYOUT = {
+  centerX: 420,
+  startY: 16,
+  rowH: 200,
+  terminalRowH: 340,
+  conversationLaneH: 380,
+  colGap: 320,
+  reviewY: 1200,
+} as const;
 
 function ticket(
   id: string,
@@ -130,48 +124,23 @@ function snapshot(
   };
 }
 
-describe("ticketCardId / isTicketCardId / layoutStorageKey", () => {
-  it("prefixes ticket ids and leaves utility ids alone", () => {
-    expect(ticketCardId("01")).toBe("ticket:01");
-    expect(isTicketCardId("ticket:01")).toBe(true);
-    expect(isTicketCardId(START_CARD_ID)).toBe(false);
-    expect(isTicketCardId(REVIEW_CARD_ID)).toBe(false);
-  });
+/** The Detail for a card of the snapshot's own derivation: the test reads
+ *  the Detail off the same projected cards the canvas renders. */
+function detailOf(
+  snap: PoolSnapshot,
+  cardId: string,
+): ReturnType<typeof projectDetail> {
+  return projectDetail(projectPool(snap).cards, cardId);
+}
 
-  it("keys stored positions by the card id alone (one pool per server)", () => {
-    expect(layoutStorageKey("ticket:01")).toBe("ticket:01");
-    expect(layoutStorageKey(START_CARD_ID)).toBe(START_CARD_ID);
-  });
-});
-
-describe("ticketDepth", () => {
-  const tickets = [
-    ticket("A"),
-    ticket("B", { blockedBy: ["A"] }),
-    ticket("C", { blockedBy: ["B"] }),
-    ticket("D", { blockedBy: ["A", "C"] }),
-  ];
-
-  it("is 0 for a leaf and grows with the longest blocker chain", () => {
-    expect(ticketDepth("A", tickets)).toBe(0);
-    expect(ticketDepth("B", tickets)).toBe(1);
-    expect(ticketDepth("C", tickets)).toBe(2);
-    expect(ticketDepth("D", tickets)).toBe(3);
-  });
-
-  it("returns 0 for an unknown ticket", () => {
-    expect(ticketDepth("zzz", tickets)).toBe(0);
-  });
-});
-
-describe("projectPoolEdges", () => {
+describe("projectPool edges", () => {
   it("draws start, blocked-by, and review edges for a small pool", () => {
     const tickets = [
       ticket("A"),
       ticket("B", { blockedBy: ["A"] }),
       ticket("C", { blockedBy: ["B"] }),
     ];
-    const edges = projectPoolEdges(tickets);
+    const edges = projectPool(snapshot({ state: { tickets } })).edges;
     expect(edges).toEqual([
       { source: START_CARD_ID, target: "ticket:A" },
       { source: "ticket:A", target: REVIEW_CARD_ID },
@@ -188,7 +157,7 @@ describe("projectPoolEdges", () => {
       ticket("B"),
       ticket("C", { blockedBy: ["A", "B"] }),
     ];
-    const edges = projectPoolEdges(tickets);
+    const edges = projectPool(snapshot({ state: { tickets } })).edges;
     const starts = edges.filter((e) => e.source === START_CARD_ID);
     expect(starts.map((e) => e.target).sort()).toEqual(["ticket:A", "ticket:B"]);
     expect(edges).toContainEqual({ source: "ticket:A", target: "ticket:C" });
@@ -299,33 +268,53 @@ const INTERRUPT_KINDS = [
   "review",
 ];
 
-describe("interruptForm", () => {
-  it("gives all seven interrupt kinds a renderable, answerable form", () => {
-    for (const kind of INTERRUPT_KINDS) {
-      const form = interruptForm({ ticketId: "A", kind, body: "body" });
-      expect(form.title.length).toBeGreaterThan(0);
-      expect(form.actions.length).toBeGreaterThan(0);
+describe("interrupt forms", () => {
+  // One interrupted ticket per kind, read through the Needs input tray's
+  // rows: the form mapping is the projection's, so the public rows pin it.
+  function rows(): NeedsInputRow[] {
+    return projectNeedsInput(
+      snapshot({
+        phase: "quiescent",
+        state: {
+          tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
+          interrupts: INTERRUPT_KINDS.map((kind) => ({
+            ticketId: `T-${kind}`,
+            kind,
+            body: `${kind} body`,
+          })),
+        },
+      }),
+    );
+  }
+
+  it("gives all seven kinds a renderable, answerable form", () => {
+    for (const row of rows()) {
+      expect(row.interrupt.form.title.length).toBeGreaterThan(0);
+      expect(row.interrupt.form.actions.length).toBeGreaterThan(0);
     }
   });
 
   it("resumes the human-decision kinds and gates the approval kinds", () => {
-    const actions = (kind: string) =>
-      interruptForm({ ticketId: "A", kind, body: "" }).actions.map((a) => a.action);
-    expect(actions("checkpoint")).toEqual(["resume"]);
-    expect(actions("crash")).toEqual(["resume"]);
-    expect(actions("deadlock")).toEqual(["resume"]);
-    expect(actions("merge-conflict")).toEqual(["resume"]);
-    expect(actions("selection")).toEqual(["resume"]);
-    expect(actions("merge-approval")).toEqual(["approve", "reject"]);
-    expect(actions("review")).toEqual(["approve", "reject"]);
+    const actions = Object.fromEntries(
+      rows().map((row) => [
+        row.interrupt.kind,
+        row.interrupt.form.actions.map((a) => a.action),
+      ]),
+    );
+    expect(actions).toEqual({
+      checkpoint: ["resume"],
+      crash: ["resume"],
+      deadlock: ["resume"],
+      "merge-conflict": ["resume"],
+      "merge-approval": ["approve", "reject"],
+      selection: ["resume"],
+      review: ["approve", "reject"],
+    });
   });
 
   it("titles each kind for the card and Detail", () => {
     const titles = Object.fromEntries(
-      INTERRUPT_KINDS.map((kind) => [
-        kind,
-        interruptForm({ ticketId: "A", kind, body: "" }).title,
-      ]),
+      rows().map((row) => [row.interrupt.kind, row.interrupt.form.title]),
     );
     expect(titles).toEqual({
       checkpoint: "checkpoint",
@@ -336,12 +325,6 @@ describe("interruptForm", () => {
       selection: "human selection",
       review: "review",
     });
-  });
-
-  it("falls back to a resume form for an unknown kind", () => {
-    const form = interruptForm({ ticketId: "A", kind: "future-kind", body: "" });
-    expect(form.title).toBe("future-kind");
-    expect(form.actions.map((a) => a.action)).toEqual(["resume"]);
   });
 });
 
@@ -366,7 +349,7 @@ describe("interrupt projection", () => {
   it("carries each interrupt kind onto its card with a form", () => {
     const view = projectPool(interruptSnapshot());
     for (const kind of INTERRUPT_KINDS) {
-      const card = view.cards.find((c) => c.id === ticketCardId(`T-${kind}`));
+      const card = view.cards.find((c) => c.id === `ticket:T-${kind}`);
       expect(card?.kind).toBe("ticket");
       if (card?.kind === "ticket") {
         expect(card.interrupt?.kind).toBe(kind);
@@ -378,14 +361,15 @@ describe("interrupt projection", () => {
   });
 
   it("carries the same interrupt and form into the Detail", () => {
-    const snap = interruptSnapshot();
+    const view = projectPool(interruptSnapshot());
     for (const kind of INTERRUPT_KINDS) {
-      const detail = projectDetail(snap, ticketCardId(`T-${kind}`));
+      const card = view.cards.find((c) => c.id === `ticket:T-${kind}`);
+      const detail = projectDetail(view.cards, `ticket:T-${kind}`);
       expect(detail?.kind).toBe("ticket");
       if (detail?.kind === "ticket") {
         expect(detail.interrupt?.kind).toBe(kind);
-        expect(detail.interrupt?.form).toEqual(
-          interruptForm({ ticketId: `T-${kind}`, kind, body: `${kind} body` }),
+        expect(detail.interrupt).toEqual(
+          card?.kind === "ticket" ? card.interrupt : null,
         );
       }
     }
@@ -442,7 +426,7 @@ describe("queued-answer waiting state", () => {
   });
 
   it("mirrors the waiting state in the Detail", () => {
-    const detail = projectDetail(queuedSnapshot(), "ticket:A");
+    const detail = detailOf(queuedSnapshot(), "ticket:A");
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.interrupt?.queued).toBe(true);
@@ -671,7 +655,7 @@ describe("blocked-by-checkpoint notice", () => {
   });
 
   it("mirrors the notice in the dependent's Detail", () => {
-    const detail = projectDetail(blockedSnapshot(), "ticket:B");
+    const detail = detailOf(blockedSnapshot(), "ticket:B");
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.blockedByCheckpoint).toEqual(["A"]);
@@ -768,8 +752,8 @@ describe("checkpoint visible at attempt exit", () => {
 
   it("projects the full needs-human look on the checkpointed card while the sibling runs", () => {
     const view = projectPool(windowSnapshot());
-    const card = view.cards.find((c) => c.id === ticketCardId("01"));
-    const sibling = view.cards.find((c) => c.id === ticketCardId("02"));
+    const card = view.cards.find((c) => c.id === "ticket:01");
+    const sibling = view.cards.find((c) => c.id === "ticket:02");
     expect(card?.kind).toBe("ticket");
     expect(sibling?.kind).toBe("ticket");
     if (card?.kind === "ticket" && sibling?.kind === "ticket") {
@@ -783,7 +767,7 @@ describe("checkpoint visible at attempt exit", () => {
   });
 
   it("offers the interrupt form in the Detail and reports needs input during the window", () => {
-    const detail = projectDetail(windowSnapshot(), ticketCardId("01"));
+    const detail = detailOf(windowSnapshot(), "ticket:01");
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.interrupt?.form.title).toBe("checkpoint");
@@ -799,7 +783,7 @@ describe("checkpoint visible at attempt exit", () => {
 
   it("shows the blocked-by-checkpoint notice on the dependent during the window", () => {
     const view = projectPool(windowSnapshot());
-    const dependent = view.cards.find((c) => c.id === ticketCardId("03"));
+    const dependent = view.cards.find((c) => c.id === "ticket:03");
     expect(dependent?.kind).toBe("ticket");
     if (dependent?.kind === "ticket") {
       expect(dependent.blockedByCheckpoint).toEqual(["01"]);
@@ -818,8 +802,8 @@ describe("checkpoint visible at attempt exit", () => {
         queuedAnswers: [{ ticketId: "01", kind: "checkpoint" }],
       },
     });
-    const card = view.cards.find((c) => c.id === ticketCardId("01"));
-    const sibling = view.cards.find((c) => c.id === ticketCardId("02"));
+    const card = view.cards.find((c) => c.id === "ticket:01");
+    const sibling = view.cards.find((c) => c.id === "ticket:02");
     expect(card?.kind).toBe("ticket");
     expect(sibling?.kind).toBe("ticket");
     if (card?.kind === "ticket" && sibling?.kind === "ticket") {
@@ -841,7 +825,7 @@ describe("checkpoint visible at attempt exit", () => {
       },
     });
     const view = projectPool(resolved);
-    const dependent = view.cards.find((c) => c.id === ticketCardId("03"));
+    const dependent = view.cards.find((c) => c.id === "ticket:03");
     expect(dependent?.kind).toBe("ticket");
     if (dependent?.kind === "ticket") {
       expect(dependent.blockedByCheckpoint).toEqual([]);
@@ -892,7 +876,7 @@ describe("review projection", () => {
   });
 
   it("carries the review interrupt into the review card's Detail", () => {
-    const detail = projectDetail(reviewSnapshot(), REVIEW_CARD_ID);
+    const detail = detailOf(reviewSnapshot(), REVIEW_CARD_ID);
     expect(detail?.kind).toBe("utility");
     if (detail?.kind === "utility") {
       expect(detail.label).toBe("review");
@@ -905,8 +889,15 @@ describe("review projection", () => {
   });
 
   it("tells the reviewer a reject note names the tickets to send back", () => {
-    const form = interruptForm({ ticketId: REVIEW_CARD_ID, kind: "review", body: "" });
-    expect(form.notePlaceholder).toContain("name the tickets");
+    const rows = projectNeedsInput(
+      snapshot({
+        state: {
+          tickets: [ticket("A")],
+          interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "" }],
+        },
+      }),
+    );
+    expect(rows[0].interrupt.form.notePlaceholder).toContain("name the tickets");
   });
 });
 
@@ -921,7 +912,7 @@ describe("projectDetail", () => {
         config: {},
       },
     });
-    const detail = projectDetail(snap, "ticket:A");
+    const detail = detailOf(snap, "ticket:A");
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.status).toBe("checkpoint");
@@ -931,7 +922,7 @@ describe("projectDetail", () => {
   });
 
   it("projects a utility card", () => {
-    const detail = projectDetail(snapshot(), START_CARD_ID);
+    const detail = detailOf(snapshot(), START_CARD_ID);
     expect(detail).toEqual({
       kind: "utility",
       id: START_CARD_ID,
@@ -941,75 +932,16 @@ describe("projectDetail", () => {
   });
 
   it("returns null for a card not in the pool", () => {
-    expect(projectDetail(snapshot(), "ticket:zzz")).toBeNull();
+    expect(detailOf(snapshot(), "ticket:zzz")).toBeNull();
   });
 
   it("carries the grades endpoint's winner for the timeline's badge", () => {
     const snap = snapshot({ state: { tickets: [ticket("A"), ticket("B")] } });
     const grades = { A: { attempt: 2, score: 9, verdict: "pass", winner: 2 } };
-    const a = projectDetail(snap, "ticket:A", grades);
-    const b = projectDetail(snap, "ticket:B", grades);
+    const a = projectDetail(projectPool(snap, grades).cards, "ticket:A");
+    const b = projectDetail(projectPool(snap, grades).cards, "ticket:B");
     expect(a?.kind === "ticket" && a.winner).toBe(2);
     expect(b?.kind === "ticket" && b.winner).toBe(null);
-  });
-});
-
-describe("projectDetailTab", () => {
-  function detail(
-    status: PoolStatus,
-    interrupt: TicketDetailView["interrupt"] = null,
-    ticketId = "A",
-  ): TicketDetailView {
-    return {
-      kind: "ticket",
-      ticketId,
-      title: `ticket ${ticketId}`,
-      status,
-      mergePending: false,
-      blockedBy: [],
-      blockedByCheckpoint: [],
-      outcome: null,
-      interrupt,
-      winner: null,
-    };
-  }
-
-  const pending = (ticketId = "A"): TicketDetailView["interrupt"] => ({
-    ticketId,
-    kind: "checkpoint",
-    body: "the brief",
-    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
-    queued: false,
-  });
-
-  it("maps each pool status to its default tab", () => {
-    expect(projectDetailTab(detail("ready"), null)).toBe("spec");
-    expect(projectDetailTab(detail("in-progress"), null)).toBe("progress");
-    expect(projectDetailTab(detail("checkpoint"), null)).toBe("progress");
-    expect(projectDetailTab(detail("done"), null)).toBe("outcome");
-  });
-
-  it("maps a pending interrupt to Progress on every status, including done", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
-      expect(projectDetailTab(detail(status, pending()), null)).toBe("progress");
-    }
-  });
-
-  it("lets a manual tab choice override the default for the current ticket", () => {
-    const override: TabOverride = { ticketId: "A", tab: "spec" };
-    expect(projectDetailTab(detail("done"), override)).toBe("spec");
-    expect(projectDetailTab(detail("ready"), { ticketId: "A", tab: "outcome" })).toBe("outcome");
-  });
-
-  it("lets a manual choice override the interrupt-driven Progress tab", () => {
-    const override: TabOverride = { ticketId: "A", tab: "outcome" };
-    expect(projectDetailTab(detail("checkpoint", pending()), override)).toBe("outcome");
-  });
-
-  it("resets the override when the selected ticket changes", () => {
-    const override: TabOverride = { ticketId: "A", tab: "spec" };
-    expect(projectDetailTab(detail("done", null, "B"), override)).toBe("outcome");
-    expect(projectDetailTab(detail("in-progress", null, "B"), override)).toBe("progress");
   });
 });
 
@@ -1037,9 +969,15 @@ describe("projectDetailTabs", () => {
     ticketId,
     kind: "checkpoint",
     body: "the brief",
-    form: interruptForm({ ticketId, kind: "checkpoint", body: "the brief" }),
+    form: {
+      title: "checkpoint",
+      actions: [{ action: "resume", label: "resume", tone: "primary" }],
+    },
     queued: false,
   });
+
+  const active = (status: PoolStatus, override: TabOverride | null = null) =>
+    projectDetailTabs(detail(status), override).find((tab) => tab.active)?.id;
 
   it("projects the fixed Spec / Progress / Outcome bar on every status", () => {
     for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
@@ -1050,14 +988,32 @@ describe("projectDetailTabs", () => {
     }
   });
 
-  it("activates the tab the default projection chooses", () => {
-    const tabs = projectDetailTabs(detail("done"), null);
-    expect(tabs.find((tab) => tab.active)?.id).toBe("outcome");
+  it("maps each pool status to its default tab", () => {
+    expect(active("ready")).toBe("spec");
+    expect(active("in-progress")).toBe("progress");
+    expect(active("checkpoint")).toBe("progress");
+    expect(active("done")).toBe("outcome");
   });
 
-  it("activates a manual choice made for this ticket", () => {
-    const tabs = projectDetailTabs(detail("done"), { ticketId: "A", tab: "spec" });
-    expect(tabs.find((tab) => tab.active)?.id).toBe("spec");
+  it("maps a pending interrupt to Progress on every status, including done", () => {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+      const tabs = projectDetailTabs(detail(status, pending()), null);
+      expect(tabs.find((tab) => tab.active)?.id).toBe("progress");
+    }
+  });
+
+  it("activates a manual choice made for this ticket, over the default and the interrupt", () => {
+    expect(projectDetailTabs(detail("done"), { ticketId: "A", tab: "spec" }).find((tab) => tab.active)?.id).toBe("spec");
+    expect(projectDetailTabs(detail("ready"), { ticketId: "A", tab: "outcome" }).find((tab) => tab.active)?.id).toBe("outcome");
+    expect(
+      projectDetailTabs(detail("checkpoint", pending()), { ticketId: "A", tab: "outcome" }).find((tab) => tab.active)?.id,
+    ).toBe("outcome");
+  });
+
+  it("ignores a manual choice made for another ticket", () => {
+    const override: TabOverride = { ticketId: "A", tab: "spec" };
+    expect(projectDetailTabs(detail("done", null, "B"), override).find((tab) => tab.active)?.id).toBe("outcome");
+    expect(projectDetailTabs(detail("in-progress", null, "B"), override).find((tab) => tab.active)?.id).toBe("progress");
   });
 
   it("puts the interrupt dot on the Progress tab only while one is pending", () => {
@@ -1138,9 +1094,9 @@ describe("merge pending projection", () => {
     expect(cardOf("02")?.mergePending).toBe(false);
     expect(cardOf("03")?.mergePending).toBe(false);
     // The Detail mirrors the card.
-    const detail = projectDetail(snap, ticketCardId("01"));
+    const detail = detailOf(snap, "ticket:01");
     expect(detail?.kind === "ticket" && detail.mergePending).toBe(true);
-    const plain = projectDetail(snap, ticketCardId("02"));
+    const plain = detailOf(snap, "ticket:02");
     expect(plain?.kind === "ticket" && plain.mergePending).toBe(false);
   });
 });
@@ -1229,17 +1185,6 @@ describe("poolStatus", () => {
   });
 });
 
-describe("projectLog", () => {
-  it("extracts string log lines and drops the rest", () => {
-    expect(projectLog({ log: ["a", 42, "b"] })).toEqual(["a", "b"]);
-  });
-
-  it("is empty without a log", () => {
-    expect(projectLog({})).toEqual([]);
-    expect(projectLog(null)).toEqual([]);
-  });
-});
-
 describe("projectTimeline", () => {
   function event(
     attempt: number,
@@ -1290,10 +1235,41 @@ describe("projectTimeline", () => {
       "exited",
       "checkpoint",
     ]);
-    expect(view.attempts[0].events[2].payload).toEqual({
-      code: 0,
-      status: "checkpoint",
-    });
+  });
+
+  it("decodes each row's time label, grade, and reassignment", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "graded", { score: 8, verdict: "pass", reasons: "clean diff" }),
+        event(1, "reassigned", {
+          from: { harness: "claude", model: null },
+          to: { harness: "kimi", model: "k3" },
+        }),
+        event(1, "spawned"),
+      ]),
+      "done",
+    );
+    const [graded, reassigned, spawned] = view.attempts[0].events;
+    expect(graded.grade).toEqual({ score: 8, verdict: "pass", reasons: "clean diff" });
+    expect(graded.timeLabel.length).toBeGreaterThan(0);
+    expect(reassigned.reassignment).toBe(
+      "reassigned: claude / unassigned → kimi / k3",
+    );
+    expect(spawned.grade).toBeNull();
+    expect(spawned.reassignment).toBeNull();
+  });
+
+  it("leaves a torn payload undecoded, so the plain event row still shows", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "graded", { score: "eight" }),
+        event(1, "reassigned", { from: 42 }),
+      ]),
+      "done",
+    );
+    const [graded, reassigned] = view.attempts[0].events;
+    expect(graded.grade).toBeNull();
+    expect(reassigned.reassignment).toBeNull();
   });
 
   it("marks no attempt running when the ticket is not in-progress", () => {
@@ -1633,96 +1609,6 @@ describe("layout", () => {
   });
 });
 
-describe("mergeLayout", () => {
-  const defaults = {
-    "ticket:A": { x: 100, y: 200 },
-    "ticket:B": { x: 300, y: 400 },
-  };
-
-  it("overrides defaults with stored positions and drops unknown ids", () => {
-    expect(
-      mergeLayout(defaults, { "ticket:A": { x: 1, y: 2 }, leftover: { x: 3, y: 4 } }),
-    ).toEqual({
-      "ticket:A": { x: 1, y: 2 },
-      "ticket:B": { x: 300, y: 400 },
-    });
-  });
-
-  it("returns defaults when nothing is stored", () => {
-    expect(mergeLayout(defaults, {})).toEqual(defaults);
-  });
-});
-
-describe("parseStoredLayout", () => {
-  it("keeps finite x/y pairs and drops anything else", () => {
-    expect(
-      parseStoredLayout({
-        "ticket:A": { x: 10, y: 20 },
-        "ticket:B": { x: "no", y: 1 },
-        START: { x: 1 },
-      }),
-    ).toEqual({ "ticket:A": { x: 10, y: 20 } });
-  });
-
-  it("returns empty for non-objects", () => {
-    expect(parseStoredLayout(null)).toEqual({});
-    expect(parseStoredLayout("nope")).toEqual({});
-    expect(parseStoredLayout([{ x: 1, y: 2 }])).toEqual({});
-  });
-});
-
-describe("edgePath", () => {
-  const source = { x: 300, y: 196, w: 280, h: 80 };
-  const target = { x: 300, y: 376, w: 280, h: 80 };
-
-  it("routes downward elbows through a mid-Y horizontal", () => {
-    expect(edgePath(source, target, "ortho")).toEqual({
-      d: "M 440 276 L 440 326 L 440 326 L 440 376",
-      lx: 446,
-      ly: 326,
-    });
-  });
-
-  it("draws a straight segment between the facing edges", () => {
-    expect(edgePath(source, target, "straight")).toEqual({
-      d: "M 440 276 L 440 376",
-      lx: 446,
-      ly: 326,
-    });
-  });
-
-  it("leaves the top of the source when the target sits above", () => {
-    expect(edgePath(target, source, "ortho").d).toBe(
-      "M 440 376 L 440 326 L 440 326 L 440 276",
-    );
-  });
-});
-
-describe("zoomAtCursor", () => {
-  it("keeps the world point under the cursor stationary", () => {
-    expect(zoomAtCursor({ x: 0, y: 0, zoom: 1 }, { x: 100, y: 100 }, 2)).toEqual({
-      x: -100,
-      y: -100,
-      zoom: 2,
-    });
-  });
-
-  it("clamps at the zoom ceiling and does not shift the view", () => {
-    expect(zoomAtCursor({ x: 8, y: 8, zoom: 2.5 }, { x: 40, y: 40 }, 2)).toEqual({
-      x: 8,
-      y: 8,
-      zoom: 2.5,
-    });
-  });
-});
-
-describe("strokeWidthForZoom", () => {
-  it("keeps a 1.5px stroke visually constant", () => {
-    expect(strokeWidthForZoom(2)).toBe(0.75);
-    expect(strokeWidthForZoom(0.5)).toBe(3);
-  });
-});
-
 describe("clampDrawersHeight", () => {
   it("clamps below the minimum and above the maximum", () => {
     expect(clampDrawersHeight(0)).toBe(DRAWER_MIN_VH);
@@ -1799,60 +1685,6 @@ describe("nextNodeSelection", () => {
   });
 });
 
-describe("flowNeighbourhood", () => {
-  const edges = projectPoolEdges([
-    ticket("A"),
-    ticket("B", { blockedBy: ["A"] }),
-    ticket("C", { blockedBy: ["B"] }),
-  ]);
-
-  it("returns the one-hop inflow and outflow of the selection", () => {
-    expect(flowNeighbourhood(edges, "ticket:B")).toEqual({
-      inflow: ["ticket:A"],
-      outflow: [REVIEW_CARD_ID, "ticket:C"],
-    });
-  });
-
-  it("is one hop only: no transitive dependency cone", () => {
-    const hood = flowNeighbourhood(edges, "ticket:C");
-    expect(hood.inflow).toEqual(["ticket:B"]);
-    expect(hood.inflow).not.toContain("ticket:A");
-    expect(hood.inflow).not.toContain(START_CARD_ID);
-  });
-
-  it("lets start flow into a blockerless ticket and review out of every ticket", () => {
-    const hood = flowNeighbourhood(edges, "ticket:A");
-    expect(hood.inflow).toEqual([START_CARD_ID]);
-    expect(hood.outflow).toEqual([REVIEW_CARD_ID, "ticket:B"]);
-  });
-
-  it("lights the utility cards' own neighbourhoods", () => {
-    expect(flowNeighbourhood(edges, START_CARD_ID)).toEqual({
-      inflow: [],
-      outflow: ["ticket:A"],
-    });
-    expect(flowNeighbourhood(edges, REVIEW_CARD_ID)).toEqual({
-      inflow: ["ticket:A", "ticket:B", "ticket:C"],
-      outflow: [],
-    });
-  });
-
-  it("is empty for a cleared selection or an unknown card", () => {
-    expect(flowNeighbourhood(edges, null)).toEqual({ inflow: [], outflow: [] });
-    expect(flowNeighbourhood(edges, "ticket:zzz")).toEqual({ inflow: [], outflow: [] });
-  });
-
-  it("re-derives from the edges of each live snapshot", () => {
-    const first = projectPoolEdges([ticket("A")]);
-    expect(flowNeighbourhood(first, "ticket:A").outflow).toEqual([REVIEW_CARD_ID]);
-    const next = projectPoolEdges([ticket("A"), ticket("B", { blockedBy: ["A"] })]);
-    expect(flowNeighbourhood(next, "ticket:A").outflow).toEqual([
-      REVIEW_CARD_ID,
-      "ticket:B",
-    ]);
-  });
-});
-
 describe("a card click opens the Detail", () => {
   function flightSnapshot(): PoolSnapshot {
     return snapshot({
@@ -1881,15 +1713,15 @@ describe("a card click opens the Detail", () => {
       ["D", "done"],
     ];
     for (const [id, status] of cases) {
-      const selected = nextNodeSelection(null, ticketCardId(id));
-      const detail = selected ? projectDetail(snap, selected) : null;
+      const selected = nextNodeSelection(null, `ticket:${id}`);
+      const detail = selected ? detailOf(snap, selected) : null;
       expect(detail?.kind).toBe("ticket");
       if (detail?.kind === "ticket") expect(detail.status).toBe(status);
     }
   });
 
   it("keeps a pending interrupt answerable from the Detail's form", () => {
-    const detail = projectDetail(flightSnapshot(), ticketCardId("C"));
+    const detail = detailOf(flightSnapshot(), "ticket:C");
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.interrupt?.body).toBe("the brief");
@@ -1898,7 +1730,7 @@ describe("a card click opens the Detail", () => {
   });
 
   it("keeps the Detail across a snapshot that changes the card's status", () => {
-    const selected = nextNodeSelection(null, ticketCardId("P"));
+    const selected = nextNodeSelection(null, "ticket:P");
     const next = snapshot({
       state: {
         tickets: [ticket("P", { status: "done" })],
@@ -1908,7 +1740,7 @@ describe("a card click opens the Detail", () => {
         config: {},
       },
     });
-    const detail = selected ? projectDetail(next, selected) : null;
+    const detail = selected ? detailOf(next, selected) : null;
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.status).toBe("done");
@@ -1917,8 +1749,8 @@ describe("a card click opens the Detail", () => {
   });
 
   it("closes the Detail gracefully when the selected card has left the pool", () => {
-    const selected = nextNodeSelection(null, ticketCardId("R"));
-    expect(selected && projectDetail(flightSnapshot(), selected)).not.toBeNull();
+    const selected = nextNodeSelection(null, "ticket:R");
+    expect(selected && detailOf(flightSnapshot(), selected)).not.toBeNull();
     const gone = snapshot({
       state: {
         tickets: [ticket("P")],
@@ -1928,7 +1760,7 @@ describe("a card click opens the Detail", () => {
         config: {},
       },
     });
-    expect(selected && projectDetail(gone, selected)).toBeNull();
+    expect(selected && detailOf(gone, selected)).toBeNull();
   });
 });
 
@@ -2207,48 +2039,42 @@ describe("projectPool terminal surface", () => {
 // Conversations (issue #60)
 // ---------------------------------------------------------------------------
 
-describe("conversationCardId / isConversationCardId", () => {
-  it("prefixes conversation ids and leaves other ids alone", () => {
-    expect(conversationCardId("conv-1")).toBe("conversation:conv-1");
-    expect(isConversationCardId("conversation:conv-1")).toBe(true);
-    expect(isConversationCardId("ticket:01")).toBe(false);
-    expect(isConversationCardId(START_CARD_ID)).toBe(false);
-  });
-});
-
-describe("conversationIdleAge", () => {
+describe("conversation idle age", () => {
   const now = Date.parse("2026-09-10T12:00:00.000Z");
 
+  // The card's idle age readout, projected from the Turn's idleSince.
+  function idleAge(idleSince: string | null): string | null {
+    const view = projectPool(
+      snapshot({
+        state: {
+          conversations: [
+            conversation("conv-1", {
+              turn: { state: "waiting", lastLine: "", idleSince },
+            }),
+          ],
+        },
+      }),
+      {},
+      {},
+      {},
+      now,
+    );
+    const card = view.cards.find((c) => c.id === "conversation:conv-1");
+    return card?.kind === "conversation" ? card.idleAge : null;
+  }
+
   it("is null while there is no idleSince (still working)", () => {
-    expect(conversationIdleAge(null, now)).toBeNull();
+    expect(idleAge(null)).toBeNull();
   });
 
   it("is null for an unparseable timestamp", () => {
-    expect(conversationIdleAge("not a date", now)).toBeNull();
+    expect(idleAge("not a date")).toBeNull();
   });
 
   it("renders seconds, minutes, and hours+minutes at the right scale", () => {
-    expect(conversationIdleAge(new Date(now - 45_000).toISOString(), now)).toBe("45s");
-    expect(conversationIdleAge(new Date(now - 4 * 60_000).toISOString(), now)).toBe("4m");
-    expect(
-      conversationIdleAge(new Date(now - (72 * 60_000)).toISOString(), now),
-    ).toBe("1h 12m");
-  });
-});
-
-describe("projectConversationEnd", () => {
-  it("defaults to not-ending with no failure when the store holds no entry", () => {
-    expect(projectConversationEnd(undefined)).toEqual({ ending: false, failure: null });
-  });
-
-  it("passes the store's entry through verbatim", () => {
-    expect(projectConversationEnd({ ending: true, failure: null })).toEqual({
-      ending: true,
-      failure: null,
-    });
-    expect(projectConversationEnd({ ending: false, failure: "pool resume failed: 500" })).toEqual(
-      { ending: false, failure: "pool resume failed: 500" },
-    );
+    expect(idleAge(new Date(now - 45_000).toISOString())).toBe("45s");
+    expect(idleAge(new Date(now - 4 * 60_000).toISOString())).toBe("4m");
+    expect(idleAge(new Date(now - (72 * 60_000)).toISOString())).toBe("1h 12m");
   });
 });
 
@@ -2415,28 +2241,43 @@ describe("layout: the Conversations lane shifts ticket rows down", () => {
   });
 });
 
-describe("projectConversationEdges", () => {
+describe("projectPool conversation edges", () => {
   it("draws an edge from a Conversation to each spawned ticket and conversation", () => {
-    const tickets = [ticket("A")];
-    const conversations = [
-      conversation("conv-1", { children: ["A", "conv-2"] }),
-      conversation("conv-2"),
-    ];
-    const edges = projectConversationEdges(conversations, tickets);
-    expect(edges).toContainEqual({ source: "conversation:conv-1", target: "ticket:A" });
-    expect(edges).toContainEqual({
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [ticket("A")],
+          conversations: [
+            conversation("conv-1", { children: ["A", "conv-2"] }),
+            conversation("conv-2"),
+          ],
+        },
+      }),
+    );
+    expect(view.edges).toContainEqual({
+      source: "conversation:conv-1",
+      target: "ticket:A",
+    });
+    expect(view.edges).toContainEqual({
       source: "conversation:conv-1",
       target: "conversation:conv-2",
     });
   });
 
   it("drops a child id that names neither a live ticket nor a live conversation", () => {
-    const conversations = [conversation("conv-1", { children: ["ghost"] })];
-    expect(projectConversationEdges(conversations, [])).toEqual([]);
+    const view = projectPool(
+      snapshot({
+        state: {
+          conversations: [conversation("conv-1", { children: ["ghost"] })],
+        },
+      }),
+    );
+    expect(view.edges).toEqual([]);
   });
 
-  it("is empty with no Conversations", () => {
-    expect(projectConversationEdges([], [ticket("A")])).toEqual([]);
+  it("draws no conversation edges with no Conversations", () => {
+    const view = projectPool(snapshot({ state: { tickets: [ticket("A")] } }));
+    expect(view.edges.some((e) => e.source.startsWith("conversation:"))).toBe(false);
   });
 });
 
@@ -2530,7 +2371,7 @@ describe("projectDetail for a Conversation card", () => {
         ],
       },
     });
-    const detail = projectDetail(snap, "conversation:conv-1");
+    const detail = detailOf(snap, "conversation:conv-1");
     expect(detail).toEqual({
       kind: "conversation",
       conversationId: "conv-1",

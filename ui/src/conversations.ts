@@ -9,6 +9,7 @@
  */
 
 import {
+  conversationTurnLabel,
   type ConversationTrayRow,
   type PoolConversationState,
   type StartConversationRequest,
@@ -317,7 +318,7 @@ export class ConversationsTray {
       h(
         "span",
         { class: `conversations-turn conversations-turn-${row.turn.state}` },
-        row.turn.state === "waiting" ? "waiting on you" : "agent working",
+        conversationTurnLabel(row.turn.state),
       ),
       row.idleAge ? h("span", { class: "dim conversations-idle" }, row.idleAge) : null,
     );

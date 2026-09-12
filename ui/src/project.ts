@@ -5,6 +5,7 @@
  */
 
 import { marked } from "marked";
+import type { Point, TopologyEdge } from "./geometry";
 
 // ---------------------------------------------------------------------------
 // Pool snapshot (wire format served by the pool server)
@@ -90,7 +91,7 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
  * kind falls back to a plain resume form so a newer engine never renders an
  * unanswerable interrupt.
  */
-export function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
+function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
   return INTERRUPT_FORMS[interrupt.kind] ?? { title: interrupt.kind, actions: [RESUME] };
 }
 
@@ -159,6 +160,16 @@ export interface PoolConversationState {
   /** Ticket and Conversation ids this Conversation has spawned. */
   children: string[];
 }
+
+/** The Turn state badge's word: "waiting on you" outranks "agent working" as
+ *  the operator's cue, matching the Conversations tray's own wording. Shared
+ *  by the Conversation card and its Detail. */
+export function conversationTurnLabel(state: TurnState): string {
+  return state === "waiting" ? "waiting on you" : "agent working";
+}
+
+/** The word an unassigned Assignment (or one of its null fields) reads as. */
+export const UNASSIGNED_LABEL = "unassigned";
 
 interface PoolState {
   tickets: PoolTicketState[];
@@ -282,10 +293,80 @@ export interface TerminalPeekResponse {
 // Timeline view model
 // ---------------------------------------------------------------------------
 
+/** A grade as the timeline shows it under its attempt's graded event: the
+ *  full payload, reasons included. The card's GradeView is the summary
+ *  shape; this is the record. */
+export interface TimelineGradeView {
+  score: number;
+  verdict: string;
+  reasons: string;
+}
+
+/**
+ * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`
+ * and `reassignment` straight off the row and never parses a payload. The
+ * grade and reassignment are null unless the event's kind carries one and
+ * its payload decoded cleanly.
+ */
 interface TimelineEventView {
   kind: string;
   at: string;
-  payload: Record<string, unknown>;
+  timeLabel: string;
+  grade: TimelineGradeView | null;
+  reassignment: string | null;
+}
+
+function formatEventTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour12: false });
+}
+
+/** The graded event's payload as a grade, or null when a field is missing or
+ *  mistyped. The engine writes all three fields, so a null here means a torn
+ *  or foreign line, and the timeline falls back to the plain event row. */
+function gradeFromPayload(payload: Record<string, unknown>): TimelineGradeView | null {
+  const { score, verdict, reasons } = payload;
+  if (
+    typeof score !== "number" ||
+    typeof verdict !== "string" ||
+    typeof reasons !== "string"
+  ) {
+    return null;
+  }
+  return { score, verdict, reasons };
+}
+
+// A config reload's `reassigned` event (ADR-0018), as one readable line: "harness
+// / model → harness / model". A field the config leaves unassigned reads as
+// "unassigned", matching how the card badge reads a null Assignment field.
+// Anything not shaped like a from/to Assignment record (a foreign or torn
+// line) decodes to null — never throws, so an event kind this build does not
+// fully understand still shows its timestamp instead of breaking the timeline.
+function reassignmentFromPayload(payload: Record<string, unknown>): string | null {
+  const describe = (side: unknown): string | null => {
+    if (typeof side !== "object" || side === null) return null;
+    const { harness, model } = side as Record<string, unknown>;
+    if (harness !== null && typeof harness !== "string") return null;
+    if (model !== null && typeof model !== "string") return null;
+    return `${harness ?? UNASSIGNED_LABEL} / ${model ?? UNASSIGNED_LABEL}`;
+  };
+  const from = describe(payload.from);
+  const to = describe(payload.to);
+  if (from === null || to === null) return null;
+  return `reassigned: ${from} → ${to}`;
+}
+
+/** One raw event decoded into its timeline row. */
+function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
+  return {
+    kind: event.kind,
+    at: event.at,
+    timeLabel: formatEventTime(event.at),
+    grade: event.kind === "graded" ? gradeFromPayload(event.payload) : null,
+    reassignment:
+      event.kind === "reassigned" ? reassignmentFromPayload(event.payload) : null,
+  };
 }
 
 interface TimelineAttemptView {
@@ -322,7 +403,7 @@ export function projectTimeline(
     const byAttempt = new Map<number, TimelineEventView[]>();
     for (const event of response.events) {
       const list = byAttempt.get(event.attempt) ?? [];
-      list.push({ kind: event.kind, at: event.at, payload: event.payload });
+      list.push(decodeTimelineEvent(event));
       byAttempt.set(event.attempt, list);
     }
     const numbers = [...byAttempt.keys()].sort((a, b) => a - b);
@@ -510,7 +591,7 @@ export function projectLogPane(
  * LOG_CHUNK_BYTES: the wire contract pages in these steps, so the tail-first
  * window and the "load earlier" step are one chunk each.
  */
-export const LOG_TAIL_BYTES = 64 * 1024;
+const LOG_TAIL_BYTES = 64 * 1024;
 
 /** The byte offset a tail-first open starts at: the last window of the log. */
 export function initialLogWindow(totalSize: number): number {
@@ -534,7 +615,7 @@ export function earlierLogOffset(firstOffset: number): number | null {
 }
 
 /** Slack in px for "scrolled to the bottom": within it counts as at the tail. */
-export const LOG_BOTTOM_SLACK_PX = 24;
+const LOG_BOTTOM_SLACK_PX = 24;
 
 /**
  * Whether the log pane sits at the tail. Auto-scroll follows the log only
@@ -554,9 +635,9 @@ export function logAtBottom(
 // ---------------------------------------------------------------------------
 
 /** Under this age the staleness readout counts as fresh movement. */
-export const VITALS_FRESH_MS = 10_000;
+const VITALS_FRESH_MS = 10_000;
 /** Silence past this age reads as idle, in the interrupt color. */
-export const VITALS_IDLE_MS = 60_000;
+const VITALS_IDLE_MS = 60_000;
 /** The sparkline holds at most this many per-poll diff-total samples. */
 export const VITALS_MAX_SAMPLES = 40;
 
@@ -688,8 +769,6 @@ function projectStaleness(
 // View model
 // ---------------------------------------------------------------------------
 
-export type Point = { x: number; y: number };
-
 export interface TicketCardView {
   kind: "ticket";
   id: string;
@@ -798,7 +877,7 @@ export interface ConversationCardView {
 
 export type PoolCardView = TicketCardView | UtilityCardView | ConversationCardView;
 
-interface PoolView {
+export interface PoolView {
   seq: number;
   phase: PoolPhase;
   cards: PoolCardView[];
@@ -810,31 +889,17 @@ interface PoolView {
 // Pool projection
 // ---------------------------------------------------------------------------
 
-export const START_CARD_ID = "START";
-export const REVIEW_CARD_ID = "REVIEW";
+const START_CARD_ID = "START";
+const REVIEW_CARD_ID = "REVIEW";
 const TICKET_PREFIX = "ticket:";
 const CONVERSATION_PREFIX = "conversation:";
 
-export function ticketCardId(ticketId: string): string {
+function ticketCardId(ticketId: string): string {
   return `${TICKET_PREFIX}${ticketId}`;
 }
 
-export function isTicketCardId(id: string): boolean {
-  return id.startsWith(TICKET_PREFIX);
-}
-
-export function conversationCardId(conversationId: string): string {
+function conversationCardId(conversationId: string): string {
   return `${CONVERSATION_PREFIX}${conversationId}`;
-}
-
-export function isConversationCardId(id: string): boolean {
-  return id.startsWith(CONVERSATION_PREFIX);
-}
-
-// There is one pool per server, so a card's stored position is keyed by its
-// own id; no thread scoping is needed.
-export function layoutStorageKey(cardId: string): string {
-  return cardId;
 }
 
 /**
@@ -845,9 +910,9 @@ export function layoutStorageKey(cardId: string): string {
  * and a live Conversation card ~285px (~325px with a two-line title and an
  * idle row). `rowH` fits the headless case; `terminalRowH` a row holding a
  * pane-backed ticket; `conversationLaneH` the Conversations lane, whose live
- * cards always carry a pane. Exported for the layout tests.
+ * cards always carry a pane.
  */
-export const LAYOUT = {
+const LAYOUT = {
   centerX: 420,
   startY: 16,
   rowH: 200,
@@ -858,7 +923,7 @@ export const LAYOUT = {
 } as const;
 
 /** Depth of a ticket = length of its longest blocker chain; leaf tickets are 0. */
-export function ticketDepth(
+function ticketDepth(
   ticketId: string,
   tickets: PoolTicketState[],
   visiting: Set<string> = new Set(),
@@ -946,7 +1011,7 @@ function rowPitch(row: PoolTicketState[]): number {
     : LAYOUT.rowH;
 }
 
-export function projectPoolEdges(
+function projectPoolEdges(
   tickets: PoolTicketState[],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
@@ -972,7 +1037,7 @@ export function projectPoolEdges(
  * between the snapshot and the spawn, or a spawn that failed validation)
  * draws no edge rather than a dangling one.
  */
-export function projectConversationEdges(
+function projectConversationEdges(
   conversations: PoolConversationState[],
   tickets: PoolTicketState[],
 ): TopologyEdge[] {
@@ -1046,7 +1111,7 @@ function toInterruptView(raw: PoolInterrupt | null, state: PoolState): Interrupt
  * store holds no entry; the card still gets the surface, in its pending
  * "waiting for output" state, so there is no empty flash.
  */
-export function projectTerminalSurface(
+function projectTerminalSurface(
   paneId: string | null,
   state: TerminalSurfaceView | undefined,
 ): TerminalSurfaceView | null {
@@ -1089,7 +1154,7 @@ function projectTicket(
  * The idle age readout ("4m", "1h 12m") from a Turn's `idleSince`: null while
  * the Turn is `working` (no idleSince yet) or the timestamp fails to parse.
  */
-export function conversationIdleAge(
+function conversationIdleAge(
   idleSince: string | null,
   now: number,
 ): string | null {
@@ -1106,7 +1171,7 @@ export function conversationIdleAge(
 
 /** The End action's view for a Conversation id; the default before any End
  *  has ever been attempted this session. */
-export function projectConversationEnd(
+function projectConversationEnd(
   state: ConversationEndView | undefined,
 ): ConversationEndView {
   return state ?? { ending: false, failure: null };
@@ -1283,13 +1348,6 @@ export function projectConversationsNeedsInput(
     }));
 }
 
-export function projectLog(raw: unknown): string[] {
-  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { log?: unknown }).log)) {
-    return [];
-  }
-  return (raw as { log: unknown[] }).log.filter((line): line is string => typeof line === "string");
-}
-
 /**
  * The pool's default Assignment, read from the snapshot's `config` for the
  * New Conversation form's placeholders (the same defaults `startConversation`
@@ -1426,18 +1484,17 @@ export interface ConversationDetailView {
 
 export type DetailView = TicketDetailView | UtilityDetailView | ConversationDetailView;
 
-/** The Detail for a selected card, or null when the card is not in the pool. */
+/**
+ * The Detail for a selected card, read off the pool's already-projected
+ * cards: the caller derives the cards once per cycle and passes them in, so
+ * the Detail and the canvas never disagree about the same snapshot. Null
+ * when the card is not in the pool.
+ */
 export function projectDetail(
-  snapshot: PoolSnapshot,
+  cards: PoolCardView[],
   cardId: string,
-  grades: Record<string, GradeView> = {},
-  terminal: Record<string, TerminalSurfaceView> = {},
-  now: number = Date.now(),
-  conversationEndings: Record<string, ConversationEndView> = {},
 ): DetailView | null {
-  const card = projectPool(snapshot, grades, {}, terminal, now, conversationEndings).cards.find(
-    (c) => c.id === cardId,
-  );
+  const card = cards.find((c) => c.id === cardId);
   if (!card) return null;
   if (card.kind === "ticket") {
     return {
@@ -1531,7 +1588,7 @@ export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
  * merge-conflict) and an unknown kind's plain resume fallback. Review and
  * merge-approval rows carry two actions and are answered individually.
  */
-export function isResumeKindRow(row: NeedsInputRow): boolean {
+function isResumeKindRow(row: NeedsInputRow): boolean {
   return (
     row.interrupt.form.actions.length === 1 &&
     row.interrupt.form.actions[0].action === "resume"
@@ -1571,7 +1628,7 @@ export interface TabOverride {
  * pending interrupt always wins over the status, even on a done ticket: the
  * interrupt is the action surface, and the action surface is Progress.
  */
-export function defaultDetailTab(
+function defaultDetailTab(
   status: PoolStatus,
   interruptPending: boolean,
 ): DetailTab {
@@ -1592,7 +1649,7 @@ export function defaultDetailTab(
  * a choice made on another ticket does not apply, so the default reasserts
  * itself when the selection changes ticket.
  */
-export function projectDetailTab(
+function projectDetailTab(
   detail: TicketDetailView,
   override: TabOverride | null,
 ): DetailTab {
@@ -1651,126 +1708,11 @@ export function nextNodeSelection(current: string | null, clicked: string): stri
 }
 
 // ---------------------------------------------------------------------------
-// Canvas geometry (unchanged from the thread-driven Console)
-// ---------------------------------------------------------------------------
-
-export type EdgeMode = "ortho" | "straight";
-
-export interface CardBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export interface TopologyEdge {
-  source: string;
-  target: string;
-  conditional?: boolean;
-  data?: string;
-}
-
-/**
- * The flow neighbourhood of a selected card: its one-hop inflow (the cards
- * whose edges point at it: its blockers, plus start when it is blockerless)
- * and one-hop outflow (the cards it points at: its dependents, plus review).
- * One hop only, never the transitive cone, so a chain does not light up the
- * whole canvas. A cleared selection has an empty neighbourhood.
- */
-export function flowNeighbourhood(
-  edges: TopologyEdge[],
-  selectedId: string | null,
-): { inflow: string[]; outflow: string[] } {
-  if (!selectedId) return { inflow: [], outflow: [] };
-  return {
-    inflow: edges.filter((edge) => edge.target === selectedId).map((edge) => edge.source),
-    outflow: edges.filter((edge) => edge.source === selectedId).map((edge) => edge.target),
-  };
-}
-
-export function edgePath(
-  source: CardBox,
-  target: CardBox,
-  mode: EdgeMode,
-): { d: string; lx: number; ly: number } {
-  const sx = source.x + source.w / 2;
-  const sy = source.y + source.h / 2;
-  const tx = target.x + target.w / 2;
-  const ty = target.y + target.h / 2;
-  const up = ty < sy;
-  const outY = up ? source.y : source.y + source.h;
-  const inY = up ? target.y + target.h : target.y;
-  if (mode === "ortho") {
-    const midY = (outY + inY) / 2;
-    return {
-      d: `M ${sx} ${outY} L ${sx} ${midY} L ${tx} ${midY} L ${tx} ${inY}`,
-      lx: sx + 6,
-      ly: midY,
-    };
-  }
-  return {
-    d: `M ${sx} ${outY} L ${tx} ${inY}`,
-    lx: (sx + tx) / 2 + 6,
-    ly: (outY + inY) / 2,
-  };
-}
-
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 2.5;
-
-export interface ViewTransform {
-  x: number;
-  y: number;
-  zoom: number;
-}
-
-export function zoomAtCursor(
-  view: ViewTransform,
-  cursor: Point,
-  factor: number,
-): ViewTransform {
-  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.zoom * factor));
-  if (zoom === view.zoom) return view;
-  const wx = (cursor.x - view.x) / view.zoom;
-  const wy = (cursor.y - view.y) / view.zoom;
-  return { x: cursor.x - wx * zoom, y: cursor.y - wy * zoom, zoom };
-}
-
-export function strokeWidthForZoom(zoom: number): number {
-  return 1.5 / zoom;
-}
-
-export function mergeLayout(
-  defaults: Record<string, Point>,
-  stored: Record<string, Point>,
-): Record<string, Point> {
-  const positions: Record<string, Point> = {};
-  for (const [id, pos] of Object.entries(defaults)) {
-    positions[id] = stored[id] ?? pos;
-  }
-  return positions;
-}
-
-export function parseStoredLayout(raw: unknown): Record<string, Point> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const positions: Record<string, Point> = {};
-  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!value || typeof value !== "object") continue;
-    const x = (value as { x?: unknown }).x;
-    const y = (value as { y?: unknown }).y;
-    if (typeof x !== "number" || typeof y !== "number") continue;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    positions[id] = { x, y };
-  }
-  return positions;
-}
-
-// ---------------------------------------------------------------------------
 // Drawers height clamp
 // ---------------------------------------------------------------------------
 
-export const DRAWER_MIN_VH = 15;
-export const DRAWER_MAX_VH = 80;
+const DRAWER_MIN_VH = 15;
+const DRAWER_MAX_VH = 80;
 export const DRAWER_DEFAULT_VH = 32;
 
 /** Clamp a drawer height in vh units to the shared bounds. */

@@ -10,7 +10,7 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "useDefineForClassFields": true,
-    "noUnusedLocals": false,
+    "noUnusedLocals": true,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client", "bun"]
