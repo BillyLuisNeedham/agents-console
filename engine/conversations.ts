@@ -39,10 +39,13 @@ import {
   type MergeResult,
   type WorktreeInfo,
 } from "./worktrees.ts";
-import { waitForAttemptEnding, type AttemptEnding } from "./attempt-ending.ts";
-import { closeTab } from "./herdr.ts";
 import {
   exitCrashReason,
+  waitForPaneEnding,
+  type PaneEnding,
+} from "./attempt-ending.ts";
+import { closeTab } from "./herdr.ts";
+import {
   launchAttempt,
   type AttemptHandle,
   type PaneTailer,
@@ -599,7 +602,7 @@ export async function startConversation(
 
 function watchForCrash(session: Session, runtime: ConversationRuntime): void {
   if (!runtime.paneId) return;
-  void waitForAttemptEnding(session.herdrSocket, runtime.paneId, runtime.exitCodePath, runtime.release.signal)
+  void waitForPaneEnding(session.herdrSocket, runtime.paneId, runtime.exitCodePath, runtime.release.signal)
     .then((ending) => {
       if (runtime.release.signal.aborted || runtime.ending) return;
       markConversationCrashed(session, runtime, ending);
@@ -607,7 +610,7 @@ function watchForCrash(session: Session, runtime: ConversationRuntime): void {
     .catch(() => {});
 }
 
-function markConversationCrashed(session: Session, runtime: ConversationRuntime, ending: AttemptEnding): void {
+function markConversationCrashed(session: Session, runtime: ConversationRuntime, ending: PaneEnding): void {
   // The pane is gone: drain the tailer so the derived log holds what it showed.
   void runtime.tailer?.finish().catch(() => {});
   writeConversationStatus(runtime.file, "crashed");

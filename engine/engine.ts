@@ -47,17 +47,19 @@ import {
 } from "./herdr.ts";
 import {
   attemptStreamPath,
-  awaitOutcomeOrPaneEnd,
-  exitCrashReason,
-  exitedPhrase,
-  readAttemptResult,
   readLogTail,
   rotateAttemptLog,
   runAttempt,
   startPaneStreamTail,
   type AttemptEnv,
-  type ReadFailure,
 } from "./attempt-run.ts";
+import {
+  exitedPhrase,
+  readAttemptResult,
+  waitForAttemptEnding,
+  type AttemptEndingDecision,
+  type ReadFailure,
+} from "./attempt-ending.ts";
 import {
   answerConversationMerge,
   conversationViews,
@@ -1829,69 +1831,63 @@ async function finalizeAdoptedAttempt(
   );
   const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
   const tailer = streamPath ? startPaneStreamTail(streamPath, logPath) : null;
+  let decision;
   try {
-    // The adopted attempt ends on its Outcome without requiring pane exit,
-    // exactly as a live terminal-backed spawn: the TUI deliberately stays
-    // alive after the agent declares done (ADR-0016). The ending race
-    // underneath is attempt-ending.ts's: pane end against the exit-code
-    // file, with pane loss without an Outcome the crash signal. An outcome
-    // written while the engine was down resolves immediately.
-    const code = await awaitOutcomeOrPaneEnd(
-      session.herdrSocket,
-      adopted.paneId,
+    // The adopted attempt's ending is the Attempt-ending module's one
+    // decision, exactly as a live terminal-backed spawn's: a pane watch
+    // (pane end against the exit-code file, pane loss without an Outcome
+    // the crash signal) raced against the result-file poll, because the TUI
+    // deliberately stays alive after the agent declares done (ADR-0016). An
+    // exit-code file written while the engine was down resolves
+    // immediately, without opening a connection.
+    decision = await waitForAttemptEnding({
+      watch: { kind: "pane", socketPath: session.herdrSocket, paneId: adopted.paneId },
       exitCodePath,
       outcomePath,
-      (path) => readAttemptResult(path, validateOutcome).ok,
-    );
-    // Abandoned while waiting (the human answered): the answer path owns
-    // the ticket now and this finalize records nothing further.
-    if (adopted.abandoned) return;
-    // The answer path may have abandoned the attempt while the code was
-    // being read; the map entry is the ownership record, so a missing or
-    // flagged entry means the answer path owns the ticket from here.
-    const current = session.adopted.get(ticketId);
-    if (!current || current.abandoned) return;
-    // Ownership passes to the recorded exit: from here a later answer is
-    // ordinary interrupt handling, never an abandonment.
-    session.adopted.delete(ticketId);
-    recordAdoptedExit(
-      session,
-      marker,
-      attempt,
-      code,
-      logPath,
-      exitCodePath,
-      adopted.paneId,
-    );
+      validate: validateOutcome,
+      crashSubject: "harness",
+    });
   } finally {
+    // Drained ahead of the log-tail read below, so the exit facts are
+    // complete; also drained on an abandoned wait, whose return skips the
+    // record but never the drain.
     if (tailer) await tailer.finish().catch(() => {});
   }
+  // Abandoned while waiting (the human answered): the answer path owns
+  // the ticket now and this finalize records nothing further.
+  if (adopted.abandoned) return;
+  // The answer path may have abandoned the attempt while the ending was
+  // being read; the map entry is the ownership record, so a missing or
+  // flagged entry means the answer path owns the ticket from here.
+  const current = session.adopted.get(ticketId);
+  if (!current || current.abandoned) return;
+  // Ownership passes to the recorded exit: from here a later answer is
+  // ordinary interrupt handling, never an abandonment.
+  session.adopted.delete(ticketId);
+  recordAdoptedExit(session, marker, attempt, decision, logPath, outcomePath);
 }
 
 // Record one adopted attempt's exit (ADR-0014): the mirror of runTicket's
-// exit tail, without the spawn-time parts. Mutates session state and emits,
-// exactly the paths the drive's own exit handling uses.
+// exit tail, without the spawn-time parts. Consumes the Attempt-ending
+// module's decision (the code, the already-read Outcome and the crash
+// reason) rather than re-reading and re-deriving them its own way; what
+// stays here is genuinely its own: the marker status write, the checkpoint
+// Brief, the interrupt and the merge chaining. Mutates session state and
+// emits, exactly the paths the drive's own exit handling uses.
 function recordAdoptedExit(
   session: Session,
   marker: TicketMarker,
   attempt: number,
-  code: number,
+  decision: AttemptEndingDecision<Extract<OutcomeResult, { ok: true }>>,
   logPath: string,
-  exitCodePath: string,
-  paneId: string,
+  outcomePath: string,
 ): void {
   const ticketId = marker.id;
-  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
-  const outcome = readAttemptResult(outcomePath, validateOutcome);
+  const { code, result: outcome, crashReason } = decision;
   const outcomeExists = existsSync(outcomePath);
   const logTail = readLogTail(logPath);
   let status: TicketStatus = "in-progress";
-  let crashReason: string | null = null;
-  if (code !== 0) {
-    crashReason = exitCrashReason(code, exitCodePath, "harness", paneId);
-  } else if (!outcome.ok) {
-    crashReason = outcome.reason;
-  } else {
+  if (crashReason === null && outcome.ok) {
     status = outcome.outcome.status;
   }
   appendEvent(session.runsDir, ticketId, {
@@ -4888,7 +4884,7 @@ function planTicket(
 // valid outcome is a crash. The crash reason distinguishes the classes in the
 // ticket log: a dead harness, an agent that never wrote its outcome, an
 // outcome that does not parse, and an outcome whose status is invalid. The
-// reading itself is the Attempt-run module's (readAttemptResult); this is
+// reading itself is the Attempt-ending module's (readAttemptResult); this is
 // the Outcome's validator.
 export type OutcomeResult =
   | { ok: true; outcome: Outcome; spawnRejections?: SpawnRejection[] }

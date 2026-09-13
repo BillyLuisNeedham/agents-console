@@ -9,9 +9,9 @@
  * `SpawnContext`, deciding terminal-backed once, opening the herdr tab or
  * spawning headless, recording the `spawned` event, tailing the Stream file
  * into the derived log (ADR-0012, ADR-0016), waiting for readiness and
- * delivering the prompt, racing the Attempt ending against the result file,
- * reading the result, deriving the crash reason, and recording `exited` and
- * `crash` on the Ticket log.
+ * delivering the prompt, waiting on the Attempt ending (attempt-ending.ts
+ * decides how the attempt ended, with what code, result and crash reason),
+ * and recording `exited` and `crash` on the Ticket log.
  *
  * The seam is split in two so a Conversation, which never ends on a result
  * file, can use the launch half alone: `launchAttempt` runs from the stale
@@ -65,7 +65,24 @@ import {
   openAttemptTab,
   paneSendInput,
 } from "./herdr.ts";
-import { PANE_TAIL_POLL_MS, waitForAttemptEnding } from "./attempt-ending.ts";
+import {
+  PANE_TAIL_POLL_MS,
+  SPAWN_INTERACTIVE_PROMPT_FAILED,
+  SPAWN_INTERACTIVE_READY_FAILED,
+  attemptCrashReason,
+  readAttemptResult,
+  readExitCode,
+  waitForAttemptEnding,
+  type ReadFailure,
+  type ResultValidator,
+} from "./attempt-ending.ts";
+
+// The result reader and its types live in the Attempt-ending module (the
+// result file is the ending signal, ADR-0005); re-exported here because this
+// module's callers and tests have always imported them from the Attempt-run
+// module.
+export { readAttemptResult };
+export type { ReadFailure, ResultValidator };
 import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
 import type { ChildTracker } from "./children.ts";
 import {
@@ -162,17 +179,6 @@ export interface AttemptSpec<R extends { ok: true } = { ok: true }> {
       }
     | { kind: "spawned-only" };
 }
-
-/** A result file that could not be read as a valid result, with the reason the crash event carries. */
-export interface ReadFailure {
-  ok: false;
-  reason: string;
-}
-
-/** A site's result validator: the parsed JSON to a valid result or a failure. */
-export type ResultValidator<R extends { ok: true }> = (
-  parsed: unknown,
-) => R | ReadFailure;
 
 /** The follow-file tailer deriving a pane's log from its Stream file. */
 export interface PaneTailer {
@@ -302,27 +308,6 @@ export function rotateAttemptLog(
       join(runsDir, attemptStreamName(ticketId, attempt, resolver)),
     );
   }
-}
-
-/**
- * The one result reader (ADR-0005: the result file is the only ending
- * signal). The preamble is shared by every site, a missing file and an
- * unparseable one having the same two reasons everywhere; what a valid
- * result looks like is the site's validator, so an Outcome, a resolution, a
- * grade and a verdict read through the one path without agreeing on shape.
- */
-export function readAttemptResult<R extends { ok: true }>(
-  path: string,
-  validate: ResultValidator<R>,
-): R | ReadFailure {
-  if (!existsSync(path)) return { ok: false, reason: "no outcome written" };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return { ok: false, reason: "outcome is not parseable JSON" };
-  }
-  return validate(parsed);
 }
 
 // The exit facts' log tail (ADR-0012): the last ~20 lines of the attempt's
@@ -518,10 +503,11 @@ export async function launchAttempt<R extends { ok: true }>(
 }
 
 /**
- * Wait for a launched Attempt's ending and read its result. A live pane
- * races the Attempt ending against the result file (ADR-0016: the attempt
- * ends on a valid result without requiring pane exit); a headless child is
- * its exit; an ended handle skips the wait. The tailer, if any, is drained
+ * Wait for a launched Attempt's ending and read its result. The wait itself
+ * is the Attempt-ending module's one decision: a live pane goes in as a pane
+ * watch (the three-form race against the result-file poll, ADR-0016), a
+ * headless child as its exit, and an ended handle skips the wait, its
+ * launch having already decided the ending. The tailer, if any, is drained
  * before the log tail is read, so the exit facts are complete.
  */
 export async function awaitAttempt<R extends { ok: true }>(
@@ -530,26 +516,40 @@ export async function awaitAttempt<R extends { ok: true }>(
 ): Promise<AttemptRun<R>> {
   const { env, spec, ctx } = handle;
   let code: number;
+  let result: R | ReadFailure;
+  let crashReason: string | null;
   if (handle.kind === "ended") {
     code = handle.code;
-  } else if (handle.headlessExit !== null) {
-    code = await handle.headlessExit;
+    result = readAttemptResult(ctx.outcomePath, validate);
+    crashReason =
+      code !== 0
+        ? attemptCrashReason(env.children, code, ctx.exitCodePath, spec.crashSubject, handle.paneId)
+        : result.ok
+          ? null
+          : result.reason;
   } else {
+    let decision;
     try {
-      code = await awaitOutcomeOrPaneEnd(
-        env.herdrSocket,
-        handle.paneId!,
-        ctx.exitCodePath,
-        ctx.outcomePath,
-        // The attempt's completion: a valid result the moment it appears,
-        // without waiting for the TUI to exit (ADR-0016).
-        (path) => readAttemptResult(path, validate).ok,
-      );
+      decision = await waitForAttemptEnding<R>({
+        watch:
+          handle.headlessExit !== null
+            ? { kind: "headless", exit: handle.headlessExit }
+            : {
+                kind: "pane",
+                socketPath: env.herdrSocket,
+                paneId: handle.paneId!,
+              },
+        exitCodePath: ctx.exitCodePath,
+        outcomePath: ctx.outcomePath,
+        validate,
+        crashSubject: spec.crashSubject,
+        tracker: env.children,
+      });
     } finally {
       if (handle.tailer) await handle.tailer.finish().catch(() => {});
     }
+    ({ code, result, crashReason } = decision);
   }
-  const result = readAttemptResult(ctx.outcomePath, validate);
   // The exit facts (ADR-0012), computed the moment the attempt exits: the
   // log is closed by now, so the tail is complete, and the result file's
   // existence is the fact that distinguishes "agent never wrote its
@@ -564,21 +564,9 @@ export async function awaitAttempt<R extends { ok: true }>(
     outcomePath: ctx.outcomePath,
     exitCodePath: ctx.exitCodePath,
   };
-  if (code !== 0) {
-    return {
-      ...facts,
-      ok: false,
-      result,
-      crashReason: attemptCrashReason(
-        env.children,
-        code,
-        ctx.exitCodePath,
-        spec.crashSubject,
-        handle.paneId,
-      ),
-    };
+  if (code !== 0 || !result.ok) {
+    return { ...facts, ok: false, result, crashReason: crashReason! };
   }
-  if (!result.ok) return { ...facts, ok: false, result, crashReason: result.reason };
   return { ...facts, ok: true, result, crashReason: null };
 }
 
@@ -717,30 +705,17 @@ function spawnedPayload(
 }
 
 // ---------------------------------------------------------------------------
-// Prompt delivery and the completion wait
+// Prompt delivery
 // ---------------------------------------------------------------------------
 
-// The completion poll's cadence: how often a terminal-backed attempt checks
-// whether its result has appeared.
-const ATTEMPT_COMPLETE_POLL_MS = 250;
-// The engine's own negative "exit codes" for a botched interactive spawn,
-// mapped to human reasons by exitCrashReason. They are deliberately not
-// codes a harness can exit with, and stay clear of EXIT_CODE_UNREADABLE and
-// EXIT_CODE_PANE_GONE, the ending wait's own sentinels.
-const SPAWN_INTERACTIVE_READY_FAILED = -3;
-const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
-
-// Whether a spawn's code is one of the engine's own: the harness never ran
-// (or never took its prompt), as opposed to a code the harness exited with.
+// Whether a spawn's code is one of the engine's own (the Attempt-ending
+// module's SPAWN_INTERACTIVE sentinels): the harness never ran (or never
+// took its prompt), as opposed to a code the harness exited with.
 function isBotchedSpawnCode(code: number): boolean {
   return (
     code === SPAWN_INTERACTIVE_READY_FAILED ||
     code === SPAWN_INTERACTIVE_PROMPT_FAILED
   );
-}
-
-function sleep(ms: number): Promise<null> {
-  return new Promise((resolve) => setTimeout(() => resolve(null), ms));
 }
 
 /**
@@ -843,171 +818,6 @@ async function deliverPromptInner(
     return undefined;
   }
   return SPAWN_INTERACTIVE_PROMPT_FAILED;
-}
-
-/**
- * The completion wait of a terminal-backed spawn (ADR-0016, on ADR-0014's
- * raced endings): the attempt ends on a valid result without requiring pane
- * exit, since a TUI deliberately stays alive after the agent declares done,
- * so the result poll races the attempt's ending (attempt-ending.ts races
- * herdr's pane end against the wrapper's exit-code file, and a pane that
- * vanishes from the listing with no file behind it is the pane's own crash),
- * and the loser is released so one attempt costs the pool no subscription
- * and no timer once it is over. Exported for the boot-adopted attempt's
- * finalize (engine.ts), which waits on a pane it never launched.
- */
-export async function awaitOutcomeOrPaneEnd(
-  socketPath: string,
-  paneId: string,
-  exitCodePath: string,
-  outcomePath: string,
-  completed: (path: string) => boolean,
-): Promise<number> {
-  const release = new AbortController();
-  try {
-    const ending = await Promise.race([
-      waitForAttemptEnding(socketPath, paneId, exitCodePath, release.signal),
-      outcomeCompleted(outcomePath, completed, release.signal),
-    ]);
-    // The result may have been written a moment before the ending landed;
-    // confirm before reading the ending as a crash.
-    if (ending === "outcome" || completed(outcomePath)) return 0;
-    // A pane that left the listing has already been given the ending's grace
-    // window to write its file and did not, so there is nothing to read and
-    // nothing to wait for: reading anyway buys only the retry's two seconds
-    // and then the wrong words, blaming a wrapper that never got to run.
-    if (ending === "pane-gone") return EXIT_CODE_PANE_GONE;
-    // The exit-code file is written before the shell exits, so it is already
-    // there in the normal case; the retry only covers a daemon that reaps
-    // the pane ahead of the wrapper's last write.
-    return readExitCode(exitCodePath);
-  } finally {
-    release.abort();
-  }
-}
-
-// The result half of the completion race: resolves once the attempt's
-// completion predicate holds, polling at the completion cadence. Once the
-// race is lost it stops polling and never settles, collected with the race.
-async function outcomeCompleted(
-  outcomePath: string,
-  completed: (path: string) => boolean,
-  release: AbortSignal,
-): Promise<"outcome"> {
-  while (!release.aborted) {
-    if (completed(outcomePath)) return "outcome";
-    await sleep(ATTEMPT_COMPLETE_POLL_MS);
-  }
-  return new Promise(() => {});
-}
-
-// ---------------------------------------------------------------------------
-// Exit codes and crash reasons
-// ---------------------------------------------------------------------------
-
-// No exit code ever arrived: the wrapper's file was missing or unparseable
-// after every retry. A shell exit status is 0-255, so a negative can never
-// collide with a real one, which is what makes it usable as the signal.
-const EXIT_CODE_UNREADABLE = -1;
-
-// The pane left herdr's listing and the ending's grace window passed with no
-// file behind it (attempt-ending.ts): the attempt is over and its exit status
-// is not recoverable from anywhere. Its own value for the same reason as
-// EXIT_CODE_UNREADABLE, and distinct from it because the two want different
-// words: nothing here is the wrapper's doing.
-const EXIT_CODE_PANE_GONE = -2;
-
-// The crash reason for a non-zero exit, whose causes want different words. A
-// real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
-// fate is unknown and the pane wrapper is the thing to look at;
-// EXIT_CODE_PANE_GONE means the pane itself went away, which is neither of
-// their faults and is why it names the pane instead; the SPAWN_INTERACTIVE
-// codes are the engine's own botched interactive spawn, where the harness
-// never ran at all. The distinction is worth a helper: an unparseable file
-// reported itself as `exited 1` on attempts that had in fact succeeded, and
-// read as a harness fault until the file itself was inspected (ADR-0014's
-// amendment). `paneId` is not optional so that a new crash site has to say
-// whether it has a pane at all; a headless attempt has none and can never
-// end this way.
-export function exitCrashReason(
-  code: number,
-  exitCodePath: string,
-  subject: string,
-  paneId: string | null,
-): string {
-  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
-    return "TUI never became ready";
-  }
-  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
-    return "prompt never landed";
-  }
-  if (code === EXIT_CODE_UNREADABLE) {
-    return (
-      `${subject} exit code unreadable: the pane wrapper never wrote a ` +
-      `usable ${exitCodePath}`
-    );
-  }
-  if (code === EXIT_CODE_PANE_GONE) {
-    return (
-      `${subject} pane gone: ${paneId ?? "the pane"} left herdr's listing ` +
-      `and no exit code was written to ${exitCodePath}`
-    );
-  }
-  return `${subject} exited ${code}`;
-}
-
-// The crash reason for an attempt's non-zero exit, naming a shutdown stop
-// as what it was (ADR-0017): a headless child the engine stopped exits on
-// the signal, and "exited 143" would read as the harness's own failure.
-// Terminal-backed attempts are never stopped, and the negative sentinels
-// are the engine's own codes, so both keep the ordinary reason.
-function attemptCrashReason(
-  children: ChildTracker,
-  code: number,
-  exitCodePath: string,
-  subject: string,
-  paneId: string | null,
-): string {
-  if (children.stopping && paneId === null && code > 0) {
-    return `${subject} stopped by engine shutdown (exited ${code})`;
-  }
-  return exitCrashReason(code, exitCodePath, subject, paneId);
-}
-
-// How the pool log names the ending in passing, where the line is about the
-// marker and the code is one clause of it. A real code is the shell's own
-// status and reads as one; a sentinel is not a status at all, so it says what
-// happened instead of printing a number no shell produced. Templating it
-// unconditionally put `exited -2` on the same line as a crash reason whose
-// whole purpose is to report that no exit status was ever observed, which
-// described one attempt two contradictory ways in a single breath.
-export function exitedPhrase(code: number): string {
-  if (code === EXIT_CODE_UNREADABLE) return "ended with no exit code";
-  if (code === EXIT_CODE_PANE_GONE) return "ended with its pane gone";
-  if (code === SPAWN_INTERACTIVE_READY_FAILED) {
-    return "ended before its TUI became ready";
-  }
-  if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
-    return "ended before its prompt landed";
-  }
-  return `exited ${code}`;
-}
-
-// Read the wrapper-written exit code, retrying briefly for a reaping race,
-// and translating a missing or malformed file into EXIT_CODE_UNREADABLE: the
-// attempt still ended (pane killed, daemon lost) and the crash path is the
-// right ending, but it says which happened.
-async function readExitCode(path: string): Promise<number> {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    try {
-      const parsed = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
-      if (Number.isFinite(parsed)) return parsed;
-    } catch {
-      // not there yet
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  return EXIT_CODE_UNREADABLE;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,16 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { waitForAttemptEnding, type EndingCadence } from "./attempt-ending.ts";
+import {
+  exitCrashReason,
+  exitedPhrase,
+  waitForAttemptEnding,
+  waitForPaneEnding,
+  type EndingCadence,
+  type ReadFailure,
+} from "./attempt-ending.ts";
+import { ChildTracker } from "./children.ts";
 import {
   startFakeHerdr,
   stopFakeHerdrs,
@@ -50,11 +58,11 @@ async function watching(fake: FakeHerdr): Promise<void> {
   );
 }
 
-describe("waitForAttemptEnding", () => {
+describe("waitForPaneEnding", () => {
   it("ends on the pane's own end, without waiting on a file", async () => {
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -72,7 +80,7 @@ describe("waitForAttemptEnding", () => {
   it("ends on the exit-code file while the subscription is healthy and silent", async () => {
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -96,7 +104,7 @@ describe("waitForAttemptEnding", () => {
     // the engine waited two hours over a card that read `running`.
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -117,7 +125,7 @@ describe("waitForAttemptEnding", () => {
     // of the other observations arrives.
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -144,7 +152,7 @@ describe("waitForAttemptEnding", () => {
     // written. The pane leaving the daemon's listing is the only thing left
     // that can say so, and a wait that cannot say so parks instead.
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       exitCodePath(),
@@ -163,7 +171,7 @@ describe("waitForAttemptEnding", () => {
     // and throw away the exit code it was in the middle of writing.
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -191,7 +199,7 @@ describe("waitForAttemptEnding", () => {
     // and say nothing.
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -221,7 +229,7 @@ describe("waitForAttemptEnding", () => {
       fail: { "pane.list": { code: -1, message: "no listing today" } },
     });
     const path = exitCodePath();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       path,
@@ -246,7 +254,7 @@ describe("waitForAttemptEnding", () => {
     const path = exitCodePath();
     writeFileSync(path, "0\n");
     expect(
-      await waitForAttemptEnding(
+      await waitForPaneEnding(
         fake.socketPath,
         "pane-1",
         path,
@@ -261,7 +269,7 @@ describe("waitForAttemptEnding", () => {
   it("ends when the caller releases it", async () => {
     const fake = await startFakeHerdr({ foreignPanes: [LIVE_PANE] });
     const release = new AbortController();
-    const ending = waitForAttemptEnding(
+    const ending = waitForPaneEnding(
       fake.socketPath,
       "pane-1",
       exitCodePath(),
@@ -272,5 +280,225 @@ describe("waitForAttemptEnding", () => {
     release.abort();
     expect(await ending).toBe("released");
     await until("the subscriber go", () => fake.subscribers === 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The one ending decision: the headless adapter and the adopted fast path.
+// Neither needs a daemon at all: the headless watch is the child's own exit,
+// and an exit-code file already on disk decides before a connection opens.
+// ---------------------------------------------------------------------------
+
+// A site's validator, in miniature: the module takes any site's, so these
+// tests drive their own rather than pulling the engine's Outcome one in.
+type TestResult = { ok: true; status: string };
+
+function validateTestResult(parsed: unknown): TestResult | ReadFailure {
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as { status?: unknown }).status === "done"
+  ) {
+    return { ok: true, status: "done" };
+  }
+  return { ok: false, reason: "status was not done" };
+}
+
+// The attempt's two files in one fresh runs directory.
+function attemptPaths(): { exitCodePath: string; outcomePath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "attempt-ending-"));
+  runDirs.push(dir);
+  return {
+    exitCodePath: join(dir, "01.exitcode"),
+    outcomePath: join(dir, "01.outcome.json"),
+  };
+}
+
+describe("waitForAttemptEnding with a headless watch", () => {
+  it("ends on the child's exit and reads the result after", async () => {
+    const paths = attemptPaths();
+    writeFileSync(paths.outcomePath, JSON.stringify({ status: "done" }));
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "headless", exit: Promise.resolve(0) },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+    });
+    expect(decision).toEqual({
+      ending: "child-exit",
+      code: 0,
+      result: { ok: true, status: "done" },
+      crashReason: null,
+    });
+  });
+
+  it("carries the child's own code and names the harness on a crash", async () => {
+    const paths = attemptPaths();
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "headless", exit: Promise.resolve(3) },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+    });
+    expect(decision.ending).toBe("child-exit");
+    expect(decision.code).toBe(3);
+    expect(decision.result).toEqual({ ok: false, reason: "no outcome written" });
+    expect(decision.crashReason).toBe("harness exited 3");
+  });
+
+  it("reads a clean exit with no result as the missing-outcome crash", async () => {
+    const paths = attemptPaths();
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "headless", exit: Promise.resolve(0) },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+    });
+    expect(decision.code).toBe(0);
+    expect(decision.crashReason).toBe("no outcome written");
+  });
+
+  it("names a shutdown stop as what it was, not as the harness's failure", async () => {
+    // ADR-0017: a headless child the engine stopped exits on the signal, and
+    // "exited 143" would read as the harness's own failure. The tracker's
+    // flag is read after the wait resolves, so setting it before the child
+    // settles is the honest ordering here.
+    const paths = attemptPaths();
+    const tracker = new ChildTracker();
+    tracker.stopping = true;
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "headless", exit: Promise.resolve(143) },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+      tracker,
+    });
+    expect(decision.crashReason).toBe(
+      "harness stopped by engine shutdown (exited 143)",
+    );
+  });
+});
+
+describe("waitForAttemptEnding's boot fast path", () => {
+  // The adopted attempt's pane watch with the exit-code file already on
+  // disk: the wrapper wrote it before its shell exited and the previous
+  // attempt's file is removed before a wrapper is ever sent, so it can only
+  // be this attempt's. The socket path connects to nothing; the decision
+  // must never go near it.
+  const DEAD_SOCKET = join(tmpdir(), "attempt-ending-no-such-daemon.sock");
+
+  it("decides on the exit-code file already on disk, without a daemon", async () => {
+    const paths = attemptPaths();
+    writeFileSync(paths.exitCodePath, "7\n");
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "pane", socketPath: DEAD_SOCKET, paneId: "pane-1" },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+    });
+    expect(decision.ending).toBe("exit-code");
+    expect(decision.code).toBe(7);
+    expect(decision.result).toEqual({ ok: false, reason: "no outcome written" });
+    expect(decision.crashReason).toBe("harness exited 7");
+  });
+
+  it("reads an outcome written while the engine was down as the clean ending", async () => {
+    const paths = attemptPaths();
+    writeFileSync(paths.exitCodePath, "0\n");
+    writeFileSync(paths.outcomePath, JSON.stringify({ status: "done" }));
+    const decision = await waitForAttemptEnding<TestResult>({
+      watch: { kind: "pane", socketPath: DEAD_SOCKET, paneId: "pane-1" },
+      ...paths,
+      validate: validateTestResult,
+      crashSubject: "harness",
+    });
+    expect(decision).toEqual({
+      ending: "outcome",
+      code: 0,
+      result: { ok: true, status: "done" },
+      crashReason: null,
+    });
+  });
+});
+
+// The three causes of a non-zero exit read differently on purpose: a real code
+// blames the harness, an unreadable one points at the pane wrapper, and a pane
+// that left herdr's listing blames neither. Conflating the first two once
+// reported successful attempts as `harness exited 1` (ADR-0014).
+describe("exitCrashReason", () => {
+  test("names the harness and its code for a real exit", () => {
+    expect(exitCrashReason(3, "/runs/17.exitcode", "harness", null)).toBe(
+      "harness exited 3",
+    );
+  });
+
+  test("carries the subject through, so a resolver reads as one", () => {
+    expect(exitCrashReason(2, "/runs/17.exitcode", "resolver", null)).toBe(
+      "resolver exited 2",
+    );
+  });
+
+  test("points at the unwritten file when no code arrived", () => {
+    const reason = exitCrashReason(-1, "/runs/17.exitcode", "harness", null);
+    expect(reason).toContain("exit code unreadable");
+    expect(reason).toContain("/runs/17.exitcode");
+    expect(reason).not.toContain("exited -1");
+  });
+
+  // The pane left herdr's listing and the grace window passed with no file:
+  // the attempt is over and nothing it did is knowable. Reporting that as the
+  // wrapper's fault reads as a harness fault, which is what sent an operator
+  // looking at a harness that had never run.
+  test("names the pane and the unwritten file when the pane is gone", () => {
+    const reason = exitCrashReason(
+      -2,
+      "/runs/17.exitcode",
+      "harness",
+      "pane-4",
+    );
+    expect(reason).toContain("pane-4");
+    expect(reason).toContain("/runs/17.exitcode");
+    expect(reason).not.toContain("exited -2");
+    // The two words that would blame something that never got the chance.
+    expect(reason).not.toContain("harness exited");
+    expect(reason).not.toContain("wrapper never wrote");
+  });
+});
+
+// The pool log has to name the ending in passing, on the same line as the
+// marker and the crash reason. Templating the number unconditionally put
+// `exited -2` immediately beside a reason whose whole job is to say no exit
+// status was ever observed, so one attempt read two contradictory ways on
+// consecutive lines.
+describe("exitedPhrase", () => {
+  test("reads as the shell's own status for a real exit", () => {
+    expect(exitedPhrase(3)).toBe("exited 3");
+    expect(exitedPhrase(0)).toBe("exited 0");
+  });
+
+  test("says no code arrived rather than printing the sentinel", () => {
+    expect(exitedPhrase(-1)).toBe("ended with no exit code");
+    expect(exitedPhrase(-1)).not.toContain("-1");
+  });
+
+  test("says the pane went away rather than printing the sentinel", () => {
+    expect(exitedPhrase(-2)).toBe("ended with its pane gone");
+    expect(exitedPhrase(-2)).not.toContain("-2");
+  });
+
+  // Both halves of a log line come from here: the phrase and the reason it
+  // sits beside must agree about whether a status was ever seen.
+  test("agrees with the crash reason it sits beside", () => {
+    for (const code of [-1, -2]) {
+      const reason = exitCrashReason(
+        code,
+        "/runs/17.exitcode",
+        "harness",
+        "pane-4",
+      );
+      expect(`${exitedPhrase(code)}, crash: ${reason}`).not.toContain(
+        `exited ${code}`,
+      );
+    }
   });
 });
