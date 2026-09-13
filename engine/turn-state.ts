@@ -1,13 +1,14 @@
 /**
- * Turn-state derivation (the Conversations ADR, docs/adr/0018-conversations-
- * beside-tickets.md; CONTEXT.md: Turn): a Conversation is always either
+ * Turn state (the Conversations ADR, docs/adr/0018-conversations-beside-
+ * tickets.md; CONTEXT.md: Turn state): a Conversation is always either
  * `working` (its agent is acting, or nobody has looked yet) or `waiting` (on
- * the operator). Detected purely from two consecutive pane reads, with no
- * knowledge of herdr, sockets, or timers — engine/notices.ts's poller is the
- * only caller, on a fixed tick, and owns everything about *when* to read a
- * pane and what to do once the state changes (emit a snapshot, deliver a
- * queued Notice). Kept pure and free of engine.ts/conversations.ts imports so
- * its rules are trivial to table-test.
+ * the operator). Detected purely from consecutive pane reads, with no
+ * knowledge of herdr, sockets, or timers — the Conversation module's tick
+ * (engine/conversations.ts) is the only caller, on a fixed interval, and
+ * owns everything about *when* to read a pane and what to do once the
+ * state changes (publish a snapshot, deliver a queued Notice). Kept pure and
+ * free of engine.ts/conversations.ts imports so its rules are trivial to
+ * table-test.
  *
  * A pane read is two regions (issue #71): the transcript, and below it the
  * TUI's chrome — the input box and whatever footer the harness draws under
@@ -22,7 +23,6 @@
  * placeholder, opencode's footer hint).
  */
 
-import type { TurnState } from "./conversations.ts";
 import { VIEWPORT_WRAP_CHROME } from "./pane-session.ts";
 
 // "unchanged for 2 reads with the idle pattern present" (the plan): a single
@@ -40,27 +40,40 @@ export const IDLE_STABLE_READS = 2;
 // row much further up (a rendered table's edge) is never mistaken for it.
 export const INPUT_BOX_MAX_ROWS = 8;
 
-export interface TurnStatePrev {
-  // The previous read's transcript (TurnStateResult.transcript), not its
-  // raw pane text: the poller stores what deriveTurnState hands back.
-  text: string;
-  state: TurnState;
+/** Which side of its Turn a Conversation is on. */
+export type TurnSide = "working" | "waiting";
+
+/**
+ * A Conversation's Turn state, stored whole on its runtime and handed back
+ * in on the next read. `state`, `lastLine` and `idleSince` are what the wire
+ * shows; `stableReads` and `transcript` are the transition's own memory
+ * (the idle count so far, and the transcript region the next read is
+ * compared against) and never leave the engine.
+ */
+export interface TurnState {
+  state: TurnSide;
+  lastLine: string;
+  // When the Turn last flipped to `waiting`; null while working.
+  idleSince: string | null;
   stableReads: number;
+  transcript: string;
 }
 
-export interface TurnStateResult {
-  state: TurnState;
-  lastLine: string;
-  // Carried back to the caller so it can hand the same shape in as `prev` on
-  // the next read; deriveTurnState itself holds nothing between calls.
-  stableReads: number;
-  // The transcript region this read was judged on, for the caller to store
-  // as the next read's `prev.text`.
-  transcript: string;
-  // Whether `state` or `lastLine` moved since `prev` — the poller's signal to
-  // emit a snapshot rather than silently updating the runtime and waiting for
+/** The Turn state of a freshly launched Conversation: working, unstable, nothing said yet. */
+export const FRESH_TURN: TurnState = {
+  state: "working",
+  lastLine: "",
+  idleSince: null,
+  stableReads: 0,
+  transcript: "",
+};
+
+export interface TurnTransition {
+  turn: TurnState;
+  // Whether `state` or `lastLine` moved — the tick's signal to publish a
+  // snapshot rather than silently updating the runtime and waiting for
   // some other reason to publish one.
-  changed: boolean;
+  publish: boolean;
 }
 
 function isBlank(row: string): boolean {
@@ -143,39 +156,40 @@ export function extractLastLine(text: string): string {
   return lastLineOf(transcriptOf(text));
 }
 
-const FRESH: TurnStatePrev = { text: "", state: "working", stableReads: 0 };
-
 /**
- * One turn-state read. `prev` is the previous call's result reshaped as
- * input (null for the very first read of a freshly launched Conversation,
- * treated identically to a prior empty read: working, unstable, nothing
- * said yet). Any change in the pane's transcript region — the agent
- * streaming, the operator typing, a Notice just delivered — resets the idle
- * count and marks the turn `working`, whatever it was before: only a
- * transcript-stable pane can be idle. Chrome-only movement (a statusline
- * counter ticking under the input box) is not a change at all. Once the
- * transcript stops changing, `idlePattern`'s presence in the whole read is
- * checked each read; IDLE_STABLE_READS consecutive stable-and-idle reads
- * flip the state to `waiting`, and it stays there (through further
- * stable-and-idle reads) until the transcript changes again. A stable pane
- * whose idle pattern is absent (a dialog, a crash in progress) never
- * reaches `waiting` and resets its stable-idle count the same way an
- * outright change would; it simply holds `prev.state` for the state
- * itself, so a Conversation already `waiting` does not flap back to
- * `working` on a read that is stable but not (yet) idle, and one already
+ * One turn-state read: the current Turn state, one pane read, the harness's
+ * idle pattern and the clock, to the next Turn state and whether to publish
+ * it. Any change in the pane's transcript region — the agent streaming, the
+ * operator typing, a Notice just delivered — resets the idle count and marks
+ * the turn `working`, whatever it was before: only a transcript-stable pane
+ * can be idle. Chrome-only movement (a statusline counter ticking under the
+ * input box) is not a change at all. Once the transcript stops changing,
+ * `idlePattern`'s presence in the whole read is checked each read;
+ * IDLE_STABLE_READS consecutive stable-and-idle reads flip the state to
+ * `waiting`, stamping `idleSince` with `now`, and it stays there (through
+ * further stable-and-idle reads, `idleSince` untouched) until the transcript
+ * changes again, which clears it. A stable pane whose idle pattern is absent
+ * (a dialog, a crash in progress) never reaches `waiting` and resets its
+ * stable-idle count the same way an outright change would; it simply holds
+ * the current state, so a Conversation already `waiting` does not flap back
+ * to `working` on a read that is stable but not (yet) idle, and one already
  * `working` does not flip early.
  */
-export function deriveTurnState(
-  prev: TurnStatePrev | null,
+export function nextTurnState(
+  current: TurnState,
   text: string,
   idlePattern: string,
-): TurnStateResult {
-  const p = prev ?? FRESH;
+  now: string,
+): TurnTransition {
   const transcript = transcriptOf(text);
   const lastLine = lastLineOf(transcript);
-  if (transcript !== p.text) {
-    const changed = p.state !== "working" || lastLine !== lastLineOf(p.text);
-    return { state: "working", lastLine, stableReads: 0, transcript, changed };
+  if (transcript !== current.transcript) {
+    const publish =
+      current.state !== "working" || lastLine !== lastLineOf(current.transcript);
+    return {
+      turn: { state: "working", lastLine, idleSince: null, stableReads: 0, transcript },
+      publish,
+    };
   }
   const idle = idlePattern.length > 0 && text.includes(idlePattern);
   // Mirrors waitForReadiness's own stable-count rule (pane-session.ts): a
@@ -183,8 +197,13 @@ export function deriveTurnState(
   // count rather than merely pausing it, so `waiting` requires the idle
   // pattern on IDLE_STABLE_READS *consecutive* reads, not just any two ever
   // seen while text happened not to change.
-  const stableReads = idle ? p.stableReads + 1 : 0;
-  const state: TurnState =
-    idle && stableReads >= IDLE_STABLE_READS ? "waiting" : p.state;
-  return { state, lastLine, stableReads, transcript, changed: state !== p.state };
+  const stableReads = idle ? current.stableReads + 1 : 0;
+  const state: TurnSide =
+    idle && stableReads >= IDLE_STABLE_READS ? "waiting" : current.state;
+  const idleSince =
+    state === "waiting" ? (current.state === "waiting" ? current.idleSince : now) : null;
+  return {
+    turn: { state, lastLine, idleSince, stableReads, transcript },
+    publish: state !== current.state,
+  };
 }

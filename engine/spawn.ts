@@ -78,7 +78,7 @@ export interface HarnessDescriptor {
   // The pane-rendered pattern that marks the TUI idle, waiting on the
   // operator (the Conversations ADR's Turn state, engine/turn-state.ts):
   // present on 2 consecutive stable reads with unchanged text means
-  // "waiting", per deriveTurnState. Defaults to readyPattern via
+  // "waiting", per nextTurnState. Defaults to readyPattern via
   // idlePatternFor below, which is only correct when readyPattern is itself
   // an idle-only signal (opencode's and cursor's placeholders, observed only
   // at the boot ready frame); a harness whose readyPattern is a persistent
@@ -181,7 +181,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     // #71) shows the glyph is not an idle-only marker either: the input box
     // keeps its `❯` while the agent works, and each operator turn is echoed
     // into the transcript with one. So for claude this pattern is a "the TUI
-    // is up" guard, and idleness rests on deriveTurnState's transcript
+    // is up" guard, and idleness rests on nextTurnState's transcript
     // stability (turn-state.ts): mid-turn the spinner row (`✢ Sautéing…`)
     // redraws every read, and once the turn ends the transcript holds
     // still.

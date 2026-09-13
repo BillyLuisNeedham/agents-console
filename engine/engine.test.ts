@@ -15,7 +15,7 @@ import {
   REVIEW_TICKET_ID,
   engineSpawnSet,
   interactiveWrapper,
-  resolveAssignment,
+  resolveTicketAssignment,
   runPool,
   startPool,
   validateOutcome,
@@ -384,7 +384,7 @@ describe("verify assignment", () => {
         config,
       });
       const [marker] = loadPoolMarkers(join(poolDir, "issues"));
-      const assignment = resolveAssignment(
+      const assignment = resolveTicketAssignment(
         marker,
         config,
         stubHarness(poolDir, {}).harnesses,
@@ -400,7 +400,7 @@ describe("verify assignment", () => {
       config,
     });
     const [marker] = loadPoolMarkers(join(poolDir, "issues"));
-    const assignment = resolveAssignment(
+    const assignment = resolveTicketAssignment(
       marker,
       config,
       stubHarness(poolDir, {}).harnesses,
@@ -448,7 +448,7 @@ describe("verify assignment", () => {
       config,
     });
     const [marker] = loadPoolMarkers(join(poolDir, "issues"));
-    const assignment = resolveAssignment(
+    const assignment = resolveTicketAssignment(
       marker,
       config,
       stubHarness(poolDir, {}).harnesses,
@@ -468,7 +468,7 @@ describe("verify assignment", () => {
       config,
     });
     const [marker] = loadPoolMarkers(join(poolDir, "issues"));
-    const assignment = resolveAssignment(
+    const assignment = resolveTicketAssignment(
       marker,
       config,
       stubHarness(poolDir, {}).harnesses,
@@ -489,14 +489,14 @@ describe("verify assignment", () => {
     const rig = stubHarness(poolDir, {});
 
     expect(
-      resolveAssignment(marker, withMystery, rig.harnesses).verify,
+      resolveTicketAssignment(marker, withMystery, rig.harnesses).verify,
     ).toBeUndefined();
 
     const withBoth = {
       ...stubConfig,
       assign: { "01": { mystery: "x", verify: 2 } },
     } as PoolConfig;
-    expect(resolveAssignment(marker, withBoth, rig.harnesses).verify).toBe(2);
+    expect(resolveTicketAssignment(marker, withBoth, rig.harnesses).verify).toBe(2);
 
     const run = await approveReview(
       await runPool({ poolDir, harnesses: rig.harnesses }),
