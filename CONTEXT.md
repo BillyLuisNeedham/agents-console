@@ -150,6 +150,10 @@ _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ende
 One exchange in a Conversation: something said to the agent, or the agent's reply. The operator types Turns in the herdr tab; the engine types a Turn when a spawned Ticket ends. A Conversation is always either waiting on the operator or working on a Turn.
 _Avoid_: message (a chat term), prompt (that is only the first Turn), super-step (that is the engine's round, not the talk's)
 
+**Turn state**:
+Which side of its current Turn a Conversation is on: working (the agent is replying) or waiting (on the operator), with the last line the agent showed and, when waiting, since when. Read from the pane by the engine, never reported by the agent. A Notice is delivered only while the Conversation is waiting.
+_Avoid_: Turn (that is the exchange itself), idle (the agent waits for the operator; it is not idle), status (that is live, ended or crashed)
+
 **Notice**:
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)

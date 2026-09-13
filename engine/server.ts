@@ -35,8 +35,6 @@ import {
   repoRootOf,
   loadPoolTickets,
   startPool,
-  UNASSIGNED_ASSIGNMENT_VIEW,
-  type AssignmentView,
   type ConversationView,
   type HarnessCommand,
   type InterruptKind,
@@ -47,6 +45,7 @@ import {
   type StartConversationRequest,
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
+import { UNASSIGNED_ASSIGNMENT_VIEW, type AssignmentView } from "./assignment.ts";
 import {
   attemptLogName,
   attemptStreamName,

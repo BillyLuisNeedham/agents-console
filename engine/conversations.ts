@@ -18,14 +18,20 @@
  * itself is split on whitespace, so an un-encoded chain would corrupt the
  * parse. Tickets never hit this because pool.ts's fields (id, status,
  * blocked-by, spawned-by) never contain spaces.
+ *
+ * The module proper is built once at startPool (createConversations): it
+ * takes the environment a Conversation runs against (ConversationEnv) and
+ * the engine operations it may call (ConversationHost), and owns every
+ * live Conversation's runtime — its pane, worktree, Turn state, Notice
+ * queue and 2 s tick — plus the ids reserved for starts still in flight.
+ * Nothing here reaches into the engine's Session, and nothing runs at
+ * import time; the storage functions above the module are plain exports the
+ * server and the tests share.
  */
 
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import {
-  appendEvent,
-  type TicketEventKind,
-} from "./events.ts";
+import { appendEvent, lastAttempt, type TicketEventKind } from "./events.ts";
 import type { TicketMarker } from "./pool.ts";
 import {
   branchFor,
@@ -44,25 +50,30 @@ import {
   waitForPaneEnding,
   type PaneEnding,
 } from "./attempt-ending.ts";
-import { closeTab } from "./herdr.ts";
+import { closeTab, peekPane } from "./herdr.ts";
 import {
   launchAttempt,
+  type AttemptEnv,
   type AttemptHandle,
   type PaneTailer,
 } from "./attempt-run.ts";
 import { buildConversationTeaching } from "./prompt.ts";
-import type { Notice } from "./notices.ts";
 import {
-  attemptEnvOf,
-  clearInterrupt,
-  closeAttemptTabs,
-  emitSnapshot,
-  handleMergeConflict,
-  raiseInterrupt,
+  conversationEndedNoticeText,
+  diffStatSummary,
+  ticketEndedNoticeText,
+  type Notice,
+} from "./notices.ts";
+import { typeVerified, INTERACTIVE_PANE_READ_LINES } from "./pane-session.ts";
+import { defaultHarnessDescriptors, idlePatternFor } from "./spawn.ts";
+import { FRESH_TURN, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
+import {
+  assignmentViewOf,
+  DEFAULT_DRIVERS,
+  resolveAssignment,
   type AssignmentView,
-  type Interrupt,
-  type Session,
-} from "./engine.ts";
+} from "./assignment.ts";
+import type { Interrupt, PoolConfig } from "./engine.ts";
 
 // ---------------------------------------------------------------------------
 // Storage: the marker format and its parser, in the style of pool.ts.
@@ -70,8 +81,6 @@ import {
 
 const CONVERSATION_STATUSES = ["live", "ended", "crashed"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
-
-export type TurnState = "working" | "waiting";
 
 export interface ConversationRecord {
   id: string;
@@ -218,27 +227,8 @@ function nowIso(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime tracking (engine.ts's Session.conversations) and the B hooks.
+// The runtime: one record per live Conversation, owned by the module.
 // ---------------------------------------------------------------------------
-
-interface ConversationTurn {
-  state: TurnState;
-  lastLine: string;
-  idleSince: string | null;
-  // Workstream B's deriveTurnState counter (engine/turn-state.ts), carried
-  // here so its poller has somewhere to keep it between polls; A never reads
-  // it.
-  stableReads: number;
-  // The previous read's transcript region (TurnStateResult.transcript), the
-  // text deriveTurnState compares the next read against.
-  lastText: string;
-}
-
-// Notice's canonical definition now lives in engine/notices.ts (Workstream
-// B); re-exported here so every existing import of it from conversations.ts
-// (A's own code, and anything written against A's placeholder before B
-// landed) keeps working unchanged.
-export type { Notice } from "./notices.ts";
 
 export interface ConversationRuntime {
   id: string;
@@ -249,50 +239,26 @@ export interface ConversationRuntime {
   exitCodePath: string;
   streamPath: string;
   logPath: string;
-  turn: ConversationTurn;
+  // Stored whole and replaced whole on every tick (engine/turn-state.ts).
+  turn: TurnState;
   // The follow-file tailer deriving the log from the pane's Stream file
   // (ADR-0012), started by the launch and finished by End or crash so the
-  // derived log is complete; absent for a Conversation recovered without a
-  // launch (boot).
+  // derived log is complete.
   tailer?: PaneTailer | null;
-  // Workstream B's queue: proposals from spawned work land here, delivered
-  // as a Turn once the poller sees this Conversation waiting.
+  // Notices from spawned work that ended, delivered as a Turn once the tick
+  // sees this Conversation waiting.
   notices: Notice[];
-  // Set the moment endConversation is called; guards the background crash
-  // watcher (watchForCrash) from racing the ending it already knows about.
+  // Set the moment End is called; guards the background crash watcher
+  // (watchForCrash) from racing the ending it already knows about.
   ending: boolean;
   closing?: string;
   release: AbortController;
+  // The 2 s tick: pane read, Turn state, Notice delivery, spawn proposals.
+  // Cleared at End, crash and dispose.
+  timer: ReturnType<typeof setInterval> | null;
 }
 
-// Workstream B's per-Conversation poller (turn state + notice delivery,
-// engine/turn-state.ts): startConversation calls this once the pane is
-// ready, if B has installed one via setConversationPoller. Left unset, a
-// Conversation still starts and runs; only its turn/notice tracking on the
-// Console lags until B lands. The simplest hook that keeps A and B from
-// needing to import each other's modules.
-export type ConversationPoller = (session: Session, id: string) => void;
-let conversationPoller: ConversationPoller | null = null;
-export function setConversationPoller(poller: ConversationPoller | null): void {
-  conversationPoller = poller;
-}
-
-// Workstream B's parent-notification hook (spec's Notices section: a child
-// Conversation's end enqueues a Notice on its parent). Called once a
-// Conversation has genuinely ended (merged, ended with no commits, or ended
-// with its branch parked on reject) or crashed, naming the branch and the
-// operator's optional closing line; B installs the real enqueue via
-// setConversationEndedHook, and A calls it unconditionally so no ending path
-// can forget to.
-export type ConversationEndedHook = (
-  session: Session,
-  id: string,
-  info: { branch: string; closing?: string; crashed: boolean },
-) => void;
-let conversationEndedHook: ConversationEndedHook | null = null;
-export function setConversationEndedHook(hook: ConversationEndedHook | null): void {
-  conversationEndedHook = hook;
-}
+const CONVERSATION_POLL_MS = 2_000;
 
 // ---------------------------------------------------------------------------
 // The wire view (PoolSnapshot.conversations).
@@ -306,407 +272,468 @@ export interface ConversationView {
   assignment: AssignmentView;
   paneId: string | null;
   branch: string | null;
-  turn: { state: TurnState; lastLine: string; idleSince: string | null };
+  turn: { state: TurnSide; lastLine: string; idleSince: string | null };
   children: string[];
 }
-
-function assignmentViewOf(rec: { harness: string; model: string; drivers: string }): AssignmentView {
-  return {
-    harness: rec.harness || null,
-    model: rec.model || null,
-    drivers: rec.drivers || "implement",
-  };
-}
-
-function childrenOf(session: Session, id: string, conversations: ConversationRecord[]): string[] {
-  const tickets = session.markers
-    .filter((m) => m.spawnedBy === id)
-    .map((m) => m.id);
-  const kids = conversations.filter((c) => c.spawnedBy === id).map((c) => c.id);
-  return [...tickets, ...kids];
-}
-
-function conversationViewOf(
-  session: Session,
-  rec: ConversationRecord,
-  conversations: ConversationRecord[],
-): ConversationView {
-  const runtime = session.conversations.get(rec.id);
-  const branch = runtime
-    ? runtime.worktree.branch
-    : branchFor(session.cwd, rec.id);
-  return {
-    id: rec.id,
-    title: rec.title,
-    status: rec.status,
-    spawnedBy: rec.spawnedBy ?? null,
-    assignment: assignmentViewOf(rec),
-    paneId: runtime?.paneId ?? null,
-    // A conversation with no live runtime (ended cleanly, or never tracked
-    // across a restart) has no branch worth naming once it merged; a
-    // git-less pool has none at all. Neither is an error: the card simply
-    // shows nothing to look at.
-    branch: session.git ? branch : null,
-    turn: runtime
-      ? { state: runtime.turn.state, lastLine: runtime.turn.lastLine, idleSince: runtime.turn.idleSince }
-      : { state: "waiting", lastLine: "", idleSince: null },
-    children: childrenOf(session, rec.id, conversations),
-  };
-}
-
-/** Every Conversation the pool knows about, live or not, as the snapshot wants them. */
-export function conversationViews(session: Session): ConversationView[] {
-  const conversations = loadConversations(conversationsDir(session.poolDir));
-  return conversations.map((rec) => conversationViewOf(session, rec, conversations));
-}
-
-// ---------------------------------------------------------------------------
-// Boot: a Conversation recorded live when the engine last ran is stale — its
-// pane's fate is unknown and, per the spec, Conversations do not resume in
-// v1 regardless — so every one of them crashes at boot rather than sitting
-// unreachable with no runtime entry to end it by.
-// ---------------------------------------------------------------------------
-
-export function crashStaleLiveConversationsAtBoot(session: Session): void {
-  for (const rec of loadConversations(conversationsDir(session.poolDir))) {
-    if (rec.status !== "live") continue;
-    writeConversationStatus(rec.file, "crashed");
-    appendEvent(session.runsDir, rec.id, {
-      at: nowIso(),
-      attempt: 1,
-      kind: "crash" as TicketEventKind,
-      payload: {
-        reason:
-          "engine restarted; Conversations do not resume (the Conversations ADR)",
-      },
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Starting.
-// ---------------------------------------------------------------------------
 
 export interface StartConversationRequest {
   title: string;
   opening?: string;
   assign?: { harness?: string; model?: string; drivers?: string };
   spawnedBy?: string;
-  // The spawn poller (engine/notices.ts's adoptSpawnProposals path)
-  // precomputes a collision-free id shared across a parent's ticket-spawn
-  // and Conversation-spawn counters before calling this: the two are
-  // otherwise numbered independently (nextConversationSpawnId below only
-  // counts existing Conversation records) and could mint the same
-  // `<parent>-spawn-N` a sibling ticket spawn already claimed. When given,
-  // used verbatim instead of computing one. Absent for every operator-
-  // started call (the Console form) and every existing direct test, whose
-  // id keeps coming from nextConversationId/nextConversationSpawnId.
+  // Spawn adoption (engine.ts's adoptSpawnProposals) precomputes a
+  // collision-free id shared across a parent's ticket-spawn and
+  // Conversation-spawn counters before calling this: the two are otherwise
+  // numbered independently (nextConversationSpawnId below only counts
+  // existing Conversation records) and could mint the same `<parent>-spawn-N`
+  // a sibling ticket spawn already claimed. When given, used verbatim
+  // instead of computing one. Absent for every operator-started call (the
+  // Console form) and every existing direct test, whose id keeps coming from
+  // nextConversationId/nextConversationSpawnId.
   id?: string;
 }
 
-function resolveConversationAssignment(
-  session: Session,
-  req: StartConversationRequest,
-  existing: ConversationRecord[],
-): { harness: string; model: string; drivers: string } {
-  let base: { harness: string; model: string; drivers: string } | undefined;
-  if (req.spawnedBy) {
-    const parent = existing.find((r) => r.id === req.spawnedBy);
-    if (parent) base = { harness: parent.harness, model: parent.model, drivers: parent.drivers };
-  }
-  const config = session.state.config;
-  const harness = req.assign?.harness ?? base?.harness ?? config.defaults?.harness ?? "";
-  const model = req.assign?.model ?? base?.model ?? config.defaults?.model ?? "";
-  const drivers = req.assign?.drivers ?? base?.drivers ?? config.defaults?.drivers ?? "implement";
-  if (!harness) {
-    throw new Error(
-      "conversation start: no harness resolved (set assign.harness, inherit " +
-        "from the parent Conversation, or console.json defaults.harness)",
-    );
-  }
-  if (!session.harnesses[harness]) {
-    throw new Error(
-      `conversation start: names unknown harness '${harness}'. Known: ` +
-        `${Object.keys(session.harnesses).sort().join(", ")}`,
-    );
-  }
-  if (!model) {
-    throw new Error(
-      "conversation start: no model resolved (set assign.model, inherit " +
-        "from the parent Conversation, or console.json defaults.model)",
-    );
-  }
-  return { harness, model, drivers };
+// What the two ticket-ending hooks need of a Ticket: the marker's id, title
+// and spawned-by, nothing more.
+export interface TicketLike {
+  id: string;
+  title: string;
+  spawnedBy?: string;
+}
+
+// ---------------------------------------------------------------------------
+// The module: what it takes and what it exposes.
+// ---------------------------------------------------------------------------
+
+/**
+ * The pool facts a Conversation runs against: the Attempt-run environment
+ * (ADR-0014) plus the pool directory, the checkout and whether git is there.
+ * Built once at startPool; the terminal setting and agents file never
+ * reload (ADR-0018 reloads only the assignment slice), so nothing here goes
+ * stale.
+ */
+export interface ConversationEnv extends AttemptEnv {
+  poolDir: string;
+  cwd: string;
+  git: boolean;
 }
 
 /**
- * Start a Conversation: refuse a non-terminal pool, resolve its Assignment,
- * give it a worktree and branch, then launch it through the Attempt-run
- * module (ADR-0014's one code path): the named herdr tab, the interactive
- * harness under the ADR-0016 wrapper, the readiness wait, and the opening
- * Turn typed verbatim and echo verified. A Conversation has no headless
- * fallback (ADR-0018: it is a terminal-backed TUI or nothing), so a tab or
- * a launch command that could not be had is a start failure. Throws only
- * when the pool cannot host a Conversation at all (headless, no git) or the
- * launch never got a running pane; once the record exists on disk it
- * resolves even when the harness died before its TUI, the TUI never became
- * ready, or the opening Turn never landed, reporting the Conversation
- * crashed rather than losing the attempt to an unstructured rejection.
+ * The engine operations a Conversation may call, implemented in engine.ts
+ * by one small function over its Session. Everything the engine owns and a
+ * Conversation touches goes through here: the snapshot stream, the
+ * interrupt list, the merge chain, the spawn queue, the assignment table,
+ * the pool's markers and its live config.
  */
-export async function startConversation(
-  session: Session,
-  req: StartConversationRequest,
-): Promise<ConversationView> {
-  const env = attemptEnvOf(session);
-  if (!env.terminalBacked) {
-    throw new Error(
-      "conversation start: the pool is not terminal-backed (set " +
-        'console.json terminal: "herdr")',
-    );
-  }
-  if (!session.git) {
-    throw new Error(
-      "conversation start: the pool has no git checkout, so it cannot give " +
-        "the Conversation its own worktree and branch",
-    );
-  }
-  if (!req.title?.trim()) {
-    throw new Error("conversation start: title is required");
-  }
-  const dir = conversationsDir(session.poolDir);
-  const existing = loadConversations(dir);
-  const id =
-    req.id ??
-    (req.spawnedBy
-      ? nextConversationSpawnId(req.spawnedBy, existing)
-      : nextConversationId(existing));
-  const { harness, model, drivers } = resolveConversationAssignment(session, req, existing);
-  const worktree = prepareWorktree(session.cwd, id);
-  const file = conversationFile(session.poolDir, id);
-  const opening = req.opening ?? "";
-  // The spawn-teaching paragraph (Workstream B, prompt.ts) always lands,
-  // appended to the opening Turn when there is one; typed alone otherwise,
-  // so an agent given no opening still learns the propose-and-adopt
-  // mechanism before the operator's first real Turn. spawnPath mirrors the
-  // events module's outcome naming for a Conversation's own proposal
-  // channel: `<id>.spawn.json` beside its `.outcome.json`, polled by
-  // notices.ts's per-Conversation poller.
-  const spawnPath = join(session.runsDir, `${id}.spawn.json`);
-  const teaching = buildConversationTeaching(spawnPath);
-  const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
+export interface ConversationHost {
+  /** Publish a snapshot now: a Conversation's start, end, crash and Turn changes all happen off the drive loop, so nothing else would. */
+  publish(): void;
+  raiseInterrupt(interrupt: Interrupt): void;
+  clearInterrupt(interrupt: Interrupt, log: string): void;
+  /** Hand a conflicted merge to the resolver machinery; settles once the resulting interrupt is raised. */
+  resolveConflict(marker: TicketMarker, result: MergeResult, attempt: number): Promise<void>;
+  /** Close every herdr tab opened under this id: the launch's, and any resolver run's. */
+  closeAttemptTabs(id: string): void;
+  /** Run `work` after every merge queued before it, so no two merges touch the checkout at once; settles as `work` does. */
+  chainMerge(work: () => Promise<void> | void): Promise<void>;
+  /** Validate and adopt a Conversation's raw spawn proposals (the `spawn` field of its spawn.json): `onRejected` is handed the malformed entries for the module to log before the survivors are queued, adopted at once when the engine is idle. */
+  adoptSpawns(parentId: string, raw: unknown, onRejected: (rejections: { index?: number; reason: string }[]) => void): void;
+  /** Record a Conversation's resolved Assignment under its id (if not already known) so work it spawns inherits it. */
+  recordAssignment(id: string, assignment: { harness: string; model: string; drivers: string }): void;
+  /** The pool's Tickets as the engine currently knows them. */
+  markers(): readonly TicketMarker[];
+  /** The live pool config. */
+  config(): PoolConfig;
+}
 
-  // The launch: one attempt, the well-known file names, no rotation, no
-  // headless fallback, the opening Turn as a plain prompt (no driver line:
-  // a Conversation has no skill to invoke and no file-referencing fallback,
-  // so a paste that never lands is a crash, not a silently empty pane), and
-  // only the spawned event on the log; the crash and ending events are the
-  // Conversation's own. `issuePath` points at the Conversation's record so
-  // a custom harness that renders it never points at nothing.
-  let launch: AttemptHandle;
-  try {
-    launch = await launchAttempt(env, {
+export interface ConversationModule {
+  /** Start a Conversation; throws when the pool cannot host one at all. */
+  start(req: StartConversationRequest): Promise<ConversationView>;
+  /** End a Conversation the operator is done with. */
+  end(id: string, closing?: string): Promise<void>;
+  /** A merge-conflict or merge-approval answer whose id names a live Conversation. */
+  answerMerge(id: string, interrupt: Interrupt, approve: boolean | undefined): void;
+  /** Every Conversation the pool knows about, live or not, as the snapshot wants them. */
+  views(): ConversationView[];
+  /** Crash every Conversation recorded live by a previous engine run (they do not resume). */
+  crashStaleAtBoot(): void;
+  /** A spawned Ticket reached done: notify its parent Conversation, if any. */
+  ticketEnded(marker: TicketLike, branch: string, diffRange: string | null): void;
+  /** A spawned Ticket checkpointed: notify its parent Conversation, if any. */
+  ticketCheckpointed(marker: TicketLike, brief: string): void;
+  /** Whether a Conversation is live right now (ending included). */
+  isLive(id: string): boolean;
+  /** Ids of Conversations whose start is still in flight and has no record on disk yet. */
+  reservedIds(): Iterable<string>;
+  /** Stop every tick; called at shutdown. Runtimes are left as they are. */
+  dispose(): void;
+}
+
+export function createConversations(env: ConversationEnv, host: ConversationHost): ConversationModule {
+  const dir = conversationsDir(env.poolDir);
+  const runtimes = new Map<string, ConversationRuntime>();
+  // Ids of starts still in flight (start is async and its record is
+  // written well after the herdr tab opens): engine.ts's spawn counters
+  // fold these in so a second adoption before the record lands can never
+  // mint the same `<parent>-spawn-N` twice.
+  const reserved = new Set<string>();
+
+  function publish(): void {
+    host.publish();
+  }
+
+  function event(id: string, kind: TicketEventKind, payload: Record<string, unknown>, attempt = 1): void {
+    appendEvent(env.runsDir, id, { at: nowIso(), attempt, kind, payload });
+  }
+
+  // -------------------------------------------------------------------------
+  // Views.
+  // -------------------------------------------------------------------------
+
+  function childrenOf(id: string, conversations: ConversationRecord[]): string[] {
+    const tickets = host
+      .markers()
+      .filter((m) => m.spawnedBy === id)
+      .map((m) => m.id);
+    const kids = conversations.filter((c) => c.spawnedBy === id).map((c) => c.id);
+    return [...tickets, ...kids];
+  }
+
+  function viewOf(rec: ConversationRecord, conversations: ConversationRecord[]): ConversationView {
+    const runtime = runtimes.get(rec.id);
+    const branch = runtime ? runtime.worktree.branch : branchFor(env.cwd, rec.id);
+    return {
+      id: rec.id,
+      title: rec.title,
+      status: rec.status,
+      spawnedBy: rec.spawnedBy ?? null,
+      // A record written before drivers were stored reads as the default.
+      assignment: assignmentViewOf({ ...rec, drivers: rec.drivers || DEFAULT_DRIVERS }),
+      paneId: runtime?.paneId ?? null,
+      // A conversation with no live runtime (ended cleanly, or never tracked
+      // across a restart) has no branch worth naming once it merged; a
+      // git-less pool has none at all. Neither is an error: the card simply
+      // shows nothing to look at.
+      branch: env.git ? branch : null,
+      turn: runtime
+        ? { state: runtime.turn.state, lastLine: runtime.turn.lastLine, idleSince: runtime.turn.idleSince }
+        : { state: "waiting", lastLine: "", idleSince: null },
+      children: childrenOf(rec.id, conversations),
+    };
+  }
+
+  function views(): ConversationView[] {
+    const conversations = loadConversations(dir);
+    return conversations.map((rec) => viewOf(rec, conversations));
+  }
+
+  // -------------------------------------------------------------------------
+  // Boot: a Conversation recorded live when the engine last ran is stale —
+  // its pane's fate is unknown and, per the spec, Conversations do not
+  // resume in v1 regardless — so every one of them crashes at boot rather
+  // than sitting unreachable with no runtime entry to end it by.
+  // -------------------------------------------------------------------------
+
+  function crashStaleAtBoot(): void {
+    for (const rec of loadConversations(dir)) {
+      if (rec.status !== "live") continue;
+      writeConversationStatus(rec.file, "crashed");
+      event(rec.id, "crash", {
+        reason: "engine restarted; Conversations do not resume (the Conversations ADR)",
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Starting.
+  // -------------------------------------------------------------------------
+
+  function resolveStartAssignment(
+    req: StartConversationRequest,
+    existing: ConversationRecord[],
+  ): { harness: string; model: string; drivers: string } {
+    const parent = req.spawnedBy ? existing.find((r) => r.id === req.spawnedBy) : undefined;
+    return resolveAssignment({
+      subject: "conversation start:",
+      request: req.assign,
+      inherited: parent
+        ? { harness: parent.harness, model: parent.model, drivers: parent.drivers }
+        : undefined,
+      defaults: host.config().defaults,
+      strict: true,
+      verify: false,
+      harnesses: env.harnesses,
+    });
+  }
+
+  /**
+   * Start a Conversation: refuse a non-terminal pool, resolve its
+   * Assignment, give it a worktree and branch, then launch it through the
+   * Attempt-run module (ADR-0014's one code path): the named herdr tab, the
+   * interactive harness under the ADR-0016 wrapper, the readiness wait, and
+   * the opening Turn typed verbatim and echo verified. A Conversation has
+   * no headless fallback (ADR-0018: it is a terminal-backed TUI or
+   * nothing), so a tab or a launch command that could not be had is a
+   * start failure. Throws only when the pool cannot host a Conversation at
+   * all (headless, no git) or the launch never got a running pane; once the
+   * record exists on disk it resolves even when the harness died before its
+   * TUI, the TUI never became ready, or the opening Turn never landed,
+   * reporting the Conversation crashed rather than losing the attempt to an
+   * unstructured rejection.
+   */
+  async function start(req: StartConversationRequest): Promise<ConversationView> {
+    if (!env.terminalBacked) {
+      throw new Error(
+        "conversation start: the pool is not terminal-backed (set " +
+          'console.json terminal: "herdr")',
+      );
+    }
+    if (!env.git) {
+      throw new Error(
+        "conversation start: the pool has no git checkout, so it cannot give " +
+          "the Conversation its own worktree and branch",
+      );
+    }
+    if (!req.title?.trim()) {
+      throw new Error("conversation start: title is required");
+    }
+    const existing = loadConversations(dir);
+    const id =
+      req.id ??
+      (req.spawnedBy
+        ? nextConversationSpawnId(req.spawnedBy, existing)
+        : nextConversationId(existing));
+    // Reserved before the first await, so an adoption that reads the
+    // reserved ids right after firing this start already sees it.
+    reserved.add(id);
+    try {
+      return await launch(id, req, existing);
+    } finally {
+      reserved.delete(id);
+    }
+  }
+
+  async function launch(
+    id: string,
+    req: StartConversationRequest,
+    existing: ConversationRecord[],
+  ): Promise<ConversationView> {
+    const { harness, model, drivers } = resolveStartAssignment(req, existing);
+    const worktree = prepareWorktree(env.cwd, id);
+    const file = conversationFile(env.poolDir, id);
+    const opening = req.opening ?? "";
+    // The spawn-teaching paragraph (prompt.ts) always lands, appended to the
+    // opening Turn when there is one; typed alone otherwise, so an agent
+    // given no opening still learns the propose-and-adopt mechanism before
+    // the operator's first real Turn. spawnPath mirrors the events module's
+    // outcome naming for a Conversation's own proposal channel:
+    // `<id>.spawn.json` beside its `.outcome.json`, polled by this
+    // Conversation's tick.
+    const spawnPath = spawnProposalPath(id);
+    const teaching = buildConversationTeaching(spawnPath);
+    const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
+
+    // The launch: one attempt, the well-known file names, no rotation, no
+    // headless fallback, the opening Turn as a plain prompt (no driver line:
+    // a Conversation has no skill to invoke and no file-referencing
+    // fallback, so a paste that never lands is a crash, not a silently empty
+    // pane), and only the spawned event on the log; the crash and ending
+    // events are the Conversation's own. `issuePath` points at the
+    // Conversation's record so a custom harness that renders it never
+    // points at nothing.
+    let handle: AttemptHandle;
+    try {
+      handle = await launchAttempt(env, {
+        id,
+        issuePath: file,
+        title: req.title,
+        body: toType,
+        driver: "converse",
+        harness,
+        model,
+        cwd: worktree.path,
+        branch: worktree.branch,
+        attempt: 1,
+        naming: { attempt: null, resolver: false },
+        rotate: "none",
+        fallback: "none",
+        prompt: { kind: "plain", echo: opening.trim() || teaching },
+        crashSubject: "harness",
+        events: { kind: "spawned-only" },
+      });
+    } catch (err) {
+      removeWorktree(env.cwd, worktree);
+      throw new Error(
+        `conversation start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const record: ConversationRecord = {
       id,
-      issuePath: file,
-      title: req.title,
-      body: toType,
-      driver: "converse",
+      file,
+      title: req.title.trim(),
+      opening,
+      status: "live",
+      ...(req.spawnedBy ? { spawnedBy: req.spawnedBy } : {}),
       harness,
       model,
-      cwd: worktree.path,
-      branch: worktree.branch,
-      attempt: 1,
-      naming: { attempt: null, resolver: false },
-      rotate: "none",
-      fallback: "none",
-      prompt: { kind: "plain", echo: opening.trim() || teaching },
-      crashSubject: "harness",
-      events: { kind: "spawned-only" },
+      drivers,
+    };
+    writeConversation(dir, record);
+
+    if (handle.kind === "ended") {
+      // The harness died before its TUI came up (its own exit code,
+      // ADR-0016), or the TUI never became ready or the opening Turn never
+      // landed (the engine's codes): the launch is over, but the record and
+      // worktree stay. A crash, not a rejection, matching every other
+      // pane-loss-without-End ending. The launch keeps a pane whose harness
+      // died on its own (ADR-0014's crashed-attempt rule), but this
+      // Conversation never joins the runtimes, so nothing else would ever
+      // close the tab: it goes here, as markCrashed's does.
+      writeConversationStatus(file, "crashed");
+      event(id, "crash", {
+        code: handle.code,
+        reason: exitCrashReason(handle.code, handle.ctx.exitCodePath, "harness", handle.paneId),
+      });
+      host.closeAttemptTabs(id);
+      noteEnded(id, { branch: worktree.branch, crashed: true });
+      // Same reasoning as the success path below: this launch never touches
+      // the drive loop, so nothing else would ever tell the snapshot stream
+      // this Conversation existed at all.
+      publish();
+      return viewOf({ ...record, status: "crashed" }, loadConversations(dir));
+    }
+
+    const runtime: ConversationRuntime = {
+      id,
+      file,
+      paneId: handle.paneId,
+      tabId: handle.tabId,
+      worktree,
+      exitCodePath: handle.ctx.exitCodePath,
+      streamPath: handle.ctx.streamPath ?? join(env.runsDir, `${id}.stream.jsonl`),
+      logPath: handle.ctx.logPath,
+      turn: FRESH_TURN,
+      tailer: handle.tailer,
+      notices: [],
+      ending: false,
+      release: new AbortController(),
+      timer: null,
+    };
+    runtimes.set(id, runtime);
+    watchForCrash(runtime);
+    // The Assignment under this Conversation's id, so a Ticket it spawns
+    // whose spawned-by names it resolves the same way a grader or spawned
+    // ticket inherits from its own parent.
+    host.recordAssignment(id, { harness, model, drivers });
+    runtime.timer = setInterval(() => tick(id), CONVERSATION_POLL_MS);
+    // start is called directly off the PoolRun handle (the server route, or
+    // a fire-and-forget spawn adoption), never through the drive loop, so
+    // nothing else emits a snapshot that would tell the SSE stream this
+    // Conversation now exists; a pool with no other ticket activity in
+    // flight could otherwise go arbitrarily long before the next unrelated
+    // emit.
+    publish();
+    return viewOf(record, loadConversations(dir));
+  }
+
+  function watchForCrash(runtime: ConversationRuntime): void {
+    if (!runtime.paneId) return;
+    void waitForPaneEnding(env.herdrSocket, runtime.paneId, runtime.exitCodePath, runtime.release.signal)
+      .then((ending) => {
+        if (runtime.release.signal.aborted || runtime.ending) return;
+        markCrashed(runtime, ending);
+      })
+      .catch(() => {});
+  }
+
+  function stopTick(runtime: ConversationRuntime): void {
+    if (runtime.timer !== null) clearInterval(runtime.timer);
+    runtime.timer = null;
+  }
+
+  function markCrashed(runtime: ConversationRuntime, ending: PaneEnding): void {
+    // The pane is gone: drain the tailer so the derived log holds what it showed.
+    void runtime.tailer?.finish().catch(() => {});
+    stopTick(runtime);
+    writeConversationStatus(runtime.file, "crashed");
+    event(runtime.id, "crash", { reason: `pane lost without End (${ending})` });
+    host.closeAttemptTabs(runtime.id);
+    // Before the runtime leaves the map, as in finishEnd: noteEnded reads
+    // runtime.notices to drop and log whatever never delivered.
+    noteEnded(runtime.id, { branch: runtime.worktree.branch, crashed: true });
+    runtimes.delete(runtime.id);
+    publish();
+  }
+
+  // -------------------------------------------------------------------------
+  // Ending.
+  // -------------------------------------------------------------------------
+
+  function finishEnd(runtime: ConversationRuntime, merged: boolean): void {
+    stopTick(runtime);
+    writeConversationStatus(runtime.file, "ended");
+    event(runtime.id, "ended", { closing: runtime.closing ?? null, by: "operator", merged });
+    host.closeAttemptTabs(runtime.id);
+    // While the runtime is still in the map: noteEnded reads its notices
+    // to drop and log whatever never delivered.
+    noteEnded(runtime.id, {
+      branch: runtime.worktree.branch,
+      closing: runtime.closing,
+      crashed: false,
     });
-  } catch (err) {
-    removeWorktree(session.cwd, worktree);
-    throw new Error(
-      `conversation start: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    runtimes.delete(runtime.id);
+    // The one place every ending path converges (end's no-commit fast path
+    // and its merge-chain success, plus the three merge answers below):
+    // none of those callers run inside the drive loop (end is a direct
+    // PoolRun call; the merge answers route through processAnswer, which
+    // only emits once a fresh drive actually starts or reaches its next
+    // boundary, not synchronously), so this is the single spot that
+    // guarantees the snapshot stream sees the ending promptly, mirroring
+    // markCrashed's own emit just above.
+    publish();
   }
 
-  const record: ConversationRecord = {
-    id,
-    file,
-    title: req.title.trim(),
-    opening,
-    status: "live",
-    ...(req.spawnedBy ? { spawnedBy: req.spawnedBy } : {}),
-    harness,
-    model,
-    drivers,
-  };
-  writeConversation(dir, record);
+  /**
+   * End a Conversation: only the operator does this (card End, Detail End,
+   * or closing the herdr tab — the last arrives as a pane loss and is
+   * handled by watchForCrash instead, never here). The tab closes at once,
+   * before the merge is even attempted: once End is clicked the talk is over
+   * regardless of how the merge goes, and a conflict's resolver gets its own
+   * fresh tab (host.resolveConflict) rather than reusing the one just
+   * closed.
+   */
+  async function end(id: string, closing?: string): Promise<void> {
+    const runtime = runtimes.get(id);
+    if (!runtime) throw new Error(`end conversation: no live conversation ${id}`);
+    if (runtime.ending) return;
+    runtime.ending = true;
+    runtime.closing = closing;
+    runtime.release.abort();
+    if (runtime.tabId) await closeTab(env.herdrSocket, runtime.tabId).catch(() => {});
+    // The talk is over: drain the tailer so the derived log is complete.
+    await runtime.tailer?.finish().catch(() => {});
 
-  if (launch.kind === "ended") {
-    // The harness died before its TUI came up (its own exit code, ADR-0016),
-    // or the TUI never became ready or the opening Turn never landed (the
-    // engine's codes): the launch is over, but the record and worktree
-    // stay. A crash, not a rejection, matching every other
-    // pane-loss-without-End ending. The launch keeps a pane whose harness
-    // died on its own (ADR-0014's crashed-attempt rule), but this
-    // Conversation never joins session.conversations, so nothing else would
-    // ever close the tab: it goes here, as markConversationCrashed's does.
-    writeConversationStatus(file, "crashed");
-    appendEvent(session.runsDir, id, {
-      at: nowIso(),
-      attempt: 1,
-      kind: "crash" as TicketEventKind,
-      payload: {
-        code: launch.code,
-        reason: exitCrashReason(launch.code, launch.ctx.exitCodePath, "harness", launch.paneId),
-      },
-    });
-    closeAttemptTabs(session, id);
-    conversationEndedHook?.(session, id, { branch: worktree.branch, crashed: true });
-    // Same reasoning as the success path below: this launch never touches
-    // the drive loop (startConversation is called directly off the
-    // PoolRun handle, not through kickProcessing), so nothing else would
-    // ever tell the snapshot stream this Conversation existed at all.
-    emitSnapshot(session, session.settledPhase ?? "running");
-    return conversationViewOf(session, { ...record, status: "crashed" }, loadConversations(dir));
-  }
+    const target = currentBranch(env.cwd);
+    const countProbe = git(env.cwd, ["rev-list", "--count", `${target}..${runtime.worktree.branch}`]);
+    const hasCommits = countProbe.ok && Number(countProbe.out) > 0;
+    if (!hasCommits) {
+      removeWorktree(env.cwd, runtime.worktree);
+      finishEnd(runtime, false);
+      return;
+    }
 
-  const runtime: ConversationRuntime = {
-    id,
-    file,
-    paneId: launch.paneId,
-    tabId: launch.tabId,
-    worktree,
-    exitCodePath: launch.ctx.exitCodePath,
-    streamPath: launch.ctx.streamPath ?? join(session.runsDir, `${id}.stream.jsonl`),
-    logPath: launch.ctx.logPath,
-    turn: { state: "working", lastLine: "", idleSince: null, stableReads: 0, lastText: "" },
-    tailer: launch.tailer,
-    notices: [],
-    ending: false,
-    release: new AbortController(),
-  };
-  session.conversations.set(id, runtime);
-  watchForCrash(session, runtime);
-  conversationPoller?.(session, id);
-  // startConversation is called directly off the PoolRun handle (the
-  // server route, or a fire-and-forget spawn adoption), never through
-  // kickProcessing/the drive loop, so nothing else emits a snapshot that
-  // would tell the SSE stream this Conversation
-  // now exists; a pool with no other ticket activity in flight could
-  // otherwise go arbitrarily long before the next unrelated emit.
-  emitSnapshot(session, session.settledPhase ?? "running");
-
-  return conversationViewOf(session, record, loadConversations(dir));
-}
-
-function watchForCrash(session: Session, runtime: ConversationRuntime): void {
-  if (!runtime.paneId) return;
-  void waitForPaneEnding(session.herdrSocket, runtime.paneId, runtime.exitCodePath, runtime.release.signal)
-    .then((ending) => {
-      if (runtime.release.signal.aborted || runtime.ending) return;
-      markConversationCrashed(session, runtime, ending);
-    })
-    .catch(() => {});
-}
-
-function markConversationCrashed(session: Session, runtime: ConversationRuntime, ending: PaneEnding): void {
-  // The pane is gone: drain the tailer so the derived log holds what it showed.
-  void runtime.tailer?.finish().catch(() => {});
-  writeConversationStatus(runtime.file, "crashed");
-  appendEvent(session.runsDir, runtime.id, {
-    at: nowIso(),
-    attempt: 1,
-    kind: "crash" as TicketEventKind,
-    payload: { reason: `pane lost without End (${ending})` },
-  });
-  closeAttemptTabs(session, runtime.id);
-  // Same reordering as finishConversationEnd, same reason: B's hook needs
-  // runtime.notices before it is gone.
-  conversationEndedHook?.(session, runtime.id, { branch: runtime.worktree.branch, crashed: true });
-  session.conversations.delete(runtime.id);
-  emitSnapshot(session, session.settledPhase ?? "running");
-}
-
-// ---------------------------------------------------------------------------
-// Ending.
-// ---------------------------------------------------------------------------
-
-function finishConversationEnd(session: Session, runtime: ConversationRuntime, merged: boolean): void {
-  writeConversationStatus(runtime.file, "ended");
-  appendEvent(session.runsDir, runtime.id, {
-    at: nowIso(),
-    attempt: 1,
-    kind: "ended" as TicketEventKind,
-    payload: { closing: runtime.closing ?? null, by: "operator", merged },
-  });
-  closeAttemptTabs(session, runtime.id);
-  // The hook fires while the runtime is still in session.conversations (the
-  // delete follows it, deliberately reordered from A's original): B's hook
-  // reads runtime.notices to drop and log whatever never delivered, and
-  // session.conversations.get(id) would already be empty-handed the other
-  // way round.
-  conversationEndedHook?.(session, runtime.id, {
-    branch: runtime.worktree.branch,
-    closing: runtime.closing,
-    crashed: false,
-  });
-  session.conversations.delete(runtime.id);
-  // The one place every ending path converges (endConversation's no-commit
-  // fast path and its merge-chain success, plus resumeConversationMerge,
-  // approveConversationMerge and rejectConversationMerge below, all call
-  // this instead of duplicating the ending): none of those callers run
-  // inside the drive loop (endConversation is a direct PoolRun call; the
-  // merge answers route through processAnswer/kickProcessing, which only
-  // emits once a fresh drive actually starts or reaches its next boundary,
-  // not synchronously), so this is the single spot that guarantees the
-  // snapshot stream sees the ending promptly, mirroring
-  // markConversationCrashed's own emit just above.
-  emitSnapshot(session, session.settledPhase ?? "running");
-}
-
-/**
- * End a Conversation: only the operator does this (card End, Detail End, or
- * closing the herdr tab — the last arrives as a pane loss and is handled by
- * watchForCrash instead, never here). The tab closes at once, before the
- * merge is even attempted: once End is clicked the talk is over regardless
- * of how the merge goes, and a conflict's resolver gets its own fresh tab
- * (handleMergeConflict) rather than reusing the one just closed.
- */
-export async function endConversation(session: Session, id: string, closing?: string): Promise<void> {
-  const runtime = session.conversations.get(id);
-  if (!runtime) throw new Error(`end conversation: no live conversation ${id}`);
-  if (runtime.ending) return;
-  runtime.ending = true;
-  runtime.closing = closing;
-  runtime.release.abort();
-  if (runtime.tabId) await closeTab(session.herdrSocket, runtime.tabId).catch(() => {});
-  // The talk is over: drain the tailer so the derived log is complete.
-  await runtime.tailer?.finish().catch(() => {});
-
-  const target = currentBranch(session.cwd);
-  const countProbe = git(session.cwd, ["rev-list", "--count", `${target}..${runtime.worktree.branch}`]);
-  const hasCommits = countProbe.ok && Number(countProbe.out) > 0;
-  if (!hasCommits) {
-    removeWorktree(session.cwd, runtime.worktree);
-    finishConversationEnd(session, runtime, false);
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
-    session.mergeChain = session.mergeChain
-      .then(() => {
-        const result = mergeBranch(session.cwd, runtime.worktree.branch);
+    // A merge-chain failure must never wedge the End for its caller: the
+    // Conversation is left `ending` with its worktree intact, visible as a
+    // stuck End the operator can retry, and the chain itself stays usable
+    // for the next caller (the host's contract).
+    await host
+      .chainMerge(async () => {
+        const result = mergeBranch(env.cwd, runtime.worktree.branch);
         if (result.ok) {
-          removeWorktree(session.cwd, runtime.worktree);
-          appendEvent(session.runsDir, id, {
-            at: nowIso(),
-            attempt: 1,
-            kind: "merged" as TicketEventKind,
-            payload: {},
-          });
-          finishConversationEnd(session, runtime, true);
-          resolve();
+          removeWorktree(env.cwd, runtime.worktree);
+          event(id, "merged", {});
+          finishEnd(runtime, true);
           return;
         }
         const synthMarker: TicketMarker = {
@@ -717,173 +744,386 @@ export async function endConversation(session: Session, id: string, closing?: st
           title: id,
           spec: "",
         };
-        // The ending stays pending: runtime remains in session.conversations
-        // (still `ending`) until the raised interrupt is answered, at which
-        // point answerConversationMerge below finishes it.
-        return handleMergeConflict(session, synthMarker, result, 1).then(resolve);
+        // The ending stays pending: the runtime remains in the map (still
+        // `ending`) until the raised interrupt is answered, at which point
+        // answerMerge below finishes it.
+        await host.resolveConflict(synthMarker, result, 1);
       })
-      .catch(() => {
-        // A merge-chain failure must never wedge the chain for the next
-        // caller (a ticket's merge, another Conversation's End); the
-        // Conversation is left `ending` with its worktree intact, visible
-        // as a stuck End the operator can retry.
-        resolve();
-      });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// The processAnswer hook: merge-conflict / merge-approval answers for a
-// Conversation id route here instead of through the ticket path.
-// ---------------------------------------------------------------------------
-
-function conversationMergeConflictInterrupt(
-  session: Session,
-  runtime: ConversationRuntime,
-  result: MergeResult,
-): Interrupt {
-  const files = result.conflicted.length > 0 ? result.conflicted.join(", ") : "(no unmerged paths listed)";
-  return {
-    ticketId: runtime.id,
-    kind: "merge-conflict",
-    body:
-      `merging ${runtime.worktree.branch} onto the working branch failed; the ` +
-      "merge was aborted and the working branch was left clean.\n" +
-      `conflicted files: ${files}\n` +
-      `the Conversation's work is parked on branch ${runtime.worktree.branch}, ` +
-      `checked out at ${worktreePathFor(session.cwd, runtime.id)}.\n` +
-      (result.detail ? `git said: ${result.detail}\n` : "") +
-      "resolve the conflict by hand and resume; the merge is re-attempted on resume.",
-  };
-}
-
-function conversationManualMergeInterrupt(
-  session: Session,
-  runtime: ConversationRuntime,
-  result: MergeResult,
-  attemptNote: string,
-): Interrupt {
-  const base = conversationMergeConflictInterrupt(session, runtime, result);
-  return { ...base, body: `${base.body}\nThe resolver agent attempted: ${attemptNote}` };
-}
-
-function resumeConversationMerge(
-  session: Session,
-  runtime: ConversationRuntime,
-  interrupt: Interrupt,
-): void {
-  const result = mergeBranch(session.cwd, runtime.worktree.branch);
-  if (!result.ok) {
-    appendEvent(session.runsDir, runtime.id, {
-      at: nowIso(),
-      attempt: 1,
-      kind: "merge-conflict" as TicketEventKind,
-      payload: { files: result.conflicted },
-    });
-    clearInterrupt(session, interrupt, `merge re-attempt for conversation ${runtime.id} still conflicts`);
-    raiseInterrupt(session, conversationMergeConflictInterrupt(session, runtime, result));
-    return;
+      .catch(() => {});
   }
-  removeWorktree(session.cwd, runtime.worktree);
-  appendEvent(session.runsDir, runtime.id, {
-    at: nowIso(),
-    attempt: 1,
-    kind: "merged" as TicketEventKind,
-    payload: {},
-  });
-  clearInterrupt(
-    session,
-    interrupt,
-    `interrupt answered for conversation ${runtime.id} (merge-conflict): merge landed`,
-  );
-  finishConversationEnd(session, runtime, true);
-}
 
-function approveConversationMerge(
-  session: Session,
-  runtime: ConversationRuntime,
-  interrupt: Interrupt,
-): void {
-  commitMerge(runtime.worktree);
-  const result = mergeBranch(session.cwd, runtime.worktree.branch);
-  if (!result.ok) {
-    appendEvent(session.runsDir, runtime.id, {
-      at: nowIso(),
-      attempt: 1,
-      kind: "merge-conflict" as TicketEventKind,
-      payload: { files: result.conflicted },
-    });
-    clearInterrupt(
-      session,
+  // -------------------------------------------------------------------------
+  // Merge answers: merge-conflict / merge-approval answers for a
+  // Conversation id route here instead of through the ticket path.
+  // -------------------------------------------------------------------------
+
+  function mergeConflictInterrupt(runtime: ConversationRuntime, result: MergeResult): Interrupt {
+    const files = result.conflicted.length > 0 ? result.conflicted.join(", ") : "(no unmerged paths listed)";
+    return {
+      ticketId: runtime.id,
+      kind: "merge-conflict",
+      body:
+        `merging ${runtime.worktree.branch} onto the working branch failed; the ` +
+        "merge was aborted and the working branch was left clean.\n" +
+        `conflicted files: ${files}\n` +
+        `the Conversation's work is parked on branch ${runtime.worktree.branch}, ` +
+        `checked out at ${worktreePathFor(env.cwd, runtime.id)}.\n` +
+        (result.detail ? `git said: ${result.detail}\n` : "") +
+        "resolve the conflict by hand and resume; the merge is re-attempted on resume.",
+    };
+  }
+
+  function manualMergeInterrupt(
+    runtime: ConversationRuntime,
+    result: MergeResult,
+    attemptNote: string,
+  ): Interrupt {
+    const base = mergeConflictInterrupt(runtime, result);
+    return { ...base, body: `${base.body}\nThe resolver agent attempted: ${attemptNote}` };
+  }
+
+  function resumeMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
+    const result = mergeBranch(env.cwd, runtime.worktree.branch);
+    if (!result.ok) {
+      event(runtime.id, "merge-conflict", { files: result.conflicted });
+      host.clearInterrupt(interrupt, `merge re-attempt for conversation ${runtime.id} still conflicts`);
+      host.raiseInterrupt(mergeConflictInterrupt(runtime, result));
+      return;
+    }
+    removeWorktree(env.cwd, runtime.worktree);
+    event(runtime.id, "merged", {});
+    host.clearInterrupt(
       interrupt,
-      `merge after resolver approval for conversation ${runtime.id} still conflicts`,
+      `interrupt answered for conversation ${runtime.id} (merge-conflict): merge landed`,
     );
-    raiseInterrupt(
-      session,
-      conversationManualMergeInterrupt(
-        session,
-        runtime,
-        result,
-        "the resolver's resolution did not merge cleanly on approval",
-      ),
+    finishEnd(runtime, true);
+  }
+
+  function approveMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
+    commitMerge(runtime.worktree);
+    const result = mergeBranch(env.cwd, runtime.worktree.branch);
+    if (!result.ok) {
+      event(runtime.id, "merge-conflict", { files: result.conflicted });
+      host.clearInterrupt(
+        interrupt,
+        `merge after resolver approval for conversation ${runtime.id} still conflicts`,
+      );
+      host.raiseInterrupt(
+        manualMergeInterrupt(runtime, result, "the resolver's resolution did not merge cleanly on approval"),
+      );
+      return;
+    }
+    removeWorktree(env.cwd, runtime.worktree);
+    event(runtime.id, "merged", {});
+    host.clearInterrupt(
+      interrupt,
+      `interrupt answered for conversation ${runtime.id} (merge-approval): resolver resolution committed`,
     );
-    return;
+    finishEnd(runtime, true);
   }
-  removeWorktree(session.cwd, runtime.worktree);
-  appendEvent(session.runsDir, runtime.id, {
-    at: nowIso(),
-    attempt: 1,
-    kind: "merged" as TicketEventKind,
-    payload: {},
-  });
-  clearInterrupt(
-    session,
-    interrupt,
-    `interrupt answered for conversation ${runtime.id} (merge-approval): resolver resolution committed`,
-  );
-  finishConversationEnd(session, runtime, true);
-}
 
-function rejectConversationMerge(
-  session: Session,
-  runtime: ConversationRuntime,
-  interrupt: Interrupt,
-): void {
-  git(runtime.worktree.path, ["merge", "--abort"]);
-  clearInterrupt(
-    session,
-    interrupt,
-    `merge-approval rejected for conversation ${runtime.id}: staged resolution discarded, branch parked`,
-  );
-  // Unlike a ticket's rejectMerge, the Conversation is not reopened: only
-  // the operator starts a new one (spec: only the operator ends a
-  // Conversation, and ending is terminal). The branch stays parked.
-  finishConversationEnd(session, runtime, false);
-}
+  function rejectMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
+    git(runtime.worktree.path, ["merge", "--abort"]);
+    host.clearInterrupt(
+      interrupt,
+      `merge-approval rejected for conversation ${runtime.id}: staged resolution discarded, branch parked`,
+    );
+    // Unlike a ticket's rejectMerge, the Conversation is not reopened: only
+    // the operator starts a new one (spec: only the operator ends a
+    // Conversation, and ending is terminal). The branch stays parked.
+    finishEnd(runtime, false);
+  }
 
-/**
- * engine.ts's processAnswer calls this when a merge-conflict or
- * merge-approval interrupt's ticketId names a live Conversation, before
- * falling through to the ticket path (which would fail: a Conversation has
- * no Issue file in session.markers).
- */
-export function answerConversationMerge(
-  session: Session,
-  id: string,
-  interrupt: Interrupt,
-  approve: boolean | undefined,
-): void {
-  const runtime = session.conversations.get(id);
-  if (!runtime) {
-    throw new Error(`conversation merge answer: no live conversation ${id}`);
+  function answerMerge(id: string, interrupt: Interrupt, approve: boolean | undefined): void {
+    const runtime = runtimes.get(id);
+    if (!runtime) {
+      throw new Error(`conversation merge answer: no live conversation ${id}`);
+    }
+    if (interrupt.kind === "merge-conflict") {
+      resumeMerge(runtime, interrupt);
+      return;
+    }
+    if (approve) {
+      approveMerge(runtime, interrupt);
+    } else {
+      rejectMerge(runtime, interrupt);
+    }
   }
-  if (interrupt.kind === "merge-conflict") {
-    resumeConversationMerge(session, runtime, interrupt);
-    return;
+
+  // -------------------------------------------------------------------------
+  // Notices: queued on the parent's runtime, typed into its pane once it is
+  // next waiting, dropped (and logged on the child's file) when the parent
+  // is gone or ending.
+  // -------------------------------------------------------------------------
+
+  function logDropped(notice: Notice, reason: string): void {
+    event(
+      notice.from,
+      "notice-dropped",
+      { to: notice.to, kind: notice.kind, reason, text: notice.text },
+      lastAttempt(env.runsDir, notice.from),
+    );
   }
-  if (approve) {
-    approveConversationMerge(session, runtime, interrupt);
-  } else {
-    rejectConversationMerge(session, runtime, interrupt);
+
+  /**
+   * Queue one Notice for delivery, or drop it at once. Void by design:
+   * queueing is synchronous bookkeeping on the runtime; a delivery that
+   * becomes possible immediately (the parent is already `waiting`) is kicked
+   * off in the background rather than awaited here, so no caller needs to
+   * become async just to raise one.
+   */
+  function enqueue(notice: Notice): void {
+    const runtime = runtimes.get(notice.to);
+    if (!runtime || runtime.ending) {
+      // Orphaned: the parent never existed this run, already ended, crashed,
+      // or is mid-End (its tab is already closing). Dropped and logged on
+      // the CHILD's own file — the spec's wording is explicit that this
+      // lands on "the child's ticket log", never the parent's, since the
+      // parent may have nothing worth writing to by the time this fires.
+      logDropped(notice, runtime ? "parent conversation is ending" : "parent conversation is not live");
+      return;
+    }
+    runtime.notices.push(notice);
+    if (runtime.turn.state === "waiting") {
+      void deliver(notice.to);
+    }
   }
+
+  function harnessDescriptorFor(runtime: ConversationRuntime) {
+    const rec = readConversation(runtime.file);
+    return defaultHarnessDescriptors[rec.harness];
+  }
+
+  /**
+   * Drain a Conversation's queued Notices by typing each as its own Turn
+   * (typeVerified + Enter — typeVerified sends the Enter itself once the
+   * echo confirms). Claims the whole queue up front (a synchronous splice,
+   * before any await), so a concurrent trigger — the tick's own waiting
+   * check racing an enqueue that fired mid-tick — can never double-deliver.
+   * A delivery that fails to echo (typeVerified resolves false) *or throws*
+   * (a herdr RPC failure: a daemon blip, a socket error) stops the drain and
+   * puts the undelivered remainder back at the front of the queue for the
+   * next trigger to retry, rather than skipping ahead or losing it. Both
+   * callers fire this with a bare `void` (raising a Notice, or the tick's
+   * own waiting check, must never become async just to wait on delivery),
+   * so this function itself must never reject: an uncaught rejection from a
+   * `void`-launched promise is an unhandled rejection Bun can escalate to a
+   * process crash. Every failure, from typeVerified itself or from anything
+   * around it (a Conversation's record briefly unreadable), is therefore
+   * caught here, logged once as this attempt's own "notice" event, and
+   * turned into "still queued" rather than an exception.
+   */
+  async function deliver(id: string): Promise<void> {
+    try {
+      const runtime = runtimes.get(id);
+      if (!runtime || runtime.ending || !runtime.paneId || runtime.notices.length === 0) return;
+      const descriptor = harnessDescriptorFor(runtime);
+      const queue = runtime.notices.splice(0);
+      for (let i = 0; i < queue.length; i++) {
+        const notice = queue[i];
+        const echoTargets = [descriptor?.echoPattern, notice.text].filter(
+          (t): t is string => typeof t === "string" && t.length > 0,
+        );
+        let delivered = false;
+        let error: string | undefined;
+        try {
+          delivered = await typeVerified(
+            env.herdrSocket,
+            runtime.paneId,
+            notice.text,
+            echoTargets,
+            descriptor?.clearKeys ?? [],
+          );
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+        }
+        const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
+        event(notice.from, "notice", { ...payload, to: notice.to }, lastAttempt(env.runsDir, notice.from));
+        event(id, "notice", { ...payload, from: notice.from }, lastAttempt(env.runsDir, id));
+        if (!delivered) {
+          runtime.notices.unshift(...queue.slice(i));
+          return;
+        }
+      }
+    } catch {
+      // Belt and braces beyond the per-notice catch above: anything else
+      // that could throw here (harnessDescriptorFor's file read, a runtime
+      // that vanished mid-drain) must still never escape as an unhandled
+      // rejection. Nothing to queue back in this outer case since the queue
+      // was already claimed by the inner splice; the next enqueue or waiting
+      // read starts a fresh drain.
+    }
+  }
+
+  // Whether `id` names a Conversation the pool has ever recorded, live or
+  // not. Distinct from isLive: a ticket's spawned-by can name a Conversation
+  // that has since ended or crashed, and that case must still reach enqueue
+  // so its Notice is dropped and *logged*, not silently skipped — only a
+  // spawned-by that names an ordinary Ticket (not a Conversation at all)
+  // should build nothing.
+  function isKnown(id: string): boolean {
+    return loadConversations(dir).some((r) => r.id === id);
+  }
+
+  /**
+   * A spawned Ticket reached `done` (its merge landed): if its `spawned-by`
+   * names any Conversation the pool has recorded, enqueue a Notice —
+   * enqueue itself decides delivery vs. drop from there (the parent may no
+   * longer be live). `diffRange` is a git range (`<sha-before>..HEAD`)
+   * computed by the caller before the merge removed the ticket's branch —
+   * null when the range could not be captured (a headless pool, or a fast
+   * path that skipped it), in which case the diff reads as unavailable
+   * rather than guessing.
+   */
+  function ticketEnded(marker: TicketLike, branch: string, diffRange: string | null): void {
+    if (!marker.spawnedBy || !isKnown(marker.spawnedBy)) return;
+    const diffStat = diffRange ? diffStatSummary(env.cwd, diffRange) : "(diff unavailable)";
+    const text = ticketEndedNoticeText({
+      id: marker.id,
+      title: marker.title,
+      outcome: "done",
+      branch,
+      diffStat,
+    });
+    enqueue({ to: marker.spawnedBy, from: marker.id, kind: "ticket-ended", text });
+  }
+
+  /**
+   * A spawned Ticket checkpointed: if its `spawned-by` names any
+   * Conversation the pool has recorded, enqueue a Notice (same "known, not
+   * just live" rule as ticketEnded above). The branch still exists in a git
+   * pool (a checkpoint never merges), so the diff is a live three-dot range
+   * against the pool's current working branch; a headless pool has neither,
+   * and the Notice still goes out (to be delivered or dropped) with
+   * placeholders for both.
+   */
+  function ticketCheckpointed(marker: TicketLike, brief: string): void {
+    if (!marker.spawnedBy || !isKnown(marker.spawnedBy)) return;
+    const branch = env.git ? branchFor(env.cwd, marker.id) : "(no git checkout)";
+    const diffStat = env.git
+      ? diffStatSummary(env.cwd, `${currentBranch(env.cwd)}...${branch}`)
+      : "(no git checkout)";
+    const text = ticketEndedNoticeText({
+      id: marker.id,
+      title: marker.title,
+      outcome: "checkpoint",
+      brief,
+      branch,
+      diffStat,
+    });
+    enqueue({ to: marker.spawnedBy, from: marker.id, kind: "ticket-ended", text });
+  }
+
+  // A Conversation has genuinely ended (merged, ended with no commits, or
+  // ended with its branch parked on reject) or crashed: drop what never
+  // delivered, and tell its own parent, if it has one. Called while the
+  // runtime is still in the map.
+  function noteEnded(id: string, info: { branch: string; closing?: string; crashed: boolean }): void {
+    const runtime = runtimes.get(id);
+    for (const notice of runtime?.notices ?? []) {
+      logDropped(notice, "parent conversation ended before delivery");
+    }
+    const parentId = loadConversations(dir).find((r) => r.id === id)?.spawnedBy;
+    if (!parentId) return;
+    const text = conversationEndedNoticeText({ branch: info.branch, closing: info.closing });
+    enqueue({ to: parentId, from: id, kind: "conversation-ended", text });
+  }
+
+  // -------------------------------------------------------------------------
+  // The tick: Turn state (engine/turn-state.ts), Notice delivery and this
+  // Conversation's own mid-run Spawn proposal file, every 2 s per live
+  // Conversation.
+  // -------------------------------------------------------------------------
+
+  function spawnProposalPath(id: string): string {
+    return join(env.runsDir, `${id}.spawn.json`);
+  }
+
+  /**
+   * Read `runs/<id>.spawn.json`, consume it (rm, whether it parsed or not: a
+   * malformed file left in place would be re-read and re-rejected forever),
+   * and hand its `spawn` field to the host, which validates it against
+   * exactly the shape a Ticket's outcome.spawn is held to and adopts the
+   * survivors. Rejected entries are logged first, the same way an outcome's
+   * are (spawn-rejected on this Conversation's own file, since it is both
+   * proposer and parent here).
+   */
+  function pollSpawnProposals(id: string): void {
+    const path = spawnProposalPath(id);
+    if (!existsSync(path)) return;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      rmSync(path, { force: true });
+      return;
+    }
+    rmSync(path, { force: true });
+    const spawnField = (raw as { spawn?: unknown } | null)?.spawn;
+    host.adoptSpawns(id, spawnField, (rejections) => {
+      for (const rejection of rejections) {
+        event(
+          id,
+          "spawn-rejected",
+          { index: rejection.index, reason: rejection.reason },
+          lastAttempt(env.runsDir, id),
+        );
+      }
+    });
+  }
+
+  function tick(id: string): void {
+    const runtime = runtimes.get(id);
+    if (!runtime || runtime.ending || !runtime.paneId) return;
+    // A single tick's failure (a transient read error, a record momentarily
+    // unreadable) must never take the tick down for every other live
+    // Conversation, nor stop this one's own future ticks: swallow and let
+    // the next tick try again, the same tolerance peekPane's own callers
+    // already apply to a daemon blip.
+    let descriptor;
+    try {
+      descriptor = harnessDescriptorFor(runtime);
+    } catch {
+      return;
+    }
+    const idlePattern = descriptor ? idlePatternFor(descriptor) : "";
+    void peekPane(env.herdrSocket, runtime.paneId, INTERACTIVE_PANE_READ_LINES)
+      .catch(() => null)
+      .then((text) => {
+        try {
+          // The runtime may have ended while this read was in flight (the
+          // tab closes as soon as End is called, well before the pane's
+          // fate is known); re-fetch rather than trusting the closure's
+          // reference.
+          const live = runtimes.get(id);
+          if (text === null || !live || live.ending) return;
+          const { turn, publish: changed } = nextTurnState(live.turn, text, idlePattern, nowIso());
+          live.turn = turn;
+          if (changed) publish();
+          if (turn.state === "waiting" && live.notices.length > 0) {
+            void deliver(id);
+          }
+          pollSpawnProposals(id);
+        } catch {
+          // See above: one tick's failure is not fatal.
+        }
+      });
+  }
+
+  function dispose(): void {
+    for (const runtime of runtimes.values()) stopTick(runtime);
+  }
+
+  return {
+    start,
+    end,
+    answerMerge,
+    views,
+    crashStaleAtBoot,
+    ticketEnded,
+    ticketCheckpointed,
+    isLive: (id) => runtimes.has(id),
+    reservedIds: () => reserved,
+    dispose,
+  };
 }
