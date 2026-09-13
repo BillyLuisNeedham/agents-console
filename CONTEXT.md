@@ -30,6 +30,10 @@ The function `(current, update) => value` that merges one channel.
 **Super-step**:
 One coordinated round of node execution. Parallel nodes in the same super-step see the same starting snapshot.
 
+**Super-step boundary**:
+The pause between two super-steps, where the engine does what a super-step in flight must not: the Config reload, the Queued answer drain, Spawn adoption, the reconciles, and the check of the Merge hold. Only then is the ready set computed and the next super-step planned. While the Merge hold stands the boundary waits and recomputes; nothing is planned until it lifts.
+_Avoid_: tick (implies a clock; the boundary runs when the previous super-step ends), between-step
+
 **Checkpoint**:
 A saved snapshot of state after a super-step. Makes a run pausable and resumable.
 

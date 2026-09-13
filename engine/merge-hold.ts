@@ -20,6 +20,15 @@
  * the last emitted set is non-empty the watch re-derives on a slow cadence
  * and asks the engine to emit when the set differs; when the set is empty
  * nothing runs.
+ *
+ * The wait-and-recompute rule (ADR-0014, amended by ticket 06 of #54) lives
+ * here too: the one way any scheduling flow computes a spawn set through
+ * the hold. It recomputes, and if the recompute found the hold standing it
+ * waits the hold out and recomputes again, until a recompute finds nothing
+ * held. The super-step boundary's recompute is the whole boundary; an
+ * engine-run flow's recompute is its spawn set. Either way a hold that
+ * re-engages between the wait's exit and the recompute is a re-wait, never
+ * a set handed back under a hold.
  */
 
 import type { TicketStatus } from "./pool.ts";
@@ -27,6 +36,14 @@ import { branchFor, currentBranch, git } from "./worktrees.ts";
 
 /** How often a held pool re-derives the hold looking for a merge done by hand. */
 export const MERGE_HOLD_WATCH_MS = 2_000;
+
+/**
+ * The poll cadence of a waiting flow (ADR-0014). The hold is re-derived on
+ * every tick, so a manual CLI merge is observed without any Console action;
+ * the cadence is only the latency between the merge landing and the flow
+ * resuming.
+ */
+export const MERGE_HOLD_POLL_MS = 250;
 
 /** The git facts the derivation reads. */
 export interface MergeHoldProbe {
@@ -69,6 +86,66 @@ export function deriveMergeHold(
     if (!probe.branchExists(branch)) return false;
     return !probe.isAncestor(branch, target);
   });
+}
+
+/**
+ * What the wait-and-recompute rule needs of the engine: the hold, derived
+ * fresh on every call; the drain of queued answers, reporting whether it
+ * applied any; the log line that says the pool paused and why, written once
+ * per wait; and the emit that shows the pause and each applied answer.
+ */
+export interface HoldHost {
+  derive(): string[];
+  /** Applies queued answers; true when at least one was applied. */
+  drain(): boolean;
+  engaged(hold: string[]): void;
+  emit(): void;
+}
+
+/**
+ * The recompute's answer: the value the flow wants and the hold the
+ * recompute observed while computing it. A non-empty hold means the value
+ * was computed under the hold and must not be handed back.
+ */
+export interface Recomputed<T> {
+  value: T;
+  hold: string[];
+}
+
+/**
+ * The one wait-and-recompute rule. Recomputes; if the recompute saw the
+ * hold standing, waits the hold out and recomputes again; hands back the
+ * first value a recompute produced with nothing held.
+ *
+ * The wait is live: it polls the derivation and drains queued answers on
+ * every tick, so an approved or rejected merge processes here rather than
+ * at a boundary the paused flow never reaches, and a pause is never stuck
+ * behind the very answer that lifts it. Draining mid-super-step is safe
+ * exactly where the boundary drain is safe (ADR-0004): at every wait site
+ * every attempt has exited and the join is done, so the answer cannot be
+ * undone, and processing never spawns. The engagement is logged once per
+ * wait, so a held pool says why in the log the Console already shows.
+ *
+ * The loop cannot run away on its own: each wait exits only once nothing
+ * holds, and whatever re-engaged the hold between the wait's exit and the
+ * recompute is what the next wait drains or observes.
+ */
+export async function throughMergeHold<T>(
+  host: HoldHost,
+  recompute: () => Recomputed<T> | Promise<Recomputed<T>>,
+  options: { intervalMs?: number } = {},
+): Promise<T> {
+  const intervalMs = options.intervalMs ?? MERGE_HOLD_POLL_MS;
+  for (;;) {
+    const { value, hold } = await recompute();
+    if (hold.length === 0) return value;
+    host.engaged(hold);
+    host.emit();
+    while (host.derive().length > 0) {
+      if (host.drain()) host.emit();
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
 }
 
 export interface MergeHoldWatch {

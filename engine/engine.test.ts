@@ -13,7 +13,6 @@ import { join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
-  engineSpawnSet,
   interactiveWrapper,
   resolveTicketAssignment,
   runPool,
@@ -25,11 +24,7 @@ import {
 } from "./engine.ts";
 import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
 import { appendEvent } from "./events.ts";
-import {
-  loadPoolMarkers,
-  type TicketMarker,
-  type TicketStatus,
-} from "./pool.ts";
+import { loadPoolMarkers, type TicketMarker } from "./pool.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import { processIsLive } from "./children.ts";
@@ -8322,78 +8317,6 @@ describe("worktrees", () => {
         "resolved\n",
       );
     }, 15000);
-
-    // The engine-run helper's contract, pinned directly: an empty recompute
-    // is the hold re-engaged, so the helper waits again and hands back the
-    // set, never an empty one. The scenario this guards is a done-but-
-    // unmerged marker landing between the wait's exit and the recompute;
-    // nothing schedulable runs in that microtask-scale gap today, so no
-    // pool-driven test can stage it. The scripted session is the only way
-    // to land a hold in exactly that gap: each read of the session's state
-    // hands back the next script entry, and the proxy absorbs the engine's
-    // state reassignments so every read hits the script. Reads one to six
-    // are: the first wait's check (hold), its log write (hold), the wait's
-    // loop check (clear, so the wait exits), the recompute (hold, the
-    // re-engagement), the re-wait's check (clear, early exit), and the
-    // second recompute (clear, the set hands back).
-    it("re-waits a hold that re-engages between the wait and the recompute, never handing back an empty set", async () => {
-      const { poolDir, git } = makeGitPool(
-        { tickets: [{ file: "01-t.md", marker: DONE_01 }], config: stubConfig },
-        { "shared.txt": "base\n" },
-      );
-      parkBranch(poolDir, git, "01");
-      const script = ["hold", "hold", "clear", "hold", "clear", "clear"];
-      const held: Record<string, TicketStatus> = { "01": "done" };
-      const spawnSession = new Proxy(
-        {
-          git: true,
-          cwd: poolDir,
-          answers: new QueuedAnswerStore(join(poolDir, "runs")),
-        },
-        {
-          get(target, prop) {
-            if (prop === "state") {
-              return script.shift() === "hold"
-                ? {
-                    tickets: held,
-                    log: [],
-                    outcomes: {},
-                    config: stubConfig,
-                    interrupts: [],
-                    reviewApproved: false,
-                  }
-                : {
-                    tickets: {},
-                    log: [],
-                    outcomes: {},
-                    config: stubConfig,
-                    interrupts: [],
-                    reviewApproved: false,
-                  };
-            }
-            return Reflect.get(target, prop, target);
-          },
-          set() {
-            return true;
-          },
-        },
-      ) as unknown as Parameters<typeof engineSpawnSet>[0];
-      const judge: TicketMarker = {
-        id: "01-head-to-head",
-        file: join(poolDir, "issues", "01-head-to-head.md"),
-        blockedBy: ["01"],
-        status: "ready",
-        title: "head-to-head for 01",
-        spec: "",
-      };
-
-      const spawnable = await engineSpawnSet(spawnSession, () => {}, [judge]);
-
-      // The recompute at read four saw the hold standing, so a shape that
-      // handed the recompute straight back would return [] here; the loop is
-      // what turns the re-engagement into a re-wait and a second recompute.
-      expect(spawnable).toEqual([judge]);
-    });
   });
 
   describe("resolver agent", () => {

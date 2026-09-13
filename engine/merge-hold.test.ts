@@ -4,7 +4,9 @@ import { describe, expect, it } from "bun:test";
 import {
   createMergeHoldWatch,
   deriveMergeHold,
+  type HoldHost,
   type MergeHoldProbe,
+  throughMergeHold,
 } from "./merge-hold.ts";
 import type { TicketStatus } from "./pool.ts";
 
@@ -173,5 +175,95 @@ describe("merge hold watch", () => {
     watch.emitted(["01"]);
     await settle(30);
     expect(derives).toBe(at);
+  });
+});
+
+describe("wait-and-recompute rule", () => {
+  /**
+   * A scripted host: each derive answers the next entry of `derives`, each
+   * drain the next entry of `drained`, and every call the rule makes is
+   * counted, so a case can say how many times the rule waited, drained
+   * and emitted.
+   */
+  function scriptedHost(
+    derives: string[][],
+    drained: boolean[] = [],
+  ): HoldHost & { pauses: string[][]; drains: number; emits: number; derived: number } {
+    const host = {
+      pauses: [] as string[][],
+      drains: 0,
+      emits: 0,
+      derived: 0,
+      derive: () => {
+        host.derived += 1;
+        const next = derives.shift();
+        if (next === undefined) throw new Error("derive past the script");
+        return next;
+      },
+      drain: () => {
+        host.drains += 1;
+        return drained.shift() ?? false;
+      },
+      engaged: (ids: string[]) => {
+        host.pauses.push(ids);
+      },
+      emit: () => {
+        host.emits += 1;
+      },
+    };
+    return host;
+  }
+
+  it("hands back the first recompute when nothing holds, without a wait", async () => {
+    const h = scriptedHost([]);
+    let recomputes = 0;
+    const value = await throughMergeHold(h, () => {
+      recomputes += 1;
+      return { value: ["judge"], hold: [] };
+    });
+    expect(value).toEqual(["judge"]);
+    expect(recomputes).toBe(1);
+    expect(h.derived).toBe(0);
+    expect(h.emits).toBe(0);
+  });
+
+  it("re-waits a hold that re-engages between the wait and the recompute, never handing back a held set", async () => {
+    // Recomputes answer, in order: held (the first wait), held again (the
+    // re-engagement in the gap after the first wait exits), then clear.
+    // The waits poll the host: the first sees hold then clear, the second
+    // sees clear at once.
+    const recomputed: string[][] = [["01"], ["01"], []];
+    const h = scriptedHost([["01"], [], []]);
+    let recomputes = 0;
+    const value = await throughMergeHold(
+      h,
+      () => {
+        recomputes += 1;
+        const hold = recomputed.shift()!;
+        return { value: hold.length > 0 ? [] : ["judge"], hold };
+      },
+      { intervalMs: 1 },
+    );
+    // A shape that handed the second recompute straight back would return
+    // [] here; the rule turns the re-engagement into a second wait and a
+    // third recompute.
+    expect(value).toEqual(["judge"]);
+    expect(recomputes).toBe(3);
+    expect(h.pauses).toEqual([["01"], ["01"]]);
+  });
+
+  it("logs the engagement once per wait, drains on every tick and emits only when a drain applied something", async () => {
+    // One wait of three ticks: the second tick's drain applies an answer.
+    const h = scriptedHost([["01"], ["01"], ["01"], []], [false, true, false]);
+    const holds: string[][] = [["01", "02"], []];
+    await throughMergeHold(
+      h,
+      () => ({ value: "ready", hold: holds.shift()! }),
+      { intervalMs: 1 },
+    );
+    expect(h.pauses).toEqual([["01", "02"]]);
+    expect(h.drains).toBe(3);
+    // The engagement's emit, plus one for the applied answer.
+    expect(h.emits).toBe(2);
   });
 });

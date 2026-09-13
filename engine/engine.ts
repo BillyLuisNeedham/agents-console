@@ -80,7 +80,9 @@ import {
   createMergeHoldWatch,
   deriveMergeHold,
   gitMergeHoldProbe,
+  type HoldHost,
   type MergeHoldWatch,
+  throughMergeHold,
 } from "./merge-hold.ts";
 import {
   branchExists,
@@ -398,12 +400,6 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
   };
 }
 
-// The merge hold's poll cadence while the pool pauses (ADR-0014). The hold
-// is re-derived from markers and branch state on every tick, so a manual
-// CLI merge is observed without any Console action; the cadence is only the
-// latency between the merge landing and the pool resuming.
-const MERGE_HOLD_POLL_MS = 250;
-
 // ADR-0014's merge hold, derived on demand and never persisted: the ids of
 // tickets whose status is done but whose branch has not landed in the merge
 // target, the pool checkout's working branch, main or a feature branch
@@ -427,34 +423,31 @@ function mergeHold(session: Session): string[] {
   );
 }
 
-// The hold's wait, every caller's pause and the way the pause lifts. Polls
-// the derivation and drains queued answers as it goes, until nothing holds
-// the pool. Draining is what makes the wait live: an approved or rejected
-// merge processes here rather than at the boundary, so a pause is never
-// stuck behind the very answer that lifts it. Draining mid-super-step is
-// safe exactly where the boundary drain is safe (ADR-0004): at every wait
-// site every attempt has exited and the join is done, so the answer cannot
-// be undone, and processing never spawns. The engagement is logged once per
-// wait, so a held pool says why in the log the Console already shows.
-async function holdCleared(
+// What the wait-and-recompute rule (merge-hold.ts) needs of a session: the
+// hold derived fresh, the queued-answer drain, the log line that says the
+// pool paused and why, and the snapshot emit. Built once per wait site from
+// the whole Session; nothing else about the session reaches the rule.
+function holdHost(
   session: Session,
   emit: (phase: RunPhase) => void,
-): Promise<void> {
-  const hold = mergeHold(session);
-  if (hold.length === 0) return;
-  session.state = applyUpdate(session.state, {
-    log: [
-      `merge hold (ADR-0014): pool paused; awaiting the merge of ` +
-        `${hold.join(", ")}`,
-    ],
-  });
-  emit("running");
-  while (mergeHold(session).length > 0) {
-    const pendingBefore = session.answers.pending().length;
-    drainAnswers(session);
-    if (session.answers.pending().length !== pendingBefore) emit("running");
-    await Bun.sleep(MERGE_HOLD_POLL_MS);
-  }
+): HoldHost {
+  return {
+    derive: () => mergeHold(session),
+    drain: () => {
+      const pendingBefore = session.answers.pending().length;
+      drainAnswers(session);
+      return session.answers.pending().length !== pendingBefore;
+    },
+    engaged: (hold) => {
+      session.state = applyUpdate(session.state, {
+        log: [
+          `merge hold (ADR-0014): pool paused; awaiting the merge of ` +
+            `${hold.join(", ")}`,
+        ],
+      });
+    },
+    emit: () => emit("running"),
+  };
 }
 
 // The ready set's one home (ticket 01, the seam ADR-0014's merge hold stands
@@ -476,8 +469,10 @@ async function holdCleared(
 // ticket's branch is unmerged, nothing is handed back. The hold is derived
 // once and handed back alongside the ready set, so the pool-wide caller
 // reading this entry point directly cannot mistake a hold that lifted
-// between two derivations for a stop; the engine-run flows wait the hold out
-// and recompute through engineSpawnSet below.
+// between two derivations for a stop; every flow computes through the one
+// wait-and-recompute rule (merge-hold.ts), the boundary with the whole
+// boundary as its recompute and the engine-run flows through
+// engineSpawnSet below.
 function readySet(
   session: Session,
   candidates: TicketMarker[],
@@ -503,29 +498,24 @@ function readySet(
   };
 }
 
-// The engine-run flows' spawn set: the wait-and-recompute rule ADR-0014
-// fixes, folded into one helper for the three sites that share it (grading's
-// initial round, its re-spawn rounds, and the head-to-head judge). The wait
-// is holdCleared, the recompute is readySet, and the loop is the rule the
-// ticket-02 sites spelled out per copy: an all-engine proposal returns empty
-// for no reason but the hold, so an empty return here is the hold re-engaged
-// in the gap between the wait's exit and the recompute, and the only honest
-// response is to wait again and recompute. The flow never sees an empty set,
-// so a judge spawn can never destructure one. The loop cannot run away on
-// its own: each turn's wait exits only once nothing holds, and whatever
-// re-engaged the hold between turns is what the next wait drains or
-// observes. The pool-wide caller keeps its own shape instead: an empty set
-// there can mean nothing ready, which is a stop, not a pause.
-export async function engineSpawnSet(
+// The engine-run flows' spawn set, the three sites that share it being
+// grading's initial round, its re-spawn rounds and the head-to-head judge.
+// The recompute is readySet over the flow's proposal; an all-engine proposal
+// returns empty for no reason but the hold, so the rule's re-wait on a held
+// recompute is what keeps a judge spawn from ever destructuring an empty
+// set. The pool-wide caller (the super-step boundary) uses the same rule
+// with a different recompute: an empty set there can mean nothing ready,
+// which is a stop, not a pause, so it reads the ready set and the hold
+// apart.
+async function engineSpawnSet(
   session: Session,
   emit: (phase: RunPhase) => void,
   candidates: TicketMarker[],
 ): Promise<TicketMarker[]> {
-  for (;;) {
-    await holdCleared(session, emit);
+  return throughMergeHold(holdHost(session, emit), () => {
     const { ready, hold } = readySet(session, candidates);
-    if (hold.length === 0) return ready;
-  }
+    return { value: ready, hold };
+  });
 }
 
 interface SettleWaiter {
@@ -999,6 +989,12 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   session.onSnapshot?.(snapshot);
 }
 
+// One super-step per turn of the loop: the boundary decides whether there is
+// a next super-step, the plan numbers and records it, the run fans it out
+// and joins it, and the close settles the drive once the boundary finds
+// nothing to run or the run says stop. Each phase takes the whole Session:
+// the plan, the run and the close read and write most of it, and the hold
+// wait, the one piece with a narrow need, is behind its own host.
 async function driveLoop(session: Session): Promise<void> {
   const emit = (phase: RunPhase) => emitSnapshot(session, phase);
 
@@ -1008,18 +1004,43 @@ async function driveLoop(session: Session): Promise<void> {
   // can never enter the ready set as a duplicate spawn.
   await session.terminalReconcile;
   for (;;) {
+    const next = await superStepBoundary(session, emit);
+    if (next.kind === "close") break;
+    const step = planSuperStep(session, emit, next.ready);
+    if ((await runSuperStep(session, emit, step)) === "stop") break;
+  }
+  await closeDrive(session, emit);
+}
+
+type BoundaryOutcome =
+  | { kind: "run"; ready: TicketMarker[] }
+  | { kind: "close" };
+
+// The super-step boundary: everything a super-step in flight must not do,
+// then the ready set. Its recompute is the whole boundary, run through the
+// one wait-and-recompute rule (merge-hold.ts): while ADR-0014's merge hold
+// stands the boundary waits, and once the hold lifts (an approved merge, an
+// observed manual merge, a rejection that reopens the ticket) the whole
+// boundary runs again, so the reload, the drain and the adoption all see
+// whatever lifted it. An empty ready set with nothing held is the close,
+// not a pause.
+async function superStepBoundary(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+): Promise<BoundaryOutcome> {
+  const ready = await throughMergeHold(holdHost(session, emit), () => {
     reconcileDeadlocks(session);
     // Config reload (ADR-0018): the assignment slice of console.json
     // re-reads here, before the answer drain and spawn adoption below, so
     // both see the reloaded config for whatever they schedule this
     // super-step.
     reloadConfigAtBoundary(session);
-    // The super-step boundary: answers accepted while the previous
-    // super-step was in flight are applied now, in submission order, after
-    // that super-step's join and persistence and before this one's
-    // scheduling. Processing never spawns; the scheduling below does. The
-    // drain persists the answered state itself, so a resume is on disk
-    // before this super-step schedules, not only at its closing persist.
+    // Answers accepted while the previous super-step was in flight are
+    // applied now, in submission order, after that super-step's join and
+    // persistence and before this one's scheduling. Processing never
+    // spawns; the scheduling does. The drain persists the answered state
+    // itself, so a resume is on disk before this super-step schedules, not
+    // only at its closing persist.
     drainAnswers(session);
     // Spawn adoption (ADR-0010) rides the same boundary: proposals
     // established by the previous super-step's outcomes, or by the answer
@@ -1030,320 +1051,351 @@ async function driveLoop(session: Session): Promise<void> {
     // The super-step's spawn set routes through the one entry point
     // (ticket 01): the loop schedules the ready set it hands back, and
     // ADR-0014's merge hold (ticket 02) is the one rule that can withhold
-    // it. An empty set under the hold is a pause, not a stop: the loop
-    // waits for the hold to lift (an approved merge, an observed manual
-    // merge, a rejection that reopens the ticket) and recomputes, so a
-    // manual CLI merge resumes the pool with no Console action.
+    // it.
     const { ready, hold } = readySet(session, session.markers);
-    if (ready.length === 0) {
-      if (hold.length > 0) {
-        await holdCleared(session, emit);
-        continue;
-      }
-      break;
+    return { value: ready, hold };
+  });
+  return ready.length === 0 ? { kind: "close" } : { kind: "run", ready };
+}
+
+interface SuperStepPlan {
+  ready: TicketMarker[];
+  planned: { marker: TicketMarker; plan: TicketPlan }[];
+  // The state every attempt of this super-step spawns against: fixed at
+  // the plan, so a sibling's exit mid-step never changes what a later
+  // spawn reads.
+  snapshot: PoolState;
+}
+
+// The plan: the super-step gets its number, every attempt its number, the
+// markers their in-progress status on disk, and every attempt its scheduled
+// event, all before any spawn.
+function planSuperStep(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+  ready: TicketMarker[],
+): SuperStepPlan {
+  session.superStep += 1;
+  // Every attempt this super-step spawns is numbered before any spawn,
+  // so a verify fan-out cannot race the events counter: attempts run
+  // base..base+N-1 off one nextAttempt read per ticket.
+  const planned = ready.flatMap((marker) => {
+    const verify = session.assignments.get(marker.id)!.verify;
+    if (verify != null) {
+      // A verify ticket's attempts write attempt-numbered logs, but a
+      // pre-verify solo attempt's well-known log must still rotate
+      // before the fan-out spawns, so the history survives.
+      rotateAttemptLog(
+        session.runsDir,
+        marker.id,
+        join(session.runsDir, attemptLogName(marker.id, null, false)),
+        "exited",
+      );
     }
-    session.superStep += 1;
-    // Every attempt this super-step spawns is numbered before any spawn,
-    // so a verify fan-out cannot race the events counter: attempts run
-    // base..base+N-1 off one nextAttempt read per ticket.
-    const planned = ready.flatMap((marker) => {
-      const verify = session.assignments.get(marker.id)!.verify;
-      if (verify != null) {
-        // A verify ticket's attempts write attempt-numbered logs, but a
-        // pre-verify solo attempt's well-known log must still rotate
-        // before the fan-out spawns, so the history survives.
-        rotateAttemptLog(
-          session.runsDir,
-          marker.id,
-          join(session.runsDir, attemptLogName(marker.id, null, false)),
-          "exited",
-        );
-      }
-      const base = nextAttempt(session.runsDir, marker.id);
-      return Array.from({ length: verify ?? 1 }, (_, i) => ({
+    const base = nextAttempt(session.runsDir, marker.id);
+    return Array.from({ length: verify ?? 1 }, (_, i) => ({
+      marker,
+      plan: planTicket(
+        session,
         marker,
-        plan: planTicket(
-          session,
-          marker,
-          ready.length,
-          base + i,
-          verify != null,
-        ),
-      }));
-    });
-    session.state = applyUpdate(session.state, {
-      tickets: Object.fromEntries(
-        ready.map((marker) => [marker.id, "in-progress" as const]),
+        ready.length,
+        base + i,
+        verify != null,
       ),
-      log: [
-        `super-step ${session.superStep}: ${ready.map((m) => m.id).join(", ")}`,
-      ],
+    }));
+  });
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries(
+      ready.map((marker) => [marker.id, "in-progress" as const]),
+    ),
+    log: [
+      `super-step ${session.superStep}: ${ready.map((m) => m.id).join(", ")}`,
+    ],
+  });
+  writeMarkers(session);
+  for (const { marker, plan } of planned) {
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: plan.attempt,
+      kind: "scheduled",
+      payload: {},
     });
-    writeMarkers(session);
-    for (const { marker, plan } of planned) {
-      appendEvent(session.runsDir, marker.id, {
+  }
+  emit("running");
+  const snapshot = session.state;
+  return { ready, planned, snapshot };
+}
+
+// The run: the fan-out, the serialised merge chain, the boundary join, the
+// merge outcomes, the crash interrupts, grading and selection, and the
+// boundary persist. "stop" ends the drive at the close without another
+// boundary: the shutdown gate (ADR-0017) and an exhausted persist both say
+// it.
+async function runSuperStep(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+  { ready, planned, snapshot }: SuperStepPlan,
+): Promise<"continue" | "stop"> {
+  // Merges land in completion order: each ticket's merge chains onto a
+  // serialized queue the moment the ticket finishes, while its siblings
+  // are still running. The queue starts from the session-wide merge chain
+  // so a boot-adopted terminal attempt's finalize merge (ADR-0014), which
+  // runs outside the drive loop, never runs its git work concurrently
+  // with this step's merges on the main checkout.
+  const merges: {
+    marker: TicketMarker;
+    result: MergeResult;
+    attempt: number;
+    // The working branch's tip just before this merge ran (the
+    // Conversations ADR): captured so a ticket-ended Notice's diff summary
+    // can be computed after the fact, once mergeTicket has already removed
+    // the ticket's own branch. Empty in a headless pool (git unavailable).
+    beforeSha: string;
+  }[] = [];
+  let mergeQueue: Promise<void> = session.mergeChain;
+  const results = await Promise.all(
+    planned.map(({ marker, plan }) =>
+      runTicket(
+        marker,
+        snapshot,
+        session.assignments.get(marker.id)!,
+        {
+          ...attemptEnvOf(session, snapshot.config),
+          poolDir: session.poolDir,
+          issuesDir: session.issuesDir,
+        },
+        plan,
+      ).then((result) => {
+        // The attempt's surviving proposals ride to the boundary's
+        // adoption buffer (ADR-0010). A verify candidate carries none:
+        // its proposals ride or die with selection.
+        if (result.spawnProposals && result.spawnProposals.length > 0) {
+          session.pendingSpawns.push({
+            parentId: marker.id,
+            proposals: result.spawnProposals,
+            origin: "ticket",
+          });
+        }
+        if (plan.verify) {
+          // A verify candidate never merges and never writes the
+          // ticket's status, at its exit or before its siblings exit:
+          // the fan-out proceeds only once every attempt has exited
+          // (grading and selection are later tickets). Only the pool
+          // log moves, so the Console sees each attempt's exit live.
+          session.state = applyUpdate(session.state, result.update);
+          result.joinedAtExit = true;
+          emit("running");
+          return result;
+        }
+        if (result.plan.worktree && result.status === "done") {
+          mergeQueue = mergeQueue.then(() => {
+            // Captured just before the merge, inside the serialized chain:
+            // HEAD may have moved since this ticket's attempt exited (an
+            // earlier sibling's merge in the same super-step), so this is
+            // the range mergeTicket is actually about to add, not
+            // whatever HEAD was when the outer async callback started.
+            const beforeSha = session.git
+              ? git(session.cwd, ["rev-parse", "HEAD"]).out
+              : "";
+            merges.push({
+              marker,
+              result: mergeTicket(session, marker, result.plan.worktree!),
+              attempt: result.plan.attempt,
+              beforeSha,
+            });
+          });
+          // Publish the tail at every extension, not once after the await:
+          // an adopted terminal attempt's finalize merge (ADR-0014) chains
+          // onto session.mergeChain from outside the drive loop and must
+          // never see a stale, already-settled tail.
+          session.mergeChain = mergeQueue.catch(() => {});
+        }
+        if (result.status === "in-progress") {
+          // A crashed attempt was recorded at exit (the crash event
+          // landed in runTicket); push a snapshot now so the Console
+          // shows the crash within seconds, not when the slowest
+          // sibling's super-step ends.
+          emit("running");
+        } else {
+          // A terminal result (done or checkpoint) lands in state the
+          // moment the attempt exits, so its true status word shows on
+          // the card and in the snapshot stream while its siblings still
+          // run. The boundary join skips it (joinedAtExit), so applying
+          // the same update twice is a no-op; anything genuinely computed
+          // across results stays there. A checkpoint's interrupt is
+          // raised here too, so the card turns red and the interrupt is
+          // answerable while a sibling still runs; an answer accepted
+          // then is queued and processed at the next boundary
+          // (ADR-0004), so raising the interrupt processes nothing.
+          session.state = applyUpdate(session.state, result.update);
+          result.joinedAtExit = true;
+          if (result.status === "checkpoint") {
+            raiseCheckpoint(session, result.marker, result.plan.attempt);
+          }
+          emit("running");
+        }
+        return result;
+      }),
+    ),
+  );
+  await mergeQueue;
+
+  let joined = session.state;
+  for (const result of results) {
+    // A terminal result (done or checkpoint) was joined at attempt exit;
+    // the boundary only folds in what remains, so the same update is
+    // never applied twice and the state join stays coherent.
+    if (result.joinedAtExit) continue;
+    joined = applyUpdate(joined, result.update);
+  }
+  session.state = joined;
+  for (const merge of merges) {
+    if (merge.result.ok) {
+      appendEvent(session.runsDir, merge.marker.id, {
         at: new Date().toISOString(),
-        attempt: plan.attempt,
-        kind: "scheduled",
+        attempt: merge.attempt,
+        kind: "merged",
         payload: {},
       });
-    }
-    emit("running");
-    const snapshot = session.state;
-
-    // Merges land in completion order: each ticket's merge chains onto a
-    // serialized queue the moment the ticket finishes, while its siblings
-    // are still running. The queue starts from the session-wide merge chain
-    // so a boot-adopted terminal attempt's finalize merge (ADR-0014), which
-    // runs outside the drive loop, never runs its git work concurrently
-    // with this step's merges on the main checkout.
-    const merges: {
-      marker: TicketMarker;
-      result: MergeResult;
-      attempt: number;
-      // The working branch's tip just before this merge ran (the
-      // Conversations ADR): captured so a ticket-ended Notice's diff summary
-      // can be computed after the fact, once mergeTicket has already removed
-      // the ticket's own branch. Empty in a headless pool (git unavailable).
-      beforeSha: string;
-    }[] = [];
-    let mergeQueue: Promise<void> = session.mergeChain;
-    const results = await Promise.all(
-      planned.map(({ marker, plan }) =>
-        runTicket(
-          marker,
-          snapshot,
-          session.assignments.get(marker.id)!,
-          {
-            ...attemptEnvOf(session, snapshot.config),
-            poolDir: session.poolDir,
-            issuesDir: session.issuesDir,
-          },
-          plan,
-        ).then((result) => {
-          // The attempt's surviving proposals ride to the boundary's
-          // adoption buffer (ADR-0010). A verify candidate carries none:
-          // its proposals ride or die with selection.
-          if (result.spawnProposals && result.spawnProposals.length > 0) {
-            session.pendingSpawns.push({
-              parentId: marker.id,
-              proposals: result.spawnProposals,
-              origin: "ticket",
-            });
-          }
-          if (plan.verify) {
-            // A verify candidate never merges and never writes the
-            // ticket's status, at its exit or before its siblings exit:
-            // the fan-out proceeds only once every attempt has exited
-            // (grading and selection are later tickets). Only the pool
-            // log moves, so the Console sees each attempt's exit live.
-            session.state = applyUpdate(session.state, result.update);
-            result.joinedAtExit = true;
-            emit("running");
-            return result;
-          }
-          if (result.plan.worktree && result.status === "done") {
-            mergeQueue = mergeQueue.then(() => {
-              // Captured just before the merge, inside the serialized chain:
-              // HEAD may have moved since this ticket's attempt exited (an
-              // earlier sibling's merge in the same super-step), so this is
-              // the range mergeTicket is actually about to add, not
-              // whatever HEAD was when the outer async callback started.
-              const beforeSha = session.git
-                ? git(session.cwd, ["rev-parse", "HEAD"]).out
-                : "";
-              merges.push({
-                marker,
-                result: mergeTicket(session, marker, result.plan.worktree!),
-                attempt: result.plan.attempt,
-                beforeSha,
-              });
-            });
-            // Publish the tail at every extension, not once after the await:
-            // an adopted terminal attempt's finalize merge (ADR-0014) chains
-            // onto session.mergeChain from outside the drive loop and must
-            // never see a stale, already-settled tail.
-            session.mergeChain = mergeQueue.catch(() => {});
-          }
-          if (result.status === "in-progress") {
-            // A crashed attempt was recorded at exit (the crash event
-            // landed in runTicket); push a snapshot now so the Console
-            // shows the crash within seconds, not when the slowest
-            // sibling's super-step ends.
-            emit("running");
-          } else {
-            // A terminal result (done or checkpoint) lands in state the
-            // moment the attempt exits, so its true status word shows on
-            // the card and in the snapshot stream while its siblings still
-            // run. The boundary join skips it (joinedAtExit), so applying
-            // the same update twice is a no-op; anything genuinely computed
-            // across results stays there. A checkpoint's interrupt is
-            // raised here too, so the card turns red and the interrupt is
-            // answerable while a sibling still runs; an answer accepted
-            // then is queued and processed at the next boundary
-            // (ADR-0004), so raising the interrupt processes nothing.
-            session.state = applyUpdate(session.state, result.update);
-            result.joinedAtExit = true;
-            if (result.status === "checkpoint") {
-              raiseCheckpoint(session, result.marker, result.plan.attempt);
-            }
-            emit("running");
-          }
-          return result;
-        }),
-      ),
-    );
-    await mergeQueue;
-
-    let joined = session.state;
-    for (const result of results) {
-      // A terminal result (done or checkpoint) was joined at attempt exit;
-      // the boundary only folds in what remains, so the same update is
-      // never applied twice and the state join stays coherent.
-      if (result.joinedAtExit) continue;
-      joined = applyUpdate(joined, result.update);
-    }
-    session.state = joined;
-    for (const merge of merges) {
-      if (merge.result.ok) {
-        appendEvent(session.runsDir, merge.marker.id, {
-          at: new Date().toISOString(),
-          attempt: merge.attempt,
-          kind: "merged",
-          payload: {},
-        });
-        closeAttemptTab(session, merge.marker.id, merge.attempt);
-        session.conversations.ticketEnded(
-          merge.marker,
-          branchFor(session.cwd, merge.marker.id),
-          merge.beforeSha ? `${merge.beforeSha}..HEAD` : null,
-        );
-        session.state = applyUpdate(session.state, {
-          log: [
-            `ticket ${merge.marker.id}: merged ${branchFor(session.cwd, merge.marker.id)} ` +
-              "onto the working branch" +
-              (merge.result.detail.endsWith("is gone")
-                ? ` (${merge.result.detail})`
-                : ""),
-          ],
-        });
-      } else {
-        await handleMergeConflict(
-          session,
-          merge.marker,
-          merge.result,
-          merge.attempt,
-        );
-      }
-    }
-    if (session.children.stopping) {
-      // Shutdown (ADR-0017): this super-step joined after its headless
-      // attempts were stopped. Each stop is on its ticket's log already; no
-      // crash interrupt is raised for them, so the next boot resets those
-      // tickets to ready instead of waiting on a human, and nothing more is
-      // scheduled or graded.
+      closeAttemptTab(session, merge.marker.id, merge.attempt);
+      session.conversations.ticketEnded(
+        merge.marker,
+        branchFor(session.cwd, merge.marker.id),
+        merge.beforeSha ? `${merge.beforeSha}..HEAD` : null,
+      );
       session.state = applyUpdate(session.state, {
         log: [
-          "engine shutdown: super-step joined; no crash interrupts raised " +
-            "and nothing more scheduled",
+          `ticket ${merge.marker.id}: merged ${branchFor(session.cwd, merge.marker.id)} ` +
+            "onto the working branch" +
+            (merge.result.detail.endsWith("is gone")
+              ? ` (${merge.result.detail})`
+              : ""),
         ],
       });
-      break;
+    } else {
+      await handleMergeConflict(
+        session,
+        merge.marker,
+        merge.result,
+        merge.attempt,
+      );
     }
-    for (const result of results) {
-      if (result.status === "in-progress") {
-        // The crash event and the marker update landed at attempt exit;
-        // only the crash interrupt waits for the boundary here. A
-        // checkpoint's interrupt was already raised at exit, so the
-        // at-exit path is the only writer of its interrupt. The body quotes
-        // the log path, the tail and the outcome fact (ADR-0012), so the
-        // Needs-input surface explains the dead attempt by itself.
-        raiseInterrupt(session, {
-          ticketId: result.marker.id,
-          kind: "crash",
-          body: crashInterruptBody(result),
-        });
-      }
-    }
-    // The fan-out is complete once every attempt has exited; this line is
-    // the gate's record. Nothing has merged and no status was written: the
-    // ticket stays in-progress for grading (ticket 03) to take over.
-    for (const marker of ready) {
-      if (session.assignments.get(marker.id)!.verify == null) continue;
-      const attempts = results.filter((r) => r.marker.id === marker.id);
-      const tally = (status: TicketStatus) =>
-        attempts.filter((r) => r.status === status).length;
-      session.state = applyUpdate(session.state, {
-        log: [
-          `ticket ${marker.id}: verify fan-out complete: ` +
-            `${attempts.length} attempts exited ` +
-            `(${tally("done")} done, ${tally("checkpoint")} checkpoint, ` +
-            `${tally("in-progress")} crash); no merge and no status ` +
-            "write until grading",
-        ],
-      });
-    }
-    // Grading (ticket 03): once every attempt of a verify ticket has
-    // exited, the engine writes one grader ticket per attempt into the
-    // pool and runs them through the ordinary assign machinery. Grader
-    // tickets are real tickets on disk with the build ticket as their
-    // blocker, but the main loop never schedules them from the ready set:
-    // the build ticket stays in-progress until selection has chosen a
-    // winner, so the engine runs the graders itself here, the way it runs
-    // the merge resolver, and writes their statuses itself. Their spawn
-    // set still routes through the one entry point (ticket 01), so the
-    // merge hold (ticket 02) pauses it with everything else.
-    for (const marker of ready) {
-      const assignment = session.assignments.get(marker.id)!;
-      if (assignment.verify == null) continue;
-      const attempts = results
-        .filter((r) => r.marker.id === marker.id)
-        .map((r) => r.plan.attempt)
-        .sort((a, b) => a - b);
-      const grades = await runGraders(session, marker, attempts, emit);
-      // Lone-attempt resolution (ticket 05): with one attempt and one
-      // grade there is nothing to select between, so the grade decides
-      // at the ticket: flag → checkpoint, pass → done.
-      if (assignment.verify === 1 && attempts.length === 1) {
-        resolveLoneAttempt(
-          session,
-          marker,
-          results.find((r) => r.marker.id === marker.id)!,
-          grades.get(attempts[0]) ?? null,
-          emit,
-        );
-        continue;
-      }
-      // Winner selection (ticket 04): with more than one graded candidate
-      // and every attempt done, the engine picks the best and merges only
-      // that attempt's branch. A round with a crashed or paused attempt
-      // grades but decides nothing: the crash or checkpoint interrupt owns
-      // the ticket and the re-round after the human answers selects
-      // afresh. A grader without a usable grade is equally undecided
-      // (ticket 07's re-spawn supplies it). With the pool's selection set
-      // to human (ticket 08), the same completed fan-out raises the
-      // selection interrupt instead and the answer picks the winner.
-      const round = results.filter((r) => r.marker.id === marker.id);
-      if (
-        round.every((r) => r.status === "done") &&
-        attempts.every((attempt) => grades.has(attempt))
-      ) {
-        if (selectionMode(session.state.config) === "human") {
-          raiseSelectionInterrupt(session, marker, attempts, grades, emit);
-        } else {
-          await selectAndMergeWinner(session, marker, attempts, grades, emit);
-        }
-      }
-    }
-    // The boundary persist: a failed write retries with backoff, and the
-    // drive carries on once a write lands. If retries are exhausted the
-    // persistence interrupt is raised and the loop stops scheduling, the
-    // store still open: the closing gate below settles quiescent and the
-    // run waits for a human instead of dying (issue #26).
-    if (!(await persistWithRetry(session))) break;
-    emit("running");
   }
+  if (session.children.stopping) {
+    // Shutdown (ADR-0017): this super-step joined after its headless
+    // attempts were stopped. Each stop is on its ticket's log already; no
+    // crash interrupt is raised for them, so the next boot resets those
+    // tickets to ready instead of waiting on a human, and nothing more is
+    // scheduled or graded.
+    session.state = applyUpdate(session.state, {
+      log: [
+        "engine shutdown: super-step joined; no crash interrupts raised " +
+          "and nothing more scheduled",
+      ],
+    });
+    return "stop";
+  }
+  for (const result of results) {
+    if (result.status === "in-progress") {
+      // The crash event and the marker update landed at attempt exit;
+      // only the crash interrupt waits for the boundary here. A
+      // checkpoint's interrupt was already raised at exit, so the
+      // at-exit path is the only writer of its interrupt. The body quotes
+      // the log path, the tail and the outcome fact (ADR-0012), so the
+      // Needs-input surface explains the dead attempt by itself.
+      raiseInterrupt(session, {
+        ticketId: result.marker.id,
+        kind: "crash",
+        body: crashInterruptBody(result),
+      });
+    }
+  }
+  // The fan-out is complete once every attempt has exited; this line is
+  // the gate's record. Nothing has merged and no status was written: the
+  // ticket stays in-progress for grading (ticket 03) to take over.
+  for (const marker of ready) {
+    if (session.assignments.get(marker.id)!.verify == null) continue;
+    const attempts = results.filter((r) => r.marker.id === marker.id);
+    const tally = (status: TicketStatus) =>
+      attempts.filter((r) => r.status === status).length;
+    session.state = applyUpdate(session.state, {
+      log: [
+        `ticket ${marker.id}: verify fan-out complete: ` +
+          `${attempts.length} attempts exited ` +
+          `(${tally("done")} done, ${tally("checkpoint")} checkpoint, ` +
+          `${tally("in-progress")} crash); no merge and no status ` +
+          "write until grading",
+      ],
+    });
+  }
+  // Grading (ticket 03): once every attempt of a verify ticket has
+  // exited, the engine writes one grader ticket per attempt into the
+  // pool and runs them through the ordinary assign machinery. Grader
+  // tickets are real tickets on disk with the build ticket as their
+  // blocker, but the main loop never schedules them from the ready set:
+  // the build ticket stays in-progress until selection has chosen a
+  // winner, so the engine runs the graders itself here, the way it runs
+  // the merge resolver, and writes their statuses itself. Their spawn
+  // set still routes through the one entry point (ticket 01), so the
+  // merge hold (ticket 02) pauses it with everything else.
+  for (const marker of ready) {
+    const assignment = session.assignments.get(marker.id)!;
+    if (assignment.verify == null) continue;
+    const attempts = results
+      .filter((r) => r.marker.id === marker.id)
+      .map((r) => r.plan.attempt)
+      .sort((a, b) => a - b);
+    const grades = await runGraders(session, marker, attempts, emit);
+    // Lone-attempt resolution (ticket 05): with one attempt and one
+    // grade there is nothing to select between, so the grade decides
+    // at the ticket: flag → checkpoint, pass → done.
+    if (assignment.verify === 1 && attempts.length === 1) {
+      resolveLoneAttempt(
+        session,
+        marker,
+        results.find((r) => r.marker.id === marker.id)!,
+        grades.get(attempts[0]) ?? null,
+        emit,
+      );
+      continue;
+    }
+    // Winner selection (ticket 04): with more than one graded candidate
+    // and every attempt done, the engine picks the best and merges only
+    // that attempt's branch. A round with a crashed or paused attempt
+    // grades but decides nothing: the crash or checkpoint interrupt owns
+    // the ticket and the re-round after the human answers selects
+    // afresh. A grader without a usable grade is equally undecided
+    // (ticket 07's re-spawn supplies it). With the pool's selection set
+    // to human (ticket 08), the same completed fan-out raises the
+    // selection interrupt instead and the answer picks the winner.
+    const round = results.filter((r) => r.marker.id === marker.id);
+    if (
+      round.every((r) => r.status === "done") &&
+      attempts.every((attempt) => grades.has(attempt))
+    ) {
+      if (selectionMode(session.state.config) === "human") {
+        raiseSelectionInterrupt(session, marker, attempts, grades, emit);
+      } else {
+        await selectAndMergeWinner(session, marker, attempts, grades, emit);
+      }
+    }
+  }
+  // The boundary persist: a failed write retries with backoff, and the
+  // drive carries on once a write lands. If retries are exhausted the
+  // persistence interrupt is raised and the loop stops scheduling, the
+  // store still open: the closing gate (closeDrive) settles quiescent and
+  // the run waits for a human instead of dying (issue #26).
+  if (!(await persistWithRetry(session))) return "stop";
+  emit("running");
+  return "continue";
+}
 
+// The close: the review gate, the phase decision, the final persist and the
+// settle.
+async function closeDrive(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+): Promise<void> {
   const pending = session.markers
     .map((m) => m.id)
     .filter((id) => session.state.tickets[id] !== "done");
