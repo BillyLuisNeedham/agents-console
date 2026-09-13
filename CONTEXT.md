@@ -166,6 +166,10 @@ _Avoid_: Turn (that is the exchange itself), idle (the agent waits for the opera
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
 
+**Wire shape**:
+The declared shape of one message between engine and Console — the snapshot, a response envelope, a request body. Each is declared once, on the engine side; the Console type-imports it, so drift between the two is a compile error, not a silent copy.
+_Avoid_: DTO, schema, contract (all too generic)
+
 ## Verification
 
 **Verify**:

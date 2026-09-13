@@ -24,7 +24,7 @@ import {
   type DetailTab,
   type DetailTabView,
   type DetailView,
-  type InterruptAction,
+  type ResumeAction,
   type InterruptView,
   type LogPaneView,
   type TimelineGradeView,
@@ -55,7 +55,7 @@ export interface DetailHandlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
-  onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
+  onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
   /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
    *  Conversations store tracks the in-flight/failure state on `endView`. */

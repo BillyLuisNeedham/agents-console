@@ -7,16 +7,17 @@
  */
 
 import type {
-  GradeView,
-  PoolConversationState,
-  PoolSnapshot,
+  ConversationView,
+  EnrichedSnapshot,
+  ResumeAction,
   StartConversationRequest,
   TerminalPeekResponse,
   TicketActivityResponse,
   TicketBodyResponse,
   TicketEventsResponse,
+  TicketGradeSummary,
   TicketLogResponse,
-} from "./project";
+} from "../../engine/wire.ts";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -38,11 +39,9 @@ export const STREAM_SILENCE_FACTOR = 3;
 const STREAM_RETRY_MS = 3_000;
 
 interface StreamHandlers {
-  onSnapshot: (snapshot: PoolSnapshot) => void;
+  onSnapshot: (snapshot: EnrichedSnapshot) => void;
   onError: (message: string) => void;
 }
-
-type ResumeAction = "resume" | "approve" | "reject";
 
 /** Split complete SSE frames (terminated by a blank line) off a buffer. */
 function takeSseFrames(buffer: string): { rest: string; frames: string[] } {
@@ -56,7 +55,7 @@ function takeSseFrames(buffer: string): { rest: string; frames: string[] } {
 }
 
 type StreamFrame =
-  | { kind: "snapshot"; snapshot: PoolSnapshot }
+  | { kind: "snapshot"; snapshot: EnrichedSnapshot }
   | { kind: "stream-config"; heartbeatMs: number };
 
 /**
@@ -85,7 +84,7 @@ function streamFrameFromSse(frame: string): StreamFrame | null {
   try {
     const parsed = JSON.parse(data.join("\n"));
     if (eventType === "snapshot") {
-      return { kind: "snapshot", snapshot: parsed as PoolSnapshot };
+      return { kind: "snapshot", snapshot: parsed as EnrichedSnapshot };
     }
     if (eventType === "stream-config") {
       const heartbeatMs = (parsed as { heartbeatMs?: unknown }).heartbeatMs;
@@ -107,7 +106,7 @@ export class PoolClient {
   }
 
   /** The latest snapshot, or null before the server has started a run. */
-  async getState(): Promise<PoolSnapshot | null> {
+  async getState(): Promise<EnrichedSnapshot | null> {
     const res = await fetch(`${this.base}/api/state`);
     if (!res.ok) throw new Error(`pool state failed: ${res.status}`);
     const body = await res.json();
@@ -115,7 +114,7 @@ export class PoolClient {
   }
 
   /** Start (or restart) the pool run and return the first snapshot. */
-  async start(): Promise<PoolSnapshot> {
+  async start(): Promise<EnrichedSnapshot> {
     const res = await fetch(`${this.base}/api/start`, { method: "POST" });
     if (!res.ok) throw new Error(`pool start failed: ${res.status}`);
     const body = await res.json();
@@ -132,7 +131,7 @@ export class PoolClient {
     ticketId: string,
     action: ResumeAction,
     note?: string,
-  ): Promise<PoolSnapshot> {
+  ): Promise<EnrichedSnapshot> {
     const res = await fetch(`${this.base}/api/resume`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -170,7 +169,7 @@ export class PoolClient {
    * reads. Tickets without a grade are absent. Fetched on the snapshot
    * cadence, like the selected ticket's events.
    */
-  async getGrades(): Promise<Record<string, GradeView>> {
+  async getGrades(): Promise<Record<string, TicketGradeSummary>> {
     const res = await fetch(`${this.base}/api/grades`);
     if (!res.ok) throw new Error(`pool grades failed: ${res.status}`);
     const body = await res.json();
@@ -254,7 +253,7 @@ export class PoolClient {
    */
   async startConversation(
     request: StartConversationRequest,
-  ): Promise<PoolConversationState> {
+  ): Promise<ConversationView> {
     const res = await fetch(`${this.base}/api/conversations`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -278,7 +277,7 @@ export class PoolClient {
    * still be merging or crashed-detection in flight, so the caller renders
    * from it the same way it renders any other snapshot.
    */
-  async endConversation(id: string, closing?: string): Promise<PoolSnapshot> {
+  async endConversation(id: string, closing?: string): Promise<EnrichedSnapshot> {
     const res = await fetch(`${this.base}/api/conversations/end`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -427,8 +426,8 @@ export interface VisibilitySource {
  */
 export function refetchStateOnVisible(
   source: VisibilitySource,
-  getState: () => Promise<PoolSnapshot | null>,
-  onSnapshot: (snapshot: PoolSnapshot) => void,
+  getState: () => Promise<EnrichedSnapshot | null>,
+  onSnapshot: (snapshot: EnrichedSnapshot) => void,
 ): () => void {
   const handler = (): void => {
     if (source.visibilityState !== "visible") return;

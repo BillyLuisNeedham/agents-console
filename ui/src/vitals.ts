@@ -14,16 +14,16 @@
 import {
   projectVitals,
   pushVitalsSample,
-  type PoolSnapshot,
-  type PoolStatus,
+  type EnrichedSnapshot,
   type TicketActivityResponse,
+  type TicketStatus,
   type VitalsState,
 } from "./project";
 
 /** The poll cadence: one request per live ticket per interval. */
 export const VITALS_POLL_MS = 2_000;
 
-const CANDIDATE_STATUSES = new Set<PoolStatus>(["in-progress", "checkpoint"]);
+const CANDIDATE_STATUSES = new Set<TicketStatus>(["in-progress", "checkpoint"]);
 
 export type ActivityFetch = (
   ticketId: string,
@@ -48,7 +48,7 @@ export class Vitals {
   /** Fetches already out; a slow answer never stacks or delays the others. */
   private readonly inFlight = new Set<string>();
   private candidates = new Set<string>();
-  private statuses = new Map<string, PoolStatus>();
+  private statuses = new Map<string, TicketStatus>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: VitalsOptions) {
@@ -65,7 +65,7 @@ export class Vitals {
    * refetch each once. A spawn or resolver start emits a snapshot, so this is
    * also what re-arms a ticket whose last response said nothing was live.
    */
-  update(snapshot: PoolSnapshot | null): void {
+  update(snapshot: EnrichedSnapshot | null): void {
     const tickets = snapshot?.state.tickets ?? [];
     const known = new Set(tickets.map((t) => t.id));
     for (const id of [...this.payloads.keys()]) {

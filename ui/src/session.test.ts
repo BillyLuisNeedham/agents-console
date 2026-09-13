@@ -4,32 +4,35 @@ import { describe, expect, it } from "bun:test";
 import { ConsoleSession, type ConsoleSessionOptions } from "./session";
 import {
   projectPool,
-  type GradeView,
-  type PoolConversationState,
-  type PoolSnapshot,
-  type PoolTicketState,
+  type ConversationView,
+  type EnrichedSnapshot,
+  type EnrichedTicketState,
   type TicketBodyResponse,
+  type TicketEventKind,
   type TicketEventsResponse,
+  type TicketGradeSummary,
 } from "./project";
 
 function ticket(
   id: string,
-  overrides: Partial<PoolTicketState> = {},
-): PoolTicketState {
+  overrides: Partial<EnrichedTicketState> = {},
+): EnrichedTicketState {
   return {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
     status: "ready",
+    mergePending: false,
     assignment: { harness: null, model: null, drivers: "implement" },
+    liveAttempt: null,
     ...overrides,
   };
 }
 
 function conversation(
   id: string,
-  overrides: Partial<PoolConversationState> = {},
-): PoolConversationState {
+  overrides: Partial<ConversationView> = {},
+): ConversationView {
   return {
     id,
     title: `conversation ${id}`,
@@ -45,10 +48,10 @@ function conversation(
 }
 
 function snapshot(
-  overrides: Omit<Partial<PoolSnapshot>, "state"> & {
-    state?: Partial<PoolSnapshot["state"]>;
+  overrides: Omit<Partial<EnrichedSnapshot>, "state"> & {
+    state?: Partial<EnrichedSnapshot["state"]>;
   } = {},
-): PoolSnapshot {
+): EnrichedSnapshot {
   return {
     seq: 0,
     phase: "running",
@@ -56,6 +59,7 @@ function snapshot(
     ...overrides,
     state: {
       tickets: [],
+      conversations: [],
       log: [],
       outcomes: {},
       interrupts: [],
@@ -87,7 +91,7 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function eventsResponse(kind: string): TicketEventsResponse {
+function eventsResponse(kind: TicketEventKind): TicketEventsResponse {
   return {
     events: [{ at: "2026-09-12T10:00:00Z", attempt: 1, kind, payload: {} }],
     attempts: [],
@@ -124,7 +128,7 @@ function rig() {
       bodies.set(id, list);
       return d.promise;
     },
-    getGrades: () => Promise.resolve({} as Record<string, GradeView>),
+    getGrades: () => Promise.resolve({} as Record<string, TicketGradeSummary>),
     getLog: (ticketId) => {
       logCalls.push(ticketId);
       return new Promise(() => {});

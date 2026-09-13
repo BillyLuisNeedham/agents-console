@@ -9,10 +9,11 @@ import {
 } from "./needs-input";
 import {
   projectNeedsInput,
-  type InterruptAction,
+  type EnrichedSnapshot,
+  type InterruptKind,
   type InterruptView,
   type NeedsInputRow,
-  type PoolSnapshot,
+  type ResumeAction,
 } from "./project";
 
 // The form shapes the resume-all tests need: the single-action resume form
@@ -35,7 +36,7 @@ function form(kind: string): InterruptView["form"] {
   };
 }
 
-function row(ticketId: string, kind: string, queued = false): NeedsInputRow {
+function row(ticketId: string, kind: InterruptKind, queued = false): NeedsInputRow {
   return {
     cardId: `ticket:${ticketId}`,
     ticketId,
@@ -72,10 +73,10 @@ function deferred(): Deferred {
 // dispatch order before any outcome lands.
 function fakeAnswer(): {
   answer: AnswerHandler;
-  calls: { ticketId: string; action: InterruptAction; note?: string }[];
+  calls: { ticketId: string; action: ResumeAction; note?: string }[];
   deferreds: Map<string, Deferred>;
 } {
-  const calls: { ticketId: string; action: InterruptAction; note?: string }[] = [];
+  const calls: { ticketId: string; action: ResumeAction; note?: string }[] = [];
   const deferreds = new Map<string, Deferred>();
   const answer: AnswerHandler = (ticketId, action, note) => {
     calls.push({ ticketId, action, note });
@@ -166,7 +167,7 @@ describe("NeedsInputTray waiting rows", () => {
   // The engine's accept-now / drain-at-boundary contract (ADR-0004): an
   // answered interrupt stays listed with its queued flag set until the
   // super-step boundary snapshot drops it.
-  function queuedAnswerSnapshot(): PoolSnapshot {
+  function queuedAnswerSnapshot(): EnrichedSnapshot {
     return {
       seq: 0,
       phase: "running",
@@ -178,29 +179,42 @@ describe("NeedsInputTray waiting rows", () => {
             title: "ticket A",
             blockedBy: [],
             status: "checkpoint",
+            mergePending: false,
             assignment: { harness: null, model: null, drivers: "implement" },
+            liveAttempt: null,
           },
           {
             id: "B",
             title: "ticket B",
             blockedBy: [],
             status: "checkpoint",
+            mergePending: false,
             assignment: { harness: null, model: null, drivers: "implement" },
+            liveAttempt: null,
           },
         ],
+        conversations: [],
         log: [],
         outcomes: {},
         interrupts: [
           { ticketId: "A", kind: "checkpoint", body: "brief A" },
           { ticketId: "B", kind: "checkpoint", body: "brief B" },
         ],
-        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+        queuedAnswers: [
+          {
+            seq: 1,
+            ticketId: "A",
+            kind: "checkpoint",
+            at: "2026-09-12T10:00:00Z",
+            processedAt: null,
+          },
+        ],
         config: {},
       },
     };
   }
 
-  function drainedSnapshot(): PoolSnapshot {
+  function drainedSnapshot(): EnrichedSnapshot {
     const snap = queuedAnswerSnapshot();
     snap.state.interrupts = snap.state.interrupts.filter((i) => i.ticketId !== "A");
     snap.state.queuedAnswers = [];
