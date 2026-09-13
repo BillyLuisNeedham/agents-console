@@ -29,7 +29,7 @@ function snap(
         blockedBy: [],
         status: "in-progress",
         assignment: { harness: null, model: null, drivers: "implement" },
-        ...(paneId === undefined ? {} : { paneId }),
+        ...(paneId === undefined ? {} : { liveAttempt: { attempt: 1, paneId } }),
       })),
       conversations: Object.entries(conversationPanes).map(([id, paneId]) => ({
         id,

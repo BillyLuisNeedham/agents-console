@@ -1,10 +1,10 @@
 /**
  * Terminal surface: the client side of the card's terminal-backed attempt
  * surface (ADR-0014). The store polls the peek endpoint for every ticket
- * whose enriched snapshot entry carries a paneId (that is, whose current
- * attempt is terminal-backed and running), every 2s and once per pool
- * snapshot, and holds the peek text and focus confirmations the cards'
- * surfaces project from. A ticket whose paneId leaves the snapshot (the
+ * whose enriched snapshot entry carries a live attempt with a pane (that
+ * is, whose current attempt is terminal-backed and running), every 2s and
+ * once per pool snapshot, and holds the peek text and focus confirmations
+ * the cards' surfaces project from. A ticket whose pane leaves the snapshot (the
  * attempt ended, or the ticket left the pool) is pruned, so its polling
  * stops with its surface; a re-spawned attempt's new pane id resets the
  * entry to pending. Module scope in the bootstrap, so a full-DOM rebuild
@@ -69,7 +69,8 @@ export class TerminalSurface {
 
   /**
    * The snapshot cadence: prune to the tickets and Conversations whose
-   * current attempt is terminal-backed (a paneId on the enriched snapshot),
+   * current attempt is terminal-backed (a live attempt's pane on the
+   * enriched snapshot),
    * reset entries whose attempt re-spawned under a new pane id, and peek
    * each once, so a freshly spawned attempt's surface fills as soon as its
    * snapshot lands rather than after up to 2s. A live Conversation carries
@@ -79,8 +80,9 @@ export class TerminalSurface {
   update(snapshot: PoolSnapshot | null): void {
     const paneOf = new Map<string, string>();
     for (const ticket of snapshot?.state.tickets ?? []) {
-      if (typeof ticket.paneId === "string" && ticket.paneId !== "") {
-        paneOf.set(ticket.id, ticket.paneId);
+      const paneId = ticket.liveAttempt?.paneId;
+      if (typeof paneId === "string" && paneId !== "") {
+        paneOf.set(ticket.id, paneId);
       }
     }
     for (const conversation of snapshot?.state.conversations ?? []) {

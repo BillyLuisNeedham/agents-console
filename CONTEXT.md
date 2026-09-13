@@ -94,6 +94,10 @@ _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channe
 One run of a harness on behalf of a Ticket or a Conversation, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects; a Conversation has exactly one, ended by the operator or by a crash.
 _Avoid_: run (that's the whole thread), execution, job
 
+**Live attempt**:
+An Attempt between its launch and its Attempt ending, as the engine knows it in memory: the attempt number and, for a Terminal-backed attempt, its pane. The engine's snapshot carries one per Ticket, the highest-numbered Attempt still live, so the Console and the terminal routes read the pane from the snapshot and never work it out from the events files. Gone the moment the ending is recorded; never persisted, so a restart knows only what it re-adopts.
+_Avoid_: running attempt (status is the ticket's), current attempt (a settled Attempt is still the latest), active pane (the pane is where it runs, not what it is)
+
 **Terminal-backed attempt**:
 An Attempt whose harness runs as an interactive TUI in a herdr pane instead of a headless child — a real terminal the operator can watch and type into mid-run, while the engine stays oblivious to that input. The attempt ends when a valid Outcome appears; the TUI stays alive afterward and pane exit trails whenever the operator closes the tab, so pane loss *without* an Outcome is the crash signal. Its Stream file is a `script` typescript (both directions), not harness stream-json (ADR-0016). Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
 _Avoid_: interactive attempt (interaction is the operator's, not the attempt's), attached attempt, PTY attempt
@@ -149,6 +153,10 @@ _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ende
 **Turn**:
 One exchange in a Conversation: something said to the agent, or the agent's reply. The operator types Turns in the herdr tab; the engine types a Turn when a spawned Ticket ends. A Conversation is always either waiting on the operator or working on a Turn.
 _Avoid_: message (a chat term), prompt (that is only the first Turn), super-step (that is the engine's round, not the talk's)
+
+**Turn state**:
+Which side of its current Turn a Conversation is on: working (the agent is replying) or waiting (on the operator), with the last line the agent showed and, when waiting, since when. Read from the pane by the engine, never reported by the agent. A Notice is delivered only while the Conversation is waiting.
+_Avoid_: Turn (that is the exchange itself), idle (the agent waits for the operator; it is not idle), status (that is live, ended or crashed)
 
 **Notice**:
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.

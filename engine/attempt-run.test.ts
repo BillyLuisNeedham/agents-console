@@ -18,6 +18,7 @@ import {
 } from "./attempt-run.ts";
 import { validateOutcome, type OutcomeResult } from "./engine.ts";
 import { ChildTracker } from "./children.ts";
+import { createLiveAttempts } from "./live-attempts.ts";
 import { appendEvent, readEvents } from "./events.ts";
 import {
   defaultHarnessDescriptors,
@@ -98,6 +99,7 @@ function envFor(
     harnesses,
     herdrSocket,
     children: rig.children,
+    liveAttempts: createLiveAttempts(),
     terminalBacked,
   };
 }

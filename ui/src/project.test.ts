@@ -1962,7 +1962,7 @@ describe("projectPool paneId", () => {
         tickets: [
           // The enriched snapshot serves paneId only on terminal-backed
           // attempts; headless tickets lack the field entirely.
-          ticket("01", { status: "in-progress", paneId: "pane-7" }),
+          ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
           ticket("02", { status: "in-progress" }),
         ],
       },
@@ -1989,7 +1989,7 @@ describe("projectPool terminal surface", () => {
     const snap = terminalSnap([
       // The enriched snapshot serves paneId only on terminal-backed running
       // attempts; the surface appears with it.
-      ticket("01", { status: "in-progress", paneId: "pane-7" }),
+      ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
       ticket("02", { status: "in-progress" }),
     ]);
     const view = projectPool(snap, {}, {}, {});
@@ -2005,7 +2005,7 @@ describe("projectPool terminal surface", () => {
 
   it("threads the store's peek text and focus confirmation into the surface", () => {
     const snap = terminalSnap([
-      ticket("01", { status: "in-progress", paneId: "pane-7" }),
+      ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
     ]);
     const terminal: Record<string, TerminalSurfaceView> = {
       "01": { paneId: "pane-7", status: "live", text: "output", justFocused: true },
@@ -2153,7 +2153,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
 
   it("gives a row the terminal pitch while any ticket in it runs a pane-backed attempt", () => {
     const tickets = [
-      ticket("A", { status: "in-progress", paneId: "w17:p2" }),
+      ticket("A", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "w17:p2" } }),
       ticket("A2"),
       ticket("B", { blockedBy: ["A"] }),
       ticket("C", { blockedBy: ["B"] }),
@@ -2171,7 +2171,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
     const running = projectPool(
       snapshot({
         state: {
-          tickets: [ticket("A", { status: "in-progress", paneId: "w17:p2" }), ticket("B", { blockedBy: ["A"] })],
+          tickets: [ticket("A", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "w17:p2" } }), ticket("B", { blockedBy: ["A"] })],
         },
       }),
     );
@@ -2190,7 +2190,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
       chain.push(
         ticket(`T${i}`, {
           status: "in-progress",
-          paneId: `w1:p${i}`,
+          liveAttempt: { attempt: 1, paneId: `w1:p${i}` },
           blockedBy: i === 0 ? [] : [`T${i - 1}`],
         }),
       );

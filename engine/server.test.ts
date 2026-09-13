@@ -6,7 +6,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -16,10 +15,7 @@ import { join } from "node:path";
 import {
   ACTIVITY_CACHE_TTL_MS,
   createPoolServer,
-  currentAttemptPaneIds,
   LOG_CHUNK_BYTES,
-  resolveTerminalPane,
-  spawnedPaneAllowlist,
   TERMINAL_MIN_BUN_VERSION,
   TERMINAL_PEEK_LINES,
   terminalRuntimeRefusal,
@@ -31,6 +27,11 @@ import { appendEvent, type TicketEventKind } from "./events.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
 import { readConversation } from "./conversations.ts";
+import {
+  startExecutingFakeHerdr,
+  type ExecutingFakeHerdr,
+  type ExecutingFakeHerdrOptions,
+} from "./herdr-executing-fake.ts";
 import { makeTempDir } from "./tmp.ts";
 import {
   STUB_DEFAULTS,
@@ -1118,16 +1119,16 @@ describe("merge pending enrichment", () => {
     return body.snapshot?.state.tickets ?? [];
   }
 
-  it("labels a done ticket whose parked branch has not landed, and drops the label once it lands", async () => {
+  it("labels a done ticket whose parked branch has not landed, and drops the label once a manual merge lands", async () => {
     const { root, poolDir, run } = makeRepoWithPool([{ file: "01-a.md", marker: DONE_01 }]);
     parkBranch(root, run, "01");
     const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
     // The parked branch is exactly the merge hold (ADR-0014): the engine's
     // drive pauses on it rather than settling, so the label is read from the
-    // first snapshot and the serve-time re-derivation, never from a settle.
+    // first snapshot's hold set, never from a settle.
     await server.start();
 
-    // Parked and unmerged: the emit-time enrichment carries the label.
+    // Parked and unmerged: the snapshot's hold set carries the label.
     expect(server.latest?.state.tickets[0]).toMatchObject({
       id: "01",
       status: "done",
@@ -1135,25 +1136,23 @@ describe("merge pending enrichment", () => {
     });
 
     // A manual CLI merge, branch kept and now an ancestor of the working
-    // branch, lifts the label on the next snapshot without any Console
-    // action. The ticket is still done; only the merge was pending.
+    // branch, raises no snapshot of its own: the engine's hold watch (and
+    // the held drive's own poll) notice it and emit, so the label lifts
+    // without any Console action and the replay surface serves that emit
+    // as it is. The ticket is still done; only the merge was pending.
     run(["merge", "--no-edit", branchFor(root, "01")]);
+    let tickets: EnrichedTicketWire[] = [];
+    await waitFor(() => {
+      tickets = server.latest?.state.tickets ?? [];
+      return tickets[0]?.mergePending === false;
+    }, "the hold to lift on the snapshot after the manual merge");
     expect((await ticketsOf(server))[0]).toMatchObject({
       id: "01",
       status: "done",
       mergePending: false,
     });
-
-    // A branch that is gone reads as merged the same way: the engine
-    // deletes it once its own merge lands.
-    run(["checkout", "-q", "-B", branchFor(root, "01")]);
-    writeFileSync(join(root, "again.txt"), "more\n");
-    run(["add", "again.txt"]);
-    run(["commit", "-qm", "again"]);
-    run(["checkout", "-q", "main"]);
-    expect((await ticketsOf(server))[0]?.mergePending).toBe(true);
-    run(["branch", "-D", branchFor(root, "01")]);
-    expect((await ticketsOf(server))[0]?.mergePending).toBe(false);
+    // The gone-branch reading (a deleted branch is landed) is pinned in
+    // merge-hold.test.ts, on the one derivation this label comes from.
   });
 
   it("reads the merge target as the working branch, so a feature branch holds a label main would clear", async () => {
@@ -1868,42 +1867,32 @@ describe("ticket activity endpoint", () => {
     expect(body.running).toBe(false);
   });
 
-  it("reports running only while the latest attempt is live", async () => {
+  it("reports running while the snapshot shows a live attempt, and not once it has ended", async () => {
+    // `running` is read from the last snapshot's Live attempt, never from
+    // the events file: a real attempt held open, then released.
     const poolDir = makeServerPool([
       { file: "01-a.md", marker },
-      { file: "02-b.md", marker: marker.replace("id=01", "id=02") },
-      { file: "03-c.md", marker: marker.replace("id=01", "id=03") },
-      { file: "04-d.md", marker: marker.replace("id=01", "id=04") },
+      { file: "02-b.md", marker: marker.replace("id=01", "id=02").replace("status=ready", "status=done") },
     ]);
-    // 01: an implement attempt in flight.
-    seedEvents(poolDir, "01", [ev(1, "spawned")]);
-    // 02: parked at a checkpoint.
-    seedEvents(poolDir, "02", [
-      ev(1, "spawned"),
-      ev(1, "exited", { code: 0, status: "checkpoint" }),
-      ev(1, "checkpoint"),
-    ]);
-    // 03: a conflicted merge, resolver attempt in flight.
-    seedEvents(poolDir, "03", [
-      ev(1, "spawned"),
-      ev(1, "exited", { code: 0, status: "done" }),
-      ev(1, "merge-conflict"),
-      ev(2, "resolver"),
-    ]);
-    // 04: the same, but the human has answered the approval interrupt.
-    seedEvents(poolDir, "04", [
-      ev(1, "spawned"),
-      ev(1, "exited", { code: 0, status: "done" }),
-      ev(1, "merge-conflict"),
-      ev(2, "resolver"),
-      ev(2, "answered"),
-    ]);
-    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
-
+    const sentinel = join(poolDir, "release-01");
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+    );
+    await server.start();
+    await waitFor(
+      () => server.latest?.state.tickets.find((t) => t.id === "01")?.liveAttempt != null,
+      "01's attempt to be live on the snapshot",
+    );
     expect((await getActivity(server, "01")).body.running).toBe(true);
+    // 02 was done before boot and never spawned: nothing live.
     expect((await getActivity(server, "02")).body.running).toBe(false);
-    expect((await getActivity(server, "03")).body.running).toBe(true);
-    expect((await getActivity(server, "04")).body.running).toBe(false);
+
+    writeFileSync(sentinel, "");
+    await server.settled();
+    expect(server.latest?.state.tickets.find((t) => t.id === "01")?.liveAttempt).toBeNull();
+    await Bun.sleep(ACTIVITY_CACHE_TTL_MS + 50);
+    expect((await getActivity(server, "01")).body.running).toBe(false);
   });
 
   it("serves the cached payload for repeat requests inside the TTL", async () => {
@@ -2465,153 +2454,85 @@ describe("fleet registration", () => {
 // ---------------------------------------------------------------------------
 
 describe("terminal endpoints", () => {
-  const fakeServers: import("node:net").Server[] = [];
+  // Both endpoints read the pane from the last snapshot's Live attempt
+  // (ADR-0014, ticket 05 of #54): every case here runs a real
+  // terminal-backed pool against the executing fake daemon and reaches the
+  // pane the engine itself registered, never one seeded by hand.
+
+  const fakes: ExecutingFakeHerdr[] = [];
 
   afterEach(async () => {
-    while (fakeServers.length > 0) {
-      const server = fakeServers.pop()!;
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    while (fakes.length > 0) await fakes.pop()!.close();
   });
 
-  interface TerminalFakeRequest {
-    method: string;
-    params: Record<string, unknown>;
+  async function fakeHerdr(options?: ExecutingFakeHerdrOptions): Promise<ExecutingFakeHerdr> {
+    const fake = await startExecutingFakeHerdr(options);
+    fakes.push(fake);
+    return fake;
   }
 
-  interface TerminalFake {
-    socketPath: string;
-    requests: TerminalFakeRequest[];
-    /** Per-pane recent-output text; a pane absent here reads as empty. */
-    text: Record<string, string>;
-    /** Methods forced to answer with a herdr-style error body. */
-    fail: Record<string, unknown>;
+  const READY_01 = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  function liveAttemptOf(server: PoolServer, id: string): { attempt: number; paneId: string | null } | null | undefined {
+    return server.latest?.state.tickets.find((t) => t.id === id)?.liveAttempt;
   }
 
   /**
-   * A fake herdr daemon for the terminal endpoints: newline-delimited
-   * JSON-RPC, one request per connection. `pane.read` serves the per-pane
-   * text table (revision always 0, exactly the stagnation the
-   * implementation must not rely on); `pane.focus` just records. A foreign
-   * pane seeded in the table stands in for a live agent session sharing
-   * the daemon, which no endpoint may ever name.
+   * A terminal-backed pool whose one ticket runs an attempt held open until
+   * released, resolved once the snapshot carries its pane. The stub harness
+   * has no interactive descriptor, so the engine types nothing into the
+   * pane after the wrapper: what pane.read shows is exactly what the fake
+   * renders, and no engine read races the endpoint's.
    */
-  function startFakeHerdr(seed?: { text?: Record<string, string> }): Promise<TerminalFake> {
-    const requests: TerminalFakeRequest[] = [];
-    const fake: TerminalFake = {
-      socketPath: "",
-      requests,
-      text: { "pane-foreign": "someone else's agent\n", ...seed?.text },
-      fail: {},
-    };
-    const server = createServer((socket) => {
-      let buf = "";
-      socket.on("data", (d) => {
-        buf += d.toString();
-        const newline = buf.indexOf("\n");
-        if (newline < 0) return;
-        const msg = JSON.parse(buf.slice(0, newline)) as {
-          id: string;
-          method: string;
-          params: Record<string, unknown>;
-        };
-        requests.push({ method: msg.method, params: msg.params });
-        let response: Record<string, unknown>;
-        if (msg.method in fake.fail) {
-          response = { id: msg.id, error: fake.fail[msg.method] };
-        } else if (msg.method === "pane.read") {
-          const paneId = String(msg.params.pane_id ?? "");
-          response = {
-            id: msg.id,
-            result: {
-              read: {
-                text: fake.text[paneId] ?? "",
-                revision: 0,
-                truncated: false,
-              },
-            },
-          };
-        } else if (msg.method === "pane.focus") {
-          response = { id: msg.id, result: {} };
-        } else {
-          response = {
-            id: msg.id,
-            error: { code: -32601, message: `unknown method ${msg.method}` },
-          };
-        }
-        socket.end(JSON.stringify(response) + "\n");
-      });
-    });
-    fakeServers.push(server);
-    const dir = makeTempDir("herdr-terminal-");
-    registerTempDir(dir);
-    fake.socketPath = join(dir, "herdr.sock");
-    return new Promise((resolve, reject) => {
-      server.on("error", reject);
-      server.listen(fake.socketPath, () => resolve(fake));
-    });
-  }
-
-  /** A pool with three tickets; the caller writes the events each test needs. */
-  function makeTerminalPool(): { poolDir: string; runsDir: string } {
-    const poolDir = makeServerPool([
-      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
-      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
-      { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
-    ]);
-    return { poolDir, runsDir: join(poolDir, "runs") };
-  }
-
-  function recordSpawned(runsDir: string, ticketId: string, attempt: number, paneId: string | null): void {
-    appendEvent(runsDir, ticketId, {
-      at: "2026-09-05T00:00:00Z",
-      attempt,
-      kind: "spawned",
-      payload: { pane_id: paneId },
-    });
-  }
-
-  function recordSettled(runsDir: string, ticketId: string, attempt: number, kind: "exited" | "crash" | "answered" | "merged"): void {
-    appendEvent(runsDir, ticketId, {
-      at: "2026-09-05T00:01:00Z",
-      attempt,
-      kind,
-      payload: {},
-    });
-  }
-
-  function startTerminalServer(poolDir: string, herdrSocket: string): PoolServer {
-    const server = createPoolServer({
+  async function livePool(): Promise<{
+    server: PoolServer;
+    fake: ExecutingFakeHerdr;
+    poolDir: string;
+    paneId: string;
+    release: () => void;
+  }> {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }], { terminal: "herdr" });
+    const sentinel = join(poolDir, "release-01");
+    const fake = await fakeHerdr();
+    const server = await startServer(
       poolDir,
-      port: 0,
-      distDir: "/nonexistent",
-      registryPath: fleetRegistry(poolDir),
-      herdrSocket,
-    });
-    servers.push(server);
-    return server;
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+      { herdrSocket: fake.socketPath },
+    );
+    await server.start();
+    await waitFor(
+      () => typeof liveAttemptOf(server, "01")?.paneId === "string",
+      "01's live pane on the snapshot",
+    );
+    return {
+      server,
+      fake,
+      poolDir,
+      paneId: liveAttemptOf(server, "01")!.paneId!,
+      release: () => writeFileSync(sentinel, ""),
+    };
   }
 
-  it("peek translates the ticket id to the recorded pane id and serves its recent output", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    const fake = await startFakeHerdr({ text: { "pane-1": "working\nstill working" } });
-    const server = startTerminalServer(poolDir, fake.socketPath);
+  const peekReads = (fake: ExecutingFakeHerdr) =>
+    fake.requests.filter((r) => r.method === "pane.read" && r.params.lines === TERMINAL_PEEK_LINES);
+
+  it("peek translates the ticket id to its live pane and serves the pane's recent output", async () => {
+    const { server, fake, paneId, release } = await livePool();
+    fake.setPaneContent(paneId, "working\nstill working");
 
     const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ ticket: "01", paneId: "pane-1", text: "working\nstill working" });
+    expect(await res.json()).toEqual({ ticket: "01", paneId, text: "working\nstill working" });
     // The wire call is the prototype's verified peek shape. The line count is
     // at least a terminal height: a TUI fills the pane, and pane.read returns
     // only the last N rendered rows, so a small count reads empty or a footer
     // sliver (prototype/tui-prompt-paste/FINDINGS.md section 2, proven).
     expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(80);
-    expect(fake.requests).toEqual([
+    expect(peekReads(fake)).toEqual([
       {
         method: "pane.read",
         params: {
-          pane_id: "pane-1",
+          pane_id: paneId,
           source: "recent",
           format: "text",
           strip_ansi: true,
@@ -2619,140 +2540,134 @@ describe("terminal endpoints", () => {
         },
       },
     ]);
+    release();
+    await settleOrBeat(server);
   });
 
-  it("focus calls pane.focus with the recorded pane id", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    const fake = await startFakeHerdr();
-    const server = startTerminalServer(poolDir, fake.socketPath);
+  it("focus calls pane.focus with the live pane id", async () => {
+    const { server, fake, paneId, release } = await livePool();
 
     const res = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, paneId: "pane-1" });
-    expect(fake.requests).toEqual([
-      { method: "pane.focus", params: { pane_id: "pane-1" } },
+    expect(await res.json()).toEqual({ ok: true, paneId });
+    expect(fake.requests.filter((r) => r.method === "pane.focus")).toEqual([
+      { method: "pane.focus", params: { pane_id: paneId } },
     ]);
+    release();
+    await settleOrBeat(server);
   });
 
-  it("never names a pane the pool did not spawn, and the guard refuses one", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    const fake = await startFakeHerdr();
-    const server = startTerminalServer(poolDir, fake.socketPath);
+  it("answers a headless attempt and an unknown ticket with a clean no-pane 404", async () => {
+    // A headless pool: the attempt is live on the snapshot with no pane.
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }]);
+    const sentinel = join(poolDir, "release-01");
+    const fake = await fakeHerdr();
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+      { herdrSocket: fake.socketPath },
+    );
+    await server.start();
+    await waitFor(() => liveAttemptOf(server, "01") != null, "01's headless attempt to be live");
+    expect(liveAttemptOf(server, "01")).toEqual({ attempt: 1, paneId: null });
 
-    await fetch(`${server.url}/api/terminal/peek?ticket=01`);
-    await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
-    // The daemon hosts a foreign live-agent pane; no request may name it.
-    // This is the spawned-only guarantee end to end: the endpoints are keyed
-    // by ticket id and translate only through the pool's own spawned events,
-    // so there is no request that reaches herdr for an unrelated pane.
-    expect(fake.requests).toHaveLength(2);
-    for (const request of fake.requests) {
-      expect(String(request.params.pane_id)).not.toBe("pane-foreign");
-    }
-
-    // The allowlist behind the 403: only pane ids the pool recorded on a
-    // spawned event pass. End to end the guard cannot trip on well-formed
-    // state (resolution and allowlist read the same events); the "conversation
-    // endpoints" describe below trips it for real off corrupted pool state.
-    const meta = [{ id: "01" }] as Parameters<typeof spawnedPaneAllowlist>[1];
-    const allowlist = spawnedPaneAllowlist(runsDir, meta);
-    expect([...allowlist].sort()).toEqual(["pane-1"]);
-  });
-
-  it("answers unknown, headless, and finished tickets with a clean no-pane 404", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    // Ticket 02 spawned headless: the recorded fallback fact is pane_id null.
-    recordSpawned(runsDir, "02", 1, null);
-    // Ticket 03 ran terminal-backed but its attempt has settled.
-    recordSpawned(runsDir, "03", 1, "pane-3");
-    recordSettled(runsDir, "03", 1, "exited");
-    const fake = await startFakeHerdr();
-    const server = startTerminalServer(poolDir, fake.socketPath);
-
-    for (const ticket of ["02", "03", "99"]) {
+    for (const ticket of ["01", "99"]) {
       const peek = await fetch(`${server.url}/api/terminal/peek?ticket=${ticket}`);
       expect(peek.status).toBe(404);
-      expect((await peek.json()).error).toBe(
-        `no terminal-backed pane for ticket ${ticket}`,
-      );
+      expect((await peek.json()).error).toBe(`no terminal-backed pane for ticket ${ticket}`);
       const focus = await fetch(`${server.url}/api/terminal/focus?ticket=${ticket}`, {
         method: "POST",
       });
       expect(focus.status).toBe(404);
-      expect((await focus.json()).error).toBe(
-        `no terminal-backed pane for ticket ${ticket}`,
-      );
+      expect((await focus.json()).error).toBe(`no terminal-backed pane for ticket ${ticket}`);
     }
     // No-pane tickets never reach the daemon.
     expect(fake.requests).toEqual([]);
+    writeFileSync(sentinel, "");
+    await settleOrBeat(server);
   });
 
-  it("resolves the ticket's latest attempt's pane: a retry supersedes the old one", () => {
-    const { runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-old");
-    recordSettled(runsDir, "01", 1, "exited");
-    recordSpawned(runsDir, "01", 2, "pane-new");
-    expect(resolveTerminalPane(runsDir, "01")).toBe("pane-new");
-    recordSettled(runsDir, "01", 2, "exited");
-    expect(resolveTerminalPane(runsDir, "01")).toBeNull();
-    expect(resolveTerminalPane(runsDir, "02")).toBeNull();
+  it("answers a finished attempt with the same 404: the pane leaves the snapshot when the attempt ends", async () => {
+    const { server, fake, release } = await livePool();
+    release();
+    await server.settled();
+    expect(liveAttemptOf(server, "01")).toBeNull();
+
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(peek.status).toBe(404);
+    expect((await peek.json()).error).toBe("no terminal-backed pane for ticket 01");
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
+    expect(focus.status).toBe(404);
+    expect(peekReads(fake)).toEqual([]);
+    expect(fake.requests.filter((r) => r.method === "pane.focus")).toEqual([]);
   });
 
   it("treats an empty read as empty text, not an error", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    // No text seeded: a background tab still warming up reads empty.
-    const fake = await startFakeHerdr();
-    const server = startTerminalServer(poolDir, fake.socketPath);
-
+    const { server, paneId, release } = await livePool();
+    // Nothing rendered: a background tab still warming up reads empty.
     const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ticket: "01", paneId: "pane-1", text: "" });
+    expect(await res.json()).toEqual({ ticket: "01", paneId, text: "" });
+    release();
+    await settleOrBeat(server);
   });
 
   it("freshness comes from text, not revision: a stagnant revision still serves new text", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    const fake = await startFakeHerdr({ text: { "pane-1": "first" } });
-    const server = startTerminalServer(poolDir, fake.socketPath);
-
+    const { server, fake, paneId, release } = await livePool();
+    fake.setPaneContent(paneId, "first");
     const first = await (await fetch(`${server.url}/api/terminal/peek?ticket=01`)).json();
     expect(first.text).toBe("first");
-    fake.text["pane-1"] = "second";
+    fake.setPaneContent(paneId, "second");
     const second = await (await fetch(`${server.url}/api/terminal/peek?ticket=01`)).json();
     expect(second.text).toBe("second");
     // The response carries no revision at all: nothing downstream may rely
     // on it advancing (the fake serves revision 0 for both reads).
     expect("revision" in second).toBe(false);
+    release();
+    await settleOrBeat(server);
   });
 
-  it("a daemon failure is a clean 502, not a crash", async () => {
-    const { poolDir, runsDir } = makeTerminalPool();
-    recordSpawned(runsDir, "01", 1, "pane-1");
-    const fake = await startFakeHerdr();
-    fake.fail["pane.read"] = { code: -1, message: "daemon says no" };
-    fake.fail["pane.focus"] = { code: -1, message: "daemon says no" };
-    const server = startTerminalServer(poolDir, fake.socketPath);
+  it("a daemon failure is a clean 502, not a crash, and the only 502 there is", async () => {
+    const { server, fake, release } = await livePool();
+    fake.fail.add("pane.read");
+    fake.fail.add("pane.focus");
 
     const peek = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
     expect(peek.status).toBe(502);
-    expect((await peek.json()).error).toContain("daemon says no");
-    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, {
-      method: "POST",
-    });
+    expect((await peek.json()).error).toContain("pane.read refused");
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
     expect(focus.status).toBe(502);
-    expect((await focus.json()).error).toContain("daemon says no");
+    expect((await focus.json()).error).toContain("pane.focus refused");
+    fake.fail.clear();
+    release();
+    await settleOrBeat(server);
+  });
+
+  it("peek reads no events file: it still answers after the ticket's file is deleted", async () => {
+    const { server, fake, poolDir, paneId, release } = await livePool();
+    fake.setPaneContent(paneId, "still here");
+    // The events file was the old derivation's only source; the pane now
+    // rides the snapshot, so the file's loss changes nothing for the
+    // endpoint (the attempt's own exit later appends to a fresh file).
+    const eventsFile = join(poolDir, "runs", "01.events.jsonl");
+    expect(existsSync(eventsFile)).toBe(true);
+    rmSync(eventsFile);
+
+    const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ticket: "01", paneId, text: "still here" });
+    release();
+    await settleOrBeat(server);
   });
 });
 
-describe("paneId enrichment (terminal-backed attempts)", () => {
-  // ADR-0014: the spawned event records the attempt's pane_id; the server's
-  // snapshot enrichment threads it to the card projection as paneId. These
-  // tests drive real pools against a fake herdr daemon (the engine's herdr
-  // socket is overridable per run, exactly as the engine tests do), never the
-  // live daemon.
+describe("liveAttempt enrichment (terminal-backed attempts)", () => {
+  // ADR-0014: the engine registers each Attempt's pane the moment its
+  // spawned event is recorded, and the snapshot's liveAttempts carries it
+  // to the enriched ticket as `liveAttempt`; the server threads it through
+  // verbatim. These tests drive real pools against a fake herdr daemon (the
+  // engine's herdr socket is overridable per run, exactly as the engine
+  // tests do), never the live daemon.
 
   const fakeHerdrServers: { close: () => Promise<void> }[] = [];
 
@@ -2916,7 +2831,7 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     });
   }
 
-  it("exposes each terminal-backed ticket's paneId on the enriched snapshot", async () => {
+  it("exposes each terminal-backed ticket's live pane on the enriched snapshot", async () => {
     const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -2926,14 +2841,10 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
       { terminal: "herdr" },
     );
     const fake = await startFakeHerdr();
-    // A settled attempt's paneId drops from the snapshot by design (a
-    // finished card's surface and polling stop), and no emit separates a
-    // spawn from its exit while its siblings all run — the one emit that
-    // catches attempts live is the sibling-exit emit. So the three ready
-    // tickets share one super-step: 01 finishes (slowly enough that every
-    // spawn below has been persisted), and its exit emit must still carry
-    // 02 and 03's blocked attempts, each held open on its own sentinel
-    // until the snapshot has been read.
+    // A finished attempt's record leaves the snapshot by design (a finished
+    // card's surface and polling stop), so 02 and 03 are held open on their
+    // own sentinels until the snapshot has been read; 01 finishes on its
+    // own, so the super-step's later emits must still carry the other two.
     const release = {
       "02": join(poolDir, "release-02"),
       "03": join(poolDir, "release-03"),
@@ -2964,12 +2875,16 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     let live: { pane02: string; pane03: string } | null = null;
     await waitFor(() => {
       const tickets = server.latest?.state.tickets;
-      const pane02 = tickets?.find((t) => t.id === "02")?.paneId;
-      const pane03 = tickets?.find((t) => t.id === "03")?.paneId;
+      const pane02 = tickets?.find((t) => t.id === "02")?.liveAttempt?.paneId;
+      const pane03 = tickets?.find((t) => t.id === "03")?.liveAttempt?.paneId;
       live = typeof pane02 === "string" && typeof pane03 === "string" ? { pane02, pane03 } : null;
       return live !== null;
-    }, "02 and 03's live attempts to expose paneIds on one snapshot");
+    }, "02 and 03's live attempts to expose panes on one snapshot");
     const { pane02, pane03 } = live!;
+    expect(server.latest?.state.tickets.find((t) => t.id === "02")?.liveAttempt).toEqual({
+      attempt: 1,
+      paneId: pane02,
+    });
     // Every attempt of a terminal-backed pool opens its own named tab, so
     // each ticket's current attempt carries a distinct recovered pane id.
     expect(pane02).toMatch(/^pane-/);
@@ -2993,37 +2908,57 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     await settleOrBeat(server);
   });
 
-  it("exposes no paneId on a headless pool", async () => {
+  it("exposes a live attempt with no pane on a headless pool, and none once it ends", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
-    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    const sentinel = join(poolDir, "release-01");
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+    );
 
     await server.start();
+    // A headless attempt is live with a null pane: the card projection
+    // reads the null as "no surface" while the attempt still counts as
+    // running.
+    await waitFor(
+      () => server.latest?.state.tickets[0]?.liveAttempt != null,
+      "the headless attempt to be live on the snapshot",
+    );
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    writeFileSync(sentinel, "");
     const snapshot = await server.settled();
-    // Headless spawns record no pane facts at all, so the field is absent
-    // rather than null: the card projection reads absence as "no surface".
-    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    expect(snapshot.state.tickets[0]!.liveAttempt).toBeNull();
   });
 
-  it("exposes no paneId when the daemon refused the tab and the attempt fell back to headless", async () => {
+  it("exposes no pane when the daemon refused the tab and the attempt fell back to headless", async () => {
     const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
       { terminal: "herdr" },
     );
+    const sentinel = join(poolDir, "release-01");
     const fake = await startFakeHerdr({ fail: ["tab.create"] });
-    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
-      herdrSocket: fake.socketPath,
-    });
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+      { herdrSocket: fake.socketPath },
+    );
 
     await server.start();
+    // The fallback runs headless: live on the snapshot with a null pane.
+    await waitFor(
+      () => server.latest?.state.tickets[0]?.liveAttempt != null,
+      "the fallback attempt to be live on the snapshot",
+    );
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    writeFileSync(sentinel, "");
     const snapshot = await server.settled();
-    // The fallback runs headless and still completes; the spawned event's
-    // pane_id is null, so the enrichment exposes no paneId.
+    // The fallback still completes; the spawned event's pane_id is null.
     expect(snapshot.state.tickets[0]!.status).toBe("done");
-    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    expect(snapshot.state.tickets[0]!.liveAttempt).toBeNull();
     const spawned = readFileSync(
       join(poolDir, "runs", "01.events.jsonl"),
       "utf8",
@@ -3036,28 +2971,38 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
     expect(typeof event?.payload.terminal_error).toBe("string");
   });
 
-  it("exposes no paneId when the tab opened but the wrapper send was refused and the attempt fell back to headless", async () => {
+  it("exposes no pane when the tab opened but the wrapper send was refused and the attempt fell back to headless", async () => {
     const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
       { terminal: "herdr" },
     );
+    const sentinel = join(poolDir, "release-01");
     // The daemon accepts tab.create, so the attempt has a real pane; the
     // pane.send_input that would start the wrapper in it is refused, and the
     // spawn falls back to headless mid-flight.
     const fake = await startFakeHerdr({ fail: ["pane.send_input"] });
-    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
-      herdrSocket: fake.socketPath,
-    });
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+      { herdrSocket: fake.socketPath },
+    );
 
     await server.start();
+    // The fallback runs headless: live with a null pane, never the dead
+    // pane id the fallback closed.
+    await waitFor(
+      () => server.latest?.state.tickets[0]?.liveAttempt != null,
+      "the fallback attempt to be live on the snapshot",
+    );
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    writeFileSync(sentinel, "");
     const snapshot = await server.settled();
-    // The fallback runs headless and still completes; the spawned event
-    // records the fallback (pane_id null + terminal_error), not the dead
-    // pane id the fallback closed, so the enrichment exposes no paneId.
+    // The fallback still completes; the spawned event records the fallback
+    // (pane_id null + terminal_error), not the dead pane id.
     expect(snapshot.state.tickets[0]!.status).toBe("done");
-    expect(snapshot.state.tickets[0]!.paneId).toBeUndefined();
+    expect(snapshot.state.tickets[0]!.liveAttempt).toBeNull();
     // The close is fire-and-forget on the fallback path, so wait for the
     // daemon to have recorded it rather than racing the settled snapshot.
     await waitFor(
@@ -3077,96 +3022,6 @@ describe("paneId enrichment (terminal-backed attempts)", () => {
   });
 });
 
-describe("currentAttemptPaneIds", () => {
-  // The derivation the enrichment rides on: the ticket's latest spawned
-  // event is the only source, so a string pane_id maps, and a later null
-  // (the headless fallback) clears an earlier attempt's pane.
-
-  function runsWith(events: Record<string, { attempt: number; pane_id?: unknown }[]>): string {
-    const runsDir = join(makeTempDir("pane-ids-"), "runs");
-    registerTempDir(join(runsDir, ".."));
-    mkdirSync(runsDir, { recursive: true });
-    for (const [id, list] of Object.entries(events)) {
-      for (const event of list) {
-        appendEvent(runsDir, id, {
-          at: "2026-09-05T00:00:00Z",
-          attempt: event.attempt,
-          kind: "spawned",
-          payload:
-            event.pane_id === undefined ? {} : { pane_id: event.pane_id },
-        });
-      }
-    }
-    return runsDir;
-  }
-
-  const meta = [{ id: "01", file: "01.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" }];
-
-  it("maps the latest spawned event's string pane_id", () => {
-    const runsDir = runsWith({
-      "01": [
-        { attempt: 1, pane_id: "pane-1" },
-        { attempt: 2, pane_id: "pane-2" },
-      ],
-    });
-    expect(currentAttemptPaneIds(runsDir, meta)).toEqual({ "01": "pane-2" });
-  });
-
-  it("omits a ticket whose latest spawn fell back to headless (pane_id null), even after a terminal-backed attempt", () => {
-    const runsDir = runsWith({
-      "01": [
-        { attempt: 1, pane_id: "pane-1" },
-        { attempt: 2, pane_id: null },
-      ],
-    });
-    expect(currentAttemptPaneIds(runsDir, meta)).toEqual({});
-  });
-
-  it("omits headless spawns (no pane facts) and tickets with no events", () => {
-    const runsDir = runsWith({
-      "01": [{ attempt: 1 }],
-      "02": [{ attempt: 1, pane_id: 42 }],
-    });
-    const two = [
-      ...meta,
-      { id: "02", file: "02.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" },
-    ];
-    expect(currentAttemptPaneIds(runsDir, two)).toEqual({});
-  });
-
-  it("omits a ticket whose latest attempt has settled, so a finished card's surface and polling stop", () => {
-    const runsDir = runsWith({
-      "01": [
-        { attempt: 1, pane_id: "pane-1" },
-        { attempt: 2, pane_id: "pane-2" },
-      ],
-    });
-    appendEvent(runsDir, "01", {
-      at: "2026-09-05T00:01:00Z",
-      attempt: 2,
-      kind: "exited",
-      payload: {},
-    });
-    // An earlier attempt settling changes nothing while the latest runs.
-    appendEvent(runsDir, "02", {
-      at: "2026-09-05T00:00:30Z",
-      attempt: 1,
-      kind: "exited",
-      payload: {},
-    });
-    const two = [
-      ...meta,
-      { id: "02", file: "02.md", blockedBy: [], status: "ready" as const, title: "t", spec: "" },
-    ];
-    appendEvent(runsDir, "02", {
-      at: "2026-09-05T00:02:00Z",
-      attempt: 2,
-      kind: "spawned",
-      payload: { pane_id: "pane-2b" },
-    });
-    expect(currentAttemptPaneIds(runsDir, two)).toEqual({ "02": "pane-2b" });
-  });
-});
 
 describe("terminalRuntimeRefusal", () => {
   // Issue #61: Bun 1.2.13 segfaulted inside its event loop a few hundred
@@ -3595,31 +3450,29 @@ describe("conversation endpoints", () => {
     await fake.close();
   });
 
-  it("the spawned-only guard 403s a Conversation whose record is gone but whose events still name a pane", async () => {
+  it("an ended Conversation answers the same no-pane 404 as a finished ticket, never a 502", async () => {
     const poolDir = makeConvoPool();
     const fake = await startLaunchFakeHerdr();
     const server = startConvoServer(poolDir, fake.socketPath);
     await server.start();
     await server.settled();
 
-    const created = await server.startConversation({ title: "Corrupt me" });
-
-    // Corrupted pool state: the record file is gone, so the request's
-    // allowlist is built without this Conversation's events, while the id
-    // check still passes (the snapshot union knows the id) and the events
-    // file still resolves its pane. Resolution yields a pane the allowlist
-    // does not contain — exactly what the 403 exists for.
-    const recordFile = join(poolDir, "conversations", `${created.id}.md`);
-    renameSync(recordFile, `${recordFile}.bak`);
-    try {
-      const res = await fetch(`${server.url}/api/terminal/peek?ticket=${created.id}`);
-      expect(res.status).toBe(403);
-      expect((await res.json()).error).toContain("not one this pool spawned");
-    } finally {
-      renameSync(`${recordFile}.bak`, recordFile);
-    }
-
+    const created = await server.startConversation({ title: "End me" });
+    expect((await fetch(`${server.url}/api/terminal/peek?ticket=${created.id}`)).status).toBe(200);
     await server.endConversation(created.id);
+
+    // The End's own emit carries the view with its pane gone; the endpoints
+    // read that snapshot and nothing else, so the daemon is never asked
+    // about a pane that no longer exists.
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=${created.id}`);
+    expect(peek.status).toBe(404);
+    expect((await peek.json()).error).toBe(`no terminal-backed pane for ticket ${created.id}`);
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=${created.id}`, {
+      method: "POST",
+    });
+    expect(focus.status).toBe(404);
+    expect((await focus.json()).error).toBe(`no terminal-backed pane for ticket ${created.id}`);
+
     await fake.close();
   });
 

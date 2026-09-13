@@ -1,84 +1,103 @@
 import { describe, expect, it } from "bun:test";
 import {
-  deriveTurnState,
-  extractLastLine,
+  FRESH_TURN,
   IDLE_STABLE_READS,
-  type TurnStatePrev,
+  extractLastLine,
+  nextTurnState,
+  type TurnState,
 } from "./turn-state.ts";
 
-describe("deriveTurnState", () => {
-  it("starts working on the very first read (prev null), whatever the text", () => {
-    const r = deriveTurnState(null, "some pane text\n❯", "❯");
-    expect(r.state).toBe("working");
-    expect(r.changed).toBe(true);
+const T0 = "2026-09-13T10:00:00.000Z";
+const T1 = "2026-09-13T10:00:02.000Z";
+
+// A Turn state as the tick would hold it after a read judged on `transcript`.
+function held(
+  transcript: string,
+  state: TurnState["state"],
+  stableReads: number,
+  idleSince: string | null = state === "waiting" ? T0 : null,
+): TurnState {
+  return { state, lastLine: extractLastLine(transcript), idleSince, stableReads, transcript };
+}
+
+describe("nextTurnState", () => {
+  it("starts working on the very first read (fresh state), whatever the text", () => {
+    const { turn, publish } = nextTurnState(FRESH_TURN, "some pane text\n❯", "❯", T1);
+    expect(turn.state).toBe("working");
+    expect(turn.idleSince).toBeNull();
+    expect(publish).toBe(true);
   });
 
-  it("a text change always resets to working and resets the stable count", () => {
-    const prev = { text: "old", state: "waiting" as const, stableReads: 5 };
-    const r = deriveTurnState(prev, "new", "❯");
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(0);
-    expect(r.changed).toBe(true);
+  it("a text change always resets to working, clears idleSince and resets the stable count", () => {
+    const { turn, publish } = nextTurnState(held("old", "waiting", 5), "new", "❯", T1);
+    expect(turn.state).toBe("working");
+    expect(turn.stableReads).toBe(0);
+    expect(turn.idleSince).toBeNull();
+    expect(publish).toBe(true);
   });
 
-  it("a text change from working to working (same state) is unchanged only if lastLine is identical too", () => {
-    const prev = { text: "line one\nline two", state: "working" as const, stableReads: 0 };
-    const r1 = deriveTurnState(prev, "line one\nline two more", "❯");
-    expect(r1.state).toBe("working");
-    expect(r1.changed).toBe(true); // lastLine moved
+  it("a text change from working to working publishes only when lastLine moved too", () => {
+    const r1 = nextTurnState(held("line one\nline two", "working", 0), "line one\nline two more", "❯", T1);
+    expect(r1.turn.state).toBe("working");
+    expect(r1.publish).toBe(true); // lastLine moved
 
-    const prev2 = { text: "same tail\nfoo", state: "working" as const, stableReads: 0 };
-    // Different full text, but the extracted last line matches: still
-    // "changed" is about state-or-lastLine, and here text differs above the
-    // last line, so lastLine is unaffected but the function still reports
-    // working->working with the same lastLine as unchanged.
-    const r2 = deriveTurnState(prev2, "other tail\nfoo", "❯");
-    expect(r2.lastLine).toBe("foo");
-    expect(r2.changed).toBe(false);
+    // Different full text, but the extracted last line matches: publish is
+    // about state-or-lastLine, and here text differs above the last line,
+    // so the transition reports working->working with the same lastLine as
+    // nothing to publish.
+    const r2 = nextTurnState(held("same tail\nfoo", "working", 0), "other tail\nfoo", "❯", T1);
+    expect(r2.turn.lastLine).toBe("foo");
+    expect(r2.publish).toBe(false);
   });
 
-  it("requires IDLE_STABLE_READS consecutive stable+idle reads before flipping to waiting", () => {
+  it("requires IDLE_STABLE_READS consecutive stable+idle reads before flipping to waiting, stamping idleSince on the flip", () => {
     expect(IDLE_STABLE_READS).toBe(2);
-    let prev: TurnStatePrev = { text: "", state: "working", stableReads: 0 };
     // First read: text changes from "" -> content, resets to working.
-    let r = deriveTurnState(prev, "agent output\n❯", "❯");
-    expect(r.state).toBe("working");
-    prev = { text: "agent output\n❯", state: r.state, stableReads: r.stableReads };
+    let r = nextTurnState(FRESH_TURN, "agent output\n❯", "❯", T0);
+    expect(r.turn.state).toBe("working");
 
     // Second read: same text, idle pattern present, but only 1 stable read so far.
-    r = deriveTurnState(prev, "agent output\n❯", "❯");
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(1);
-    expect(r.changed).toBe(false);
-    prev = { text: "agent output\n❯", state: r.state, stableReads: r.stableReads };
+    r = nextTurnState(r.turn, "agent output\n❯", "❯", T0);
+    expect(r.turn.state).toBe("working");
+    expect(r.turn.stableReads).toBe(1);
+    expect(r.turn.idleSince).toBeNull();
+    expect(r.publish).toBe(false);
 
-    // Third read: same text again, second stable+idle read -> waiting.
-    r = deriveTurnState(prev, "agent output\n❯", "❯");
-    expect(r.state).toBe("waiting");
-    expect(r.changed).toBe(true);
+    // Third read: same text again, second stable+idle read -> waiting, since now.
+    r = nextTurnState(r.turn, "agent output\n❯", "❯", T1);
+    expect(r.turn.state).toBe("waiting");
+    expect(r.turn.idleSince).toBe(T1);
+    expect(r.publish).toBe(true);
   });
 
   it("a stable read without the idle pattern present never becomes waiting and resets the stable count", () => {
-    const prev = { text: "mid dialog", state: "working" as const, stableReads: 1 };
-    const r = deriveTurnState(prev, "mid dialog", "❯");
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(0);
-    expect(r.changed).toBe(false);
+    const { turn, publish } = nextTurnState(held("mid dialog", "working", 1), "mid dialog", "❯", T1);
+    expect(turn.state).toBe("working");
+    expect(turn.stableReads).toBe(0);
+    expect(turn.idleSince).toBeNull();
+    expect(publish).toBe(false);
   });
 
-  it("once waiting, further stable+idle reads hold waiting with no further change", () => {
-    const prev = { text: "❯", state: "waiting" as const, stableReads: 2 };
-    const r = deriveTurnState(prev, "❯", "❯");
-    expect(r.state).toBe("waiting");
-    expect(r.changed).toBe(false);
-    expect(r.stableReads).toBe(3);
+  it("once waiting, further stable+idle reads hold waiting, keep the original idleSince and publish nothing", () => {
+    const { turn, publish } = nextTurnState(held("❯", "waiting", 2, T0), "❯", "❯", T1);
+    expect(turn.state).toBe("waiting");
+    expect(turn.idleSince).toBe(T0);
+    expect(publish).toBe(false);
+    expect(turn.stableReads).toBe(3);
+  });
+
+  it("once waiting, a stable read without the idle pattern holds waiting and its idleSince (no flap)", () => {
+    const { turn, publish } = nextTurnState(held("❯", "waiting", 2, T0), "❯", "zzz", T1);
+    expect(turn.state).toBe("waiting");
+    expect(turn.idleSince).toBe(T0);
+    expect(turn.stableReads).toBe(0);
+    expect(publish).toBe(false);
   });
 
   it("an empty idlePattern never matches, so the turn can never become waiting", () => {
-    const prev = { text: "x", state: "working" as const, stableReads: 5 };
-    const r = deriveTurnState(prev, "x", "");
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(0);
+    const { turn } = nextTurnState(held("x", "working", 5), "x", "", T1);
+    expect(turn.state).toBe("working");
+    expect(turn.stableReads).toBe(0);
   });
 });
 
@@ -259,47 +278,45 @@ describe("extractLastLine on live frames (issue #71)", () => {
   });
 });
 
-describe("deriveTurnState on live frames (issue #71)", () => {
-  function step(prev: TurnStatePrev | null, text: string) {
-    const r = deriveTurnState(prev, text, "❯");
-    return { r, next: { text: r.transcript, state: r.state, stableReads: r.stableReads } };
-  }
-
+describe("nextTurnState on live frames (issue #71)", () => {
   it("reaches waiting on an idle claude frame and ignores the statusline ticking underneath", () => {
-    let { r, next } = step(null, claudeIdle("63.5k 32% $0.07"));
-    expect(r.state).toBe("working");
-    expect(r.lastLine).toBe("✻ Sautéed for 1s · done 2:35 PM");
+    let r = nextTurnState(FRESH_TURN, claudeIdle("63.5k 32% $0.07"), "❯", T0);
+    expect(r.turn.state).toBe("working");
+    expect(r.turn.lastLine).toBe("✻ Sautéed for 1s · done 2:35 PM");
     // The usage counter moves, the transcript does not: still a stable read.
-    ({ r, next } = step(next, claudeIdle("63.6k 32% $0.08")));
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(1);
-    ({ r, next } = step(next, claudeIdle("63.6k 32% $0.08 ↻ 33m")));
-    expect(r.state).toBe("waiting");
-    expect(r.changed).toBe(true);
+    r = nextTurnState(r.turn, claudeIdle("63.6k 32% $0.08"), "❯", T0);
+    expect(r.turn.state).toBe("working");
+    expect(r.turn.stableReads).toBe(1);
+    r = nextTurnState(r.turn, claudeIdle("63.6k 32% $0.08 ↻ 33m"), "❯", T1);
+    expect(r.turn.state).toBe("waiting");
+    expect(r.turn.idleSince).toBe(T1);
+    expect(r.publish).toBe(true);
     // Once waiting, a footer-only change is not a change at all.
-    ({ r, next } = step(next, claudeIdle("63.6k 32% $0.08 ↻ 32m")));
-    expect(r.state).toBe("waiting");
-    expect(r.changed).toBe(false);
-    expect(r.stableReads).toBe(3);
+    r = nextTurnState(r.turn, claudeIdle("63.6k 32% $0.08 ↻ 32m"), "❯", "2026-09-13T10:00:04.000Z");
+    expect(r.turn.state).toBe("waiting");
+    expect(r.turn.idleSince).toBe(T1);
+    expect(r.publish).toBe(false);
+    expect(r.turn.stableReads).toBe(3);
   });
 
   it("goes back to working when the transcript itself moves", () => {
-    const prev = { text: transcriptOf(claudeIdle()), state: "waiting" as const, stableReads: 4 };
-    const r = deriveTurnState(prev, CLAUDE_WORKING, "❯");
-    expect(r.state).toBe("working");
-    expect(r.stableReads).toBe(0);
-    expect(r.lastLine).toBe("✢ Sautéing…");
-    expect(r.changed).toBe(true);
+    const { turn, publish } = nextTurnState(
+      held(transcriptOf(claudeIdle()), "waiting", 4),
+      CLAUDE_WORKING,
+      "❯",
+      T1,
+    );
+    expect(turn.state).toBe("working");
+    expect(turn.stableReads).toBe(0);
+    expect(turn.idleSince).toBeNull();
+    expect(turn.lastLine).toBe("✢ Sautéing…");
+    expect(publish).toBe(true);
   });
 
-  it("hands back the transcript it judged, so feeding it in as prev reads as stable", () => {
-    const first = deriveTurnState(null, claudeIdle(), "❯");
-    expect(first.transcript).toBe(transcriptOf(claudeIdle()));
-    const second = deriveTurnState(
-      { text: first.transcript, state: first.state, stableReads: first.stableReads },
-      claudeIdle(),
-      "❯",
-    );
-    expect(second.stableReads).toBe(1);
+  it("carries the transcript it judged, so the same frame next read is stable", () => {
+    const first = nextTurnState(FRESH_TURN, claudeIdle(), "❯", T0);
+    expect(first.turn.transcript).toBe(transcriptOf(claudeIdle()));
+    const second = nextTurnState(first.turn, claudeIdle(), "❯", T1);
+    expect(second.turn.stableReads).toBe(1);
   });
 });

@@ -9,12 +9,15 @@
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
  * server enriches the former into an array of {id, title, blockedBy, status,
- * assignment, paneId?} so the projection can draw blocked-by edges, show
- * titles, render the record verbatim, and reach a terminal-backed attempt's
- * herdr pane (ADR-0014). The metadata (title, spec, blockedBy) is the
- * engine's own marker parsing, re-read from the pool's issues directory on
- * every snapshot and ticket-scoped request: a
- * ticket file that lands after boot (an engine-written Spawn or grader
+ * mergePending, assignment, liveAttempt} so the projection can draw
+ * blocked-by edges, show titles, render the record verbatim, and reach a
+ * terminal-backed attempt's herdr pane (ADR-0014). Every fact on that array
+ * is the engine's: the merge hold and the live attempt ride the engine's
+ * snapshot, so nothing here reads git or the events files to build it, and
+ * the replay surfaces serve the last snapshot as it is. The metadata
+ * (title, spec, blockedBy) is the engine's own marker parsing, re-read from
+ * the pool's issues directory on every snapshot and ticket-scoped request:
+ * a ticket file that lands after boot (an engine-written Spawn or grader
  * ticket, or a hand edit) renders as a live card without a restart. The
  * grades endpoint re-derives from the same refreshed meta.
  */
@@ -32,11 +35,8 @@ import { join, resolve } from "node:path";
 import {
   readConfig,
   REVIEW_TICKET_ID,
-  repoRootOf,
   loadPoolTickets,
   startPool,
-  UNASSIGNED_ASSIGNMENT_VIEW,
-  type AssignmentView,
   type ConversationView,
   type HarnessCommand,
   type InterruptKind,
@@ -47,6 +47,8 @@ import {
   type StartConversationRequest,
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
+import { UNASSIGNED_ASSIGNMENT_VIEW, type AssignmentView } from "./assignment.ts";
+import type { LiveAttemptRecord } from "./live-attempts.ts";
 import {
   attemptLogName,
   attemptStreamName,
@@ -74,13 +76,9 @@ import {
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
-import {
-  branchLandedInto,
-  branchFor,
-  currentBranch,
-  git,
-  gitAvailable,
-} from "./worktrees.ts";
+// The one git use left in this file is the activity endpoint's diff summary;
+// no snapshot or terminal route reaches it.
+import { git } from "./worktrees.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
@@ -115,17 +113,21 @@ interface EnrichedTicketState {
   blockedBy: string[];
   status: TicketStatus;
   /** True when the ticket is done but its branch has not landed in the
-   *  merge target (ADR-0014): the "done, merge pending" card label. Derived
-   *  server-side here; every UI surface reads this field and never git. */
+   *  merge target (ADR-0014): the "done, merge pending" card label. A
+   *  lookup into the snapshot's Merge hold, the engine's one derivation;
+   *  every UI surface reads this field and never git. */
   mergePending: boolean;
   /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
   assignment: AssignmentView;
   /**
-   * The current attempt's herdr pane id (ADR-0014), present only while the
-   * latest spawned event records one: terminal-backed attempts carry it,
-   * headless pools and headless-fallback attempts have the field absent.
+   * The ticket's Live attempt (ADR-0014): the attempt number and, for a
+   * terminal-backed attempt, its herdr pane, served verbatim from the
+   * engine's snapshot while the attempt runs; null once it has ended, so a
+   * finished card's terminal surface and its polling stop, and null for a
+   * ticket with nothing running. A headless attempt is live with a null
+   * pane.
    */
-  paneId?: string;
+  liveAttempt: LiveAttemptRecord | null;
 }
 
 interface EnrichedSnapshot {
@@ -174,83 +176,13 @@ export interface PoolServer {
   endConversation: (id: string, closing?: string) => Promise<void>;
 }
 
-// The events that close an attempt for good: a resolver run records no exited
-// event, so answered and merged close it too. Without them a resolver-driven
-// merge would read as live forever.
-const SETTLED_EVENT_KINDS = new Set(["exited", "crash", "answered", "merged"]);
-
-/**
- * The current attempt's pane id per ticket, derived from the ticket's own
- * events: a terminal-backed spawn records its recovered pane id on the
- * `spawned` event as `pane_id` (ADR-0014, ADR-0015), and the latest attempt's
- * latest spawned event wins, so a later headless-fallback attempt clears an
- * earlier pane id. Only a live attempt maps to an entry: a settled attempt
- * (SETTLED_EVENT_KINDS), a headless pool (no pane facts recorded), the
- * fallback's `pane_id: null`, and a ticket with no attempt at all all leave
- * the ticket without a paneId, so headless attempts and headless pools expose
- * none — and a finished attempt's paneId leaves the snapshot, which is what
- * stops the card's terminal surface and its polling (the spec's "stops when
- * the attempt ends").
- */
-export function currentAttemptPaneIds(
-  runsDir: string,
-  meta: TicketMarker[],
-): Record<string, string> {
-  const paneIds: Record<string, string> = {};
-  for (const marker of meta) {
-    const events = readEvents(runsDir, marker.id);
-    const latest = events.reduce((m, e) => Math.max(m, e.attempt), 0);
-    if (latest === 0) continue;
-    const latestEvents = events.filter((e) => e.attempt === latest);
-    if (latestEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind))) continue;
-    const paneId = latestEvents
-      .filter((e) => e.kind === "spawned")
-      .at(-1)?.payload.pane_id;
-    if (typeof paneId === "string" && paneId !== "") {
-      paneIds[marker.id] = paneId;
-    }
-  }
-  return paneIds;
-}
-
-/**
- * The done-but-unmerged ticket ids (ADR-0014): a ticket the snapshot reports
- * done whose branch has not landed in the merge target, the pool checkout's
- * current branch, main or a feature branch alike. Derived on demand from
- * branch state, never persisted, the way the engine derives the hold itself
- * (ADR-0007's pattern). A git-less pool has no branches, so nothing is ever
- * pending there.
- */
-function deriveMergePending(
-  poolDir: string,
-  statuses: Iterable<readonly [string, TicketStatus]>,
-): Set<string> {
-  const entries = [...statuses];
-  const pending = new Set<string>();
-  if (!entries.some(([, status]) => status === "done")) return pending;
-  const cwd = repoRootOf(poolDir);
-  if (!gitAvailable(cwd)) return pending;
-  const target = currentBranch(cwd);
-  for (const [id, status] of entries) {
-    if (status !== "done") continue;
-    if (branchLandedInto(cwd, branchFor(cwd, id), target)) continue;
-    pending.add(id);
-  }
-  return pending;
-}
-
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
 function enrich(
   snapshot: PoolSnapshot,
   meta: TicketMarker[],
   poolName: string,
-  poolDir: string,
-  paneIds: Record<string, string>,
 ): EnrichedSnapshot {
-  const pending = deriveMergePending(
-    poolDir,
-    Object.entries(snapshot.state.tickets),
-  );
+  const hold = new Set(snapshot.mergeHold);
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -261,7 +193,7 @@ function enrich(
         title: m.title,
         blockedBy: m.blockedBy,
         status: snapshot.state.tickets[m.id] ?? "ready",
-        mergePending: pending.has(m.id),
+        mergePending: hold.has(m.id),
         // A meta id the engine has not resolved yet (a hand-written file
         // seen between the meta refresh and the boundary that adopts it)
         // reads as unassigned until the record lands; the engine's map is
@@ -269,7 +201,7 @@ function enrich(
         assignment: snapshot.assignments[m.id] ?? {
           ...UNASSIGNED_ASSIGNMENT_VIEW,
         },
-        ...(paneIds[m.id] !== undefined ? { paneId: paneIds[m.id] } : {}),
+        liveAttempt: snapshot.liveAttempts[m.id] ?? null,
       })),
       conversations: snapshot.conversations,
       log: snapshot.state.log,
@@ -277,35 +209,6 @@ function enrich(
       interrupts: snapshot.state.interrupts,
       queuedAnswers: snapshot.queuedAnswers,
       config: snapshot.state.config as unknown as Record<string, unknown>,
-    },
-  };
-}
-
-/**
- * The cached latest was enriched at its emit, but the branch state behind
- * the merge-pending label can move without one: a manual CLI merge while
- * the pool sits quiescent raises no snapshot. The replay surfaces (/api/state
- * and a stream connect) re-derive before serving, so a Console opened after
- * such a merge sees the label gone rather than the last emit's.
- */
-function withMergePending(
-  snapshot: EnrichedSnapshot,
-  poolDir: string,
-): EnrichedSnapshot {
-  const pending = deriveMergePending(
-    poolDir,
-    snapshot.state.tickets.map(
-      (ticket) => [ticket.id, ticket.status] as const,
-    ),
-  );
-  return {
-    ...snapshot,
-    state: {
-      ...snapshot.state,
-      tickets: snapshot.state.tickets.map((ticket) => ({
-        ...ticket,
-        mergePending: pending.has(ticket.id),
-      })),
     },
   };
 }
@@ -702,6 +605,7 @@ function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
 function readTicketActivity(
   poolDir: string,
   ticketId: string,
+  running: boolean,
 ): TicketActivityResponse {
   const runsDir = join(poolDir, "runs");
   const events = readEvents(runsDir, ticketId);
@@ -716,18 +620,9 @@ function readTicketActivity(
       break;
     }
   }
-  // Live means the ticket's latest attempt is doing work: an implement run in
-  // flight, or a resolver run in flight on a checkpointed merge. The latest
-  // attempt is the highest attempt number recorded; an attempt only counts
-  // once it has actually spawned.
-  const latestAttempt = events.reduce((m, e) => Math.max(m, e.attempt), 0);
-  const latestAttemptEvents = events.filter((e) => e.attempt === latestAttempt);
-  const running =
-    latestAttempt > 0 &&
-    latestAttemptEvents.some(
-      (e) => e.kind === "spawned" || e.kind === "resolver",
-    ) &&
-    !latestAttemptEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind));
+  // `running` is the caller's: the last snapshot shows a Live attempt for
+  // this ticket (an implement run in flight, or a resolver run in flight on
+  // a conflicted merge). The events are read here only for the worktree.
   const lastEventAt = events.length > 0 ? events[events.length - 1].at : null;
   const diff =
     worktree !== null && existsSync(worktree)
@@ -763,56 +658,6 @@ export const ACTIVITY_CACHE_TTL_MS = 1000;
  * working area, while staying a bounded glance rather than a full log.
  */
 export const TERMINAL_PEEK_LINES = 80;
-
-/**
- * The ticket-id -> pane-id translation both terminal endpoints key on
- * (ADR-0014): the pane id recorded on the ticket's latest attempt's
- * `spawned` event, but only while that attempt is still live. A settled
- * attempt (finished), a headless fallback spawn (pane_id null on the
- * spawned event), and a ticket with no attempt at all all resolve to null,
- * so the endpoints answer "no pane" rather than reaching a stale or foreign
- * pane.
- */
-export function resolveTerminalPane(
-  runsDir: string,
-  ticketId: string,
-): string | null {
-  const events = readEvents(runsDir, ticketId);
-  const latest = events.reduce((m, e) => Math.max(m, e.attempt), 0);
-  if (latest === 0) return null;
-  const latestEvents = events.filter((e) => e.attempt === latest);
-  if (latestEvents.some((e) => SETTLED_EVENT_KINDS.has(e.kind))) return null;
-  const spawned = latestEvents.filter((e) => e.kind === "spawned");
-  const paneId = spawned.at(-1)?.payload.pane_id;
-  return typeof paneId === "string" && paneId !== "" ? paneId : null;
-}
-
-/**
- * Every pane id this pool recorded on a `spawned` event, across its
- * tickets and its Conversations alike (issue #60: a Conversation's launch
- * records `pane_id`/`tab_id` on a `spawned` event on its own
- * `runs/<conv-id>.events.jsonl`, the same file naming a ticket's attempt
- * uses, so this needs nothing but the id to find it): the allowlist behind
- * the spawned-only guard. Derived from pool state at request time rather
- * than held in memory, so a server restart neither widens it (forgetting a
- * spawn) nor narrows it (protecting a pane that is legitimately gone); the
- * prototype's per-process Set did both. Takes anything with an `id` — a
- * `TicketMarker` or a `ConversationRecord` — since only the id is read.
- */
-export function spawnedPaneAllowlist(
-  runsDir: string,
-  meta: { id: string }[],
-): Set<string> {
-  const allowlist = new Set<string>();
-  for (const marker of meta) {
-    for (const event of readEvents(runsDir, marker.id)) {
-      if (event.kind !== "spawned") continue;
-      const paneId = event.payload.pane_id;
-      if (typeof paneId === "string" && paneId !== "") allowlist.add(paneId);
-    }
-  }
-  return allowlist;
-}
 
 // ---------------------------------------------------------------------------
 // Grades endpoint
@@ -1128,7 +973,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let meta = loadPoolTickets(poolDir);
   let ticketIds = new Set(meta.map((m) => m.id));
   // Conversation ids (issue #60), read the same way ticket meta is: from
-  // disk on every snapshot and every terminal request, so a Conversation
+  // disk on every snapshot and every Conversation request, so a Conversation
   // that just started is known before its next engine snapshot lands. The
   // conversations directory does not exist on a pool with none yet, and
   // loadConversations reads that as [] rather than throwing.
@@ -1149,7 +994,11 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     const hit = activityCache.get(ticketId);
     const now = Date.now();
     if (hit && now - hit.at < ACTIVITY_CACHE_TTL_MS) return hit.value;
-    const value = readTicketActivity(poolDir, ticketId);
+    const value = readTicketActivity(
+      poolDir,
+      ticketId,
+      (latest?.state.tickets.find((t) => t.id === ticketId)?.liveAttempt ?? null) !== null,
+    );
     activityCache.set(ticketId, { at: now, value });
     return value;
   }
@@ -1213,15 +1062,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       herdrSocket,
       onSnapshot: (snapshot) => {
         refreshMeta();
-        broadcast(
-          enrich(
-            snapshot,
-            meta,
-            poolName,
-            poolDir,
-            currentAttemptPaneIds(join(poolDir, "runs"), meta),
-          ),
-        );
+        broadcast(enrich(snapshot, meta, poolName));
       },
     });
     return latest!;
@@ -1308,50 +1149,28 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   }
 
   // The shared first half of both terminal endpoints: the id (a ticket's or,
-  // since issue #60, a Conversation's) -> pane translation and the
-  // spawned-only guard. Unknown ids take the same "no pane" answer as
-  // headless, finished, and never-spawned ones, so the endpoints never
-  // reveal which ids exist and every no-pane case is one shape. The 403
-  // guard cannot trip on well-formed pool state (the translation and the
-  // allowlist read the same events); it is the belt-and-braces refusal for
-  // corrupted state. `resolveTerminalPane` and `spawnedPaneAllowlist` need
-  // nothing Conversation-specific: a Conversation's launch records
-  // `pane_id`/`tab_id` on a `spawned` event the same way an attempt's does,
-  // on `runs/<conv-id>.events.jsonl`, so passing the id (or the id plus the
-  // combined ticket+Conversation record list below) through unchanged works.
+  // since issue #60, a Conversation's) -> pane translation, read from the
+  // last snapshot alone: a ticket's Live attempt pane or a Conversation
+  // view's pane, both the engine's own record of what it spawned. Unknown
+  // ids take the same "no pane" answer as headless, finished, and
+  // never-spawned ones and ended Conversations, so the endpoints never
+  // reveal which ids exist and every no-pane case is one shape. The
+  // spawned-only guarantee (user story 12) is the record's provenance: the
+  // engine registers a pane only when it opened the tab itself, so there
+  // is nothing to allowlist against.
   function resolveTerminalRequest(ticketId: string):
     | { ok: true; paneId: string }
     | { ok: false; status: number; error: string } {
-    refreshMeta();
-    if (!ticketIds.has(ticketId) && !conversationIds.has(ticketId)) {
+    const ticket = latest?.state.tickets.find((t) => t.id === ticketId);
+    const paneId =
+      ticket?.liveAttempt?.paneId ??
+      latest?.state.conversations.find((c) => c.id === ticketId)?.paneId ??
+      null;
+    if (paneId === null || paneId === "") {
       return {
         ok: false,
         status: 404,
         error: `no terminal-backed pane for ticket ${ticketId}`,
-      };
-    }
-    const paneId = resolveTerminalPane(join(poolDir, "runs"), ticketId);
-    if (paneId === null) {
-      return {
-        ok: false,
-        status: 404,
-        error: `no terminal-backed pane for ticket ${ticketId}`,
-      };
-    }
-    // The spawned-only refusal (the headline guard, user story 12): the
-    // translation above only yields pane ids from the pool's own events and
-    // the allowlist reads those same events, so well-formed state can never
-    // trip this; it exists so corrupted state still cannot point the Console
-    // at a pane the pool did not spawn.
-    if (
-      !spawnedPaneAllowlist(join(poolDir, "runs"), [...meta, ...conversationRecords]).has(
-        paneId,
-      )
-    ) {
-      return {
-        ok: false,
-        status: 403,
-        error: `refusing: pane ${paneId} is not one this pool spawned`,
       };
     }
     return { ok: true, paneId };
@@ -1374,9 +1193,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         const pathname = url.pathname;
 
         if (pathname === "/api/state") {
-          return Response.json({
-            snapshot: latest ? withMergePending(latest, poolDir) : null,
-          });
+          return Response.json({ snapshot: latest });
         }
 
         if (pathname === "/api/start" && req.method === "POST") {
@@ -1548,10 +1365,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ reason: message }, { status });
           }
           refreshMeta();
-          return Response.json(
-            { snapshot: latest ? withMergePending(latest, poolDir) : null },
-            { status: 202 },
-          );
+          return Response.json({ snapshot: latest }, { status: 202 });
         }
 
         if (pathname === "/api/activity") {
@@ -1650,9 +1464,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               controller = ctrl;
               clients.add(ctrl);
               ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
-              if (latest) {
-                ctrl.enqueue(encodeSnapshot(withMergePending(latest, poolDir)));
-              }
+              if (latest) ctrl.enqueue(encodeSnapshot(latest));
               heartbeat = setInterval(() => {
                 try {
                   ctrl.enqueue(HEARTBEAT_FRAME);

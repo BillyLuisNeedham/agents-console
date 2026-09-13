@@ -235,20 +235,6 @@ export function mergeBranch(repoRoot: string, branch: string): MergeResult {
   return { ok: false, conflicted, detail: merge.err || merge.out };
 }
 
-// True when the branch's work has landed in the merge target: either the
-// branch is gone (the engine deletes it once its merge lands, and a missing
-// branch means a human finished the job by hand, the same reading
-// mergeBranch applies) or it is an ancestor of the target, whether the
-// engine's merge or a manual one did it.
-export function branchLandedInto(
-  repoRoot: string,
-  branch: string,
-  target: string,
-): boolean {
-  if (!refExists(repoRoot, branch)) return true;
-  return git(repoRoot, ["merge-base", "--is-ancestor", branch, target]).ok;
-}
-
 // The attempt branches a verify ticket currently has on disk: every
 // pool/<id>.attempt-N ref, numbered. Selection keeps the winner's branch and
 // discards the rest, so a superseded round's branches are cleaned up with
