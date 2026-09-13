@@ -85,6 +85,7 @@ export { readAttemptResult };
 export type { ReadFailure, ResultValidator };
 import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
 import type { ChildTracker } from "./children.ts";
+import type { LiveAttempts } from "./live-attempts.ts";
 import {
   StreamLineBuffer,
   TranscriptLineBuffer,
@@ -107,6 +108,12 @@ export interface AttemptEnv {
   harnesses: Record<string, HarnessCommand>;
   herdrSocket: string;
   children: ChildTracker;
+  /**
+   * The Live attempts registry: the launch registers the Attempt once its
+   * `spawned` event is recorded, and the run clears it where the ending is
+   * recorded (a launch-only caller clears its own).
+   */
+  liveAttempts: LiveAttempts;
   terminalBacked: boolean;
   agents?: string;
 }
@@ -391,13 +398,22 @@ export async function launchAttempt<R extends { ok: true }>(
     terminal: AttemptTerminal | undefined,
     terminalError?: string,
     pid?: number,
-  ): void =>
+  ): void => {
     appendEvent(env.runsDir, id, {
       at: new Date().toISOString(),
       attempt: spec.attempt,
       kind: "spawned",
       payload: spawnedPayload(argv, ctx, spec.branch, terminal, terminalError, pid),
     });
+    // Live from the moment the spawn is on the log, with the pane the event
+    // records: a fallback that nulled the event's pane_id is headless here
+    // too, so the registry can never point at the pane the fallback closed.
+    const headlessRun = terminal === undefined || terminalError !== undefined;
+    env.liveAttempts.register(id, spec.attempt, {
+      paneId: headlessRun ? null : terminal.paneId,
+      tabId: headlessRun ? null : terminal.tabId,
+    });
+  };
   const headless = (
     terminal: AttemptTerminal | undefined,
     terminalError?: string,
@@ -612,6 +628,9 @@ export async function runAttempt<R extends { ok: true }>(
       });
     }
   }
+  // The Attempt ending is recorded (or, for a spawned-only run, decided):
+  // the Live attempt leaves the registry at the same moment.
+  env.liveAttempts.clear(spec.id, spec.attempt);
   return run;
 }
 

@@ -38,7 +38,9 @@
  * daemon that cannot keep a subscription (restart mid-wait), for the
  * exit-code file fallback. `injectPane` and `endPane` simulate the orphans
  * boot reconciliation must handle: a pane with no process behind it, and
- * its later end.
+ * its later end. A method named in `fail` (seeded by the option, mutable on
+ * the handle) answers with a herdr-style error body, the shape of a daemon
+ * refusing the call, so a refusal can be switched on mid-run.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -53,6 +55,7 @@ export interface FakeHerdrRequest {
 
 export interface ExecutingFakeHerdrOptions {
   breakSubscriptions?: boolean;
+  fail?: string[];
   rendered?: string;
   dropInputs?: number;
   hideInputs?: number;
@@ -64,6 +67,8 @@ export interface ExecutingFakeHerdr {
   socketPath: string;
   requests: FakeHerdrRequest[];
   submitted: string[];
+  /** Methods that answer with an error body from now on. */
+  fail: Set<string>;
   close: () => Promise<void>;
   injectPane: (paneId: string) => void;
   endPane: (paneId: string) => void;
@@ -80,6 +85,7 @@ export async function startExecutingFakeHerdr(
   const defaultHideInputs = options?.hideInputs ?? 0;
   const wrapWidth = options?.wrapWidth;
   const holdPane = options?.holdPane === true;
+  const fail = new Set(options?.fail ?? []);
   // The input area as pane.read shows it: verbatim, or drawn as a bordered
   // box that wraps each line at `wrapWidth` columns.
   const renderInput = (inputArea: string): string => {
@@ -154,6 +160,15 @@ export async function startExecutingFakeHerdr(
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
+      if (fail.has(msg.method)) {
+        socket.end(
+          JSON.stringify({
+            id: msg.id,
+            error: { code: -32000, message: `${msg.method} refused` },
+          }) + "\n",
+        );
+        return;
+      }
       if (msg.method === "tab.create") {
         minted += 1;
         const tabId = `tab-${minted}`;
@@ -291,6 +306,7 @@ export async function startExecutingFakeHerdr(
     socketPath,
     requests,
     submitted,
+    fail,
     close: () =>
       new Promise<void>((resolve) => {
         for (const proc of procs) proc.kill();

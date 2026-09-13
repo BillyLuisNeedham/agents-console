@@ -215,9 +215,9 @@ export async function peekPane(
 
 /**
  * Focus the pane's tab in the operator's herdr TUI: one `pane.focus` call.
- * The pool server only ever names panes its own `spawned` events recorded
- * (the spawned-only guard in server.ts), so this can never yank the TUI
- * to an unrelated live agent session sharing the daemon.
+ * The pool server only ever names a pane the engine's own snapshot records
+ * as a live attempt's or a live Conversation's (server.ts), so this can
+ * never yank the TUI to an unrelated live agent session sharing the daemon.
  */
 export async function focusPane(
   socketPath: string,

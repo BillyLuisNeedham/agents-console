@@ -118,11 +118,18 @@ export interface PoolTicketState {
   /** The ticket's resolved Assignment record, rendered verbatim. */
   assignment: PoolTicketAssignment;
   /**
-   * The current attempt's herdr pane id (ADR-0014), served only for
-   * terminal-backed attempts; absent on headless pools and headless
-   * fallbacks.
+   * The ticket's Live attempt (ADR-0014): the attempt number and, for a
+   * terminal-backed attempt, its herdr pane, served while the attempt runs
+   * and null once it has ended. A headless attempt is live with a null
+   * pane. Absent on an older server's snapshot; the projection reads it as
+   * null.
    */
-  paneId?: string;
+  liveAttempt?: PoolLiveAttempt | null;
+}
+
+export interface PoolLiveAttempt {
+  attempt: number;
+  paneId: string | null;
 }
 
 export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
@@ -1006,7 +1013,7 @@ function layoutPool(
 
 /** A ticket row's vertical pitch: taller while any of its tickets runs a pane-backed attempt. */
 function rowPitch(row: PoolTicketState[]): number {
-  return row.some((ticket) => ticket.paneId !== undefined && ticket.paneId !== null)
+  return row.some((ticket) => typeof ticket.liveAttempt?.paneId === "string")
     ? LAYOUT.terminalRowH
     : LAYOUT.rowH;
 }
@@ -1105,8 +1112,9 @@ function toInterruptView(raw: PoolInterrupt | null, state: PoolState): Interrupt
 
 /**
  * The card's terminal surface (ADR-0014): present exactly when the ticket's
- * current attempt is terminal-backed and running (the enriched snapshot
- * carries its paneId, and drops it the moment the attempt ends), so headless
+ * current attempt is terminal-backed and running (the enriched snapshot's
+ * live attempt carries its pane, and the record goes the moment the attempt
+ * ends), so headless
  * and finished cards stay untouched. Before the first peek payload lands the
  * store holds no entry; the card still gets the surface, in its pending
  * "waiting for output" state, so there is no empty flash.
@@ -1143,8 +1151,8 @@ function projectTicket(
     interrupt: toInterruptView(raw, state),
     grade,
     vitals: projectVitals(vitals, ticket.status, now),
-    paneId: ticket.paneId ?? null,
-    terminal: projectTerminalSurface(ticket.paneId ?? null, terminal),
+    paneId: ticket.liveAttempt?.paneId ?? null,
+    terminal: projectTerminalSurface(ticket.liveAttempt?.paneId ?? null, terminal),
     x: pos.x,
     y: pos.y,
   };

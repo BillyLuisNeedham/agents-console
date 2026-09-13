@@ -75,10 +75,16 @@ import {
   type AssignmentView,
 } from "./assignment.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
+import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from "./live-attempts.ts";
+import {
+  createMergeHoldWatch,
+  deriveMergeHold,
+  gitMergeHoldProbe,
+  type MergeHoldWatch,
+} from "./merge-hold.ts";
 import {
   branchExists,
   branchFor,
-  branchLandedInto,
   commitMerge,
   attemptBranches,
   currentBranch,
@@ -287,6 +293,16 @@ export interface PoolSnapshot {
   // Every Conversation the pool knows about (conversations.ts), live or not:
   // the second collection beside tickets (the Conversations ADR).
   conversations: ConversationView[];
+  // The Live attempt per ticket (live-attempts.ts): the highest-numbered
+  // Attempt still running and, for a Terminal-backed attempt, its pane. Read
+  // from the registry at emit, never persisted; the server and the terminal
+  // routes take the pane from here and never from the events files.
+  liveAttempts: Record<string, LiveAttemptRecord>;
+  // The Merge hold (ADR-0014, merge-hold.ts): the done-but-unmerged ticket
+  // ids, derived fresh at every emit from the statuses and branch state and
+  // never persisted or checkpointed, so the server's "done, merge pending"
+  // label is this one derivation and spawns no git of its own.
+  mergeHold: string[];
 }
 
 interface RunOptions {
@@ -404,18 +420,11 @@ const MERGE_HOLD_POLL_MS = 250;
 // merging by hand outside the engine — still reads as landed, the
 // operator-trust reading ADR-0014 owns.
 function mergeHold(session: Session): string[] {
-  if (!session.git) return [];
-  const tickets = session.state.tickets;
-  if (!Object.values(tickets).some((status) => status === "done")) return [];
-  const target = currentBranch(session.cwd);
-  const hold: string[] = [];
-  for (const [id, status] of Object.entries(tickets)) {
-    if (status !== "done") continue;
-    if (engineTicketBuildId(id)) continue;
-    if (branchLandedInto(session.cwd, branchFor(session.cwd, id), target)) continue;
-    hold.push(id);
-  }
-  return hold;
+  return deriveMergeHold(
+    session.state.tickets,
+    (id) => engineTicketBuildId(id) !== null,
+    session.git ? gitMergeHoldProbe(session.cwd) : null,
+  );
 }
 
 // The hold's wait, every caller's pause and the way the pause lifts. Polls
@@ -591,6 +600,13 @@ interface Session {
   // Conversation, reached through the operations it exposes and reaching
   // back into this Session only through the host conversationHostOf builds.
   conversations: ConversationModule;
+  // The Live attempts registry (live-attempts.ts): every Attempt between its
+  // launch and its ending, kept by the Attempt-run module, boot adoption and
+  // the Conversation module; read here only when a snapshot is emitted.
+  liveAttempts: LiveAttempts;
+  // The Merge hold watch (merge-hold.ts): re-derives the hold while the last
+  // emitted set is non-empty, so a merge done by hand reaches the snapshot.
+  holdWatch: MergeHoldWatch;
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -691,9 +707,14 @@ export function startPool(options: RunOptions): PoolRun {
   // exist until the literal below is built; the host is only ever called
   // once startPool has returned, so the reference is bound late on purpose.
   let session: Session;
+  // A pane becoming reachable, or ceasing to be, is worth a snapshot of its
+  // own: the drive's next emit may be a whole super-step away.
+  const liveAttempts = createLiveAttempts(() =>
+    emitSnapshot(session, session.settledPhase ?? "running"),
+  );
   const conversations = createConversations(
     {
-      ...attemptEnvFrom(config, harnesses, runsDir, herdrSocket, children),
+      ...attemptEnvFrom(config, harnesses, runsDir, herdrSocket, children, liveAttempts),
       poolDir,
       cwd,
       git,
@@ -738,6 +759,11 @@ export function startPool(options: RunOptions): PoolRun {
     lastConfigText,
     children,
     orphans: [],
+    liveAttempts,
+    holdWatch: createMergeHoldWatch({
+      derive: () => mergeHold(session),
+      onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
+    }),
     conversations,
   };
 
@@ -952,6 +978,9 @@ function reportDriveDeath(session: Session, error: unknown): void {
 // time, and every markProcessed is followed by an emit, so the merged queue
 // in the snapshot stream never goes stale.
 export function emitSnapshot(session: Session, phase: RunPhase): void {
+  // The hold is derived fresh here and nowhere persisted (ADR-0014); the
+  // watch notes what went out so a merge done by hand can move it.
+  const hold = mergeHold(session);
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
@@ -961,8 +990,12 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
       [...session.assignments].map(([id, a]) => [id, assignmentViewOf(a)]),
     ),
     conversations: session.conversations.views(),
+    // A Conversation's pane rides its own view above.
+    liveAttempts: session.liveAttempts.records((id) => session.conversations.isLive(id)),
+    mergeHold: hold,
   };
   session.snapshots.push(snapshot);
+  session.holdWatch.emitted(hold);
   session.onSnapshot?.(snapshot);
 }
 
@@ -1772,6 +1805,10 @@ function adoptTerminalAttempt(
     attempt: orphan.attempt,
     abandoned: false,
   });
+  session.liveAttempts.register(marker.id, orphan.attempt, {
+    paneId: orphan.paneId,
+    tabId: null,
+  });
   log.push(
     `ticket ${marker.id}: attempt ${orphan.attempt} re-adopted from live ` +
       `pane ${orphan.paneId}; waiting on its exit`,
@@ -1798,6 +1835,7 @@ function abandonAdoption(session: Session, ticketId: string): void {
   if (!adopted) return;
   adopted.abandoned = true;
   session.adopted.delete(ticketId);
+  session.liveAttempts.clear(ticketId, adopted.attempt);
   void closePane(session.herdrSocket, adopted.paneId).catch(() => {});
   session.state = applyUpdate(session.state, {
     log: [
@@ -1880,6 +1918,7 @@ async function finalizeAdoptedAttempt(
   // Ownership passes to the recorded exit: from here a later answer is
   // ordinary interrupt handling, never an abandonment.
   session.adopted.delete(ticketId);
+  session.liveAttempts.clear(ticketId, attempt);
   recordAdoptedExit(session, marker, attempt, decision, logPath, outcomePath);
 }
 
@@ -2073,6 +2112,8 @@ function persistenceInterrupt(error: unknown): Interrupt {
 }
 
 function closeStore(session: Session): void {
+  // A closed or dead drive stops the hold watch too: nothing emits for it.
+  session.holdWatch.stop();
   if (!session.storeOpen) return;
   session.storeOpen = false;
   session.store.close();
@@ -4717,19 +4758,28 @@ function attemptEnvFrom(
   runsDir: string,
   herdrSocket: string,
   children: ChildTracker,
+  liveAttempts: LiveAttempts,
 ): AttemptEnv {
   return {
     runsDir,
     harnesses,
     herdrSocket,
     children,
+    liveAttempts,
     terminalBacked: config.terminal === "herdr",
     agents: config.agents,
   };
 }
 
 function attemptEnvOf(session: Session, config: PoolConfig = session.state.config): AttemptEnv {
-  return attemptEnvFrom(config, session.harnesses, session.runsDir, session.herdrSocket, session.children);
+  return attemptEnvFrom(
+    config,
+    session.harnesses,
+    session.runsDir,
+    session.herdrSocket,
+    session.children,
+    session.liveAttempts,
+  );
 }
 
 interface TicketPlan {

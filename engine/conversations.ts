@@ -595,6 +595,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         code: handle.code,
         reason: exitCrashReason(handle.code, handle.ctx.exitCodePath, "harness", handle.paneId),
       });
+      env.liveAttempts.clear(id, 1);
       host.closeAttemptTabs(id);
       noteEnded(id, { branch: worktree.branch, crashed: true });
       // Same reasoning as the success path below: this launch never touches
@@ -658,6 +659,9 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     stopTick(runtime);
     writeConversationStatus(runtime.file, "crashed");
     event(runtime.id, "crash", { reason: `pane lost without End (${ending})` });
+    // A launch-only run clears its own Live attempt where it records the
+    // ending (attempt-run.ts): here, and at End below.
+    env.liveAttempts.clear(runtime.id, 1);
     host.closeAttemptTabs(runtime.id);
     // Before the runtime leaves the map, as in finishEnd: noteEnded reads
     // runtime.notices to drop and log whatever never delivered.
@@ -674,6 +678,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     stopTick(runtime);
     writeConversationStatus(runtime.file, "ended");
     event(runtime.id, "ended", { closing: runtime.closing ?? null, by: "operator", merged });
+    env.liveAttempts.clear(runtime.id, 1);
     host.closeAttemptTabs(runtime.id);
     // While the runtime is still in the map: noteEnded reads its notices
     // to drop and log whatever never delivered.
