@@ -9,6 +9,7 @@ import {
 } from "./needs-input";
 import {
   projectNeedsInput,
+  projectPool,
   type EnrichedSnapshot,
   type InterruptKind,
   type InterruptView,
@@ -222,7 +223,7 @@ describe("NeedsInputTray waiting rows", () => {
   }
 
   it("marks a row with a matching queued answer as answered and waiting", () => {
-    const rows = projectNeedsInput(queuedAnswerSnapshot());
+    const rows = projectNeedsInput(projectPool(queuedAnswerSnapshot()).cards);
     expect(waitingStatus(rows[0])).toBe("answered · waiting");
     expect(waitingStatus(rows[1])).toBeNull();
   });
@@ -232,13 +233,13 @@ describe("NeedsInputTray waiting rows", () => {
     tray.setNote("A", "clean the worktree first");
     tray.setNote("B", "skip the flaky test");
     // While A waits, its row still lists, so its draft stays pending.
-    const waiting = projectNeedsInput(queuedAnswerSnapshot());
+    const waiting = projectNeedsInput(projectPool(queuedAnswerSnapshot()).cards);
     tray.pruneDrafts(new Set(waiting.map((row) => row.ticketId)));
     expect(tray.note("A")).toBe("clean the worktree first");
     expect(tray.note("B")).toBe("skip the flaky test");
     // The boundary applies the queued answer and the row disappears; the
     // draft goes with it, and the still-open row's draft stands.
-    const drained = projectNeedsInput(drainedSnapshot());
+    const drained = projectNeedsInput(projectPool(drainedSnapshot()).cards);
     tray.pruneDrafts(new Set(drained.map((row) => row.ticketId)));
     expect(tray.note("A")).toBe("");
     expect(tray.note("B")).toBe("skip the flaky test");

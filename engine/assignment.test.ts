@@ -11,13 +11,13 @@ const known = "Known: claude, codex";
 const parent = { harness: "codex", model: "o3", drivers: "implement review" };
 const defaults = { harness: "claude", model: "opus", drivers: "implement" };
 
-// The four callers, each with its own layers (ticket 04's Design).
+// The four callers, each with its own overrides (ticket 04's Design).
 const ordinary = { subject: "pool config: ticket 01", defaults, strict: false, verify: true, harnesses };
 const spawned = { subject: "pool config: ticket 01-spawn-1", inherited: parent, strict: false, verify: true, harnesses };
 const grader = { subject: "pool config: ticket 01-grader-1", inherited: parent, strict: false, verify: false, harnesses };
 const conversation = { subject: "conversation start:", inherited: parent, defaults, strict: true, verify: false, harnesses };
 
-describe("resolveAssignment: layers", () => {
+describe("resolveAssignment: field-wise overrides", () => {
   it("ordinary ticket: request over defaults, empty when neither says", () => {
     expect(resolveAssignment({ ...ordinary, request: undefined })).toEqual(defaults);
     expect(resolveAssignment({ ...ordinary, request: { model: "haiku" } })).toEqual({

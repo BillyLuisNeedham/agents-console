@@ -1384,12 +1384,13 @@ export interface NeedsInputRow {
  * in card order, so the tray and the canvas agree. Each interrupt carries
  * its form (the shared interrupt-form config, unknown kinds falling back to
  * a plain resume form) and its queued flag, exactly as the cards project it.
- * A pure projection of the snapshot: no new data source, the tray reads what
- * the cards read.
+ * A pure projection of the projected cards: no new data source, the tray
+ * reads what the cards read. Takes the cards so the session's single
+ * projectPool per cycle stays single.
  */
-export function projectNeedsInput(snapshot: EnrichedSnapshot): NeedsInputRow[] {
+export function projectNeedsInput(cards: PoolCardView[]): NeedsInputRow[] {
   const rows: NeedsInputRow[] = [];
-  for (const card of projectPool(snapshot).cards) {
+  for (const card of cards) {
     if (card.kind === "conversation") continue;
     if (!card.interrupt) continue;
     rows.push(

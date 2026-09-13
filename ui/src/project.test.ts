@@ -286,17 +286,19 @@ describe("interrupt forms", () => {
   // rows: the form mapping is the projection's, so the public rows pin it.
   function rows(): NeedsInputRow[] {
     return projectNeedsInput(
-      snapshot({
-        phase: "quiescent",
-        state: {
-          tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
-          interrupts: INTERRUPT_KINDS.map((kind) => ({
-            ticketId: `T-${kind}`,
-            kind,
-            body: `${kind} body`,
-          })),
-        },
-      }),
+      projectPool(
+        snapshot({
+          phase: "quiescent",
+          state: {
+            tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
+            interrupts: INTERRUPT_KINDS.map((kind) => ({
+              ticketId: `T-${kind}`,
+              kind,
+              body: `${kind} body`,
+            })),
+          },
+        }),
+      ).cards,
     );
   }
 
@@ -494,7 +496,7 @@ describe("projectNeedsInput", () => {
         ],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     // Card order, not interrupt order: the tray and the canvas agree.
     expect(rows.map((r) => r.cardId)).toEqual(["ticket:A", "ticket:B"]);
     expect(rows.map((r) => r.ticketId)).toEqual(["A", "B"]);
@@ -520,7 +522,7 @@ describe("projectNeedsInput", () => {
         queuedAnswers: [queued("A", "crash")],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(2);
     expect(rows[0].interrupt.queued).toBe(true);
     expect(rows[1].interrupt.queued).toBe(false);
@@ -534,7 +536,7 @@ describe("projectNeedsInput", () => {
         queuedAnswers: [queued("A", "checkpoint")],
       },
     });
-    expect(projectNeedsInput(waiting)).toHaveLength(1);
+    expect(projectNeedsInput(projectPool(waiting).cards)).toHaveLength(1);
     // The boundary applies the queued answer: the interrupt and its queued
     // record both drop, and the waiting row goes with them.
     const drained = snapshot({
@@ -544,7 +546,7 @@ describe("projectNeedsInput", () => {
         queuedAnswers: [],
       },
     });
-    expect(projectNeedsInput(drained)).toEqual([]);
+    expect(projectNeedsInput(projectPool(drained).cards)).toEqual([]);
   });
 
   it("projects the review card's interrupt as a row that selects the review card", () => {
@@ -554,7 +556,7 @@ describe("projectNeedsInput", () => {
         interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "final review" }],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(1);
     expect(rows[0].cardId).toBe(REVIEW_CARD_ID);
     expect(rows[0].ticketId).toBe(REVIEW_CARD_ID);
@@ -575,14 +577,14 @@ describe("projectNeedsInput", () => {
         interrupts: [{ ticketId: "A", kind: "harness-gone" as InterruptKind, body: "?" }],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(1);
     expect(rows[0].interrupt.form.title).toBe("harness-gone");
     expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume"]);
   });
 
   it("is empty with no pending interrupts", () => {
-    expect(projectNeedsInput(snapshot())).toEqual([]);
+    expect(projectNeedsInput(projectPool(snapshot()).cards)).toEqual([]);
   });
 });
 
@@ -606,7 +608,7 @@ describe("bulkResumeRows", () => {
         queuedAnswers: [queued("C", "crash")],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     // The review row answers individually, the queued crash row already
     // stands answered, and the unknown kind falls back to a plain resume
     // form, so it bulk-fires with the checkpoint.
@@ -624,7 +626,7 @@ describe("bulkResumeRows", () => {
         queuedAnswers: [queued("A", "checkpoint")],
       },
     });
-    expect(bulkResumeRows(projectNeedsInput(snap))).toEqual([]);
+    expect(bulkResumeRows(projectNeedsInput(projectPool(snap).cards))).toEqual([]);
   });
 });
 
@@ -905,12 +907,14 @@ describe("review projection", () => {
 
   it("tells the reviewer a reject note names the tickets to send back", () => {
     const rows = projectNeedsInput(
-      snapshot({
-        state: {
-          tickets: [ticket("A")],
-          interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "" }],
-        },
-      }),
+      projectPool(
+        snapshot({
+          state: {
+            tickets: [ticket("A")],
+            interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "" }],
+          },
+        }),
+      ).cards,
     );
     expect(rows[0].interrupt.form.notePlaceholder).toContain("name the tickets");
   });

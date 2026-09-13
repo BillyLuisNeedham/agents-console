@@ -376,12 +376,12 @@ export class ConsoleSession {
             logIsCurrent ? this.logs.state.error : null,
           )
         : null,
-      needsInput: this.snapshot ? projectNeedsInput(this.snapshot) : [],
+      needsInput: projectNeedsInput(cards),
       conversationsNeedsInput: this.snapshot
         ? projectConversationsNeedsInput(this.snapshot)
         : [],
       conversationsTray: this.snapshot
-        ? projectConversationsTray(this.snapshot.state.conversations ?? [])
+        ? projectConversationsTray(this.snapshot.state.conversations)
         : [],
       conversationDefaults: this.snapshot
         ? poolAssignmentDefaults(this.snapshot.state.config)

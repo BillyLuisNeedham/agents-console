@@ -3,7 +3,7 @@
  * drivers a unit of work runs on, plus the verify count a Ticket may carry.
  * One resolver serves every caller: an ordinary Ticket, a spawned Ticket, an
  * engine-run judge (grader, head-to-head) and a Conversation each supply
- * their own layers and the resolver applies them field-wise in one order,
+ * their own overrides and the resolver applies them field-wise in one order,
  * request first, then what the unit inherits from its parent or build
  * ticket, then the pool defaults. A named harness must be in the harness
  * table; whether an empty harness or model is an error is the caller's
