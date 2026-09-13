@@ -23,7 +23,7 @@ import { h } from "./dom";
 import {
   bulkResumeRows,
   type ConversationNeedsInputRow,
-  type InterruptAction,
+  type ResumeAction,
   type NeedsInputRow,
 } from "./project";
 
@@ -34,7 +34,7 @@ import {
  */
 export type AnswerHandler = (
   ticketId: string,
-  action: InterruptAction,
+  action: ResumeAction,
   note?: string,
 ) => Promise<void>;
 
@@ -55,7 +55,7 @@ export interface NeedsInputHandlers {
 
 /** One row's failed answer: the action a retry refires, and why it failed. */
 export interface NeedsInputFailure {
-  action: InterruptAction;
+  action: ResumeAction;
   message: string;
 }
 
@@ -185,7 +185,7 @@ export class NeedsInputTray {
   // only needed when a mark actually drops), a reject marks it. The note
   // draft is read at dispatch and never written, so a failure leaves it
   // intact.
-  private async fire(ticketId: string, action: InterruptAction): Promise<void> {
+  private async fire(ticketId: string, action: ResumeAction): Promise<void> {
     try {
       await this.onAnswer(ticketId, action, this.note(ticketId));
       if (this.failures.delete(ticketId)) this.onChange();

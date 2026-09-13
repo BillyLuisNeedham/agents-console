@@ -2,14 +2,14 @@
 
 import { describe, expect, it } from "bun:test";
 import { Vitals } from "./vitals";
-import type { PoolSnapshot, PoolStatus, TicketActivityResponse } from "./project";
+import type { EnrichedSnapshot, TicketActivityResponse, TicketStatus } from "./project";
 
 // The store's cadence logic drives through update() and a short poll
 // interval; the fetch is injected, so no server and no real 2s wait exists.
 
 const POLL_MS = 5;
 
-function snap(tickets: Record<string, PoolStatus>): PoolSnapshot {
+function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
   return {
     seq: 1,
     phase: "running",
@@ -20,8 +20,11 @@ function snap(tickets: Record<string, PoolStatus>): PoolSnapshot {
         title: `ticket ${id}`,
         blockedBy: [],
         status,
+        mergePending: false,
         assignment: { harness: null, model: null, drivers: "implement" },
+        liveAttempt: null,
       })),
+      conversations: [],
       log: [],
       outcomes: {},
       interrupts: [],
@@ -47,7 +50,7 @@ interface Harness {
 }
 
 function makeStore(
-  tickets: Record<string, PoolStatus>,
+  tickets: Record<string, TicketStatus>,
   respond: (ticketId: string) => Promise<TicketActivityResponse>,
 ): Harness {
   const fetched: string[] = [];

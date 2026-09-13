@@ -19,7 +19,6 @@ import {
   lastAttempt,
   nextAttempt,
   readEvents,
-  type TicketEventKind,
 } from "./events.ts";
 import {
   type CheckpointStore,

@@ -7,7 +7,7 @@ import {
   STREAM_HEARTBEAT_MS,
   STREAM_SILENCE_FACTOR,
 } from "./client";
-import type { PoolConversationState, PoolSnapshot } from "./project";
+import type { ConversationView, EnrichedSnapshot } from "./project";
 
 // The client's stream seam: a fake fetch feeding controllable byte streams,
 // and fake timers to drive the silence watchdog, so the self-healing behavior
@@ -18,7 +18,7 @@ import type { PoolConversationState, PoolSnapshot } from "./project";
 
 const SILENCE_MS = STREAM_HEARTBEAT_MS * STREAM_SILENCE_FACTOR;
 
-function snap(seq: number): PoolSnapshot {
+function snap(seq: number): EnrichedSnapshot {
   return {
     seq,
     phase: "running",
@@ -30,9 +30,12 @@ function snap(seq: number): PoolSnapshot {
           title: "t",
           blockedBy: [],
           status: "ready",
+          mergePending: false,
           assignment: { harness: null, model: null, drivers: "implement" },
+          liveAttempt: null,
         },
       ],
+      conversations: [],
       log: [],
       outcomes: {},
       interrupts: [],
@@ -42,7 +45,7 @@ function snap(seq: number): PoolSnapshot {
   };
 }
 
-function snapshotFrame(snapshot: PoolSnapshot): string {
+function snapshotFrame(snapshot: EnrichedSnapshot): string {
   return `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`;
 }
 
@@ -180,7 +183,7 @@ describe("PoolClient.stream", () => {
   it("renders a snapshot frame", async () => {
     const { fetch, streams } = streamFetch();
     globalThis.fetch = fetch;
-    const snapshots: PoolSnapshot[] = [];
+    const snapshots: EnrichedSnapshot[] = [];
     const errors: string[] = [];
     const client = new PoolClient();
     client.stream({
@@ -197,7 +200,7 @@ describe("PoolClient.stream", () => {
   it("counts a heartbeat comment frame as liveness but never as a snapshot", async () => {
     const { fetch, streams } = streamFetch();
     globalThis.fetch = fetch;
-    const snapshots: PoolSnapshot[] = [];
+    const snapshots: EnrichedSnapshot[] = [];
     const client = new PoolClient();
     client.stream({
       onSnapshot: (s) => snapshots.push(s),
@@ -221,7 +224,7 @@ describe("PoolClient.stream", () => {
   it("derives the silence window from the served heartbeat interval", async () => {
     const { fetch, streams } = streamFetch();
     globalThis.fetch = fetch;
-    const snapshots: PoolSnapshot[] = [];
+    const snapshots: EnrichedSnapshot[] = [];
     const client = new PoolClient();
     client.stream({
       onSnapshot: (s) => snapshots.push(s),
@@ -276,7 +279,7 @@ describe("PoolClient.stream", () => {
   it("tears down a silent stream, reopens it, and renders the replayed snapshot", async () => {
     const { fetch, streams } = streamFetch();
     globalThis.fetch = fetch;
-    const snapshots: PoolSnapshot[] = [];
+    const snapshots: EnrichedSnapshot[] = [];
     const errors: string[] = [];
     const client = new PoolClient();
     client.stream({
@@ -344,7 +347,7 @@ describe("PoolClient.stream", () => {
   it("stops everything once the close handle is called", async () => {
     const { fetch, streams } = streamFetch();
     globalThis.fetch = fetch;
-    const snapshots: PoolSnapshot[] = [];
+    const snapshots: EnrichedSnapshot[] = [];
     const errors: string[] = [];
     const client = new PoolClient();
     const close = client.stream({
@@ -385,8 +388,8 @@ describe("refetchStateOnVisible", () => {
 
   it("refetches the latest snapshot when the page returns to visible", async () => {
     const s = source();
-    const fetched: PoolSnapshot[] = [];
-    const rendered: PoolSnapshot[] = [];
+    const fetched: EnrichedSnapshot[] = [];
+    const rendered: EnrichedSnapshot[] = [];
     refetchStateOnVisible(
       s,
       () => {
@@ -409,7 +412,7 @@ describe("refetchStateOnVisible", () => {
 
   it("ignores a failed refetch and lets the stream recover", async () => {
     const s = source();
-    const rendered: PoolSnapshot[] = [];
+    const rendered: EnrichedSnapshot[] = [];
     refetchStateOnVisible(
       s,
       () => Promise.reject(new Error("pool state failed: 500")),
@@ -439,7 +442,7 @@ describe("PoolClient Conversations routes (issue #60)", () => {
   }
 
   it("starts a Conversation with POST /api/conversations, body and shape intact", async () => {
-    const conversation: PoolConversationState = {
+    const conversation: ConversationView = {
       id: "conv-2",
       title: "new one",
       status: "live",

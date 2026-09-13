@@ -11,14 +11,14 @@
 import {
   conversationTurnLabel,
   type ConversationTrayRow,
-  type PoolConversationState,
+  type ConversationView,
   type StartConversationRequest,
 } from "./project";
 import { h } from "./dom";
 
 export type StartConversationHandler = (
   request: StartConversationRequest,
-) => Promise<PoolConversationState>;
+) => Promise<ConversationView>;
 
 export type EndConversationHandler = (
   conversationId: string,

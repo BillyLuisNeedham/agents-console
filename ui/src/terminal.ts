@@ -14,7 +14,7 @@
  */
 
 import {
-  type PoolSnapshot,
+  type EnrichedSnapshot,
   type TerminalPeekResponse,
   type TerminalSurfaceView,
 } from "./project";
@@ -77,7 +77,7 @@ export class TerminalSurface {
    * its pane the same way a running ticket attempt does, keyed by its own
    * id: the server accepts `?ticket=<conv-id>` for peek/focus unchanged.
    */
-  update(snapshot: PoolSnapshot | null): void {
+  update(snapshot: EnrichedSnapshot | null): void {
     const paneOf = new Map<string, string>();
     for (const ticket of snapshot?.state.tickets ?? []) {
       const paneId = ticket.liveAttempt?.paneId;

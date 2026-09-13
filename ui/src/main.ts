@@ -7,7 +7,7 @@
 
 import "./styles.css";
 import { PoolClient } from "./client";
-import { POOL_TAB_COLORS, type PoolSnapshot } from "./project";
+import { POOL_TAB_COLORS, type EnrichedSnapshot } from "./project";
 import { ConsoleSession } from "./session";
 import { TerminalSurface } from "./terminal";
 import { ConsoleView } from "./view";
@@ -135,7 +135,7 @@ function render(): void {
 }
 
 async function boot(): Promise<void> {
-  let snapshot: PoolSnapshot | null = null;
+  let snapshot: EnrichedSnapshot | null = null;
   try {
     snapshot = await client.getState();
   } catch (err) {
