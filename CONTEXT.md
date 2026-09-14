@@ -30,6 +30,10 @@ The function `(current, update) => value` that merges one channel.
 **Super-step**:
 One coordinated round of node execution. Parallel nodes in the same super-step see the same starting snapshot.
 
+**Super-step boundary**:
+The pause between two super-steps, where the engine does what a super-step in flight must not: the Config reload, the Queued answer drain, Spawn adoption, the reconciles, and the check of the Merge hold. Only then is the ready set computed and the next super-step planned. While the Merge hold stands the boundary waits and recomputes; nothing is planned until it lifts.
+_Avoid_: tick (implies a clock; the boundary runs when the previous super-step ends), between-step
+
 **Checkpoint**:
 A saved snapshot of state after a super-step. Makes a run pausable and resumable.
 
@@ -161,6 +165,10 @@ _Avoid_: Turn (that is the exchange itself), idle (the agent waits for the opera
 **Notice**:
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
+
+**Wire shape**:
+The declared shape of one message between engine and Console: the snapshot, a response envelope, a request body. Each is declared once, on the engine side; the Console type-imports it, so drift between the two is a compile error, not a silent copy.
+_Avoid_: DTO, schema, contract (all too generic)
 
 ## Verification
 

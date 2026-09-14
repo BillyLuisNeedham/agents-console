@@ -14,10 +14,10 @@ import {
   statusLabel,
   UNASSIGNED_LABEL,
   VITALS_MAX_SAMPLES,
+  type AssignmentView,
   type ConversationCardView,
   type InterruptView,
   type PoolCardView,
-  type PoolTicketAssignment,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -118,7 +118,7 @@ function sparkline(samples: number[]): SVGSVGElement {
  * stranded. One line, the model ellipsizing before the rest; a click
  * toggles the full wrapped text in place.
  */
-function renderAssignmentBadge(assignment: PoolTicketAssignment): HTMLElement {
+function renderAssignmentBadge(assignment: AssignmentView): HTMLElement {
   const badge = h("div", { class: "assignment-badge" });
   if (assignment.harness === null && assignment.model === null) {
     badge.classList.add("assignment-badge-unassigned");

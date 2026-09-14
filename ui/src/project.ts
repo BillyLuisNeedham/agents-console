@@ -6,34 +6,60 @@
 
 import { marked } from "marked";
 import type { Point, TopologyEdge } from "./geometry";
+import type {
+  AssignmentView,
+  ConversationStatus,
+  ConversationView,
+  EnrichedSnapshot,
+  EnrichedTicketState,
+  Interrupt,
+  Outcome,
+  QueuedAnswer,
+  ResumeAction,
+  RunPhase,
+  StartConversationRequest,
+  TicketActivityResponse,
+  TicketEvent,
+  TicketEventsResponse,
+  TicketGradeSummary,
+  TicketStatus,
+  TurnSide,
+} from "../../engine/wire.ts";
 
 // ---------------------------------------------------------------------------
-// Pool snapshot (wire format served by the pool server)
+// Wire shapes (CONTEXT.md: Wire shape): declared once in the engine's wire
+// module and type-imported here, so drift between engine and Console is a
+// compile error. Re-exported so the rest of the UI keeps one import site.
 // ---------------------------------------------------------------------------
 
-export type PoolStatus = "ready" | "in-progress" | "done" | "checkpoint";
+export type {
+  AssignmentView,
+  ConversationStatus,
+  ConversationView,
+  EnrichedSnapshot,
+  EnrichedTicketState,
+  InterruptKind,
+  QueuedAnswer,
+  ResumeAction,
+  RunPhase,
+  StartConversationRequest,
+  TerminalPeekResponse,
+  TicketActivityResponse,
+  TicketBodyResponse,
+  TicketEvent,
+  TicketEventKind,
+  TicketEventsResponse,
+  TicketGradeSummary,
+  TicketLogResponse,
+  TicketStatus,
+  TurnSide,
+} from "../../engine/wire.ts";
 
-interface PoolOutcome {
-  summary: string;
-  commitSha: string | null;
-}
+/** The snapshot's state slice, as the projections take it. */
+type PoolState = EnrichedSnapshot["state"];
 
-interface PoolInterrupt {
-  ticketId: string;
-  kind: string;
-  body: string;
-}
-
-/**
- * An accepted answer still waiting for processing (a Queued answer). Merged
- * into every snapshot at emit time from the queued-answer store; the waiting
- * state the card and Detail render comes from matching one of these against
- * a pending interrupt.
- */
-interface PoolQueuedAnswer {
-  ticketId: string;
-  kind: string;
-}
+/** A Conversation's Turn as the wire carries it on its view. */
+type ConversationTurn = ConversationView["turn"];
 
 // ---------------------------------------------------------------------------
 // Interrupt forms: one form shape across the interrupt kinds, with a
@@ -42,10 +68,8 @@ interface PoolQueuedAnswer {
 // every answer path, so every form carries the note field.
 // ---------------------------------------------------------------------------
 
-export type InterruptAction = "resume" | "approve" | "reject";
-
 interface InterruptFormAction {
-  action: InterruptAction;
+  action: ResumeAction;
   label: string;
   tone: "primary" | "danger";
 }
@@ -57,7 +81,7 @@ interface InterruptFormView {
 }
 
 /** An interrupt with its form attached, as projected onto a card or Detail. */
-export interface InterruptView extends PoolInterrupt {
+export interface InterruptView extends Interrupt {
   form: InterruptFormView;
   /** True while an accepted answer waits for processing: answered-and-waiting. */
   queued: boolean;
@@ -87,222 +111,31 @@ const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
 };
 
 /**
- * The form for an interrupt. The engine's seven kinds all render; an unknown
- * kind falls back to a plain resume form so a newer engine never renders an
+ * The form for an interrupt. An unknown kind (an engine newer than this
+ * build) falls back to a plain resume form so it never renders an
  * unanswerable interrupt.
  */
-function interruptForm(interrupt: PoolInterrupt): InterruptFormView {
+function interruptForm(interrupt: Interrupt): InterruptFormView {
   return INTERRUPT_FORMS[interrupt.kind] ?? { title: interrupt.kind, actions: [RESUME] };
-}
-
-/**
- * One ticket's resolved Assignment (ADR-0013), served verbatim by the engine:
- * null harness or model is an unassigned field, drivers is the engine's
- * space-separated chain string.
- */
-export interface PoolTicketAssignment {
-  harness: string | null;
-  model: string | null;
-  drivers: string;
-}
-
-export interface PoolTicketState {
-  id: string;
-  title: string;
-  blockedBy: string[];
-  status: PoolStatus;
-  /** Server-derived: the ticket is done but its branch has not landed in
-   *  the merge target (ADR-0014). Absent on an older server's snapshot;
-   *  the projection reads it as false. */
-  mergePending?: boolean;
-  /** The ticket's resolved Assignment record, rendered verbatim. */
-  assignment: PoolTicketAssignment;
-  /**
-   * The ticket's Live attempt (ADR-0014): the attempt number and, for a
-   * terminal-backed attempt, its herdr pane, served while the attempt runs
-   * and null once it has ended. A headless attempt is live with a null
-   * pane. Absent on an older server's snapshot; the projection reads it as
-   * null.
-   */
-  liveAttempt?: PoolLiveAttempt | null;
-}
-
-export interface PoolLiveAttempt {
-  attempt: number;
-  paneId: string | null;
-}
-
-export type PoolPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
-
-// ---------------------------------------------------------------------------
-// Conversations (issue #60): an open-ended talk beside the pool's Tickets.
-// Wire format on the snapshot, mirroring PoolTicketState's split from its
-// card view model (ConversationCardView, below).
-// ---------------------------------------------------------------------------
-
-export type ConversationStatus = "live" | "ended" | "crashed";
-export type TurnState = "working" | "waiting";
-
-export interface ConversationTurnView {
-  state: TurnState;
-  /** The last line the pane showed above its input box; "" before any Turn. */
-  lastLine: string;
-  /** Set once the Turn state settles on `waiting`; null while `working`. */
-  idleSince: string | null;
-}
-
-export interface PoolConversationState {
-  id: string;
-  title: string;
-  status: ConversationStatus;
-  /** The parent Conversation's id that spawned this one; null for an
-   *  operator-started Conversation. */
-  spawnedBy: string | null;
-  assignment: PoolTicketAssignment;
-  /** The herdr pane id, present while the Conversation is live. */
-  paneId: string | null;
-  /** The Conversation's own branch; null before it has committed anything. */
-  branch: string | null;
-  turn: ConversationTurnView;
-  /** Ticket and Conversation ids this Conversation has spawned. */
-  children: string[];
 }
 
 /** The Turn state badge's word: "waiting on you" outranks "agent working" as
  *  the operator's cue, matching the Conversations tray's own wording. Shared
  *  by the Conversation card and its Detail. */
-export function conversationTurnLabel(state: TurnState): string {
+export function conversationTurnLabel(state: TurnSide): string {
   return state === "waiting" ? "waiting on you" : "agent working";
 }
 
 /** The word an unassigned Assignment (or one of its null fields) reads as. */
 export const UNASSIGNED_LABEL = "unassigned";
 
-interface PoolState {
-  tickets: PoolTicketState[];
-  /** Absent on an older server's snapshot; the projection reads it as []. */
-  conversations?: PoolConversationState[];
-  log: string[];
-  outcomes: Record<string, PoolOutcome>;
-  interrupts: PoolInterrupt[];
-  queuedAnswers: PoolQueuedAnswer[];
-  config: Record<string, unknown>;
-}
-
-// ---------------------------------------------------------------------------
-// Conversation wire types (served by POST /api/conversations and /conversations/end)
-// ---------------------------------------------------------------------------
-
-export interface StartConversationAssignment {
-  harness?: string;
-  model?: string;
-  drivers?: string;
-}
-
-export interface StartConversationRequest {
-  title: string;
-  opening?: string;
-  assign?: StartConversationAssignment;
-}
-
-export interface PoolSnapshot {
-  seq: number;
-  phase: PoolPhase;
-  /** The pool's display name, computed server-side from the pool directory. */
-  poolName: string;
-  state: PoolState;
-}
-
-// ---------------------------------------------------------------------------
-// Ticket events (wire format served by /api/events)
-// ---------------------------------------------------------------------------
-
-export interface TicketEvent {
-  at: string;
-  attempt: number;
-  kind: string;
-  payload: Record<string, unknown>;
-}
-
-interface ReconstructedAttempt {
-  attempt: number;
-  logFile: string;
-  modifiedAt: string;
-}
-
-export interface TicketEventsResponse {
-  events: TicketEvent[];
-  attempts: ReconstructedAttempt[];
-  reconstructed: boolean;
-  /** The ticket's spec text: the issue file body after the title heading. */
-  spec: string;
-}
-
-// ---------------------------------------------------------------------------
-// Ticket body wire type (served by /api/ticket)
-// ---------------------------------------------------------------------------
-
-export interface TicketBodyResponse {
-  id: string;
-  /** The Issue file's markdown with the line-1 state marker stripped. */
-  body: string;
-}
-
-// ---------------------------------------------------------------------------
-// Log pane wire types (served by /api/log)
-// ---------------------------------------------------------------------------
-
-interface LogAttemptInfo {
-  attempt: number;
-  kind: "implement" | "resolver" | "reconstructed";
-  logFile: string;
-  /** The attempt's Stream file, or null when it has none on disk. */
-  streamFile: string | null;
-  current: boolean;
-}
-
-export interface TicketLogResponse {
-  content: string;
-  offset: number;
-  nextOffset: number;
-  totalSize: number;
-  attempts: LogAttemptInfo[];
-}
-
-// ---------------------------------------------------------------------------
-// Ticket activity wire type (served by /api/activity)
-// ---------------------------------------------------------------------------
-
-export interface TicketActivityResponse {
-  ticketId: string;
-  running: boolean;
-  diff: { added: number; removed: number; files: string[] } | null;
-  log: { size: number; mtime: string } | null;
-  lastEventAt: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Terminal surface wire types (served by /api/terminal/peek and /focus)
-// ---------------------------------------------------------------------------
-
-/**
- * The peek endpoint's answer for one ticket: the attempt pane's recent
- * output as plain text (ANSI stripped server-side, ~8 lines). The UI keys
- * every terminal call by ticket id; the server resolves and guards the pane.
- */
-export interface TerminalPeekResponse {
-  ticket: string;
-  paneId: string;
-  text: string;
-}
-
 // ---------------------------------------------------------------------------
 // Timeline view model
 // ---------------------------------------------------------------------------
 
 /** A grade as the timeline shows it under its attempt's graded event: the
- *  full payload, reasons included. The card's GradeView is the summary
- *  shape; this is the record. */
+ *  full payload, reasons included. The card's TicketGradeSummary is the
+ *  summary shape; this is the record. */
 export interface TimelineGradeView {
   score: number;
   verdict: string;
@@ -404,7 +237,7 @@ export interface TimelineView {
  */
 export function projectTimeline(
   response: TicketEventsResponse,
-  status: PoolStatus,
+  status: TicketStatus,
 ): TimelineView {
   if (response.events.length > 0) {
     const byAttempt = new Map<number, TimelineEventView[]>();
@@ -474,7 +307,7 @@ const LIVE_LAST_KINDS = new Set(["scheduled", "spawned", "resolver"]);
 function runningAttempt(
   numbers: number[],
   byAttempt: Map<number, TimelineEventView[]>,
-  status: PoolStatus,
+  status: TicketStatus,
 ): number | null {
   if (status !== "in-progress") return null;
   for (let i = numbers.length - 1; i >= 0; i--) {
@@ -713,7 +546,7 @@ export function pushVitalsSample(samples: number[], total: number): number[] {
  */
 export function projectVitals(
   input: VitalsState | null,
-  status: PoolStatus,
+  status: TicketStatus,
   now: number,
 ): VitalsView | null {
   if (!input) return null;
@@ -785,17 +618,17 @@ export interface TicketCardView {
   /** Blockers sitting at checkpoint with a pending interrupt: the stall is
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
-  status: PoolStatus;
+  status: TicketStatus;
   /** Done with its branch still unmerged: the card's state word reads
    *  "done, merge pending". Derived server-side; the card only shows it. */
   mergePending: boolean;
   /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
-  assignment: PoolTicketAssignment;
-  outcome: PoolOutcome | null;
+  assignment: AssignmentView;
+  outcome: Outcome | null;
   interrupt: InterruptView | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
    *  no grade UI renders at all, so there is no empty state. */
-  grade: GradeView | null;
+  grade: TicketGradeSummary | null;
   /** The Vitals footer's view data. Null whenever nothing should render:
    *  done or ready tickets, a crashed attempt parked at in-progress, or no
    *  activity payload yet (no empty flash before the first data lands). */
@@ -814,16 +647,6 @@ export interface TicketCardView {
   terminal: TerminalSurfaceView | null;
   x: number;
   y: number;
-}
-
-/** One ticket's latest grade as the grades endpoint serves it. */
-export interface GradeView {
-  attempt: number;
-  score: number;
-  verdict: string;
-  /** The attempt Selection named (merged attempt on pre-selection tickets);
-   *  null until either event lands. Derived once, server-side. */
-  winner: number | null;
 }
 
 export type TerminalSurfaceStatus = "pending" | "live" | "waiting" | "unavailable";
@@ -868,10 +691,10 @@ export interface ConversationCardView {
   title: string;
   status: ConversationStatus;
   spawnedBy: string | null;
-  assignment: PoolTicketAssignment;
+  assignment: AssignmentView;
   paneId: string | null;
   branch: string | null;
-  turn: ConversationTurnView;
+  turn: ConversationTurn;
   /** "4m", "1h 12m"; null while the Turn state is `working` (no idleSince). */
   idleAge: string | null;
   /** The card's terminal surface, reused from ticket cards; present while
@@ -886,7 +709,7 @@ export type PoolCardView = TicketCardView | UtilityCardView | ConversationCardVi
 
 export interface PoolView {
   seq: number;
-  phase: PoolPhase;
+  phase: RunPhase;
   cards: PoolCardView[];
   edges: TopologyEdge[];
   log: string[];
@@ -932,7 +755,7 @@ const LAYOUT = {
 /** Depth of a ticket = length of its longest blocker chain; leaf tickets are 0. */
 function ticketDepth(
   ticketId: string,
-  tickets: PoolTicketState[],
+  tickets: EnrichedTicketState[],
   visiting: Set<string> = new Set(),
 ): number {
   const ticket = tickets.find((t) => t.id === ticketId);
@@ -964,8 +787,8 @@ function ticketDepth(
  * stored separately and never touched by this.
  */
 function layoutPool(
-  tickets: PoolTicketState[],
-  conversations: PoolConversationState[] = [],
+  tickets: EnrichedTicketState[],
+  conversations: ConversationView[] = [],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
 ): Record<string, Point> {
@@ -985,7 +808,7 @@ function layoutPool(
   const ticketBaseY =
     LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.conversationLaneH : 0);
 
-  const byDepth = new Map<number, PoolTicketState[]>();
+  const byDepth = new Map<number, EnrichedTicketState[]>();
   let maxDepth = -1;
   for (const ticket of tickets) {
     const depth = ticketDepth(ticket.id, tickets);
@@ -1012,14 +835,14 @@ function layoutPool(
 }
 
 /** A ticket row's vertical pitch: taller while any of its tickets runs a pane-backed attempt. */
-function rowPitch(row: PoolTicketState[]): number {
+function rowPitch(row: EnrichedTicketState[]): number {
   return row.some((ticket) => typeof ticket.liveAttempt?.paneId === "string")
     ? LAYOUT.terminalRowH
     : LAYOUT.rowH;
 }
 
 function projectPoolEdges(
-  tickets: PoolTicketState[],
+  tickets: EnrichedTicketState[],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
 ): TopologyEdge[] {
@@ -1045,8 +868,8 @@ function projectPoolEdges(
  * draws no edge rather than a dangling one.
  */
 function projectConversationEdges(
-  conversations: PoolConversationState[],
-  tickets: PoolTicketState[],
+  conversations: ConversationView[],
+  tickets: EnrichedTicketState[],
 ): TopologyEdge[] {
   const ticketIds = new Set(tickets.map((t) => t.id));
   const conversationIds = new Set(conversations.map((c) => c.id));
@@ -1073,7 +896,7 @@ function projectConversationEdges(
  * Visibility only: scheduling still requires done, and a checkpointed blocker
  * is never a deadlock.
  */
-function checkpointBlockers(ticket: PoolTicketState, state: PoolState): string[] {
+function checkpointBlockers(ticket: EnrichedTicketState, state: PoolState): string[] {
   if (ticket.status !== "ready") return [];
   return ticket.blockedBy.filter((blockerId) => {
     const blocker = state.tickets.find((t) => t.id === blockerId);
@@ -1092,8 +915,8 @@ export function checkpointNotice(blockers: string[]): string {
 
 /** True when the queued answer is the accepted answer for this interrupt. */
 function isAnswerQueued(
-  answers: PoolQueuedAnswer[],
-  interrupt: { ticketId: string; kind: string },
+  answers: QueuedAnswer[],
+  interrupt: Interrupt,
 ): boolean {
   return answers.some(
     (answer) =>
@@ -1101,7 +924,7 @@ function isAnswerQueued(
   );
 }
 
-function toInterruptView(raw: PoolInterrupt | null, state: PoolState): InterruptView | null {
+function toInterruptView(raw: Interrupt | null, state: PoolState): InterruptView | null {
   if (!raw) return null;
   return {
     ...raw,
@@ -1128,10 +951,10 @@ function projectTerminalSurface(
 }
 
 function projectTicket(
-  ticket: PoolTicketState,
+  ticket: EnrichedTicketState,
   state: PoolState,
   pos: Point,
-  grade: GradeView | null,
+  grade: TicketGradeSummary | null,
   vitals: VitalsState | null,
   terminal: TerminalSurfaceView | undefined,
   now: number,
@@ -1145,7 +968,7 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
-    mergePending: ticket.mergePending ?? false,
+    mergePending: ticket.mergePending,
     assignment: ticket.assignment,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
@@ -1186,7 +1009,7 @@ function projectConversationEnd(
 }
 
 function projectConversation(
-  conversation: PoolConversationState,
+  conversation: ConversationView,
   pos: Point,
   terminal: TerminalSurfaceView | undefined,
   endings: Record<string, ConversationEndView>,
@@ -1231,15 +1054,15 @@ function projectUtility(
 }
 
 export function projectPool(
-  snapshot: PoolSnapshot,
-  grades: Record<string, GradeView> = {},
+  snapshot: EnrichedSnapshot,
+  grades: Record<string, TicketGradeSummary> = {},
   vitals: Record<string, VitalsState> = {},
   terminal: Record<string, TerminalSurfaceView> = {},
   now: number = Date.now(),
   conversationEndings: Record<string, ConversationEndView> = {},
 ): PoolView {
   const tickets = snapshot.state.tickets;
-  const conversations = snapshot.state.conversations ?? [];
+  const conversations = snapshot.state.conversations;
   const positions = layoutPool(tickets, conversations);
   const cards: PoolCardView[] = [
     projectUtility(START_CARD_ID, "start", snapshot.state, positions[START_CARD_ID]),
@@ -1286,7 +1109,7 @@ export interface ConversationTrayRow {
   cardId: string;
   title: string;
   status: ConversationStatus;
-  turn: ConversationTurnView;
+  turn: ConversationTurn;
   idleAge: string | null;
 }
 
@@ -1299,7 +1122,7 @@ export interface ConversationTrayRow {
  * from their card or Detail, not the operator's work queue.
  */
 export function projectConversationsTray(
-  conversations: PoolConversationState[],
+  conversations: ConversationView[],
   now: number = Date.now(),
 ): ConversationTrayRow[] {
   const rows = conversations
@@ -1343,9 +1166,9 @@ export interface ConversationNeedsInputRow {
  * only counts as needing the operator once its own Turn is waiting.
  */
 export function projectConversationsNeedsInput(
-  snapshot: PoolSnapshot,
+  snapshot: EnrichedSnapshot,
 ): ConversationNeedsInputRow[] {
-  const conversations = snapshot.state.conversations ?? [];
+  const conversations = snapshot.state.conversations;
   return conversations
     .filter((c) => c.status === "live" && c.turn.state === "waiting")
     .map((c) => ({
@@ -1366,25 +1189,25 @@ export function projectConversationsNeedsInput(
  */
 export function poolAssignmentDefaults(
   config: Record<string, unknown>,
-): StartConversationAssignment {
+): NonNullable<StartConversationRequest["assign"]> {
   // The pool's console.json nests its Assignment defaults under `defaults`;
   // the form shows them as placeholders so a blank field means "pool default".
   const nested = config.defaults;
   const source: Record<string, unknown> =
     nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
-  const defaults: StartConversationAssignment = {};
+  const defaults: NonNullable<StartConversationRequest["assign"]> = {};
   if (typeof source.harness === "string") defaults.harness = source.harness;
   if (typeof source.model === "string") defaults.model = source.model;
   if (typeof source.drivers === "string") defaults.drivers = source.drivers;
   return defaults;
 }
 
-export function statusLabel(status: PoolStatus, mergePending = false): string {
+export function statusLabel(status: TicketStatus, mergePending = false): string {
   if (status === "done" && mergePending) return "done, merge pending";
   return status === "in-progress" ? "running" : status;
 }
 
-export function phaseLabel(phase: PoolPhase): string {
+export function phaseLabel(phase: RunPhase): string {
   switch (phase) {
     case "running":
       return "running";
@@ -1426,7 +1249,7 @@ export const POOL_TAB_COLORS = {
  * so it lands on needs input without a rule of its own. Colors come from the
  * Console palette; the tab title and the favicon both consume this value.
  */
-export function poolStatus(snapshot: PoolSnapshot): PoolTabStatus {
+export function poolStatus(snapshot: EnrichedSnapshot): PoolTabStatus {
   if (snapshot.phase === "dead") {
     return { word: "dead", color: POOL_TAB_COLORS.dead };
   }
@@ -1453,12 +1276,12 @@ export interface TicketDetailView {
   kind: "ticket";
   ticketId: string;
   title: string;
-  status: PoolStatus;
+  status: TicketStatus;
   /** Mirrors the card's: done with its branch still unmerged. */
   mergePending: boolean;
   blockedBy: string[];
   blockedByCheckpoint: string[];
-  outcome: PoolOutcome | null;
+  outcome: Outcome | null;
   interrupt: InterruptView | null;
   /** The winning attempt's number from the grades endpoint, for the
    *  timeline's winner badge. Null when the ticket is ungraded or no
@@ -1481,10 +1304,10 @@ export interface ConversationDetailView {
   title: string;
   status: ConversationStatus;
   spawnedBy: string | null;
-  assignment: PoolTicketAssignment;
+  assignment: AssignmentView;
   paneId: string | null;
   branch: string | null;
-  turn: ConversationTurnView;
+  turn: ConversationTurn;
   idleAge: string | null;
   terminal: TerminalSurfaceView | null;
   endView: ConversationEndView;
@@ -1561,12 +1384,13 @@ export interface NeedsInputRow {
  * in card order, so the tray and the canvas agree. Each interrupt carries
  * its form (the shared interrupt-form config, unknown kinds falling back to
  * a plain resume form) and its queued flag, exactly as the cards project it.
- * A pure projection of the snapshot: no new data source, the tray reads what
- * the cards read.
+ * A pure projection of the projected cards: no new data source, the tray
+ * reads what the cards read. Takes the cards so the session's single
+ * projectPool per cycle stays single.
  */
-export function projectNeedsInput(snapshot: PoolSnapshot): NeedsInputRow[] {
+export function projectNeedsInput(cards: PoolCardView[]): NeedsInputRow[] {
   const rows: NeedsInputRow[] = [];
-  for (const card of projectPool(snapshot).cards) {
+  for (const card of cards) {
     if (card.kind === "conversation") continue;
     if (!card.interrupt) continue;
     rows.push(
@@ -1637,7 +1461,7 @@ export interface TabOverride {
  * interrupt is the action surface, and the action surface is Progress.
  */
 function defaultDetailTab(
-  status: PoolStatus,
+  status: TicketStatus,
   interruptPending: boolean,
 ): DetailTab {
   if (interruptPending) return "progress";

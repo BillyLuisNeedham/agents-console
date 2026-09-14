@@ -15,11 +15,11 @@ import {
   type DetailTab,
   type DetailTabView,
   type DetailView,
-  type InterruptAction,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
-  type PoolPhase,
+  type ResumeAction,
+  type RunPhase,
   type TimelineView,
 } from "./project";
 import { flowNeighbourhood, type TopologyEdge } from "./geometry";
@@ -35,7 +35,7 @@ import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
 
 export interface AppModel {
-  phase: PoolPhase | null;
+  phase: RunPhase | null;
   phaseLabel: string;
   cards: PoolCardView[];
   edges: TopologyEdge[];
@@ -72,7 +72,7 @@ export interface Handlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
-  onAnswer: (ticketId: string, action: InterruptAction, note?: string) => void;
+  onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
 }
 

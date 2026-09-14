@@ -3,7 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { TerminalSurface } from "./terminal";
 import type {
-  PoolSnapshot,
+  EnrichedSnapshot,
   TerminalPeekResponse,
 } from "./project";
 
@@ -17,7 +17,7 @@ const CONFIRM_MS = 5;
 function snap(
   panes: Record<string, string | undefined>,
   conversationPanes: Record<string, string | undefined> = {},
-): PoolSnapshot {
+): EnrichedSnapshot {
   return {
     seq: 1,
     phase: "running",
@@ -27,9 +27,10 @@ function snap(
         id,
         title: `ticket ${id}`,
         blockedBy: [],
-        status: "in-progress",
+        status: "in-progress" as const,
+        mergePending: false,
         assignment: { harness: null, model: null, drivers: "implement" },
-        ...(paneId === undefined ? {} : { liveAttempt: { attempt: 1, paneId } }),
+        liveAttempt: paneId === undefined ? null : { attempt: 1, paneId },
       })),
       conversations: Object.entries(conversationPanes).map(([id, paneId]) => ({
         id,

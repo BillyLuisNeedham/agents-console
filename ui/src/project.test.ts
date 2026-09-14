@@ -33,18 +33,21 @@ import {
   pushVitalsSample,
   VITALS_MAX_SAMPLES,
   type ConversationCardView,
+  type ConversationView,
+  type EnrichedSnapshot,
+  type EnrichedTicketState,
+  type InterruptKind,
   type NeedsInputRow,
-  type PoolConversationState,
-  type PoolSnapshot,
-  type PoolStatus,
-  type PoolTicketState,
+  type QueuedAnswer,
   type TabOverride,
   type TerminalSurfaceView,
   type TicketActivityResponse,
   type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
+  type TicketEventKind,
   type TicketEventsResponse,
+  type TicketStatus,
   type TimelineView,
   type VitalsState,
 } from "./project";
@@ -72,22 +75,24 @@ const LAYOUT = {
 
 function ticket(
   id: string,
-  overrides: Partial<PoolTicketState> = {},
-): PoolTicketState {
+  overrides: Partial<EnrichedTicketState> = {},
+): EnrichedTicketState {
   return {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
     status: "ready",
+    mergePending: false,
     assignment: { harness: null, model: null, drivers: "implement" },
+    liveAttempt: null,
     ...overrides,
   };
 }
 
 function conversation(
   id: string,
-  overrides: Partial<PoolConversationState> = {},
-): PoolConversationState {
+  overrides: Partial<ConversationView> = {},
+): ConversationView {
   return {
     id,
     title: `conversation ${id}`,
@@ -103,10 +108,10 @@ function conversation(
 }
 
 function snapshot(
-  overrides: Omit<Partial<PoolSnapshot>, "state"> & {
-    state?: Partial<PoolSnapshot["state"]>;
+  overrides: Omit<Partial<EnrichedSnapshot>, "state"> & {
+    state?: Partial<EnrichedSnapshot["state"]>;
   } = {},
-): PoolSnapshot {
+): EnrichedSnapshot {
   return {
     seq: 0,
     phase: "running",
@@ -114,6 +119,7 @@ function snapshot(
     ...overrides,
     state: {
       tickets: [],
+      conversations: [],
       log: [],
       outcomes: {},
       interrupts: [],
@@ -124,10 +130,16 @@ function snapshot(
   };
 }
 
+/** A full Queued answer record as the wire carries it; the projection reads
+ *  only ticketId and kind. */
+function queued(ticketId: string, kind: InterruptKind): QueuedAnswer {
+  return { seq: 1, ticketId, kind, at: "2026-09-12T10:00:00Z", processedAt: null };
+}
+
 /** The Detail for a card of the snapshot's own derivation: the test reads
  *  the Detail off the same projected cards the canvas renders. */
 function detailOf(
-  snap: PoolSnapshot,
+  snap: EnrichedSnapshot,
   cardId: string,
 ): ReturnType<typeof projectDetail> {
   return projectDetail(projectPool(snap).cards, cardId);
@@ -205,7 +217,7 @@ describe("projectPool", () => {
           ticket("D", { status: "ready", blockedBy: ["B"] }),
         ],
         log: ["super-step 1: A"],
-        outcomes: { A: { summary: "done A", commitSha: "abc" } },
+        outcomes: { A: { status: "done", summary: "done A", commitSha: "abc" } },
         interrupts: [{ ticketId: "C", kind: "checkpoint", body: "brief" }],
         config: {},
       },
@@ -237,7 +249,7 @@ describe("projectPool", () => {
     const snap = snapshot({
       state: {
         tickets: [ticket("A", { status: "done" })],
-        outcomes: { A: { summary: "did the thing", commitSha: "sha1" } },
+        outcomes: { A: { status: "done", summary: "did the thing", commitSha: "sha1" } },
         interrupts: [],
         log: [],
         config: {},
@@ -246,6 +258,7 @@ describe("projectPool", () => {
     const view = projectPool(snap);
     const a = view.cards.find((c) => c.id === "ticket:A");
     expect(a && a.kind === "ticket" ? a.outcome : null).toEqual({
+      status: "done",
       summary: "did the thing",
       commitSha: "sha1",
     });
@@ -258,7 +271,7 @@ describe("projectPool", () => {
   });
 });
 
-const INTERRUPT_KINDS = [
+const INTERRUPT_KINDS: InterruptKind[] = [
   "checkpoint",
   "crash",
   "deadlock",
@@ -273,17 +286,19 @@ describe("interrupt forms", () => {
   // rows: the form mapping is the projection's, so the public rows pin it.
   function rows(): NeedsInputRow[] {
     return projectNeedsInput(
-      snapshot({
-        phase: "quiescent",
-        state: {
-          tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
-          interrupts: INTERRUPT_KINDS.map((kind) => ({
-            ticketId: `T-${kind}`,
-            kind,
-            body: `${kind} body`,
-          })),
-        },
-      }),
+      projectPool(
+        snapshot({
+          phase: "quiescent",
+          state: {
+            tickets: INTERRUPT_KINDS.map((kind) => ticket(`T-${kind}`)),
+            interrupts: INTERRUPT_KINDS.map((kind) => ({
+              ticketId: `T-${kind}`,
+              kind,
+              body: `${kind} body`,
+            })),
+          },
+        }),
+      ).cards,
     );
   }
 
@@ -329,7 +344,7 @@ describe("interrupt forms", () => {
 });
 
 describe("interrupt projection", () => {
-  function interruptSnapshot(): PoolSnapshot {
+  function interruptSnapshot(): EnrichedSnapshot {
     return snapshot({
       phase: "quiescent",
       state: {
@@ -398,7 +413,7 @@ describe("interrupt projection", () => {
 });
 
 describe("queued-answer waiting state", () => {
-  function queuedSnapshot(): PoolSnapshot {
+  function queuedSnapshot(): EnrichedSnapshot {
     return snapshot({
       state: {
         tickets: [ticket("A"), ticket("B")],
@@ -406,7 +421,7 @@ describe("queued-answer waiting state", () => {
           { ticketId: "A", kind: "checkpoint", body: "brief A" },
           { ticketId: "B", kind: "checkpoint", body: "brief B" },
         ],
-        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+        queuedAnswers: [queued("A", "checkpoint")],
       },
     });
   }
@@ -458,7 +473,7 @@ describe("queued-answer waiting state", () => {
       state: {
         tickets: [ticket("A")],
         interrupts: [{ ticketId: "A", kind: "merge-approval", body: "resolution" }],
-        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+        queuedAnswers: [queued("A", "checkpoint")],
       },
     });
     const card = projectPool(snap).cards.find((c) => c.id === "ticket:A");
@@ -481,7 +496,7 @@ describe("projectNeedsInput", () => {
         ],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     // Card order, not interrupt order: the tray and the canvas agree.
     expect(rows.map((r) => r.cardId)).toEqual(["ticket:A", "ticket:B"]);
     expect(rows.map((r) => r.ticketId)).toEqual(["A", "B"]);
@@ -504,10 +519,10 @@ describe("projectNeedsInput", () => {
           { ticketId: "A", kind: "crash", body: "log path" },
           { ticketId: "B", kind: "checkpoint", body: "brief" },
         ],
-        queuedAnswers: [{ ticketId: "A", kind: "crash" }],
+        queuedAnswers: [queued("A", "crash")],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(2);
     expect(rows[0].interrupt.queued).toBe(true);
     expect(rows[1].interrupt.queued).toBe(false);
@@ -518,10 +533,10 @@ describe("projectNeedsInput", () => {
       state: {
         tickets: [ticket("A")],
         interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
-        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+        queuedAnswers: [queued("A", "checkpoint")],
       },
     });
-    expect(projectNeedsInput(waiting)).toHaveLength(1);
+    expect(projectNeedsInput(projectPool(waiting).cards)).toHaveLength(1);
     // The boundary applies the queued answer: the interrupt and its queued
     // record both drop, and the waiting row goes with them.
     const drained = snapshot({
@@ -531,7 +546,7 @@ describe("projectNeedsInput", () => {
         queuedAnswers: [],
       },
     });
-    expect(projectNeedsInput(drained)).toEqual([]);
+    expect(projectNeedsInput(projectPool(drained).cards)).toEqual([]);
   });
 
   it("projects the review card's interrupt as a row that selects the review card", () => {
@@ -541,7 +556,7 @@ describe("projectNeedsInput", () => {
         interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "final review" }],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(1);
     expect(rows[0].cardId).toBe(REVIEW_CARD_ID);
     expect(rows[0].ticketId).toBe(REVIEW_CARD_ID);
@@ -557,17 +572,19 @@ describe("projectNeedsInput", () => {
     const snap = snapshot({
       state: {
         tickets: [ticket("A")],
-        interrupts: [{ ticketId: "A", kind: "harness-gone", body: "?" }],
+        // A kind this build does not know, standing in for one a newer
+        // engine adds: the literal union rejects it, so the fixture casts.
+        interrupts: [{ ticketId: "A", kind: "harness-gone" as InterruptKind, body: "?" }],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     expect(rows).toHaveLength(1);
     expect(rows[0].interrupt.form.title).toBe("harness-gone");
     expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume"]);
   });
 
   it("is empty with no pending interrupts", () => {
-    expect(projectNeedsInput(snapshot())).toEqual([]);
+    expect(projectNeedsInput(projectPool(snapshot()).cards)).toEqual([]);
   });
 });
 
@@ -586,12 +603,12 @@ describe("bulkResumeRows", () => {
           { ticketId: "A", kind: "checkpoint", body: "brief" },
           { ticketId: "B", kind: "merge-approval", body: "resolution" },
           { ticketId: "C", kind: "crash", body: "log path" },
-          { ticketId: "D", kind: "harness-gone", body: "?" },
+          { ticketId: "D", kind: "harness-gone" as InterruptKind, body: "?" },
         ],
-        queuedAnswers: [{ ticketId: "C", kind: "crash" }],
+        queuedAnswers: [queued("C", "crash")],
       },
     });
-    const rows = projectNeedsInput(snap);
+    const rows = projectNeedsInput(projectPool(snap).cards);
     // The review row answers individually, the queued crash row already
     // stands answered, and the unknown kind falls back to a plain resume
     // form, so it bulk-fires with the checkpoint.
@@ -606,15 +623,15 @@ describe("bulkResumeRows", () => {
           { ticketId: "A", kind: "checkpoint", body: "brief" },
           { ticketId: "B", kind: "review", body: "final review" },
         ],
-        queuedAnswers: [{ ticketId: "A", kind: "checkpoint" }],
+        queuedAnswers: [queued("A", "checkpoint")],
       },
     });
-    expect(bulkResumeRows(projectNeedsInput(snap))).toEqual([]);
+    expect(bulkResumeRows(projectNeedsInput(projectPool(snap).cards))).toEqual([]);
   });
 });
 
 describe("blocked-by-checkpoint notice", () => {
-  function blockedSnapshot(): PoolSnapshot {
+  function blockedSnapshot(): EnrichedSnapshot {
     return snapshot({
       state: {
         tickets: [
@@ -736,7 +753,7 @@ describe("blocked-by-checkpoint notice", () => {
 });
 
 describe("checkpoint visible at attempt exit", () => {
-  function windowSnapshot(): PoolSnapshot {
+  function windowSnapshot(): EnrichedSnapshot {
     return snapshot({
       phase: "running",
       state: {
@@ -799,7 +816,7 @@ describe("checkpoint visible at attempt exit", () => {
       ...snap,
       state: {
         ...snap.state,
-        queuedAnswers: [{ ticketId: "01", kind: "checkpoint" }],
+        queuedAnswers: [queued("01", "checkpoint")],
       },
     });
     const card = view.cards.find((c) => c.id === "ticket:01");
@@ -834,15 +851,15 @@ describe("checkpoint visible at attempt exit", () => {
 });
 
 describe("review projection", () => {
-  function reviewSnapshot(): PoolSnapshot {
+  function reviewSnapshot(): EnrichedSnapshot {
     return snapshot({
       phase: "quiescent",
       state: {
         tickets: [ticket("A", { status: "done" }), ticket("B", { status: "done" })],
         log: [],
         outcomes: {
-          A: { summary: "did A", commitSha: "sha-a" },
-          B: { summary: "did B", commitSha: "sha-b" },
+          A: { status: "done", summary: "did A", commitSha: "sha-a" },
+          B: { status: "done", summary: "did B", commitSha: "sha-b" },
         },
         interrupts: [
           {
@@ -890,12 +907,14 @@ describe("review projection", () => {
 
   it("tells the reviewer a reject note names the tickets to send back", () => {
     const rows = projectNeedsInput(
-      snapshot({
-        state: {
-          tickets: [ticket("A")],
-          interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "" }],
-        },
-      }),
+      projectPool(
+        snapshot({
+          state: {
+            tickets: [ticket("A")],
+            interrupts: [{ ticketId: REVIEW_CARD_ID, kind: "review", body: "" }],
+          },
+        }),
+      ).cards,
     );
     expect(rows[0].interrupt.form.notePlaceholder).toContain("name the tickets");
   });
@@ -947,7 +966,7 @@ describe("projectDetail", () => {
 
 describe("projectDetailTabs", () => {
   function detail(
-    status: PoolStatus,
+    status: TicketStatus,
     interrupt: TicketDetailView["interrupt"] = null,
     ticketId = "A",
   ): TicketDetailView {
@@ -976,11 +995,11 @@ describe("projectDetailTabs", () => {
     queued: false,
   });
 
-  const active = (status: PoolStatus, override: TabOverride | null = null) =>
+  const active = (status: TicketStatus, override: TabOverride | null = null) =>
     projectDetailTabs(detail(status), override).find((tab) => tab.active)?.id;
 
   it("projects the fixed Spec / Progress / Outcome bar on every status", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as TicketStatus[]) {
       const tabs = projectDetailTabs(detail(status), null);
       expect(tabs.map((tab) => tab.id)).toEqual(["spec", "progress", "outcome"]);
       expect(tabs.map((tab) => tab.label)).toEqual(["Spec", "Progress", "Outcome"]);
@@ -996,7 +1015,7 @@ describe("projectDetailTabs", () => {
   });
 
   it("maps a pending interrupt to Progress on every status, including done", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as TicketStatus[]) {
       const tabs = projectDetailTabs(detail(status, pending()), null);
       expect(tabs.find((tab) => tab.active)?.id).toBe("progress");
     }
@@ -1103,7 +1122,7 @@ describe("merge pending projection", () => {
 
 describe("poolStatus", () => {
   it("needs input in red when any interrupt is pending, whatever the phase", () => {
-    const interrupts = [{ ticketId: "a", kind: "checkpoint", body: "" }];
+    const interrupts = [{ ticketId: "a", kind: "checkpoint" as const, body: "" }];
     for (const phase of ["running", "done", "quiescent", "stalled"] as const) {
       expect(poolStatus(snapshot({ phase, state: { ...snapshot().state, interrupts } }))).toEqual({
         word: "needs input",
@@ -1128,8 +1147,8 @@ describe("poolStatus", () => {
           { ticketId: "b", kind: "checkpoint", body: "" },
         ],
         queuedAnswers: [
-          { ticketId: "a", kind: "checkpoint" },
-          { ticketId: "b", kind: "checkpoint" },
+          queued("a", "checkpoint"),
+          queued("b", "checkpoint"),
         ],
       },
     });
@@ -1142,7 +1161,7 @@ describe("poolStatus", () => {
           { ticketId: "a", kind: "checkpoint", body: "" },
           { ticketId: "b", kind: "checkpoint", body: "" },
         ],
-        queuedAnswers: [{ ticketId: "a", kind: "checkpoint" }],
+        queuedAnswers: [queued("a", "checkpoint")],
       },
     });
     expect(poolStatus(oneWaiting)).toEqual({
@@ -1188,7 +1207,7 @@ describe("poolStatus", () => {
 describe("projectTimeline", () => {
   function event(
     attempt: number,
-    kind: string,
+    kind: TicketEventKind,
     payload: Record<string, unknown> = {},
   ): TicketEvent {
     return { at: "2026-01-01T00:00:00.000Z", attempt, kind, payload };
@@ -1686,7 +1705,7 @@ describe("nextNodeSelection", () => {
 });
 
 describe("a card click opens the Detail", () => {
-  function flightSnapshot(): PoolSnapshot {
+  function flightSnapshot(): EnrichedSnapshot {
     return snapshot({
       phase: "quiescent",
       state: {
@@ -1706,7 +1725,7 @@ describe("a card click opens the Detail", () => {
 
   it("opens a ticket Detail for a card of any status", () => {
     const snap = flightSnapshot();
-    const cases: [string, PoolStatus][] = [
+    const cases: [string, TicketStatus][] = [
       ["R", "ready"],
       ["P", "in-progress"],
       ["C", "checkpoint"],
@@ -1735,7 +1754,7 @@ describe("a card click opens the Detail", () => {
       state: {
         tickets: [ticket("P", { status: "done" })],
         log: [],
-        outcomes: { P: { summary: "did P", commitSha: "sha-p" } },
+        outcomes: { P: { status: "done", summary: "did P", commitSha: "sha-p" } },
         interrupts: [],
         config: {},
       },
@@ -1792,7 +1811,7 @@ function vitalsState(
 
 describe("projectVitals", () => {
   it("is hidden before the first payload arrives, whatever the status", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as PoolStatus[]) {
+    for (const status of ["ready", "in-progress", "checkpoint", "done"] as TicketStatus[]) {
       expect(projectVitals(null, status, VITALS_NOW)).toBeNull();
     }
   });
@@ -1978,7 +1997,7 @@ describe("projectPool paneId", () => {
 });
 
 describe("projectPool terminal surface", () => {
-  const terminalSnap = (tickets: PoolTicketState[]) =>
+  const terminalSnap = (tickets: EnrichedTicketState[]) =>
     snapshot({ state: { tickets } });
   const cardOf = (view: ReturnType<typeof projectPool>, id: string) =>
     view.cards.find(
@@ -2185,7 +2204,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
   });
 
   it("keeps REVIEW below the last row when tall rows push past its fixed spot", () => {
-    const chain: PoolTicketState[] = [];
+    const chain: EnrichedTicketState[] = [];
     for (let i = 0; i < 4; i++) {
       chain.push(
         ticket(`T${i}`, {

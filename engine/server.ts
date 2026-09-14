@@ -39,23 +39,31 @@ import {
   startPool,
   type ConversationView,
   type HarnessCommand,
-  type InterruptKind,
   type PoolConfig,
   type PoolRun,
   type PoolSnapshot,
-  type RunPhase,
   type StartConversationRequest,
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
-import { UNASSIGNED_ASSIGNMENT_VIEW, type AssignmentView } from "./assignment.ts";
-import type { LiveAttemptRecord } from "./live-attempts.ts";
+import { UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
 import {
   attemptLogName,
   attemptStreamName,
   parseAttemptLogName,
   readEvents,
-  type TicketEvent,
 } from "./events.ts";
+import type {
+  EnrichedSnapshot,
+  LogAttemptInfo,
+  ReconstructedAttempt,
+  ResumeAction,
+  TerminalPeekResponse,
+  TicketActivityResponse,
+  TicketBodyResponse,
+  TicketEventsResponse,
+  TicketGradeSummary,
+  TicketLogResponse,
+} from "./wire.ts";
 import {
   defaultRegistryPath,
   pidIsLive,
@@ -66,7 +74,6 @@ import {
 import {
   MARKER_RE,
   type TicketMarker,
-  type TicketStatus,
 } from "./pool.ts";
 import {
   HERDR_SOCKET_DEFAULT,
@@ -74,7 +81,6 @@ import {
   peekPane,
 } from "./herdr.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
-import type { QueuedAnswer } from "./queued-answers.ts";
 import { defaultHarnesses } from "./spawn.ts";
 // The one git use left in this file is the activity endpoint's diff summary;
 // no snapshot or terminal route reaches it.
@@ -107,53 +113,10 @@ export interface PoolServerOptions {
  */
 export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 
-interface EnrichedTicketState {
-  id: string;
-  title: string;
-  blockedBy: string[];
-  status: TicketStatus;
-  /** True when the ticket is done but its branch has not landed in the
-   *  merge target (ADR-0014): the "done, merge pending" card label. A
-   *  lookup into the snapshot's Merge hold, the engine's one derivation;
-   *  every UI surface reads this field and never git. */
-  mergePending: boolean;
-  /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
-  assignment: AssignmentView;
-  /**
-   * The ticket's Live attempt (ADR-0014): the attempt number and, for a
-   * terminal-backed attempt, its herdr pane, served verbatim from the
-   * engine's snapshot while the attempt runs; null once it has ended, so a
-   * finished card's terminal surface and its polling stop, and null for a
-   * ticket with nothing running. A headless attempt is live with a null
-   * pane.
-   */
-  liveAttempt: LiveAttemptRecord | null;
-}
-
-interface EnrichedSnapshot {
-  seq: number;
-  phase: RunPhase;
-  /** The pool's display name: the last two path segments of the pool directory. */
-  poolName: string;
-  state: {
-    tickets: EnrichedTicketState[];
-    /** Every Conversation the pool knows about (issue #60), passed through
-     *  from the engine's own snapshot verbatim: conversationViewOf already
-     *  builds the wire shape the UI wants, so there is nothing to enrich. */
-    conversations: ConversationView[];
-    log: string[];
-    outcomes: Record<string, { summary: string; commitSha: string | null }>;
-    interrupts: { ticketId: string; kind: InterruptKind; body: string }[];
-    /** Accepted answers still waiting for processing (the Queued answers). */
-    queuedAnswers: QueuedAnswer[];
-    config: Record<string, unknown>;
-  };
-}
-
 export interface PoolServer {
   latest: EnrichedSnapshot | null;
   start: () => Promise<EnrichedSnapshot>;
-  answer: (ticketId: string, action: "resume" | "approve" | "reject", note?: string) => Promise<EnrichedSnapshot>;
+  answer: (ticketId: string, action: ResumeAction, note?: string) => Promise<EnrichedSnapshot>;
   /** Resolves once the in-flight drive settles, with the settled snapshot. */
   settled: () => Promise<EnrichedSnapshot>;
   url: string;
@@ -255,50 +218,12 @@ function serveStatic(distDir: string, pathname: string): Response | null {
 // Ticket events endpoint
 // ---------------------------------------------------------------------------
 
-interface TicketEventsResponse {
-  events: TicketEvent[];
-  attempts: ReconstructedAttempt[];
-  reconstructed: boolean;
-  /** The ticket's spec text: the issue file body after the title heading. */
-  spec: string;
-}
-
 // ---------------------------------------------------------------------------
 // Ticket log endpoint
 // ---------------------------------------------------------------------------
 
 /** The largest byte range a single log response serves. Larger logs page. */
 export const LOG_CHUNK_BYTES = 64 * 1024;
-
-interface LogAttemptInfo {
-  attempt: number;
-  kind: "implement" | "resolver" | "reconstructed";
-  logFile: string;
-  /**
-   * The attempt's Stream file (the raw stream tee, ADR-0012), named by the
-   * events module's contract the same way `logFile` is. Null when the
-   * attempt has no Stream file on disk: a raw harness (opencode), a
-   * pre-streaming attempt, or a reconstructed row.
-   */
-  streamFile: string | null;
-  current: boolean;
-}
-
-interface TicketLogResponse {
-  content: string;
-  offset: number;
-  nextOffset: number;
-  totalSize: number;
-  attempts: LogAttemptInfo[];
-}
-
-interface TicketActivityResponse {
-  ticketId: string;
-  running: boolean;
-  diff: { added: number; removed: number; files: string[] } | null;
-  log: { size: number; mtime: string } | null;
-  lastEventAt: string | null;
-}
 
 // ANSI escape sequences: CSI (colors, cursor movement) and OSC (title, hyperlinks)
 // are stripped server-side so the served log reads as clean text.
@@ -476,12 +401,6 @@ async function readLogRange(
     nextOffset: start + decodeEnd,
     totalSize,
   };
-}
-
-interface ReconstructedAttempt {
-  attempt: number;
-  logFile: string;
-  modifiedAt: string;
 }
 
 // Attempt logs are the four names the events module's naming contract
@@ -663,24 +582,6 @@ export const TERMINAL_PEEK_LINES = 80;
 // Grades endpoint
 // ---------------------------------------------------------------------------
 
-/**
- * One ticket's latest grade, as the card summaries show it: the score and
- * verdict with the graded attempt's number, plus the winning attempt's
- * number once Selection has named one. Derived at read time from the same
- * events files the Detail's timeline reads, so a card and the Detail never
- * disagree. Reasons stay in the events payload; the card is a summary.
- */
-export interface TicketGradeSummary {
-  attempt: number;
-  score: number;
-  verdict: string;
-  /** The attempt Selection named, or the merged attempt on a ticket graded
-   *  before the selection machinery. Null until either event lands. The
-   *  Detail's winner badge reads this field, so both surfaces share the one
-   *  derivation. */
-  winner: number | null;
-}
-
 // The winning attempt's latest well-formed grade per ticket, keyed by ticket
 // id; before a selection has landed, the latest graded event stands in.
 // Parallel graders append in completion order, so the last graded line in the
@@ -734,12 +635,6 @@ function readPoolGrades(
 // ---------------------------------------------------------------------------
 // Ticket body endpoint
 // ---------------------------------------------------------------------------
-
-export interface TicketBodyResponse {
-  id: string;
-  /** The Issue file's markdown with the line-1 state marker stripped. */
-  body: string;
-}
 
 // The line-1 `<!-- state: ... -->` marker is pool metadata, never prose for
 // the UI: drop it, and the blank lines that separated it from the body.
@@ -1082,7 +977,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // otherwise.
   async function answer(
     ticketId: string,
-    action: "resume" | "approve" | "reject",
+    action: ResumeAction,
     note?: string,
   ): Promise<EnrichedSnapshot> {
     const run = currentRun;
@@ -1209,7 +1104,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               note?: unknown;
             };
             const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
-            const action = body.action === "approve" || body.action === "reject"
+            const action: ResumeAction = body.action === "approve" || body.action === "reject"
               ? body.action
               : "resume";
             const note = typeof body.note === "string" ? body.note : undefined;
@@ -1398,11 +1293,12 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               resolved.paneId,
               TERMINAL_PEEK_LINES,
             );
-            return Response.json({
+            const body: TerminalPeekResponse = {
               ticket: ticketId,
               paneId: resolved.paneId,
               text,
-            });
+            };
+            return Response.json(body);
           } catch (err) {
             return Response.json(
               { error: err instanceof Error ? err.message : String(err) },

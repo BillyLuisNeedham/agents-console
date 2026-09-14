@@ -28,16 +28,16 @@ import {
   selectLogAttempt,
   type ConversationEndView,
   type DetailTab,
-  type GradeView,
-  type InterruptAction,
+  type EnrichedSnapshot,
   type PoolCardView,
-  type PoolSnapshot,
   type PoolTabStatus,
   type PoolView,
+  type ResumeAction,
   type TabOverride,
   type TerminalSurfaceView,
   type TicketBodyResponse,
   type TicketEventsResponse,
+  type TicketGradeSummary,
   type TimelineView,
   type VitalsState,
 } from "./project";
@@ -45,32 +45,32 @@ import type { AppModel } from "./view";
 
 /** The vitals store, as the session consumes it. */
 export interface SessionVitals {
-  update(snapshot: PoolSnapshot): void;
+  update(snapshot: EnrichedSnapshot): void;
   state(): Record<string, VitalsState>;
 }
 
 /** The terminal surface store, as the session consumes it. */
 export interface SessionTerminal {
-  update(snapshot: PoolSnapshot): void;
+  update(snapshot: EnrichedSnapshot): void;
   state(): Record<string, TerminalSurfaceView>;
 }
 
 export interface ConsoleSessionOptions {
-  getState: () => Promise<PoolSnapshot | null>;
+  getState: () => Promise<EnrichedSnapshot | null>;
   getEvents: (id: string) => Promise<TicketEventsResponse>;
   getTicket: (id: string) => Promise<TicketBodyResponse | null>;
-  getGrades: () => Promise<Record<string, GradeView>>;
+  getGrades: () => Promise<Record<string, TicketGradeSummary>>;
   /** The log pane's byte-range fetch, handed to the LogPane the session owns. */
   getLog: LogFetch;
   /** Answer an interrupt; resolves with the resumed pool's snapshot. */
   answer: (
     ticketId: string,
-    action: InterruptAction,
+    action: ResumeAction,
     note?: string,
-  ) => Promise<PoolSnapshot>;
+  ) => Promise<EnrichedSnapshot>;
   /** Open the snapshot stream; returns a function that closes it. */
   stream: (handlers: {
-    onSnapshot: (snapshot: PoolSnapshot) => void;
+    onSnapshot: (snapshot: EnrichedSnapshot) => void;
     onError: (message: string) => void;
   }) => () => void;
   vitals: SessionVitals;
@@ -112,7 +112,7 @@ export class ConsoleSession {
   private readonly derivePool: typeof projectPool;
   private readonly onChange: () => void;
 
-  private snapshot: PoolSnapshot | null = null;
+  private snapshot: EnrichedSnapshot | null = null;
   private selectedId: string | null = null;
   private logOpen = false;
   private inspectorOpen = false;
@@ -130,7 +130,7 @@ export class ConsoleSession {
   // The latest grade per ticket, for the card summaries; refetched on the
   // snapshot cadence. Absent until the first fetch lands: the cards render
   // no grade UI until then, which is the no-grade state anyway.
-  private grades: Record<string, GradeView> = {};
+  private grades: Record<string, TicketGradeSummary> = {};
 
   // Ticket bodies for the Spec tab: fetched once per ticket on first
   // selection and held for the session; a 404 caches null so a known-missing
@@ -189,7 +189,7 @@ export class ConsoleSession {
    * move the selected ticket; the events file is append-only and small, so a
    * refetch is cheap), refetch the grades, and repaint.
    */
-  setSnapshot(snapshot: PoolSnapshot): void {
+  setSnapshot(snapshot: EnrichedSnapshot): void {
     this.snapshot = snapshot;
     this.connected = true;
     this.error = null;
@@ -278,7 +278,7 @@ export class ConsoleSession {
    */
   async answer(
     ticketId: string,
-    action: InterruptAction,
+    action: ResumeAction,
     note?: string,
   ): Promise<void> {
     const snapshot = await this.answerSeam(ticketId, action, note);
@@ -376,12 +376,12 @@ export class ConsoleSession {
             logIsCurrent ? this.logs.state.error : null,
           )
         : null,
-      needsInput: this.snapshot ? projectNeedsInput(this.snapshot) : [],
+      needsInput: projectNeedsInput(cards),
       conversationsNeedsInput: this.snapshot
         ? projectConversationsNeedsInput(this.snapshot)
         : [],
       conversationsTray: this.snapshot
-        ? projectConversationsTray(this.snapshot.state.conversations ?? [])
+        ? projectConversationsTray(this.snapshot.state.conversations)
         : [],
       conversationDefaults: this.snapshot
         ? poolAssignmentDefaults(this.snapshot.state.config)
@@ -467,7 +467,7 @@ export class ConsoleSession {
         (c.kind === "conversation" && c.conversationId === id),
     );
     this.timelineState.ticketId = id;
-    // A Conversation's status has no direct PoolStatus equivalent; `live`
+    // A Conversation's status has no direct TicketStatus equivalent; `live`
     // reads as `in-progress` for the timeline's running-attempt marker,
     // anything else as `done` (nothing left running).
     const status =

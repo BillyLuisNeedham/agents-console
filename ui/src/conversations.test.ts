@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { ConversationsTray } from "./conversations";
-import type { PoolConversationState, StartConversationRequest } from "./project";
+import type { ConversationView, StartConversationRequest } from "./project";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -20,7 +20,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-const CONVERSATION: PoolConversationState = {
+const CONVERSATION: ConversationView = {
   id: "conv-1",
   title: "plan the migration",
   status: "live",
@@ -36,14 +36,14 @@ const CONVERSATION: PoolConversationState = {
  *  before any outcome lands (the needs-input.test.ts pattern). */
 function trayHarness() {
   const startCalls: StartConversationRequest[] = [];
-  const startDeferreds: Deferred<PoolConversationState>[] = [];
+  const startDeferreds: Deferred<ConversationView>[] = [];
   const endCalls: { id: string; closing?: string }[] = [];
   const endDeferreds = new Map<string, Deferred<void>>();
   let changes = 0;
   const tray = new ConversationsTray({
     onStart: (request) => {
       startCalls.push(request);
-      const d = deferred<PoolConversationState>();
+      const d = deferred<ConversationView>();
       startDeferreds.push(d);
       return d.promise;
     },
