@@ -36,6 +36,17 @@ on disk. One Console server binds one pool at a time. A pool directory holds:
   Notice when a spawned ticket ends. Requires `terminal: herdr` in
   `console.json` (see `docs/adr/0018-conversations-beside-tickets.md`)
 
+## Terminal-backed pools
+
+With `terminal: herdr` in `console.json`, every attempt and every Conversation
+runs as an interactive TUI in its own named herdr tab. All of a pool's tabs
+open in one **Pool workspace**: the herdr workspace the server was launched in
+(`HERDR_WORKSPACE_ID`), else one created for the pool, remembered in
+`runs/pool-workspace.json` so a restart lands its tabs back where the operator
+left them. Each attempt's pane also appears in herdr's left-hand agent list,
+named for the harness and labelled with the attempt's tab label; a Conversation
+shows as blocked there while it waits on the operator.
+
 ## Run
 
 Runtime is bun.

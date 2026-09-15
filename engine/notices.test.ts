@@ -144,6 +144,7 @@ const doneTicket = (id: string) =>
 
 interface FakePane {
   tabId: string;
+  workspaceId: string | null;
   cwd: string;
   alive: boolean;
   buffer: string;
@@ -165,6 +166,8 @@ interface FakePane {
 function startFakeHerdr(): Promise<{
   socketPath: string;
   panes: Map<string, FakePane>;
+  /** Every call the daemon saw, in order: the agent reports are read off it. */
+  requests: { method: string; params: Record<string, unknown> }[];
   close: () => Promise<void>;
   // A one-shot switch: the next pane.send_input call answers with an RPC
   // error instead of applying the input, simulating a herdr daemon blip
@@ -174,12 +177,14 @@ function startFakeHerdr(): Promise<{
   setTabCreateDelayMs: (ms: number) => void;
 }> {
   let minted = 0;
+  let mintedWorkspaces = 0;
   const panes = new Map<string, FakePane>();
   const subscribers: Socket[] = [];
   const connections = new Set<Socket>();
   const procs: ReturnType<typeof Bun.spawn>[] = [];
   let failNext = false;
   let tabCreateDelayMs = 0;
+  const requests: { method: string; params: Record<string, unknown> }[] = [];
 
   const broadcast = (event: string, data: Record<string, unknown>): void => {
     for (const sub of [...subscribers]) {
@@ -211,35 +216,53 @@ function startFakeHerdr(): Promise<{
         method: string;
         params: Record<string, unknown>;
       };
+      requests.push({ method: msg.method, params: msg.params });
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
       if (msg.method === "tab.create") {
         minted += 1;
+        const workspaceId =
+          typeof msg.params.workspace_id === "string" ? msg.params.workspace_id : null;
         const tabId = `tab-${minted}`;
         const paneId = `pane-${minted}`;
         panes.set(paneId, {
           tabId,
+          workspaceId,
           cwd: String(msg.params.cwd ?? "/"),
           alive: true,
           buffer: "",
           booted: false,
           inputArea: "",
         });
+        // herdr protocol 20 answers with the root pane (issue #94); the
+        // engine takes the pane id straight off it.
+        const created = {
+          type: "tab_created",
+          tab: { tab_id: tabId },
+          root_pane: { pane_id: paneId, tab_id: tabId },
+        };
         // Delayed on demand (tabCreateDelayMs), so a test can hold a
         // startConversation call open long enough to interleave a second
         // one before the first's Conversation record ever lands on disk —
         // the id-collision window the reservation set closes.
         if (tabCreateDelayMs > 0) {
-          setTimeout(() => respond({ tab: { tab_id: tabId } }), tabCreateDelayMs);
+          setTimeout(() => respond(created), tabCreateDelayMs);
         } else {
-          respond({ tab: { tab_id: tabId } });
+          respond(created);
         }
+      } else if (msg.method === "workspace.get") {
+        // The Pool workspace (issue #94): this fake never loses one, so a
+        // workspace it was asked about is one it holds.
+        respond({ workspace: { workspace_id: String(msg.params.workspace_id ?? "") } });
+      } else if (msg.method === "workspace.create") {
+        mintedWorkspaces += 1;
+        respond({ workspace: { workspace_id: `w${mintedWorkspaces}` } });
       } else if (msg.method === "pane.list") {
         respond({
           panes: [...panes.entries()]
             .filter(([, p]) => p.alive)
-            .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id })),
+            .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id, workspace_id: p.workspaceId })),
         });
       } else if (msg.method === "pane.read") {
         const pane = panes.get(String(msg.params.pane_id));
@@ -329,6 +352,7 @@ function startFakeHerdr(): Promise<{
       resolve({
         socketPath,
         panes,
+        requests,
         close: () =>
           new Promise<void>((res) => {
             for (const proc of procs) proc.kill();
@@ -819,4 +843,73 @@ describe("Notice delivery", () => {
 
     await run.shutdown(0);
   }, 10000);
+});
+
+describe("Conversation agent reporting (issue #94)", () => {
+  it("reports the pane working at launch, blocked when the Turn waits, and releases it at End", async () => {
+    // herdr lists a pane in its agent sidebar only when an agent is bound to
+    // it, and it never binds ours (the harness runs inside `script`), so the
+    // engine asserts the identity itself. A Conversation is the one Attempt
+    // with a Turn state, so it is the one whose reported state moves:
+    // waiting on the operator is "blocked" in herdr's vocabulary. This fake
+    // renders a real idle prompt, so the flip is the module's own turn-state
+    // read and not a stub.
+    const { poolDir } = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "stub-model" },
+        terminal: "herdr",
+      },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { claude: () => ["cat"] },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Talk" });
+
+      const reports = () =>
+        fake.requests.filter((r) => r.method === "pane.report_agent");
+      // The launch's own report: the wrapper is in the pane, so the pane is
+      // this Conversation's agent, at work.
+      await waitFor(() => reports().length >= 1);
+      expect(reports()[0].params).toMatchObject({
+        pane_id: view.paneId,
+        source: "herdr:agent-console",
+        agent: "claude",
+        state: "working",
+        message: "conv-1 · Talk",
+      });
+
+      // The tick reads the idle prompt and the Turn flips to waiting.
+      await waitFor(
+        () =>
+          run.snapshots.at(-1)?.conversations.find((c) => c.id === view.id)?.turn
+            .state === "waiting",
+      );
+      await waitFor(() => reports().length >= 2);
+      expect(reports()[1].params).toMatchObject({
+        pane_id: view.paneId,
+        agent: "claude",
+        state: "blocked",
+      });
+
+      await run.endConversation(view.id);
+      await waitFor(() =>
+        fake.requests.some((r) => r.method === "pane.release_agent"),
+      );
+      expect(
+        fake.requests.find((r) => r.method === "pane.release_agent")!.params,
+      ).toMatchObject({
+        pane_id: view.paneId,
+        source: "herdr:agent-console",
+        agent: "claude",
+      });
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 25000);
 });

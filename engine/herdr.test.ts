@@ -4,10 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ATTEMPT_TAB_LABEL_MAX,
+  PANE_AGENT_SOURCE,
   attemptTabLabel,
   closeTab,
   herdrRpc,
+  listPaneIds,
   openAttemptTab,
+  releasePaneAgent,
+  reportPaneAgent,
+  resolvePoolWorkspace,
   waitForPaneEnd,
 } from "./herdr.ts";
 import {
@@ -78,49 +83,210 @@ describe("herdrRpc", () => {
 });
 
 describe("openAttemptTab", () => {
-  it("creates an unfocused tab in the attempt cwd and recovers the root pane by tab id", async () => {
+  it("creates an unfocused tab in the Pool workspace and takes the pane off root_pane", async () => {
     const fake = await startFakeHerdr({
-      foreignPanes: [
-        { tab_id: "tab-foreign", pane_id: "pane-foreign" },
-      ],
+      workspaces: [{ workspace_id: "w7" }],
+      foreignPanes: [{ tab_id: "tab-foreign", pane_id: "pane-foreign" }],
     });
     const tab = await openAttemptTab(
       fake.socketPath,
       "01 · Named herdr tabs",
       "/work/tree",
+      "w7",
     );
-    expect(tab.tabId).toBe("tab-1");
-    // The pane id comes from the pane.list entry whose tab_id is the created
-    // tab: tab.create carries no root pane id (verified herdr behaviour),
-    // and a foreign pane must never be picked.
-    expect(tab.paneId).toBe("pane-1");
+    // The ids the daemon minted inside the named workspace (issue #94): the
+    // tab landed in the Pool workspace, not wherever herdr's focus was.
+    expect(tab.tabId).toBe("w7:t1");
+    expect(tab.paneId).toBe("w7:p1");
+    // One call, and only one: herdr protocol 20 answers tab.create with
+    // `tab_created { tab, root_pane }`, so the pane.list scan the first cut
+    // needed (and the race it carried) is gone.
     expect(fake.requests).toEqual([
       {
         method: "tab.create",
-        params: { label: "01 · Named herdr tabs", focus: false, cwd: "/work/tree" },
+        params: {
+          label: "01 · Named herdr tabs",
+          focus: false,
+          cwd: "/work/tree",
+          workspace_id: "w7",
+        },
       },
-      { method: "pane.list", params: {} },
     ]);
   });
 
   it("throws when tab.create returns an error", async () => {
     const fake = await startFakeHerdr({
+      workspaces: [{ workspace_id: "w7" }],
       fail: { "tab.create": { code: -1, message: "no daemon here" } },
     });
     await expect(
-      openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree"),
+      openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree", "w7"),
     ).rejects.toThrow(/tab\.create failed.*no daemon here/);
   });
 
-  it("throws when no pane belongs to the created tab", async () => {
-    // The daemon accepted tab.create but its listing does not show the new
-    // tab yet: recovery must fail loudly rather than guess a pane.
+  it("throws when the Pool workspace is gone", async () => {
+    // The operator closed it mid-run: the daemon refuses the tab, and the
+    // caller (attempt-run.ts) re-resolves once before falling back.
+    const fake = await startFakeHerdr({ workspaces: [{ workspace_id: "w7" }] });
+    fake.removeWorkspace("w7");
+    await expect(
+      openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree", "w7"),
+    ).rejects.toThrow(/no such workspace w7/);
+  });
+
+  it("throws when the answer carries no root pane", async () => {
+    // A daemon older than protocol 20: the tab exists but its pane id is
+    // unknowable, and guessing one is what the pane.list scan used to do.
     const fake = await startFakeHerdr({
-      listOnly: [{ tab_id: "tab-foreign", pane_id: "pane-foreign" }],
+      workspaces: [{ workspace_id: "w7" }],
+      rootPaneless: true,
     });
     await expect(
-      openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree"),
-    ).rejects.toThrow(/no pane found for new tab/);
+      openAttemptTab(fake.socketPath, "01 · Named herdr tabs", "/work/tree", "w7"),
+    ).rejects.toThrow(/tab\.create returned no root pane id/);
+  });
+});
+
+describe("resolvePoolWorkspace", () => {
+  const candidates = { label: "pool", cwd: "/repo" };
+
+  it("keeps the remembered workspace when it is still there", async () => {
+    const fake = await startFakeHerdr({
+      workspaces: [{ workspace_id: "wR" }, { workspace_id: "wL" }],
+    });
+    expect(
+      await resolvePoolWorkspace(fake.socketPath, {
+        ...candidates,
+        remembered: "wR",
+        launch: "wL",
+      }),
+    ).toEqual({ workspaceId: "wR", origin: "remembered" });
+    // Confirmed before it is used, and nothing else asked: no listing, no
+    // path matching, no create.
+    expect(fake.requests).toEqual([
+      { method: "workspace.get", params: { workspace_id: "wR" } },
+    ]);
+  });
+
+  it("falls to the launch workspace when the remembered one is gone", async () => {
+    const fake = await startFakeHerdr({
+      workspaces: [{ workspace_id: "wR" }, { workspace_id: "wL" }],
+    });
+    fake.removeWorkspace("wR");
+    expect(
+      await resolvePoolWorkspace(fake.socketPath, {
+        ...candidates,
+        remembered: "wR",
+        launch: "wL",
+      }),
+    ).toEqual({ workspaceId: "wL", origin: "launch" });
+    expect(fake.requests.map((r) => r.method)).toEqual([
+      "workspace.get",
+      "workspace.get",
+    ]);
+  });
+
+  it("creates one, unfocused and labelled for the pool, when neither holds", async () => {
+    const fake = await startFakeHerdr();
+    expect(
+      await resolvePoolWorkspace(fake.socketPath, {
+        ...candidates,
+        remembered: "wR",
+        launch: "wL",
+      }),
+    ).toEqual({ workspaceId: "w1", origin: "created" });
+    expect(fake.requests.at(-1)).toEqual({
+      method: "workspace.create",
+      params: { label: "pool", cwd: "/repo", focus: false },
+    });
+  });
+
+  it("creates one when the pool remembers nothing and was not launched in one", async () => {
+    const fake = await startFakeHerdr();
+    expect(
+      await resolvePoolWorkspace(fake.socketPath, {
+        ...candidates,
+        remembered: null,
+        launch: null,
+      }),
+    ).toEqual({ workspaceId: "w1", origin: "created" });
+    // No candidate to confirm, so nothing but the create.
+    expect(fake.requests.map((r) => r.method)).toEqual(["workspace.create"]);
+  });
+
+  it("rejects when the daemon will not create one either", async () => {
+    const fake = await startFakeHerdr({
+      fail: { "workspace.create": { code: -1, message: "daemon says no" } },
+    });
+    await expect(
+      resolvePoolWorkspace(fake.socketPath, {
+        ...candidates,
+        remembered: null,
+        launch: null,
+      }),
+    ).rejects.toThrow(/workspace\.create failed.*daemon says no/);
+  });
+});
+
+describe("listPaneIds", () => {
+  it("scopes the listing to the Pool workspace when one is known", async () => {
+    const fake = await startFakeHerdr({ workspaces: [{ workspace_id: "w7" }] });
+    const mine = await openAttemptTab(fake.socketPath, "01 · Mine", "/w", "w7");
+    // A pane of another workspace: the daemon serves every one of them, and
+    // the scope is what keeps this pool's reconciliation to its own.
+    fake.workspaces.push({ workspace_id: "w8" });
+    await openAttemptTab(fake.socketPath, "02 · Theirs", "/w", "w8");
+    expect(await listPaneIds(fake.socketPath, "w7")).toEqual([mine.paneId]);
+    expect((await listPaneIds(fake.socketPath)).length).toBe(2);
+    const listings = fake.requests.filter((r) => r.method === "pane.list");
+    expect(listings[0].params).toEqual({ workspace_id: "w7" });
+    expect(listings[1].params).toEqual({});
+  });
+});
+
+describe("pane agent reporting", () => {
+  it("reports the agent under the engine's own source, with a monotonic seq", async () => {
+    const fake = await startFakeHerdr();
+    await reportPaneAgent(fake.socketPath, "pane-1", "claude", "working", "01 · t");
+    await reportPaneAgent(fake.socketPath, "pane-1", "claude", "blocked", "01 · t");
+    const reports = fake.requests.filter((r) => r.method === "pane.report_agent");
+    expect(reports).toHaveLength(2);
+    expect(reports[0].params).toMatchObject({
+      pane_id: "pane-1",
+      source: PANE_AGENT_SOURCE,
+      agent: "claude",
+      state: "working",
+      message: "01 · t",
+    });
+    expect(reports[1].params.state).toBe("blocked");
+    expect(typeof reports[0].params.seq).toBe("number");
+    expect(Number(reports[1].params.seq)).toBeGreaterThan(
+      Number(reports[0].params.seq),
+    );
+  });
+
+  it("releases the agent under the same source", async () => {
+    const fake = await startFakeHerdr();
+    await releasePaneAgent(fake.socketPath, "pane-1", "claude");
+    expect(fake.requests).toEqual([
+      {
+        method: "pane.release_agent",
+        params: {
+          pane_id: "pane-1",
+          source: PANE_AGENT_SOURCE,
+          agent: "claude",
+        },
+      },
+    ]);
+  });
+
+  it("rejects when the daemon refuses the report, so the caller can swallow it", async () => {
+    const fake = await startFakeHerdr({
+      fail: { "pane.report_agent": { code: -1, message: "no such pane" } },
+    });
+    await expect(
+      reportPaneAgent(fake.socketPath, "pane-1", "claude", "working", "01 · t"),
+    ).rejects.toThrow(/pane\.report_agent failed/);
   });
 });
 
@@ -151,8 +317,8 @@ describe("waitForPaneEnd", () => {
     // only listened for pane events parked for good when the operator
     // closed an attempt's tab. The tab event names no pane, so the wait
     // re-reads the listing and settles on the pane's absence.
-    const fake = await startFakeHerdr();
-    const tab = await openAttemptTab(fake.socketPath, "01 · Tab", "/work/tree");
+    const fake = await startFakeHerdr({ workspaces: [{ workspace_id: "w7" }] });
+    const tab = await openAttemptTab(fake.socketPath, "01 · Tab", "/work/tree", "w7");
     const ending = waitForPaneEnd(fake.socketPath, tab.paneId);
     await subscribedAndChecked(fake);
     await closeTab(fake.socketPath, tab.tabId);
@@ -162,15 +328,17 @@ describe("waitForPaneEnd", () => {
   it("keeps waiting through another tab's close", async () => {
     // Every subscriber sees every tab's close; only the listing says whose
     // pane went with it.
-    const fake = await startFakeHerdr();
-    const mine = await openAttemptTab(fake.socketPath, "01 · Mine", "/work/tree");
-    const other = await openAttemptTab(fake.socketPath, "02 · Other", "/work/tree");
+    const fake = await startFakeHerdr({ workspaces: [{ workspace_id: "w7" }] });
+    const mine = await openAttemptTab(fake.socketPath, "01 · Mine", "/work/tree", "w7");
+    const other = await openAttemptTab(fake.socketPath, "02 · Other", "/work/tree", "w7");
     const ending = waitForPaneEnd(fake.socketPath, mine.paneId);
     await subscribedAndChecked(fake);
     await closeTab(fake.socketPath, other.tabId);
     await until(
       "the listing re-read after the other tab's close",
-      () => fake.requests.filter((r) => r.method === "pane.list").length >= 4,
+      // The subscription's own liveness check, then the re-read the other
+      // tab's close forces; opening a tab no longer lists anything.
+      () => fake.requests.filter((r) => r.method === "pane.list").length >= 2,
     );
     let settled = false;
     void ending.then(() => {

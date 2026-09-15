@@ -35,11 +35,27 @@ export interface FakeHerdr {
    * pane's absence and the event's absence can be observed together.
    */
   removePane(paneId: string): void;
+  /**
+   * Close a workspace out from under the pool, the way an operator does
+   * mid-run (issue #94): `workspace.get` stops answering for it and
+   * `tab.create` into it is refused, so the engine's re-resolve and retry
+   * can be driven.
+   */
+  removeWorkspace(workspaceId: string): void;
+  /** The workspaces the fake currently holds, seeded plus created. */
+  workspaces: FakeWorkspace[];
 }
 
 export interface FakePane {
   tab_id: string;
   pane_id: string;
+  /** The Pool workspace the pane's tab was created in (issue #94), when one was named. */
+  workspace_id?: string;
+}
+
+export interface FakeWorkspace {
+  workspace_id: string;
+  label?: string;
 }
 
 const servers: Server[] = [];
@@ -58,9 +74,16 @@ export async function stopFakeHerdrs(): Promise<void> {
 
 /**
  * A fake herdr daemon speaking the real wire shape: one JSON line in, one
- * JSON line out, per connection. `tab.create` mints a tab id and a root pane;
- * `pane.list` serves the created panes plus any foreign panes the test seeds
- * (live-agent panes the pool must never touch); `tab.close` drops the tab's
+ * JSON line out, per connection. `tab.create` mints a tab id and a root pane
+ * and answers with both (herdr protocol 20's `tab_created`), placing them in
+ * the workspace the call names (issue #94), which also keys the minted ids so
+ * a test can see where a tab landed; `workspace.get` answers for a workspace
+ * the fake holds and errors for one it does not; `workspace.create` mints
+ * one; `pane.list` serves the created panes plus any foreign panes the test
+ * seeds (live-agent panes the pool must never touch), filtered by
+ * `workspace_id` when the call scopes itself; `pane.report_agent` and
+ * `pane.release_agent` are recorded and acknowledged, the way the daemon
+ * takes an identity a client asserts; `tab.close` drops the tab's
  * panes from the listing and pushes only `tab_closed`, `pane.close` drops
  * the pane and pushes `pane_closed`, the daemon's own asymmetry (verified
  * against herdr 0.8.2, issue #61). Any other method, or a method in `fail`,
@@ -79,13 +102,22 @@ export function startFakeHerdr(options?: {
   // When set, pane.list answers exactly these panes, ignoring created tabs:
   // the shape of a daemon whose new tab has not shown up in the listing yet.
   listOnly?: FakePane[];
+  // Workspaces the daemon already holds (issue #94), so a test can offer one
+  // as the pool's remembered or launch workspace.
+  workspaces?: FakeWorkspace[];
+  // When set, tab.create answers with the tab alone and no root pane: a
+  // daemon older than herdr protocol 20, whose answer the engine must refuse
+  // loudly rather than spawn into a pane it never learned the id of.
+  rootPaneless?: boolean;
   fail?: Record<string, unknown>;
 }): Promise<FakeHerdr> {
   const requests: RecordedRequest[] = [];
   let connections = 0;
   let minted = 0;
+  let mintedWorkspaces = 0;
   const panes: FakePane[] = [...(options?.foreignPanes ?? [])];
   const listOnly = options?.listOnly ? [...options.listOnly] : null;
+  const workspaces: FakeWorkspace[] = [...(options?.workspaces ?? [])];
   const subscribers = new Set<Socket>();
   const push = (event: string, data: Record<string, unknown>): void => {
     const line = JSON.stringify({ event, data: { type: event, ...data } }) + "\n";
@@ -118,12 +150,105 @@ export function startFakeHerdr(options?: {
           socket.write(JSON.stringify({ id: msg.id, result: {} }) + "\n");
           continue;
         } else if (msg.method === "tab.create") {
+          const workspace_id =
+            typeof msg.params.workspace_id === "string"
+              ? msg.params.workspace_id
+              : undefined;
+          if (
+            workspace_id !== undefined &&
+            !workspaces.some((w) => w.workspace_id === workspace_id)
+          ) {
+            // The workspace the call names is gone: the daemon refuses the
+            // tab, which is what an operator closing it mid-run looks like.
+            response = {
+              id: msg.id,
+              error: { code: -32001, message: `no such workspace ${workspace_id}` },
+            };
+            socket.end(JSON.stringify(response) + "\n");
+            return;
+          }
           minted += 1;
-          const tab_id = `tab-${minted}`;
-          panes.push({ tab_id, pane_id: `pane-${minted}` });
-          response = { id: msg.id, result: { tab: { tab_id } } };
+          // Ids carry the workspace when one was named, so a test reads
+          // where a tab landed off the ids alone.
+          const tab_id =
+            workspace_id !== undefined ? `${workspace_id}:t${minted}` : `tab-${minted}`;
+          const pane_id =
+            workspace_id !== undefined ? `${workspace_id}:p${minted}` : `pane-${minted}`;
+          const pane: FakePane = {
+            tab_id,
+            pane_id,
+            ...(workspace_id !== undefined ? { workspace_id } : {}),
+          };
+          panes.push(pane);
+          response = {
+            id: msg.id,
+            result: {
+              type: "tab_created",
+              tab: { tab_id, ...(workspace_id !== undefined ? { workspace_id } : {}) },
+              ...(options?.rootPaneless === true
+                ? {}
+                : {
+                    root_pane: {
+                      pane_id,
+                      tab_id,
+                      ...(workspace_id !== undefined ? { workspace_id } : {}),
+                    },
+                  }),
+            },
+          };
+        } else if (msg.method === "workspace.get") {
+          const workspace = workspaces.find(
+            (w) => w.workspace_id === msg.params.workspace_id,
+          );
+          response = workspace
+            ? { id: msg.id, result: { workspace } }
+            : {
+                id: msg.id,
+                error: {
+                  code: -32001,
+                  message: `no such workspace ${String(msg.params.workspace_id)}`,
+                },
+              };
+        } else if (msg.method === "workspace.create") {
+          mintedWorkspaces += 1;
+          const workspace: FakeWorkspace = {
+            workspace_id: `w${mintedWorkspaces}`,
+            label: typeof msg.params.label === "string" ? msg.params.label : "",
+          };
+          workspaces.push(workspace);
+          // The daemon opens a workspace with a tab and a pane in it; the
+          // engine reads only the workspace id, but the shape is the real
+          // one so nothing here teaches the engine a smaller answer.
+          minted += 1;
+          const tab_id = `${workspace.workspace_id}:t${minted}`;
+          const pane_id = `${workspace.workspace_id}:p${minted}`;
+          panes.push({ tab_id, pane_id, workspace_id: workspace.workspace_id });
+          response = {
+            id: msg.id,
+            result: {
+              workspace,
+              tab: { tab_id, workspace_id: workspace.workspace_id },
+              root_pane: { pane_id, tab_id, workspace_id: workspace.workspace_id },
+            },
+          };
+        } else if (msg.method === "pane.report_agent" || msg.method === "pane.release_agent") {
+          // Recorded above like every call; the daemon's own answer is an ok.
+          response = { id: msg.id, result: { type: "ok" } };
         } else if (msg.method === "pane.list") {
-          response = { id: msg.id, result: { panes: listOnly ?? panes } };
+          const listed = listOnly ?? panes;
+          const scope =
+            typeof msg.params.workspace_id === "string"
+              ? msg.params.workspace_id
+              : null;
+          response = {
+            id: msg.id,
+            result: {
+              panes:
+                scope === null
+                  ? listed
+                  : listed.filter((p) => p.workspace_id === scope),
+            },
+          };
         } else if (msg.method === "tab.close") {
           // A closed tab takes its panes silently (verified herdr 0.8.2,
           // issue #61): the listing drops them and one `tab_closed` goes
@@ -193,6 +318,17 @@ export function startFakeHerdr(options?: {
             if (at !== -1) list.splice(at, 1);
           }
         },
+        removeWorkspace(workspaceId) {
+          const at = workspaces.findIndex((w) => w.workspace_id === workspaceId);
+          if (at !== -1) workspaces.splice(at, 1);
+          for (const list of [panes, listOnly]) {
+            if (!list) continue;
+            for (let i = list.length - 1; i >= 0; i--) {
+              if (list[i].workspace_id === workspaceId) list.splice(i, 1);
+            }
+          }
+        },
+        workspaces,
       }),
     );
   });

@@ -2695,6 +2695,7 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
   }> {
     const requests: { method: string; params: Record<string, unknown> }[] = [];
     let minted = 0;
+    let mintedWorkspaces = 0;
     const panes = new Map<string, { tabId: string; cwd: string; buffer: string }>();
     const subscribers: import("node:net").Socket[] = [];
     const connections = new Set<import("node:net").Socket>();
@@ -2747,7 +2748,18 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
             cwd: String(msg.params.cwd ?? "/"),
             buffer: "",
           });
-          respond({ tab: { tab_id: tabId } });
+          // herdr protocol 20 answers with the root pane (issue #94).
+          respond({
+            type: "tab_created",
+            tab: { tab_id: tabId },
+            root_pane: { pane_id: `pane-${minted}`, tab_id: tabId },
+          });
+        } else if (msg.method === "workspace.get") {
+          // The Pool workspace (issue #94): this fake never loses one.
+          respond({ workspace: { workspace_id: String(msg.params.workspace_id ?? "") } });
+        } else if (msg.method === "workspace.create") {
+          mintedWorkspaces += 1;
+          respond({ workspace: { workspace_id: `w${mintedWorkspaces}` } });
         } else if (msg.method === "pane.list") {
           respond({
             panes: [...panes.entries()].map(([paneId, pane]) => ({
@@ -3204,6 +3216,7 @@ describe("conversation endpoints", () => {
    */
   function startLaunchFakeHerdr(): Promise<{ socketPath: string; close: () => Promise<void> }> {
     let minted = 0;
+    let mintedWorkspaces = 0;
     interface FakePane {
       tabId: string;
       cwd: string;
@@ -3243,7 +3256,18 @@ describe("conversation endpoints", () => {
             booted: false,
             inputArea: "",
           });
-          respond({ tab: { tab_id: tabId } });
+          // herdr protocol 20 answers with the root pane (issue #94).
+          respond({
+            type: "tab_created",
+            tab: { tab_id: tabId },
+            root_pane: { pane_id: paneId, tab_id: tabId },
+          });
+        } else if (msg.method === "workspace.get") {
+          // The Pool workspace (issue #94): this fake never loses one.
+          respond({ workspace: { workspace_id: String(msg.params.workspace_id ?? "") } });
+        } else if (msg.method === "workspace.create") {
+          mintedWorkspaces += 1;
+          respond({ workspace: { workspace_id: `w${mintedWorkspaces}` } });
         } else if (msg.method === "pane.list") {
           respond({
             panes: [...panes.entries()]
