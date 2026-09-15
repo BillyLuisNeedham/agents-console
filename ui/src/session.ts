@@ -41,7 +41,7 @@ import {
   type TimelineView,
   type VitalsState,
 } from "./project";
-import type { AppModel } from "./view";
+import type { AppModel, StopState } from "./view";
 
 /** The vitals store, as the session consumes it. */
 export interface SessionVitals {
@@ -68,6 +68,9 @@ export interface ConsoleSessionOptions {
     action: ResumeAction,
     note?: string,
   ) => Promise<EnrichedSnapshot>;
+  /** Stop this pool's server (issue #97). Resolves when the server has
+   *  accepted the stop, rejects with the refusal's reason. */
+  stop: () => Promise<void>;
   /** Open the snapshot stream; returns a function that closes it. */
   stream: (handlers: {
     onSnapshot: (snapshot: EnrichedSnapshot) => void;
@@ -106,6 +109,7 @@ export class ConsoleSession {
   private readonly getTicket: ConsoleSessionOptions["getTicket"];
   private readonly getGrades: ConsoleSessionOptions["getGrades"];
   private readonly answerSeam: ConsoleSessionOptions["answer"];
+  private readonly stopSeam: ConsoleSessionOptions["stop"];
   private readonly streamSeam: ConsoleSessionOptions["stream"];
   private readonly vitals: SessionVitals;
   private readonly terminal: SessionTerminal;
@@ -118,6 +122,16 @@ export class ConsoleSession {
   private inspectorOpen = false;
   private error: string | null = null;
   private connected = false;
+
+  // The Stop control's state (issue #97). The confirmation is inline on the
+  // button, so it is one small state machine, not a modal: `armed` is the
+  // "Really stop?" prompt, `requesting` the POST in flight. It lives in
+  // memory only, so a refresh disarms. `stoppedFromHere` marks the tab whose
+  // Stop request was accepted, which is the only tab that can honestly say
+  // the stop came from this page.
+  private stopState: StopState = "idle";
+  private stopFailure: string | null = null;
+  private stoppedFromHere = false;
 
   // The selected card's timeline: the events fetch answers on its own
   // cadence, and a slow answer answering after a newer selection (or a newer
@@ -162,6 +176,7 @@ export class ConsoleSession {
     this.getTicket = options.getTicket;
     this.getGrades = options.getGrades;
     this.answerSeam = options.answer;
+    this.stopSeam = options.stop;
     this.streamSeam = options.stream;
     this.vitals = options.vitals;
     this.terminal = options.terminal;
@@ -190,8 +205,23 @@ export class ConsoleSession {
    * refetch is cheap), refetch the grades, and repaint.
    */
   setSnapshot(snapshot: EnrichedSnapshot): void {
+    const wasStopped = this.snapshot?.phase === "stopped";
     this.snapshot = snapshot;
     this.connected = true;
+    if (wasStopped && snapshot.phase !== "stopped") {
+      // A fresh snapshot after a `stopped` one is the relaunched server the
+      // client's retry found on its own (issue #97): the page is live again,
+      // so the stop control and the "from this page" marker start over.
+      this.stoppedFromHere = false;
+      this.stopState = "idle";
+      this.stopFailure = null;
+    } else if (this.stopState === "armed" && snapshot.phase !== "done") {
+      // Stop is offered only on a done pool, so a phase that moved off done
+      // withdraws the offer and the armed confirmation goes with it. A
+      // request already in flight keeps its label until the farewell lands.
+      this.stopState = "idle";
+      this.stopFailure = null;
+    }
     this.error = null;
     this.vitals.update(snapshot);
     this.terminal.update(snapshot);
@@ -208,6 +238,12 @@ export class ConsoleSession {
    * out the grace delay, and the timer arms only on the first error of an
    * outage: a dead connection re-fires onError on every retry, and
    * re-arming each time would push the banner past the grace window forever.
+   * A `stopped` snapshot is the exception (issue #97): the server closes
+   * every stream and stops serving right after that farewell, so the
+   * disconnect that follows is the expected end of an orderly shutdown, not
+   * a fault. The connection still goes down, but no banner is raised; the
+   * canvas says the pool stopped, and the client's retry picks a relaunched
+   * server back up on its own.
    */
   connect(): void {
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,10 +262,14 @@ export class ConsoleSession {
       onError: (message) => {
         this.connected = false;
         lastStreamError = message;
+        if (this.stoppedPhase()) {
+          this.onChange();
+          return;
+        }
         if (graceTimer === null) {
           graceTimer = setTimeout(() => {
             graceTimer = null;
-            if (!this.connected) {
+            if (!this.connected && !this.stoppedPhase()) {
               this.error = lastStreamError;
               this.onChange();
             }
@@ -283,6 +323,48 @@ export class ConsoleSession {
   ): Promise<void> {
     const snapshot = await this.answerSeam(ticketId, action, note);
     this.setSnapshot(snapshot);
+  }
+
+  /** True once the latest snapshot is the farewell of an orderly shutdown. */
+  private stoppedPhase(): boolean {
+    return this.snapshot?.phase === "stopped";
+  }
+
+  /** Arm the Stop control's inline confirmation (issue #97). Nothing is sent. */
+  armStop(): void {
+    this.stopState = "armed";
+    this.stopFailure = null;
+    this.onChange();
+  }
+
+  /** Disarm the confirmation. Nothing is sent, on the way in or out. */
+  cancelStop(): void {
+    this.stopState = "idle";
+    this.stopFailure = null;
+    this.onChange();
+  }
+
+  /**
+   * Send the stop. The button stays on "stopping..." after the 202, because
+   * the request only means the server accepted: the stop itself is done when
+   * the farewell `stopped` snapshot lands, and that snapshot withdraws the
+   * control. A refusal (the pool started running again, or was never
+   * started) or a network failure disarms and shows its reason inline next
+   * to the button, never on the global banner: nothing about the pool is
+   * broken, the request simply did not apply.
+   */
+  async confirmStop(): Promise<void> {
+    this.stopState = "requesting";
+    this.stopFailure = null;
+    this.onChange();
+    try {
+      await this.stopSeam();
+      this.stoppedFromHere = true;
+    } catch (err) {
+      this.stopState = "idle";
+      this.stopFailure = err instanceof Error ? err.message : String(err);
+    }
+    this.onChange();
   }
 
   /** Surface a failure on the global banner (the fire-and-forget paths). */
@@ -348,6 +430,19 @@ export class ConsoleSession {
       connected: this.connected,
       seq: this.snapshot?.seq ?? 0,
       error: this.error,
+      stop: {
+        // Offered only on a done pool over a live stream (issue #97): there
+        // is nothing to interrupt, and a POST down a dead stream would go
+        // nowhere. The relaunch command is the pool directory verbatim, as
+        // the snapshot carries it.
+        offered: this.view?.phase === "done" && this.connected,
+        state: this.stopState,
+        failure: this.stopFailure,
+        stoppedFromHere: this.stoppedFromHere,
+        relaunch: this.snapshot
+          ? `bun run engine/server.ts --pool ${this.snapshot.poolDir}`
+          : null,
+      },
       detail,
       detailTabs:
         detail?.kind === "ticket" ? projectDetailTabs(detail, this.tabOverride) : null,

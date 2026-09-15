@@ -23,6 +23,7 @@ function snap(seq: number): EnrichedSnapshot {
     seq,
     phase: "running",
     poolName: "repo/pool",
+    poolDir: "/tmp/pool",
     state: {
       tickets: [
         {
@@ -511,5 +512,55 @@ describe("PoolClient Conversations routes (issue #60)", () => {
     await expect(client.endConversation("conv-1")).rejects.toThrow(
       "end conversation failed: 404",
     );
+  });
+});
+
+describe("PoolClient.stop (issue #97)", () => {
+  /** The same fetch stub shape as the Conversations routes above, plus a
+   *  json() that rejects, for a body that never arrives. */
+  function jsonFetch(status: number, body: unknown, bodyFails = false) {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: () =>
+          bodyFails ? Promise.reject(new Error("not json")) : Promise.resolve(body),
+      } as unknown as Response);
+    }) as unknown as typeof globalThis.fetch;
+    return { fetch, calls };
+  }
+
+  it("POSTs /api/stop with no body and resolves on the 202", async () => {
+    const { fetch, calls } = jsonFetch(202, { stopping: true });
+    globalThis.fetch = fetch;
+    const client = new PoolClient();
+    await client.stop();
+    expect(calls[0]!.url).toBe("/api/stop");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(calls[0]!.init?.body).toBeUndefined();
+  });
+
+  it("surfaces a 409's error as the thrown Error's message", async () => {
+    const { fetch } = jsonFetch(409, {
+      error: "pool is running, not done: stop refused",
+    });
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().stop()).rejects.toThrow(
+      "pool is running, not done: stop refused",
+    );
+  });
+
+  it("falls back to a generic message when a refusal carries no error body", async () => {
+    const { fetch } = jsonFetch(500, null, true);
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().stop()).rejects.toThrow("pool stop failed: 500");
+  });
+
+  it("propagates a network failure", async () => {
+    globalThis.fetch = (() =>
+      Promise.reject(new Error("fetch failed"))) as unknown as typeof globalThis.fetch;
+    await expect(new PoolClient().stop()).rejects.toThrow("fetch failed");
   });
 });

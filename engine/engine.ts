@@ -277,8 +277,19 @@ interface PoolUpdate {
 // gate's done/quiescent/stalled: it is emitted only by reportDriveDeath, when
 // an error the drive truly cannot continue from has killed the loop. If the
 // phase was emitted the drive reported its own death; if it wasn't, the drive
-// is lying.
-export type RunPhase = "running" | "done" | "quiescent" | "stalled" | "dead";
+// is lying. `stopped` is the other terminal phase and the only one the drive
+// never emits: shutdownSession emits it once, as the farewell frame, after
+// the children are stopped and the store closed (issue #97). It says "this
+// server is going away on purpose", so a Console tab can tell an orderly
+// stop from a dead drive (which carries an errors.jsonl entry) and from a
+// lost connection (which carries no frame at all).
+export type RunPhase =
+  | "running"
+  | "done"
+  | "quiescent"
+  | "stalled"
+  | "dead"
+  | "stopped";
 
 export interface PoolSnapshot {
   seq: number;
@@ -860,7 +871,11 @@ const SHUTDOWN_SETTLE_WAIT_MS = 3_000;
 // stop on its ticket log, and the loop raises no crash interrupts and
 // schedules nothing once stopping), then close the store. A ticket whose
 // attempt was stopped is left in-progress with no interrupt, which is
-// exactly what the next boot resets to ready.
+// exactly what the next boot resets to ready. The last thing out is the
+// farewell: one `stopped` snapshot carrying the final state (issue #97), so
+// every Console tab on the stream learns the server left on purpose rather
+// than watching its connection drop. Emitting is best-effort: a farewell
+// that throws must never hold up the lock release behind it.
 async function shutdownSession(
   session: Session,
   graceMs?: number,
@@ -878,6 +893,11 @@ async function shutdownSession(
   }
   session.conversations.dispose();
   closeStore(session);
+  try {
+    emitSnapshot(session, "stopped");
+  } catch {
+    // The farewell is a courtesy to the stream; the stop is already done.
+  }
 }
 
 function nextSettle(session: Session): Promise<PoolRun> {

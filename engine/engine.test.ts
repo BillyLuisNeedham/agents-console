@@ -10084,14 +10084,21 @@ describe("headless orphans", () => {
     return text === "" ? null : Number(text);
   }
 
-  it("shutdown stops a running attempt with its grandchildren, records the stop, and raises no crash interrupt", async () => {
+  it("shutdown stops a running attempt with its grandchildren, records the stop, raises no crash interrupt, and says goodbye", async () => {
     const poolDir = makePool({
       tickets: [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       ],
       config: stubConfig,
     });
-    const run = startPool({ poolDir, harnesses: lingeringHarness(poolDir) });
+    // Issue #97: every snapshot the run emits, so the shutdown's farewell can
+    // be checked as the last one rather than inferred from the handle.
+    const emitted: { seq: number; phase: string }[] = [];
+    const run = startPool({
+      poolDir,
+      harnesses: lingeringHarness(poolDir),
+      onSnapshot: ({ seq, phase }) => emitted.push({ seq, phase }),
+    });
     await waitFor(
       () =>
         readEventsFile(poolDir, "01").some(
@@ -10105,6 +10112,17 @@ describe("headless orphans", () => {
     expect(processIsLive(grandchild)).toBe(true);
 
     await run.shutdown(1_000);
+
+    // The farewell (issue #97): a run stopped mid-attempt still signs off
+    // with one `stopped` snapshot, so a Console tab watching a busy pool
+    // learns the server left on purpose rather than seeing its stream drop.
+    // The stop emits snapshots of its own on the way (the joined super-step,
+    // the recorded stop), so the farewell is placed against the one before
+    // it rather than against the last one seen before the shutdown.
+    const farewell = emitted.at(-1)!;
+    expect(farewell.phase).toBe("stopped");
+    expect(farewell.seq).toBe(emitted.at(-2)!.seq + 1);
+    expect(emitted.filter((s) => s.phase === "stopped")).toHaveLength(1);
 
     // The group went with the harness: the sleeper it forked is gone too.
     expect(processIsLive(pid)).toBe(false);
@@ -10231,6 +10249,41 @@ describe("headless orphans", () => {
     );
     const issue = readFileSync(join(poolDir, "issues", "01-a.md"), "utf8");
     expect(issue).toContain("No agent from that process was found still running at this boot");
+  });
+});
+
+// The shutdown farewell (issue #97). `stopped` is the one phase the drive
+// never emits: shutdownSession emits it once, after the children are stopped
+// and the store closed, so a Console tab can tell an orderly stop from a dead
+// drive and from a lost connection.
+describe("the shutdown farewell", () => {
+  it("ends a finished run with one `stopped` snapshot after its `done` one", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const emitted: { seq: number; phase: string }[] = [];
+    const run = await approveReview(
+      await runPool({
+        poolDir,
+        harnesses: stubHarness(poolDir, {}).harnesses,
+        onSnapshot: ({ seq, phase }) => emitted.push({ seq, phase }),
+      }),
+    );
+    expect(run.phase).toBe("done");
+    const done = emitted.at(-1)!;
+    expect(done.phase).toBe("done");
+
+    await run.shutdown(1_000);
+
+    // The farewell is the next snapshot in the same sequence, not a repeat
+    // of the last one: a client tracking seq sees it as new.
+    const farewell = emitted.at(-1)!;
+    expect(farewell.phase).toBe("stopped");
+    expect(farewell.seq).toBe(done.seq + 1);
+    expect(emitted.filter((s) => s.phase === "stopped")).toHaveLength(1);
   });
 });
 

@@ -34,6 +34,26 @@ import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
 
+/** The Stop control's three states (issue #97): the button, the inline
+ *  "Really stop?" confirmation, and the POST in flight. */
+export type StopState = "idle" | "armed" | "requesting";
+
+/**
+ * The Stop control's view slice (issue #97). `offered` gates the button on a
+ * done pool over a live stream; `state` is the inline confirmation's state
+ * machine; `failure` is a refused or failed request's reason, shown beside
+ * the button rather than on the global banner; `stoppedFromHere` marks the
+ * tab that asked for the stop; `relaunch` is the command the stopped notice
+ * prints for getting the server back.
+ */
+export interface StopView {
+  offered: boolean;
+  state: StopState;
+  failure: string | null;
+  stoppedFromHere: boolean;
+  relaunch: string | null;
+}
+
 export interface AppModel {
   phase: RunPhase | null;
   phaseLabel: string;
@@ -46,6 +66,8 @@ export interface AppModel {
   connected: boolean;
   seq: number;
   error: string | null;
+  /** The Stop control and the stopped-server notice (issue #97). */
+  stop: StopView;
   detail: DetailView | null;
   /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
   detailTabs: DetailTabView[] | null;
@@ -74,6 +96,11 @@ export interface Handlers {
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
+  /** The Stop control's three intents (issue #97): raise the inline
+   *  confirmation, drop it (nothing is sent), and send the stop. */
+  onArmStop: () => void;
+  onCancelStop: () => void;
+  onConfirmStop: () => void;
 }
 
 export type ConsoleViewOptions = NeedsInputOptions &
@@ -106,6 +133,13 @@ export class ConsoleView {
   // highlight instead of stripping it.
   private selectedNodeId: string | null = null;
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
+  // The canvas header's Stop control is built once with the canvas, but its
+  // intents belong to the render handlers, so they land through the latest
+  // render's set, the way the selection does.
+  private stopHandlers: Pick<
+    Handlers,
+    "onArmStop" | "onCancelStop" | "onConfirmStop"
+  > | null = null;
 
   constructor(options: ConsoleViewOptions) {
     this.onFocusTerminal = options.onFocusTerminal;
@@ -117,6 +151,9 @@ export class ConsoleView {
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
+      onArmStop: () => this.stopHandlers?.onArmStop(),
+      onCancelStop: () => this.stopHandlers?.onCancelStop(),
+      onConfirmStop: () => this.stopHandlers?.onConfirmStop(),
     });
     this.needsInput = new NeedsInputTray(options);
   }
@@ -132,6 +169,7 @@ export class ConsoleView {
     this.drawers.cancelDrag();
     this.detail.cancelDrag();
     this.onSelectNode = handlers.onSelectNode;
+    this.stopHandlers = handlers;
     this.canvas.sync(model.cards);
     const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
     this.detail.pruneDrafts(pendingInterrupts);

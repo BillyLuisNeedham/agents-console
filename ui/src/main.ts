@@ -75,6 +75,7 @@ const session = new ConsoleSession({
   getLog: (ticketId, attempt, offset, end, stream) =>
     client.getLog(ticketId, attempt, offset, end, stream),
   answer: (ticketId, action, note) => client.answer(ticketId, action, note),
+  stop: () => client.stop(),
   stream: (handlers) => client.stream(handlers),
   vitals,
   terminal,
@@ -131,6 +132,14 @@ function render(): void {
       });
     },
     onSelectTab: (ticketId, tab) => session.selectTab(ticketId, tab),
+    // The Stop control (issue #97). `confirmStop` catches its own failures
+    // into the inline message beside the button, so there is nothing to
+    // report here: a refused stop is not a broken pool.
+    onArmStop: () => session.armStop(),
+    onCancelStop: () => session.cancelStop(),
+    onConfirmStop: () => {
+      void session.confirmStop();
+    },
   });
 }
 

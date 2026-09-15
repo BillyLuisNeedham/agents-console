@@ -79,6 +79,9 @@ export interface EnrichedSnapshot {
   phase: RunPhase;
   /** The pool's display name: the last two path segments of the pool directory. */
   poolName: string;
+  /** The pool directory the server was launched on, verbatim: what a
+   *  relaunch after a Console stop (issue #97) passes to `--pool`. */
+  poolDir: string;
   state: {
     tickets: EnrichedTicketState[];
     /** Every Conversation the pool knows about (issue #60), passed through

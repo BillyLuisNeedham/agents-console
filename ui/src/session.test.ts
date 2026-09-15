@@ -56,6 +56,7 @@ function snapshot(
     seq: 0,
     phase: "running",
     poolName: "repo/pool",
+    poolDir: "/tmp/pool",
     ...overrides,
     state: {
       tickets: [],
@@ -110,6 +111,11 @@ function rig() {
   const events = new Map<string, Deferred<TicketEventsResponse>[]>();
   const bodies = new Map<string, Deferred<TicketBodyResponse | null>[]>();
   const logCalls: string[] = [];
+  const stops: Deferred<void>[] = [];
+  const streamHandlers: {
+    onSnapshot: (snapshot: EnrichedSnapshot) => void;
+    onError: (message: string) => void;
+  }[] = [];
   let projectCalls = 0;
   let changes = 0;
   const options: ConsoleSessionOptions = {
@@ -134,7 +140,17 @@ function rig() {
       return new Promise(() => {});
     },
     answer: () => Promise.resolve(snapshot()),
-    stream: () => () => {},
+    // The stop seam parks like the rest, so a test can watch the control sit
+    // on "stopping..." before the 202 lands (issue #97).
+    stop: () => {
+      const d = deferred<void>();
+      stops.push(d);
+      return d.promise;
+    },
+    stream: (handlers) => {
+      streamHandlers.push(handlers);
+      return () => {};
+    },
     vitals: { update: () => {}, state: () => ({}) },
     terminal: { update: () => {}, state: () => ({}) },
     projectPool: (...args) => {
@@ -150,6 +166,8 @@ function rig() {
     events,
     bodies,
     logCalls,
+    stops,
+    streamHandlers,
     projectCalls: () => projectCalls,
     changes: () => changes,
   };
@@ -320,5 +338,158 @@ describe("tab override", () => {
     // selected ticket's default reasserts itself.
     session.selectTab("B", "progress");
     expect(session.model({}).detailTabs?.find((t) => t.active)?.id).toBe("outcome");
+  });
+});
+
+/**
+ * Capture the timers the session arms instead of running them, so a test can
+ * fire the stream's grace timer without waiting it out, and can assert that
+ * a path arms no timer at all.
+ */
+function captureTimers() {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const pending: (() => void)[] = [];
+  globalThis.setTimeout = ((fn: () => void) => {
+    pending.push(fn);
+    return pending.length as unknown as ReturnType<typeof setTimeout>;
+  }) as unknown as typeof globalThis.setTimeout;
+  globalThis.clearTimeout = (() => {}) as unknown as typeof globalThis.clearTimeout;
+  return {
+    pending,
+    runAll: () => {
+      for (const fn of pending.splice(0)) fn();
+    },
+    restore: () => {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    },
+  };
+}
+
+describe("stop control (issue #97)", () => {
+  /** A connected session sitting on a done pool: the one state that offers Stop. */
+  function doneSession() {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.connect();
+    session.setSnapshot(snapshot({ phase: "done" }));
+    return { r, session };
+  }
+
+  it("offers Stop only while the pool is done and the stream is connected", () => {
+    const { r, session } = doneSession();
+    expect(session.model({}).stop.offered).toBe(true);
+    session.setSnapshot(snapshot({ phase: "running" }));
+    expect(session.model({}).stop.offered).toBe(false);
+    session.setSnapshot(snapshot({ phase: "done" }));
+    expect(session.model({}).stop.offered).toBe(true);
+    // A dropped stream takes the offer with it: a POST down a dead
+    // connection would go nowhere.
+    r.streamHandlers[0]!.onError("pool stream disconnected");
+    expect(session.model({}).stop.offered).toBe(false);
+  });
+
+  it("arms and cancels the inline confirmation without sending anything", () => {
+    const { r, session } = doneSession();
+    expect(session.model({}).stop.state).toBe("idle");
+    session.armStop();
+    expect(session.model({}).stop.state).toBe("armed");
+    session.cancelStop();
+    expect(session.model({}).stop.state).toBe("idle");
+    expect(r.stops).toHaveLength(0);
+  });
+
+  it("disarms when a snapshot moves the pool off done", () => {
+    const { session } = doneSession();
+    session.armStop();
+    session.setSnapshot(snapshot({ phase: "running" }));
+    expect(session.model({}).stop.state).toBe("idle");
+    expect(session.model({}).stop.offered).toBe(false);
+  });
+
+  it("holds 'stopping...' until the 202, then marks the stop as this page's", async () => {
+    const { r, session } = doneSession();
+    session.armStop();
+    const settled = session.confirmStop();
+    // The request is out: the button stays disabled on its in-flight label,
+    // because a 202 only means the server accepted the stop.
+    expect(session.model({}).stop.state).toBe("requesting");
+    expect(r.stops).toHaveLength(1);
+    r.stops[0]!.resolve();
+    await settled;
+    expect(session.model({}).stop.stoppedFromHere).toBe(true);
+    // The farewell snapshot withdraws the control and carries the pool
+    // directory the relaunch command prints.
+    session.setSnapshot(snapshot({ phase: "stopped", poolDir: "/repos/demo/.pool" }));
+    const model = session.model({});
+    expect(model.phase).toBe("stopped");
+    expect(model.phaseLabel).toBe("stopped");
+    expect(model.stop.offered).toBe(false);
+    expect(model.stop.stoppedFromHere).toBe(true);
+    expect(model.stop.relaunch).toBe("bun run engine/server.ts --pool /repos/demo/.pool");
+  });
+
+  it("leaves 'from this page' off a tab that did not ask for the stop", () => {
+    const { session } = doneSession();
+    session.setSnapshot(snapshot({ phase: "stopped" }));
+    expect(session.model({}).stop.stoppedFromHere).toBe(false);
+  });
+
+  it("puts a refused stop beside the button, never on the global banner", async () => {
+    const { r, session } = doneSession();
+    session.armStop();
+    const settled = session.confirmStop();
+    r.stops[0]!.reject(new Error("pool is running, not done: stop refused"));
+    await settled;
+    const model = session.model({});
+    expect(model.stop.state).toBe("idle");
+    expect(model.stop.failure).toBe("pool is running, not done: stop refused");
+    expect(model.stop.stoppedFromHere).toBe(false);
+    expect(model.error).toBeNull();
+  });
+
+  it("raises no banner for the disconnect that follows a stopped snapshot, and recovers on relaunch", () => {
+    const timers = captureTimers();
+    try {
+      const r = rig();
+      const session = new ConsoleSession(r.options);
+      session.connect();
+      session.setSnapshot(snapshot({ phase: "stopped", poolDir: "/repos/demo/.pool" }));
+      r.streamHandlers[0]!.onError("pool stream disconnected");
+      // The stop is the reason the stream ended, so no grace timer is armed
+      // at all; running every timer there is proves it.
+      expect(timers.pending).toHaveLength(0);
+      timers.runAll();
+      const stopped = session.model({});
+      expect(stopped.error).toBeNull();
+      expect(stopped.connected).toBe(false);
+      // The client keeps retrying; a relaunched server's first snapshot puts
+      // the page back to live, with the stop control's state cleared.
+      session.setSnapshot(snapshot({ phase: "done" }));
+      const relaunched = session.model({});
+      expect(relaunched.error).toBeNull();
+      expect(relaunched.connected).toBe(true);
+      expect(relaunched.stop.stoppedFromHere).toBe(false);
+      expect(relaunched.stop.offered).toBe(true);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("still banners an ordinary disconnect, so the stopped case is a real exception", () => {
+    const timers = captureTimers();
+    try {
+      const r = rig();
+      const session = new ConsoleSession(r.options);
+      session.connect();
+      session.setSnapshot(snapshot({ phase: "done" }));
+      r.streamHandlers[0]!.onError("pool stream disconnected");
+      expect(timers.pending).toHaveLength(1);
+      timers.runAll();
+      expect(session.model({}).error).toBe("pool stream disconnected");
+    } finally {
+      timers.restore();
+    }
   });
 });
