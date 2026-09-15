@@ -19,6 +19,7 @@ import {
   lastAttempt,
   nextAttempt,
   readEvents,
+  ticketSeedName,
 } from "./events.ts";
 import {
   type CheckpointStore,
@@ -2414,9 +2415,16 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
 
 // The dual-write and the agent's own edits to the canonical Issue file leave
 // it dirty on the working branch and git refuses a merge that would touch a
-// dirty file, so the Issue steps aside for the merge and comes straight
-// back: its content is the file of record and never travels through the
-// ticket's branch.
+// dirty file, so the Issue steps aside for the merge. It used to come
+// straight back over whatever the merge wrote, which threw away every note
+// and tick an agent had committed to its worktree copy instead of the pool's
+// (issue #92): the merge commit kept them, the file the next agent reads did
+// not. Now the two copies are reconciled: a three-way merge of the pool copy
+// and the branch's copy against the seed the worktree was planned from, so
+// an addition on either side survives and an identical addition on both
+// merges clean. Line 1 is the engine's marker and always comes from the
+// pool copy. Lines both sides changed differently stay in the file as
+// conflict markers, recorded on the ticket log, never silently dropped.
 function mergeWithIssueAside(
   session: Session,
   marker: TicketMarker,
@@ -2425,8 +2433,138 @@ function mergeWithIssueAside(
   const aside = `${marker.file}.pool-aside`;
   renameSync(marker.file, aside);
   const result = mergeBranch(session.cwd, branch);
-  renameSync(aside, marker.file);
+  if (!result.ok || !existsSync(marker.file)) {
+    // Aborted, or the branch never touched the ticket file: the pool copy
+    // is the whole story.
+    renameSync(aside, marker.file);
+    return result;
+  }
+  const ours = readFileSync(aside, "utf8");
+  const theirs = readFileSync(marker.file, "utf8");
+  const reconciled = reconcileTicketFile(session, marker, branch, ours, theirs);
+  writeFileSync(marker.file, reconciled.content);
+  rmSync(aside, { force: true });
+  if (reconciled.conflicted) {
+    appendEvent(session.runsDir, marker.id, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, marker.id),
+      kind: "ticket-file-conflict",
+      payload: {
+        file: relative(session.cwd, marker.file),
+        branch,
+      },
+    });
+    session.state = applyUpdate(session.state, {
+      log: [
+        `${marker.id}: the pool's ticket file and the branch's copy changed ` +
+          `the same lines; conflict markers left in ` +
+          `${relative(session.cwd, marker.file)}`,
+      ],
+    });
+  }
   return result;
+}
+
+// Splits a ticket file at its marker line: the state line the engine owns,
+// and everything after it that the work adds to.
+function splitMarkerLine(content: string): { line1: string; body: string } {
+  const nl = content.indexOf("\n");
+  return nl === -1
+    ? { line1: content, body: "" }
+    : { line1: content.slice(0, nl), body: content.slice(nl + 1) };
+}
+
+// The base for the reconcile: the seed planTicket kept when the branch's
+// worktree was planned, or, for a worktree this engine never seeded (an
+// adopted attempt from before seeds were kept), the file as committed at the
+// merge base. With no base at all the pool copy stands in as the base, so the
+// branch's edits land and nothing conflicts.
+function ticketSeedFor(
+  session: Session,
+  marker: TicketMarker,
+  branch: string,
+  ours: string,
+): string {
+  const attempt = /\.attempt-(\d+)$/.exec(branch);
+  const seedPath = join(
+    session.runsDir,
+    ticketSeedName(marker.id, attempt ? Number(attempt[1]) : null),
+  );
+  if (existsSync(seedPath)) return readFileSync(seedPath, "utf8");
+  const base = git(session.cwd, ["merge-base", "HEAD", branch]);
+  if (base.ok) {
+    const shown = Bun.spawnSync({
+      cmd: [
+        "git",
+        "-C",
+        session.cwd,
+        "show",
+        `${base.out}:${relative(session.cwd, marker.file)}`,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (shown.exitCode === 0) return shown.stdout.toString();
+  }
+  return ours;
+}
+
+// The three-way body merge behind mergeWithIssueAside, through
+// `git merge-file`, whose exit status is the conflict count (negative on
+// error, which is treated as a whole-file conflict rather than a silent
+// pick of one side).
+function reconcileTicketFile(
+  session: Session,
+  marker: TicketMarker,
+  branch: string,
+  ours: string,
+  theirs: string,
+): { content: string; conflicted: boolean } {
+  if (ours === theirs) return { content: ours, conflicted: false };
+  const seed = ticketSeedFor(session, marker, branch, ours);
+  const mine = splitMarkerLine(ours);
+  const base = splitMarkerLine(seed);
+  const other = splitMarkerLine(theirs);
+  if (mine.body === other.body) {
+    return { content: `${mine.line1}\n${mine.body}`, conflicted: false };
+  }
+  const scratch = join(session.runsDir, `${marker.id}.reconcile`);
+  mkdirSync(scratch, { recursive: true });
+  const paths = { ours: join(scratch, "pool"), base: join(scratch, "seed"), theirs: join(scratch, "branch") };
+  writeFileSync(paths.ours, mine.body);
+  writeFileSync(paths.base, base.body);
+  writeFileSync(paths.theirs, other.body);
+  const merged = Bun.spawnSync({
+    cmd: [
+      "git",
+      "merge-file",
+      "-p",
+      "-L",
+      "pool (file of record)",
+      "-L",
+      "seed",
+      "-L",
+      `branch ${branch}`,
+      paths.ours,
+      paths.base,
+      paths.theirs,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  rmSync(scratch, { recursive: true, force: true });
+  if (merged.exitCode < 0 || merged.exitCode > 127) {
+    return {
+      content:
+        `${mine.line1}\n<<<<<<< pool (file of record)\n${mine.body}` +
+        `=======\n${other.body}>>>>>>> branch ${branch}\n`,
+      conflicted: true,
+    };
+  }
+  return {
+    content: `${mine.line1}\n${merged.stdout.toString()}`,
+    conflicted: merged.exitCode > 0,
+  };
 }
 
 // Resuming a merge-conflict interrupt re-attempts the merge. A human who
@@ -4949,10 +5087,12 @@ function crashInterruptBody(result: CrashFacts): string {
 // branch and worktree, even alone in its round: grading diffs the attempt's
 // commit and selection merges one attempt's branch, so a candidate never
 // shares the main checkout. Anything else runs in the main checkout. The main
-// checkout's Issue file is the single canonical copy: the spawn prompt hands
-// the agent its absolute path for reading and notes, and the engine writes
-// the final status to it at attempt exit. The worktree gets a seed copy as
-// context only; the merge already discards worktree Issue edits.
+// checkout's Issue file is the file of record: the spawn prompt hands the
+// agent its absolute path for reading and notes, and the engine writes the
+// final status to it at attempt exit. The worktree gets a seed copy as
+// context, and the same seed is kept under runs/ so that whatever the agent
+// adds to the worktree copy and commits is carried into the file of record
+// when the branch merges (mergeWithIssueAside), never discarded.
 function planTicket(
   session: Session,
   marker: TicketMarker,
@@ -4976,6 +5116,11 @@ function planTicket(
   const seedCopy = join(worktree.path, relative(session.cwd, marker.file));
   mkdirSync(dirname(seedCopy), { recursive: true });
   copyFileSync(marker.file, seedCopy);
+  mkdirSync(session.runsDir, { recursive: true });
+  copyFileSync(
+    marker.file,
+    join(session.runsDir, ticketSeedName(marker.id, verify ? attempt : null)),
+  );
   return { cwd: worktree.path, worktree, attempt, verify };
 }
 

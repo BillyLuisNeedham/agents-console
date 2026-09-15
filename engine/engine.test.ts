@@ -179,6 +179,14 @@ interface GitStubBehaviour {
   recordDir?: string;
   expectFile?: string;
   noiseFile?: string;
+  // The ticket file's two copies (issue #92): text appended to the
+  // worktree's seed copy at its relative path and committed, text appended
+  // to the pool's file of record through the absolute path the prompt hands
+  // over, and one literal substitution applied to either copy.
+  ticketAppend?: string;
+  poolAppend?: string;
+  ticketReplace?: [string, string];
+  poolReplace?: [string, string];
 }
 
 function gitStubHarness(
@@ -194,7 +202,20 @@ function gitStubHarness(
       'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; plan="$6"',
       'WORK_FILE=""; WORK_LINE=""; OVERWRITE=""; COMMIT_MSG=""',
       'LEAVE_FILE=""; TOUCH=""; WAIT_FOR=""; WAIT_MERGED=""; MAIN_REPO=""; RECORD_DIR=""; EXPECT_FILE=""; NOISE_FILE=""',
+      'TICKET_APPEND=""; POOL_APPEND=""; TICKET_FROM=""; TICKET_TO=""; POOL_FROM=""; POOL_TO=""',
       'source "$plan"',
+      // The worktree copy sits at the ticket's relative path under the cwd;
+      // the pool copy is $issue itself. `replace` is a literal bash
+      // substitution so the stub needs no sed -i portability dance.
+      // The sentinel keeps the file's trailing newlines exactly as they were:
+      // $(...) would strip them and the reconcile would see a phantom edit.
+      'replace_in() { local f="$1" from="$2" to="$3" c; c="$(cat "$f"; printf x)"; c="${c%x}"; printf \'%s\' "${c//"$from"/"$to"}" > "$f"; }',
+      "staged=0",
+      'wt_ticket="issues/$(basename "$issue")"',
+      'if [ -n "$TICKET_APPEND" ]; then printf \'%b\' "$TICKET_APPEND" >> "$wt_ticket"; git add "$wt_ticket"; staged=1; fi',
+      'if [ -n "$TICKET_FROM" ]; then replace_in "$wt_ticket" "$TICKET_FROM" "$TICKET_TO"; git add "$wt_ticket"; staged=1; fi',
+      'if [ -n "$POOL_APPEND" ]; then printf \'%b\' "$POOL_APPEND" >> "$issue"; fi',
+      'if [ -n "$POOL_FROM" ]; then replace_in "$issue" "$POOL_FROM" "$POOL_TO"; fi',
       'if [ -n "$TOUCH" ]; then touch "$TOUCH"; fi',
       'if [ -n "$WAIT_FOR" ]; then',
       "  for _ in $(seq 1 100); do",
@@ -220,7 +241,6 @@ function gitStubHarness(
       '  git branch --show-current > "$RECORD_DIR/branch"',
       '  pwd > "$RECORD_DIR/cwd"',
       "fi",
-      "staged=0",
       'if [ -n "$WORK_FILE" ]; then',
       '  mkdir -p "$(dirname "$WORK_FILE")"',
       '  if [ -n "$OVERWRITE" ]; then printf \'%s\\n\' "${WORK_LINE:-work}" > "$WORK_FILE"',
@@ -286,6 +306,16 @@ function gitStubHarness(
     if (b.recordDir) lines.push(`RECORD_DIR=${quote(b.recordDir)}`);
     if (b.expectFile) lines.push(`EXPECT_FILE=${quote(b.expectFile)}`);
     if (b.noiseFile) lines.push(`NOISE_FILE=${quote(b.noiseFile)}`);
+    if (b.ticketAppend) lines.push(`TICKET_APPEND=${quote(b.ticketAppend)}`);
+    if (b.poolAppend) lines.push(`POOL_APPEND=${quote(b.poolAppend)}`);
+    if (b.ticketReplace) {
+      lines.push(`TICKET_FROM=${quote(b.ticketReplace[0])}`);
+      lines.push(`TICKET_TO=${quote(b.ticketReplace[1])}`);
+    }
+    if (b.poolReplace) {
+      lines.push(`POOL_FROM=${quote(b.poolReplace[0])}`);
+      lines.push(`POOL_TO=${quote(b.poolReplace[1])}`);
+    }
     writeFileSync(planPath, lines.join("\n") + "\n");
     return [
       "bash",
@@ -7793,6 +7823,149 @@ describe("worktrees", () => {
     expect(subjects).toContain("work-01");
     expect(subjects).toContain("work-02");
   }, 15000);
+
+  // Issue #92: the pool's ticket file is the file of record, and an attempt
+  // in a worktree gets a seed copy. Whatever the agent adds to either copy
+  // must be in the file of record after the merge; the aside rename used to
+  // put the pre-agent pool copy back over the merged file.
+  describe("ticket file reconcile at merge (#92)", () => {
+    const body = "# Ticket\n\n## Acceptance\n\n1. Do A\n2. Do B\n";
+    const notesTicket = (id: string) => ({ ...readyTicket(id), body });
+    const poolFile = (poolDir: string, id: string) =>
+      readFileSync(join(poolDir, "issues", `${id}-t.md`), "utf8");
+
+    it("carries notes and ticks committed to the worktree copy into the file of record", async () => {
+      const { poolDir, git } = makeGitPool({
+        tickets: [notesTicket("01"), notesTicket("02")],
+        config: stubConfig,
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "one.txt",
+          commitMsg: "work-01",
+          ticketAppend: "\n## Notes\n\n- field id is customfield_10020\n",
+          ticketReplace: ["1. Do A", "1. [x] Do A"],
+        },
+        "02": { workFile: "two.txt", commitMsg: "work-02" },
+      });
+
+      const run = await approveReview(
+        await runPool({ poolDir, harnesses: rig.harnesses }),
+      );
+      expect(run.phase).toBe("done");
+      expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+
+      const onDisk = poolFile(poolDir, "01");
+      expect(onDisk.split("\n")[0]).toContain("status=done");
+      expect(onDisk).toContain("1. [x] Do A");
+      expect(onDisk).toContain("## Notes\n\n- field id is customfield_10020");
+      expect(onDisk).not.toContain("<<<<<<<");
+      // The merge commit and the disk agree on the body.
+      const committed = git(["show", "HEAD:issues/01-t.md"]).stdout.toString();
+      expect(committed).toContain("- field id is customfield_10020");
+      expect(readEventLines(poolDir, "01").map((e) => e.kind)).not.toContain(
+        "ticket-file-conflict",
+      );
+      expect(existsSync(join(poolDir, "issues", "01-t.md.pool-aside"))).toBe(false);
+      // The seed the reconcile used is kept under runs/.
+      expect(existsSync(join(poolDir, "runs", "01.seed.md"))).toBe(true);
+      // The untouched ticket is exactly as before, status aside.
+      expect(poolFile(poolDir, "02")).toBe(
+        `<!-- state: id=02 blocked-by=none status=done -->\n\n${body}\n`,
+      );
+    }, 15000);
+
+    it("keeps notes written to the pool copy through the absolute path, as before", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [notesTicket("01"), notesTicket("02")],
+        config: stubConfig,
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "one.txt",
+          commitMsg: "work-01",
+          poolAppend: "\n## Notes\n\n- written to the file of record\n",
+        },
+        "02": { workFile: "two.txt", commitMsg: "work-02" },
+      });
+
+      const run = await approveReview(
+        await runPool({ poolDir, harnesses: rig.harnesses }),
+      );
+      expect(run.phase).toBe("done");
+      const onDisk = poolFile(poolDir, "01");
+      expect(onDisk.split("\n")[0]).toContain("status=done");
+      expect(onDisk).toContain("- written to the file of record");
+      expect(onDisk).not.toContain("<<<<<<<");
+      expect(readEventLines(poolDir, "01").map((e) => e.kind)).not.toContain(
+        "ticket-file-conflict",
+      );
+    }, 15000);
+
+    it("keeps edits to different regions of both copies", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [notesTicket("01"), notesTicket("02")],
+        config: stubConfig,
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "one.txt",
+          commitMsg: "work-01",
+          ticketReplace: ["1. Do A", "1. [x] Do A"],
+          poolAppend: "\n## Notes\n\n- pool-side note\n",
+        },
+        "02": { workFile: "two.txt", commitMsg: "work-02" },
+      });
+
+      const run = await approveReview(
+        await runPool({ poolDir, harnesses: rig.harnesses }),
+      );
+      expect(run.phase).toBe("done");
+      const onDisk = poolFile(poolDir, "01");
+      expect(onDisk.split("\n")[0]).toContain("status=done");
+      expect(onDisk).toContain("1. [x] Do A");
+      expect(onDisk).toContain("- pool-side note");
+      expect(onDisk).not.toContain("<<<<<<<");
+      expect(readEventLines(poolDir, "01").map((e) => e.kind)).not.toContain(
+        "ticket-file-conflict",
+      );
+    }, 15000);
+
+    it("leaves conflict markers and a ticket-log event when both copies changed the same lines", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [notesTicket("01"), notesTicket("02")],
+        config: stubConfig,
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": {
+          workFile: "one.txt",
+          commitMsg: "work-01",
+          ticketReplace: ["1. Do A", "1. [x] Do A"],
+          poolReplace: ["1. Do A", "1. [ ] Do A (skipped)"],
+        },
+        "02": { workFile: "two.txt", commitMsg: "work-02" },
+      });
+
+      const run = await approveReview(
+        await runPool({ poolDir, harnesses: rig.harnesses }),
+      );
+      expect(run.phase).toBe("done");
+      expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+      const onDisk = poolFile(poolDir, "01");
+      expect(onDisk.split("\n")[0]).toContain("status=done");
+      expect(onDisk).toContain("<<<<<<< pool (file of record)");
+      expect(onDisk).toContain("1. [ ] Do A (skipped)");
+      expect(onDisk).toContain("1. [x] Do A");
+      expect(onDisk).toContain(">>>>>>> branch ");
+      const conflict = readEventLines(poolDir, "01").find(
+        (e) => e.kind === "ticket-file-conflict",
+      );
+      expect(conflict).toBeTruthy();
+      expect(conflict?.payload).toMatchObject({ file: "issues/01-t.md" });
+      // No interrupt: the file says it all, and the pool is not held.
+      expect(run.interrupts).toEqual([]);
+    }, 15000);
+  });
 
   it("merges finished branches in completion order and never rebases a running ticket", async () => {
     const { poolDir, head, git } = makeGitPool({
