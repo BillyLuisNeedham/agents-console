@@ -116,6 +116,7 @@ function snapshot(
     seq: 0,
     phase: "running",
     poolName: "repo/pool",
+    poolDir: "/tmp/pool",
     ...overrides,
     state: {
       tickets: [],
@@ -1068,6 +1069,8 @@ describe("phaseLabel", () => {
     expect(phaseLabel("done")).toBe("done");
     expect(phaseLabel("stalled")).toBe("stalled");
     expect(phaseLabel("dead")).toBe("dead");
+    // The farewell phase of an orderly shutdown (issue #97).
+    expect(phaseLabel("stopped")).toBe("stopped");
   });
 });
 
@@ -1201,6 +1204,20 @@ describe("poolStatus", () => {
       state: { interrupts: [{ ticketId: "a", kind: "checkpoint", body: "" }] },
     });
     expect(poolStatus(snap)).toEqual({ word: "dead", color: "#f85149" });
+  });
+
+  it("stopped in the idle grey, terminal like dead (issue #97)", () => {
+    expect(poolStatus(snapshot({ phase: "stopped" }))).toEqual({
+      word: "stopped",
+      color: "#8b949e",
+    });
+    // Nothing can answer an interrupt once the server has stopped, so the
+    // stop outranks needs input the way dead does.
+    const snap = snapshot({
+      phase: "stopped",
+      state: { interrupts: [{ ticketId: "a", kind: "checkpoint", body: "" }] },
+    });
+    expect(poolStatus(snap)).toEqual({ word: "stopped", color: "#8b949e" });
   });
 });
 

@@ -18,10 +18,12 @@ import {
   type ConversationCardView,
   type InterruptView,
   type PoolCardView,
+  type RunPhase,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
 } from "./project";
+import type { StopView } from "./view";
 import {
   edgePath,
   layoutStorageKey,
@@ -197,9 +199,29 @@ interface CanvasBind {
 export interface CanvasModel {
   cards: PoolCardView[];
   connected: boolean;
+  /** The raw phase, for the two things the label alone cannot tell apart: a
+   *  stopped server's status line and its body notice (issue #97). */
+  phase: RunPhase | null;
   phaseLabel: string;
   seq: number;
   error: string | null;
+  stop: StopView;
+}
+
+/**
+ * The header's status line. A stopped server (issue #97) reads its phase
+ * whatever the connection says: the stream drops the moment after the
+ * farewell snapshot, so waiting on `connected` would replace the one true
+ * thing the page knows with "connecting". The tab that asked for the stop
+ * says so; every other tab just reports the stop.
+ */
+export function canvasStatusText(model: CanvasModel): string {
+  if (model.phase === "stopped") {
+    return model.stop.stoppedFromHere ? "pool · stopped · from this page" : "pool · stopped";
+  }
+  return model.connected
+    ? `pool · ${model.phaseLabel} · snapshot ${model.seq}`
+    : "pool · connecting";
 }
 
 /** The selection's one-hop flow neighbourhood, computed by the composition. */
@@ -224,6 +246,9 @@ export class Canvas {
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
+  private readonly onArmStop: () => void;
+  private readonly onCancelStop: () => void;
+  private readonly onConfirmStop: () => void;
 
   constructor(options: {
     onCardTap: (nodeId: string) => void;
@@ -233,11 +258,19 @@ export class Canvas {
     /** A Conversation card's End button. Fire-and-forget: the Conversations
      *  store tracks the in-flight/failure state the card reads back. */
     onEndConversation: (conversationId: string) => void;
+    /** The header's Stop control (issue #97): arm the inline confirmation,
+     *  drop it, and send the stop. Cancel sends nothing. */
+    onArmStop: () => void;
+    onCancelStop: () => void;
+    onConfirmStop: () => void;
   }) {
     this.onCardTap = options.onCardTap;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
     this.onEndConversation = options.onEndConversation;
+    this.onArmStop = options.onArmStop;
+    this.onCancelStop = options.onCancelStop;
+    this.onConfirmStop = options.onConfirmStop;
     if (typeof window !== "undefined") {
       window.addEventListener("pointerup", (event) => this.endDrag(event));
       window.addEventListener("pointercancel", (event) => this.endDrag(event));
@@ -287,7 +320,10 @@ export class Canvas {
       ...model.cards.map((card) => this.renderCard(card, selection)),
     );
     const viewport = h("div", { class: "canvas-viewport" }, world);
-    main.append(this.renderCanvasHeader(model), viewport);
+    main.append(this.renderCanvasHeader(model));
+    const stopped = this.renderStoppedNotice(model);
+    if (stopped) main.append(stopped);
+    main.append(viewport);
     return main;
   }
 
@@ -649,13 +685,7 @@ export class Canvas {
     return h(
       "div",
       { class: "canvas-header" },
-      h(
-        "span",
-        { class: "dim" },
-        model.connected
-          ? `pool · ${model.phaseLabel} · snapshot ${model.seq}`
-          : "pool · connecting",
-      ),
+      h("span", { class: "dim" }, canvasStatusText(model)),
       model.error ? h("span", { class: "error-inline" }, model.error) : null,
       h(
         "div",
@@ -690,6 +720,7 @@ export class Canvas {
           },
           "New Conversation",
         ),
+        this.renderStopControl(model.stop),
         h(
           "button",
           {
@@ -707,6 +738,89 @@ export class Canvas {
           "reset layout",
         ),
       ),
+    );
+  }
+
+  /**
+   * The Stop control (issue #97), offered only while the pool is done and
+   * the stream is live. The confirmation is inline on the button rather than
+   * a modal, the way a Conversation's End button swaps its own label:
+   * "Really stop?" with Stop and Cancel beside it, then a disabled
+   * "stopping..." while the POST is out. Cancel sends nothing, and a refusal
+   * shows beside the button, not on the global banner.
+   */
+  private renderStopControl(stop: StopView): HTMLElement | null {
+    if (!stop.offered) return null;
+    if (stop.state === "requesting") {
+      return h(
+        "div",
+        { class: "canvas-stop" },
+        h(
+          "button",
+          { class: "btn btn-danger", type: "button", disabled: true },
+          "stopping...",
+        ),
+      );
+    }
+    if (stop.state === "armed") {
+      return h(
+        "div",
+        { class: "canvas-stop canvas-stop-armed" },
+        h("span", { class: "canvas-stop-prompt" }, "Really stop?"),
+        h(
+          "button",
+          {
+            class: "btn btn-danger",
+            type: "button",
+            title: "stop this pool's server",
+            onclick: () => this.onConfirmStop(),
+          },
+          "Stop",
+        ),
+        h(
+          "button",
+          { class: "btn", type: "button", onclick: () => this.onCancelStop() },
+          "Cancel",
+        ),
+      );
+    }
+    return h(
+      "div",
+      { class: "canvas-stop" },
+      h(
+        "button",
+        {
+          class: "btn btn-danger canvas-stop-server",
+          type: "button",
+          title: "stop this pool's server",
+          onclick: () => this.onArmStop(),
+        },
+        "Stop server",
+      ),
+      stop.failure
+        ? h("span", { class: "error-inline canvas-stop-failure" }, stop.failure)
+        : null,
+    );
+  }
+
+  /**
+   * The stopped-server notice (issue #97): a bar under the header for the
+   * one thing the operator can do about it. The page keeps retrying the
+   * stream on its own, so relaunching from a terminal is all it takes.
+   */
+  private renderStoppedNotice(model: CanvasModel): HTMLElement | null {
+    if (model.phase !== "stopped") return null;
+    return h(
+      "div",
+      { class: "canvas-stopped" },
+      h(
+        "span",
+        { class: "canvas-stopped-text" },
+        "This pool's server has stopped. Relaunch it from a terminal and this page will reconnect on its own:",
+      ),
+      model.stop.relaunch
+        ? h("code", { class: "canvas-stopped-command" }, model.stop.relaunch)
+        : null,
     );
   }
 

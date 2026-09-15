@@ -14,6 +14,7 @@ function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
     seq: 1,
     phase: "running",
     poolName: "repo/pool",
+    poolDir: "/tmp/pool",
     state: {
       tickets: Object.entries(tickets).map(([id, status]) => ({
         id,

@@ -320,6 +320,45 @@ body {
   margin-left: auto;
 }
 
+/* The Stop control and the stopped-server notice (issue #97). The control
+   keeps its confirmation on one row beside the other header tools; the
+   notice is a bar under the header, carrying the relaunch command. */
+
+.canvas-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.canvas-stop-prompt {
+  font-size: 11px;
+  color: var(--interrupt);
+  white-space: nowrap;
+}
+
+.canvas-stopped {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.canvas-stopped-command {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  user-select: all;
+}
+
 .canvas-edge-toggle {
   display: inline-flex;
   align-items: center;

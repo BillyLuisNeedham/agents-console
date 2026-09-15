@@ -1219,6 +1219,10 @@ export function phaseLabel(phase: RunPhase): string {
       return "stalled";
     case "dead":
       return "dead";
+    // The farewell phase of an orderly shutdown (issue #97): terminal, and
+    // the last thing the stream carries before the server stops serving.
+    case "stopped":
+      return "stopped";
   }
 }
 
@@ -1229,29 +1233,37 @@ export interface PoolTabStatus {
 
 /** The tab status colors, from the Console palette. The favicon's boot dot
  *  consumes the idle color before any snapshot lands. Dead shares the alarm
- *  red with needs input: its word carries the difference. */
+ *  red with needs input: its word carries the difference. A stopped server
+ *  (issue #97) shares the idle grey: nothing is wrong, nothing is running. */
 export const POOL_TAB_COLORS = {
   needsInput: "#f85149",
   running: "#d29922",
   complete: "#3fb950",
   idle: "#8b949e",
   dead: "#f85149",
+  stopped: "#8b949e",
 } as const;
 
 /**
- * The pool's at-a-glance status for the browser tab, worst-first: a dead
- * phase is terminal and outranks everything (no answer can reach a dead
- * drive, so needs input would mislead); then a pending interrupt with no
- * queued answer or a stalled phase needs input; otherwise a running phase is
- * running, a done phase is complete, and anything else is idle. An interrupt
- * whose answer is already queued waits on the engine, not the operator, so
- * it stays out of needs input. Quiescent always carries a pending interrupt,
- * so it lands on needs input without a rule of its own. Colors come from the
- * Console palette; the tab title and the favicon both consume this value.
+ * The pool's at-a-glance status for the browser tab, worst-first: the two
+ * terminal phases outrank everything, because no answer can reach either, so
+ * needs input would mislead. A dead phase is a drive that died; a stopped
+ * phase is the server's own orderly shutdown (issue #97), which leaves any
+ * interrupt on the snapshot unanswerable until someone relaunches. Then a
+ * pending interrupt with no queued answer or a stalled phase needs input;
+ * otherwise a running phase is running, a done phase is complete, and
+ * anything else is idle. An interrupt whose answer is already queued waits
+ * on the engine, not the operator, so it stays out of needs input. Quiescent
+ * always carries a pending interrupt, so it lands on needs input without a
+ * rule of its own. Colors come from the Console palette; the tab title and
+ * the favicon both consume this value.
  */
 export function poolStatus(snapshot: EnrichedSnapshot): PoolTabStatus {
   if (snapshot.phase === "dead") {
     return { word: "dead", color: POOL_TAB_COLORS.dead };
+  }
+  if (snapshot.phase === "stopped") {
+    return { word: "stopped", color: POOL_TAB_COLORS.stopped };
   }
   const unanswered = snapshot.state.interrupts.some(
     (interrupt) => !isAnswerQueued(snapshot.state.queuedAnswers, interrupt),
