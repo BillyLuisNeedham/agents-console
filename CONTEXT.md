@@ -59,6 +59,10 @@ One unit of implement work. It has an id and the ids of tickets that must finish
 _Avoid_: issue, task, Implement (Implement is not a node; tickets are)
 On disk the pool's ticket directory is still called `issues/`, and the skill `my-issue-runner` keeps its name — legacy names for the same concept; prose says ticket.
 
+**Ticket file**:
+The markdown file that is a Ticket's record: its state line, its spec, and whatever the work adds to it, such as a Brief or Notes. The Pool's own copy is the file of record; the next agent reads that copy, and the engine writes status there. An Attempt that runs in its own worktree gets a seed copy for context. Anything the agent adds to either copy survives: edits committed on the Attempt's branch are carried into the file of record when that branch merges, never discarded. If the two copies disagree on the same lines, the file of record shows both versions and the Ticket log says so.
+_Avoid_: issue file (legacy name), marker (that's the state line the engine reads), spec (the body only), seed (that's the worktree's copy, not the record)
+
 **Review**:
 The final human judgment of finished ticket work, after implement tickets have run.
 _Avoid_: per-ticket lint, typecheck (those are not Review)
