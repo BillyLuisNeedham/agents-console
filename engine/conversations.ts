@@ -38,6 +38,7 @@ import {
   currentBranch,
   commitMerge,
   git,
+  blockedMergeExplanation,
   mergeBranch,
   prepareWorktree,
   removeWorktree,
@@ -737,7 +738,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         const result = mergeBranch(env.cwd, runtime.worktree.branch);
         if (result.ok) {
           removeWorktree(env.cwd, runtime.worktree);
-          event(id, "merged", {});
+          event(id, "merged", mergedPayload(result));
           finishEnd(runtime, true);
           return;
         }
@@ -762,7 +763,26 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // Conversation id route here instead of through the ticket path.
   // -------------------------------------------------------------------------
 
+  // The interrupt for a merge that did not land, in either of its shapes: a
+  // conflict git started and the engine aborted, or a merge git refused
+  // before starting because untracked pool files stood in its way (#92).
+  // Both keep the merge-conflict kind (resume re-attempts the merge); only
+  // the body differs, and a blocked one never claims anything conflicted.
   function mergeConflictInterrupt(runtime: ConversationRuntime, result: MergeResult): Interrupt {
+    const parked =
+      `the Conversation's work is parked on branch ${runtime.worktree.branch}, ` +
+      `checked out at ${worktreePathFor(env.cwd, runtime.id)}.\n` +
+      (result.detail ? `git said: ${result.detail}\n` : "");
+    if (result.reason === "blocked") {
+      return {
+        ticketId: runtime.id,
+        kind: "merge-conflict",
+        body:
+          `merging ${runtime.worktree.branch} onto the working branch was blocked: ` +
+          blockedMergeExplanation(env.cwd, result) +
+          parked,
+      };
+    }
     const files = result.conflicted.length > 0 ? result.conflicted.join(", ") : "(no unmerged paths listed)";
     return {
       ticketId: runtime.id,
@@ -771,9 +791,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         `merging ${runtime.worktree.branch} onto the working branch failed; the ` +
         "merge was aborted and the working branch was left clean.\n" +
         `conflicted files: ${files}\n` +
-        `the Conversation's work is parked on branch ${runtime.worktree.branch}, ` +
-        `checked out at ${worktreePathFor(env.cwd, runtime.id)}.\n` +
-        (result.detail ? `git said: ${result.detail}\n` : "") +
+        parked +
         "resolve the conflict by hand and resume; the merge is re-attempted on resume.",
     };
   }
@@ -784,19 +802,38 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     attemptNote: string,
   ): Interrupt {
     const base = mergeConflictInterrupt(runtime, result);
+    // A blocked merge never reached the resolver's resolution; its body
+    // already says what stood in the way.
+    if (result.reason === "blocked") return base;
     return { ...base, body: `${base.body}\nThe resolver agent attempted: ${attemptNote}` };
+  }
+
+  function failedMergeEvent(runtime: ConversationRuntime, result: MergeResult): void {
+    if (result.reason === "blocked") {
+      event(runtime.id, "merge-blocked", { files: result.blocked });
+    } else {
+      event(runtime.id, "merge-conflict", { files: result.conflicted });
+    }
+  }
+
+  function mergedPayload(result: MergeResult): Record<string, unknown> {
+    return result.cleared.length > 0 ? { cleared: result.cleared } : {};
   }
 
   function resumeMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
     const result = mergeBranch(env.cwd, runtime.worktree.branch);
     if (!result.ok) {
-      event(runtime.id, "merge-conflict", { files: result.conflicted });
-      host.clearInterrupt(interrupt, `merge re-attempt for conversation ${runtime.id} still conflicts`);
+      failedMergeEvent(runtime, result);
+      host.clearInterrupt(
+        interrupt,
+        `merge re-attempt for conversation ${runtime.id} ` +
+          (result.reason === "blocked" ? "is still blocked" : "still conflicts"),
+      );
       host.raiseInterrupt(mergeConflictInterrupt(runtime, result));
       return;
     }
     removeWorktree(env.cwd, runtime.worktree);
-    event(runtime.id, "merged", {});
+    event(runtime.id, "merged", mergedPayload(result));
     host.clearInterrupt(
       interrupt,
       `interrupt answered for conversation ${runtime.id} (merge-conflict): merge landed`,
@@ -808,10 +845,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     commitMerge(runtime.worktree);
     const result = mergeBranch(env.cwd, runtime.worktree.branch);
     if (!result.ok) {
-      event(runtime.id, "merge-conflict", { files: result.conflicted });
+      failedMergeEvent(runtime, result);
       host.clearInterrupt(
         interrupt,
-        `merge after resolver approval for conversation ${runtime.id} still conflicts`,
+        `merge after resolver approval for conversation ${runtime.id} ` +
+          (result.reason === "blocked" ? "is blocked" : "still conflicts"),
       );
       host.raiseInterrupt(
         manualMergeInterrupt(runtime, result, "the resolver's resolution did not merge cleanly on approval"),
@@ -819,7 +857,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       return;
     }
     removeWorktree(env.cwd, runtime.worktree);
-    event(runtime.id, "merged", {});
+    event(runtime.id, "merged", mergedPayload(result));
     host.clearInterrupt(
       interrupt,
       `interrupt answered for conversation ${runtime.id} (merge-approval): resolver resolution committed`,

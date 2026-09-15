@@ -24,6 +24,10 @@ const EVENT_KINDS = [
   "exited",
   "merged",
   "merge-conflict",
+  // A merge git refused before starting (#92): untracked files in the pool
+  // checkout that differ from the branch's version stood in its way.
+  // Nothing conflicted and no resolver runs; the operator clears the way.
+  "merge-blocked",
   "resolver",
   "graded",
   "selected",
@@ -37,6 +41,10 @@ const EVENT_KINDS = [
   "spawn-adopted",
   "spawn-rejected",
   "reassigned",
+  // The ticket file's two copies (the pool's file of record and the
+  // worktree seed the agent committed) changed the same lines differently,
+  // so the reconcile at merge left conflict markers in the file of record.
+  "ticket-file-conflict",
   // Conversations (the Conversations ADR, docs/adr/0018-conversations-
   // beside-tickets.md): "ended" is an operator-ended Conversation's closing
   // record (merged, ended with no commits, or ended with its branch parked
@@ -137,6 +145,18 @@ export function attemptOutcomeName(
   const numbered = attempt === null ? "" : `.attempt-${attempt}`;
   const suffix = resolver ? ".resolver" : "";
   return `${ticketId}${numbered}${suffix}.outcome.json`;
+}
+
+/**
+ * The seed file name: the Ticket file as the pool held it when an attempt's
+ * worktree was planned, kept under runs/ so the merge can reconcile the
+ * worktree's committed copy against the file of record with an exact base
+ * (`<id>.seed.md`, or `<id>.attempt-N.seed.md` for a verify attempt's own
+ * worktree). Overwritten each time the same worktree is re-seeded.
+ */
+export function ticketSeedName(ticketId: string, attempt: number | null): string {
+  const numbered = attempt === null ? "" : `.attempt-${attempt}`;
+  return `${ticketId}${numbered}.seed.md`;
 }
 
 /**
