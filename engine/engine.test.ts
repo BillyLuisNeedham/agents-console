@@ -10233,3 +10233,119 @@ describe("headless orphans", () => {
     expect(issue).toContain("No agent from that process was found still running at this boot");
   });
 });
+
+// A merge git refuses before starting because the pool directory holds an
+// untracked file the branch would write (#92): an agent that wrote its
+// findings into the pool instead of its worktree, or an earlier attempt's
+// leftovers. Nothing conflicted, so no resolver runs; the operator clears
+// the file and resumes, and a byte-identical copy is cleared automatically.
+describe("merges blocked by untracked pool files (#92)", () => {
+  it("raises a manual interrupt naming the file, spawns no resolver, and merges on resume once the file is gone", async () => {
+    // Two tickets, so each runs in its own worktree and merges at the
+    // super-step boundary (a lone ticket runs in the main checkout).
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: resolverConfig,
+    });
+    mkdirSync(join(poolDir, "findings"), { recursive: true });
+    writeFileSync(join(poolDir, "findings", "01.md"), "stale\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "findings/01.md",
+        workLine: "fresh",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+    const resolver = resolverStub(poolDir, {
+      "01": { resolved: true, note: "must never run" },
+    });
+
+    const run = await heldRun({
+      poolDir,
+      harnesses: { ...rig.harnesses, ...resolver.harnesses },
+    });
+
+    // The resolver was configured and never spawned: there is no conflict
+    // for it to reproduce, and its "already up to date" would have read as
+    // a false all-clear. The unrelated ticket merged past the block.
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect(resolver.spawnOrder).toEqual([]);
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(existsSync(join(poolDir, "two.txt"))).toBe(true);
+    expect(run.interrupts).toHaveLength(1);
+    const interrupt = run.interrupts[0];
+    expect(interrupt.ticketId).toBe("01");
+    expect(interrupt.kind).toBe("merge-conflict");
+    expect(interrupt.body).toContain("findings/01.md");
+    expect(interrupt.body).toContain("untracked in the pool directory");
+    expect(interrupt.body).toContain("Move or delete them");
+    expect(interrupt.body).toContain(branchFor(poolDir, "01"));
+    expect(interrupt.body).not.toContain("conflicted files");
+    expect(interrupt.body).not.toContain("resolver agent attempted");
+    expect(readEventLines(poolDir, "01").map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "merge-blocked",
+    ]);
+    expect(readEventLines(poolDir, "01").at(-1)?.payload).toEqual({
+      files: ["findings/01.md"],
+    });
+    // The pool tree was not touched: the operator's copy is intact, no
+    // merge is in progress, and the branch is parked for the resume.
+    expect(readFileSync(join(poolDir, "findings", "01.md"), "utf8")).toBe("stale\n");
+    expect(git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).exitCode).not.toBe(0);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).toBe(0);
+
+    // The operator removes the file and resumes: the pre-check passes and
+    // the merge lands, the branch's version now tracked in the pool.
+    rmSync(join(poolDir, "findings", "01.md"));
+    const resumed = await run.resume("01");
+    const done = await approveReview(resumed);
+    expect(done.phase).toBe("done");
+    expect(done.interrupts).toEqual([]);
+    expect(readFileSync(join(poolDir, "findings", "01.md"), "utf8")).toBe("fresh\n");
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).not.toBe(0);
+    expect(existsSync(worktreePathFor(poolDir, "01"))).toBe(false);
+    const kinds = readEventLines(poolDir, "01").map((e) => e.kind);
+    expect(kinds).not.toContain("resolver");
+    expect(kinds.at(-1)).toBe("merged");
+  }, 15000);
+
+  it("deletes an untracked copy identical to the branch's version and merges without holding", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: resolverConfig,
+    });
+    mkdirSync(join(poolDir, "findings"), { recursive: true });
+    writeFileSync(join(poolDir, "findings", "01.md"), "fresh\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "findings/01.md",
+        workLine: "fresh",
+        overwrite: true,
+        commitMsg: "work-01",
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+    const resolver = resolverStub(poolDir, {});
+
+    const run = await approveReview(
+      await runPool({
+        poolDir,
+        harnesses: { ...rig.harnesses, ...resolver.harnesses },
+      }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(run.final.tickets).toEqual({ "01": "done", "02": "done" });
+    expect(run.interrupts).toEqual([]);
+    expect(resolver.spawnOrder).toEqual([]);
+    expect(readFileSync(join(poolDir, "findings", "01.md"), "utf8")).toBe("fresh\n");
+    expect(git(["ls-files", "findings/01.md"]).stdout.toString().trim()).toBe("findings/01.md");
+    const merged = readEventLines(poolDir, "01").find((e) => e.kind === "merged");
+    expect(merged?.payload).toEqual({ cleared: ["findings/01.md"] });
+  }, 15000);
+});

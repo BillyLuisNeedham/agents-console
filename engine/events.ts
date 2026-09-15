@@ -24,6 +24,10 @@ const EVENT_KINDS = [
   "exited",
   "merged",
   "merge-conflict",
+  // A merge git refused before starting (#92): untracked files in the pool
+  // checkout that differ from the branch's version stood in its way.
+  // Nothing conflicted and no resolver runs; the operator clears the way.
+  "merge-blocked",
   "resolver",
   "graded",
   "selected",

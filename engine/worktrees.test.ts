@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeTempDir } from "./tmp.ts";
 import {
   attemptBranches,
   branchFor,
+  mergeBranch,
   poolKeyFor,
   prepareWorktree,
   worktreePathFor,
@@ -141,5 +142,115 @@ describe("pool namespacing", () => {
     expect(a.git(["worktree", "list", "--porcelain"]).out).toContain(
       `worktree ${foreign}`,
     );
+  });
+});
+
+// A merge git refuses before starting (#92): an untracked file in the pool
+// checkout that the branch would write. Git refuses even a byte-identical
+// copy, so the pre-check clears those and only a differing copy blocks.
+describe("merges blocked by untracked pool files (#92)", () => {
+  // A branch off main's initial commit that commits `path` with `content`.
+  function branchWriting(
+    repo: ReturnType<typeof makeRepo>,
+    path: string,
+    content: string,
+  ): string {
+    repo.git(["checkout", "-qb", "feat"]);
+    mkdirSync(dirname(join(repo.root, path)), { recursive: true });
+    writeFileSync(join(repo.root, path), content);
+    repo.git(["add", "-A"]);
+    repo.git(["commit", "-qm", "work"]);
+    repo.git(["checkout", "-q", "main"]);
+    return "feat";
+  }
+
+  it("deletes an untracked copy identical to the branch's version and merges", () => {
+    const repo = makeRepo();
+    const branch = branchWriting(repo, "findings/x.md", "fresh\n");
+    mkdirSync(join(repo.root, "findings"));
+    writeFileSync(join(repo.root, "findings", "x.md"), "fresh\n");
+
+    const result = mergeBranch(repo.root, branch);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(result.cleared).toEqual(["findings/x.md"]);
+    expect(result.blocked).toEqual([]);
+    expect(result.detail).toContain("findings/x.md");
+    // The branch's version is now the tracked one and the tree is clean.
+    expect(readFileSync(join(repo.root, "findings", "x.md"), "utf8")).toBe("fresh\n");
+    expect(repo.git(["ls-files", "findings/x.md"]).out).toBe("findings/x.md");
+    expect(repo.git(["status", "--porcelain"]).out).toBe("");
+  });
+
+  it("refuses to merge over an untracked copy that differs, without starting the merge, and merges once it is gone", () => {
+    const repo = makeRepo();
+    const branch = branchWriting(repo, "findings/x.md", "fresh\n");
+    mkdirSync(join(repo.root, "findings"));
+    writeFileSync(join(repo.root, "findings", "x.md"), "stale\n");
+    const headBefore = repo.git(["rev-parse", "HEAD"]).out;
+
+    const result = mergeBranch(repo.root, branch);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("blocked");
+    expect(result.blocked).toEqual(["findings/x.md"]);
+    expect(result.conflicted).toEqual([]);
+    expect(result.cleared).toEqual([]);
+    expect(result.detail).toContain("findings/x.md");
+    // Nothing was touched: the operator's copy is intact, no merge is in
+    // progress, and the working branch did not move.
+    expect(readFileSync(join(repo.root, "findings", "x.md"), "utf8")).toBe("stale\n");
+    expect(repo.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok).toBe(false);
+    expect(repo.git(["rev-parse", "HEAD"]).out).toBe(headBefore);
+
+    rmSync(join(repo.root, "findings", "x.md"));
+    const again = mergeBranch(repo.root, branch);
+    expect(again.ok).toBe(true);
+    expect(again.cleared).toEqual([]);
+    expect(readFileSync(join(repo.root, "findings", "x.md"), "utf8")).toBe("fresh\n");
+  });
+
+  it("ignores untracked files the branch does not touch", () => {
+    const repo = makeRepo();
+    const branch = branchWriting(repo, "findings/x.md", "fresh\n");
+    writeFileSync(join(repo.root, "notes.md"), "mine\n");
+
+    const result = mergeBranch(repo.root, branch);
+    expect(result.ok).toBe(true);
+    expect(result.cleared).toEqual([]);
+    expect(readFileSync(join(repo.root, "notes.md"), "utf8")).toBe("mine\n");
+  });
+
+  it("classifies a merge git refused for uncommitted changes as blocked, not conflicted", () => {
+    const repo = makeRepo();
+    const branch = branchWriting(repo, "base.txt", "from-branch\n");
+    // A tracked file with local changes the branch would overwrite: git
+    // refuses before starting, with no MERGE_HEAD and no unmerged paths,
+    // the same signature as the untracked case.
+    writeFileSync(join(repo.root, "base.txt"), "dirty\n");
+
+    const result = mergeBranch(repo.root, branch);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("blocked");
+    expect(result.blocked).toEqual(["base.txt"]);
+    expect(result.conflicted).toEqual([]);
+    expect(result.detail).toContain("local changes");
+    expect(readFileSync(join(repo.root, "base.txt"), "utf8")).toBe("dirty\n");
+    expect(repo.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok).toBe(false);
+  });
+
+  it("still reports a merge git started and could not finish as a conflict", () => {
+    const repo = makeRepo();
+    const branch = branchWriting(repo, "base.txt", "from-branch\n");
+    writeFileSync(join(repo.root, "base.txt"), "from-main\n");
+    repo.git(["commit", "-qam", "main moves"]);
+
+    const result = mergeBranch(repo.root, branch);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("conflict");
+    expect(result.conflicted).toEqual(["base.txt"]);
+    expect(result.blocked).toEqual([]);
+    // Aborted, as before: the working branch is left clean.
+    expect(repo.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok).toBe(false);
+    expect(readFileSync(join(repo.root, "base.txt"), "utf8")).toBe("from-main\n");
   });
 });

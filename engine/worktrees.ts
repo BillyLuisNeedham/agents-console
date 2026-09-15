@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface WorktreeInfo {
@@ -212,27 +212,163 @@ export function removeWorktree(repoRoot: string, info: WorktreeInfo): void {
 
 export interface MergeResult {
   ok: boolean;
+  // Why a failed merge failed. "conflict": git started the merge and hit
+  // unmerged paths (named in `conflicted`); the engine aborted it and the
+  // resolver can reproduce it. "blocked": git refused before starting,
+  // typically because the checkout holds untracked files the merge would
+  // overwrite (named in `blocked`); nothing conflicted, there is nothing
+  // for a resolver to resolve, and only the operator can clear the way.
+  reason?: "conflict" | "blocked";
   conflicted: string[];
+  blocked: string[];
+  // Untracked files in the checkout that were byte-identical to the
+  // branch's version and were deleted so the merge could write them.
+  cleared: string[];
   detail: string;
+}
+
+interface UntrackedInTheWay {
+  blocked: string[];
+  identical: string[];
+}
+
+// The checkout's top level: `git status` and `git diff --name-only` name
+// paths relative to it whatever directory the pool runs in.
+function toplevelOf(repoRoot: string): string {
+  const probe = git(repoRoot, ["rev-parse", "--show-toplevel"]);
+  return probe.ok && probe.out ? probe.out : repoRoot;
+}
+
+// Untracked files in the checkout that merging `branch` would write: the
+// intersection of the checkout's untracked entries with the files the
+// branch changes against the merge base. Git refuses such a merge outright
+// (#92), even when the file's bytes already match, so each one is sorted
+// into byte-identical (safe to delete) or differing (the operator's call).
+// Ignored files are not listed: git overwrites those without asking.
+function untrackedInTheWay(repoRoot: string, branch: string): UntrackedInTheWay {
+  const none: UntrackedInTheWay = { blocked: [], identical: [] };
+  const base = git(repoRoot, ["merge-base", "HEAD", branch]);
+  if (!base.ok || !base.out) return none;
+  const touched = new Set(
+    git(repoRoot, ["diff", "--name-only", base.out, branch]).out
+      .split("\n")
+      .filter(Boolean),
+  );
+  if (touched.size === 0) return none;
+  const untracked = git(repoRoot, ["status", "--porcelain=v1", "-z", "-uall"])
+    .out.split("\0")
+    .filter((entry) => entry.startsWith("?? "))
+    .map((entry) => entry.slice(3))
+    .filter((path) => touched.has(path));
+  const toplevel = toplevelOf(repoRoot);
+  const result: UntrackedInTheWay = { blocked: [], identical: [] };
+  for (const path of untracked) {
+    // No blob on the branch means the branch deleted the file; the merge
+    // then has nothing to write over the untracked copy.
+    const theirs = git(repoRoot, ["rev-parse", "-q", "--verify", `${branch}:${path}`]);
+    if (!theirs.ok) continue;
+    const ours = git(repoRoot, ["hash-object", "--", join(toplevel, path)]);
+    if (ours.ok && ours.out === theirs.out) result.identical.push(path);
+    else result.blocked.push(path);
+  }
+  return result;
+}
+
+// The paths git names when it refuses a merge before starting: the
+// tab-indented lines of "The following untracked working tree files would
+// be overwritten by merge:" and "Your local changes to the following files
+// would be overwritten by merge:".
+function refusedPaths(stderr: string): string[] {
+  return stderr
+    .split("\n")
+    .filter((line) => line.startsWith("\t"))
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 // Merges the ticket's branch onto whatever the pool's working branch
 // currently is. A failure aborts the merge so the working branch is never
 // left half-merged; the caller surfaces the conflict. A missing branch means
 // a human finished the job by hand and cleaned up, which counts as merged.
+//
+// Before merging, untracked files in the checkout that the branch would
+// overwrite are checked (#92): byte-identical copies are deleted so the
+// merge can proceed, and a differing copy blocks the merge without
+// starting it, reported as `reason: "blocked"` rather than as a conflict.
+// A merge git refuses for any other reason before starting (no MERGE_HEAD,
+// no unmerged paths) is classified the same way, with git's own message
+// as the detail.
 export function mergeBranch(repoRoot: string, branch: string): MergeResult {
   if (!refExists(repoRoot, branch)) {
-    return { ok: true, conflicted: [], detail: `branch ${branch} is gone` };
+    return {
+      ok: true,
+      conflicted: [],
+      blocked: [],
+      cleared: [],
+      detail: `branch ${branch} is gone`,
+    };
   }
+  const way = untrackedInTheWay(repoRoot, branch);
+  if (way.blocked.length > 0) {
+    return {
+      ok: false,
+      reason: "blocked",
+      conflicted: [],
+      blocked: way.blocked,
+      cleared: [],
+      detail:
+        "untracked files in the checkout would be overwritten by the merge " +
+        `and differ from the branch's version: ${way.blocked.join(", ")}`,
+    };
+  }
+  const toplevel = toplevelOf(repoRoot);
+  for (const path of way.identical) {
+    rmSync(join(toplevel, path), { force: true });
+  }
+  const cleared = way.identical;
+  const clearedNote =
+    cleared.length > 0
+      ? ` (deleted untracked copies identical to the branch's: ${cleared.join(", ")})`
+      : "";
   const merge = git(repoRoot, ["merge", "--no-edit", branch]);
-  if (merge.ok) return { ok: true, conflicted: [], detail: merge.out };
+  if (merge.ok) {
+    return { ok: true, conflicted: [], blocked: [], cleared, detail: merge.out + clearedNote };
+  }
   const conflicted = git(repoRoot, ["diff", "--name-only", "--diff-filter=U"])
     .out.split("\n")
     .filter(Boolean);
-  if (git(repoRoot, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok) {
+  const inProgress = git(repoRoot, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok;
+  if (inProgress) {
     git(repoRoot, ["merge", "--abort"]);
   }
-  return { ok: false, conflicted, detail: merge.err || merge.out };
+  const detail = (merge.err || merge.out) + clearedNote;
+  if (conflicted.length === 0 && !inProgress) {
+    return {
+      ok: false,
+      reason: "blocked",
+      conflicted: [],
+      blocked: refusedPaths(merge.err),
+      cleared,
+      detail,
+    };
+  }
+  return { ok: false, reason: "conflict", conflicted, blocked: [], cleared, detail };
+}
+
+// Where a blocked merge's files are and what the operator does about them:
+// the shared explanation the engine's and the Conversation module's
+// interrupts both carry, so the two never describe the refusal differently.
+export function blockedMergeExplanation(repoRoot: string, result: MergeResult): string {
+  const files = result.blocked.length > 0 ? result.blocked.join(", ") : "(none named)";
+  return (
+    "git refused to start the merge; nothing conflicted and the working " +
+    "branch was not touched.\n" +
+    `files in the way: ${files}\n` +
+    `these files are untracked in the pool directory (${toplevelOf(repoRoot)}), ` +
+    "or carry uncommitted changes there, and differ from the branch's " +
+    "committed version. Move or delete them (commit them if tracked), then " +
+    "resume; the merge is re-attempted on resume.\n"
+  );
 }
 
 // The attempt branches a verify ticket currently has on disk: every

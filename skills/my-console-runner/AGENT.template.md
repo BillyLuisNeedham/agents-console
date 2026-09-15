@@ -109,6 +109,9 @@ message is yours to write.
 ## Standing constraints, all non-negotiable
 
 - Leave the branch as you found it. Commit to the branch you are on, and create none.
+- The ticket path you are given is an absolute path outside your working directory. Write
+  everything else, findings and output files included, at paths relative to your working
+  directory, and commit them there. Never write into the pool directory.
 - Leave pushing and pull requests to the human. Commits are where your work stops.
 - Write commit messages and documentation with no AI tool attribution of any kind: no
   co-author trailer, no generated-with footer, in commits, code, docs or anywhere else.

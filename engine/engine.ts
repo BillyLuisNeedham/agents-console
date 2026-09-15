@@ -89,6 +89,7 @@ import {
   branchFor,
   commitMerge,
   attemptBranches,
+  blockedMergeExplanation,
   currentBranch,
   discardWorktree,
   git,
@@ -1255,7 +1256,7 @@ async function runSuperStep(
         at: new Date().toISOString(),
         attempt: merge.attempt,
         kind: "merged",
-        payload: {},
+        payload: mergedPayload(merge.result),
       });
       closeAttemptTab(session, merge.marker.id, merge.attempt);
       session.conversations.ticketEnded(
@@ -2063,7 +2064,7 @@ function recordAdoptedExit(
           at: new Date().toISOString(),
           attempt,
           kind: "merged",
-          payload: {},
+          payload: mergedPayload(merge),
         });
         closeAttemptTab(session, ticketId, attempt);
         session.conversations.ticketEnded(
@@ -2589,18 +2590,16 @@ function resumeMerge(
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
   }
   if (!result.ok) {
-    appendEvent(session.runsDir, marker.id, {
-      at: new Date().toISOString(),
-      attempt: lastAttempt(session.runsDir, marker.id),
-      kind: "merge-conflict",
-      payload: { files: result.conflicted },
-    });
+    recordFailedMerge(session, marker.id, lastAttempt(session.runsDir, marker.id), result);
     session.state = applyUpdate(session.state, {
       interrupts: [
         ...session.state.interrupts.filter((i) => i !== interrupt),
         mergeConflictInterrupt(session, marker, result),
       ],
-      log: [`merge re-attempt for ${marker.id} still conflicts`],
+      log: [
+        `merge re-attempt for ${marker.id} ` +
+          (result.reason === "blocked" ? "is still blocked" : "still conflicts"),
+      ],
     });
     return;
   }
@@ -2609,7 +2608,7 @@ function resumeMerge(
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, marker.id),
     kind: "merged",
-    payload: {},
+    payload: mergedPayload(result),
   });
   closeAttemptTabs(session, marker.id);
   session.conversations.ticketEnded(marker, branch, beforeSha ? `${beforeSha}..HEAD` : null);
@@ -2721,12 +2720,15 @@ async function handleMergeConflict(
   result: MergeResult,
   attempt: number,
 ): Promise<void> {
-  appendEvent(session.runsDir, marker.id, {
-    at: new Date().toISOString(),
-    attempt,
-    kind: "merge-conflict",
-    payload: { files: result.conflicted },
-  });
+  recordFailedMerge(session, marker.id, attempt, result);
+  // A blocked merge never started (#92): there is no conflicted state for
+  // a resolver to reproduce (it would only report "already up to date"),
+  // so it goes straight to the operator, who clears the files in the way
+  // and resumes.
+  if (result.reason === "blocked") {
+    raiseInterrupt(session, mergeConflictInterrupt(session, marker, result));
+    return;
+  }
   const worktree: WorktreeInfo = {
     path: worktreePathFor(session.cwd, marker.id),
     branch: branchFor(session.cwd, marker.id),
@@ -2880,12 +2882,7 @@ function approveMerge(
   const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, worktree.branch);
   if (!result.ok) {
-    appendEvent(session.runsDir, marker.id, {
-      at: new Date().toISOString(),
-      attempt: lastAttempt(session.runsDir, marker.id),
-      kind: "merge-conflict",
-      payload: { files: result.conflicted },
-    });
+    recordFailedMerge(session, marker.id, lastAttempt(session.runsDir, marker.id), result);
     session.state = applyUpdate(session.state, {
       interrupts: [
         ...session.state.interrupts.filter((i) => i !== interrupt),
@@ -2896,7 +2893,10 @@ function approveMerge(
           "the resolver's resolution did not merge cleanly on approval",
         ),
       ],
-      log: [`merge after resolver approval for ${marker.id} still conflicts`],
+      log: [
+        `merge after resolver approval for ${marker.id} ` +
+          (result.reason === "blocked" ? "is blocked" : "still conflicts"),
+      ],
     });
     return;
   }
@@ -2905,7 +2905,7 @@ function approveMerge(
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, marker.id),
     kind: "merged",
-    payload: {},
+    payload: mergedPayload(result),
   });
   closeAttemptTabs(session, marker.id);
   session.conversations.ticketEnded(
@@ -3899,7 +3899,8 @@ function completeLoneAttempt(
         attempt,
         mergeConflictComplaint(session, marker.id, attempt, merge),
         `ticket ${marker.id}: attempt ${attempt} passed grading but its ` +
-          "merge conflicted; checkpoint raised for the human",
+          (merge.reason === "blocked" ? "merge was blocked" : "merge conflicted") +
+          "; checkpoint raised for the human",
         emit,
       );
       return;
@@ -3908,7 +3909,7 @@ function completeLoneAttempt(
       at: new Date().toISOString(),
       attempt,
       kind: "merged",
-      payload: {},
+      payload: mergedPayload(merge),
     });
     closeAttemptTab(session, marker.id, attempt);
     session.conversations.ticketEnded(
@@ -3960,6 +3961,15 @@ function mergeConflictComplaint(
   result: MergeResult,
 ): string {
   const branch = branchFor(session.cwd, buildId, attempt);
+  if (result.reason === "blocked") {
+    return (
+      `The attempt passed grading, but merging ${branch} onto the working ` +
+      `branch was blocked: ${blockedMergeExplanation(session.cwd, result)}` +
+      `The work is parked on ${branch}. Clear the files by hand and merge ` +
+      "the branch yourself, or answer resume to re-run the ticket from the " +
+      "current HEAD."
+    );
+  }
   const files =
     result.conflicted.length > 0
       ? result.conflicted.join(", ")
@@ -4250,7 +4260,8 @@ function completeSelection(
         attempt,
         mergeConflictComplaint(session, marker.id, attempt, merge),
         `ticket ${marker.id}: attempt ${attempt} selected but its merge ` +
-          "conflicted; checkpoint raised for the human",
+          (merge.reason === "blocked" ? "was blocked" : "conflicted") +
+          "; checkpoint raised for the human",
         emit,
       );
       return;
@@ -4259,7 +4270,7 @@ function completeSelection(
       at: new Date().toISOString(),
       attempt,
       kind: "merged",
-      payload: {},
+      payload: mergedPayload(merge),
     });
     closeAttemptTab(session, marker.id, attempt);
     mergedNote = ` merged ${branchFor(session.cwd, marker.id, attempt)} onto the working branch`;
@@ -5560,12 +5571,56 @@ function mergeTicket(
   return result;
 }
 
+// The lifecycle event a failed merge records: merge-blocked names the files
+// in the way of a merge git refused to start (#92), merge-conflict the
+// unmerged paths of one it started.
+function recordFailedMerge(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+  result: MergeResult,
+): void {
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: result.reason === "blocked" ? "merge-blocked" : "merge-conflict",
+    payload: {
+      files: result.reason === "blocked" ? result.blocked : result.conflicted,
+    },
+  });
+}
+
+// The merged event's payload: the untracked pool copies the merge deleted
+// because they matched the branch's version byte for byte (#92), when any.
+function mergedPayload(result: MergeResult): Record<string, unknown> {
+  return result.cleared.length > 0 ? { cleared: result.cleared } : {};
+}
+
+// The interrupt for a merge that did not land, in either of its shapes: a
+// conflict git started and the engine aborted, or a merge git refused
+// before starting because untracked pool files stood in its way (#92).
+// Both keep the merge-conflict kind (resume re-attempts the merge); only
+// the body differs, and a blocked one never claims anything conflicted.
 function mergeConflictInterrupt(
   session: Session,
   marker: TicketMarker,
   result: MergeResult,
 ): Interrupt {
   const branch = branchFor(session.cwd, marker.id);
+  const parked =
+    `the ticket's work is parked on branch ${branch}, checked out at ` +
+    `${worktreePathFor(session.cwd, marker.id)}.\n` +
+    (result.detail ? `git said: ${result.detail}\n` : "");
+  if (result.reason === "blocked") {
+    return {
+      ticketId: marker.id,
+      kind: "merge-conflict",
+      body:
+        `merging ${branch} onto the working branch was blocked: ` +
+        blockedMergeExplanation(session.cwd, result) +
+        parked,
+    };
+  }
   const files =
     result.conflicted.length > 0
       ? result.conflicted.join(", ")
@@ -5577,16 +5632,15 @@ function mergeConflictInterrupt(
       `merging ${branch} onto the working branch failed; the merge was ` +
       "aborted and the working branch was left clean.\n" +
       `conflicted files: ${files}\n` +
-      `the ticket's work is parked on branch ${branch}, checked out at ` +
-      `${worktreePathFor(session.cwd, marker.id)}.\n` +
-      (result.detail ? `git said: ${result.detail}\n` : "") +
+      parked +
       "resolve the conflict and resume this ticket; the merge is " +
       "re-attempted on resume.",
   };
 }
 
 // The manual-resolution interrupt: the resolver path's merge-conflict, with
-// what the resolver tried noted for the human.
+// what the resolver tried noted for the human. A blocked merge never
+// reached a resolver's resolution, so its body stands alone.
 function manualMergeInterrupt(
   session: Session,
   marker: TicketMarker,
@@ -5594,6 +5648,7 @@ function manualMergeInterrupt(
   attemptNote: string,
 ): Interrupt {
   const base = mergeConflictInterrupt(session, marker, result);
+  if (result.reason === "blocked") return base;
   return {
     ...base,
     body: `${base.body}\nThe resolver agent attempted: ${attemptNote}`,
