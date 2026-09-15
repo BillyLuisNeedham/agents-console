@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prototype · stop a finished pool's server (#97)</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #1f2328; --dim: #6e7781; --line: #d0d7de;
+    --accent: #0969da; --accent-ink: #fff;
+    --needs: #f85149; --running: #d29922; --complete: #3fb950; --idle: #8b949e; --dead: #f85149; --stopped: #8b949e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 24px 16px 64px; }
+  main { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 10px; }
+  h3 { font-size: 15px; margin: 0 0 6px; }
+  p { margin: 0 0 10px; }
+  .intro { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; margin-bottom: 20px; }
+  .intro .q { font-weight: 600; }
+  .proto-tag { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; background: #fff8c5; border: 1px solid #d4a72c; color: #7d4e00; border-radius: 4px; padding: 1px 6px; margin-bottom: 8px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 14px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; }
+  .changed { background: #fff8c5; border-radius: 3px; padding: 0 4px; margin: 0 -4px; }
+  .btn { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid var(--line); background: #f6f8fa; color: var(--ink); cursor: pointer; }
+  .btn:hover { background: #eef1f4; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn-primary:hover { background: #0860c4; }
+  .btn-danger { background: #cf222e; border-color: #cf222e; color: #fff; }
+  .btn-danger:hover { background: #b91c26; }
+  .btn-ghost { background: transparent; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .actions-group { margin-bottom: 12px; }
+  .actions-group h3 { font-size: 13px; color: var(--dim); font-weight: 600; margin-bottom: 6px; }
+  .settings label { display: block; margin-bottom: 10px; font-size: 14px; }
+  .settings .opts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; }
+  .settings .opts label { display: inline; margin: 0; font-weight: normal; }
+  .settings .why { color: var(--dim); font-size: 13px; }
+  .rec { font-size: 11px; color: var(--complete); font-weight: 600; margin-left: 4px; }
+
+  /* the fake browser tabs */
+  .tabs { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 1000px) { .tabs.two { grid-template-columns: 1fr 1fr; } }
+  .browser { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+  .browser .strip { display: flex; align-items: center; gap: 8px; background: #e7ebef; padding: 8px 12px; font-size: 13px; }
+  .browser .strip .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .browser .strip .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .browser .strip .who { margin-left: auto; color: var(--dim); }
+  .console-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; background: #0d1117; color: #c9d1d9; font-size: 13px; }
+  .console-head .dim { color: #8b949e; }
+  .console-head .error-inline { color: #f85149; }
+  .console-head .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .console-head .btn { padding: 3px 9px; font-size: 12px; }
+  .console-head .btn-primary { background: #238636; border-color: #238636; }
+  .console-head .btn-dark { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+  .console-head .btn-danger { background: #da3633; border-color: #da3633; }
+  .console-head .really { color: #f0f6fc; display: inline-flex; gap: 6px; align-items: center; }
+  .console-body { min-height: 96px; padding: 12px; background: #0d1117; color: #8b949e; font-size: 13px; border-top: 1px solid #21262d; }
+  .console-body .card { display: inline-block; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; margin: 0 6px 6px 0; color: #c9d1d9; background: #161b22; }
+  .console-body .banner { border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; color: #c9d1d9; background: #161b22; }
+  .console-body .banner.err { border-color: #f85149; color: #ffa198; }
+  .console-body .banner.stop { border-color: #8b949e; }
+  .console-body .banner code { background: #21262d; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .console-body .note { color: #8b949e; margin-top: 6px; }
+  .closed { padding: 24px; text-align: center; color: var(--dim); border: 1px dashed var(--line); border-radius: 8px; }
+
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 240px; overflow: auto; background: #f6f8fa; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  .log div { white-space: pre-wrap; }
+  .log .t { color: var(--dim); }
+  .log .refused { color: #cf222e; }
+  .log .srv { color: #0969da; }
+
+  /* walkthroughs */
+  .wt-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+  .wt-tabs button { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 6px 6px 0 0; border: 1px solid var(--line); border-bottom: none; background: #eef1f4; cursor: pointer; }
+  .wt-tabs button.active { background: #fff; font-weight: 600; border-color: var(--accent); }
+  .wt { background: #fff; border: 1px solid var(--line); border-radius: 0 8px 8px 8px; padding: 14px 16px; }
+  .wt .watch { color: var(--dim); font-size: 14px; }
+  .steps { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 6px; }
+  .steps li { display: flex; align-items: center; gap: 10px; }
+  .steps .n { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: var(--dim); flex: none; }
+  .steps li.done .n { background: var(--complete); border-color: var(--complete); color: #fff; }
+  .steps li.next .n { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .steps .hint { color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <span class="proto-tag">Prototype · throwaway · issue #97</span>
+  <h1>Stopping a finished pool's server from the Console</h1>
+  <div class="intro">
+    <p class="q">The question: when a pool reaches <em>done</em>, the Console shows a "Stop server" button. Press it and the pool's server shuts down. What does the page (and any other open tab) show once the server is gone, and can it tell "stopped on purpose" apart from "crashed" and "lost the network"?</p>
+    <p>This page simulates one pool server and up to two browser tabs looking at it. Nothing real runs. Press buttons on the right, or follow a walkthrough at the bottom. The state re-renders after every press; what just changed is <span class="changed">highlighted</span>. The four design choices from the issue are toggles, so you can feel each answer rather than argue it.</p>
+  </div>
+
+  <div class="grid">
+    <div>
+      <section class="panel">
+        <h2>The browser tab(s)</h2>
+        <div id="tabs" class="tabs"></div>
+      </section>
+      <section class="panel">
+        <h2>The pool server (what a terminal would show)</h2>
+        <dl class="kv" id="server"></dl>
+      </section>
+      <section class="panel">
+        <h2>What happened</h2>
+        <div class="log" id="log"></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="panel settings" id="settings">
+        <h2>Design choices (the issue's open questions)</h2>
+      </section>
+      <section class="panel">
+        <h2>Free play</h2>
+        <div id="actions"></div>
+      </section>
+    </div>
+  </div>
+
+  <section style="margin-top: 8px">
+    <h2>Guided walkthroughs</h2>
+    <div class="wt-tabs" id="wt-tabs"></div>
+    <div class="wt" id="wt"></div>
+  </section>
+</main>
+
+<script>
+// =====================================================================
+//  PURE MODULE — the state model under test. No DOM in here.
+//  If the model is right, this is the piece that lifts into the codebase
+//  (the reducer shape maps onto: a /api/stop route + shutdown() change on
+//  the server, and a "server stopped" rule in ui/src/session.ts).
+// =====================================================================
+const PoolStop = (() => {
+  const TICK_SECONDS = 3;      // one tick = the client's 3 s stream retry
+  const GRACE_TICKS = 2;       // the 4 s banner grace, rounded to ticks
+
+  const DEFAULT_SETTINGS = {
+    onlyInDone: true,   // Q1: offer the button only when phase is "done"
+    confirm: true,      // Q2: one "Really stop?" step
+    farewell: true,     // Q3a: the server broadcasts a final snapshot before it stops serving
+    word: "stopped",    // Q3b: the phase word the page lands on ("stopped" or reuse "dead")
+  };
+
+  function makeTab() {
+    return {
+      open: true, network: "up", connected: true,
+      phase: null, seq: 0,           // last snapshot this tab saw
+      stop: "idle",                  // idle | armed | requested
+      learned: null,                 // null | "stopped" (the tab knows the server stopped on purpose)
+      stoppedBy: null,               // "me" | "elsewhere"
+      outageSince: null, error: null, retries: 0,
+    };
+  }
+
+  function initial(overrides = {}) {
+    const state = {
+      settings: { ...DEFAULT_SETTINGS, ...overrides },
+      tick: 0,
+      server: {
+        process: "serving",          // serving | stopping | exited
+        phase: "running", seq: 1,    // phase of the last snapshot the server emitted
+        attempts: 2, interrupts: 0,
+        lock: true, fleet: "listed", // runs/server.pid ; ~/.agent-graphs/pools.json
+        errorsLogged: 0, stopOrigin: null,
+      },
+      tabs: { A: makeTab(), B: null },
+      log: [],
+      changed: new Set(),
+    };
+    pushSnapshot(state, "boot");
+    return state;
+  }
+
+  // --- helpers ---------------------------------------------------------
+  function log(state, text, kind) { state.log.push({ tick: state.tick, text, kind }); }
+  function mark(state, key) { state.changed.add(key); }
+  function eachOpenTab(state, fn) { for (const id of ["A", "B"]) if (state.tabs[id] && state.tabs[id].open) fn(state.tabs[id], id); }
+
+  // The server emits a snapshot; every connected tab receives it.
+  function pushSnapshot(state, why) {
+    const s = state.server;
+    eachOpenTab(state, (tab, id) => {
+      if (!tab.connected) return;
+      tab.phase = s.phase; tab.seq = s.seq;
+      mark(state, `tab.${id}.phase`);
+    });
+    if (why) log(state, `server → snapshot ${s.seq} · phase ${s.phase} (${why})`, "srv");
+  }
+
+  function stopButtonOffered(state, tab) {
+    if (!tab.open || !tab.connected || tab.learned) return false;
+    if (tab.phase === "done") return true;
+    if (!state.settings.onlyInDone && (tab.phase === "quiescent" || tab.phase === "stalled")) return true;
+    return false;
+  }
+
+  // POST /api/stop as the server would handle it. Returns an http-ish result.
+  function serverHandlesStop(state, origin) {
+    const s = state.server;
+    if (s.process !== "serving") return { status: 0, error: "connection refused" };
+    if (state.settings.onlyInDone && s.phase !== "done") {
+      return { status: 409, error: `pool is ${s.phase}, not done` };
+    }
+    // 202: reply first, then shut down — the reply must not race the socket teardown.
+    s.process = "stopping"; s.stopOrigin = origin; mark(state, "server.process");
+    log(state, `server ← POST /api/stop (${origin}) → 202 accepted`, "srv");
+    beginShutdown(state);
+    return { status: 202 };
+  }
+
+  function beginShutdown(state) {
+    const s = state.server;
+    if (s.attempts > 0) log(state, `server: stopping ${s.attempts} live attempt(s) (TERM, grace, KILL)`, "srv");
+    if (state.settings.farewell) {
+      s.phase = state.settings.word; s.seq += 1; mark(state, "server.phase");
+      log(state, `server → farewell snapshot ${s.seq} · phase ${s.phase}`, "srv");
+      eachOpenTab(state, (tab, id) => {
+        if (!tab.connected) return;
+        tab.phase = s.phase; tab.seq = s.seq;
+        tab.learned = "stopped";
+        tab.stoppedBy = tab.stop === "requested" ? "me" : "elsewhere";
+        tab.stop = "idle";
+        mark(state, `tab.${id}.learned`);
+      });
+    } else {
+      // No farewell: a tab that asked for the stop can infer it from its own 202.
+      eachOpenTab(state, (tab, id) => {
+        if (tab.stop === "requested") {
+          tab.learned = "stopped"; tab.stoppedBy = "me"; tab.stop = "idle";
+          mark(state, `tab.${id}.learned`);
+        }
+      });
+    }
+  }
+
+  // --- the reducer -----------------------------------------------------
+  function reduce(prev, action) {
+    const state = structuredClone(prev);
+    state.changed = new Set();
+    const s = state.server;
+    const tab = action.tab ? state.tabs[action.tab] : null;
+
+    switch (action.type) {
+      // ---- things the pool does on its own
+      case "pool_done":
+        s.phase = "done"; s.attempts = 0; s.interrupts = 0; s.seq += 1;
+        mark(state, "server.phase"); mark(state, "server.attempts");
+        log(state, "pool done: every ticket reached done (store closed, drive settled)");
+        pushSnapshot(state, "closeDrive"); break;
+      case "pool_question":
+        s.phase = "quiescent"; s.attempts = 1; s.interrupts = 1; s.seq += 1;
+        mark(state, "server.phase"); mark(state, "server.attempts");
+        log(state, "pool quiescent: an attempt is waiting on your answer");
+        pushSnapshot(state, "closeDrive"); break;
+      case "pool_stalled":
+        s.phase = "stalled"; s.attempts = 0; s.interrupts = 0; s.seq += 1;
+        mark(state, "server.phase");
+        log(state, "pool stalled: tickets left but nothing runnable");
+        pushSnapshot(state, "closeDrive"); break;
+      case "pool_running":
+        s.phase = "running"; s.attempts = 2; s.interrupts = 0; s.seq += 1;
+        mark(state, "server.phase"); mark(state, "server.attempts");
+        log(state, "pool running again");
+        pushSnapshot(state, "resume"); break;
+      case "drive_crash":
+        s.phase = "dead"; s.attempts = 0; s.errorsLogged += 1; s.seq += 1;
+        mark(state, "server.phase"); mark(state, "server.errorsLogged");
+        log(state, "pool dead: the drive threw — appended runs/errors.jsonl. The server keeps serving.", "refused");
+        pushSnapshot(state, "reportDriveDeath"); break;
+
+      // ---- the operator in a tab
+      case "click_stop": {
+        if (!tab || !tab.open) break;
+        if (!stopButtonOffered(state, tab)) { log(state, `tab ${action.tab}: there is no Stop button here (phase ${tab.phase ?? "?"}, ${tab.connected ? "connected" : "disconnected"})`, "refused"); break; }
+        if (state.settings.confirm) { tab.stop = "armed"; mark(state, `tab.${action.tab}.stop`); log(state, `tab ${action.tab}: Stop pressed — asking "Really stop?"`); break; }
+        // no confirm: fall through to the request
+      }
+      // eslint-disable-next-line no-fallthrough
+      case "confirm_stop": {
+        if (!tab || !tab.open) break;
+        if (action.type === "confirm_stop" && tab.stop !== "armed" && state.settings.confirm) { log(state, `tab ${action.tab}: nothing to confirm`, "refused"); break; }
+        if (tab.network === "down") { tab.error = "stop failed: network is down"; mark(state, `tab.${action.tab}.error`); log(state, `tab ${action.tab}: POST /api/stop never left the machine`, "refused"); break; }
+        tab.stop = "requested"; tab.error = null; mark(state, `tab.${action.tab}.stop`);
+        log(state, `tab ${action.tab}: POST /api/stop`);
+        const res = serverHandlesStop(state, `tab ${action.tab}`);
+        if (res.status !== 202) {
+          tab.stop = "idle"; tab.error = `stop failed: ${res.status ? res.status + " " : ""}${res.error}`;
+          mark(state, `tab.${action.tab}.error`);
+          log(state, `tab ${action.tab}: ${tab.error}`, "refused");
+        }
+        break;
+      }
+      case "cancel_stop":
+        if (!tab || tab.stop !== "armed") break;
+        tab.stop = "idle"; mark(state, `tab.${action.tab}.stop`);
+        log(state, `tab ${action.tab}: cancelled — nothing sent`); break;
+      case "refresh": {
+        if (!tab) break;
+        const fresh = makeTab(); fresh.network = tab.network;
+        state.tabs[action.tab] = fresh; mark(state, `tab.${action.tab}.phase`);
+        if (fresh.network === "down" || s.process !== "serving") {
+          fresh.connected = false; fresh.outageSince = state.tick;
+          fresh.error = "pool server unreachable: fetch failed";
+          log(state, `tab ${action.tab}: refreshed — GET /api/state failed, no memory of why`, "refused");
+        } else {
+          fresh.phase = s.phase; fresh.seq = s.seq;
+          log(state, `tab ${action.tab}: refreshed — GET /api/state → phase ${s.phase}`);
+        }
+        break;
+      }
+      case "open_b": {
+        const b = makeTab(); state.tabs.B = b; mark(state, "tab.B.phase");
+        if (s.process === "serving") { b.phase = s.phase; b.seq = s.seq; log(state, "tab B opened — GET /api/state → phase " + s.phase); }
+        else { b.connected = false; b.outageSince = state.tick; b.error = "pool server unreachable: fetch failed"; log(state, "tab B opened — server is not there", "refused"); }
+        break;
+      }
+      case "close_b": state.tabs.B = null; log(state, "tab B closed"); break;
+      case "network_down": if (!tab) break; tab.network = "down"; mark(state, `tab.${action.tab}.network`); log(state, `tab ${action.tab}: network dropped (server untouched)`); break;
+      case "network_up": if (!tab) break; tab.network = "up"; mark(state, `tab.${action.tab}.network`); log(state, `tab ${action.tab}: network back — reconnects on the next retry`); break;
+
+      // ---- the operator in a terminal
+      case "curl_stop": {
+        log(state, "terminal: curl -X POST localhost:8789/api/stop");
+        const res = serverHandlesStop(state, "curl");
+        if (res.status !== 202) log(state, `terminal: ${res.status || "—"} ${res.error}`, "refused");
+        break;
+      }
+      case "sigterm":
+        if (s.process !== "serving") { log(state, "terminal: nothing to kill", "refused"); break; }
+        s.process = "stopping"; s.stopOrigin = "SIGTERM"; mark(state, "server.process");
+        log(state, "terminal: kill <pid> → SIGTERM: stopping attempts, then exiting (hard limit 15 s)", "srv");
+        beginShutdown(state); break;
+      case "relaunch":
+        if (s.process !== "exited") { log(state, "terminal: the pool lock is held — a server is already up", "refused"); break; }
+        s.process = "serving"; s.lock = true; s.fleet = "listed"; s.stopOrigin = null;
+        if (s.phase === "stopped" || s.phase === "dead") s.phase = "done"; // the persisted store still says every ticket is done
+        s.seq = 1; mark(state, "server.process"); mark(state, "server.phase");
+        log(state, "terminal: bun run engine/server.ts --pool <dir> → serving again, snapshot 1 from the persisted store", "srv");
+        break;
+
+      // ---- time
+      case "tick": {
+        state.tick += 1;
+        if (s.process === "stopping") {
+          s.process = "exited"; s.lock = false; s.fleet = "stale until next read"; s.attempts = 0;
+          mark(state, "server.process"); mark(state, "server.lock"); mark(state, "server.fleet");
+          log(state, `server: attempts stopped, stopped serving, released runs/server.pid, process exited (origin: ${s.stopOrigin})`, "srv");
+        }
+        eachOpenTab(state, (t, id) => {
+          const reachable = s.process === "serving" && t.network === "up";
+          if (t.connected && !reachable) {
+            t.connected = false; t.outageSince = state.tick; mark(state, `tab.${id}.connected`);
+            log(state, `tab ${id}: stream dropped${t.learned ? " (expected — it knows the server stopped)" : ""}`);
+          } else if (!t.connected && reachable) {
+            t.connected = true; t.outageSince = null; t.error = null; t.retries += 1;
+            t.learned = null; t.stoppedBy = null;
+            t.phase = s.phase; t.seq = s.seq; mark(state, `tab.${id}.connected`); mark(state, `tab.${id}.phase`);
+            log(state, `tab ${id}: reconnected → snapshot ${s.seq} · phase ${s.phase}`);
+          } else if (!t.connected) {
+            t.retries += 1;
+            if (!t.learned && !t.error && state.tick - t.outageSince >= GRACE_TICKS) {
+              t.error = "pool stream disconnected"; mark(state, `tab.${id}.error`);
+              log(state, `tab ${id}: banner "pool stream disconnected" — will retry every ${TICK_SECONDS} s, forever`, "refused");
+            }
+          }
+        });
+        break;
+      }
+      case "set_setting":
+        state.settings[action.key] = action.value; log(state, `setting: ${action.key} = ${action.value}`); break;
+      default: break;
+    }
+    return state;
+  }
+
+  // --- what each tab shows (mirrors ui/src/project.ts poolStatus + canvas header) ----
+  function view(state, id) {
+    const tab = state.tabs[id];
+    if (!tab || !tab.open) return null;
+    const w = state.settings.word;
+    let word, color;
+    if (tab.learned) { word = w; color = w === "dead" ? "var(--dead)" : "var(--stopped)"; }
+    else if (tab.phase === "dead") { word = "dead"; color = "var(--dead)"; }
+    else if (tab.phase === "stalled" || tab.phase === "quiescent") { word = "needs input"; color = "var(--needs)"; }
+    else if (tab.phase === "running") { word = "running"; color = "var(--running)"; }
+    else if (tab.phase === "done") { word = "complete"; color = "var(--complete)"; }
+    else { word = "idle"; color = "var(--idle)"; }
+
+    const labels = { running: "running", quiescent: "waiting on you", done: "done", stalled: "stalled", dead: "dead", stopped: "stopped" };
+    let status;
+    if (tab.learned) status = `pool · ${labels[w]}${tab.stoppedBy === "me" ? " · from this page" : ""}`;
+    else if (!tab.connected) status = "pool · connecting";
+    else status = `pool · ${labels[tab.phase] ?? tab.phase} · snapshot ${tab.seq}`;
+
+    let banner = null;
+    if (tab.learned) {
+      banner = { kind: "stop", text: tab.stoppedBy === "me"
+        ? "The pool server was stopped from this page. Every ticket is done and the run is on disk. To look at it again, relaunch from a terminal:"
+        : "The pool server was stopped (from another tab, or from a terminal). To look at it again, relaunch from a terminal:",
+        cmd: "bun run engine/server.ts --pool <dir>" };
+    } else if (tab.error) banner = { kind: "err", text: tab.error };
+    else if (tab.phase === "dead") banner = { kind: "err", text: "pool dead: the drive threw. See runs/errors.jsonl. The server is still up." };
+
+    return {
+      id, word, color, status, banner,
+      connected: tab.connected, network: tab.network,
+      stopButton: stopButtonOffered(state, tab) ? tab.stop : null,   // null | idle | armed | requested
+      cards: tab.connected && !tab.learned ? Math.max(0, 3 - (tab.phase === "running" ? 0 : 1)) : 0,
+    };
+  }
+
+  return { initial, reduce, view, DEFAULT_SETTINGS, TICK_SECONDS };
+})();
+
+// =====================================================================
+//  PAGE SHELL — throwaway. Renders state, wires buttons, runs walkthroughs.
+// =====================================================================
+let state = PoolStop.initial();
+let activeWT = 0, wtStep = 0;
+
+function dispatch(action) { state = PoolStop.reduce(state, action); render(); }
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "onclick") el.onclick = v; else if (k === "class") el.className = v; else if (k === "disabled") el.disabled = v; else el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) el.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return el;
+}
+const ch = (key) => state.changed.has(key) ? "changed" : "";
+
+function renderTab(id) {
+  const v = PoolStop.view(state, id);
+  if (!v) return h("div", { class: "closed" }, "Tab B is closed", h("br"), h("button", { class: "btn", onclick: () => dispatch({ type: "open_b" }) }, "Open tab B"));
+  const tools = [h("button", { class: "btn btn-primary", disabled: true }, "New Conversation")];
+  if (v.stopButton === "idle") tools.push(h("button", { class: "btn btn-danger " + ch(`tab.${id}.stop`), onclick: () => dispatch({ type: "click_stop", tab: id }) }, "Stop server"));
+  if (v.stopButton === "armed") tools.push(h("span", { class: "really " + ch(`tab.${id}.stop`) }, "Really stop? The page can't start it again.",
+    h("button", { class: "btn btn-danger", onclick: () => dispatch({ type: "confirm_stop", tab: id }) }, "Stop"),
+    h("button", { class: "btn btn-dark", onclick: () => dispatch({ type: "cancel_stop", tab: id }) }, "Cancel")));
+  if (v.stopButton === "requested") tools.push(h("button", { class: "btn btn-danger", disabled: true }, "stopping…"));
+
+  const body = [];
+  if (v.banner) body.push(h("div", { class: `banner ${v.banner.kind} ${ch(`tab.${id}.learned`)} ${ch(`tab.${id}.error`)}` }, v.banner.text, v.banner.cmd ? [" ", h("code", {}, v.banner.cmd)] : null));
+  else for (let i = 0; i < v.cards; i++) body.push(h("span", { class: "card" }, `ticket ${i + 1}`));
+  if (!v.connected && !v.banner) body.push(h("div", { class: "note" }, "(stream down, retrying quietly — banner after 4 s)"));
+  if (v.network === "down") body.push(h("div", { class: "note" }, "this tab has no network"));
+
+  return h("div", { class: "browser" },
+    h("div", { class: "strip" }, h("span", { class: "dot", style: `background:${v.color}` }), h("span", { class: `title ${ch(`tab.${id}.learned`)} ${ch(`tab.${id}.phase`)}` }, `${v.word} — my-pool`), h("span", { class: "who" }, `tab ${id}`)),
+    h("div", { class: "console-head" }, h("span", { class: `dim ${ch(`tab.${id}.connected`)}` }, v.status), h("span", { class: "tools" }, ...tools)),
+    h("div", { class: "console-body" }, ...body));
+}
+
+function renderServer() {
+  const s = state.server;
+  const rows = [
+    ["process", { serving: "serving on :8789", stopping: "shutting down…", exited: "exited" }[s.process], "server.process"],
+    ["last snapshot", `${s.seq} · phase ${s.phase}`, "server.phase"],
+    ["live attempts", s.attempts, "server.attempts"],
+    ["runs/server.pid", s.lock ? "held by this pid" : "released", "server.lock"],
+    ["fleet registry", s.fleet, "server.fleet"],
+    ["runs/errors.jsonl", `${s.errorsLogged} entr${s.errorsLogged === 1 ? "y" : "ies"}`, "server.errorsLogged"],
+    ["clock", `t = ${state.tick * PoolStop.TICK_SECONDS} s`, ""],
+  ];
+  return rows.flatMap(([k, v, key]) => [h("dt", {}, k), h("dd", { class: ch(key) }, v)]);
+}
+
+const ACTIONS = [
+  { group: "The pool, on its own", items: [
+    ["Every ticket reaches done", { type: "pool_done" }],
+    ["An attempt asks a question", { type: "pool_question" }],
+    ["Pool stalls", { type: "pool_stalled" }],
+    ["Pool starts running", { type: "pool_running" }],
+    ["The drive crashes", { type: "drive_crash" }],
+  ]},
+  { group: "You, in tab A", items: [
+    ["Press Stop", { type: "click_stop", tab: "A" }],
+    ["Confirm", { type: "confirm_stop", tab: "A" }],
+    ["Cancel", { type: "cancel_stop", tab: "A" }],
+    ["Refresh the page", { type: "refresh", tab: "A" }],
+    ["Lose network", { type: "network_down", tab: "A" }],
+    ["Network back", { type: "network_up", tab: "A" }],
+  ]},
+  { group: "You, in tab B", items: [
+    ["Open tab B", { type: "open_b" }],
+    ["Press Stop", { type: "click_stop", tab: "B" }],
+    ["Confirm", { type: "confirm_stop", tab: "B" }],
+    ["Refresh the page", { type: "refresh", tab: "B" }],
+    ["Close tab B", { type: "close_b" }],
+  ]},
+  { group: "You, in a terminal", items: [
+    ["curl POST /api/stop", { type: "curl_stop" }],
+    ["kill <pid> (SIGTERM)", { type: "sigterm" }],
+    ["Relaunch the server", { type: "relaunch" }],
+  ]},
+  { group: "Time", items: [
+    ["3 seconds pass", { type: "tick" }],
+  ]},
+];
+
+function renderActions() {
+  return ACTIONS.map(g => h("div", { class: "actions-group" }, h("h3", {}, g.group),
+    h("div", { class: "actions" }, ...g.items.map(([label, a]) => h("button", { class: "btn", onclick: () => dispatch(a) }, label)))));
+}
+
+const SETTINGS = [
+  { key: "onlyInDone", q: "1 · Where is the button offered?", opts: [[true, "only when the pool is done"], [false, "also when waiting on you / stalled"]], rec: true,
+    why: "In done nothing is running, so stopping decides nothing about live work. In the other phases an attempt may be mid-flight." },
+  { key: "confirm", q: "2 · Confirm first?", opts: [[true, "one \"Really stop?\" step"], [false, "no, stop on the first click"]], rec: true,
+    why: "The page cannot start the server it just stopped; relaunching means the terminal." },
+  { key: "farewell", q: "3a · How does a page learn the server stopped?", opts: [[true, "the server sends a farewell snapshot before it stops serving"], [false, "only the tab that pressed Stop knows (from its own 202)"]], rec: true,
+    why: "Today shutdown emits nothing and just drops the stream. Watch what tab B sees under each choice." },
+  { key: "word", q: "3b · Which phase word does the page land on?", opts: [["stopped", "a new word: stopped"], ["dead", "reuse dead"]], rec: "stopped",
+    why: "dead today means \"the drive threw\" and comes with an entry in runs/errors.jsonl. Compare the two crashes in walkthrough 5." },
+];
+
+function renderSettings() {
+  return SETTINGS.map(s => {
+    const opts = s.opts.map(([val, label]) => {
+      const inp = h("input", { type: "radio", name: s.key });
+      inp.checked = state.settings[s.key] === val;
+      inp.onchange = () => dispatch({ type: "set_setting", key: s.key, value: val });
+      return h("label", {}, inp, " ", label, val === s.rec ? h("span", { class: "rec" }, "recommended") : null);
+    });
+    return h("label", {}, h("strong", {}, s.q), h("div", { class: "opts" }, ...opts), h("div", { class: "why" }, s.why));
+  });
+}
+
+// ---- walkthroughs ---------------------------------------------------
+const WALKTHROUGHS = [
+  { title: "1 · The happy path", settings: {},
+    intro: "A pool finishes. You stop its server from the page. Watch the tab title, the status line, runs/server.pid and the fleet entry.",
+    watch: "After the stop, the page says what happened and how to get back, instead of \"connecting\".",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["Press Stop", { type: "click_stop", tab: "A" }], ["Confirm", { type: "confirm_stop", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "2 · Change of mind", settings: {},
+    intro: "You press Stop, then think better of it. Then you refresh the page with the confirmation still showing.",
+    watch: "Cancel sends nothing. A refresh also disarms it: the confirmation lives in the page, not on the server.",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["Press Stop", { type: "click_stop", tab: "A" }], ["Cancel", { type: "cancel_stop", tab: "A" }], ["Press Stop", { type: "click_stop", tab: "A" }], ["Refresh the page", { type: "refresh", tab: "A" }]] },
+  { title: "3 · Two tabs open (farewell on)", settings: { farewell: true },
+    intro: "Tab B is watching the same pool. Tab A stops the server. This run has the farewell snapshot ON.",
+    watch: "Tab B lands on the same word as A, but without \"from this page\". Then run walkthrough 4 for the other choice.",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["Open tab B", { type: "open_b" }], ["Press Stop in A", { type: "click_stop", tab: "A" }], ["Confirm in A", { type: "confirm_stop", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "4 · Two tabs open (farewell off)", settings: { farewell: false },
+    intro: "Same as 3, but the server sends no farewell: only the tab that pressed Stop can know.",
+    watch: "Tab B shows \"connecting\", then \"pool stream disconnected\", and retries forever. It looks exactly like a crash or a lost network.",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["Open tab B", { type: "open_b" }], ["Press Stop in A", { type: "click_stop", tab: "A" }], ["Confirm in A", { type: "confirm_stop", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "5 · Stopped vs crashed vs offline", settings: {},
+    intro: "Three ways to lose a pool, back to back. First the drive crashes (server still up). Then your network drops and comes back. Then a real stop.",
+    watch: "Crash = red \"dead\" with an error on disk, server still serving. Offline = \"connecting\" then recovers. Stop = grey \"stopped\", server gone. Flip 3b to \"reuse dead\" and run it again: the first and last become the same word.",
+    steps: [["The drive crashes", { type: "drive_crash" }], ["3 seconds pass", { type: "tick" }], ["The server is still up: the pool starts running again", { type: "pool_running" }], ["Lose network", { type: "network_down", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }], ["Network back", { type: "network_up", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["Every ticket reaches done", { type: "pool_done" }], ["Press Stop", { type: "click_stop", tab: "A" }], ["Confirm", { type: "confirm_stop", tab: "A" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "6 · Not finished yet", settings: {},
+    intro: "The pool is waiting on your answer. There is no button. Someone tries the route by hand anyway.",
+    watch: "The page offers nothing, and the server refuses with 409, so a stale tab or a curl cannot kill a pool mid-flight.",
+    steps: [["An attempt asks a question", { type: "pool_question" }], ["Press Stop (there is no button)", { type: "click_stop", tab: "A" }], ["curl POST /api/stop", { type: "curl_stop" }], ["Every ticket reaches done", { type: "pool_done" }], ["curl POST /api/stop", { type: "curl_stop" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "7 · Coming back later", settings: {},
+    intro: "You stopped the server yesterday and left the tab open. Today you relaunch it from a terminal. Then you refresh a stopped tab before relaunching.",
+    watch: "A stopped tab keeps a slow retry, so it comes back on its own once the server is up. A refreshed tab has no memory: before the relaunch it can only say \"unreachable\".",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["Press Stop", { type: "click_stop", tab: "A" }], ["Confirm", { type: "confirm_stop", tab: "A" }], ["3 seconds pass", { type: "tick" }], ["Open tab B", { type: "open_b" }], ["Refresh tab A", { type: "refresh", tab: "A" }], ["Relaunch the server", { type: "relaunch" }], ["3 seconds pass", { type: "tick" }]] },
+  { title: "8 · Killed from the terminal", settings: { farewell: true },
+    intro: "Nobody pressed anything: the server gets SIGTERM while the tab is open. The farewell is sent from shutdown() itself, so it fires on this path too.",
+    watch: "The tab says \"stopped\" (not \"from this page\") rather than looping on \"connecting\". If the farewell only lived in the /api/stop route, this path would still look like a crash.",
+    steps: [["Every ticket reaches done", { type: "pool_done" }], ["kill <pid> (SIGTERM)", { type: "sigterm" }], ["3 seconds pass", { type: "tick" }], ["3 seconds pass", { type: "tick" }]] },
+];
+
+function startWalkthrough(i) {
+  activeWT = i; wtStep = 0;
+  state = PoolStop.initial(WALKTHROUGHS[i].settings);
+  state.log.push({ tick: 0, text: `walkthrough "${WALKTHROUGHS[i].title}" — reset to a running pool` });
+  render();
+}
+
+function renderWalkthrough() {
+  const w = WALKTHROUGHS[activeWT];
+  return [
+    h("h3", {}, w.title),
+    h("p", {}, w.intro),
+    h("p", { class: "watch" }, "Watch for: ", w.watch),
+    h("ol", { class: "steps" }, ...w.steps.map(([label, a], i) => h("li", { class: i < wtStep ? "done" : i === wtStep ? "next" : "" },
+      h("span", { class: "n" }, i < wtStep ? "✓" : i + 1),
+      h("button", { class: "btn" + (i === wtStep ? " btn-primary" : ""), disabled: i !== wtStep, onclick: () => { wtStep = i + 1; dispatch(a); } }, label)))),
+    h("p", { style: "margin-top:12px" }, h("button", { class: "btn btn-ghost", onclick: () => startWalkthrough(activeWT) }, "↺ Restart this walkthrough"),
+      " ", wtStep >= w.steps.length ? h("span", { class: "watch" }, "Done — keep pressing free-play buttons, or pick another walkthrough.") : null),
+  ];
+}
+
+function render() {
+  const tabs = document.getElementById("tabs");
+  tabs.className = "tabs" + (state.tabs.B ? " two" : "");
+  tabs.replaceChildren(renderTab("A"), renderTab("B"));
+  document.getElementById("server").replaceChildren(...renderServer());
+  const log = document.getElementById("log");
+  log.replaceChildren(...state.log.map(l => h("div", { class: l.kind || "" }, h("span", { class: "t" }, `t=${String(l.tick * PoolStop.TICK_SECONDS).padStart(3)}s  `), l.text)));
+  log.scrollTop = log.scrollHeight;
+  const settings = document.getElementById("settings");
+  settings.replaceChildren(h("h2", {}, "Design choices (the issue's open questions)"), ...renderSettings());
+  document.getElementById("actions").replaceChildren(...renderActions());
+  document.getElementById("wt-tabs").replaceChildren(...WALKTHROUGHS.map((w, i) => h("button", { class: i === activeWT ? "active" : "", onclick: () => startWalkthrough(i) }, w.title)));
+  document.getElementById("wt").replaceChildren(...renderWalkthrough());
+}
+
+startWalkthrough(0);
+</script>
+</body>
+</html>
