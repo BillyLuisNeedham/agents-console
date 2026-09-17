@@ -150,6 +150,10 @@ _Avoid_: pending answer (that's the interrupt, not the answer)
 A drive loop that has died — from an unhandled error or a hang — while the server keeps serving the last snapshot as if the run were still live. Distinct from stalled: the closing gate never ran; since ADR-0008 a reported death emits the terminal dead phase, and a death that emits nothing is lying.
 _Avoid_: stuck, frozen, hung pool
 
+**Stopped**:
+The terminal phase a pool server sends as its farewell on an orderly shutdown, whether the Console asked for it (only offered once the pool is done) or a signal did. The last snapshot on the stream before the stream ends; a tab that has seen it knows the server left on purpose, shows the relaunch command, and reconnects on its own when the pool is relaunched. Distinct from dead: nothing went wrong, and there is no `errors.jsonl` entry. Introduced by ADR-0019 (`docs/adr/0019-finished-pool-stops-from-the-console-with-a-farewell.md`), closing issue #97.
+_Avoid_: killed, crashed, disconnected (those are the cases it exists to be told apart from)
+
 **Needs input**:
 The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
 _Avoid_: action items, task list, notification center

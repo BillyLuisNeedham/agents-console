@@ -108,6 +108,13 @@ export interface PoolServerOptions {
   herdrWorkspace?: string;
   /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
+  /**
+   * What a `POST /api/stop` sets in motion once the route has accepted it
+   * (issue #97). The CLI passes the same stop-then-exit the signal handler
+   * runs; absent, the server runs its own `shutdown()` in place and stays
+   * in the process, which is what an in-process test wants.
+   */
+  onStopRequested?: () => void;
 }
 
 /**
@@ -122,6 +129,11 @@ export interface PoolServerOptions {
  */
 export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 
+// How long a shutdown lets the just-closed snapshot streams flush their
+// farewell before every connection is cut. Over loopback a single turn of
+// the event loop is enough; the margin is for a slower link.
+const STREAM_DRAIN_MS = 50;
+
 export interface PoolServer {
   latest: EnrichedSnapshot | null;
   start: () => Promise<EnrichedSnapshot>;
@@ -131,9 +143,11 @@ export interface PoolServer {
   url: string;
   close: () => Promise<void>;
   /**
-   * The orderly stop (ADR-0017): stop the run's headless attempts, stop
-   * serving, release the pool lock. The CLI's signal handler calls this and
-   * exits after it; in-process callers may call it directly.
+   * The orderly stop (ADR-0017): stop the run's headless attempts, send the
+   * stream its `stopped` farewell and close it (issue #97), stop serving,
+   * release the pool lock. The CLI's signal handler calls this and exits
+   * after it; in-process callers may call it directly. Idempotent: a second
+   * call joins the first.
    */
   shutdown: (graceMs?: number) => Promise<void>;
   /** Start a Conversation (issue #60), for tests that would rather call
@@ -153,12 +167,14 @@ function enrich(
   snapshot: PoolSnapshot,
   meta: TicketMarker[],
   poolName: string,
+  poolDir: string,
 ): EnrichedSnapshot {
   const hold = new Set(snapshot.mergeHold);
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
     poolName,
+    poolDir,
     state: {
       tickets: meta.map((m) => ({
         id: m.id,
@@ -942,16 +958,35 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let currentRun: PoolRun | null = null;
   let started = false;
 
-  const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  // Every open snapshot stream, each with the teardown of its own heartbeat
+  // so a shutdown can end the streams cleanly rather than leaving them to be
+  // cut by the socket close.
+  const clients = new Map<ReadableStreamDefaultController<Uint8Array>, () => void>();
 
   function broadcast(snapshot: EnrichedSnapshot): void {
     latest = snapshot;
     const bytes = encodeSnapshot(snapshot);
-    for (const controller of [...clients]) {
+    for (const [controller, stopHeartbeat] of [...clients]) {
       try {
         controller.enqueue(bytes);
       } catch {
+        stopHeartbeat();
         clients.delete(controller);
+      }
+    }
+  }
+
+  // End every snapshot stream after its last frame (the farewell, when the
+  // run sent one): the client sees an orderly end-of-stream behind a
+  // `stopped` snapshot, not a reset socket.
+  function closeStreams(): void {
+    for (const [controller, stopHeartbeat] of [...clients]) {
+      stopHeartbeat();
+      clients.delete(controller);
+      try {
+        controller.close();
+      } catch {
+        // Already gone; nothing to end.
       }
     }
   }
@@ -968,7 +1003,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
-        broadcast(enrich(snapshot, meta, poolName));
+        broadcast(enrich(snapshot, meta, poolName, poolDir));
       },
     });
     return latest!;
@@ -1088,6 +1123,45 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     options.defaultPort ?? DEFAULT_PORT,
   );
   let server: Bun.Server<undefined>;
+
+  // The orderly stop, one per server: a signal, a `POST /api/stop`, or an
+  // in-process caller all land here, and a second arrival joins the first.
+  // The attempts stop first, while the run's own exit handling can still
+  // record each stop, and the run's farewell `stopped` snapshot goes out to
+  // every stream as its last frame; the streams end next, then serving
+  // stops so no answer arrives into a closing run; the lock goes last, once
+  // nothing of this process still owns the pool.
+  let stopping: Promise<void> | null = null;
+  const shutdown = (graceMs?: number): Promise<void> => {
+    if (!stopping) {
+      stopping = (async () => {
+        if (currentRun) await currentRun.shutdown(graceMs);
+        closeStreams();
+        // A closed stream still has its last frames in flight: a forced stop
+        // on the same turn resets the socket under the farewell and the tab
+        // never sees it. One short pause lets the closed streams flush. (A
+        // graceful stop(false) first is not the answer: a stop(true) after
+        // it no longer closes the idle keep-alive connections, so the port
+        // would go on answering with the lock already released.)
+        await Bun.sleep(STREAM_DRAIN_MS);
+        await server.stop(true);
+        releasePoolLock(poolDir);
+      })();
+    }
+    return stopping;
+  };
+  // Set the moment a stop is accepted, on the route's own turn, so a second
+  // POST arriving before the deferred stop has begun is acknowledged rather
+  // than starting another one. `shutdown` latches itself, but an
+  // `onStopRequested` owner leaves no promise here to join, so the latch has
+  // to sit in front of the handover too (issue #97).
+  let stopRequested = false;
+  const requestStop = (): void => {
+    if (options.onStopRequested) options.onStopRequested();
+    else void shutdown();
+  };
+  const stopUnderWay = (): boolean => stopRequested || stopping !== null;
+
   try {
     server = bindPoolServer(
       resolution,
@@ -1105,6 +1179,36 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         if (pathname === "/api/start" && req.method === "POST") {
           const snapshot = await start();
           return Response.json({ snapshot });
+        }
+
+        // Stop this server from the Console (issue #97): only a finished
+        // pool may be stopped this way. Any other phase can have an attempt
+        // mid-flight (or an answer the operator is about to give), so a
+        // stale tab or a stray curl gets a 409 rather than a stop. The reply
+        // goes out before the stop begins, the way /api/resume acknowledges
+        // before processing; the farewell on the stream is how the tab
+        // learns the stop landed. A stop already under way is acknowledged
+        // again rather than started twice.
+        if (pathname === "/api/stop" && req.method === "POST") {
+          const phase = latest?.phase ?? null;
+          if (!stopUnderWay() && phase !== "done") {
+            return Response.json(
+              {
+                error:
+                  phase === null
+                    ? "pool not started: nothing to stop"
+                    : `pool is ${phase}, not done: stop refused`,
+              },
+              { status: 409 },
+            );
+          }
+          if (!stopUnderWay()) {
+            stopRequested = true;
+            // Off the request's own turn, so the 202 is on the wire before
+            // serving stops underneath it.
+            setTimeout(requestStop, 0);
+          }
+          return Response.json({ stopping: true }, { status: 202 });
         }
 
         if (pathname === "/api/resume" && req.method === "POST") {
@@ -1369,7 +1473,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           const stream = new ReadableStream<Uint8Array>({
             start(ctrl) {
               controller = ctrl;
-              clients.add(ctrl);
+              clients.set(ctrl, stopHeartbeat);
               ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
               if (latest) ctrl.enqueue(encodeSnapshot(latest));
               heartbeat = setInterval(() => {
@@ -1448,15 +1552,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       await server.stop(true);
       currentRun?.close();
     },
-    shutdown: async (graceMs) => {
-      // The attempts stop first, while the run's own exit handling can still
-      // record each stop; serving stops next so no answer arrives into a
-      // closing run; the lock goes last, once nothing of this process still
-      // owns the pool.
-      if (currentRun) await currentRun.shutdown(graceMs);
-      await server.stop(true);
-      releasePoolLock(poolDir);
-    },
+    shutdown,
   };
 }
 
@@ -1484,12 +1580,14 @@ function runServerCli(): void {
   // consults the environment for it.
   const herdrWorkspace = process.env.HERDR_WORKSPACE_ID || undefined;
   let server: PoolServer;
+  const stopAndExit = shutdownThenExit(() => server);
   try {
     server = createPoolServer({
       poolDir,
       ...(port !== undefined ? { port } : {}),
       ...(registryPath !== undefined ? { registryPath } : {}),
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
+      onStopRequested: () => stopAndExit("stop requested from the Console"),
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
@@ -1498,25 +1596,26 @@ function runServerCli(): void {
   void server.start().then(() => {
     console.log(`pool server on ${server.url} (${poolDir})`);
   });
-  installShutdownHandlers(server);
+  installShutdownHandlers(stopAndExit);
 }
 
 /**
- * Trap SIGTERM and SIGINT (ADR-0017): an untrapped kill left every headless
- * harness running under init, and the relaunch raced them in their own
- * worktrees (issue #65). The handler stops the attempts, releases the pool,
- * and exits; a second signal during the stop is ignored rather than
- * cutting the stop short, and a stop that hangs past its bound exits anyway
- * so the operator is never left with a server that will not die.
+ * The CLI's one way out (ADR-0017): stop the attempts, release the pool,
+ * exit. A signal and a Console stop (issue #97) both take it, and a second
+ * arrival during the stop is ignored rather than cutting the stop short. A
+ * stop that hangs past its bound exits anyway, so the operator is never
+ * left with a server that will not die.
  */
-function installShutdownHandlers(server: PoolServer): void {
+function shutdownThenExit(
+  server: () => PoolServer,
+): (reason: string) => void {
   let stopping = false;
-  const onSignal = (signal: NodeJS.Signals): void => {
+  return (reason) => {
     if (stopping) return;
     stopping = true;
-    console.log(`${signal}: stopping attempts, then exiting`);
+    console.log(`${reason}: stopping attempts, then exiting`);
     const bound = setTimeout(() => process.exit(1), SHUTDOWN_HARD_LIMIT_MS);
-    void server.shutdown().then(
+    void server().shutdown().then(
       () => process.exit(0),
       (err) => {
         console.error(err instanceof Error ? err.message : String(err));
@@ -1525,8 +1624,16 @@ function installShutdownHandlers(server: PoolServer): void {
     );
     bound.unref();
   };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
+}
+
+/**
+ * Trap SIGTERM and SIGINT: an untrapped kill left every headless harness
+ * running under init, and the relaunch raced them in their own worktrees
+ * (issue #65).
+ */
+function installShutdownHandlers(stopAndExit: (reason: string) => void): void {
+  process.on("SIGTERM", stopAndExit);
+  process.on("SIGINT", stopAndExit);
 }
 
 // Well past the children's TERM grace plus the drive's settle wait: a stop

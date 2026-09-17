@@ -139,7 +139,11 @@ function fleetRegistry(poolDir: string): string {
 async function startServer(
   poolDir: string,
   harnesses: Record<string, HarnessCommand>,
-  options: { herdrSocket?: string; streamHeartbeatMs?: number } = {},
+  options: {
+    herdrSocket?: string;
+    streamHeartbeatMs?: number;
+    onStopRequested?: () => void;
+  } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
     poolDir,
@@ -3070,6 +3074,252 @@ describe("terminalRuntimeRefusal", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Stopping a finished pool from the Console (issue #97). The Console's stop
+// button is the only way to retire a pool that has nothing left to do, so the
+// route has to be narrow (a finished pool only), idempotent (a stale tab must
+// not stop twice), and it has to say goodbye: the farewell `stopped` snapshot
+// is how a tab tells an orderly stop from a dropped connection.
+// ---------------------------------------------------------------------------
+
+/** Read the snapshot stream until its replayed snapshot has arrived. */
+async function readOpeningFrames(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes('"phase"')) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error("stream ended before its replayed snapshot");
+    text += decoder.decode(value, { stream: true });
+  }
+  return text;
+}
+
+/** Read a snapshot stream to its end, reporting how it ended: `clean` is the
+ *  orderly end-of-stream a Console stop owes its clients, `error` the thrown
+ *  read of a socket cut from under them. */
+async function drainStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms = 10_000,
+): Promise<{ text: string; ended: "clean" | "error" | "timeout" }> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) return { text, ended: "timeout" };
+    const step = await Promise.race([
+      reader.read().then(
+        (r) =>
+          r.done
+            ? ({ kind: "clean" } as const)
+            : ({ kind: "chunk", value: r.value } as const),
+        () => ({ kind: "error" }) as const,
+      ),
+      Bun.sleep(left).then(() => ({ kind: "timeout" }) as const),
+    ]);
+    if (step.kind === "chunk") {
+      text += decoder.decode(step.value, { stream: true });
+      continue;
+    }
+    return { text, ended: step.kind };
+  }
+}
+
+/** Every complete snapshot frame in a stream's raw text. */
+function snapshotFrames(text: string): { phase: string; poolDir: string }[] {
+  const prefix = "event: snapshot\ndata: ";
+  const frames: { phase: string; poolDir: string }[] = [];
+  for (const frame of text.split("\n\n")) {
+    if (!frame.startsWith(prefix)) continue;
+    try {
+      frames.push(JSON.parse(frame.slice(prefix.length)));
+    } catch {
+      // A frame the read boundary cut in half; the rest arrives next read.
+    }
+  }
+  return frames;
+}
+
+describe("stop from the Console (#97)", () => {
+  const ready = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  /** Drive a pool all the way through its review gate, so `latest.phase` is
+   *  `done` and the stop route will accept. */
+  async function finishedServer(
+    options: Parameters<typeof startServer>[2] = {},
+  ): Promise<{ poolDir: string; server: PoolServer }> {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const server = await startServer(
+      poolDir,
+      stubHarness(poolDir, {}).harnesses,
+      options,
+    );
+    await server.start();
+    await server.settled();
+    await server.answer(REVIEW_TICKET_ID, "approve");
+    await server.settled();
+    await waitFor(() => server.latest?.phase === "done", "the pool to finish");
+    return { poolDir, server };
+  }
+
+  // A pool the operator never started has no run to stop, and the refusal
+  // says so rather than tearing down a server that has done nothing.
+  it("refuses a stop before the pool has started and keeps serving", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+
+    const res = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("not started");
+
+    // The refusal is a refusal, not a stop: the server is still there.
+    const state = await fetch(`${server.url}/api/state`);
+    expect(state.status).toBe(200);
+    expect((await state.json()) as { snapshot: unknown }).toEqual({ snapshot: null });
+  });
+
+  // A running pool has an attempt mid-flight, so a stale tab's stop is
+  // refused by phase and the attempt is left alone to finish.
+  it("refuses a stop while the pool is running and lets the attempt finish", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const sentinel = join(poolDir, "go");
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+    );
+    await server.start();
+    await waitFor(
+      () => server.latest?.phase === "running",
+      "the pool to be running with 01's attempt in flight",
+    );
+
+    const res = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(res.status).toBe(409);
+    const error = ((await res.json()) as { error: string }).error;
+    expect(error).toContain("not done");
+    expect(error).toContain("running");
+
+    // Nothing was torn down: the server still serves and the held attempt is
+    // still the one in flight.
+    const state = await fetch(`${server.url}/api/state`);
+    expect(state.status).toBe(200);
+    expect(server.latest?.phase).toBe("running");
+
+    // Release the sentinel so the attempt ends and the drive settles, rather
+    // than leaving a live harness for the teardown to race.
+    writeFileSync(sentinel, "go");
+    const settled = await server.settled();
+    expect(settled.state.tickets.map((t) => t.status)).toEqual(["done"]);
+  }, 20_000);
+
+  // The whole orderly stop, end to end: the 202, the farewell frame, the
+  // clean end of stream, the closed port, the released lock.
+  it("stops a finished pool: 202, a `stopped` farewell, then a closed stream and port", async () => {
+    const { poolDir, server } = await finishedServer();
+    expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
+
+    const res = await fetch(`${server.url}/api/stream`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const opening = await readOpeningFrames(reader);
+    expect(opening).toContain('"phase":"done"');
+
+    const stop = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(stop.status).toBe(202);
+    expect(await stop.json()).toEqual({ stopping: true });
+
+    // The farewell arrives on the open stream, and the stream then ends of
+    // its own accord: a tab learns the server left on purpose.
+    const { text, ended } = await drainStream(reader);
+    expect(text).toContain('"phase":"stopped"');
+    expect(ended).toBe("clean");
+
+    // The farewell names the pool dir a relaunch would pass to --pool.
+    const farewell = snapshotFrames(text).at(-1);
+    expect(farewell?.phase).toBe("stopped");
+    expect(farewell?.poolDir).toBe(poolDir);
+
+    // The end of the stream is not the end of the stop: the streams are
+    // closed first and serving stops behind a short drain, so joining the
+    // in-flight stop (shutdown is latched, so this starts no second one) is
+    // what makes the two assertions below exact rather than racy.
+    await server.shutdown();
+
+    // Serving has stopped and the pool lock is released, so a relaunch on
+    // this pool neither hits a live port nor trips over a stale lock.
+    await expect(fetch(`${server.url}/api/state`)).rejects.toThrow();
+    expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+  }, 20_000);
+
+  // A stale tab posting twice, or two tabs posting at once, must not start a
+  // second teardown; the second POST is acknowledged the same way.
+  it("acknowledges a repeat stop without starting a second one", async () => {
+    const { poolDir, server } = await finishedServer();
+
+    const first = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    const second = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(await second.json()).toEqual({ stopping: true });
+
+    // One stop ran, and joining it is enough: a second POST that had started
+    // its own would leave this waiting on a stop that never latched.
+    await server.shutdown();
+    expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+    await expect(fetch(`${server.url}/api/state`)).rejects.toThrow();
+  }, 20_000);
+
+  // The CLI hands the route its own stop-then-exit, because a server that
+  // shut itself down in place would leave the process running with nothing
+  // to serve. With the option given, the route accepts and hands over: the
+  // callback owns the stop, and the server is still up when it returns.
+  it("hands a stop to onStopRequested exactly once and does not shut itself down", async () => {
+    let calls = 0;
+    const { server } = await finishedServer({
+      onStopRequested: () => {
+        calls += 1;
+      },
+    });
+
+    const first = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    const second = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+
+    await waitFor(() => calls > 0, "the stop callback to fire");
+    // Both POSTs have long since been answered: nothing more is coming.
+    await Bun.sleep(100);
+    expect(calls).toBe(1);
+
+    // The callback owns the stop, so this server is untouched.
+    const state = await fetch(`${server.url}/api/state`);
+    expect(state.status).toBe(200);
+    expect(server.latest?.phase).toBe("done");
+  }, 20_000);
+});
+
+/** waitFor, for a condition that has to be fetched over HTTP. */
+async function waitUntil(cond: () => Promise<boolean>, what: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (!(await cond())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(50);
+  }
+}
+
+/** The port a spawned CLI bound, read from the fleet registry it was handed. */
+async function waitForCliPort(registryPath: string, pid: number): Promise<number> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const entry = readFleetEntries(registryPath).find((e) => e.pid === pid);
+    if (entry) return entry.port;
+    await Bun.sleep(50);
+  }
+  throw new Error("timed out waiting for the server's fleet entry");
+}
+
 // The CLI's shutdown (ADR-0017, issue #65): a SIGTERM to the real server
 // process stops its headless attempts before it exits and releases the pool
 // lock, so a relaunch neither races the attempt in its worktree nor trips
@@ -3141,6 +3391,14 @@ describe("server shutdown on signal", () => {
       expect(live(grandchild)).toBe(true);
       expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
 
+      // A Console tab watching this pool when the signal lands (issue #97):
+      // the stream it holds must end with the farewell, not with a reset
+      // socket, so the tab can say the server left on purpose.
+      const port = await waitForCliPort(join(poolDir, "fleet.json"), server.pid);
+      const stream = await fetch(`http://localhost:${port}/api/stream`);
+      const reader = stream.body!.getReader();
+      await readOpeningFrames(reader);
+
       server.kill("SIGTERM");
       const code = await server.exited;
 
@@ -3148,6 +3406,9 @@ describe("server shutdown on signal", () => {
       expect(live(pid)).toBe(false);
       expect(live(grandchild)).toBe(false);
       expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+      const farewell = await drainStream(reader);
+      expect(farewell.text).toContain('"phase":"stopped"');
+      expect(farewell.ended).toBe("clean");
       const stdout = await new Response(server.stdout).text();
       expect(stdout).toContain("SIGTERM: stopping attempts, then exiting");
       const recorded = readFileSync(events, "utf8");
@@ -3165,6 +3426,90 @@ describe("server shutdown on signal", () => {
       }
     }
   });
+
+  // Issue #97: the Console's stop button has to take the real process out,
+  // not just its run. In-process, `POST /api/stop` shuts the server down
+  // where it stands; under the CLI the route hands the same stop-then-exit
+  // the signal handler takes, so the process is gone afterwards and the pool
+  // is free for a relaunch. Nothing here spawns a harness: the pool's only
+  // ticket is already done, so the run goes straight to its review gate and
+  // the gate is answered over HTTP.
+  it("POST /api/stop exits the CLI process once the pool is done, and refuses before it", async () => {
+    const poolDir = makeServerPool(
+      [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" }],
+      { defaults: { harness: "claude", model: "stub-model" } },
+    );
+    const cli = Bun.spawn(
+      [
+        process.execPath,
+        "run",
+        join(import.meta.dir, "server.ts"),
+        "--pool",
+        poolDir,
+        "--port",
+        "0",
+        "--registry",
+        join(poolDir, "fleet.json"),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    try {
+      const port = await waitForCliPort(join(poolDir, "fleet.json"), cli.pid);
+      const url = `http://localhost:${port}`;
+      type Served = { phase: string; state: { interrupts: { kind: string }[] } };
+      const snapshot = async (): Promise<Served | null> => {
+        const res = await fetch(`${url}/api/state`);
+        return ((await res.json()) as { snapshot: Served | null }).snapshot;
+      };
+      await waitUntil(
+        async () =>
+          (await snapshot())?.state.interrupts.some((i) => i.kind === "review") ??
+          false,
+        "the pool to reach its review gate",
+      );
+
+      // Held at the review gate, the pool is not done: the stop is refused
+      // and the process stays up.
+      const early = await fetch(`${url}/api/stop`, { method: "POST" });
+      expect(early.status).toBe(409);
+      expect(((await early.json()) as { error: string }).error).toContain("not done");
+      expect((await snapshot())?.phase).not.toBe("stopped");
+
+      const approve = await fetch(`${url}/api/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "approve" }),
+      });
+      expect(approve.status).toBe(202);
+      await waitUntil(
+        async () => (await snapshot())?.phase === "done",
+        "the pool to finish",
+      );
+
+      const stream = await fetch(`${url}/api/stream`);
+      const reader = stream.body!.getReader();
+      await readOpeningFrames(reader);
+
+      const stop = await fetch(`${url}/api/stop`, { method: "POST" });
+      expect(stop.status).toBe(202);
+      expect(await stop.json()).toEqual({ stopping: true });
+
+      const farewell = await drainStream(reader);
+      expect(farewell.text).toContain('"phase":"stopped"');
+      expect(farewell.ended).toBe("clean");
+
+      // The process is the thing that had to go: it exits 0, says why, and
+      // leaves the pool unlocked for a relaunch.
+      expect(await cli.exited).toBe(0);
+      const stdout = await new Response(cli.stdout).text();
+      expect(stdout).toContain(
+        "stop requested from the Console: stopping attempts, then exiting",
+      );
+      expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
+    } finally {
+      cli.kill("SIGKILL");
+    }
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------

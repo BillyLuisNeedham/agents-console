@@ -1,6 +1,6 @@
 /**
  * Pool client: the Console's single path to the pool server. The server serves
- * the built SPA, a small JSON API (get state, start, resume-with-answer), and
+ * the built SPA, a small JSON API (get state, start, resume-with-answer, stop), and
  * an SSE stream that pushes a full state snapshot on every change plus an SSE
  * comment heartbeat on a fixed cadence. The UI renders from those snapshots
  * only; this module is the only code that talks to the server.
@@ -119,6 +119,27 @@ export class PoolClient {
     if (!res.ok) throw new Error(`pool start failed: ${res.status}`);
     const body = await res.json();
     return body.snapshot;
+  }
+
+  /**
+   * Stop this pool's server (issue #97). The server answers 202 the moment it
+   * accepts, before the shutdown itself begins, so this resolving means only
+   * that the stop landed; the tab learns it finished from the farewell
+   * `stopped` snapshot on the stream. A refusal (the pool is running, or was
+   * never started) carries its reason in the JSON body's `error`, and that
+   * reason becomes the thrown Error's message so the Stop control can show it
+   * inline.
+   */
+  async stop(): Promise<void> {
+    const res = await fetch(`${this.base}/api/stop`, { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const error =
+        body && typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      throw new Error(error ?? `pool stop failed: ${res.status}`);
+    }
   }
 
   /**
