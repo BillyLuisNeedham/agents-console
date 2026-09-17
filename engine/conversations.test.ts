@@ -69,6 +69,7 @@ const stubConfig: PoolConfig = { defaults: { harness: "stub", model: "stub-model
 // tests).
 interface FakePane {
   tabId: string;
+  workspaceId: string | null;
   cwd: string;
   alive: boolean;
   buffer: string;
@@ -95,6 +96,7 @@ async function startFakeHerdr(options?: {
 }> {
   let minted = 0;
   let swallowRemaining = options?.swallowWrapper ?? 0;
+  let mintedWorkspaces = 0;
   const requests: { method: string; params: Record<string, unknown> }[] = [];
   const panes = new Map<string, FakePane>();
   const subscribers: Socket[] = [];
@@ -137,10 +139,13 @@ async function startFakeHerdr(options?: {
       };
       if (msg.method === "tab.create") {
         minted += 1;
+        const workspaceId =
+          typeof msg.params.workspace_id === "string" ? msg.params.workspace_id : null;
         const tabId = `tab-${minted}`;
         const paneId = `pane-${minted}`;
         panes.set(paneId, {
           tabId,
+          workspaceId,
           cwd: String(msg.params.cwd ?? "/"),
           alive: true,
           buffer: "",
@@ -149,12 +154,25 @@ async function startFakeHerdr(options?: {
           swallow: swallowRemaining > 0,
         });
         swallowRemaining -= 1;
-        respond({ tab: { tab_id: tabId } });
+        // herdr protocol 20 answers with the root pane (issue #94); the
+        // engine takes the pane id straight off it.
+        respond({
+          type: "tab_created",
+          tab: { tab_id: tabId },
+          root_pane: { pane_id: paneId, tab_id: tabId },
+        });
+      } else if (msg.method === "workspace.get") {
+        // The Pool workspace (issue #94): this fake never loses one, so a
+        // workspace it was asked about is one it holds.
+        respond({ workspace: { workspace_id: String(msg.params.workspace_id ?? "") } });
+      } else if (msg.method === "workspace.create") {
+        mintedWorkspaces += 1;
+        respond({ workspace: { workspace_id: `w${mintedWorkspaces}` } });
       } else if (msg.method === "pane.list") {
         respond({
           panes: [...panes.entries()]
             .filter(([, p]) => p.alive)
-            .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id })),
+            .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id, workspace_id: p.workspaceId })),
         });
       } else if (msg.method === "pane.read") {
         const pane = panes.get(String(msg.params.pane_id));

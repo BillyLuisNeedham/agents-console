@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
@@ -4425,16 +4425,20 @@ describe("spawn and exit facts", () => {
 describe("terminal-backed attempts (named herdr tabs)", () => {
   // ADR-0014 + ADR-0015: on a `terminal: "herdr"` pool every attempt opens
   // its own named herdr tab before the spawn is recorded — unfocused, in the
-  // attempt's cwd, labeled `<ticket-id> · <ticket-title>` — and the spawned
-  // event carries the root pane id recovered from pane.list, because
-  // tab.create returns none (verified herdr behaviour). The fake daemon
+  // attempt's cwd, labeled `<ticket-id> · <ticket-title>`, and inside the
+  // Pool workspace (issue #94) — and the spawned event carries the root pane
+  // id the tab.create answer itself returns. The fake daemon
   // speaks the real wire shape and actually executes the wrapper a pane is
   // sent, so the harness genuinely runs in the pane.
+  // No workspace seeded: the ordinary boot, where the pool has none
+  // remembered and none to launch in, so it creates its own (issue #94).
+  const CREATED_WORKSPACE = "w1";
+
   async function startFakeHerdr(): ReturnType<typeof startExecutingFakeHerdr> {
     return startExecutingFakeHerdr();
   }
 
-  it("opens a named unfocused tab in the attempt cwd and records the recovered pane id", async () => {
+  it("opens a named unfocused tab in the attempt cwd and records its root pane id", async () => {
     const poolDir = makePool({
       tickets: [
         { ...readyTicket("01"), body: "# Named herdr tabs\n\nticket body" },
@@ -4466,16 +4470,21 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
     await fake.close();
 
     expect(run.final.tickets["01"]).toBe("done");
-    // Boot reconciliation's liveness pane.list comes first, then the
-    // attempt's tab.create and its pane.list recovery.
-    expect(fake.requests.map((r) => r.method).slice(1, 3)).toEqual([
-      "tab.create",
+    // The Pool workspace is resolved first (issue #94), then boot
+    // reconciliation's liveness pane.list scoped to it, then the attempt's
+    // tab.create — and no pane.list after it, the root pane coming back on
+    // the tab.create answer itself.
+    expect(fake.requests.map((r) => r.method).slice(0, 3)).toEqual([
+      "workspace.create",
       "pane.list",
+      "tab.create",
     ]);
-    expect(fake.requests[1].params).toEqual({
+    expect(fake.requests[1].params).toEqual({ workspace_id: CREATED_WORKSPACE });
+    expect(fake.requests[2].params).toEqual({
       label: "01 · Named herdr tabs",
       focus: false,
       cwd: poolDir,
+      workspace_id: CREATED_WORKSPACE,
     });
     // The harness ran inside the pane: the wrapper line was sent as text with
     // Enter as a key in the same call, and the pane's end was awaited on an events.subscribe
@@ -4497,8 +4506,8 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
     const spawned = readEventLines(poolDir, "01").find(
       (e) => e.kind === "spawned",
     )!;
-    expect(spawned.payload.pane_id).toBe("pane-1");
-    expect(spawned.payload.tab_id).toBe("tab-1");
+    expect(spawned.payload.pane_id).toBe(`${CREATED_WORKSPACE}:p1`);
+    expect(spawned.payload.tab_id).toBe(`${CREATED_WORKSPACE}:t1`);
     expect(spawned.payload.terminal_error).toBeUndefined();
   }, 15000);
 
@@ -4519,9 +4528,10 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
     await fake.close();
 
     // The cap itself is unit-tested in herdr.test.ts; here the wiring from
-    // the ticket file's heading to the socket's label params. Request 0 is
-    // boot reconciliation's liveness pane.list; the tab.create follows.
-    expect(fake.requests[1].params.label).toBe(
+    // the ticket file's heading to the socket's label params. Requests 0 and
+    // 1 are the Pool workspace's create and boot reconciliation's liveness
+    // pane.list; the tab.create follows.
+    expect(fake.requests[2].params.label).toBe(
       `01 · ${longTitle.slice(0, 35)}`,
     );
   }, 15000);
@@ -4597,7 +4607,9 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       const spawned = readEventLines(poolDir, gid).find(
         (e) => e.kind === "spawned",
       )!;
-      expect(String(spawned.payload.pane_id)).toMatch(/^pane-/);
+      expect(String(spawned.payload.pane_id)).toMatch(
+        new RegExp(`^${CREATED_WORKSPACE}:p`),
+      );
     }
   }, 15000);
 
@@ -4850,6 +4862,451 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
   }, 15000);
 });
 
+describe("the Pool workspace (issue #94)", () => {
+  // Every tab a Terminal-backed pool opens lands in one herdr workspace, so
+  // the operator's tabs for one Pool sit together and never scattered
+  // through another project's. The id is resolved once at boot — the one
+  // this pool remembers, else the one the server was launched in, else a
+  // fresh one created for it — kept in the pool's runs directory, and read
+  // by every spawn site through the Attempt environment.
+
+  function poolWorkspaceFile(poolDir: string): string {
+    return join(poolDir, "runs", "pool-workspace.json");
+  }
+
+  function rememberedWorkspace(poolDir: string): unknown {
+    return JSON.parse(readFileSync(poolWorkspaceFile(poolDir), "utf8"));
+  }
+
+  function terminalPool(tickets: PoolSpec["tickets"]): string {
+    return makePool({
+      tickets,
+      config: { ...stubConfig, terminal: "herdr" },
+    });
+  }
+
+  it("creates one at boot, remembers it, and opens the attempt's tab in it", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Created for this pool: labelled with the pool directory's name, in
+    // the pool's checkout, and never focused (ADR-0015's rule that a spawn
+    // does not steal the operator's focus, one level up).
+    const created = fake.requests.filter((r) => r.method === "workspace.create");
+    expect(created).toHaveLength(1);
+    expect(created[0].params).toEqual({
+      label: basename(poolDir),
+      cwd: poolDir,
+      focus: false,
+    });
+    // Remembered on disk, in the runs directory and never in console.json.
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
+    expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
+    // No path matching: the daemon is never asked to list its workspaces.
+    expect(fake.requests.some((r) => r.method === "workspace.list")).toBe(false);
+  }, 15000);
+
+  it("reuses the workspace the pool remembers, without creating another", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(
+      poolWorkspaceFile(poolDir),
+      JSON.stringify({ workspace_id: "w-kept" }),
+    );
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-kept"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Confirmed, then used: the restart's tabs land back where the operator
+    // left the last run's.
+    expect(fake.requests[0]).toEqual({
+      method: "workspace.get",
+      params: { workspace_id: "w-kept" },
+    });
+    expect(fake.requests.some((r) => r.method === "workspace.create")).toBe(false);
+    const created = fake.requests.find((r) => r.method === "tab.create")!;
+    expect(created.params.workspace_id).toBe("w-kept");
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-kept" });
+  }, 15000);
+
+  it("falls to the workspace the server was launched in when the remembered one is gone", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(
+      poolWorkspaceFile(poolDir),
+      JSON.stringify({ workspace_id: "w-closed" }),
+    );
+    const rig = stubHarness(poolDir, {});
+    // The daemon holds the launch workspace and not the remembered one: the
+    // operator closed last run's workspace between runs.
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(
+      fake.requests
+        .filter((r) => r.method === "workspace.get")
+        .map((r) => r.params.workspace_id),
+    ).toEqual(["w-closed", "w-launch"]);
+    expect(fake.requests.some((r) => r.method === "workspace.create")).toBe(false);
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-launch" });
+    const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
+    expect(String(spawned.payload.pane_id).startsWith("w-launch:")).toBe(true);
+  }, 15000);
+
+  it("scopes boot reconciliation's pane listing to the Pool workspace", async () => {
+    const poolDir = terminalPool([readyTicket("01")]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+
+    await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await fake.close();
+
+    // The first listing is reconciliation's liveness check: this pool's
+    // orphans can only be in this pool's workspace, so the whole host's
+    // panes are no longer part of the answer.
+    const listing = fake.requests.find((r) => r.method === "pane.list")!;
+    expect(listing.params).toEqual({ workspace_id: "w-launch" });
+  }, 15000);
+
+  it("re-resolves once and retries the tab when the workspace is closed mid-run", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# First\n\nticket body" },
+      { ...readyTicket("02", "01"), body: "# Second\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+    // The operator closes the Pool workspace once the first ticket is done,
+    // so the second ticket's tab.create is the one the daemon refuses.
+    let closed = false;
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+      onSnapshot: (snapshot) => {
+        if (closed || snapshot.state.tickets["01"] !== "done") return;
+        closed = true;
+        fake.removeWorkspace("w-launch");
+      },
+    });
+    await fake.close();
+
+    expect(closed).toBe(true);
+    expect(run.final.tickets["02"]).toBe("done");
+    // The refused tab cost one re-resolve (a fresh workspace, the launch one
+    // being gone too) and one retry, and the attempt kept its pane rather
+    // than falling back to headless.
+    expect(fake.requests.filter((r) => r.method === "workspace.create")).toHaveLength(1);
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    const spawned = readEventLines(poolDir, "02").find((e) => e.kind === "spawned")!;
+    expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
+    expect(spawned.payload.terminal_error).toBeUndefined();
+    // And the operator is told, on the pool's own log.
+    expect(
+      run.final.log.some((line) => line.includes("the pool's tabs now open in w1")),
+    ).toBe(true);
+  }, 20000);
+
+  it("keeps the same workspace when a refused tab was only a daemon blip", async () => {
+    // A tab.create can be refused for reasons that have nothing to do with
+    // the workspace. Re-resolving asks `workspace.get` about the id that
+    // failed first, and a workspace that is still there is kept: the retry
+    // goes back to the same place and no second Pool workspace is minted.
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+    fake.failNextCall("tab.create");
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(fake.requests.some((r) => r.method === "workspace.create")).toBe(false);
+    const created = fake.requests.filter((r) => r.method === "tab.create");
+    expect(created).toHaveLength(2);
+    expect(created.map((r) => r.params.workspace_id)).toEqual([
+      "w-launch",
+      "w-launch",
+    ]);
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-launch" });
+    const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
+    expect(String(spawned.payload.pane_id).startsWith("w-launch:")).toBe(true);
+  }, 15000);
+
+  it("mints one workspace, not two, when concurrent spawns are both refused", async () => {
+    // Two tickets spawn in the same super-step. The workspace closes just
+    // before they do (on boot reconciliation's listing, which is the last
+    // call before the first spawn), so both tab.creates are refused at once:
+    // the first re-resolve is joined by the second, and a third spawn
+    // arriving after it is simply told where the tabs go now. Two Pool
+    // workspaces for one pool is exactly the scattering the feature exists
+    // to prevent, so the count is the assertion.
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# First\n\nticket body" },
+      { ...readyTicket("02"), body: "# Second\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    let closed = false;
+    const fake = await startExecutingFakeHerdr({
+      workspaces: ["w-launch"],
+      onRequest: (method) => {
+        if (closed || method !== "pane.list") return;
+        closed = true;
+        fake.removeWorkspace("w-launch");
+      },
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await fake.close();
+
+    expect(closed).toBe(true);
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(run.final.tickets["02"]).toBe("done");
+    expect(fake.requests.filter((r) => r.method === "workspace.create")).toHaveLength(1);
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    for (const id of ["01", "02"]) {
+      const spawned = readEventLines(poolDir, id).find((e) => e.kind === "spawned")!;
+      expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
+      expect(spawned.payload.terminal_error).toBeUndefined();
+    }
+  }, 20000);
+
+  it("keeps the resolved workspace when it cannot be remembered", async () => {
+    // The runs directory will not take the file (here: the path is already a
+    // directory). The id is a convenience for the next boot; this run has
+    // its workspace and its tabs go in it regardless.
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    mkdirSync(poolWorkspaceFile(poolDir), { recursive: true });
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
+    expect(String(spawned.payload.pane_id).startsWith("w-launch:")).toBe(true);
+    expect(spawned.payload.terminal_error).toBeUndefined();
+    expect(
+      run.final.log.some((line) => line.includes("could not be remembered")),
+    ).toBe(true);
+  }, 15000);
+
+  it("resolves afresh when the remembered file is unreadable or holds no id", async () => {
+    // Neither a torn file nor one holding the wrong type is worth failing a
+    // boot over: the pool forgets where its tabs were and resolves again.
+    for (const content of ['{"workspace_id": 7}', "not json at all"]) {
+      const poolDir = terminalPool([readyTicket("01")]);
+      mkdirSync(join(poolDir, "runs"), { recursive: true });
+      writeFileSync(poolWorkspaceFile(poolDir), content);
+      const rig = stubHarness(poolDir, {});
+      const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+
+      const run = await runPool({
+        poolDir,
+        harnesses: rig.harnesses,
+        herdrSocket: fake.socketPath,
+        herdrWorkspace: "w-launch",
+      });
+      await fake.close();
+
+      expect(run.final.tickets["01"]).toBe("done");
+      // Nothing was taken from the file: the only workspace confirmed is
+      // the launch one, and that is where the tabs went.
+      expect(
+        fake.requests
+          .filter((r) => r.method === "workspace.get")
+          .map((r) => r.params.workspace_id),
+      ).toEqual(["w-launch"]);
+      expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-launch" });
+    }
+  }, 20000);
+
+  it("releases the agent of a live orphan pane it will not adopt", async () => {
+    // A resolver attempt's orphan keeps the headless orphan fate (ADR-0014):
+    // this engine will never watch that pane, so the "working" binding the
+    // dead engine reported for it has to go, or it sits in herdr's agent
+    // sidebar forever as work nobody is doing.
+    const poolDir = terminalPool([readyTicket("01")]);
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:00Z",
+      attempt: 1,
+      kind: "spawned",
+      payload: { pane_id: "pane-ghost", tab_id: "tab-ghost" },
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: "2026-09-05T00:00:01Z",
+      attempt: 1,
+      kind: "resolver",
+      payload: {},
+    });
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+    fake.injectPane("pane-ghost");
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    const deadline = Date.now() + 5000;
+    while (
+      !fake.requests.some(
+        (r) => r.method === "pane.release_agent" && r.params.pane_id === "pane-ghost",
+      )
+    ) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the release");
+      await Bun.sleep(10);
+    }
+    await fake.close();
+
+    expect(run.final.tickets["01"]).toBe("done");
+    // Not adopted (the log says so), and not left bound either.
+    expect(
+      run.final.log.some((line) => line.includes("kept the headless orphan fate")),
+    ).toBe(true);
+    expect(
+      fake.requests.find(
+        (r) => r.method === "pane.release_agent" && r.params.pane_id === "pane-ghost",
+      )!.params,
+    ).toMatchObject({ source: "herdr:agent-console", agent: "stub" });
+  }, 15000);
+
+  it("boots and falls back to headless when no Pool workspace can be had", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ fail: ["workspace.create"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await fake.close();
+
+    // The pool boots and the ticket runs: a terminal is a convenience, and
+    // ADR-0014's per-attempt headless fallback is what a pool without one
+    // takes.
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(
+      run.final.log.some((line) =>
+        line.includes("no Pool workspace could be resolved"),
+      ),
+    ).toBe(true);
+    // An unplaced tab is never sent: with no Pool workspace there is
+    // nowhere for it to go.
+    expect(fake.requests.some((r) => r.method === "tab.create")).toBe(false);
+    const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.pane_id).toBeNull();
+    expect(String(spawned.payload.terminal_error)).toContain("no Pool workspace");
+    expect(typeof spawned.payload.pid).toBe("number");
+  }, 15000);
+
+  it("reports the attempt's agent while it runs and releases it at the ending", async () => {
+    const poolDir = terminalPool([
+      { ...readyTicket("01"), body: "# Workspaces\n\nticket body" },
+    ]);
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+
+    await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    // The report and the release are fire-and-forget (a daemon that will not
+    // take them changes nothing about the attempt), so the release can still
+    // be in flight when the drive settles: wait for the daemon to see it
+    // rather than racing the teardown.
+    const deadline = Date.now() + 5000;
+    while (!fake.requests.some((r) => r.method === "pane.release_agent")) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the release");
+      await Bun.sleep(10);
+    }
+    await fake.close();
+
+    // herdr lists a pane in its agent sidebar only when an agent is bound
+    // to it, and our panes run the harness inside `script`, so the engine
+    // asserts the identity itself the moment the wrapper lands.
+    const reports = fake.requests.filter((r) => r.method === "pane.report_agent");
+    expect(reports).toHaveLength(1);
+    expect(reports[0].params).toMatchObject({
+      pane_id: "w1:p1",
+      source: "herdr:agent-console",
+      agent: "stub",
+      state: "working",
+      message: "01 · Workspaces",
+    });
+    // And drops it at the Attempt ending, so a finished attempt's tab (kept
+    // until merge, ADR-0014) is no longer an agent at work.
+    const released = fake.requests.filter((r) => r.method === "pane.release_agent");
+    expect(released).toHaveLength(1);
+    expect(released[0].params).toMatchObject({
+      pane_id: "w1:p1",
+      source: "herdr:agent-console",
+      agent: "stub",
+    });
+  }, 15000);
+});
+
 describe("terminal-backed engine mechanics (ADR-0014)", () => {
   // The fake daemon actually executes the wrapper shell a pane is sent, so
   // these tests observe what a pane run produces through the pool: the tab
@@ -4857,10 +5314,18 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
   // The wrapper, Stream file, exit-code file and ending mechanics themselves
   // are the Attempt-run module's, pinned in attempt-run.test.ts.
 
+  // The daemon already holds the workspace these pools are launched in
+  // (issue #94), so an injected orphan pane lives inside the Pool workspace
+  // the restarted pool resolves, exactly as a real restart's does.
+  const LAUNCH_WORKSPACE = "w-launch";
+
   async function startFakeHerdr(options?: {
     breakSubscriptions?: boolean;
   }): ReturnType<typeof startExecutingFakeHerdr> {
-    return startExecutingFakeHerdr(options);
+    return startExecutingFakeHerdr({
+      workspaces: [LAUNCH_WORKSPACE],
+      ...options,
+    });
   }
 
   // A settled run's `settled` getter resolves immediately (there is no next
@@ -4957,6 +5422,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       poolDir,
       harnesses: rig.harnesses,
       herdrSocket: fake.socketPath,
+      herdrWorkspace: LAUNCH_WORKSPACE,
     });
     await until(
       () => fake.requests.some((r) => r.method === "tab.close"),
@@ -5015,6 +5481,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       poolDir,
       harnesses: rig.harnesses,
       herdrSocket: fake.socketPath,
+      herdrWorkspace: LAUNCH_WORKSPACE,
     });
     await fake.close();
 
@@ -5032,7 +5499,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       "pane-orphan",
     );
     expect(events.filter((e) => e.kind === "spawned")[1].payload.pane_id).toBe(
-      "pane-1",
+      `${LAUNCH_WORKSPACE}:p1`,
     );
   }, 15000);
 
@@ -5066,6 +5533,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       poolDir,
       harnesses: rig.harnesses,
       herdrSocket: fake.socketPath,
+      herdrWorkspace: LAUNCH_WORKSPACE,
     });
     await run.settled;
 
@@ -5079,6 +5547,21 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     const adoption = run.interrupts.find((i) => i.ticketId === "01")!;
     expect(adoption.kind).toBe("checkpoint");
     expect(adoption.body).toContain("re-adopted");
+    // herdr forgot the agent identity the dead engine reported for this
+    // pane (issue #94), so the re-adoption reports it again and the
+    // restarted pool's attempt is back in the agent list.
+    await until(
+      () => fake.requests.some((r) => r.method === "pane.report_agent"),
+      "the re-adopted pane's agent report",
+    );
+    expect(
+      fake.requests.find((r) => r.method === "pane.report_agent")!.params,
+    ).toMatchObject({
+      pane_id: "pane-ghost",
+      source: "herdr:agent-console",
+      agent: "stub",
+      state: "working",
+    });
 
     // The pane's wrapper finished while the engine was down: its exit-code
     // and outcome files are on disk, then the pane ends.
@@ -5133,6 +5616,7 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       poolDir,
       harnesses: rig.harnesses,
       herdrSocket: fake.socketPath,
+      herdrWorkspace: LAUNCH_WORKSPACE,
     });
     await run.settled;
     expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);

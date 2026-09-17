@@ -97,6 +97,15 @@ export interface PoolServerOptions {
   registryPath?: string;
   /** The herdr daemon socket for terminal-backed attempts and the terminal endpoints; tests point this at a fake. Defaults to the daemon's path on this machine. */
   herdrSocket?: string;
+  /**
+   * The herdr workspace this server was launched in (issue #94), read from
+   * `HERDR_WORKSPACE_ID` by the CLI and passed down from there. It is the
+   * second candidate for the Pool workspace, after the id the pool
+   * remembers, so a Console started from inside herdr puts its tabs where
+   * the operator already is. Tests inject it; nothing below the CLI
+   * boundary reads the environment.
+   */
+  herdrWorkspace?: string;
   /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
   /**
@@ -870,6 +879,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const distDir = options.distDir ?? join(import.meta.dir, "..", "ui", "dist");
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
+  const herdrWorkspace = options.herdrWorkspace;
   const streamHeartbeatMs =
     options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   // The pool's ticket metadata, as the engine parses it from the Issue files —
@@ -990,6 +1000,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       poolDir,
       harnesses,
       herdrSocket,
+      ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
         broadcast(enrich(snapshot, meta, poolName, poolDir));
@@ -1562,6 +1573,12 @@ function runServerCli(): void {
     );
     process.exit(1);
   }
+  // The one read of HERDR_WORKSPACE_ID in the engine (issue #94): the
+  // workspace herdr exports into the shell the Console was launched from, so
+  // a pool started inside herdr opens its tabs where the operator already
+  // is. It travels on as an option, and nothing below this boundary ever
+  // consults the environment for it.
+  const herdrWorkspace = process.env.HERDR_WORKSPACE_ID || undefined;
   let server: PoolServer;
   const stopAndExit = shutdownThenExit(() => server);
   try {
@@ -1569,6 +1586,7 @@ function runServerCli(): void {
       poolDir,
       ...(port !== undefined ? { port } : {}),
       ...(registryPath !== undefined ? { registryPath } : {}),
+      ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       onStopRequested: () => stopAndExit("stop requested from the Console"),
     });
   } catch (err) {

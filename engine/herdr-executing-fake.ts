@@ -41,6 +41,15 @@
  * its later end. A method named in `fail` (seeded by the option, mutable on
  * the handle) answers with a herdr-style error body, the shape of a daemon
  * refusing the call, so a refusal can be switched on mid-run.
+ *
+ * Workspaces are modelled too (issue #94): `workspaces` seeds the ones the
+ * daemon already holds (a pool's remembered or launch workspace),
+ * `workspace.create` mints `w<N>`, `tab.create` refuses a workspace the
+ * daemon does not hold and otherwise mints its ids inside it
+ * (`<ws>:t<N>` / `<ws>:p<N>`), `pane.list` honours a `workspace_id` filter,
+ * and `removeWorkspace` closes one out from under a running pool the way an
+ * operator does. `pane.report_agent` and `pane.release_agent` are recorded
+ * and acknowledged.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -55,7 +64,20 @@ export interface FakeHerdrRequest {
 
 export interface ExecutingFakeHerdrOptions {
   breakSubscriptions?: boolean;
+  /**
+   * Workspaces the daemon already holds (issue #94), so a test can offer one
+   * as the pool's remembered or launch workspace. A fake with none makes the
+   * pool create its own, which is the ordinary boot.
+   */
+  workspaces?: string[];
   fail?: string[];
+  /**
+   * Called with every request the daemon receives, after it is recorded and
+   * before it is answered: the seam a test drives the daemon's own world
+   * from at an exact moment (closing a workspace as boot reconciliation's
+   * listing lands, say), where a timer would race the engine.
+   */
+  onRequest?: (method: string, params: Record<string, unknown>) => void;
   rendered?: string;
   dropInputs?: number;
   hideInputs?: number;
@@ -84,8 +106,14 @@ export interface ExecutingFakeHerdr {
   submitted: string[];
   /** Methods that answer with an error body from now on. */
   fail: Set<string>;
+  /** Refuse the next `times` calls of this method, then answer normally again: a daemon blip, not a daemon that is down. */
+  failNextCall: (method: string, times?: number) => void;
   close: () => Promise<void>;
   injectPane: (paneId: string) => void;
+  /** Close a workspace out from under the pool, the way an operator does mid-run (issue #94). */
+  removeWorkspace: (workspaceId: string) => void;
+  /** The workspace ids the fake currently holds, seeded plus created. */
+  workspaceIds: () => string[];
   endPane: (paneId: string) => void;
   setPaneContent: (paneId: string, text: string) => void;
   dropPaneInput: (paneId: string, count: number) => void;
@@ -103,6 +131,10 @@ export async function startExecutingFakeHerdr(
   let swallowRemaining = options?.swallowWrapper ?? 0;
   const shellPromptDelayMs = options?.shellPromptDelayMs ?? 0;
   const fail = new Set(options?.fail ?? []);
+  // Method -> how many more calls of it are refused before it works again.
+  const failNext = new Map<string, number>();
+  const workspaces = new Set(options?.workspaces ?? []);
+  let mintedWorkspaces = 0;
   // The input area as pane.read shows it: verbatim, or drawn as a bordered
   // box that wraps each line at `wrapWidth` columns.
   const renderInput = (inputArea: string): string => {
@@ -123,6 +155,7 @@ export async function startExecutingFakeHerdr(
     string,
     {
       tabId: string;
+      workspaceId: string | null;
       cwd: string;
       alive: boolean;
       buffer: string;
@@ -176,9 +209,23 @@ export async function startExecutingFakeHerdr(
         params: Record<string, unknown>;
       };
       requests.push({ method: msg.method, params: msg.params });
+      options?.onRequest?.(msg.method, msg.params);
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
+      const blips = failNext.get(msg.method) ?? 0;
+      if (blips > 0) {
+        // A transient refusal: this call fails, the next one works.
+        if (blips === 1) failNext.delete(msg.method);
+        else failNext.set(msg.method, blips - 1);
+        socket.end(
+          JSON.stringify({
+            id: msg.id,
+            error: { code: -32000, message: `${msg.method} blipped` },
+          }) + "\n",
+        );
+        return;
+      }
       if (fail.has(msg.method)) {
         socket.end(
           JSON.stringify({
@@ -189,11 +236,27 @@ export async function startExecutingFakeHerdr(
         return;
       }
       if (msg.method === "tab.create") {
+        const workspaceId =
+          typeof msg.params.workspace_id === "string" ? msg.params.workspace_id : null;
+        if (workspaceId !== null && !workspaces.has(workspaceId)) {
+          // The Pool workspace is gone (the operator closed it mid-run):
+          // the daemon refuses the tab, and the engine re-resolves once.
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              error: { code: -32001, message: `no such workspace ${workspaceId}` },
+            }) + "\n",
+          );
+          return;
+        }
         minted += 1;
-        const tabId = `tab-${minted}`;
-        const paneId = `pane-${minted}`;
+        // Ids carry the workspace when one was named, so a test reads where
+        // a tab landed off the ids alone (issue #94).
+        const tabId = workspaceId !== null ? `${workspaceId}:t${minted}` : `tab-${minted}`;
+        const paneId = workspaceId !== null ? `${workspaceId}:p${minted}` : `pane-${minted}`;
         panes.set(paneId, {
           tabId,
+          workspaceId,
           cwd: String(msg.params.cwd ?? "/"),
           alive: true,
           buffer: "",
@@ -207,12 +270,52 @@ export async function startExecutingFakeHerdr(
           createdAt: Date.now(),
         });
         swallowRemaining -= 1;
-        respond({ tab: { tab_id: tabId } });
+        respond({
+          type: "tab_created",
+          tab: { tab_id: tabId, ...(workspaceId !== null ? { workspace_id: workspaceId } : {}) },
+          root_pane: {
+            pane_id: paneId,
+            tab_id: tabId,
+            ...(workspaceId !== null ? { workspace_id: workspaceId } : {}),
+          },
+        });
+      } else if (msg.method === "workspace.get") {
+        const workspaceId = String(msg.params.workspace_id ?? "");
+        if (workspaces.has(workspaceId)) {
+          respond({ workspace: { workspace_id: workspaceId } });
+        } else {
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              error: { code: -32001, message: `no such workspace ${workspaceId}` },
+            }) + "\n",
+          );
+        }
+      } else if (msg.method === "workspace.create") {
+        mintedWorkspaces += 1;
+        const workspaceId = `w${mintedWorkspaces}`;
+        workspaces.add(workspaceId);
+        respond({
+          workspace: {
+            workspace_id: workspaceId,
+            label: typeof msg.params.label === "string" ? msg.params.label : "",
+          },
+        });
+      } else if (msg.method === "pane.report_agent" || msg.method === "pane.release_agent") {
+        // Recorded in `requests` like every call; the daemon answers ok.
+        respond({ type: "ok" });
       } else if (msg.method === "pane.list") {
+        const scope =
+          typeof msg.params.workspace_id === "string" ? msg.params.workspace_id : null;
         respond({
           panes: [...panes.entries()]
             .filter(([, pane]) => pane.alive)
-            .map(([paneId, pane]) => ({ tab_id: pane.tabId, pane_id: paneId })),
+            .filter(([, pane]) => scope === null || pane.workspaceId === scope)
+            .map(([paneId, pane]) => ({
+              tab_id: pane.tabId,
+              pane_id: paneId,
+              ...(pane.workspaceId !== null ? { workspace_id: pane.workspaceId } : {}),
+            })),
         });
       } else if (msg.method === "pane.read") {
         const pane = panes.get(String(msg.params.pane_id));
@@ -338,6 +441,9 @@ export async function startExecutingFakeHerdr(
     requests,
     submitted,
     fail,
+    failNextCall: (method, times = 1) => {
+      failNext.set(method, (failNext.get(method) ?? 0) + times);
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const proc of procs) proc.kill();
@@ -355,6 +461,10 @@ export async function startExecutingFakeHerdr(
     injectPane: (paneId) => {
       panes.set(paneId, {
         tabId: "tab-ghost",
+        // An injected orphan belongs to whatever workspace the pool
+        // resolved, so a scoped pane.list still finds it: the first
+        // workspace the fake holds, or none at all when it holds none.
+        workspaceId: [...workspaces][0] ?? null,
         cwd: "/tmp",
         alive: true,
         buffer: "",
@@ -369,6 +479,10 @@ export async function startExecutingFakeHerdr(
       });
     },
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
+    removeWorkspace: (workspaceId) => {
+      workspaces.delete(workspaceId);
+    },
+    workspaceIds: () => [...workspaces],
     setPaneContent: (paneId, text) => {
       const pane = panes.get(paneId);
       if (pane) pane.rendered = text;

@@ -11,11 +11,26 @@
  *
  * Terminal-backed attempts (pools configured `terminal: "herdr"`) each open
  * their own named tab at spawn time via `openAttemptTab`: the tab is created
- * unfocused in the attempt's worktree cwd and named `<ticket-id> ·
+ * unfocused in the attempt's worktree cwd, named `<ticket-id> ·
  * <ticket-title>` so the operator's tab bar reads as the roster of tickets in
- * flight. `tab.create` carries no root pane id (verified herdr behaviour), so
- * the pane id is recovered from `pane.list` filtered by the created tab's id,
- * and the engine records it on the attempt's `spawned` event.
+ * flight, and inside the **Pool workspace** (issue #94), the one herdr
+ * workspace every tab of one Pool opens in. herdr protocol 20 answers
+ * `tab.create` with `tab_created { tab, root_pane }`, both required, so the
+ * pane id comes straight off `root_pane` and the `pane.list` scan the first
+ * cut needed is gone; the engine records the pane id on the attempt's
+ * `spawned` event.
+ *
+ * The Pool workspace itself is resolved once per boot by
+ * `resolvePoolWorkspace` (remembered id, else the workspace the server was
+ * launched in, else a fresh one created for the pool), and the engine keeps
+ * the id in the pool's runs directory so a restart lands its tabs back where
+ * the operator left them.
+ *
+ * herdr lists a pane in its left-hand agent sidebar only when the pane has
+ * an agent bound to it, and its own process-name detection never binds ours
+ * (the harness runs inside `script`), so the engine asserts the identity
+ * itself: `reportPaneAgent` after the wrapper lands and on every Turn flip,
+ * `releasePaneAgent` at the Attempt ending. Both are best-effort.
  */
 
 import { connect } from "node:net";
@@ -146,45 +161,142 @@ export interface AttemptTab {
 }
 
 /**
- * Open an attempt's named tab: `tab.create` unfocused in the attempt's
- * worktree cwd, then the root pane id recovered from `pane.list` filtered by
- * the created tab's id, because `tab.create` (and the `tab_created` event)
- * carries no root pane id (verified herdr behaviour). Throws when the daemon
- * errors or the response shapes do not hold; callers treat a throw as the
- * headless fallback (ADR-0014) and record the failure on the spawned event.
+ * Open an attempt's named tab in the Pool workspace (issue #94):
+ * `tab.create` unfocused in the attempt's worktree cwd, carrying the
+ * workspace id so every tab of one Pool lands together instead of wherever
+ * the daemon's focus happens to be. The pane id comes off the answer's
+ * `root_pane`: herdr protocol 20 answers `tab_created { tab, root_pane }`
+ * with both required, so the `pane.list` scan the first cut needed (and the
+ * race it carried, a listing that had not caught up with the new tab) is
+ * gone. Throws when the daemon errors or either response shape does not
+ * hold; callers treat a throw as the headless fallback (ADR-0014) and record
+ * the failure on the spawned event.
  */
 export async function openAttemptTab(
   socketPath: string,
   label: string,
   cwd: string,
+  workspaceId: string,
 ): Promise<AttemptTab> {
   const created = await herdrRpc(socketPath, "tab.create", {
     label,
     focus: false,
     cwd,
+    workspace_id: workspaceId,
   });
-  const tabId =
+  const answer =
     typeof created === "object" && created !== null
-      ? (created as { tab?: { tab_id?: unknown } }).tab?.tab_id
-      : undefined;
+      ? (created as {
+          tab?: { tab_id?: unknown };
+          root_pane?: { pane_id?: unknown };
+        })
+      : {};
+  const tabId = answer.tab?.tab_id;
   if (typeof tabId !== "string" || tabId === "") {
     throw new Error(`tab.create returned no tab id: ${JSON.stringify(created)}`);
   }
-  const list = await herdrRpc(socketPath, "pane.list", {});
-  const panes =
-    typeof list === "object" && list !== null
-      ? (list as { panes?: unknown }).panes
-      : undefined;
-  const pane = Array.isArray(panes)
-    ? (panes as { tab_id?: unknown; pane_id?: unknown }[]).find(
-        (p) => p?.tab_id === tabId,
-      )
-    : undefined;
-  const paneId = pane?.pane_id;
+  const paneId = answer.root_pane?.pane_id;
   if (typeof paneId !== "string" || paneId === "") {
-    throw new Error(`no pane found for new tab ${tabId}`);
+    throw new Error(
+      `tab.create returned no root pane id: ${JSON.stringify(created)}`,
+    );
   }
   return { tabId, paneId };
+}
+
+/** Where the Pool workspace id the engine uses came from (issue #94). */
+export type PoolWorkspaceOrigin = "remembered" | "launch" | "created";
+
+export interface PoolWorkspaceResolution {
+  workspaceId: string;
+  origin: PoolWorkspaceOrigin;
+}
+
+/**
+ * Resolve the Pool workspace (issue #94), the one herdr workspace a
+ * Terminal-backed pool opens its attempt and Conversation tabs in. Three
+ * steps, in order:
+ *
+ * 1. `remembered`: the id this pool used last, read from its runs directory.
+ *    It is used only once `workspace.get` confirms the workspace is still
+ *    there; an operator who closed it leaves an id that answers with an
+ *    error, and the resolution falls through.
+ * 2. `launch`: the workspace the Console server was launched in
+ *    (`HERDR_WORKSPACE_ID`), confirmed the same way, so a pool started from
+ *    inside herdr puts its tabs where the operator already is.
+ * 3. Otherwise a fresh one: `workspace.create` labelled for the pool, in the
+ *    pool's repo root, unfocused (ADR-0015's rule that a spawn never steals
+ *    the operator's focus, applied one level up).
+ *
+ * There is deliberately no path-matching against `workspace.list`: a
+ * workspace's cwd is the operator's to change and two pools of one repo
+ * would collide on it, so identity comes from an id the pool recorded or
+ * was told, never from a guess. Rejects when the daemon cannot be reached at
+ * all and no candidate held; the caller boots headless-falling-back rather
+ * than refusing the pool.
+ */
+export async function resolvePoolWorkspace(
+  socketPath: string,
+  candidates: {
+    remembered: string | null;
+    launch: string | null;
+    label: string;
+    cwd: string;
+  },
+): Promise<PoolWorkspaceResolution> {
+  const known: [PoolWorkspaceOrigin, string | null][] = [
+    ["remembered", candidates.remembered],
+    ["launch", candidates.launch],
+  ];
+  for (const [origin, workspaceId] of known) {
+    if (workspaceId === null || workspaceId === "") continue;
+    if (await workspaceExists(socketPath, workspaceId)) {
+      return { workspaceId, origin };
+    }
+  }
+  const created = await herdrRpc(socketPath, "workspace.create", {
+    label: candidates.label,
+    cwd: candidates.cwd,
+    focus: false,
+  });
+  const workspaceId =
+    typeof created === "object" && created !== null
+      ? (created as { workspace?: { workspace_id?: unknown } }).workspace
+          ?.workspace_id
+      : undefined;
+  if (typeof workspaceId !== "string" || workspaceId === "") {
+    throw new Error(
+      `workspace.create returned no workspace id: ${JSON.stringify(created)}`,
+    );
+  }
+  return { workspaceId, origin: "created" };
+}
+
+/**
+ * Whether the daemon still holds this workspace: `workspace.get` answering
+ * with one. Any error (an unknown id, a daemon that is not there) is a "no",
+ * because both mean the same thing to the caller — this id cannot be used.
+ * Exported for the engine's re-resolve, which asks the same question of the
+ * id a `tab.create` just refused: a workspace that is still there means the
+ * refusal was something else, and nothing should be created.
+ */
+export async function workspaceExists(
+  socketPath: string,
+  workspaceId: string,
+): Promise<boolean> {
+  try {
+    const got = await herdrRpc(socketPath, "workspace.get", {
+      workspace_id: workspaceId,
+    });
+    const id =
+      typeof got === "object" && got !== null
+        ? (got as { workspace?: { workspace_id?: unknown } }).workspace
+            ?.workspace_id
+        : undefined;
+    return typeof id === "string" && id !== "";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -227,12 +339,90 @@ export async function focusPane(
 }
 
 /**
+ * What the engine calls itself when it asserts a pane's agent identity, on
+ * every `pane.report_agent` and the matching `pane.release_agent`: herdr
+ * keys a reported agent by (pane, source), so the source is what stops one
+ * reporter from releasing another's binding.
+ */
+export const PANE_AGENT_SOURCE = "herdr:agent-console";
+
+/**
+ * How herdr's agent sidebar shows a pane the engine reported: "working" is
+ * an attempt the agent is running, "blocked" is a Conversation waiting on
+ * the operator (herdr's vocabulary for "it needs a human"). A Ticket
+ * attempt has no Turn state and stays "working" for its whole life.
+ */
+export type PaneAgentState = "working" | "blocked";
+
+// The `seq` every report carries, so the daemon can order two reports about
+// one pane whatever order they arrive in. Strictly increasing within this
+// process, and seeded from the clock so a restarted engine almost always
+// continues above where its predecessor left off — the exception being a
+// process that reported more times than the milliseconds it lived, or a
+// clock that went backwards.
+let paneAgentSeq = Date.now();
+
+/**
+ * Report a pane's agent identity (issue #94): herdr lists a pane in its
+ * left-hand agent sidebar only when the pane has an agent bound to it, and
+ * its process-name detection never binds ours, because the harness runs
+ * inside `script` (ADR-0016). So the engine asserts the identity itself —
+ * the harness name, the state, and the attempt's tab label as the message —
+ * once the wrapper has landed, and again on every Conversation Turn flip.
+ */
+export async function reportPaneAgent(
+  socketPath: string,
+  paneId: string,
+  agent: string,
+  state: PaneAgentState,
+  message: string,
+): Promise<void> {
+  paneAgentSeq += 1;
+  await herdrRpc(socketPath, "pane.report_agent", {
+    pane_id: paneId,
+    source: PANE_AGENT_SOURCE,
+    agent,
+    state,
+    seq: paneAgentSeq,
+    message,
+  });
+}
+
+/**
+ * Drop the agent identity this engine reported for a pane, at the Attempt
+ * ending: the attempt is over, so it leaves herdr's agent list even where
+ * the pane itself lives on (a crashed attempt's tab stays open until merge,
+ * ADR-0014). Best-effort, exactly as closeTab is.
+ */
+export async function releasePaneAgent(
+  socketPath: string,
+  paneId: string,
+  agent: string,
+): Promise<void> {
+  await herdrRpc(socketPath, "pane.release_agent", {
+    pane_id: paneId,
+    source: PANE_AGENT_SOURCE,
+    agent,
+  });
+}
+
+/**
  * The live pane ids herdr currently holds, from `pane.list`. Boot
  * reconciliation (ADR-0014) treats membership as liveness: a recorded attempt
  * pane that is not listed died with the daemon restart or was closed.
+ * Scoped to the Pool workspace when one is known (issue #94), so the answer
+ * is this pool's panes rather than every pane on the host; daemon-wide
+ * otherwise, which is what the check has always done.
  */
-export async function listPaneIds(socketPath: string): Promise<string[]> {
-  const list = await herdrRpc(socketPath, "pane.list", {});
+export async function listPaneIds(
+  socketPath: string,
+  workspaceId?: string,
+): Promise<string[]> {
+  const list = await herdrRpc(
+    socketPath,
+    "pane.list",
+    workspaceId !== undefined ? { workspace_id: workspaceId } : {},
+  );
   const panes =
     typeof list === "object" && list !== null
       ? (list as { panes?: unknown }).panes
