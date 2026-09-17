@@ -51,7 +51,14 @@ import {
   waitForPaneEnding,
   type PaneEnding,
 } from "./attempt-ending.ts";
-import { closeTab, peekPane } from "./herdr.ts";
+import {
+  attemptTabLabel,
+  closeTab,
+  peekPane,
+  releasePaneAgent,
+  reportPaneAgent,
+  type PaneAgentState,
+} from "./herdr.ts";
 import {
   launchAttempt,
   type AttemptEnv,
@@ -240,6 +247,11 @@ export interface ConversationRuntime {
   exitCodePath: string;
   streamPath: string;
   logPath: string;
+  // The agent identity this Conversation's pane is reported under in
+  // herdr's agent sidebar (issue #94): the harness the Assignment resolved,
+  // and the pane's tab label as the message every report carries.
+  harness: string;
+  label: string;
   // Stored whole and replaced whole on every tick (engine/turn-state.ts).
   turn: TurnState;
   // The follow-file tailer deriving the log from the pane's Stream file
@@ -385,6 +397,33 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
   function event(id: string, kind: TicketEventKind, payload: Record<string, unknown>, attempt = 1): void {
     appendEvent(env.runsDir, id, { at: nowIso(), attempt, kind, payload });
+  }
+
+  // -------------------------------------------------------------------------
+  // The pane's agent identity in herdr's sidebar (issue #94). A Conversation
+  // is the one Attempt with a Turn state, so it is the one whose reported
+  // state moves: "working" while the agent works, "blocked" while it waits
+  // on the operator, which is herdr's word for "a human is what it needs".
+  // Both calls are fire-and-forget and swallow their failures, exactly as
+  // the tab closes do: the sidebar is a convenience, never a dependency.
+  // -------------------------------------------------------------------------
+
+  function reportAgent(runtime: ConversationRuntime, state: PaneAgentState): void {
+    if (!runtime.paneId) return;
+    void reportPaneAgent(
+      env.herdrSocket,
+      runtime.paneId,
+      runtime.harness.toLowerCase(),
+      state,
+      runtime.label,
+    ).catch(() => {});
+  }
+
+  function releaseAgent(paneId: string | null, harness: string): void {
+    if (!paneId) return;
+    void releasePaneAgent(env.herdrSocket, paneId, harness.toLowerCase()).catch(
+      () => {},
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -596,6 +635,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         code: handle.code,
         reason: exitCrashReason(handle.code, handle.ctx.exitCodePath, "harness", handle.paneId),
       });
+      // The launch reported the pane's agent the moment the wrapper landed
+      // (attempt-run.ts); this Conversation never got further, so the
+      // identity goes with the ending, as at every other ending below.
+      releaseAgent(handle.paneId, harness);
       env.liveAttempts.clear(id, 1);
       host.closeAttemptTabs(id);
       noteEnded(id, { branch: worktree.branch, crashed: true });
@@ -615,6 +658,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       exitCodePath: handle.ctx.exitCodePath,
       streamPath: handle.ctx.streamPath ?? join(env.runsDir, `${id}.stream.jsonl`),
       logPath: handle.ctx.logPath,
+      harness,
+      label: attemptTabLabel(id, req.title),
       turn: FRESH_TURN,
       tailer: handle.tailer,
       notices: [],
@@ -660,6 +705,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     stopTick(runtime);
     writeConversationStatus(runtime.file, "crashed");
     event(runtime.id, "crash", { reason: `pane lost without End (${ending})` });
+    releaseAgent(runtime.paneId, runtime.harness);
     // A launch-only run clears its own Live attempt where it records the
     // ending (attempt-run.ts): here, and at End below.
     env.liveAttempts.clear(runtime.id, 1);
@@ -679,6 +725,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     stopTick(runtime);
     writeConversationStatus(runtime.file, "ended");
     event(runtime.id, "ended", { closing: runtime.closing ?? null, by: "operator", merged });
+    releaseAgent(runtime.paneId, runtime.harness);
     env.liveAttempts.clear(runtime.id, 1);
     host.closeAttemptTabs(runtime.id);
     // While the runtime is still in the map: noteEnded reads its notices
@@ -716,6 +763,12 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     runtime.ending = true;
     runtime.closing = closing;
     runtime.release.abort();
+    // Before the tab goes: the release names a pane, and a pane whose tab
+    // has just been closed is a pane the daemon no longer has (issue #94).
+    // finishEnd releases too, for the paths that reach an ending without
+    // coming through here; a second release of a binding already dropped is
+    // a no-op, and both are best-effort anyway.
+    releaseAgent(runtime.paneId, runtime.harness);
     if (runtime.tabId) await closeTab(env.herdrSocket, runtime.tabId).catch(() => {});
     // The talk is over: drain the tailer so the derived log is complete.
     await runtime.tailer?.finish().catch(() => {});
@@ -1141,8 +1194,15 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           const live = runtimes.get(id);
           if (text === null || !live || live.ending) return;
           const { turn, publish: changed } = nextTurnState(live.turn, text, idlePattern, nowIso());
+          const flipped = live.turn.state !== turn.state;
           live.turn = turn;
           if (changed) publish();
+          // The Turn flipped, so what herdr's agent sidebar says about this
+          // pane flips with it (issue #94): waiting on the operator is
+          // "blocked", everything else is work in progress.
+          if (flipped) {
+            reportAgent(live, turn.state === "waiting" ? "blocked" : "working");
+          }
           if (turn.state === "waiting" && live.notices.length > 0) {
             void deliver(id);
           }

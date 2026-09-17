@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import {
   appendEvent,
   attemptExitCodeName,
@@ -44,14 +44,20 @@ import {
   closePane,
   closeTab,
   listPaneIds,
+  releasePaneAgent,
+  resolvePoolWorkspace,
+  workspaceExists,
 } from "./herdr.ts";
 import {
   attemptStreamPath,
   readLogTail,
+  releaseAttemptAgent,
+  reportAttemptAgent,
   rotateAttemptLog,
   runAttempt,
   startPaneStreamTail,
   type AttemptEnv,
+  type PoolWorkspace,
 } from "./attempt-run.ts";
 import {
   exitedPhrase,
@@ -331,6 +337,11 @@ interface RunOptions {
   // The herdr daemon socket for terminal-backed attempts. Tests point this
   // at a fake socket; the default is the daemon's path on this machine.
   herdrSocket?: string;
+  // The herdr workspace the server was launched in (issue #94), the second
+  // candidate for the Pool workspace after the id this pool remembers. It
+  // reaches the engine as an option and never as an environment read: the
+  // CLI boundary is the only thing below which process.env is consulted.
+  herdrWorkspace?: string;
   // The Conversations ADR: force-allow an empty issues/ (no Tickets at
   // all) even when the pool has no conversations/ directory yet either —
   // startPool already infers this on its own once a conversations/
@@ -564,6 +575,8 @@ interface Session {
   issueRunnerPath: string;
   // Where terminal-backed attempts reach the herdr daemon (ADR-0014).
   herdrSocket: string;
+  // The Pool workspace (issue #94): where every tab this pool opens lands.
+  poolWorkspace: PoolWorkspaceState;
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
@@ -716,7 +729,18 @@ export function startPool(options: RunOptions): PoolRun {
   );
   const conversations = createConversations(
     {
-      ...attemptEnvFrom(config, harnesses, runsDir, herdrSocket, children, liveAttempts),
+      ...attemptEnvFrom(
+        config,
+        harnesses,
+        runsDir,
+        herdrSocket,
+        // Bound late for the same reason the host below is: the session
+        // whose Pool workspace this reads does not exist yet, and a
+        // Conversation started after boot must read the resolved id.
+        poolWorkspaceFor(() => session),
+        children,
+        liveAttempts,
+      ),
       poolDir,
       cwd,
       git,
@@ -753,6 +777,14 @@ export function startPool(options: RunOptions): PoolRun {
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     herdrSocket,
+    poolWorkspace: {
+      // Replaced below by the boot resolution itself, so anything reading
+      // through poolWorkspaceFor before then waits for the real answer.
+      ready: Promise.resolve(),
+      id: null,
+      launch: options.herdrWorkspace ?? null,
+      reresolving: null,
+    },
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
     terminalReconcile: Promise.resolve(),
@@ -774,14 +806,24 @@ export function startPool(options: RunOptions): PoolRun {
   // at boot has an unknown pane fate and no runtime entry will ever track
   // it again, so it crashes now rather than sitting unreachable.
   session.conversations.crashStaleAtBoot();
+  // The Pool workspace comes first (issue #94): reconciliation scopes its
+  // pane listing to it, and every spawn opens its tab in it, so it is
+  // resolved before either can run. `ready` is the resolution itself, so a
+  // Conversation started off the handle the moment startPool returns waits
+  // on it rather than racing it.
+  session.poolWorkspace.ready = resolvePoolWorkspaceForSession(session);
   // Boot reconciliation, awaited by the drive before its first scheduling:
   // terminal-backed orphans are re-adopted or crashed (ADR-0014), headless
   // orphans are stopped (ADR-0017), so no ticket is ever spawned into a
   // worktree its previous attempt is still writing.
-  session.terminalReconcile = Promise.all([
-    reconcileTerminalAttempts(session),
-    reapHeadlessOrphans(session),
-  ]).then(() => undefined);
+  session.terminalReconcile = session.poolWorkspace.ready
+    .then(() =>
+      Promise.all([
+        reconcileTerminalAttempts(session),
+        reapHeadlessOrphans(session),
+      ]),
+    )
+    .then(() => undefined);
   const handle = makeHandle(session);
   session.handle = handle;
   startDrive(session);
@@ -1755,6 +1797,216 @@ function terminalAdoptable(
   );
 }
 
+// ---------------------------------------------------------------------------
+// The Pool workspace (issue #94)
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-pool runtime file that remembers the Pool workspace:
+ * `runs/pool-workspace.json`, `{ "workspace_id": "wT" }`. A runtime fact of
+ * this engine's own, never pool configuration, so it lives beside the other
+ * runs artifacts and never in console.json: the operator neither writes it
+ * nor reviews it, and a pool copied elsewhere must not drag another
+ * machine's workspace id along in a file under version control.
+ */
+const POOL_WORKSPACE_FILE = "pool-workspace.json";
+
+/**
+ * The session's knowledge of its Pool workspace. `ready` settles once boot
+ * resolution has decided (whatever it decided), so a spawn that races the
+ * boot RPC waits for it instead of opening its tab elsewhere; `id` is null
+ * until then, and stays null when no workspace could be had at all.
+ */
+interface PoolWorkspaceState {
+  ready: Promise<void>;
+  id: string | null;
+  /** The workspace the server was launched in (HERDR_WORKSPACE_ID), or null. */
+  launch: string | null;
+  /** A re-resolve in flight, shared by every spawn that raced into the same refusal. */
+  reresolving: Promise<string | null> | null;
+}
+
+function readRememberedPoolWorkspace(runsDir: string): string | null {
+  try {
+    const raw = readOptional(join(runsDir, POOL_WORKSPACE_FILE));
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as { workspace_id?: unknown };
+    return typeof parsed.workspace_id === "string" && parsed.workspace_id !== ""
+      ? parsed.workspace_id
+      : null;
+  } catch {
+    // Unreadable, torn, or holding something that is not an id: the pool
+    // simply forgets where its tabs were and resolves afresh, the same
+    // tolerance the queued-answer store gives its own file. Nothing here is
+    // worth failing a boot over.
+    return null;
+  }
+}
+
+// Written tmp + rename, the way every runtime file the engine rewrites is
+// (queued-answers.json, the fleet registry): a crash mid-write leaves the
+// previous id, never half of one.
+function rememberPoolWorkspace(runsDir: string, workspaceId: string): void {
+  const path = join(runsDir, POOL_WORKSPACE_FILE);
+  const temp = `${path}.tmp`;
+  writeFileSync(temp, `${JSON.stringify({ workspace_id: workspaceId })}\n`);
+  renameSync(temp, path);
+}
+
+/**
+ * Remember the resolved id, and carry on if that cannot be written. The file
+ * is a convenience for the *next* boot; this run already has its workspace,
+ * and an unwritable runs directory must not throw away a resolution that
+ * worked — the failure costs the operator one re-created workspace at the
+ * next restart, while treating it as fatal would cost them every tab of this
+ * run.
+ */
+function persistPoolWorkspace(session: Session, workspaceId: string): void {
+  try {
+    rememberPoolWorkspace(session.runsDir, workspaceId);
+  } catch (err) {
+    session.state = applyUpdate(session.state, {
+      log: [
+        `Pool workspace ${workspaceId} could not be remembered for the next ` +
+          `boot (${err instanceof Error ? err.message : String(err)}); ` +
+          "this run's tabs are unaffected",
+      ],
+    });
+  }
+}
+
+/**
+ * Resolve the Pool workspace at boot (issue #94), before reconciliation so
+ * the pane listing can be scoped to it, and before the drive's first
+ * scheduling so no attempt ever races it. Only a terminal-backed pool has
+ * one: a headless pool opens no tabs at all.
+ *
+ * A failure of all three steps (no remembered workspace, no launch
+ * workspace, and a daemon that will not create one) is logged and the pool
+ * boots anyway with no Pool workspace: each spawn then takes the per-attempt
+ * headless fallback ADR-0014 already promised, rather than the whole pool
+ * refusing to start over a terminal convenience.
+ */
+async function resolvePoolWorkspaceForSession(session: Session): Promise<void> {
+  if (!attemptEnvOf(session).terminalBacked) return;
+  const remembered = readRememberedPoolWorkspace(session.runsDir);
+  try {
+    const { workspaceId, origin } = await resolvePoolWorkspace(
+      session.herdrSocket,
+      {
+        remembered,
+        launch: session.poolWorkspace.launch,
+        label: basename(session.poolDir),
+        cwd: session.cwd,
+      },
+    );
+    session.poolWorkspace.id = workspaceId;
+    persistPoolWorkspace(session, workspaceId);
+    if (origin === "created") {
+      session.state = applyUpdate(session.state, {
+        log: [`Pool workspace ${workspaceId} created for this pool's tabs`],
+      });
+    }
+  } catch (err) {
+    session.poolWorkspace.id = null;
+    session.state = applyUpdate(session.state, {
+      log: [
+        "no Pool workspace could be resolved " +
+          `(${err instanceof Error ? err.message : String(err)}); ` +
+          "attempts fall back to headless",
+      ],
+    });
+  }
+}
+
+/**
+ * Re-resolve the Pool workspace after a `tab.create` the daemon refused,
+ * given the id that spawn tried. Three guards stand before any workspace is
+ * ever created, because the cost of getting this wrong is a second Pool
+ * workspace for one pool, which is exactly the scattering the first one
+ * exists to prevent:
+ *
+ * 1. The id has already moved on: another spawn's re-resolve finished while
+ *    this one was failing, so the answer is simply where the pool's tabs go
+ *    now, and no RPC is needed at all.
+ * 2. A re-resolve is in flight: every spawn that raced into the same refusal
+ *    joins it rather than starting its own.
+ * 3. The stale id is still there: a `tab.create` can be refused for reasons
+ *    that have nothing to do with the workspace (a daemon blip, a bad cwd),
+ *    and `workspace.get` is what tells those apart from a workspace the
+ *    operator closed. Still there means the refusal was transient: the same
+ *    workspace comes back and the caller's retry goes to the same place.
+ *
+ * Only past all three does the workspace count as gone, and the resolution
+ * runs without the remembered id (it is the one that just failed): the launch
+ * workspace if that still exists, otherwise a fresh one, persisted and noted
+ * on the pool log.
+ */
+function reresolvePoolWorkspace(
+  session: Session,
+  staleId: string,
+): Promise<string | null> {
+  if (session.poolWorkspace.id !== staleId) {
+    return Promise.resolve(session.poolWorkspace.id);
+  }
+  if (session.poolWorkspace.reresolving !== null) {
+    return session.poolWorkspace.reresolving;
+  }
+  const attempt = (async (): Promise<string | null> => {
+    if (await workspaceExists(session.herdrSocket, staleId)) {
+      return staleId;
+    }
+    const { workspaceId } = await resolvePoolWorkspace(session.herdrSocket, {
+      remembered: null,
+      launch: session.poolWorkspace.launch,
+      label: basename(session.poolDir),
+      cwd: session.cwd,
+    });
+    session.poolWorkspace.id = workspaceId;
+    persistPoolWorkspace(session, workspaceId);
+    session.state = applyUpdate(session.state, {
+      log: [
+        `Pool workspace ${staleId} is gone; the pool's tabs now open in ` +
+          `${workspaceId}`,
+      ],
+    });
+    return workspaceId;
+  })()
+    .catch((err: unknown) => {
+      session.state = applyUpdate(session.state, {
+        log: [
+          "the Pool workspace could not be re-resolved after a refused tab " +
+            `(${err instanceof Error ? err.message : String(err)}); ` +
+            "this attempt falls back to headless",
+        ],
+      });
+      return null;
+    })
+    .finally(() => {
+      session.poolWorkspace.reresolving = null;
+    });
+  session.poolWorkspace.reresolving = attempt;
+  return attempt;
+}
+
+/**
+ * The Pool workspace as the Attempt-run module reads it (ADR-0014's pattern:
+ * one place decides, every spawn site reads the env). Bound late, like the
+ * Conversation host: the Conversation module's environment is built before
+ * the session literal exists, and both halves must read the live id, not a
+ * copy taken before boot resolution ran.
+ */
+function poolWorkspaceFor(sessionOf: () => Session): PoolWorkspace {
+  return {
+    id: async () => {
+      const session = sessionOf();
+      await session.poolWorkspace.ready;
+      return session.poolWorkspace.id;
+    },
+    reresolve: (staleId) => reresolvePoolWorkspace(sessionOf(), staleId),
+  };
+}
+
 /**
  * Boot reconciliation for terminal-backed pools (ADR-0014), run at startPool
  * and awaited by the drive loop before its first scheduling. Every orphan of
@@ -1772,7 +2024,15 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
   if (!attemptEnvOf(session).terminalBacked) return;
   let live: string[];
   try {
-    live = await listPaneIds(session.herdrSocket);
+    // Scoped to the Pool workspace when there is one (issue #94): this
+    // pool's orphans can only be in this pool's workspace, so a host full
+    // of other panes is no longer part of the answer. A workspace that was
+    // just created holds none, which is correct rather than merely cheap;
+    // with no Pool workspace at all the listing stays daemon-wide.
+    live = await listPaneIds(
+      session.herdrSocket,
+      session.poolWorkspace.id ?? undefined,
+    );
   } catch {
     session.state = applyUpdate(session.state, {
       log: ["terminal reconciliation skipped: herdr daemon unreachable"],
@@ -1799,6 +2059,11 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
         `ticket ${marker.id}: orphaned terminal attempt ${orphan.attempt} ` +
           "kept the headless orphan fate (engine-run or verify attempt)",
       );
+      // Not adopted, so nothing in this engine will ever release the agent
+      // identity the dead one reported for that pane (issue #94): a live
+      // pane would otherwise sit in herdr's sidebar as an agent at work
+      // that no engine is watching. Best-effort, like every release.
+      releaseOrphanAgent(session, marker.id, orphan.paneId);
       continue;
     }
     if (!livePanes.has(orphan.paneId)) {
@@ -1833,6 +2098,11 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
         `ticket ${marker.id}: attempt ${orphan.attempt}'s pane is gone at ` +
           "boot; the attempt crashed and the ticket re-runs",
       );
+      // The pane left this pool's workspace, which is not proof it left the
+      // daemon: it may still be alive somewhere the listing no longer
+      // covers, carrying the dead engine's "working" binding. The release
+      // is best-effort, and for a pane that really is gone it is a no-op.
+      releaseOrphanAgent(session, marker.id, orphan.paneId);
       continue;
     }
     adoptTerminalAttempt(session, marker, orphan, midAdoption, log);
@@ -1840,6 +2110,27 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
+}
+
+/**
+ * Drop the agent identity a dead engine reported for an orphan's pane
+ * (issue #94), for every orphan this boot does not adopt: the binding is
+ * keyed by (pane, source) and nothing else in this engine will ever release
+ * it, so without this a pane the pool has washed its hands of stays in
+ * herdr's agent sidebar as work in progress. Best-effort and silent, like
+ * the tab closes; skipped when the ticket's Assignment does not name a
+ * harness, since the agent name is half the key.
+ */
+function releaseOrphanAgent(
+  session: Session,
+  ticketId: string,
+  paneId: string,
+): void {
+  const harness = session.assignments.get(ticketId)?.harness;
+  if (!harness) return;
+  void releasePaneAgent(session.herdrSocket, paneId, harness.toLowerCase()).catch(
+    () => {},
+  );
 }
 
 // Re-adopt one live orphan (ADR-0014). A fresh adoption undoes rehydrate's
@@ -1882,6 +2173,19 @@ function adoptTerminalAttempt(
     paneId: orphan.paneId,
     tabId: null,
   });
+  // The pane survived an engine that did not, and herdr forgot the agent
+  // identity the dead engine reported for it (issue #94): report it again,
+  // so a restarted pool's re-adopted attempts are back in the agent list
+  // beside its fresh ones.
+  const harness = session.assignments.get(marker.id)?.harness;
+  if (harness) {
+    reportAttemptAgent(
+      attemptEnvOf(session),
+      orphan.paneId,
+      { id: marker.id, title: marker.title, harness },
+      "working",
+    );
+  }
   log.push(
     `ticket ${marker.id}: attempt ${orphan.attempt} re-adopted from live ` +
       `pane ${orphan.paneId}; waiting on its exit`,
@@ -1979,6 +2283,13 @@ async function finalizeAdoptedAttempt(
     // complete; also drained on an abandoned wait, whose return skips the
     // record but never the drain.
     if (tailer) await tailer.finish().catch(() => {});
+  }
+  // The adopted Attempt is over: its pane leaves herdr's agent list the way
+  // a freshly launched attempt's does at its own ending (issue #94). Before
+  // the abandonment checks, because an abandoned adoption closed the pane
+  // and the identity must go either way.
+  if (assignment?.harness) {
+    releaseAttemptAgent(session.herdrSocket, adopted.paneId, assignment.harness);
   }
   // Abandoned while waiting (the human answered): the answer path owns
   // the ticket now and this finalize records nothing further.
@@ -4977,6 +5288,7 @@ function attemptEnvFrom(
   harnesses: Record<string, HarnessCommand>,
   runsDir: string,
   herdrSocket: string,
+  poolWorkspace: PoolWorkspace,
   children: ChildTracker,
   liveAttempts: LiveAttempts,
 ): AttemptEnv {
@@ -4984,6 +5296,7 @@ function attemptEnvFrom(
     runsDir,
     harnesses,
     herdrSocket,
+    poolWorkspace,
     children,
     liveAttempts,
     terminalBacked: config.terminal === "herdr",
@@ -4997,6 +5310,7 @@ function attemptEnvOf(session: Session, config: PoolConfig = session.state.confi
     session.harnesses,
     session.runsDir,
     session.herdrSocket,
+    poolWorkspaceFor(() => session),
     session.children,
     session.liveAttempts,
   );

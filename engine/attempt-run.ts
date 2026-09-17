@@ -64,6 +64,9 @@ import {
   closePane,
   openAttemptTab,
   paneSendInput,
+  releasePaneAgent,
+  reportPaneAgent,
+  type PaneAgentState,
 } from "./herdr.ts";
 import {
   PANE_TAIL_POLL_MS,
@@ -98,6 +101,31 @@ import { commitShaAt } from "./worktrees.ts";
 // ---------------------------------------------------------------------------
 
 /**
+ * The Pool workspace (issue #94) as a spawn site reads it: the engine
+ * resolves it once at boot and every site reads it from here, the ADR-0014
+ * pattern the terminal flag and the socket already follow. `id` is async
+ * because boot resolution is an RPC: a spawn that races it waits for it
+ * rather than opening its tab somewhere else. A null id means no Pool
+ * workspace could be had at all, and the attempt falls back to headless
+ * without ever sending an unplaced `tab.create`.
+ */
+export interface PoolWorkspace {
+  /** The Pool workspace's id once boot resolution has settled; null when none could be resolved. */
+  id(): Promise<string | null>;
+  /**
+   * Re-resolve after a refused `tab.create`, naming the id that spawn tried.
+   * The id is what lets the engine tell the cases apart: a workspace the
+   * operator closed mid-run is replaced (and the new id persisted), a
+   * workspace that is still there hands back the same id because the
+   * refusal was transient, and a spawn that lost the race to another's
+   * re-resolve simply gets wherever the pool's tabs go now — so two
+   * concurrent refusals can never mint two Pool workspaces. Null when no
+   * workspace could be had at all. Callers retry the tab.create once.
+   */
+  reresolve(staleId: string): Promise<string | null>;
+}
+
+/**
  * The pool facts an Attempt runs against, modelled on the narrowed
  * environment `runTicket` already took instead of the whole session.
  * `terminalBacked` is the one place the pool's terminal setting is decided
@@ -107,6 +135,8 @@ export interface AttemptEnv {
   runsDir: string;
   harnesses: Record<string, HarnessCommand>;
   herdrSocket: string;
+  /** Where this pool's tabs open (issue #94); unused by a headless pool. */
+  poolWorkspace: PoolWorkspace;
   children: ChildTracker;
   /**
    * The Live attempts registry: the launch registers the Attempt once its
@@ -446,16 +476,11 @@ export async function launchAttempt<R extends { ok: true }>(
     return headless(undefined);
   }
   // A terminal-backed attempt opens its own named herdr tab before the
-  // spawn is recorded, so the spawned event can carry the recovered pane id
-  // (ADR-0014, ADR-0015); the event is recorded once the wrapper send's
+  // spawn is recorded, so the spawned event can carry the pane id the tab
+  // came back with (ADR-0014, ADR-0015); the event is recorded once the wrapper send's
   // outcome is known, so a mid-flight fallback records pane_id null plus
   // terminal_error instead of the dead pane.
-  const terminal = await openAttemptTerminal(
-    env.herdrSocket,
-    id,
-    spec.title,
-    spec.cwd,
-  );
+  const terminal = await openAttemptTerminal(env, id, spec.title, spec.cwd);
   if (terminal.paneId === null || terminal.tabId === null) {
     if (spec.fallback === "none") {
       throw new Error(`could not open a herdr tab: ${terminal.error}`);
@@ -476,6 +501,12 @@ export async function launchAttempt<R extends { ok: true }>(
     return headless(terminal, terminalError);
   }
   recordSpawned(interactiveArgv, terminal);
+  // The wrapper is in the pane, so the pane is this attempt's agent: assert
+  // the identity so herdr lists it in the operator's agent sidebar beside
+  // the agents it detected itself (issue #94). A Ticket attempt has no Turn
+  // state, so it is "working" from here until its ending releases it; a
+  // Conversation's tick flips it as its Turn does.
+  reportAttemptAgent(env, terminal.paneId, spec, "working");
   // The session half of a terminal-backed spawn (ADR-0016): the tailer on
   // the attempt's typescript Stream file, then prompt delivery (readiness
   // wait, typed prompt, echo verification, retry, file-reference fallback).
@@ -566,6 +597,15 @@ export async function awaitAttempt<R extends { ok: true }>(
     }
     ({ code, result, crashReason } = decision);
   }
+  // The Attempt is over, so its pane is no longer an agent at work: the
+  // identity the launch reported is released here (issue #94), where every
+  // ending of a spawn-site attempt converges, whatever the pane's own fate
+  // (a crashed attempt keeps its tab until merge, and must still leave the
+  // agent list). A Conversation never reaches here — its endings are its
+  // own, and release there.
+  if (handle.paneId !== null) {
+    releaseAttemptAgent(env.herdrSocket, handle.paneId, spec.harness);
+  }
   // The exit facts (ADR-0012), computed the moment the attempt exits: the
   // log is closed by now, so the tail is complete, and the result file's
   // existence is the fact that distinguishes "agent never wrote its
@@ -640,8 +680,8 @@ export async function runAttempt<R extends { ok: true }>(
 
 /**
  * The terminal facts a terminal-backed spawn adds to the `spawned` event's
- * payload (ADR-0014, ADR-0015): the pane id the attempt's named tab was
- * recovered to and the tab id that pane lives in (the tab id is what merge
+ * payload (ADR-0014, ADR-0015): the root pane id the attempt's named tab
+ * came back with and the tab id that pane lives in (the tab id is what merge
  * cleanup closes the terminal by), and, when the tab could not be opened, the
  * error that stopped it. Both ids are null on that fallback path: the attempt
  * runs headless and the ticket log carries why.
@@ -653,24 +693,46 @@ interface AttemptTerminal {
 }
 
 /**
- * Open the attempt's named herdr tab for a terminal-backed spawn. Never
- * throws: herdr is optional (ADR-0014), so a missing or misbehaving daemon
- * falls the spawn back to headless and the failure lands on the spawned
- * event, where the ticket log shows it.
+ * Open the attempt's named herdr tab for a terminal-backed spawn, in the
+ * Pool workspace (issue #94). Never throws: herdr is optional (ADR-0014), so
+ * a missing or misbehaving daemon falls the spawn back to headless and the
+ * failure lands on the spawned event, where the ticket log shows it.
+ *
+ * A refused `tab.create` is read as a Pool workspace that is gone — the
+ * operator closed it mid-run — and costs the spawn one re-resolve and one
+ * retry: whatever else the refusal was, re-resolving is cheap and the retry
+ * is the only thing that saves the attempt from running headless. A second
+ * refusal is the fallback, exactly as before. A pool with no Pool workspace
+ * at all never sends an unplaced `tab.create`: that is a terminal error for
+ * this attempt and nothing more.
  */
 async function openAttemptTerminal(
-  socketPath: string,
+  env: AttemptEnv,
   id: string,
   title: string,
   cwd: string,
 ): Promise<AttemptTerminal> {
+  const label = attemptTabLabel(id, title);
   try {
-    const tab = await openAttemptTab(
-      socketPath,
-      attemptTabLabel(id, title),
-      cwd,
-    );
-    return { paneId: tab.paneId, tabId: tab.tabId };
+    const workspaceId = await env.poolWorkspace.id();
+    if (workspaceId === null) {
+      throw new Error(
+        "no Pool workspace: the herdr daemon could not give this pool one at boot",
+      );
+    }
+    try {
+      const tab = await openAttemptTab(env.herdrSocket, label, cwd, workspaceId);
+      return { paneId: tab.paneId, tabId: tab.tabId };
+    } catch (refused) {
+      // The refused id goes back with the question: the engine answers with
+      // the same workspace when it is still there (a transient refusal),
+      // with the one another spawn's re-resolve already moved to, or with a
+      // fresh one when this workspace is genuinely gone.
+      const retryId = await env.poolWorkspace.reresolve(workspaceId);
+      if (retryId === null) throw refused;
+      const tab = await openAttemptTab(env.herdrSocket, label, cwd, retryId);
+      return { paneId: tab.paneId, tabId: tab.tabId };
+    }
   } catch (err) {
     return {
       paneId: null,
@@ -678,6 +740,43 @@ async function openAttemptTerminal(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Report this attempt's agent identity on its pane (issue #94), so herdr
+ * lists it in the operator's agent sidebar: the harness the Assignment
+ * resolved as the agent name, the attempt's tab label as the message.
+ * Fire-and-forget and swallowing, exactly as the tab closes are: a daemon
+ * that will not take the report changes nothing about the attempt, and the
+ * sidebar is a convenience, never a dependency.
+ */
+export function reportAttemptAgent(
+  env: AttemptEnv,
+  paneId: string,
+  spec: { id: string; title: string; harness: string },
+  state: PaneAgentState,
+): void {
+  void reportPaneAgent(
+    env.herdrSocket,
+    paneId,
+    spec.harness.toLowerCase(),
+    state,
+    attemptTabLabel(spec.id, spec.title),
+  ).catch(() => {});
+}
+
+/**
+ * Release this attempt's agent identity at its ending (issue #94), the other
+ * half of `reportAttemptAgent`. Fire-and-forget for the same reasons.
+ */
+export function releaseAttemptAgent(
+  socketPath: string,
+  paneId: string,
+  harness: string,
+): void {
+  void releasePaneAgent(socketPath, paneId, harness.toLowerCase()).catch(
+    () => {},
+  );
 }
 
 /**

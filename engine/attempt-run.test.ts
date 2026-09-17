@@ -14,6 +14,7 @@ import {
   runAttempt,
   type AttemptEnv,
   type AttemptSpec,
+  type PoolWorkspace,
   type ReadFailure,
 } from "./attempt-run.ts";
 import { validateOutcome, type OutcomeResult } from "./engine.ts";
@@ -72,12 +73,59 @@ function makeRig(): Rig {
   return rig;
 }
 
+// Every fake here holds the pool's workspace (issue #94), because every
+// attempt below is a terminal-backed one and a terminal-backed attempt only
+// opens its tab inside a Pool workspace: POOL_WORKSPACE is the id the
+// engine's own boot resolution would have handed the spawn.
+const POOL_WORKSPACE = "w1";
+
 async function startFakeHerdr(
   options?: ExecutingFakeHerdrOptions,
 ): Promise<ExecutingFakeHerdr> {
-  const fake = await startExecutingFakeHerdr(options);
+  const fake = await startExecutingFakeHerdr({
+    workspaces: [POOL_WORKSPACE],
+    ...options,
+  });
   fakes.push(fake);
   return fake;
+}
+
+// The protocol-only fake, holding the same Pool workspace.
+async function startProtocolFake(
+  options?: Parameters<typeof startProtocolFakeHerdr>[0],
+): Promise<Awaited<ReturnType<typeof startProtocolFakeHerdr>>> {
+  return startProtocolFakeHerdr({
+    workspaces: [{ workspace_id: POOL_WORKSPACE }],
+    ...options,
+  });
+}
+
+/**
+ * The Pool workspace as the engine hands one to a spawn site: a resolved id,
+ * and a re-resolve whose answer the test seeds (`next`), which is how the
+ * "operator closed the workspace mid-run" retry is driven. `reresolves`
+ * records the stale id each re-resolve was asked about, so a test can prove
+ * both how many there were and that the caller named the id it tried. A
+ * re-resolve asked about an id that is no longer the current one answers
+ * with the current one, the way the engine's own does for a spawn that lost
+ * the race to another's re-resolve.
+ */
+function testPoolWorkspace(options?: {
+  id?: string | null;
+  next?: string | null;
+}): PoolWorkspace & { reresolves: string[] } {
+  let current = options?.id === undefined ? POOL_WORKSPACE : options.id;
+  const workspace = {
+    reresolves: [] as string[],
+    id: async () => current,
+    reresolve: async (staleId: string) => {
+      workspace.reresolves.push(staleId);
+      if (staleId !== current) return current;
+      current = options?.next ?? null;
+      return current;
+    },
+  };
+  return workspace;
 }
 
 afterEach(async () => {
@@ -93,11 +141,13 @@ function envFor(
   harnesses: Record<string, HarnessCommand>,
   herdrSocket: string,
   terminalBacked = true,
+  poolWorkspace: PoolWorkspace = testPoolWorkspace(),
 ): AttemptEnv {
   return {
     runsDir: rig.runsDir,
     harnesses,
     herdrSocket,
+    poolWorkspace,
     children: rig.children,
     liveAttempts: createLiveAttempts(),
     terminalBacked,
@@ -380,6 +430,113 @@ describe("headless attempts", () => {
   });
 });
 
+describe("the Pool workspace (issue #94)", () => {
+  it("opens the attempt's tab inside the Pool workspace", async () => {
+    const rig = makeRig();
+    const stub = stubHarness(rig.dir, {});
+    const fake = await startFakeHerdr();
+
+    const run = await runAttempt(
+      envFor(rig, stub.harnesses, fake.socketPath),
+      ticketSpec(rig, "stub"),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    const created = fake.requests.filter((r) => r.method === "tab.create");
+    expect(created).toHaveLength(1);
+    expect(created[0].params).toEqual({
+      label: "01 · t",
+      focus: false,
+      cwd: rig.dir,
+      workspace_id: POOL_WORKSPACE,
+    });
+    // The pane came off the tab.create answer's root pane, so the tab is the
+    // spawn's first call and no listing scan follows it: the only pane.list
+    // in the run is the pane-end wait's own liveness check, which comes
+    // after the wrapper and its prompt.
+    const beforeWrapper = fake.requests.slice(
+      0,
+      fake.requests.findIndex((r) => r.method === "pane.send_input"),
+    );
+    expect(beforeWrapper.map((r) => r.method)).toEqual(["tab.create"]);
+    expect(run.paneId).toBe(`${POOL_WORKSPACE}:p1`);
+  }, 15000);
+
+  it("re-resolves once and retries the tab when the workspace is gone", async () => {
+    const rig = makeRig();
+    const stub = stubHarness(rig.dir, {});
+    // The daemon holds the pool's new workspace and not the one the spawn
+    // starts from: the operator closed that one mid-run.
+    const fake = await startFakeHerdr();
+    const workspace = testPoolWorkspace({ id: "w-gone", next: POOL_WORKSPACE });
+
+    const run = await runAttempt(
+      envFor(rig, stub.harnesses, fake.socketPath, true, workspace),
+      ticketSpec(rig, "stub"),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    expect(workspace.reresolves).toEqual(["w-gone"]);
+    // Two tab.creates, the second in the re-resolved workspace, and the
+    // attempt kept its pane rather than falling back to headless.
+    const created = fake.requests.filter((r) => r.method === "tab.create");
+    expect(created.map((r) => r.params.workspace_id)).toEqual([
+      "w-gone",
+      POOL_WORKSPACE,
+    ]);
+    const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.pane_id).toBe(`${POOL_WORKSPACE}:p1`);
+    expect(spawned.payload.terminal_error).toBeUndefined();
+  }, 15000);
+
+  it("falls back to headless when the re-resolve cannot find one either", async () => {
+    const rig = makeRig();
+    const stub = stubHarness(rig.dir, {});
+    const fake = await startFakeHerdr();
+    const workspace = testPoolWorkspace({ id: "w-gone", next: null });
+
+    const run = await runAttempt(
+      envFor(rig, stub.harnesses, fake.socketPath, true, workspace),
+      ticketSpec(rig, "stub"),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    expect(workspace.reresolves).toEqual(["w-gone"]);
+    // One refused tab, no retry to make, and the refusal itself on the log.
+    expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(1);
+    const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.pane_id).toBeNull();
+    expect(String(spawned.payload.terminal_error)).toContain("no such workspace w-gone");
+    expect(typeof spawned.payload.pid).toBe("number");
+  }, 15000);
+
+  it("never sends an unplaced tab.create when the pool has no Pool workspace", async () => {
+    const rig = makeRig();
+    const stub = stubHarness(rig.dir, {});
+    const fake = await startFakeHerdr();
+    const workspace = testPoolWorkspace({ id: null });
+
+    const run = await runAttempt(
+      envFor(rig, stub.harnesses, fake.socketPath, true, workspace),
+      ticketSpec(rig, "stub"),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    // A tab with no workspace would land wherever the daemon's focus
+    // happens to be, which is the scattering this pool's workspace exists
+    // to stop: the attempt runs headless instead, and says so.
+    expect(fake.requests.some((r) => r.method === "tab.create")).toBe(false);
+    expect(workspace.reresolves).toEqual([]);
+    const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.pane_id).toBeNull();
+    expect(String(spawned.payload.terminal_error)).toContain("no Pool workspace");
+  }, 15000);
+});
+
 describe("the headless fallbacks (ADR-0014)", () => {
   it("falls back to headless with the error on the spawned event when the daemon is absent", async () => {
     const rig = makeRig();
@@ -400,7 +557,7 @@ describe("the headless fallbacks (ADR-0014)", () => {
   it("falls back to headless when the tab cannot be opened", async () => {
     const rig = makeRig();
     const stub = stubHarness(rig.dir, {});
-    const fake = await startProtocolFakeHerdr({
+    const fake = await startProtocolFake({
       fail: { "tab.create": { code: 7, message: "no workspace" } },
     });
     const env = envFor(rig, stub.harnesses, fake.socketPath);
@@ -419,7 +576,7 @@ describe("the headless fallbacks (ADR-0014)", () => {
   it("falls back to headless when the wrapper cannot be sent, closing the half-started pane", async () => {
     const rig = makeRig();
     const stub = stubHarness(rig.dir, {});
-    const fake = await startProtocolFakeHerdr({
+    const fake = await startProtocolFake({
       fail: { "pane.send_input": { code: 9, message: "pane refused input" } },
     });
     const env = envFor(rig, stub.harnesses, fake.socketPath);
@@ -427,8 +584,8 @@ describe("the headless fallbacks (ADR-0014)", () => {
     const run = await runAttempt(env, ticketSpec(rig, "stub"), validateOutcome);
 
     expect(run.ok).toBe(true);
-    // The tab opened and the pane was recovered, then the send failed: the
-    // event must never point at the dead pane the fallback closed.
+    // The tab opened with its root pane, then the send failed: the event
+    // must never point at the dead pane the fallback closed.
     expect(fake.requests.some((r) => r.method === "tab.create")).toBe(true);
     const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
     expect(spawned.payload.pane_id).toBeNull();
@@ -441,13 +598,13 @@ describe("the headless fallbacks (ADR-0014)", () => {
     );
     expect(
       fake.requests.find((r) => r.method === "pane.close")!.params.pane_id,
-    ).toBe("pane-1");
+    ).toBe("w1:p1");
   }, 15000);
 
   it("fails the launch instead of falling back when the spec forbids it", async () => {
     const rig = makeRig();
     const stub = stubHarness(rig.dir, {});
-    const noTab = await startProtocolFakeHerdr({
+    const noTab = await startProtocolFake({
       fail: { "tab.create": { code: 7, message: "no workspace" } },
     });
     await expect(
@@ -456,7 +613,7 @@ describe("the headless fallbacks (ADR-0014)", () => {
         ticketSpec(rig, "stub", { fallback: "none" }),
       ),
     ).rejects.toThrow(/^could not open a herdr tab: tab\.create failed/);
-    const noSend = await startProtocolFakeHerdr({
+    const noSend = await startProtocolFake({
       fail: { "pane.send_input": { code: 9, message: "pane refused input" } },
     });
     await expect(
@@ -519,11 +676,11 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
     // The spawned event carries the pane and tab the attempt ran in, the
     // ids the merge-time close keys off.
     const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
-    expect(spawned.payload.pane_id).toBe("pane-1");
-    expect(spawned.payload.tab_id).toBe("tab-1");
+    expect(spawned.payload.pane_id).toBe("w1:p1");
+    expect(spawned.payload.tab_id).toBe("w1:t1");
     expect(spawned.payload.pid).toBeUndefined();
-    expect(run.paneId).toBe("pane-1");
-    expect(run.tabId).toBe("tab-1");
+    expect(run.paneId).toBe("w1:p1");
+    expect(run.tabId).toBe("w1:t1");
   }, 15000);
 
   it("captures the session in the script typescript Stream file and derives the ANSI-stripped log from it", async () => {
@@ -773,7 +930,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
             fake.requests.filter((r) => r.method === "pane.send_input").length >= 4,
           "the typed prompt's send",
         );
-        fake.endPane("pane-1");
+        fake.endPane("w1:p1");
         const run = await running;
 
         expect(run.ok).toBe(false);
@@ -1067,7 +1224,7 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
           () => fake.requests.filter((r) => r.method === "pane.read").length >= 2,
           "the readiness poll",
         );
-        fake.endPane("pane-1");
+        fake.endPane("w1:p1");
         const handle = await launching;
         expect(handle.kind).toBe("ended");
         const run = await awaitAttempt(handle, validateOutcome);
@@ -1190,10 +1347,10 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
     // No file-referencing fallback exists for a plain prompt.
     expect(existsSync(join(rig.runsDir, "01.outcome.prompt.txt"))).toBe(false);
     const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
-    expect(spawned.payload.pane_id).toBe("pane-1");
-    expect(spawned.payload.tab_id).toBe("tab-1");
+    expect(spawned.payload.pane_id).toBe("w1:p1");
+    expect(spawned.payload.tab_id).toBe("w1:t1");
     if (handle.kind === "live") {
-      expect(handle.paneId).toBe("pane-1");
+      expect(handle.paneId).toBe("w1:p1");
       expect(handle.tailer).not.toBeNull();
       await handle.tailer!.finish();
     }
