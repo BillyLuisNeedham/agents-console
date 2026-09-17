@@ -138,6 +138,15 @@ export function startFakeHerdr(options?: {
           socket.end(JSON.stringify({ id: msg.id, result: { type: "ok" } }) + "\n");
           push("tab_closed", { tab_id: tabId, workspace_id: "w1" });
           return;
+        } else if (msg.method === "pane.read") {
+          // A pane at its shell prompt: non-empty and unchanging, so the
+          // engine's shell-settle gate (issue #102) passes at once. This
+          // fake never runs a wrapper, so nothing ever renders past it.
+          const paneId = String(msg.params.pane_id ?? "");
+          const known = panes.some((p) => p.pane_id === paneId);
+          response = known
+            ? { id: msg.id, result: { read: { text: "$ ", revision: 0, truncated: false } } }
+            : { id: msg.id, error: { code: -32000, message: `pane ${paneId} not found` } };
         } else if (msg.method === "pane.close") {
           // A closed pane announces itself (verified herdr 0.8.2).
           const paneId = String(msg.params.pane_id ?? "");

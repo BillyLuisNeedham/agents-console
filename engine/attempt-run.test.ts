@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+  LAUNCH_TRIES,
   awaitAttempt,
   launchAttempt,
   readAttemptResult,
@@ -101,6 +102,15 @@ function envFor(
     children: rig.children,
     liveAttempts: createLiveAttempts(),
     terminalBacked,
+    // The launch half in milliseconds: the fake's shell prompt is there at
+    // once, and a wrapper that runs creates its Stream file within a tick.
+    launchCadence: {
+      settlePollMs: 10,
+      settleConfirmations: 2,
+      settleTimeoutMs: 1_000,
+      landedTimeoutMs: 3_000,
+      landedPollMs: 20,
+    },
   };
 }
 
@@ -492,6 +502,13 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       ticketSpec(rig, "stub"),
       validateOutcome,
     );
+    // The Outcome ends the attempt (ADR-0016); the wrapper's trailing
+    // exit-code write lands a moment after, and closing the fake kills the
+    // wrapper shell, so wait for the write before the fake goes.
+    await until(
+      () => existsSync(join(rig.runsDir, "01.exitcode")),
+      "the wrapper's exit-code write",
+    );
     await fake.close();
 
     expect(run.ok).toBe(true);
@@ -607,16 +624,31 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
 
   it("waits on the exit-code file when the event subscription cannot be kept", async () => {
     const rig = makeRig();
-    const stub = stubHarness(rig.dir, {});
+    // The harness holds until released, so it is still running when the
+    // ending wait begins and the wait has a subscription to attempt; an
+    // instant harness would have its Outcome on disk before the wait
+    // started, and the wait would end on it without ever subscribing.
+    const release = join(rig.dir, "release");
+    const { command } = harnessStub(rig.dir, { waitFor: release, outcome: doneOutcome });
     // A daemon that drops every subscription (a restart mid-wait, or one
     // too old for events.subscribe): the wrapper's exit-code file is the
     // only end signal, and the attempt must still complete.
     const fake = await startFakeHerdr({ breakSubscriptions: true });
 
-    const run = await runAttempt(
-      envFor(rig, stub.harnesses, fake.socketPath),
+    const running = runAttempt(
+      envFor(rig, { stub: command }, fake.socketPath),
       ticketSpec(rig, "stub"),
       validateOutcome,
+    );
+    await until(
+      () => fake.requests.some((r) => r.method === "events.subscribe"),
+      "the ending wait's subscription attempt",
+    );
+    writeFileSync(release, "");
+    const run = await running;
+    await until(
+      () => existsSync(join(rig.runsDir, "01.exitcode")),
+      "the wrapper's exit-code write",
     );
     await fake.close();
 
@@ -689,23 +721,23 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
         expect(run.ok).toBe(true);
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-        // The send sequence: wrapper text + enter, then the typed driver
+        // The send sequence: wrapper (text and Enter in one call), then the typed driver
         // prompt text + enter. Nothing else is sent.
-        expect(sends).toHaveLength(4);
+        expect(sends).toHaveLength(3);
         expect(sends[0].params.text as string).toContain(SCRIPT_RECORD_PREFIX);
-        expect(sends[1].params.keys).toEqual(["enter"]);
-        const prompt = sends[2].params.text as string;
+        expect(sends[0].params.keys).toEqual(["enter"]);
+        const prompt = sends[1].params.text as string;
         expect(prompt.startsWith(promptPrefix(harness, rig.issuePath))).toBe(true);
         // The issue reference rides the prompt, so it is the harness-agnostic
         // echo target the verification matched. It is also the final line, so
         // a long paste cannot scroll it out of the peeked tail.
         expect(prompt).toContain(rig.issuePath);
         expect(prompt.split("\n").at(-1)).toBe(rig.issuePath);
-        expect(sends[3].params.keys).toEqual(["enter"]);
+        expect(sends[2].params.keys).toEqual(["enter"]);
         // The readiness poll read the pane before the prompt was typed.
         expect(
           fake.requests
-            .slice(0, fake.requests.indexOf(sends[2]))
+            .slice(0, fake.requests.indexOf(sends[1]))
             .some((r) => r.method === "pane.read"),
         ).toBe(true);
         // The spawned event records the argv the pane actually ran: the
@@ -765,12 +797,12 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
           ticketSpec(rig, harness),
           validateOutcome,
         );
-        // Wait until the prompt has been delivered (four send_input calls:
-        // the wrapper pair and the prompt pair) so the completion wait is
+        // Wait until the prompt has been delivered (three send_input calls:
+        // the wrapper call and the prompt pair) so the completion wait is
         // live, then lose the pane with no outcome on disk.
         await until(
           () =>
-            fake.requests.filter((r) => r.method === "pane.send_input").length >= 4,
+            fake.requests.filter((r) => r.method === "pane.send_input").length >= 3,
           "the typed prompt's send",
         );
         fake.endPane("pane-1");
@@ -809,26 +841,26 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
         expect(run.ok).toBe(true);
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-        // Wrapper pair, three lost full-prompt pastes with a clear before
+        // The wrapper call, three lost full-prompt pastes with a clear before
         // each retry and before the fallback, then the fallback and Enter.
-        expect(sends).toHaveLength(10);
+        expect(sends).toHaveLength(9);
         expect(sends[0].params.text as string).toContain(SCRIPT_RECORD_PREFIX);
-        expect(sends[1].params.keys).toEqual(["enter"]);
+        expect(sends[0].params.keys).toEqual(["enter"]);
         expect(
-          (sends[2].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
+          (sends[1].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
         ).toBe(true);
-        expect(sends[3].params.keys).toEqual(clearKeys);
+        expect(sends[2].params.keys).toEqual(clearKeys);
         expect(
-          (sends[4].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
+          (sends[3].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
         ).toBe(true);
-        expect(sends[5].params.keys).toEqual(clearKeys);
+        expect(sends[4].params.keys).toEqual(clearKeys);
         expect(
-          (sends[6].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
+          (sends[5].params.text as string).startsWith(promptPrefix(harness, rig.issuePath)),
         ).toBe(true);
-        expect(sends[7].params.keys).toEqual(clearKeys);
+        expect(sends[6].params.keys).toEqual(clearKeys);
         const promptFile = join(rig.runsDir, "01.outcome.prompt.txt");
-        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
-        expect(sends[9].params.keys).toEqual(["enter"]);
+        expect(sends[7].params.text as string).toBe(`/implement ${promptFile}`);
+        expect(sends[8].params.keys).toEqual(["enter"]);
         expect(existsSync(promptFile)).toBe(true);
         const promptFileText = readFileSync(promptFile, "utf8");
         expect(promptFileText.startsWith(`${rig.issuePath}\n\n`)).toBe(true);
@@ -861,9 +893,9 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(run.ok).toBe(true);
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
         const promptFile = join(rig.runsDir, "01.outcome.prompt.txt");
-        expect(sends[7].params.keys).toEqual(clearKeys);
-        expect(sends[8].params.text as string).toBe(`/verify ${promptFile}`);
-        expect(sends[9].params.keys).toEqual(["enter"]);
+        expect(sends[6].params.keys).toEqual(clearKeys);
+        expect(sends[7].params.text as string).toBe(`/verify ${promptFile}`);
+        expect(sends[8].params.keys).toEqual(["enter"]);
       }, 20000);
 
       it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("clears the input before pasting the file-reference fallback", async () => {
@@ -888,8 +920,8 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(run.ok).toBe(true);
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
         const promptFile = join(rig.runsDir, "01.outcome.prompt.txt");
-        expect(sends[7].params.keys).toEqual(clearKeys);
-        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
+        expect(sends[6].params.keys).toEqual(clearKeys);
+        expect(sends[7].params.text as string).toBe(`/implement ${promptFile}`);
       }, 20000);
 
       it.skipIf(defaultHarnessDescriptors[harness].clearKeys.length === 0)("fails the spawn when the fallback echo misses", async () => {
@@ -956,9 +988,9 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(rig.issuePath.length).toBeGreaterThan(24);
         // One paste, verified first time: no clear, no retry, no fallback.
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-        expect(sends).toHaveLength(4);
-        expect(sends[2].params.text as string).toContain(rig.issuePath);
-        expect(sends[3].params.keys).toEqual(["enter"]);
+        expect(sends).toHaveLength(3);
+        expect(sends[1].params.text as string).toContain(rig.issuePath);
+        expect(sends[2].params.keys).toEqual(["enter"]);
         expect(fake.submitted).toHaveLength(1);
         expect(fake.submitted[0].split("\n").at(-1)).toBe(rig.issuePath);
       }, 20000);
@@ -988,9 +1020,9 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(run.ok).toBe(true);
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
         const promptFile = join(rig.runsDir, "01.outcome.prompt.txt");
-        expect(sends).toHaveLength(10);
-        expect(sends[8].params.text as string).toBe(`/implement ${promptFile}`);
-        expect(sends[9].params.keys).toEqual(["enter"]);
+        expect(sends).toHaveLength(9);
+        expect(sends[7].params.text as string).toBe(`/implement ${promptFile}`);
+        expect(sends[8].params.keys).toEqual(["enter"]);
         expect(fake.submitted).toEqual([`/implement ${promptFile}`]);
       }, 20000);
 
@@ -1044,9 +1076,9 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         const crash = readEvents(rig.runsDir, "01").find((e) => e.kind === "crash")!;
         expect(crash.payload.reason).toBe("prompt never landed");
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-        // Wrapper pair and one paste. No retry, no fallback, no Enter on the prompt.
-        expect(sends).toHaveLength(3);
-        expect(sends[2].params.text as string).toContain(rig.issuePath);
+        // The wrapper call and one paste. No retry, no fallback, no Enter on the prompt.
+        expect(sends).toHaveLength(2);
+        expect(sends[1].params.text as string).toContain(rig.issuePath);
         expect(fake.submitted).toEqual([]);
       }, 20000);
 
@@ -1115,9 +1147,9 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
         expect(run.crashReason).toBe("harness exited 3");
         expect(elapsed).toBeLessThan(10_000);
         // Nothing was typed into the shell the wrapper left behind: the
-        // wrapper pair and no more.
+        // wrapper call and no more.
         const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-        expect(sends).toHaveLength(2);
+        expect(sends).toHaveLength(1);
         expect(fake.submitted).toEqual([]);
         // The pane stays open: it is a crashed attempt's tab (ADR-0014) and
         // holds the only record of why the harness died.
@@ -1175,16 +1207,16 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
     expect(handle.kind).toBe("live");
     const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-    // Wrapper pair, then the body itself and Enter: no `/converse` line, no
+    // The wrapper call, then the body itself and Enter: no `/converse` line, no
     // trailing issue reference.
-    expect(sends).toHaveLength(4);
-    expect(sends[2].params.text).toBe(body);
-    expect(sends[3].params.keys).toEqual(["enter"]);
+    expect(sends).toHaveLength(3);
+    expect(sends[1].params.text).toBe(body);
+    expect(sends[2].params.keys).toEqual(["enter"]);
     expect(fake.submitted).toEqual([body]);
     // The readiness wait ran before the paste.
     expect(
       fake.requests
-        .slice(0, fake.requests.indexOf(sends[2]))
+        .slice(0, fake.requests.indexOf(sends[1]))
         .some((r) => r.method === "pane.read"),
     ).toBe(true);
     // No file-referencing fallback exists for a plain prompt.
@@ -1219,8 +1251,8 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
 
     expect(handle.kind).toBe("live");
     const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-    expect(sends).toHaveLength(4);
-    expect(sends[2].params.text).toBe(body);
+    expect(sends).toHaveLength(3);
+    expect(sends[1].params.text).toBe(body);
     expect(fake.submitted).toEqual([body]);
     if (handle.kind === "live") await handle.tailer?.finish();
     await fake.close();
@@ -1252,6 +1284,143 @@ describe("interactive terminal-backed attempts (ADR-0016)", () => {
       "the botched launch's pane close",
     );
     expect(fake.submitted).toEqual([]);
+    await fake.close();
+  }, 20000);
+});
+
+describe("Botched launch (issue #102)", () => {
+  // The claude descriptor is real (readiness waits for its ready frame), the
+  // command a bash stub that holds like a TUI, and the fake renders the
+  // frame once the wrapper has booted the pane. The fake's `swallowWrapper`
+  // is the shell-startup race: the first N tabs lose the wrapper typed into
+  // them and sit at their prompt with `script` never run.
+  const harness = "claude";
+  const readyFrame = `${defaultHarnessDescriptors.claude.readyPattern}2.1\n`;
+
+  it("retries a launch whose command never ran into a fresh tab, and records only that tab as spawned", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    const fake = await startFakeHerdr({ rendered: readyFrame, swallowWrapper: 1 });
+
+    const handle = await launchAttempt(
+      envFor(rig, { [harness]: command }, fake.socketPath),
+      ticketSpec(rig, harness),
+    );
+
+    expect(handle.kind).toBe("live");
+    expect(handle.paneId).toBe("pane-2");
+    expect(handle.tabId).toBe("tab-2");
+    // One retry, then the spawn: the botched tab is on the log with its
+    // reason, and the spawned event names the tab the launch ended up in.
+    const events = readEvents(rig.runsDir, "01");
+    expect(events.map((e) => e.kind)).toEqual(["launch-retried", "spawned"]);
+    expect(events[0].payload).toEqual({
+      try: 1,
+      pane_id: "pane-1",
+      tab_id: "tab-1",
+      reason: "launch command never ran",
+    });
+    expect(events[1].payload.pane_id).toBe("pane-2");
+    expect(events[1].payload.tab_id).toBe("tab-2");
+    // The botched tab was closed; the live one was not.
+    await until(
+      () => fake.requests.some((r) => r.method === "tab.close"),
+      "the botched tab's close",
+    );
+    expect(
+      fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id),
+    ).toEqual(["tab-1"]);
+    expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(2);
+    // Each wrapper went as one send: text and Enter together.
+    const wrappers = fake.requests.filter(
+      (r) =>
+        r.method === "pane.send_input" &&
+        typeof r.params.text === "string" &&
+        (r.params.text as string).includes(SCRIPT_RECORD_PREFIX),
+    );
+    expect(wrappers).toHaveLength(2);
+    for (const send of wrappers) expect(send.params.keys).toEqual(["enter"]);
+    // The prompt went into the live pane only.
+    expect(fake.submitted).toHaveLength(1);
+    if (handle.kind === "live") await handle.tailer?.finish();
+    await fake.close();
+  }, 20000);
+
+  it("gives up after LAUNCH_TRIES botched launches with a crash that says the command never ran", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    const fake = await startFakeHerdr({ rendered: readyFrame, swallowWrapper: LAUNCH_TRIES });
+    const started = Date.now();
+
+    const run = await runAttempt(
+      envFor(rig, { [harness]: command }, fake.socketPath),
+      ticketSpec(rig, harness),
+      validateOutcome,
+    );
+    const elapsed = Date.now() - started;
+
+    expect(run.ok).toBe(false);
+    expect(run.code).toBe(-5);
+    expect(run.crashReason).toBe("launch command never ran");
+    // Decided by the wrapper-landed check, not the 60s readiness timeout.
+    expect(elapsed).toBeLessThan(15_000);
+    expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(LAUNCH_TRIES);
+    // No harness ever ran: no Stream file, nothing typed beyond the
+    // wrappers, and no grade to seek.
+    expect(existsSync(join(rig.runsDir, "01.stream.jsonl"))).toBe(false);
+    expect(fake.requests.filter((r) => r.method === "pane.send_input")).toHaveLength(LAUNCH_TRIES);
+    expect(fake.submitted).toEqual([]);
+    const events = readEvents(rig.runsDir, "01");
+    expect(events.map((e) => e.kind)).toEqual([
+      "launch-retried",
+      "launch-retried",
+      "spawned",
+      "exited",
+      "crash",
+    ]);
+    expect(events.find((e) => e.kind === "spawned")!.payload.pane_id).toBe(`pane-${LAUNCH_TRIES}`);
+    expect(events.find((e) => e.kind === "crash")!.payload).toMatchObject({
+      code: -5,
+      reason: "launch command never ran",
+    });
+    // The botched tabs closed by the retry, the last pane by the crash
+    // (fire-and-forget, so wait for them to land).
+    await until(
+      () =>
+        fake.requests.filter((r) => r.method === "tab.close").length === LAUNCH_TRIES - 1 &&
+        fake.requests.some((r) => r.method === "pane.close"),
+      "the botched tabs' closes",
+    );
+    expect(
+      fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id),
+    ).toEqual(["tab-1", "tab-2"]);
+    await fake.close();
+  }, 30000);
+
+  it("waits for the pane's shell to draw its prompt before typing the wrapper", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    // A fresh tab reads empty for its first moments, the way a real one
+    // does while its shell starts: the wrapper must not be typed into it.
+    const fake = await startFakeHerdr({ rendered: readyFrame, shellPromptDelayMs: 300 });
+    const started = Date.now();
+
+    const handle = await launchAttempt(
+      envFor(rig, { [harness]: command }, fake.socketPath),
+      ticketSpec(rig, harness),
+    );
+
+    expect(handle.kind).toBe("live");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+    // The shell was read, and read non-empty, before the first send.
+    const firstSend = fake.requests.findIndex((r) => r.method === "pane.send_input");
+    const readsBefore = fake.requests
+      .slice(0, firstSend)
+      .filter((r) => r.method === "pane.read");
+    expect(readsBefore.length).toBeGreaterThanOrEqual(2);
+    expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(1);
+    expect(readEvents(rig.runsDir, "01").map((e) => e.kind)).toEqual(["spawned"]);
+    if (handle.kind === "live") await handle.tailer?.finish();
     await fake.close();
   }, 20000);
 });

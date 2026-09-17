@@ -99,7 +99,7 @@ The Console's right-hand panel for the selected node card — its status, channe
 _Avoid_: drawer (that's the bottom log/state strip), inspector (the state channel drawer)
 
 **Attempt**:
-One run of a harness on behalf of a Ticket or a Conversation, from spawn to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects; a Conversation has exactly one, ended by the operator or by a crash.
+One run of a harness on behalf of a Ticket or a Conversation, from Launch to exit. A ticket accumulates attempts across retries, merge-resolver runs, and review rejects; a Conversation has exactly one, ended by the operator or by a crash.
 _Avoid_: run (that's the whole thread), execution, job
 
 **Live attempt**:
@@ -113,6 +113,14 @@ _Avoid_: interactive attempt (interaction is the operator's, not the attempt's),
 **Outcome**:
 The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
+
+**Launch**:
+Starting an Attempt's harness: headless, spawning the child; Terminal-backed, opening the tab, waiting for its shell, typing the wrapper command, waiting for the TUI's ready frame, and typing the prompt. The launch is over when the harness is running and holds its prompt, or when it has been decided that it never will. One Attempt has one launch, however many tabs the launch opened to get there.
+_Avoid_: spawn (that's a proposed follow-up ticket), start (the operator starts a Conversation; the engine launches its Attempt), boot (the pool's)
+
+**Botched launch**:
+A Launch whose wrapper command never ran, so no harness ever started: the pane's shell was still starting when the command was typed and swallowed part of it. Retried into a fresh tab a bounded number of times before it counts as the Attempt's crash; never graded, and a Conversation it fails leaves no worktree or branch behind, since nothing ever ran in them. Distinct from a harness that ran and died, whose own exit code is the ending.
+_Avoid_: spawn race (the mechanism, not the thing), dead on arrival, readiness timeout (a launch whose harness ran but never painted; that one is not retried)
 
 **Attempt ending**:
 The observation that an Attempt is over. Headless, that is the harness's child exiting. A Terminal-backed attempt has no child, so its ending is whichever of three forms is observed first: herdr reporting the pane's end, the attempt's exit code landing on disk, or the pane found gone with no exit code behind it, which is a crash. The forms are raced, never ranked, because each is blind where another sees; only the exit code landing does not depend on the daemon still talking to us. Recorded in the fifth amendment to ADR-0014, "Attempts may run terminal-backed in herdr panes".

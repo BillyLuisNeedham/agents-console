@@ -62,6 +62,7 @@ import {
 import {
   attemptTabLabel,
   closePane,
+  closeTab,
   openAttemptTab,
   paneSendInput,
 } from "./herdr.ts";
@@ -69,6 +70,7 @@ import {
   PANE_TAIL_POLL_MS,
   SPAWN_INTERACTIVE_PROMPT_FAILED,
   SPAWN_INTERACTIVE_READY_FAILED,
+  SPAWN_INTERACTIVE_WRAPPER_LOST,
   attemptCrashReason,
   readAttemptResult,
   readExitCode,
@@ -83,7 +85,15 @@ import {
 // module.
 export { readAttemptResult };
 export type { ReadFailure, ResultValidator };
-import { sendWrapperToPane, typeVerified, waitForReadiness } from "./pane-session.ts";
+import {
+  DEFAULT_LAUNCH_CADENCE,
+  sendWrapperToPane,
+  typeVerified,
+  waitForReadiness,
+  waitForShellSettled,
+  waitForWrapperLanded,
+  type LaunchCadence,
+} from "./pane-session.ts";
 import type { ChildTracker } from "./children.ts";
 import type { LiveAttempts } from "./live-attempts.ts";
 import {
@@ -116,7 +126,18 @@ export interface AttemptEnv {
   liveAttempts: LiveAttempts;
   terminalBacked: boolean;
   agents?: string;
+  /**
+   * The launch half's timings (pane-session.ts), for a test that drives a
+   * botched launch in milliseconds; the engine leaves it unset.
+   */
+  launchCadence?: Partial<LaunchCadence>;
 }
+
+// How many times a terminal-backed launch opens a fresh tab before giving
+// up on a wrapper that never runs (issue #102): the shell-startup race is
+// per-spawn and intermittent, so a second tab almost always lands, and a
+// third bounds the cost of one that does not.
+export const LAUNCH_TRIES = 3;
 
 /**
  * What genuinely varies between the five spawn sites. `R` is the shape of a
@@ -450,32 +471,81 @@ export async function launchAttempt<R extends { ok: true }>(
   // (ADR-0014, ADR-0015); the event is recorded once the wrapper send's
   // outcome is known, so a mid-flight fallback records pane_id null plus
   // terminal_error instead of the dead pane.
-  const terminal = await openAttemptTerminal(
-    env.herdrSocket,
-    id,
-    spec.title,
-    spec.cwd,
-  );
-  if (terminal.paneId === null || terminal.tabId === null) {
-    if (spec.fallback === "none") {
-      throw new Error(`could not open a herdr tab: ${terminal.error}`);
-    }
-    return headless(terminal);
-  }
+  //
+  // The launch is tried into up to LAUNCH_TRIES fresh tabs (issue #96,
+  // issue #102): a tab's shell is given time to settle before the wrapper
+  // is typed, and `script` then has a short window to prove the wrapper ran
+  // by creating the Stream file. A wrapper that never ran is a Botched
+  // launch — the shell-startup race swallowed it — and is retried into a new
+  // tab, the botched one closed and a `launch-retried` event recording it;
+  // nothing is graded, and the `spawned` event names only the tab the launch
+  // ended up in, so tab close and boot re-adoption never chase a tab the
+  // retry already closed. The tries exhausted, the launch ends with the
+  // engine's own code, as a readiness timeout always has.
+  const cadence: LaunchCadence = { ...DEFAULT_LAUNCH_CADENCE, ...env.launchCadence };
   const interactiveArgv = interactiveHarnessCommand(env.harnesses, spec.harness)(ctx);
-  const terminalError = await sendWrapperToPane(
-    env.herdrSocket,
-    terminal.paneId,
-    interactiveArgv,
-    ctx,
-  );
-  if (terminalError !== undefined) {
-    if (spec.fallback === "none") {
-      throw new Error(`could not deliver the launch command: ${terminalError}`);
+  let terminal: AttemptTerminal & { paneId: string; tabId: string };
+  let landed: boolean;
+  for (let attempt = 1; ; attempt++) {
+    const opened = await openAttemptTerminal(
+      env.herdrSocket,
+      id,
+      spec.title,
+      spec.cwd,
+    );
+    if (opened.paneId === null || opened.tabId === null) {
+      if (spec.fallback === "none") {
+        throw new Error(`could not open a herdr tab: ${opened.error}`);
+      }
+      return headless(opened);
     }
-    return headless(terminal, terminalError);
+    terminal = { paneId: opened.paneId, tabId: opened.tabId };
+    await waitForShellSettled(env.herdrSocket, terminal.paneId, cadence);
+    const terminalError = await sendWrapperToPane(
+      env.herdrSocket,
+      terminal.paneId,
+      interactiveArgv,
+      ctx,
+    );
+    if (terminalError !== undefined) {
+      if (spec.fallback === "none") {
+        throw new Error(`could not deliver the launch command: ${terminalError}`);
+      }
+      return headless(terminal, terminalError);
+    }
+    landed = ctx.streamPath
+      ? await waitForWrapperLanded(ctx.streamPath, ctx.exitCodePath, cadence)
+      : true;
+    if (landed || attempt >= LAUNCH_TRIES) break;
+    appendEvent(env.runsDir, id, {
+      at: new Date().toISOString(),
+      attempt: spec.attempt,
+      kind: "launch-retried",
+      payload: {
+        try: attempt,
+        pane_id: terminal.paneId,
+        tab_id: terminal.tabId,
+        reason: "launch command never ran",
+      },
+    });
+    void closeTab(env.herdrSocket, terminal.tabId).catch(() => {});
   }
   recordSpawned(interactiveArgv, terminal);
+  if (!landed) {
+    // Every try was botched: the launch is over before any harness ran.
+    // The pane is closed the way a readiness timeout's is, so the operator
+    // is not left a silently idle tab; there is no transcript to drain.
+    void closePane(env.herdrSocket, terminal.paneId).catch(() => {});
+    return {
+      kind: "ended",
+      env,
+      spec,
+      ctx,
+      paneId: terminal.paneId,
+      tabId: terminal.tabId,
+      code: SPAWN_INTERACTIVE_WRAPPER_LOST,
+    };
+  }
   // The session half of a terminal-backed spawn (ADR-0016): the tailer on
   // the attempt's typescript Stream file, then prompt delivery (readiness
   // wait, typed prompt, echo verification, retry, file-reference fallback).
@@ -733,7 +803,8 @@ function spawnedPayload(
 function isBotchedSpawnCode(code: number): boolean {
   return (
     code === SPAWN_INTERACTIVE_READY_FAILED ||
-    code === SPAWN_INTERACTIVE_PROMPT_FAILED
+    code === SPAWN_INTERACTIVE_PROMPT_FAILED ||
+    code === SPAWN_INTERACTIVE_WRAPPER_LOST
   );
 }
 

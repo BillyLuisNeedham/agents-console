@@ -40,6 +40,7 @@ import {
   git,
   blockedMergeExplanation,
   mergeBranch,
+  discardWorktree,
   prepareWorktree,
   removeWorktree,
   worktreePathFor,
@@ -584,13 +585,20 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
     if (handle.kind === "ended") {
       // The harness died before its TUI came up (its own exit code,
-      // ADR-0016), or the TUI never became ready or the opening Turn never
-      // landed (the engine's codes): the launch is over, but the record and
-      // worktree stay. A crash, not a rejection, matching every other
-      // pane-loss-without-End ending. The launch keeps a pane whose harness
-      // died on its own (ADR-0014's crashed-attempt rule), but this
-      // Conversation never joins the runtimes, so nothing else would ever
-      // close the tab: it goes here, as markCrashed's does.
+      // ADR-0016), or the launch command never ran, the TUI never became
+      // ready, or the opening Turn never landed (the engine's codes): the
+      // launch is over. The record stays, marked crashed, so the event trail
+      // is kept and the id is never reused, but the worktree and branch go
+      // (issue #102, ADR-0018's amendment): the Conversation never went live,
+      // so there is nothing in them to keep, and a pool where launching is a
+      // coin flip would otherwise collect an orphaned pair per failure. A
+      // Conversation that crashes after it went live keeps its branch
+      // (markCrashed): the operator may have work in it. A crash, not a
+      // rejection, matching every other pane-loss-without-End ending. The
+      // launch keeps a pane whose harness died on its own (ADR-0014's
+      // crashed-attempt rule), but this Conversation never joins the
+      // runtimes, so nothing else would ever close the tab: it goes here, as
+      // markCrashed's does.
       writeConversationStatus(file, "crashed");
       event(id, "crash", {
         code: handle.code,
@@ -599,6 +607,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       env.liveAttempts.clear(id, 1);
       host.closeAttemptTabs(id);
       noteEnded(id, { branch: worktree.branch, crashed: true });
+      discardWorktree(env.cwd, worktree);
       // Same reasoning as the success path below: this launch never touches
       // the drive loop, so nothing else would ever tell the snapshot stream
       // this Conversation existed at all.

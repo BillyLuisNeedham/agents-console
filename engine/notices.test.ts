@@ -246,7 +246,7 @@ function startFakeHerdr(): Promise<{
         const visible = pane
           ? pane.booted
             ? `Claude Code v2.1\n${pane.inputArea || "❯"}`
-            : pane.buffer
+            : `$ ${pane.buffer}`
           : "";
         respond({ read: { text: visible, revision: 0, truncated: false } });
       } else if (msg.method === "pane.send_input") {

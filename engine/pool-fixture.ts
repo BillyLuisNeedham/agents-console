@@ -105,6 +105,12 @@ export interface StubBehaviour {
   winner?: number | string;
   exitCode?: number;
   exitCodes?: number[];
+  /**
+   * A file the stub waits for (up to ten seconds) before doing anything,
+   * so a test can hold the harness open until the engine has reached the
+   * point it means to observe, then release it by creating the file.
+   */
+  waitFor?: string;
 }
 
 export interface StubRig {
@@ -132,7 +138,13 @@ export function stubHarness(
     [
       "#!/usr/bin/env bash",
       "set -uo pipefail",
-      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"',
+      'issue="$1"; status="$2"; outcome_path="$3"; outcome_json="$4"; exit_code="$5"; wait_for="${6:-}"',
+      'if [ -n "$wait_for" ]; then',
+      "  for _ in $(seq 1 200); do",
+      '    [ -e "$wait_for" ] && break',
+      "    sleep 0.05",
+      "  done",
+      "fi",
       'if [ "$status" = "ready" ] || [ "$status" = "marker-done" ]; then',
       // In place on line 1, through awk rather than `sed -i`: BSD sed wants
       // an argument after -i and GNU sed refuses one, so the sed form rewrote
@@ -191,6 +203,7 @@ export function stubHarness(
       ctx.outcomePath,
       outcome,
       String(exitCode),
+      ...(b.waitFor ? [b.waitFor] : []),
     ];
   };
   return { harnesses: { stub }, spawned, spawnOrder, spawnList };

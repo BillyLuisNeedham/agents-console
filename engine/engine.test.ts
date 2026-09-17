@@ -4441,14 +4441,28 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       ],
       config: { ...stubConfig, terminal: "herdr" },
     });
-    const rig = stubHarness(poolDir, {});
+    // The stub holds until released, so it is still running when the
+    // ending wait begins and the wait subscribes for the pane's end; an
+    // instant stub would have its Outcome on disk before the wait started,
+    // and the wait would end on it without ever subscribing.
+    const release = join(poolDir, "release");
+    const rig = stubHarness(poolDir, { "01": { waitFor: release } });
     const fake = await startFakeHerdr();
 
-    const run = await runPool({
+    const running = runPool({
       poolDir,
       harnesses: rig.harnesses,
       herdrSocket: fake.socketPath,
     });
+    const deadline = Date.now() + 10_000;
+    while (
+      !fake.requests.some((r) => r.method === "events.subscribe") &&
+      Date.now() < deadline
+    ) {
+      await Bun.sleep(20);
+    }
+    writeFileSync(release, "");
+    const run = await running;
     await fake.close();
 
     expect(run.final.tickets["01"]).toBe("done");
@@ -4463,14 +4477,14 @@ describe("terminal-backed attempts (named herdr tabs)", () => {
       focus: false,
       cwd: poolDir,
     });
-    // The harness ran inside the pane: the wrapper line was sent as text,
-    // Enter as a key, and the pane's end was awaited on an events.subscribe
+    // The harness ran inside the pane: the wrapper line was sent as text with
+    // Enter as a key in the same call, and the pane's end was awaited on an events.subscribe
     // stream matching pane_exited, pane_closed and tab_closed (the last
     // because a closed tab takes its panes without a pane event, issue #61).
     const sends = fake.requests.filter((r) => r.method === "pane.send_input");
-    expect(sends).toHaveLength(2);
+    expect(sends).toHaveLength(1);
     expect(typeof sends[0].params.text).toBe("string");
-    expect(sends[1].params.keys).toEqual(["enter"]);
+    expect(sends[0].params.keys).toEqual(["enter"]);
     const subscriptions = fake.requests.filter(
       (r) => r.method === "events.subscribe",
     );

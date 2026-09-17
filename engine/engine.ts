@@ -106,6 +106,7 @@ export type { HarnessCommand } from "./spawn.ts";
 // Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper } from "./pane-session.ts";
+import type { LaunchCadence } from "./pane-session.ts";
 export type {
   ConversationRecord,
   ConversationStatus,
@@ -331,6 +332,9 @@ interface RunOptions {
   // The herdr daemon socket for terminal-backed attempts. Tests point this
   // at a fake socket; the default is the daemon's path on this machine.
   herdrSocket?: string;
+  // The launch half's timings (pane-session.ts), for a test that drives a
+  // Botched launch in milliseconds. Production leaves it unset.
+  launchCadence?: Partial<LaunchCadence>;
   // The Conversations ADR: force-allow an empty issues/ (no Tickets at
   // all) even when the pool has no conversations/ directory yet either —
   // startPool already infers this on its own once a conversations/
@@ -564,6 +568,8 @@ interface Session {
   issueRunnerPath: string;
   // Where terminal-backed attempts reach the herdr daemon (ADR-0014).
   herdrSocket: string;
+  // The launch half's timings, when a test overrides them (RunOptions).
+  launchCadence?: Partial<LaunchCadence>;
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
@@ -716,7 +722,15 @@ export function startPool(options: RunOptions): PoolRun {
   );
   const conversations = createConversations(
     {
-      ...attemptEnvFrom(config, harnesses, runsDir, herdrSocket, children, liveAttempts),
+      ...attemptEnvFrom(
+        config,
+        harnesses,
+        runsDir,
+        herdrSocket,
+        children,
+        liveAttempts,
+        options.launchCadence,
+      ),
       poolDir,
       cwd,
       git,
@@ -753,6 +767,7 @@ export function startPool(options: RunOptions): PoolRun {
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     herdrSocket,
+    ...(options.launchCadence ? { launchCadence: options.launchCadence } : {}),
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
     terminalReconcile: Promise.resolve(),
@@ -4979,6 +4994,7 @@ function attemptEnvFrom(
   herdrSocket: string,
   children: ChildTracker,
   liveAttempts: LiveAttempts,
+  launchCadence?: Partial<LaunchCadence>,
 ): AttemptEnv {
   return {
     runsDir,
@@ -4988,6 +5004,7 @@ function attemptEnvFrom(
     liveAttempts,
     terminalBacked: config.terminal === "herdr",
     agents: config.agents,
+    ...(launchCadence ? { launchCadence } : {}),
   };
 }
 
@@ -4999,6 +5016,7 @@ function attemptEnvOf(session: Session, config: PoolConfig = session.state.confi
     session.herdrSocket,
     session.children,
     session.liveAttempts,
+    session.launchCadence,
   );
 }
 

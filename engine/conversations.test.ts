@@ -74,10 +74,19 @@ interface FakePane {
   buffer: string;
   booted: boolean;
   inputArea: string;
+  swallow: boolean;
   proc?: ReturnType<typeof Bun.spawn>;
 }
 
-async function startFakeHerdr(): Promise<{
+// What a pane shows before its wrapper runs: the shell's prompt, so the
+// engine's shell-settle gate sees a shell that has drawn it.
+const FAKE_SHELL_PROMPT = "$ ";
+
+async function startFakeHerdr(options?: {
+  // The shell-startup race (issue #102): the first N tabs swallow the
+  // wrapper typed into them and sit at their prompt with `script` never run.
+  swallowWrapper?: number;
+}): Promise<{
   socketPath: string;
   requests: { method: string; params: Record<string, unknown> }[];
   close: () => Promise<void>;
@@ -85,6 +94,7 @@ async function startFakeHerdr(): Promise<{
   panes: Map<string, FakePane>;
 }> {
   let minted = 0;
+  let swallowRemaining = options?.swallowWrapper ?? 0;
   const requests: { method: string; params: Record<string, unknown> }[] = [];
   const panes = new Map<string, FakePane>();
   const subscribers: Socket[] = [];
@@ -136,7 +146,9 @@ async function startFakeHerdr(): Promise<{
           buffer: "",
           booted: false,
           inputArea: "",
+          swallow: swallowRemaining > 0,
         });
+        swallowRemaining -= 1;
         respond({ tab: { tab_id: tabId } });
       } else if (msg.method === "pane.list") {
         respond({
@@ -146,10 +158,21 @@ async function startFakeHerdr(): Promise<{
         });
       } else if (msg.method === "pane.read") {
         const pane = panes.get(String(msg.params.pane_id));
-        const visible = pane ? (pane.booted ? pane.inputArea : pane.buffer) : "";
+        const visible = pane
+          ? pane.booted
+            ? pane.inputArea
+            : `${FAKE_SHELL_PROMPT}${pane.buffer}`
+          : "";
         respond({ read: { text: visible, revision: 0, truncated: false } });
       } else if (msg.method === "pane.send_input") {
         const pane = panes.get(String(msg.params.pane_id));
+        if (pane && !pane.booted && pane.swallow) {
+          // The race: the shell was still starting, the wrapper is gone,
+          // and the pane sits at its prompt as if nothing was typed.
+          pane.swallow = false;
+          respond({});
+          return;
+        }
         if (pane) {
           if (typeof msg.params.text === "string") {
             if (!pane.booted) pane.buffer += msg.params.text;
@@ -164,7 +187,13 @@ async function startFakeHerdr(): Promise<{
               pane.booted = true;
               const proc = Bun.spawn(["bash", "-c", command], {
                 cwd: pane.cwd,
-                stdin: "ignore",
+                // "pipe", never written to or closed, so the `cat` harness
+                // blocks reading instead of exiting at once on /dev/null's
+                // EOF: this fake's pane must stay alive until a test ends
+                // it, as notices.test.ts's does, rather than dying inside
+                // the launch's own window and winning or losing a race
+                // with the crash watch.
+                stdin: "pipe",
                 stdout: "ignore",
                 stderr: "ignore",
               });
@@ -596,10 +625,14 @@ describe("Conversation launch failure", () => {
       expect(typeof spawned.payload.commitSha).toBe("string");
       const crash = events.find((e) => e.kind === "crash")!;
       expect(crash.payload).toEqual({ code: 1, reason: "harness exited 1" });
+      // The launch never went live, so there is nothing on the branch to
+      // keep: the worktree and branch go (issue #102, ADR-0018's amendment).
+      expect(branchExists(poolDir, view.id)).toBe(false);
+      expect(existsSync(worktreePathFor(poolDir, view.id))).toBe(false);
       // Nothing was typed into the shell the wrapper left behind; the launch
       // closed no pane, and the Conversation closed the tab once (the close
       // is fire-and-forget, so it lands a tick after the start returns).
-      expect(fake.requests.filter((r) => r.method === "pane.send_input")).toHaveLength(2);
+      expect(fake.requests.filter((r) => r.method === "pane.send_input")).toHaveLength(1);
       expect(fake.requests.some((r) => r.method === "pane.close")).toBe(false);
       const deadline = Date.now() + 2000;
       while (!fake.requests.some((r) => r.method === "tab.close") && Date.now() < deadline) {
@@ -612,6 +645,112 @@ describe("Conversation launch failure", () => {
       await fake.close();
     }
   });
+});
+
+describe("Botched Conversation launch (issue #102)", () => {
+  // The launch half in milliseconds: the fake's shell prompt is there at
+  // once, and a wrapper that runs creates its Stream file within a tick.
+  const launchCadence = {
+    settlePollMs: 10,
+    settleConfirmations: 2,
+    settleTimeoutMs: 1_000,
+    landedTimeoutMs: 1_500,
+    landedPollMs: 20,
+  };
+
+  it("retries a launch whose command never ran into a fresh tab, and goes live there", async () => {
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    // The first tab swallows the wrapper (the shell-startup race, issue
+    // #96): `script` never runs and no Stream file appears.
+    const fake = await startFakeHerdr({ swallowWrapper: 1 });
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+        launchCadence,
+      });
+      const view = await run.startConversation({ title: "Second time lucky", opening: "hello" });
+      expect(view.status).toBe("live");
+      expect(view.paneId).toBe("pane-2");
+
+      const events = readEvents(join(poolDir, "runs"), view.id);
+      expect(events.map((e) => e.kind)).toEqual(["launch-retried", "spawned"]);
+      expect(events[0].payload).toMatchObject({
+        try: 1,
+        pane_id: "pane-1",
+        tab_id: "tab-1",
+        reason: "launch command never ran",
+      });
+      // The spawned event names the tab the launch ended up in, so the
+      // Conversation's later tab close never chases the botched one, which
+      // the retry closed itself.
+      expect(events[1].payload.tab_id).toBe("tab-2");
+      const closes = fake.requests.filter((r) => r.method === "tab.close");
+      expect(closes.map((r) => r.params.tab_id)).toEqual(["tab-1"]);
+      expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(2);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 20000);
+
+  it("crashes a Conversation botched on every try and leaves no worktree or branch behind", async () => {
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const fake = await startFakeHerdr({ swallowWrapper: 3 });
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+        launchCadence,
+      });
+      const view = await run.startConversation({ title: "Never ran" });
+      expect(view.status).toBe("crashed");
+
+      // The record stays, crashed, so the trail is kept and the id is not
+      // reused; the worktree and branch do not, since nothing ever ran in
+      // them (issue #102).
+      const file = join(poolDir, "conversations", `${view.id}.md`);
+      expect(readConversation(file).status).toBe("crashed");
+      expect(branchExists(poolDir, view.id)).toBe(false);
+      expect(existsSync(worktreePathFor(poolDir, view.id))).toBe(false);
+
+      const events = readEvents(join(poolDir, "runs"), view.id);
+      expect(events.map((e) => e.kind)).toEqual([
+        "launch-retried",
+        "launch-retried",
+        "spawned",
+        "crash",
+      ]);
+      const crash = events.find((e) => e.kind === "crash")!;
+      expect(crash.payload).toEqual({ code: -5, reason: "launch command never ran" });
+      expect(fake.requests.filter((r) => r.method === "tab.create")).toHaveLength(3);
+      // Nothing was ever typed beyond the three wrapper sends: no opening
+      // Turn into a shell.
+      expect(fake.requests.filter((r) => r.method === "pane.send_input")).toHaveLength(3);
+      // The two botched tabs closed by the retry; the last by the crash
+      // (fire-and-forget, so wait for them to land).
+      const deadline = Date.now() + 2000;
+      while (
+        fake.requests.filter((r) => r.method === "tab.close").length < 3 &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(
+        fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id),
+      ).toEqual(["tab-1", "tab-2", "tab-3"]);
+      // A next Conversation takes a fresh id: the crashed record holds its own.
+      const next = await run.startConversation({ title: "After it" });
+      expect(next.id).not.toBe(view.id);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 20000);
 });
 
 describe("Conversation boot reconciliation", () => {

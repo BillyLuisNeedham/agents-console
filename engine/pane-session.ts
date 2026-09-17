@@ -12,6 +12,33 @@
 import { existsSync, rmSync } from "node:fs";
 import { closePane, paneSendInput, peekPane, waitForPaneEnd } from "./herdr.ts";
 
+/**
+ * The launch half's cadences (issue #102): how the engine waits for a fresh
+ * pane's shell before sending the wrapper, and how long it gives `script` to
+ * prove the wrapper ran. Overridable so a test can drive a botched launch in
+ * milliseconds; engine callers pass none.
+ */
+export interface LaunchCadence {
+  /** Between shell-settle reads. */
+  settlePollMs: number;
+  /** Identical non-empty reads before the shell counts as settled. */
+  settleConfirmations: number;
+  /** After this, the wrapper is sent whether or not the shell settled. */
+  settleTimeoutMs: number;
+  /** How long the Stream file has to appear before the launch is botched. */
+  landedTimeoutMs: number;
+  /** Between Stream-file probes. */
+  landedPollMs: number;
+}
+
+export const DEFAULT_LAUNCH_CADENCE: LaunchCadence = {
+  settlePollMs: 200,
+  settleConfirmations: 3,
+  settleTimeoutMs: 10_000,
+  landedTimeoutMs: 10_000,
+  landedPollMs: 50,
+};
+
 // The pane-read line count for readiness and echo polling: a freshly spawned
 // pane renders mostly blank rows above its prompt, so a small read returns
 // empty (prototype finding); 200 lines covers the TUI's input area and the
@@ -96,10 +123,75 @@ export function interactiveWrapper(
 }
 
 /**
+ * Wait for a fresh pane's shell to settle before anything is typed into it
+ * (issue #96, issue #102): a tab is not ready the instant `tab.create`
+ * returns, and text that lands while the shell is still starting is
+ * swallowed in part — the shell submits the fragment that survived and the
+ * rest sits unsubmitted at the next prompt, so `script` never runs
+ * (reproduced live against herdr 0.8.2 on both zsh and bash). The gate is
+ * prompt-agnostic: it waits for the pane to show something and for that
+ * something to stop changing across consecutive reads, which is the shell
+ * having drawn its prompt, whatever the prompt looks like. Empty reads never
+ * count (a fresh pane renders blank for its first moments). Resolves
+ * "settled" or, past the timeout, "timed-out"; the caller sends either way,
+ * because the wrapper-landed check behind it catches a swallowed send and a
+ * shell with no prompt at all must not be a launch that never happens.
+ */
+export async function waitForShellSettled(
+  socketPath: string,
+  paneId: string,
+  cadence: LaunchCadence = DEFAULT_LAUNCH_CADENCE,
+): Promise<"settled" | "timed-out"> {
+  const deadline = Date.now() + cadence.settleTimeoutMs;
+  let last = "";
+  let stable = 0;
+  while (Date.now() < deadline) {
+    const text = (
+      await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(() => "")
+    ).trim();
+    if (text !== "" && text === last) {
+      stable += 1;
+      if (stable >= cadence.settleConfirmations) return "settled";
+    } else {
+      stable = text === "" ? 0 : 1;
+      last = text;
+    }
+    await sleep(cadence.settlePollMs);
+  }
+  return "timed-out";
+}
+
+/**
+ * Whether the wrapper actually ran: `script` creates its Stream file the
+ * instant it starts, so the file's absence a moment after the send is proof
+ * the launch command never executed — the shell-startup race swallowed it
+ * (issue #96, issue #102) — and the launch is botched long before the
+ * readiness wait would time out. The exit-code file counts too: a harness
+ * that died at once still had its wrapper run, and that is the fail-fast
+ * path (ADR-0016's amendment), not this one. Resolves `true` once either
+ * file exists, `false` past the timeout.
+ */
+export async function waitForWrapperLanded(
+  streamPath: string,
+  exitCodePath: string,
+  cadence: LaunchCadence = DEFAULT_LAUNCH_CADENCE,
+): Promise<boolean> {
+  const deadline = Date.now() + cadence.landedTimeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(streamPath) || existsSync(exitCodePath)) return true;
+    await sleep(cadence.landedPollMs);
+  }
+  return existsSync(streamPath) || existsSync(exitCodePath);
+}
+
+/**
  * Send the session's wrapper to its pane (ADR-0014), the send half of a
- * terminal-backed spawn. Text and Enter travel in separate `pane.send_input`
- * calls: herdr treats a literal newline in text as pasted data, not a submit
- * (verified), so text and its submit are always two calls. Resolves with
+ * terminal-backed spawn. Text and Enter travel in one `pane.send_input`
+ * call, which herdr applies in order, text then keys (verified live on
+ * 0.8.2; it is what the CLI's atomic `pane run` does): sent as two calls
+ * they raced each other into a shell still starting up (issue #96), and a
+ * literal newline in text is pasted data, not a submit (verified), so the
+ * Enter must ride as a key. Resolves with
  * `undefined` once the pane carries the wrapper. On failure — the daemon died
  * after the tab opened, or rejected the input — closes whatever half-started
  * pane remains (best-effort: it kills a wrapper that false-alarm Enter loss
@@ -121,8 +213,8 @@ export async function sendWrapperToPane(
   try {
     await paneSendInput(socketPath, paneId, {
       text: interactiveWrapper(argv, ctx),
+      keys: ["enter"],
     });
-    await paneSendInput(socketPath, paneId, { keys: ["enter"] });
     return undefined;
   } catch (err) {
     void closePane(socketPath, paneId).catch(() => {});
