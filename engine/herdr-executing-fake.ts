@@ -83,7 +83,22 @@ export interface ExecutingFakeHerdrOptions {
   hideInputs?: number;
   wrapWidth?: number;
   holdPane?: boolean;
+  /**
+   * The shell-startup race (issue #96, issue #102): the first N tabs swallow
+   * the wrapper typed into them — the text vanishes and the Enter submits
+   * nothing, the pane left sitting at its prompt with `script` never run.
+   */
+  swallowWrapper?: number;
+  /**
+   * How long after tab.create a pane's read stays empty before its shell
+   * prompt appears: a fresh tab is not ready the instant it is created.
+   */
+  shellPromptDelayMs?: number;
 }
+
+// What a pane shows before its wrapper runs: the shell's prompt. Non-empty,
+// so the engine's shell-settle gate sees a shell that has drawn its prompt.
+export const FAKE_SHELL_PROMPT = "$ ";
 
 export interface ExecutingFakeHerdr {
   socketPath: string;
@@ -113,6 +128,8 @@ export async function startExecutingFakeHerdr(
   const defaultHideInputs = options?.hideInputs ?? 0;
   const wrapWidth = options?.wrapWidth;
   const holdPane = options?.holdPane === true;
+  let swallowRemaining = options?.swallowWrapper ?? 0;
+  const shellPromptDelayMs = options?.shellPromptDelayMs ?? 0;
   const fail = new Set(options?.fail ?? []);
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
@@ -148,6 +165,8 @@ export async function startExecutingFakeHerdr(
       hideInputs: number;
       inputArea: string;
       hideEcho: boolean;
+      swallow: boolean;
+      createdAt: number;
       proc?: ReturnType<typeof Bun.spawn>;
     }
   >();
@@ -247,7 +266,10 @@ export async function startExecutingFakeHerdr(
           hideInputs: defaultHideInputs,
           inputArea: "",
           hideEcho: false,
+          swallow: swallowRemaining > 0,
+          createdAt: Date.now(),
         });
+        swallowRemaining -= 1;
         respond({
           type: "tab_created",
           tab: { tab_id: tabId, ...(workspaceId !== null ? { workspace_id: workspaceId } : {}) },
@@ -302,7 +324,9 @@ export async function startExecutingFakeHerdr(
             ? pane.hideEcho
               ? pane.rendered
               : `${pane.rendered}${renderInput(pane.inputArea)}`
-            : `${pane.rendered}${pane.buffer}`
+            : Date.now() - pane.createdAt < shellPromptDelayMs
+              ? ""
+              : `${FAKE_SHELL_PROMPT}${pane.rendered}${pane.buffer}`
           : "";
         respond({
           read: {
@@ -313,6 +337,13 @@ export async function startExecutingFakeHerdr(
         });
       } else if (msg.method === "pane.send_input") {
         const pane = panes.get(String(msg.params.pane_id));
+        if (pane && !pane.booted && pane.swallow) {
+          // The race: the shell was still starting, the wrapper is gone,
+          // and the pane sits at its prompt as if nothing was typed.
+          pane.swallow = false;
+          respond({});
+          return;
+        }
         if (pane) {
           if (typeof msg.params.text === "string") {
             if (!pane.booted) {
@@ -443,6 +474,8 @@ export async function startExecutingFakeHerdr(
         hideInputs: 0,
         inputArea: "",
         hideEcho: false,
+        swallow: false,
+        createdAt: 0,
       });
     },
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),

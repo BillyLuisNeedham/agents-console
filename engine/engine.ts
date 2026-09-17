@@ -112,6 +112,7 @@ export type { HarnessCommand } from "./spawn.ts";
 // Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper } from "./pane-session.ts";
+import type { LaunchCadence } from "./pane-session.ts";
 export type {
   ConversationRecord,
   ConversationStatus,
@@ -337,6 +338,9 @@ interface RunOptions {
   // The herdr daemon socket for terminal-backed attempts. Tests point this
   // at a fake socket; the default is the daemon's path on this machine.
   herdrSocket?: string;
+  // The launch half's timings (pane-session.ts), for a test that drives a
+  // Botched launch in milliseconds. Production leaves it unset.
+  launchCadence?: Partial<LaunchCadence>;
   // The herdr workspace the server was launched in (issue #94), the second
   // candidate for the Pool workspace after the id this pool remembers. It
   // reaches the engine as an option and never as an environment read: the
@@ -575,6 +579,8 @@ interface Session {
   issueRunnerPath: string;
   // Where terminal-backed attempts reach the herdr daemon (ADR-0014).
   herdrSocket: string;
+  // The launch half's timings, when a test overrides them (RunOptions).
+  launchCadence?: Partial<LaunchCadence>;
   // The Pool workspace (issue #94): where every tab this pool opens lands.
   poolWorkspace: PoolWorkspaceState;
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
@@ -740,6 +746,7 @@ export function startPool(options: RunOptions): PoolRun {
         poolWorkspaceFor(() => session),
         children,
         liveAttempts,
+        options.launchCadence,
       ),
       poolDir,
       cwd,
@@ -777,6 +784,7 @@ export function startPool(options: RunOptions): PoolRun {
     onSnapshot: options.onSnapshot,
     issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
     herdrSocket,
+    ...(options.launchCadence ? { launchCadence: options.launchCadence } : {}),
     poolWorkspace: {
       // Replaced below by the boot resolution itself, so anything reading
       // through poolWorkspaceFor before then waits for the real answer.
@@ -5291,6 +5299,7 @@ function attemptEnvFrom(
   poolWorkspace: PoolWorkspace,
   children: ChildTracker,
   liveAttempts: LiveAttempts,
+  launchCadence?: Partial<LaunchCadence>,
 ): AttemptEnv {
   return {
     runsDir,
@@ -5301,6 +5310,7 @@ function attemptEnvFrom(
     liveAttempts,
     terminalBacked: config.terminal === "herdr",
     agents: config.agents,
+    ...(launchCadence ? { launchCadence } : {}),
   };
 }
 
@@ -5313,6 +5323,7 @@ function attemptEnvOf(session: Session, config: PoolConfig = session.state.confi
     poolWorkspaceFor(() => session),
     session.children,
     session.liveAttempts,
+    session.launchCadence,
   );
 }
 

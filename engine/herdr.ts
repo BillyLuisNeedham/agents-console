@@ -434,10 +434,13 @@ export async function listPaneIds(
 }
 
 /**
- * Send input to a pane, exactly as the operator's keystrokes would land. Text
- * and keys travel in separate calls: a literal `\r` inside text is pasted
- * data, not a submit (verified herdr behaviour), so the caller sends the
- * command line as text and the Enter as a key.
+ * Send input to a pane, exactly as the operator's keystrokes would land. A
+ * literal `\r` inside text is pasted data, not a submit (verified herdr
+ * behaviour), so a command line travels as text and its Enter as a key. The
+ * two may share one call: herdr applies text first, then keys (verified
+ * live on 0.8.2, and what its CLI's `pane run` sends), which is how a
+ * command line and its submit reach the shell without a gap between them
+ * (issue #96).
  */
 export async function paneSendInput(
   socketPath: string,

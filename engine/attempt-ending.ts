@@ -467,6 +467,11 @@ export const EXIT_CODE_PANE_GONE = -2;
 // module's prompt delivery, which is the launch half, not an ending.
 export const SPAWN_INTERACTIVE_READY_FAILED = -3;
 export const SPAWN_INTERACTIVE_PROMPT_FAILED = -4;
+// The launch command itself never ran, on every try: `script` never created
+// the Stream file after the wrapper was sent, so no harness ever started
+// (issue #102's botched launch). Distinct from -3, where the wrapper ran and
+// the TUI never painted.
+export const SPAWN_INTERACTIVE_WRAPPER_LOST = -5;
 
 // The crash reason for a non-zero exit, whose causes want different words. A
 // real code came from the harness; EXIT_CODE_UNREADABLE means the harness's
@@ -491,6 +496,9 @@ export function exitCrashReason(
   }
   if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
     return "prompt never landed";
+  }
+  if (code === SPAWN_INTERACTIVE_WRAPPER_LOST) {
+    return "launch command never ran";
   }
   if (code === EXIT_CODE_UNREADABLE) {
     return (
@@ -542,6 +550,9 @@ export function exitedPhrase(code: number): string {
   }
   if (code === SPAWN_INTERACTIVE_PROMPT_FAILED) {
     return "ended before its prompt landed";
+  }
+  if (code === SPAWN_INTERACTIVE_WRAPPER_LOST) {
+    return "ended before its launch command ran";
   }
   return `exited ${code}`;
 }

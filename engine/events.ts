@@ -21,6 +21,10 @@ import { join } from "node:path";
 const EVENT_KINDS = [
   "scheduled",
   "spawned",
+  // A terminal-backed launch whose wrapper never ran (issue #102's Botched
+  // launch): the tab it was typed into, closed, and the reason; the launch
+  // went on into a fresh tab, and only the tab it ended up in is `spawned`.
+  "launch-retried",
   "exited",
   "merged",
   "merge-conflict",

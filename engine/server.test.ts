@@ -2771,6 +2771,13 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
               pane_id: paneId,
             })),
           });
+        } else if (msg.method === "pane.read") {
+          // A pane at its shell prompt, so the engine's shell-settle gate
+          // (issue #102) sees a shell that has drawn it.
+          const pane = panes.get(String(msg.params.pane_id));
+          respond({
+            read: { text: pane ? `$ ${pane.buffer}` : "", revision: 0, truncated: false },
+          });
         } else if (msg.method === "pane.send_input") {
           const pane = panes.get(String(msg.params.pane_id));
           if (pane) {
@@ -3620,8 +3627,10 @@ describe("conversation endpoints", () => {
               .map(([id, p]) => ({ tab_id: p.tabId, pane_id: id })),
           });
         } else if (msg.method === "pane.read") {
+          // Before the wrapper runs the pane shows its shell prompt, so the
+          // engine's shell-settle gate (issue #102) sees a settled shell.
           const pane = panes.get(String(msg.params.pane_id));
-          const visible = pane ? (pane.booted ? pane.inputArea : pane.buffer) : "";
+          const visible = pane ? (pane.booted ? pane.inputArea : `$ ${pane.buffer}`) : "";
           respond({ read: { text: visible, revision: 0, truncated: false } });
         } else if (msg.method === "pane.send_input") {
           const pane = panes.get(String(msg.params.pane_id));
@@ -3639,7 +3648,11 @@ describe("conversation endpoints", () => {
                 pane.booted = true;
                 const proc = Bun.spawn(["bash", "-c", command], {
                   cwd: pane.cwd,
-                  stdin: "ignore",
+                  // "pipe", never written to or closed, so the `cat`
+                  // harness blocks instead of exiting at once on EOF: the
+                  // pane must stay alive until a test ends it, rather than
+                  // dying inside the launch's own window.
+                  stdin: "pipe",
                   stdout: "ignore",
                   stderr: "ignore",
                 });
