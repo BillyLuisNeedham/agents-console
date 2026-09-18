@@ -113,6 +113,7 @@ export type { HarnessCommand } from "./spawn.ts";
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper } from "./pane-session.ts";
 import type { LaunchCadence } from "./pane-session.ts";
+import { createJev, JEV_MODEL, type Jev, type JevNotice } from "./jev.ts";
 export type {
   ConversationRecord,
   ConversationStatus,
@@ -353,6 +354,11 @@ interface RunOptions {
   // that wants a Ticket-less pool to boot before its first Conversation has
   // ever started and before the directory exists (a test).
   allowEmptyIssues?: boolean;
+  // Jev, the judgement model (ADR-0020, jev.ts): built at the CLI boundary
+  // from TYPESAFE_API_KEY and passed in, so the engine never sees a key.
+  // Absent, the pool gets the unconfigured port and every call site takes
+  // its heuristic path, exactly as before Jev existed. Tests inject a fake.
+  jev?: Jev;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -610,6 +616,9 @@ interface Session {
   // startPool to the boot read, so the first boundary is a no-op unless the
   // file changed since boot.
   lastConfigText: string | null;
+  // Jev (ADR-0020) and the pool-log subscription on it, released at close.
+  jev: Jev;
+  jevUnsubscribe: () => void;
   // The headless children of this engine process (ADR-0017), tracked from
   // spawn to exit so a shutdown can stop every one of them.
   children: ChildTracker;
@@ -799,6 +808,8 @@ export function startPool(options: RunOptions): PoolRun {
     adopted: new Map(),
     mergeChain: Promise.resolve(),
     lastConfigText,
+    jev: options.jev ?? createJev(),
+    jevUnsubscribe: () => {},
     children,
     orphans: [],
     liveAttempts,
@@ -810,6 +821,19 @@ export function startPool(options: RunOptions): PoolRun {
   };
 
   rehydrate(session);
+  // Jev (ADR-0020): one boot line saying which path is live, then one line
+  // per fallback cause as the port's own dedupe announces them, never one
+  // per call. The subscription is released with the store at close.
+  session.jevUnsubscribe = session.jev.subscribe((notice) => {
+    session.state = applyUpdate(session.state, { log: [jevNoticeLine(notice)] });
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      session.jev.configured
+        ? `Jev configured (${JEV_MODEL})`
+        : "Jev not configured, heuristics only",
+    ],
+  });
   // Conversations do not resume (the Conversations ADR): any recorded live
   // at boot has an unknown pane fate and no runtime entry will ever track
   // it again, so it crashes now rather than sitting unreachable.
@@ -2503,9 +2527,16 @@ function persistenceInterrupt(error: unknown): Interrupt {
   };
 }
 
+function jevNoticeLine(notice: JevNotice): string {
+  return notice.kind === "recovered"
+    ? "Jev answering again"
+    : `Jev unavailable (${notice.cause}: ${notice.detail}); heuristics until it answers`;
+}
+
 function closeStore(session: Session): void {
   // A closed or dead drive stops the hold watch too: nothing emits for it.
   session.holdWatch.stop();
+  session.jevUnsubscribe();
   if (!session.storeOpen) return;
   session.storeOpen = false;
   session.store.close();
