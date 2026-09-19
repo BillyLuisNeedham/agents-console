@@ -5052,6 +5052,27 @@ describe("enlisted ticket lifecycle", () => {
       .stdout.toString();
   }
 
+  function currentBranchOf(dir: string): string {
+    return spawnSync("git", ["-C", dir, "branch", "--show-current"], {
+      stdio: "pipe",
+    })
+      .stdout.toString()
+      .trim();
+  }
+
+  function shaAt(dir: string, ref: string): string {
+    return spawnSync("git", ["-C", dir, "rev-parse", ref], { stdio: "pipe" })
+      .stdout.toString()
+      .trim();
+  }
+
+  function fileAt(dir: string, ref: string, path: string): string {
+    return spawnSync("git", ["-C", dir, "show", `${ref}:${path}`], {
+      stdio: "pipe",
+    })
+      .stdout.toString();
+  }
+
   it("an Outcome of done lands the ticket done, merges the found branch, and leaves the checkout and branch alone", async () => {
     const poolDir = gitTerminalPool([
       { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
@@ -5116,6 +5137,76 @@ describe("enlisted ticket lifecycle", () => {
         (r) => r.method === "tab.close" && r.params.tab_id === "tab-op",
       ),
     ).toBe(false);
+  });
+
+  it("merges a pane enlisted in the pool's own checkout onto the branch the pool was on", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    // The branch the pool is on when the pane is found. The enlist's branch
+    // rule creates a pool branch in this very checkout and moves it there, so
+    // the done merge must still land the work back on this branch.
+    const target = currentBranchOf(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-main",
+      title: "On main",
+      spec: "",
+    });
+    expect(res.status).toBe(201);
+    // The rule moved the pool's own checkout onto the created pool branch.
+    const created = branchFor(poolDir, "enlist-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+
+    // The agent commits its work in the checkout it was moved onto.
+    writeFileSync(join(poolDir, "enlisted.txt"), "work\n");
+    spawnSync("git", ["-C", poolDir, "add", "enlisted.txt"], { stdio: "ignore" });
+    spawnSync("git", ["-C", poolDir, "commit", "-qm", "enlist work"], {
+      stdio: "ignore",
+    });
+    const branchSha = shaAt(poolDir, created);
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(
+      () =>
+        server.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status ===
+        "done",
+      "enlist-1 done",
+    );
+
+    // The commit reached the branch the pool was on, not merely the pool
+    // branch that checkout had been moved to: it is an ancestor of the target
+    // and the file reads from the target's tree.
+    await waitFor(
+      () =>
+        spawnSync(
+          "git",
+          ["-C", poolDir, "merge-base", "--is-ancestor", branchSha, target],
+          { stdio: "ignore" },
+        ).status === 0,
+      "the found branch's commit on the branch the pool was on",
+    );
+    expect(fileAt(poolDir, target, "enlisted.txt")).toBe("work\n");
+    expect(eventsOf(poolDir, "enlist-1").map((e) => e.kind)).toContain("merged");
   });
 
   it("withholds a ticket blocked by the enlisted one until the merge lands", async () => {

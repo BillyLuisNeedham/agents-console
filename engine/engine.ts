@@ -489,6 +489,11 @@ function mergeHold(session: Session): string[] {
     (id) => engineTicketBuildId(id) !== null,
     {
       ...base,
+      // The captured target (ticket 04-spawn-1) outranks the live checkout
+      // read: an enlist that moved the pool's own checkout onto its created
+      // pool branch would otherwise make that branch the target and read the
+      // done ticket as already landed.
+      currentBranch: () => session.mergeTarget ?? base.currentBranch(),
       branchFor: (id) => session.enlistedWork.get(id)?.branch ?? base.branchFor(id),
     },
   );
@@ -701,6 +706,14 @@ interface Session {
   // facts instead. Seeded at enlist and, after a restart, from the enlist
   // `spawned` event.
   enlistedWork: Map<string, { branch: string; directory: string }>;
+  // The branch this pool merges into, captured when an enlist moves the pool's
+  // own checkout (issue #101, ticket 04-spawn-1): the branch rule checks the
+  // created pool branch out in the found directory, and when that directory is
+  // the pool's own checkout the live read (`currentBranch(session.cwd)`) would
+  // name the pool branch as the target, making the done merge a no-op. Null
+  // until an enlist moves the checkout, which keeps every other pool reading
+  // its target live exactly as before.
+  mergeTarget: string | null;
   // How often an enlisted attempt's tick re-reads its pane (RunOptions).
   enlistPollMs?: number;
 }
@@ -903,6 +916,7 @@ export function startPool(options: RunOptions): PoolRun {
     liveAttempts,
     enlisted,
     enlistedWork: new Map(),
+    mergeTarget: null,
     ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
@@ -1681,6 +1695,13 @@ function seedEnlistedWork(session: Session): void {
       branch: spawned.payload.branch as string,
       directory: spawned.payload.cwd as string,
     });
+    // The merge target an enlist captured when it moved the pool's own
+    // checkout (ticket 04-spawn-1): recovered so a restart mid-attempt still
+    // merges onto the branch the pane was found on, not the created pool
+    // branch the checkout now sits on.
+    if (typeof spawned.payload.merge_target === "string") {
+      session.mergeTarget = spawned.payload.merge_target;
+    }
   }
 }
 
@@ -3181,6 +3202,19 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   });
 }
 
+// Put the pool checkout back on the branch this pool merges into before a
+// merge runs (issue #101, ticket 04-spawn-1). An enlist that created the pool
+// branch in the pool's own checkout leaves the checkout on that branch, so
+// `mergeBranch(session.cwd, branch)` would merge the branch into itself and
+// the done ticket's commit would never reach the branch the pane was found
+// on. A pool whose checkout an enlist never moved has no captured target and
+// this is a no-op, so the live read stands.
+function ensureMergeTarget(session: Session): void {
+  if (session.mergeTarget === null) return;
+  if (currentBranch(session.cwd) === session.mergeTarget) return;
+  git(session.cwd, ["checkout", session.mergeTarget]);
+}
+
 // The dual-write and the agent's own edits to the canonical Issue file leave
 // it dirty on the working branch and git refuses a merge that would touch a
 // dirty file, so the Issue steps aside for the merge. It used to come
@@ -3198,6 +3232,7 @@ function mergeWithIssueAside(
   marker: TicketMarker,
   branch: string,
 ): MergeResult {
+  ensureMergeTarget(session);
   const aside = `${marker.file}.pool-aside`;
   renameSync(marker.file, aside);
   const result = mergeBranch(session.cwd, branch);
@@ -6215,6 +6250,17 @@ function applyEnlistBranchRule(
   if (pane.branch !== currentBranch(session.cwd)) {
     return { branch: pane.branch, rule: "as-found", created: false };
   }
+  // The checkout is about to move onto a branch the engine creates, so the
+  // branch it is on now is the pool's merge target from here on (ticket
+  // 04-spawn-1). Only a move in the pool's own checkout needs capturing: a
+  // linked worktree on the merge target leaves `session.cwd` where it is, and
+  // its merge already lands into the live branch. Compare top levels, not
+  // directories: a pane open in a subdirectory moves the whole checkout too.
+  const paneTop = git(pane.directory, ["rev-parse", "--show-toplevel"]).out;
+  const cwdTop = git(session.cwd, ["rev-parse", "--show-toplevel"]).out;
+  if (paneTop !== "" && paneTop === cwdTop && session.mergeTarget === null) {
+    session.mergeTarget = pane.branch;
+  }
   const probe = checkoutNewBranch(pane.directory, poolBranch);
   if (!probe.ok) {
     throw new Error(
@@ -6312,6 +6358,7 @@ async function enlistConversation(
       pane_id: pane.paneId,
       tab_id: pane.tabId,
       branch_rule: branchRule,
+      merge_target: session.mergeTarget,
     },
   });
   session.state = applyUpdate(session.state, {
@@ -6447,6 +6494,7 @@ export async function enlistTicket(
         pane_id: pane.paneId,
         tab_id: pane.tabId,
         branch_rule: branchRule,
+        merge_target: session.mergeTarget,
       },
     });
 
