@@ -28,6 +28,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     seq: 7,
     error: null,
     stop: stop(),
+    terminalBacked: false,
     ...overrides,
   };
 }

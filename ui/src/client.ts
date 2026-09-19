@@ -9,6 +9,7 @@
 import type {
   ConversationView,
   EnrichedSnapshot,
+  PanesResponse,
   ResumeAction,
   StartConversationRequest,
   TerminalPeekResponse,
@@ -265,6 +266,30 @@ export class PoolClient {
       { method: "POST" },
     );
     if (!res.ok) throw new Error(`terminal focus failed: ${res.status}`);
+  }
+
+  /**
+   * The live herdr panes an enlist could take in (issue #101), fetched when
+   * the picker opens rather than through the snapshot: the list is ephemeral
+   * and not pool state. Each pane carries the engine's verdict and, when it
+   * is ineligible, the reason beside it. A headless pool refuses with a 409
+   * `reason`; a daemon failure is a 502 `error`.
+   */
+  async listPanes(): Promise<PanesResponse> {
+    const res = await fetch(`${this.base}/api/panes`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const reason =
+        body && typeof (body as { reason?: unknown }).reason === "string"
+          ? (body as { reason: string }).reason
+          : null;
+      const error =
+        body && typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      throw new Error(reason ?? error ?? `list panes failed: ${res.status}`);
+    }
+    return res.json();
   }
 
   /**

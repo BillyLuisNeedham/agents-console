@@ -13,6 +13,7 @@ import { refetchStateOnVisible, type VisibilitySource } from "./client";
 import { StaleGuard } from "./guard";
 import { LogPane, type LogFetch } from "./log-pane";
 import {
+  isTerminalBacked,
   joinStreamFiles,
   phaseLabel,
   poolAssignmentDefaults,
@@ -443,6 +444,9 @@ export class ConsoleSession {
           ? `bun run engine/server.ts --pool ${this.snapshot.poolDir}`
           : null,
       },
+      terminalBacked: this.snapshot
+        ? isTerminalBacked(this.snapshot.state.config)
+        : false,
       detail,
       detailTabs:
         detail?.kind === "ticket" ? projectDetailTabs(detail, this.tabOverride) : null,

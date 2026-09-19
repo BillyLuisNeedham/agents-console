@@ -206,6 +206,9 @@ export interface CanvasModel {
   seq: number;
   error: string | null;
   stop: StopView;
+  /** The pool is Terminal-backed (ADR-0014): the header offers Enlist only
+   *  then, so a headless pool is never shown an action it cannot perform. */
+  terminalBacked: boolean;
 }
 
 /**
@@ -245,6 +248,7 @@ export class Canvas {
   private readonly onCardTap: (nodeId: string) => void;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
+  private readonly onEnlist: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
@@ -255,6 +259,9 @@ export class Canvas {
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
     onNewConversation: () => void;
+    /** The header's "Enlist terminal" button (issue #101): opens the pane
+     *  picker. Offered only on a Terminal-backed pool. */
+    onEnlist: () => void;
     /** A Conversation card's End button. Fire-and-forget: the Conversations
      *  store tracks the in-flight/failure state the card reads back. */
     onEndConversation: (conversationId: string) => void;
@@ -267,6 +274,7 @@ export class Canvas {
     this.onCardTap = options.onCardTap;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
+    this.onEnlist = options.onEnlist;
     this.onEndConversation = options.onEndConversation;
     this.onArmStop = options.onArmStop;
     this.onCancelStop = options.onCancelStop;
@@ -711,6 +719,17 @@ export class Canvas {
           { class: "btn", title: "reset pan and zoom", onclick: () => this.resetView() },
           "reset",
         ),
+        model.terminalBacked
+          ? h(
+              "button",
+              {
+                class: "btn canvas-enlist",
+                title: "enlist a live herdr terminal",
+                onclick: () => this.onEnlist(),
+              },
+              "Enlist terminal",
+            )
+          : null,
         h(
           "button",
           {

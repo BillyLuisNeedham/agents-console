@@ -10,6 +10,7 @@ import type {
   AssignmentView,
   ConversationStatus,
   ConversationView,
+  EnlistPane,
   EnrichedSnapshot,
   EnrichedTicketState,
   Interrupt,
@@ -36,9 +37,11 @@ export type {
   AssignmentView,
   ConversationStatus,
   ConversationView,
+  EnlistPane,
   EnrichedSnapshot,
   EnrichedTicketState,
   InterruptKind,
+  PanesResponse,
   QueuedAnswer,
   ResumeAction,
   RunPhase,
@@ -1200,6 +1203,55 @@ export function poolAssignmentDefaults(
   if (typeof source.model === "string") defaults.model = source.model;
   if (typeof source.drivers === "string") defaults.drivers = source.drivers;
   return defaults;
+}
+
+/**
+ * Whether the pool is Terminal-backed (ADR-0014): its `config.terminal` reads
+ * "herdr". The header offers Enlist only on such a pool, so the Console never
+ * shows an action the pool cannot perform.
+ */
+export function isTerminalBacked(config: Record<string, unknown>): boolean {
+  return config.terminal === "herdr";
+}
+
+/** One row of the Enlist picker: a live herdr pane as the operator reads it. */
+export interface EnlistPickerRow {
+  paneId: string;
+  harness: string | null;
+  status: string;
+  title: string;
+  directory: string;
+  branch: string;
+  eligible: boolean;
+  reason: string | null;
+}
+
+/**
+ * The Enlist picker's rows: every pane herdr reported, eligible first so the
+ * actionable panes sit at the top, then by harness and title. Ineligible rows
+ * stay in the list with their reason (the store greys them and they are not
+ * selectable); they are never dropped, so the operator learns why.
+ */
+export function projectEnlistPicker(panes: EnlistPane[]): EnlistPickerRow[] {
+  return panes
+    .map((pane) => ({
+      paneId: pane.paneId,
+      harness: pane.harness,
+      status: pane.status,
+      title: pane.title,
+      directory: pane.directory ?? "",
+      branch: pane.branch ?? "",
+      eligible: pane.eligible,
+      reason: pane.reason,
+    }))
+    .sort((a, b) => {
+      if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
+      const aHarness = a.harness ?? "";
+      const bHarness = b.harness ?? "";
+      if (aHarness !== bHarness) return aHarness < bHarness ? -1 : 1;
+      if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+      return a.paneId < b.paneId ? -1 : a.paneId > b.paneId ? 1 : 0;
+    });
 }
 
 export function statusLabel(status: TicketStatus, mergePending = false): string {

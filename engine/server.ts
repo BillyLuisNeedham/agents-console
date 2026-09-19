@@ -80,6 +80,7 @@ import {
   focusPane,
   peekPane,
 } from "./herdr.ts";
+import { listEnlistPanes } from "./enlist.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 // The one git use left in this file is the activity endpoint's diff summary;
@@ -1437,6 +1438,48 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           try {
             await focusPane(herdrSocket, resolved.paneId);
             return Response.json({ ok: true, paneId: resolved.paneId });
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 502 },
+            );
+          }
+        }
+
+        // Enlist discovery (issue #101): the live herdr panes, read over the
+        // socket on request and never through the snapshot (pane lists are
+        // ephemeral). Only a terminal-backed pool has panes to offer, so a
+        // headless one refuses with the same `reason` envelope the
+        // Conversation routes use; the Console hides the button anyway.
+        // Eligibility is the engine's judgement (engine/enlist.ts); the
+        // registered pane ids are the engine's own record, read from the last
+        // snapshot: a ticket's Live attempt pane and a live Conversation's.
+        if (pathname === "/api/panes") {
+          if (readConfig(poolDir).terminal !== "herdr") {
+            return Response.json(
+              {
+                reason:
+                  "enlist requires a terminal-backed pool " +
+                  '(set console.json "terminal": "herdr")',
+              },
+              { status: 409 },
+            );
+          }
+          const registeredPanes = new Set<string>();
+          for (const ticket of latest?.state.tickets ?? []) {
+            const paneId = ticket.liveAttempt?.paneId;
+            if (paneId) registeredPanes.add(paneId);
+          }
+          for (const conversation of latest?.state.conversations ?? []) {
+            if (conversation.paneId) registeredPanes.add(conversation.paneId);
+          }
+          try {
+            const panes = await listEnlistPanes({
+              socketPath: herdrSocket,
+              poolDir,
+              registeredPanes,
+            });
+            return Response.json(panes);
           } catch (err) {
             return Response.json(
               { error: err instanceof Error ? err.message : String(err) },

@@ -84,7 +84,7 @@ export function branchFor(
 // would break ticket worktree creation.
 const commonDirCache = new Map<string, string>();
 
-function gitCommonDir(repoRoot: string): string {
+export function gitCommonDir(repoRoot: string): string {
   const cached = commonDirCache.get(repoRoot);
   if (cached) return cached;
   const probe = git(repoRoot, [
