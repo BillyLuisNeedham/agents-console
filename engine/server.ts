@@ -80,6 +80,7 @@ import {
   focusPane,
   peekPane,
 } from "./herdr.ts";
+import { createJev, type Jev } from "./jev.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 // The one git use left in this file is the activity endpoint's diff summary;
@@ -106,6 +107,13 @@ export interface PoolServerOptions {
    * boundary reads the environment.
    */
   herdrWorkspace?: string;
+  /**
+   * Jev, the judgement model (ADR-0020): built by the CLI from
+   * `TYPESAFE_API_KEY` and passed down, the same way as herdrWorkspace.
+   * Absent, the pool runs on its heuristics exactly as before. Tests inject
+   * a fake.
+   */
+  jev?: Jev;
   /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
   /**
@@ -880,6 +888,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const harnesses = { ...defaultHarnesses, ...options.harnesses };
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
   const herdrWorkspace = options.herdrWorkspace;
+  const jev = options.jev;
   const streamHeartbeatMs =
     options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   // The pool's ticket metadata, as the engine parses it from the Issue files —
@@ -1001,6 +1010,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       harnesses,
       herdrSocket,
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
+      ...(jev !== undefined ? { jev } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
         broadcast(enrich(snapshot, meta, poolName, poolDir));
@@ -1579,6 +1589,11 @@ function runServerCli(): void {
   // is. It travels on as an option, and nothing below this boundary ever
   // consults the environment for it.
   const herdrWorkspace = process.env.HERDR_WORKSPACE_ID || undefined;
+  // The one read of TYPESAFE_API_KEY (ADR-0020): the key becomes a Jev port
+  // here and travels on as an option; absent, the port is unconfigured and
+  // the pool runs on its heuristics. Nothing below this boundary reads it,
+  // and the SDK is never given the chance to (jev.ts).
+  const jev = createJev({ apiKey: process.env.TYPESAFE_API_KEY || undefined });
   let server: PoolServer;
   const stopAndExit = shutdownThenExit(() => server);
   try {
@@ -1587,6 +1602,7 @@ function runServerCli(): void {
       ...(port !== undefined ? { port } : {}),
       ...(registryPath !== undefined ? { registryPath } : {}),
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
+      jev,
       onStopRequested: () => stopAndExit("stop requested from the Console"),
     });
   } catch (err) {

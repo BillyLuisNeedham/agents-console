@@ -30,6 +30,8 @@ import { QueuedAnswerStore } from "./queued-answers.ts";
 import { processIsLive } from "./children.ts";
 import { type SpawnContext } from "./spawn.ts";
 import { makeTempDir } from "./tmp.ts";
+import { noul } from "./jev.ts";
+import { fakeJev } from "./jev-fake.ts";
 import {
   startExecutingFakeHerdr,
   type FakeHerdrRequest,
@@ -10899,4 +10901,70 @@ describe("merges blocked by untracked pool files (#92)", () => {
     const merged = readEventLines(poolDir, "01").find((e) => e.kind === "merged");
     expect(merged?.payload).toEqual({ cleared: ["findings/01.md"] });
   }, 15000);
+});
+
+// Jev (issue #105, ADR-0020): the port is an option the boundary passes in;
+// the engine's whole involvement at this stage is one boot line saying
+// which path is live and one pool-log line per fallback cause.
+describe("Jev at boot (ADR-0020)", () => {
+  const oneTicket = (): string =>
+    makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+
+  it("logs heuristics-only without a key, and the model with one, once each", async () => {
+    const without = oneTicket();
+    const unconfigured = await approveReview(
+      await runPool({
+        poolDir: without,
+        harnesses: stubHarness(without, {}).harnesses,
+        jev: fakeJev({ configured: false }),
+      }),
+    );
+    expect(unconfigured.phase).toBe("done");
+    expect(unconfigured.final.log).toContain("Jev not configured, heuristics only");
+    expect(unconfigured.final.log.filter((l) => l.startsWith("Jev"))).toHaveLength(1);
+
+    const withKey = oneTicket();
+    const configured = await approveReview(
+      await runPool({
+        poolDir: withKey,
+        harnesses: stubHarness(withKey, {}).harnesses,
+        jev: fakeJev(),
+      }),
+    );
+    expect(configured.phase).toBe("done");
+    expect(configured.final.log).toContain("Jev configured (jev-latest)");
+  });
+
+  it("a pool started with no Jev option gets the unconfigured port: today's behaviour, said so", async () => {
+    const poolDir = oneTicket();
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses }),
+    );
+    expect(run.phase).toBe("done");
+    expect(run.final.log).toContain("Jev not configured, heuristics only");
+  });
+
+  it("a fallback cause lands in the pool log once, and a recovery once, however many asks", async () => {
+    const poolDir = oneTicket();
+    const jev = fakeJev({ cause: "rate-limited" });
+    const started = startPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses, jev });
+    const ask = () => jev.ask({ pane: "❯ " }, { waiting: noul("waiting?") });
+    await ask();
+    await ask();
+    jev.script({});
+    await ask();
+    await ask();
+    const run = await approveReview(await started.settled);
+    const jevLines = run.final.log.filter((l) => l.startsWith("Jev"));
+    expect(jevLines).toEqual([
+      "Jev configured (jev-latest)",
+      "Jev unavailable (rate-limited: scripted by the test); heuristics until it answers",
+      "Jev answering again",
+    ]);
+  });
 });
