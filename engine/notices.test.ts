@@ -558,6 +558,56 @@ describe("Conversation spawn.json adoption", () => {
     }
   }, 20000);
 
+  it("applies a ticket child proposal's own assign, overriding the parent Conversation's Assignment", async () => {
+    // The teaching promises a proposal's optional `assign` sets the child's
+    // harness/model/drivers. For a kind:"ticket" child that used to require a
+    // static console.json entry keyed by the exact child id; the proposal's
+    // own assign must carry instead (issue #101 follow-up).
+    const { poolDir } = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: { defaults: { harness: "convo", model: "parent-model" }, terminal: "herdr" },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const stub = stubHarness(poolDir, {}).harnesses.stub;
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { convo: () => ["cat"], stub },
+        herdrSocket: fake.socketPath,
+      });
+      const parent = await run.startConversation({ title: "Parent" });
+
+      writeSpawnJson(poolDir, parent.id, [
+        {
+          title: "Child on stub",
+          body: BODY,
+          assign: { harness: "stub", model: "child-model" },
+        },
+      ]);
+
+      const childId = `${parent.id}-spawn-1`;
+      await waitFor(() => existsSync(join(poolDir, "issues", `${childId}.md`)));
+      await waitFor(
+        () => run.snapshots.at(-1)?.assignments[childId] !== undefined,
+      );
+      expect(run.snapshots.at(-1)!.assignments[childId]).toEqual({
+        harness: "stub",
+        model: "child-model",
+        drivers: "implement",
+      });
+      // Persisted on the child's own marker, not only in the run's table, so
+      // a restart resolves the same Assignment.
+      expect(readFileSync(join(poolDir, "issues", `${childId}.md`), "utf8")).toContain(
+        "spawn-assign=",
+      );
+
+      await run.endConversation(parent.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 20000);
+
   it("reserves a spawn id for an in-flight kind:'conversation' start, so a second adoption before it lands on disk cannot reuse it", async () => {
     const { poolDir } = makeGitPool({
       tickets: [doneTicket("01")],
