@@ -63,6 +63,8 @@ import {
   type PoolWorkspace,
 } from "./attempt-run.ts";
 import {
+  EXIT_CODE_PANE_GONE,
+  EXIT_CODE_UNREADABLE,
   exitedPhrase,
   readAttemptResult,
   waitForAttemptEnding,
@@ -85,7 +87,13 @@ import {
   type Assignment,
   type AssignmentView,
 } from "./assignment.ts";
-import { createEnlistedAttempts, type EnlistedAttempts } from "./enlisted.ts";
+import {
+  createEnlistedAttempts,
+  waitForEnlistedEnding,
+  type EnlistedAttempts,
+  type EnlistedEnding,
+  type EnlistedHost,
+} from "./enlisted.ts";
 import {
   findEnlistablePane,
   type EnlistConversationWireRequest,
@@ -469,11 +477,38 @@ function applyUpdate(state: PoolState, update: PoolUpdate): PoolState {
 // merging by hand outside the engine — still reads as landed, the
 // operator-trust reading ADR-0014 owns.
 function mergeHold(session: Session): string[] {
+  if (!session.git) return [];
+  const base = gitMergeHoldProbe(session.cwd);
+  // An enlisted ticket's branch is not `pool/<pool>/<id>`: it is the branch
+  // the pane was found on (or the pool branch created in place), recorded in
+  // `enlistedWork`. The hold must read that branch, or an as-found done ticket
+  // would look already-landed and the pool would schedule its blocked tickets
+  // before its merge.
   return deriveMergeHold(
     session.state.tickets,
     (id) => engineTicketBuildId(id) !== null,
-    session.git ? gitMergeHoldProbe(session.cwd) : null,
+    {
+      ...base,
+      branchFor: (id) => session.enlistedWork.get(id)?.branch ?? base.branchFor(id),
+    },
   );
+}
+
+// The checkout a ticket's branch lives in: the pool worktree for an ordinary
+// ticket, the found directory for an enlisted one (issue #101). The merge
+// paths read it so the resolver, an approval and a conflict body all name the
+// right place without the enlisted attempt ever owning a pool worktree.
+function ticketWorktree(
+  session: Session,
+  marker: TicketMarker,
+  attempt?: number,
+): WorktreeInfo {
+  const work = session.enlistedWork.get(marker.id);
+  if (work) return { path: work.directory, branch: work.branch };
+  return {
+    path: worktreePathFor(session.cwd, marker.id, attempt),
+    branch: branchFor(session.cwd, marker.id, attempt),
+  };
 }
 
 // What the wait-and-recompute rule (merge-hold.ts) needs of a session: the
@@ -659,6 +694,13 @@ interface Session {
   // engine types into it. Built once at startPool, reached through the
   // operations it exposes.
   enlisted: EnlistedAttempts;
+  // The found work of every enlisted ticket (issue #101, ticket 04): the
+  // branch and directory the pane was enlisted from. Kept engine-side because
+  // the enlisted ticket has no pool worktree and no `pool/<pool>/<id>` branch
+  // to resolve, so the merge hold and the merge paths must read these two
+  // facts instead. Seeded at enlist and, after a restart, from the enlist
+  // `spawned` event.
+  enlistedWork: Map<string, { branch: string; directory: string }>;
   // How often an enlisted attempt's tick re-reads its pane (RunOptions).
   enlistPollMs?: number;
 }
@@ -724,6 +766,20 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
   };
 }
 
+// The Enlisted attempts module's view of this Session (engine/enlisted.ts's
+// EnlistedHost), bound late for the same reason the Conversation host is: the
+// session does not exist when the module is built.
+function enlistedHostOf(sessionOf: () => Session): EnlistedHost {
+  return {
+    publish: () => {
+      const session = sessionOf();
+      emitSnapshot(session, session.settledPhase ?? "running");
+    },
+    ended: (id, ending) => endEnlistedAttempt(sessionOf(), id, ending),
+    trailingExit: (id) => recordEnlistedTrailingExit(sessionOf(), id),
+  };
+}
+
 export function startPool(options: RunOptions): PoolRun {
   const poolDir = canonicalDir(options.poolDir);
   const issuesDir = join(poolDir, "issues");
@@ -771,7 +827,7 @@ export function startPool(options: RunOptions): PoolRun {
       herdrSocket,
       ...(options.enlistPollMs !== undefined ? { pollMs: options.enlistPollMs } : {}),
     },
-    { publish: () => emitSnapshot(session, session.settledPhase ?? "running") },
+    enlistedHostOf(() => session),
   );
   const conversations = createConversations(
     {
@@ -846,6 +902,7 @@ export function startPool(options: RunOptions): PoolRun {
     orphans: [],
     liveAttempts,
     enlisted,
+    enlistedWork: new Map(),
     ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
@@ -854,6 +911,7 @@ export function startPool(options: RunOptions): PoolRun {
     conversations,
   };
 
+  seedEnlistedWork(session);
   rehydrate(session);
   // Conversations do not resume (the Conversations ADR): any recorded live
   // at boot has an unknown pane fate and no runtime entry will ever track
@@ -1207,7 +1265,14 @@ function planSuperStep(
   // so a verify fan-out cannot race the events counter: attempts run
   // base..base+N-1 off one nextAttempt read per ticket.
   const planned = ready.flatMap((marker) => {
-    const verify = session.assignments.get(marker.id)!.verify;
+    // Verify is ignored for an enlisted ticket (issue #101): its one attempt
+    // is already in flight, and a re-run as an ordinary attempt is always a
+    // solo one. `marker.enlistedFrom` is the durable marker of an enlist, so
+    // this holds across a restart with no extra state.
+    const verify =
+      marker.enlistedFrom !== undefined
+        ? undefined
+        : session.assignments.get(marker.id)!.verify;
     if (verify != null) {
       // A verify ticket's attempts write attempt-numbered logs, but a
       // pre-verify solo attempt's well-known log must still rotate
@@ -1592,6 +1657,31 @@ function engineOrphanNote(orphans: { attempt: number; pid: number }[]): string {
     "done at best and the agent left no brief. The ticket is back to ready; " +
     "read the working tree before it runs again.\n"
   );
+}
+
+// The found work of every enlisted ticket, recovered from the enlist
+// `spawned` event after a restart (issue #101, ticket 04). The event carries
+// the branch and the directory the pane was enlisted from, which is all the
+// merge hold and the merge paths need; nothing else about the enlist is
+// persisted. A marker with no such event (pre-ticket-04 data) is left out and
+// falls back to the pool's own branch naming.
+function seedEnlistedWork(session: Session): void {
+  for (const marker of session.markers) {
+    if (marker.enlistedFrom === undefined) continue;
+    const spawned = readEvents(session.runsDir, marker.id)
+      .filter(
+        (event) =>
+          event.kind === "spawned" &&
+          typeof event.payload.cwd === "string" &&
+          typeof event.payload.branch === "string",
+      )
+      .pop();
+    if (!spawned) continue;
+    session.enlistedWork.set(marker.id, {
+      branch: spawned.payload.branch as string,
+      directory: spawned.payload.cwd as string,
+    });
+  }
 }
 
 // Rehydration: the last checkpoint restores the run's channels, but the
@@ -2131,6 +2221,18 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
       continue;
     }
     if (!livePanes.has(orphan.paneId)) {
+      // An enlisted pane that went while the engine was down (issue #101):
+      // the attempt is over and its Outcome either landed or did not. Either
+      // way this is the enlisted ending, not the generic crash.
+      if (marker.enlistedFrom !== undefined) {
+        stripEngineResetNote(marker.file);
+        endEnlistedAttempt(session, marker.id, "pane-gone", orphan.attempt);
+        log.push(
+          `ticket ${marker.id}: enlisted pane ${orphan.paneId} is gone at ` +
+            "boot; the attempt is checkpointed with its branch kept",
+        );
+        continue;
+      }
       // The attempt's pane is gone: the attempt crashed. The ready ticket
       // re-runs; a mid-adoption ticket loses its interrupt and joins it.
       appendEvent(session.runsDir, marker.id, {
@@ -2254,7 +2356,44 @@ function adoptTerminalAttempt(
     `ticket ${marker.id}: attempt ${orphan.attempt} re-adopted from live ` +
       `pane ${orphan.paneId}; waiting on its exit`,
   );
-  void finalizeAdoptedAttempt(session, marker.id).catch(() => {});
+  if (marker.enlistedFrom !== undefined) {
+    void finalizeAdoptedEnlisted(session, marker.id).catch(() => {});
+  } else {
+    void finalizeAdoptedAttempt(session, marker.id).catch(() => {});
+  }
+}
+
+/**
+ * The enlisted attempt's boot finalize (issue #101, ticket 04): the same
+ * background ending a live enlisted attempt records, for a pane the engine
+ * re-adopted after a restart. There is no wrapper and so no exit-code file,
+ * so the wait is the enlisted module's two-form race, Outcome against pane
+ * gone, rather than the generic `waitForAttemptEnding`.
+ */
+async function finalizeAdoptedEnlisted(
+  session: Session,
+  ticketId: string,
+): Promise<void> {
+  const adopted = session.adopted.get(ticketId);
+  if (!adopted) return;
+  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
+  let ending: EnlistedEnding;
+  try {
+    ending = await waitForEnlistedEnding(
+      session.herdrSocket,
+      adopted.paneId,
+      outcomePath,
+      new AbortController().signal,
+      session.enlistPollMs,
+    );
+  } catch {
+    return;
+  }
+  if (adopted.abandoned) return;
+  const current = session.adopted.get(ticketId);
+  if (!current || current.abandoned) return;
+  session.adopted.delete(ticketId);
+  endEnlistedAttempt(session, ticketId, ending, adopted.attempt);
 }
 
 // Remove the note rehydrate appended this boot: it is a known constant and
@@ -2502,6 +2641,239 @@ function finishAdoptedFinalize(session: Session): void {
     // owns store failures; the finalize's record must not die on one.
   }
   kickProcessing(session);
+}
+
+// ---------------------------------------------------------------------------
+// The enlisted attempt's ending (issue #101, ticket 04)
+// ---------------------------------------------------------------------------
+
+// The Assignment a ticket that stopped being an enlisted attempt runs on: the
+// ordinary pool assignment for its id, with verify stripped (an enlisted id
+// never fans out, `planSuperStep` says so too). Used where a pane-gone
+// checkpoint hands the ticket back to the ordinary engine-launched path.
+function reRunAssignment(session: Session, marker: TicketMarker): Assignment {
+  const resolved = resolveTicketAssignment(marker, session.state.config, session.harnesses);
+  const { verify: _verify, ...ordinary } = resolved;
+  return ordinary;
+}
+
+// The Brief a pane that went before its Outcome leaves behind: what happened
+// and the promise the engine keeps, that the found branch is still there.
+// The operator answers and the ticket re-runs as an ordinary engine-launched
+// attempt, which is exactly what the generic answer path below does.
+function paneGoneBrief(branch: string): string {
+  return (
+    "The herdr pane this enlisted attempt was running in went away before " +
+    "the agent wrote an Outcome, so the attempt is over and the engine did " +
+    `not re-run it blind. The found branch ${branch} and the checkout it ` +
+    "lives in were left exactly where they were. Answer resume to re-run " +
+    "this ticket as an ordinary engine-launched attempt, or leave it parked " +
+    "and finish the work by hand."
+  );
+}
+
+// Whether an exit was already recorded for this attempt, so a second
+// observation of the ending (a race between the runtime's watch and a moved
+// pane, or a boot reconcile after a live ending) records nothing twice.
+function enlistedAttemptEnded(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+): boolean {
+  return readEvents(session.runsDir, ticketId).some(
+    (event) =>
+      event.attempt === attempt &&
+      (event.kind === "exited" || event.kind === "crash"),
+  );
+}
+
+/**
+ * Record an enlisted attempt's ending (issue #101, ticket 04). The two
+ * observations the runtime races (an Outcome on disk, the pane found gone)
+ * both land here; boot re-adoption lands here too, through
+ * `finalizeAdoptedEnlisted`. There is no wrapper, so no exit code and no
+ * Stream file: the log gets the lifecycle events only.
+ *
+ * A valid Outcome writes its own status, raising the ordinary checkpoint or
+ * chaining the ordinary merge. A pane that went first is a checkpoint whose
+ * Brief names the branch it kept, never a crash, and never a re-run: the
+ * operator decides. The engine never closes the tab and never removes the
+ * found directory or branch.
+ */
+function endEnlistedAttempt(
+  session: Session,
+  ticketId: string,
+  ending: EnlistedEnding,
+  attemptHint?: number,
+): void {
+  const marker = session.markers.find((candidate) => candidate.id === ticketId);
+  if (!marker) return;
+  if (marker.status === "done") return;
+  const live = session.liveAttempts.records()[ticketId];
+  const attempt =
+    attemptHint ?? live?.attempt ?? lastAttempt(session.runsDir, ticketId);
+  if (enlistedAttemptEnded(session, ticketId, attempt)) {
+    session.liveAttempts.clear(ticketId, attempt);
+    return;
+  }
+  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, null, false));
+  const outcome = readAttemptResult(outcomePath, validateOutcome);
+  const work = session.enlistedWork.get(ticketId);
+  const branch = work?.branch ?? branchFor(session.cwd, ticketId);
+  const paneId = live?.paneId ?? null;
+
+  session.liveAttempts.clear(ticketId, attempt);
+  // The agent identity goes at the ending, the way it goes at every other
+  // ending (issue #94); the tab stays, because it was the operator's before
+  // it was the pool's. Best-effort, silent.
+  const harness = session.assignments.get(ticketId)?.harness;
+  if (paneId !== null && harness) {
+    void releasePaneAgent(session.herdrSocket, paneId, harness.toLowerCase()).catch(
+      () => {},
+    );
+  }
+
+  let status: TicketStatus = "in-progress";
+  let code = 0;
+  let crashReason: string | null = null;
+  let brief: string | undefined;
+  if (ending === "outcome") {
+    if (outcome.ok) {
+      status = outcome.outcome.status;
+      brief = outcome.outcome.brief;
+    } else {
+      // The file was there but the validator refused it: a genuine crash,
+      // the same ending an ordinary attempt's unreadable Outcome gets.
+      crashReason = outcome.reason;
+      code = EXIT_CODE_UNREADABLE;
+    }
+  } else {
+    status = "checkpoint";
+    code = EXIT_CODE_PANE_GONE;
+    brief = paneGoneBrief(branch);
+    // The pane went before an Outcome, so the next Attempt is an ordinary
+    // engine-launched one (the spec's answer path). It needs a real
+    // Assignment and the pool's own branch naming, so the as-found record is
+    // dropped here: the found branch and directory are still kept, they are
+    // simply no longer the ticket's working branch.
+    session.enlistedWork.delete(ticketId);
+    session.assignments.set(ticketId, reRunAssignment(session, marker));
+  }
+  const outcomeExists = existsSync(outcomePath);
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "exited",
+    payload: { code, status, logTail: [], outcomeExists },
+  });
+  const clearedInterrupts = session.state.interrupts.filter(
+    (i) => i.ticketId !== ticketId,
+  );
+  if (crashReason !== null) {
+    appendEvent(session.runsDir, ticketId, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "crash",
+      payload: { code, reason: crashReason, logTail: [], outcomeExists },
+    });
+    session.state = applyUpdate(session.state, {
+      interrupts: clearedInterrupts,
+      log: [
+        `ticket ${ticketId}: enlisted attempt ${attempt} ` +
+          `${exitedPhrase(code)}, crash: ${crashReason}`,
+      ],
+    });
+    raiseInterrupt(session, {
+      ticketId,
+      kind: "crash",
+      body: crashInterruptBody({ logPath: "", logTail: [], outcomePath, outcomeExists }),
+    });
+    finishAdoptedFinalize(session);
+    return;
+  }
+
+  writeMarkerStatus(marker.file, status);
+  marker.status = status;
+  if (status === "checkpoint") {
+    landCheckpointBrief(marker.file, brief);
+  }
+  session.state = applyUpdate(session.state, {
+    tickets: { [ticketId]: status },
+    interrupts: clearedInterrupts,
+    log: [
+      `ticket ${ticketId}: enlisted attempt ${attempt} ` +
+        `${exitedPhrase(code)}, marker ${status}`,
+    ],
+    ...(outcome.ok ? { outcomes: { [ticketId]: outcome.outcome } } : {}),
+  });
+  if (status === "checkpoint") {
+    raiseCheckpoint(session, marker, attempt);
+  }
+  if (status === "done") {
+    if (outcome.ok && outcome.outcome.spawn?.length) {
+      session.pendingSpawns.push({
+        parentId: ticketId,
+        proposals: outcome.outcome.spawn,
+        origin: "ticket",
+      });
+    }
+    chainEnlistedMerge(session, marker, attempt, branch);
+    return;
+  }
+  finishAdoptedFinalize(session);
+}
+
+// Merge a done enlisted ticket's found branch, chained onto the session merge
+// chain so its git work never runs concurrently with the drive's merges
+// (ADR-0014's adopted-finalize reasoning). On success the found directory and
+// branch are left alone, unlike an ordinary ticket's merge; on a conflict the
+// existing merge-conflict machinery takes over in the found checkout.
+function chainEnlistedMerge(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  branch: string,
+): void {
+  const next = session.mergeChain.then(async () => {
+    const merge = mergeWithIssueAside(session, marker, branch);
+    if (merge.ok) {
+      appendEvent(session.runsDir, marker.id, {
+        at: new Date().toISOString(),
+        attempt,
+        kind: "merged",
+        payload: mergedPayload(merge),
+      });
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${marker.id}: enlisted attempt ${attempt} merged ` +
+            `${branch} onto the working branch`,
+        ],
+      });
+      return;
+    }
+    await handleMergeConflict(session, marker, merge, attempt);
+  });
+  session.mergeChain = next.catch(() => {});
+  void next.then(
+    () => finishAdoptedFinalize(session),
+    () => finishAdoptedFinalize(session),
+  );
+}
+
+// The pane left herdr's listing after the Outcome had already ended the
+// attempt (spec, user story 28): a trailing exit. Tidying the tab after a
+// finished ticket changes nothing about the ticket, it is only recorded on
+// the pool log so the run's account is complete.
+function recordEnlistedTrailingExit(session: Session, ticketId: string): void {
+  const marker = session.markers.find((candidate) => candidate.id === ticketId);
+  if (!marker || marker.status === "in-progress") return;
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${ticketId}: herdr pane left after its outcome (trailing exit); ` +
+        "the ticket is unchanged",
+    ],
+  });
+  emitSnapshot(session, session.driving ? "running" : "quiescent");
 }
 
 // Markers dual-write: every checkpoint write is preceded by bringing the
@@ -2974,11 +3346,8 @@ function resumeMerge(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const branch = branchFor(session.cwd, marker.id);
-  const worktree: WorktreeInfo = {
-    path: worktreePathFor(session.cwd, marker.id),
-    branch,
-  };
+  const worktree: WorktreeInfo = ticketWorktree(session, marker);
+  const branch = worktree.branch;
   const beforeSha = session.git ? git(session.cwd, ["rev-parse", "HEAD"]).out : "";
   const result = mergeWithIssueAside(session, marker, branch);
   if (note && note.trim()) {
@@ -2998,14 +3367,14 @@ function resumeMerge(
     });
     return;
   }
-  removeWorktree(session.cwd, worktree);
+  removeMergeWorktree(session, marker, worktree);
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, marker.id),
     kind: "merged",
     payload: mergedPayload(result),
   });
-  closeAttemptTabs(session, marker.id);
+  if (!session.enlistedWork.has(marker.id)) closeAttemptTabs(session, marker.id);
   session.conversations.ticketEnded(marker, branch, beforeSha ? `${beforeSha}..HEAD` : null);
   session.state = applyUpdate(session.state, {
     interrupts: session.state.interrupts.filter((i) => i !== interrupt),
@@ -3124,10 +3493,7 @@ async function handleMergeConflict(
     raiseInterrupt(session, mergeConflictInterrupt(session, marker, result));
     return;
   }
-  const worktree: WorktreeInfo = {
-    path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(session.cwd, marker.id),
-  };
+  const worktree: WorktreeInfo = ticketWorktree(session, marker);
   const resolver = resolveResolver(session);
   if (!resolver) {
     raiseInterrupt(
@@ -3252,7 +3618,7 @@ function approvalInterrupt(
       `The resolver agent resolved the merge conflict for ticket ${marker.id}.\n` +
       `It attempted: ${attemptNote}\n` +
       `conflicted files: ${result.conflicted.join(", ") || "(none listed)"}\n` +
-      `the resolution is staged on branch ${branchFor(session.cwd, marker.id)}; approve to ` +
+      `the resolution is staged on branch ${ticketWorktree(session, marker).branch}; approve to ` +
       "commit it and continue, or reject to resolve by hand.",
   };
 }
@@ -3266,10 +3632,7 @@ function approveMerge(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const worktree: WorktreeInfo = {
-    path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(session.cwd, marker.id),
-  };
+  const worktree: WorktreeInfo = ticketWorktree(session, marker);
   commitMerge(worktree);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
@@ -3295,14 +3658,14 @@ function approveMerge(
     });
     return;
   }
-  removeWorktree(session.cwd, worktree);
+  removeMergeWorktree(session, marker, worktree);
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, marker.id),
     kind: "merged",
     payload: mergedPayload(result),
   });
-  closeAttemptTabs(session, marker.id);
+  if (!session.enlistedWork.has(marker.id)) closeAttemptTabs(session, marker.id);
   session.conversations.ticketEnded(
     marker,
     worktree.branch,
@@ -3328,10 +3691,7 @@ function rejectMerge(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const worktree: WorktreeInfo = {
-    path: worktreePathFor(session.cwd, marker.id),
-    branch: branchFor(session.cwd, marker.id),
-  };
+  const worktree: WorktreeInfo = ticketWorktree(session, marker);
   git(worktree.path, ["merge", "--abort"]);
   if (note && note.trim()) {
     appendFileSync(marker.file, `\n## Resume note\n\n${note.trim()}\n`);
@@ -3522,6 +3882,21 @@ function resolveAssignmentsInto(
         progressed = true;
         continue;
       }
+      if (marker.enlistedFrom !== undefined) {
+        // An enlisted ticket's Assignment is as found (issue #101): the
+        // harness comes from the pool config after a restart (the as-found
+        // facts live only in the ticket file's prose), model unknown and
+        // drivers default, and verify is stripped so the ticket still
+        // re-adopts at boot and never fans out.
+        const resolved = resolveTicketAssignment(marker, config, harnesses);
+        assignments.set(marker.id, {
+          harness: resolved.harness,
+          model: "",
+          drivers: DEFAULT_DRIVERS,
+        });
+        progressed = true;
+        continue;
+      }
       assignments.set(marker.id, resolveTicketAssignment(marker, config, harnesses));
       progressed = true;
     }
@@ -3650,7 +4025,7 @@ function reloadConfigAtBoundary(session: Session): void {
   // spawned-by cycle) leaves session.assignments and session.state.config
   // untouched — the candidate map is scratch until this call returns clean.
   const resolved = new Map<string, Assignment>();
-  for (const id of session.adopted.keys()) {
+  for (const id of [...session.adopted.keys(), ...session.enlistedWork.keys()]) {
     const frozen = session.assignments.get(id);
     if (frozen) resolved.set(id, frozen);
   }
@@ -6030,6 +6405,7 @@ export async function enlistTicket(
     title,
     branch: usedBranch,
     directory: pane.directory,
+    outcomePath,
     teaching,
   });
   if (!registration.ok) {
@@ -6121,6 +6497,24 @@ export async function enlistTicket(
       model: "",
       drivers: DEFAULT_DRIVERS,
     });
+    // The found work, for the merge hold and the merge paths: an enlisted
+    // ticket has no `pool/<pool>/<id>` branch, so they read this instead.
+    session.enlistedWork.set(id, {
+      branch: usedBranch,
+      directory: pane.directory,
+    });
+    // Verify is ignored for an enlisted Ticket (spec "Verify is ignored"):
+    // there is nothing to run N of, because the one attempt is already in
+    // flight. Logged once here, at enlist.
+    const configuredVerify = session.state.config.assign?.[id]?.verify;
+    if (configuredVerify != null) {
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${id}: verify: ${configuredVerify} ignored; an enlisted ` +
+            "ticket runs ungraded",
+        ],
+      });
+    }
     // Registration is the allowlist peek and focus read (spec): the moment
     // this lands, the card's pane resolves and a snapshot goes out.
     session.liveAttempts.register(id, 1, {
@@ -6175,6 +6569,7 @@ function unwindEnlist(
   delete tickets[id];
   session.state = { ...session.state, tickets };
   session.assignments.delete(id);
+  session.enlistedWork.delete(id);
   try {
     rmSync(join(session.issuesDir, `${id}.md`), { force: true });
     rmSync(join(session.runsDir, `${id}.events.jsonl`), { force: true });
@@ -6486,6 +6881,19 @@ function mergeTicket(
   return result;
 }
 
+// Remove a merge's worktree, except for an enlisted ticket (issue #101): its
+// checkout is the operator's found directory and its branch is the found
+// branch, and the engine's standing promise is to leave both alone at merge
+// and at every other time.
+function removeMergeWorktree(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+): void {
+  if (session.enlistedWork.has(marker.id)) return;
+  removeWorktree(session.cwd, worktree);
+}
+
 // The lifecycle event a failed merge records: merge-blocked names the files
 // in the way of a merge git refused to start (#92), merge-conflict the
 // unmerged paths of one it started.
@@ -6521,10 +6929,11 @@ function mergeConflictInterrupt(
   marker: TicketMarker,
   result: MergeResult,
 ): Interrupt {
-  const branch = branchFor(session.cwd, marker.id);
+  const worktree = ticketWorktree(session, marker);
+  const branch = worktree.branch;
   const parked =
     `the ticket's work is parked on branch ${branch}, checked out at ` +
-    `${worktreePathFor(session.cwd, marker.id)}.\n` +
+    `${worktree.path}.\n` +
     (result.detail ? `git said: ${result.detail}\n` : "");
   if (result.reason === "blocked") {
     return {

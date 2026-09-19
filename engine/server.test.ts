@@ -4968,3 +4968,514 @@ describe("enlist a pane as a conversation", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// An enlisted Ticket lives and ends like any other (issue #101, ticket 04).
+// The same executing fake and HTTP route as the enlist suite above; the
+// endings are driven by the Outcome file and the pane's end.
+// ---------------------------------------------------------------------------
+
+describe("enlisted ticket lifecycle", () => {
+  const fakes: ExecutingFakeHerdr[] = [];
+
+  afterEach(async () => {
+    while (fakes.length > 0) await fakes.pop()!.close();
+  });
+
+  async function fakeHerdr(
+    options?: ExecutingFakeHerdrOptions,
+  ): Promise<ExecutingFakeHerdr> {
+    const fake = await startExecutingFakeHerdr(options);
+    fakes.push(fake);
+    return fake;
+  }
+
+  function gitTerminalPool(
+    tickets: { file: string; marker: string }[],
+    config: Partial<PoolConfig> = {},
+  ): string {
+    const poolDir = makeServerPool(tickets, { terminal: "herdr", ...config });
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: poolDir, stdio: "ignore" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    return poolDir;
+  }
+
+  /** A linked worktree on a feature branch with one commit, so the found
+   *  branch has something to merge. */
+  function featureWorktree(poolDir: string): string {
+    const worktree = makeTempDir("enlist-life-");
+    registerTempDir(worktree);
+    spawnSync(
+      "git",
+      ["-C", poolDir, "worktree", "add", "-q", "-b", "feature/x", worktree],
+      { stdio: "ignore" },
+    );
+    writeFileSync(join(worktree, "enlisted.txt"), "work\n");
+    spawnSync("git", ["-C", worktree, "add", "-A"], { stdio: "ignore" });
+    spawnSync("git", ["-C", worktree, "commit", "-qm", "enlist work"], {
+      stdio: "ignore",
+    });
+    return worktree;
+  }
+
+  const OPENCODE_WORKING = "opencode\nworking on it";
+  const OPENCODE_WAITING = "opencode\nctrl+p commands";
+
+  const enlist = (server: PoolServer, body: Record<string, unknown>) =>
+    fetch(`${server.url}/api/enlist`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const outcomePath = (poolDir: string, id: string) =>
+    join(poolDir, "runs", `${id}.outcome.json`);
+
+  function eventsOf(poolDir: string, id: string): { kind: string; attempt: number }[] {
+    return readFileSync(join(poolDir, "runs", `${id}.events.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
+  function markerOf(poolDir: string, id: string): string {
+    return readFileSync(join(poolDir, "issues", `${id}.md`), "utf8").split("\n")[0];
+  }
+
+  function branchNamesIn(dir: string): string {
+    return spawnSync("git", ["-C", dir, "branch", "--list"], { stdio: "pipe" })
+      .stdout.toString();
+  }
+
+  it("an Outcome of done lands the ticket done, merges the found branch, and leaves the checkout and branch alone", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Do the thing",
+      spec: "",
+    });
+    expect(res.status).toBe(201);
+    // The enlist itself opens no tab.
+    expect(fake.requests.some((r) => r.method === "tab.create")).toBe(false);
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+
+    // Done with the merge hold, then the found branch lands in the merge
+    // target while the found checkout and branch stay exactly where they were.
+    await waitFor(
+      () =>
+        server.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status ===
+        "done",
+      "enlist-1 done",
+    );
+    await waitFor(
+      () => existsSync(join(poolDir, "enlisted.txt")),
+      "the found branch merged into the merge target",
+    );
+    const kinds = eventsOf(poolDir, "enlist-1").map((e) => e.kind);
+    expect(kinds).toContain("scheduled");
+    expect(kinds).toContain("spawned");
+    expect(kinds).toContain("exited");
+    expect(kinds).toContain("merged");
+    expect(kinds).not.toContain("crash");
+    // Never touched: the found directory, its commit and the found branch.
+    expect(existsSync(worktree)).toBe(true);
+    expect(existsSync(join(worktree, "enlisted.txt"))).toBe(true);
+    expect(branchNamesIn(poolDir)).toContain("feature/x");
+    // The tab was never closed.
+    expect(
+      fake.requests.some(
+        (r) => r.method === "tab.close" && r.params.tab_id === "tab-op",
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds a ticket blocked by the enlisted one until the merge lands", async () => {
+    const poolDir = gitTerminalPool([
+      {
+        file: "01.md",
+        marker: "<!-- state: id=01 blocked-by=enlist-1 status=ready -->",
+      },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const rig = stubHarness(poolDir, {});
+    const server = await startServer(
+      poolDir,
+      { ...rig.harnesses, opencode: rig.harnesses.stub },
+      { herdrSocket: fake.socketPath, enlistPollMs: 15 },
+    );
+    await server.start();
+    await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Blocker",
+      spec: "",
+    });
+    // 01 waits on enlist-1, which does not exist yet, so it never spawns.
+    expect(rig.spawnOrder).not.toContain("01");
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(
+      () => rig.spawnOrder.includes("01"),
+      "01 runnable after enlist-1's merge lands",
+    );
+    await waitFor(
+      () => server.latest?.state.tickets.find((t) => t.id === "01")?.status === "done",
+      "01 done",
+    );
+  });
+
+  it("raises the checkpoint interrupt with the Outcome's Brief", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+    await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Pause for me",
+      spec: "",
+    });
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({
+        status: "checkpoint",
+        summary: "paused",
+        brief: "Decide the schema before this goes on",
+        commitSha: null,
+      }),
+    );
+    await waitFor(
+      () =>
+        server.latest?.state.interrupts.some((i) => i.ticketId === "enlist-1") ===
+        true,
+      "the checkpoint interrupt",
+    );
+    const interrupt = server.latest!.state.interrupts.find(
+      (i) => i.ticketId === "enlist-1",
+    )!;
+    expect(interrupt.kind).toBe("checkpoint");
+    expect(interrupt.body).toContain("Decide the schema");
+    expect(markerOf(poolDir, "enlist-1")).toContain("status=checkpoint");
+    expect(readFileSync(join(poolDir, "issues", "enlist-1.md"), "utf8")).toContain(
+      "## Brief",
+    );
+  });
+
+  it("records a tab closed after the Outcome as a trailing exit and changes nothing", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+    await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Close me after",
+      spec: "",
+    });
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(
+      () =>
+        server.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status ===
+        "done",
+      "enlist-1 done",
+    );
+    // The operator tidies the tab now the work is finished.
+    fake.endPane("pane-op");
+    await waitFor(
+      () =>
+        server.latest?.state.log.some((line) =>
+          line.includes("trailing exit"),
+        ) === true,
+      "the trailing exit on the pool log",
+    );
+    expect(markerOf(poolDir, "enlist-1")).toContain("status=done");
+    expect(eventsOf(poolDir, "enlist-1").some((e) => e.kind === "crash")).toBe(false);
+  });
+
+  it("checkpoints with the branch kept when the pane goes before an Outcome, and answering re-runs it", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const rig = stubHarness(poolDir, {});
+    const server = await startServer(
+      poolDir,
+      { ...rig.harnesses, opencode: rig.harnesses.stub },
+      { herdrSocket: fake.socketPath, enlistPollMs: 15 },
+    );
+    await server.start();
+    await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Pane goes first",
+      spec: "",
+    });
+
+    fake.endPane("pane-op");
+    await waitFor(
+      () =>
+        server.latest?.state.interrupts.some((i) => i.ticketId === "enlist-1") ===
+        true,
+      "the pane-gone checkpoint",
+    );
+    const interrupt = server.latest!.state.interrupts.find(
+      (i) => i.ticketId === "enlist-1",
+    )!;
+    expect(interrupt.kind).toBe("checkpoint");
+    expect(interrupt.body).toContain("went away");
+    expect(interrupt.body).toContain("feature/x");
+    expect(markerOf(poolDir, "enlist-1")).toContain("status=checkpoint");
+    // The branch and the checkout are kept.
+    expect(existsSync(worktree)).toBe(true);
+    expect(branchNamesIn(poolDir)).toContain("feature/x");
+    expect(eventsOf(poolDir, "enlist-1").some((e) => e.kind === "crash")).toBe(false);
+
+    // Answering re-runs the ticket as an ordinary engine-launched attempt.
+    const resume = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "enlist-1", action: "resume" }),
+    });
+    expect(resume.status).toBe(202);
+    await waitFor(
+      () =>
+        eventsOf(poolDir, "enlist-1").some(
+          (e) => e.attempt === 2 && e.kind === "spawned",
+        ),
+      "the re-run as an ordinary engine-launched attempt",
+    );
+  });
+
+  it("ignores a verify entry for an enlisted ticket and says so at enlist", async () => {
+    const poolDir = gitTerminalPool(
+      [{ file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" }],
+      { assign: { "enlist-1": { harness: "stub", model: "m", verify: 2 } } },
+    );
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Ungraded",
+      spec: "",
+    });
+    expect(res.status).toBe(201);
+    await waitFor(
+      () =>
+        server.latest?.state.log.some((line) =>
+          line.includes("verify: 2 ignored"),
+        ) === true,
+      "the ignored-verify log line",
+    );
+    // The card's assignment is the as-found one, with no verify.
+    const card = server.latest!.state.tickets.find((t) => t.id === "enlist-1")!;
+    expect(card.assignment.harness).toBe("opencode");
+    expect(card.assignment.model).toBeNull();
+  });
+
+  it("re-adopts a live enlisted pane after a restart without a tab.create, and its Outcome later ends it", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    const rig = stubHarness(poolDir, {});
+    const harnesses = { ...rig.harnesses, opencode: rig.harnesses.stub };
+
+    const first = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await first.start();
+    // Seed the operator's pane into the workspace the pool resolved, so the
+    // restarted pool's workspace-scoped reconciliation can see it. The
+    // workspace resolves asynchronously after start, so wait for it.
+    await waitFor(() => fake.workspaceIds().length > 0, "the Pool workspace");
+    const workspaceId = fake.workspaceIds()[0]!;
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+      workspaceId,
+    });
+    const res = await enlist(first, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Survive the restart",
+      spec: "",
+    });
+    expect(res.status).toBe(201);
+    const tabsBefore = fake.requests.filter((r) => r.method === "tab.create").length;
+
+    await first.shutdown();
+    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+
+    const second = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await second.start();
+    await waitFor(
+      () =>
+        second.latest?.state.tickets.find((t) => t.id === "enlist-1")?.liveAttempt
+          ?.paneId === "pane-op",
+      "the re-adopted enlisted attempt",
+    );
+    // Re-adopted, not re-launched: no new tab for the enlisted pane.
+    expect(fake.requests.filter((r) => r.method === "tab.create").length).toBe(
+      tabsBefore,
+    );
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(
+      () =>
+        second.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status ===
+        "done",
+      "enlist-1 done after the restart",
+    );
+  });
+
+  it("moves the found directory's diff through /api/activity while the attempt runs", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+    await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Watch the diff",
+      spec: "",
+    });
+    writeFileSync(join(worktree, "more.txt"), "one\ntwo\nthree\n");
+    const res = await fetch(`${server.url}/api/activity?ticket=enlist-1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      running: boolean;
+      diff: { added: number } | null;
+    };
+    expect(body.running).toBe(true);
+    expect(body.diff?.added ?? 0).toBeGreaterThan(0);
+  });
+});
