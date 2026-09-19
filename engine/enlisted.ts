@@ -164,10 +164,6 @@ export type EnlistRegistration =
 export interface EnlistedAttempts {
   /** Claim a found pane and register its runtime; resolves a reason on failure. */
   register(input: RegisterEnlistedInput): Promise<EnlistRegistration>;
-  /** Whether an enlisted attempt is live under this id. */
-  isLive(id: string): boolean;
-  /** The runtime's Turn state, for callers that read it (tests, ticket 04). */
-  turnOf(id: string): TurnState | null;
   /** Stop the tick and drop the runtime (the agent identity is the caller's). */
   release(id: string): void;
   /** Stop every tick; the engine's shutdown. */
@@ -413,8 +409,6 @@ export function createEnlistedAttempts(
 
   return {
     register,
-    isLive: (id) => runtimes.has(id),
-    turnOf: (id) => runtimes.get(id)?.turn ?? null,
     release: (id) => {
       const runtime = runtimes.get(id);
       if (!runtime) return;

@@ -1121,7 +1121,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // The shared first half of both terminal endpoints: the id (a ticket's or,
   // since issue #60, a Conversation's) -> pane translation, read from the
   // last snapshot alone: a ticket's Live attempt pane or a Conversation
-  // view's pane, both the engine's own record of what it spawned. Unknown
+  // view's pane, both the engine's own record of the panes it holds. Unknown
   // ids take the same "no pane" answer as headless, finished, and
   // never-spawned ones and ended Conversations, so the endpoints never
   // reveal which ids exist and every no-pane case is one shape. Since issue
@@ -1396,6 +1396,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ reason: "paneId is required" }, { status: 400 });
           }
           const title = typeof fields.title === "string" ? fields.title : "";
+          // `becomes` is fixed at enlist time and the wire type is a two
+          // member union, so an absent or misspelled value is refused rather
+          // than defaulted to a Ticket: enlisting is not undoable, and
+          // silently picking the kind that has an end is the wrong guess to
+          // make on the operator's behalf.
+          if (fields.becomes !== "ticket" && fields.becomes !== "conversation") {
+            return Response.json(
+              { reason: 'becomes must be "ticket" or "conversation"' },
+              { status: 400 },
+            );
+          }
           try {
             if (fields.becomes === "conversation") {
               const opening =
@@ -1503,7 +1514,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         // "Open in herdr": focus the attempt's pane, jumping the operator's
-        // herdr TUI to the attempt's tab. Same translation and spawned-only
+        // herdr TUI to the attempt's tab. Same translation and registration
         // guard as peek; a mutating call, so POST only.
         if (pathname === "/api/terminal/focus" && req.method === "POST") {
           const ticketId = url.searchParams.get("ticket") ?? "";

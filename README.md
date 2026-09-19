@@ -36,6 +36,22 @@ on disk. One Console server binds one pool at a time. A pool directory holds:
   Notice when a spawned ticket ends. Requires `terminal: herdr` in
   `console.json` (see `docs/adr/0018-conversations-beside-tickets.md`)
 
+A Terminal-backed pool gains citizens a second way, beside starting a
+Conversation: **Enlist**. The operator picks a live herdr pane they opened
+themselves and makes it a Ticket or a Conversation, chosen at that moment and
+fixed from then on. The header's "Enlist terminal" button lists the panes
+herdr reports and greys the ones that cannot be enlisted with the reason
+beside them (not a checkout of this pool's repository, no harness the engine
+has a descriptor for, or a pane the pool already holds). The pane, its
+directory and its branch are used as found: the engine claims the pane,
+relabels its tab, teaches its agent the pool's protocol as a Turn, and from
+then on the card is an ordinary card, ending, merging and spawning the way
+every other card does. An enlisted Ticket is minted `enlist-N` and unfinished
+tickets can be ticked to wait on it; an enlisted Conversation cannot be waited
+on (ADR-0018). The engine never closes the enlisted tab, never removes its
+directory and never deletes its branch (see
+`docs/adr/0020-enlisted-panes-stay-in-place.md`).
+
 ## Terminal-backed pools
 
 With `terminal: herdr` in `console.json`, every attempt and every Conversation

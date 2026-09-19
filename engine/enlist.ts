@@ -50,8 +50,8 @@ export interface PanesResponse {
 /**
  * The enlist request body (issue #101), declared once here so the server
  * route and the Console type-import the same shape. `becomes` is fixed at
- * enlist time: ticket 03 built the Ticket arm, ticket 05 adds the
- * Conversation arm. The engine re-judges the pane at submit rather than
+ * enlist time, and one of the two arms is chosen from it. The engine
+ * re-judges the pane at submit rather than
  * trusting a picker read that may be stale. The branch is never on the wire:
  * the engine resolves the found directory's branch with git and applies the
  * branch rule itself.

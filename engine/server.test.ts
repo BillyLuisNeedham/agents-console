@@ -4263,6 +4263,39 @@ describe("enlist a pane as a ticket", () => {
 
   });
 
+  it("refuses a becomes the wire type does not declare, rather than defaulting to a Ticket", async () => {
+    const poolDir = gitTerminalPool();
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+
+    for (const becomes of [undefined, "", "Ticket", "conversaton"]) {
+      const res = await enlist(server, {
+        ...(becomes === undefined ? {} : { becomes }),
+        paneId: "pane-op",
+        title: "Should not land",
+        spec: "",
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).reason).toContain("becomes");
+    }
+    // Enlisting is not undoable, so a bad request writes no ticket at all
+    // rather than guessing the kind that has an end.
+    expect(existsSync(join(poolDir, "issues", "enlist-1.md"))).toBe(false);
+  });
+
   it("refuses the same pane twice as already in the pool", async () => {
     const poolDir = gitTerminalPool();
     const fake = await fakeHerdr();
@@ -5478,11 +5511,13 @@ describe("enlisted ticket lifecycle", () => {
       enlistPollMs: 15,
     });
     await first.start();
-    // Seed the operator's pane into the workspace the pool resolved, so the
-    // restarted pool's workspace-scoped reconciliation can see it. The
-    // workspace resolves asynchronously after start, so wait for it.
+    // The operator's pane sits in the operator's own workspace, never the
+    // Pool workspace: the engine promises not to move an enlisted tab
+    // (spec, Out of Scope). Seeding it anywhere else would test a state
+    // enlisting cannot produce, so boot reconciliation has to find it with a
+    // daemon-wide question rather than a workspace-scoped one.
     await waitFor(() => fake.workspaceIds().length > 0, "the Pool workspace");
-    const workspaceId = fake.workspaceIds()[0]!;
+    const poolWorkspace = fake.workspaceIds()[0]!;
     fake.seedAgent({
       paneId: "pane-op",
       agent: "opencode",
@@ -5491,8 +5526,9 @@ describe("enlisted ticket lifecycle", () => {
       status: "idle",
       rendered: OPENCODE_WAITING,
       tabId: "tab-op",
-      workspaceId,
+      workspaceId: "ws-operator",
     });
+    expect(poolWorkspace).not.toBe("ws-operator");
     const res = await enlist(first, {
       becomes: "ticket",
       paneId: "pane-op",

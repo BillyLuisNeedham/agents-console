@@ -1,17 +1,17 @@
 /**
  * Enlist: the picker for live herdr panes and the form that turns one into a
- * Ticket (issue #101), one module owning the whole session state (whether the
- * picker is open, the panes herdr reported, the in-flight read and its
- * failure, and the draft form) and rendering from the pure projections. The
- * pane read fires when the picker opens, never on the snapshot cadence: the
- * list is ephemeral, not pool state, so it gets no channel and no cache.
+ * Ticket or a Conversation (issue #101), one module owning the whole session
+ * state (whether the picker is open, the panes herdr reported, the in-flight
+ * read and its failure, and the draft form) and rendering from the pure
+ * projections. The pane read fires when the picker opens, never on the
+ * snapshot cadence: the list is ephemeral, not pool state, so it gets no
+ * channel and no cache.
  *
  * Picking an eligible pane closes the picker and opens the form, title
  * prefilled from the pane's own terminal title. The form's "Blocks" tick list
  * is every ticket not yet done, projected from the snapshot; submitting sends
- * only the fields for the chosen kind (Ticket here; ticket 05 adds the
- * Becomes switch) and surfaces a refusal from the engine's 409 inline without
- * losing the draft.
+ * only the fields for the kind the Becomes switch is on, and surfaces a
+ * refusal from the engine's 409 inline without losing the draft.
  */
 
 import { h } from "./dom";
@@ -95,11 +95,6 @@ export class EnlistStore {
   /** Whether the Enlist form is showing. */
   get isFormOpen(): boolean {
     return this.formPaneId !== null;
-  }
-
-  /** The pane the open form is enlisting, or null. */
-  get formPaneIdValue(): string | null {
-    return this.formPaneId;
   }
 
   /** Which kind the form will submit; the form opens on Ticket. */
