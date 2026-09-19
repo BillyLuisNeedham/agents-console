@@ -27,6 +27,7 @@ import {
 } from "./checkpoints.ts";
 import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
+  MARKER_RE,
   loadPoolMarkers,
   parseSpawnId,
   readMarker,
@@ -5645,6 +5646,55 @@ function writeSpawnTicket(
     "or kill it before it schedules.\n\n" +
     `${proposal.body.trim()}\n`;
   writeFileSync(join(session.issuesDir, `${id}.md`), body);
+}
+
+// The Enlist form's "Blocks" tick list writes here (spec: "Blocks is written
+// onto the other tickets"): one ticket id added to another ticket's line-1
+// marker. The marker edit is the whole write -- only the blocked-by token on
+// line one changes, every other byte of the Ticket file is preserved -- and
+// the refreshed markers come back so the caller schedules from what is now on
+// disk, the same point spawn adoption re-reads the pool. A done ticket
+// refuses: blocked-by gates the ticket's next Attempt, and a done ticket has
+// none. The engine's second pool write beside writeSpawnTicket; only the
+// engine writes the pool (ADR-0010).
+export type AddBlockerResult =
+  | { ok: true; changed: boolean; markers: TicketMarker[] }
+  | { ok: false; reason: string };
+
+const BLOCKED_BY_FIELD_RE = /blocked-by=\S*/;
+
+export function addBlockerToTicket(
+  poolDir: string,
+  ticketId: string,
+  blockerId: string,
+): AddBlockerResult {
+  const markers = loadPoolTickets(poolDir);
+  const target = markers.find((marker) => marker.id === ticketId);
+  if (!target) {
+    return { ok: false, reason: `ticket ${ticketId} is not in the pool` };
+  }
+  if (target.status === "done") {
+    return {
+      ok: false,
+      reason: `ticket ${ticketId} is done; blocked-by cannot be added to it`,
+    };
+  }
+  if (target.blockedBy.includes(blockerId)) {
+    return { ok: true, changed: false, markers };
+  }
+  const raw = readFileSync(target.file, "utf8");
+  const newline = raw.includes("\r\n") ? "\r\n" : "\n";
+  const lines = raw.split(newline);
+  if (!MARKER_RE.test(lines[0])) {
+    throw new Error(`marker write: ${target.file} has no line-1 state marker`);
+  }
+  if (!BLOCKED_BY_FIELD_RE.test(lines[0])) {
+    throw new Error(`marker write: ${target.file} has no blocked-by= field`);
+  }
+  const blockedBy = [...target.blockedBy, blockerId].join(",");
+  lines[0] = lines[0].replace(BLOCKED_BY_FIELD_RE, `blocked-by=${blockedBy}`);
+  writeFileSync(target.file, lines.join(newline));
+  return { ok: true, changed: true, markers: loadPoolTickets(poolDir) };
 }
 
 // The highest spawn number already adopted per parent, so a parent whose

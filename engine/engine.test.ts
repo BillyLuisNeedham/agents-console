@@ -13,6 +13,7 @@ import { basename, join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
+  addBlockerToTicket,
   interactiveWrapper,
   resolveTicketAssignment,
   runPool,
@@ -24,7 +25,7 @@ import {
 } from "./engine.ts";
 import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
 import { appendEvent } from "./events.ts";
-import { loadPoolMarkers, type TicketMarker } from "./pool.ts";
+import { loadPoolMarkers, writeMarkerStatus, type TicketMarker } from "./pool.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import { processIsLive } from "./children.ts";
@@ -7401,6 +7402,112 @@ describe("spawn adoption", () => {
       readEventLines(poolDir, "01-spawn-1").some((e) => e.kind === "graded"),
     ).toBe(true);
   }, 15000);
+});
+
+describe("adding a blocker to a ticket marker", () => {
+  // The Enlist form's "Blocks" tick list (spec: "Blocks is written onto the
+  // other tickets"): a pure marker write, no pane and no herdr. The ready-set
+  // rule it feeds is engine.ts's readySet: a ready ticket whose blockers are
+  // all done. Merging is the merge hold's separate gate, not blocked-by's.
+
+  const readySetIds = (markers: TicketMarker[]): string[] =>
+    markers
+      .filter(
+        (marker) =>
+          marker.status === "ready" &&
+          marker.blockedBy.every(
+            (id) => markers.find((m) => m.id === id)?.status === "done",
+          ),
+      )
+      .map((marker) => marker.id);
+
+  it("adds a blocker to a ready ticket and leaves every other byte of the file unchanged", () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const file = join(poolDir, "issues", "01-t.md");
+    const before = readFileSync(file, "utf8");
+
+    const result = addBlockerToTicket(poolDir, "01", "enlist-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changed).toBe(true);
+    expect(result.markers.find((m) => m.id === "01")?.blockedBy).toEqual([
+      "enlist-1",
+    ]);
+    expect(readFileSync(file, "utf8")).toBe(
+      before.replace("blocked-by=none", "blocked-by=enlist-1"),
+    );
+  });
+
+  it("reports a no-op and touches nothing when the blocker is already present", () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01", "enlist-1"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const file = join(poolDir, "issues", "01-t.md");
+    const before = readFileSync(file, "utf8");
+
+    const result = addBlockerToTicket(poolDir, "01", "enlist-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changed).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("refuses a done ticket with a reason and writes nothing", () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-t.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const file = join(poolDir, "issues", "01-t.md");
+    const before = readFileSync(file, "utf8");
+
+    const result = addBlockerToTicket(poolDir, "01", "enlist-1");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/01 is done/);
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("refuses a ticket that is not in the pool", () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+
+    const result = addBlockerToTicket(poolDir, "99", "enlist-1");
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toMatch(/99 is not in the pool/);
+  });
+
+  it("re-reads the pool so the blocked ticket waits until its blocker is done", () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+
+    const result = addBlockerToTicket(poolDir, "01", "02");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 02 is still ready, so 01 is excluded from the ready set; once 02 is
+    // done, 01 re-enters it (the merge is the merge hold's separate gate).
+    expect(readySetIds(result.markers)).toEqual(["02"]);
+    writeMarkerStatus(join(poolDir, "issues", "02-t.md"), "done");
+    expect(readySetIds(loadPoolMarkers(join(poolDir, "issues")))).toEqual(["01"]);
+  });
 });
 
 describe("final review", () => {
