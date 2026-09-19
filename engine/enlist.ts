@@ -47,6 +47,93 @@ export interface PanesResponse {
   panes: EnlistPane[];
 }
 
+/**
+ * The enlist request body (issue #101), declared once here so the server
+ * route and the Console type-import the same shape. `becomes` is fixed at
+ * enlist time; ticket 03 builds the Ticket arm, ticket 05 widens it to
+ * Conversation. The engine re-judges the pane at submit rather than trusting
+ * a picker read that may be stale.
+ */
+export interface EnlistTicketRequest {
+  becomes: "ticket";
+  paneId: string;
+  title: string;
+  spec: string;
+  /** The unfinished tickets that must wait on the enlisted one. */
+  blocks?: string[];
+}
+
+export type EnlistRequest = EnlistTicketRequest;
+
+/** The enlist answer: the minted id, a 201 on success. */
+export interface EnlistResponse {
+  ticketId: string;
+}
+
+/** One live pane resolved and judged for enlist: the found facts the engine
+ *  records, with eligibility already decided. */
+export interface FoundPane {
+  paneId: string;
+  tabId: string | null;
+  harness: string;
+  sessionId: string | null;
+  title: string;
+  directory: string;
+  branch: string;
+}
+
+export interface FindEnlistablePaneOptions {
+  socketPath: string;
+  poolDir: string;
+  paneId: string;
+  registeredPanes: ReadonlySet<string>;
+}
+
+/**
+ * Resolve one pane the operator picked and judge it again at submit time
+ * (issue #101): herdr's list is read afresh because the picker's answer is
+ * ephemeral. An absent pane, one already held by a live attempt or
+ * Conversation, one outside the pool's repository, one with no known harness,
+ * and one whose directory has no branch are all a reason, never a thrown
+ * error: the route turns the reason into its 409.
+ */
+export async function findEnlistablePane(
+  options: FindEnlistablePaneOptions,
+): Promise<{ ok: true; pane: FoundPane } | { ok: false; reason: string }> {
+  const agents = await listAgents(options.socketPath);
+  const agent = agents.find((candidate) => candidate.paneId === options.paneId);
+  if (!agent) {
+    return { ok: false, reason: `pane ${options.paneId} is gone` };
+  }
+  const poolCommonDir = canonical(gitCommonDir(options.poolDir));
+  const verdict = eligibilityOf(agent, poolCommonDir, options.registeredPanes);
+  if (!verdict.eligible) {
+    return { ok: false, reason: verdict.reason ?? "pane cannot be enlisted" };
+  }
+  if (agent.directory === null || agent.harness === null) {
+    return { ok: false, reason: ENLIST_REASONS.notACheckout };
+  }
+  const branch = branchAt(agent.directory);
+  if (branch === null) {
+    return {
+      ok: false,
+      reason: "the pane's directory has no branch checked out",
+    };
+  }
+  return {
+    ok: true,
+    pane: {
+      paneId: agent.paneId,
+      tabId: agent.tabId,
+      harness: agent.harness,
+      sessionId: agent.sessionId,
+      title: agent.title,
+      directory: agent.directory,
+      branch,
+    },
+  };
+}
+
 export interface ListEnlistPanesOptions {
   socketPath: string;
   /** The pool directory: any path inside the pool's repository is enough. */

@@ -15,6 +15,7 @@ import {
   type DetailTab,
   type DetailTabView,
   type DetailView,
+  type EnlistBlockRow,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
@@ -29,7 +30,7 @@ import {
   ConversationsTray,
   type ConversationsOptions,
 } from "./conversations";
-import { EnlistStore, type ListPanesHandler } from "./enlist";
+import { EnlistStore, type EnlistHandler, type ListPanesHandler } from "./enlist";
 import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
@@ -88,6 +89,8 @@ export interface AppModel {
   conversationsTray: ConversationTrayRow[];
   /** The pool's default Assignment, shown as the New Conversation form's placeholders. */
   conversationDefaults: { harness?: string; model?: string; drivers?: string };
+  /** The Enlist form's "Blocks" tick list: every ticket not yet done. */
+  enlistBlocks: EnlistBlockRow[];
 }
 
 export interface Handlers {
@@ -114,6 +117,8 @@ export type ConsoleViewOptions = NeedsInputOptions &
     /** The Enlist picker's pane read (issue #101): fetched when the picker
      *  opens, never through the snapshot. */
     onListPanes: ListPanesHandler;
+    /** The Enlist form's submit (issue #101): the engine writes the ticket. */
+    onEnlist: EnlistHandler;
   };
 
 /**
@@ -153,6 +158,7 @@ export class ConsoleView {
     this.conversationsTray = new ConversationsTray(options);
     this.enlist = new EnlistStore({
       onListPanes: options.onListPanes,
+      onEnlist: options.onEnlist,
       onChange: options.onChange,
     });
     this.canvas = new Canvas({
@@ -222,7 +228,7 @@ export class ConsoleView {
       this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),
       }),
-      this.enlist.render(),
+      this.enlist.render(model.enlistBlocks),
     );
     const content = h(
       "div",

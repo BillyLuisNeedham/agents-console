@@ -32,7 +32,7 @@ export type { AssignmentView } from "./assignment.ts";
 export type { LiveAttemptRecord } from "./live-attempts.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
-export type { EnlistPane, PanesResponse } from "./enlist.ts";
+export type { EnlistPane, PanesResponse, EnlistRequest, EnlistResponse } from "./enlist.ts";
 
 import type { ConversationView } from "./conversations.ts";
 import type { Interrupt, Outcome, RunPhase } from "./engine.ts";
@@ -73,6 +73,13 @@ export interface EnrichedTicketState {
    * pane.
    */
   liveAttempt: LiveAttemptRecord | null;
+  /**
+   * The ticket was enlisted from a live herdr pane (issue #101): its
+   * Assignment was recorded as found, so the card reads "as found" where a
+   * spawned ticket names a model. Derived by the server from the marker's
+   * durable `enlisted-from` field.
+   */
+  enlisted: boolean;
 }
 
 export interface EnrichedSnapshot {

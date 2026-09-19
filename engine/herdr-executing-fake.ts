@@ -114,6 +114,12 @@ export interface FakeHerdrAgentSeed {
   status?: string;
   title?: string;
   cwd?: string | null;
+  /** What the pane shows: a harness frame for Turn-state reads. Defaults to empty. */
+  rendered?: string;
+  /** The pane's tab id, if a test wants a known one. Defaults to `tab-<paneId>`. */
+  tabId?: string;
+  /** The harness session herdr reports for the pane, named in provenance. */
+  sessionId?: string;
 }
 
 /** One entry in the fake's `agent.list`, in the shape the engine parses. */
@@ -125,6 +131,7 @@ interface FakeAgentRecord {
   status: string;
   title: string;
   directory: string | null;
+  sessionId: string | null;
 }
 
 export interface ExecutingFakeHerdr {
@@ -146,6 +153,8 @@ export interface ExecutingFakeHerdr {
   endPane: (paneId: string) => void;
   setPaneContent: (paneId: string, text: string) => void;
   dropPaneInput: (paneId: string, count: number) => void;
+  /** The tab's current label, from `tab.create` or a later `tab.rename`. */
+  tabLabel: (tabId: string) => string | null;
 }
 
 export async function startExecutingFakeHerdr(
@@ -184,6 +193,9 @@ export async function startExecutingFakeHerdr(
   // and operator ones seeded by a test. Released or ended panes leave it,
   // as they leave herdr's sidebar.
   const agents = new Map<string, FakeAgentRecord>();
+  // Each tab's label, so `tab.rename` has somewhere to land and a test can
+  // read what the engine renamed an enlisted pane's tab to (issue #101).
+  const tabLabels = new Map<string, string>();
   let minted = 0;
   const panes = new Map<
     string,
@@ -289,6 +301,7 @@ export async function startExecutingFakeHerdr(
         // a tab landed off the ids alone (issue #94).
         const tabId = workspaceId !== null ? `${workspaceId}:t${minted}` : `tab-${minted}`;
         const paneId = workspaceId !== null ? `${workspaceId}:p${minted}` : `pane-${minted}`;
+        tabLabels.set(tabId, String(msg.params.label ?? ""));
         panes.set(paneId, {
           tabId,
           workspaceId,
@@ -351,6 +364,8 @@ export async function startExecutingFakeHerdr(
             status: typeof msg.params.state === "string" ? msg.params.state : "working",
             title: typeof msg.params.message === "string" ? msg.params.message : "",
             directory: pane.cwd,
+            sessionId:
+              typeof msg.params.session_id === "string" ? msg.params.session_id : null,
           });
         }
         respond({ type: "ok" });
@@ -358,6 +373,15 @@ export async function startExecutingFakeHerdr(
         // The attempt ended: its pane leaves herdr's sidebar, as it leaves
         // `agent.list` here.
         agents.delete(String(msg.params.pane_id ?? ""));
+        respond({ type: "ok" });
+      } else if (msg.method === "tab.rename") {
+        // The enlist claim renames the operator's tab to the attempt label
+        // (issue #101). Recorded in `requests` like every call; the daemon
+        // answers ok and its listing shows the new label.
+        const tabId = String(msg.params.tab_id ?? "");
+        if (tabLabels.has(tabId)) {
+          tabLabels.set(tabId, String(msg.params.label ?? ""));
+        }
         respond({ type: "ok" });
       } else if (msg.method === "agent.list") {
         respond({
@@ -367,6 +391,7 @@ export async function startExecutingFakeHerdr(
             tab_id: entry.tabId,
             workspace_id: entry.workspaceId,
             terminal_id: `term-${entry.paneId}`,
+            session_id: entry.sessionId,
             agent: entry.harness,
             display_agent: entry.harness,
             agent_status: entry.status,
@@ -534,16 +559,40 @@ export async function startExecutingFakeHerdr(
         });
       }),
     seedAgent: (seed) => {
+      // An operator-opened agent is a real pane too, not just a listing
+      // entry: enlist reads its rendered frame for Turn state and types the
+      // teaching Turn into it (issue #101). A seed for a pane the fake
+      // already has (one the engine opened) only rebinds the agent.
+      if (!panes.has(seed.paneId)) {
+        const tabId = seed.tabId ?? `tab-${seed.paneId}`;
+        tabLabels.set(tabId, seed.title ?? "");
+        panes.set(seed.paneId, {
+          tabId,
+          workspaceId: null,
+          cwd: seed.cwd ?? "/tmp",
+          alive: true,
+          buffer: "",
+          rendered: seed.rendered ?? "",
+          booted: true,
+          dropInputs: 0,
+          hideInputs: 0,
+          inputArea: "",
+          hideEcho: false,
+          swallow: false,
+          createdAt: 0,
+        });
+      }
       const pane = panes.get(seed.paneId);
       agents.set(seed.paneId, {
         paneId: seed.paneId,
-        tabId: pane?.tabId ?? `tab-${seed.paneId}`,
+        tabId: pane?.tabId ?? seed.tabId ?? `tab-${seed.paneId}`,
         workspaceId: pane?.workspaceId ?? "w-seed",
         harness: seed.agent,
         status: seed.status ?? "idle",
         title: seed.title ?? "",
         directory:
           seed.cwd !== undefined ? seed.cwd : (pane?.cwd ?? "/tmp"),
+        sessionId: seed.sessionId ?? null,
       });
     },
     injectPane: (paneId) => {
@@ -579,5 +628,6 @@ export async function startExecutingFakeHerdr(
       const pane = panes.get(paneId);
       if (pane) pane.dropInputs += count;
     },
+    tabLabel: (tabId) => tabLabels.get(tabId) ?? null,
   };
 }

@@ -8,6 +8,8 @@
 
 import type {
   ConversationView,
+  EnlistRequest,
+  EnlistResponse,
   EnrichedSnapshot,
   PanesResponse,
   ResumeAction,
@@ -332,6 +334,29 @@ export class PoolClient {
     if (!res.ok) throw new Error(`end conversation failed: ${res.status}`);
     const body = await res.json();
     return body.snapshot;
+  }
+
+  /**
+   * Enlist a live herdr pane as a Ticket (issue #101). 409 with a reason
+   * when the engine refuses (the pane is gone, already in the pool, a branch
+   * could not be made, the teaching Turn never landed); the reason becomes
+   * the thrown Error's message, which the Enlist form shows inline.
+   */
+  async enlist(request: EnlistRequest): Promise<EnlistResponse> {
+    const res = await fetch(`${this.base}/api/enlist`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const reason =
+        body && typeof (body as { reason?: unknown }).reason === "string"
+          ? (body as { reason: string }).reason
+          : null;
+      throw new Error(reason ?? `enlist failed: ${res.status}`);
+    }
+    return res.json();
   }
 
   /**

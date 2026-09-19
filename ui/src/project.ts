@@ -38,6 +38,8 @@ export type {
   ConversationStatus,
   ConversationView,
   EnlistPane,
+  EnlistRequest,
+  EnlistResponse,
   EnrichedSnapshot,
   EnrichedTicketState,
   InterruptKind,
@@ -627,6 +629,9 @@ export interface TicketCardView {
   mergePending: boolean;
   /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
   assignment: AssignmentView;
+  /** The ticket was enlisted from a live herdr pane (issue #101): the badge
+   *  reads "as found" where a spawned ticket names a model. */
+  enlisted: boolean;
   outcome: Outcome | null;
   interrupt: InterruptView | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
@@ -973,6 +978,7 @@ function projectTicket(
     status: ticket.status,
     mergePending: ticket.mergePending,
     assignment: ticket.assignment,
+    enlisted: ticket.enlisted,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,
@@ -1252,6 +1258,26 @@ export function projectEnlistPicker(panes: EnlistPane[]): EnlistPickerRow[] {
       if (a.title !== b.title) return a.title < b.title ? -1 : 1;
       return a.paneId < b.paneId ? -1 : a.paneId > b.paneId ? 1 : 0;
     });
+}
+
+/** One row of the Enlist form's "Blocks" tick list: a ticket that can still
+ *  wait on the enlisted one. */
+export interface EnlistBlockRow {
+  id: string;
+  title: string;
+}
+
+/**
+ * The Enlist form's "Blocks" tick list (issue #101): every ticket not yet
+ * done, in pool order. A done ticket is excluded because blocked-by gates a
+ * ticket's next Attempt and a done ticket has none, so ticking it could never
+ * take effect. The enlisted ticket does not exist yet, so nothing is filtered
+ * for it here.
+ */
+export function projectEnlistBlocks(tickets: EnrichedTicketState[]): EnlistBlockRow[] {
+  return tickets
+    .filter((ticket) => ticket.status !== "done")
+    .map((ticket) => ({ id: ticket.id, title: ticket.title }));
 }
 
 export function statusLabel(status: TicketStatus, mergePending = false): string {

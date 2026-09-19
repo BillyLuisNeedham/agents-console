@@ -22,6 +22,7 @@ function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
         blockedBy: [],
         status,
         mergePending: false,
+        enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
         liveAttempt: null,
       })),

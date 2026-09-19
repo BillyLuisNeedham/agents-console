@@ -118,11 +118,16 @@ function sparkline(samples: number[]): SVGSVGElement {
  * harness nor model is an unassigned ticket and reads a muted word instead;
  * a resolved-null field renders by omission, so no bare separator is
  * stranded. One line, the model ellipsizing before the rest; a click
- * toggles the full wrapped text in place.
+ * toggles the full wrapped text in place. An enlisted ticket (issue #101)
+ * has no model by construction, so `asFound` puts the words "as found" where
+ * the model would read.
  */
-function renderAssignmentBadge(assignment: AssignmentView): HTMLElement {
+function renderAssignmentBadge(
+  assignment: AssignmentView,
+  asFound = false,
+): HTMLElement {
   const badge = h("div", { class: "assignment-badge" });
-  if (assignment.harness === null && assignment.model === null) {
+  if (assignment.harness === null && assignment.model === null && !asFound) {
     badge.classList.add("assignment-badge-unassigned");
     badge.append(UNASSIGNED_LABEL);
   } else {
@@ -132,6 +137,8 @@ function renderAssignmentBadge(assignment: AssignmentView): HTMLElement {
     }
     if (assignment.model) {
       fields.push({ class: "assignment-badge-model", value: assignment.model });
+    } else if (asFound) {
+      fields.push({ class: "assignment-badge-model", value: "as found" });
     }
     if (assignment.drivers) {
       fields.push({ class: "assignment-badge-drivers", value: assignment.drivers });
@@ -519,7 +526,7 @@ export class Canvas {
         // The Assignment badge rides the view model like the Vitals footer,
         // so it renders inside the card render and holds its row directly
         // under the head whether or not a live attempt puts Vitals below.
-        renderAssignmentBadge(card.assignment),
+        renderAssignmentBadge(card.assignment, card.enlisted),
         h("div", { class: "card-text ticket-card-summary" }, card.title),
         blockers,
         card.grade

@@ -30,6 +30,7 @@ function snap(
         blockedBy: [],
         status: "in-progress" as const,
         mergePending: false,
+        enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
         liveAttempt: paneId === undefined ? null : { attempt: 1, paneId },
       })),

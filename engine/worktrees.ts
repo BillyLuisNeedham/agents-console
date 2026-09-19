@@ -7,7 +7,7 @@ export interface WorktreeInfo {
   branch: string;
 }
 
-interface GitProbe {
+export interface GitProbe {
   ok: boolean;
   out: string;
   err: string;
@@ -138,6 +138,23 @@ export function branchExists(
   attempt?: number,
 ): boolean {
   return refExists(repoRoot, branchFor(repoRoot, ticketId, attempt));
+}
+
+/**
+ * The enlist branch rule's in-place half (issue #101): create `branch` at the
+ * found checkout's current HEAD and check it out there, leaving the working
+ * tree untouched so uncommitted changes come along. Used when the operator's
+ * pane sits on the pool's merge target, so the enlisted ticket has a branch
+ * of its own to merge from without re-homing the checkout. A branch that
+ * already exists (a re-run, or a hand-made branch) is checked out rather than
+ * recreated; the probe carries git's own message on failure so the route can
+ * name the reason.
+ */
+export function checkoutNewBranch(cwd: string, branch: string): GitProbe {
+  if (refExists(cwd, branch)) {
+    return git(cwd, ["checkout", branch]);
+  }
+  return git(cwd, ["checkout", "-b", branch]);
 }
 
 // A parked branch or worktree (left by a checkpoint, a crash or a conflict)

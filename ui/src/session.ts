@@ -22,6 +22,7 @@ import {
   projectConversationsTray,
   projectDetail,
   projectDetailTabs,
+  projectEnlistBlocks,
   projectLogPane,
   projectNeedsInput,
   projectPool,
@@ -485,6 +486,9 @@ export class ConsoleSession {
       conversationDefaults: this.snapshot
         ? poolAssignmentDefaults(this.snapshot.state.config)
         : {},
+      enlistBlocks: this.snapshot
+        ? projectEnlistBlocks(this.snapshot.state.tickets)
+        : [],
     };
   }
 

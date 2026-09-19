@@ -23,6 +23,7 @@ function ticket(
     blockedBy: [],
     status: "ready",
     mergePending: false,
+    enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
     ...overrides,

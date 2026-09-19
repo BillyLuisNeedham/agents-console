@@ -23,6 +23,7 @@ import {
   poolStatus,
   projectDetail,
   projectDetailTabs,
+  projectEnlistBlocks,
   projectEnlistPicker,
   projectLogPane,
   projectNeedsInput,
@@ -85,6 +86,7 @@ function ticket(
     blockedBy: [],
     status: "ready",
     mergePending: false,
+    enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
     ...overrides,
@@ -2525,5 +2527,54 @@ describe("projectEnlistPicker", () => {
 
   it("is empty when herdr reports no panes", () => {
     expect(projectEnlistPicker([])).toEqual([]);
+  });
+});
+
+describe("projectEnlistBlocks", () => {
+  it("lists every ticket not yet done, in pool order", () => {
+    const rows = projectEnlistBlocks([
+      ticket("01", { status: "ready" }),
+      ticket("02", { status: "done" }),
+      ticket("03", { status: "checkpoint" }),
+      ticket("04", { status: "in-progress" }),
+    ]);
+    expect(rows).toEqual([
+      { id: "01", title: "ticket 01" },
+      { id: "03", title: "ticket 03" },
+      { id: "04", title: "ticket 04" },
+    ]);
+  });
+
+  it("is empty when every ticket is done", () => {
+    expect(projectEnlistBlocks([ticket("01", { status: "done" })])).toEqual([]);
+  });
+});
+
+describe("enlisted card marker", () => {
+  it("carries the enlisted flag onto the ticket card", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [
+            ticket("enlist-1", {
+              enlisted: true,
+              assignment: { harness: "opencode", model: null, drivers: "implement" },
+            }),
+          ],
+        },
+      }),
+    );
+    const card = view.cards.find(
+      (c) => c.kind === "ticket" && c.ticketId === "enlist-1",
+    );
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.enlisted).toBe(true);
+      expect(card.assignment).toEqual({
+        harness: "opencode",
+        model: null,
+        drivers: "implement",
+      });
+    }
   });
 });

@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { EnlistStore } from "./enlist";
-import type { PanesResponse } from "./project";
+import type { EnlistRequest, EnlistResponse, PanesResponse } from "./project";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -59,6 +59,7 @@ const PANES: PanesResponse = {
  *  before any answer lands (the conversations.test.ts pattern). */
 function harness() {
   const reads: Deferred<PanesResponse>[] = [];
+  const enlists: { request: EnlistRequest; deferred: Deferred<EnlistResponse> }[] = [];
   let changes = 0;
   const store = new EnlistStore({
     onListPanes: () => {
@@ -66,11 +67,26 @@ function harness() {
       reads.push(d);
       return d.promise;
     },
+    onEnlist: (request) => {
+      const d = deferred<EnlistResponse>();
+      enlists.push({ request, deferred: d });
+      return d.promise;
+    },
     onChange: () => {
       changes += 1;
     },
   });
-  return { store, reads, changes: () => changes };
+  return { store, reads, enlists, changes: () => changes };
+}
+
+/** Open the picker, settle the read, and pick the one eligible pane. */
+async function pickEligible() {
+  const h = harness();
+  const opened = h.store.openPicker();
+  h.reads[0]!.resolve(PANES);
+  await opened;
+  h.store.pick("pane-work");
+  return h;
 }
 
 describe("EnlistStore picker", () => {
@@ -169,3 +185,86 @@ describe("EnlistStore picker", () => {
     expect(changes()).toBe(2);
   });
 });
+
+describe("EnlistStore form", () => {
+  it("picking an eligible pane opens the form, title prefilled from the pane", async () => {
+    const { store } = await pickEligible();
+    expect(store.isFormOpen).toBe(true);
+    expect(store.pickedPaneId).toBe("pane-work");
+    expect(store.field("title")).toBe("OC | doing work");
+    expect(store.field("spec")).toBe("");
+    expect(store.blocks()).toEqual([]);
+  });
+
+  it("toggling blocks records them, and untoggling removes them", async () => {
+    const { store } = await pickEligible();
+    store.toggleBlock("01");
+    store.toggleBlock("02");
+    expect(store.isTicked("01")).toBe(true);
+    expect(store.blocks()).toEqual(["01", "02"]);
+    store.toggleBlock("01");
+    expect(store.isTicked("01")).toBe(false);
+    expect(store.blocks()).toEqual(["02"]);
+  });
+
+  it("submits the ticket fields for the chosen pane and closes on success", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "  wire up enlist  ");
+    store.setField("spec", "the spec body");
+    store.toggleBlock("01");
+
+    const submitting = store.submit();
+    expect(store.isSubmitting).toBe(true);
+    expect(enlists).toHaveLength(1);
+    expect(enlists[0]!.request).toEqual({
+      becomes: "ticket",
+      paneId: "pane-work",
+      title: "wire up enlist",
+      spec: "the spec body",
+      blocks: ["01"],
+    });
+
+    enlists[0]!.deferred.resolve({ ticketId: "enlist-1" });
+    await submitting;
+    expect(store.isFormOpen).toBe(false);
+    expect(store.isSubmitting).toBe(false);
+    expect(store.submitFailure).toBeNull();
+  });
+
+  it("leaves the draft open with the refusal inline when the engine refuses", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "keep me");
+    store.setField("spec", "my spec");
+    store.toggleBlock("01");
+
+    const submitting = store.submit();
+    enlists[0]!.deferred.reject(new Error("enlist: pane pane-work is gone"));
+    await submitting;
+
+    expect(store.isFormOpen).toBe(true);
+    expect(store.submitFailure).toBe("enlist: pane pane-work is gone");
+    expect(store.field("title")).toBe("keep me");
+    expect(store.field("spec")).toBe("my spec");
+    expect(store.blocks()).toEqual(["01"]);
+  });
+
+  it("refuses an empty title locally without calling the engine", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "   ");
+    await store.submit();
+    expect(enlists).toHaveLength(0);
+    expect(store.submitFailure).toBe("title is required");
+    expect(store.isFormOpen).toBe(true);
+  });
+
+  it("closing the form clears the draft and the refusal", async () => {
+    const { store } = await pickEligible();
+    store.setField("title", "x");
+    store.toggleBlock("01");
+    store.closeForm();
+    expect(store.isFormOpen).toBe(false);
+    expect(store.field("title")).toBe("");
+    expect(store.blocks()).toEqual([]);
+  });
+});
+
