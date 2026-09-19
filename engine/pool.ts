@@ -122,7 +122,14 @@ export function parseSpawnId(id: string): { parent: string; n: number } | null {
 // a hand-written ticket may not claim the namespace: an enlisted file carries
 // the pane it came from as `enlisted-from=<paneId>`, and one without it fails
 // the load.
-const ENLIST_ID_RE = /^enlist-\d+$/;
+const ENLIST_ID_RE = /^enlist-(\d+)$/;
+
+/** The N of an `enlist-N` id, or null when the id is not one. Exported so the
+ *  engine mints the next id from this one definition, as it does for Spawn. */
+export function parseEnlistId(id: string): number | null {
+  const match = ENLIST_ID_RE.exec(id);
+  return match ? Number(match[1]) : null;
+}
 
 /**
  * `loadPoolMarkers`'s optional third argument: the ids of every Conversation

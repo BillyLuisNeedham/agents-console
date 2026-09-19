@@ -29,6 +29,7 @@ import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   MARKER_RE,
   loadPoolMarkers,
+  parseEnlistId,
   parseSpawnId,
   readMarker,
   writeMarkerStatus,
@@ -2194,6 +2195,28 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
     return;
   }
   const livePanes = new Set(live);
+  // An enlisted pane is the one orphan the scoped listing cannot answer for
+  // (issue #101): the operator opened its tab in their own workspace and the
+  // engine promises never to move it into the Pool workspace, so it is absent
+  // from `live` whether it is alive or gone. Asking a workspace-scoped
+  // question about it would read every live enlisted attempt as pane-gone and
+  // checkpoint working tickets on every restart. The daemon-wide listing is
+  // the only honest answer, fetched once and only when an enlisted marker
+  // needs it, the way the Conversation arm's boot adoption already asks.
+  let enlistedPanes: Set<string> | null = null;
+  const enlistedPaneIsLive = async (paneId: string): Promise<boolean> => {
+    if (enlistedPanes === null) {
+      try {
+        enlistedPanes = new Set(await listPaneIds(session.herdrSocket));
+      } catch {
+        // A listing the daemon cannot answer says nothing about the pane, so
+        // it is treated as live and its ending stays with the Outcome race
+        // rather than being called gone on a failed question.
+        return true;
+      }
+    }
+    return enlistedPanes.has(paneId);
+  };
   const log: string[] = [];
   for (const marker of session.markers) {
     const orphan = terminalOrphan(session, marker.id);
@@ -2220,7 +2243,13 @@ async function reconcileTerminalAttempts(session: Session): Promise<void> {
       releaseOrphanAgent(session, marker.id, orphan.paneId);
       continue;
     }
-    if (!livePanes.has(orphan.paneId)) {
+    // The enlisted pane is asked for daemon-wide; every other orphan's pane
+    // can only be in the Pool workspace, so the scoped answer stands.
+    const paneIsLive =
+      marker.enlistedFrom !== undefined
+        ? await enlistedPaneIsLive(orphan.paneId)
+        : livePanes.has(orphan.paneId);
+    if (!paneIsLive) {
       // An enlisted pane that went while the engine was down (issue #101):
       // the attempt is over and its Outcome either landed or did not. Either
       // way this is the enlisted ending, not the generic crash.
@@ -5803,11 +5832,26 @@ interface TicketResult {
  * has gone away, or that already reaped the exited tab (verified live:
  * herdr closes a tab whose shell ends), changes nothing about the ticket.
  */
+/**
+ * Was this ticket enlisted from a pane the operator opened (issue #101)? The
+ * marker's `enlisted-from` is the durable answer and outlives the attempt,
+ * unlike `session.enlistedWork`, which is dropped at a pane-gone checkpoint.
+ * Every tab close asks it, because the tab named in an enlisted ticket's
+ * `spawned` event is the operator's own and closing it is the one thing the
+ * engine promised never to do.
+ */
+function wasEnlisted(session: Session, ticketId: string): boolean {
+  return session.markers.some(
+    (marker) => marker.id === ticketId && marker.enlistedFrom !== undefined,
+  );
+}
+
 function closeAttemptTab(
   session: Session,
   ticketId: string,
   attempt: number,
 ): void {
+  if (wasEnlisted(session, ticketId)) return;
   const spawned = readEvents(session.runsDir, ticketId).find(
     (event) =>
       event.kind === "spawned" &&
@@ -5830,6 +5874,7 @@ function closeAttemptTab(
  * time cannot know whether a resolver ran.
  */
 function closeAttemptTabs(session: Session, ticketId: string): void {
+  if (wasEnlisted(session, ticketId)) return;
   for (const spawned of readEvents(session.runsDir, ticketId)) {
     if (
       spawned.kind !== "spawned" ||
@@ -6138,8 +6183,8 @@ export function addBlockerToTicket(
 function nextEnlistId(markers: TicketMarker[]): string {
   let max = 0;
   for (const marker of markers) {
-    const match = /^enlist-(\d+)$/.exec(marker.id);
-    if (match) max = Math.max(max, Number(match[1]));
+    const n = parseEnlistId(marker.id);
+    if (n !== null) max = Math.max(max, n);
   }
   return `enlist-${max + 1}`;
 }
@@ -6179,7 +6224,7 @@ function writeEnlistTicket(
     branch: string;
     branchRule: "created" | "as-found";
   },
-): string {
+): void {
   const sessionNote = fields.sessionId ? `, session ${fields.sessionId}` : "";
   const branchNote =
     fields.branchRule === "created"
@@ -6195,7 +6240,6 @@ function writeEnlistTicket(
     `branch ${fields.branch}. ${branchNote}\n\n` +
     `${fields.spec.trim()}\n`;
   writeFileSync(join(session.issuesDir, `${id}.md`), body);
-  return body;
 }
 
 /**
@@ -6877,20 +6921,28 @@ function mergeTicket(
   worktree: WorktreeInfo,
 ): MergeResult {
   const result = mergeWithIssueAside(session, marker, worktree.branch);
-  if (result.ok) removeWorktree(session.cwd, worktree);
+  if (result.ok) removeMergeWorktree(session, marker, worktree);
   return result;
 }
 
 // Remove a merge's worktree, except for an enlisted ticket (issue #101): its
 // checkout is the operator's found directory and its branch is the found
 // branch, and the engine's standing promise is to leave both alone at merge
-// and at every other time.
+// and at every other time. The guard lives here, on the one path to
+// `removeWorktree`'s `worktree remove --force` and `branch -d`, rather than
+// at each caller: an enlisted ticket reaches the other merge paths only by
+// being unreachable there today, and an unreachability argument is not what
+// a promise this load-bearing should rest on. `enlistedFrom` is the durable
+// half of the test because `enlistedWork` is dropped at a pane-gone
+// checkpoint, while the marker remembers the pane for the ticket's life.
 function removeMergeWorktree(
   session: Session,
   marker: TicketMarker,
   worktree: WorktreeInfo,
 ): void {
-  if (session.enlistedWork.has(marker.id)) return;
+  if (marker.enlistedFrom !== undefined || session.enlistedWork.has(marker.id)) {
+    return;
+  }
   removeWorktree(session.cwd, worktree);
 }
 
