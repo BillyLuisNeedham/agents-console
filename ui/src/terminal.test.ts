@@ -44,6 +44,7 @@ function snap(
         branch: null,
         turn: { state: "working" as const, lastLine: "", idleSince: null },
         children: [],
+        enlisted: false,
       })),
       log: [],
       outcomes: {},

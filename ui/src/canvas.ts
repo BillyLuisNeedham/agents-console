@@ -610,7 +610,7 @@ export class Canvas {
       ),
     );
     const body: (Node | string | null)[] = [
-      renderAssignmentBadge(card.assignment),
+      renderAssignmentBadge(card.assignment, card.enlisted),
       h("div", { class: "card-text conversation-card-title" }, card.title),
     ];
     if (card.status === "live") {

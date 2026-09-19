@@ -113,6 +113,11 @@ export interface PoolServerOptions {
    *  #101); tests shrink it so a queued teaching Turn lands without a
    *  real-time wait. Production leaves it unset (2 s). */
   enlistPollMs?: number;
+  /** How often a live Conversation re-reads its pane for Turn state (issue
+   *  #101); tests shrink it so an enlisted Conversation's teaching, opening
+   *  and Notice Turns land without a real-time wait. Production leaves it
+   *  unset (2 s). */
+  conversationPollMs?: number;
   /**
    * What a `POST /api/stop` sets in motion once the route has accepted it
    * (issue #97). The CLI passes the same stop-then-exit the signal handler
@@ -1014,6 +1019,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       herdrSocket,
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
+      ...(options.conversationPollMs !== undefined
+        ? { conversationPollMs: options.conversationPollMs }
+        : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
         broadcast(enrich(snapshot, meta, poolName, poolDir));
@@ -1369,9 +1377,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
         }
 
-        // Enlist a live herdr pane as a Ticket (issue #101). The body is the
-        // one wire shape engine/enlist.ts declares; `becomes` is fixed at
-        // enlist time (ticket 03 builds the Ticket arm). A well-formed request
+        // Enlist a live herdr pane as a Ticket or a Conversation (issue #101).
+        // The body is the one wire shape engine/enlist.ts declares; `becomes`
+        // is fixed at enlist time and chooses the arm. A well-formed request
         // the pool refuses (pane gone, already in the pool, branch creation
         // failing, teaching undeliverable) is the Conversation start route's
         // 409 `reason` envelope, so the Console's form surfaces it inline.
@@ -1387,18 +1395,23 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           if (!paneId) {
             return Response.json({ reason: "paneId is required" }, { status: 400 });
           }
-          if (fields.becomes === "conversation") {
-            return Response.json(
-              { reason: "enlist: only a Ticket can be enlisted for now" },
-              { status: 409 },
-            );
-          }
           const title = typeof fields.title === "string" ? fields.title : "";
-          const spec = typeof fields.spec === "string" ? fields.spec : "";
-          const blocks = Array.isArray(fields.blocks)
-            ? fields.blocks.filter((id): id is string => typeof id === "string")
-            : undefined;
           try {
+            if (fields.becomes === "conversation") {
+              const opening =
+                typeof fields.opening === "string" ? fields.opening : undefined;
+              const answer = await enlist({
+                becomes: "conversation",
+                paneId,
+                title,
+                ...(opening !== undefined ? { opening } : {}),
+              });
+              return Response.json(answer, { status: 201 });
+            }
+            const spec = typeof fields.spec === "string" ? fields.spec : "";
+            const blocks = Array.isArray(fields.blocks)
+              ? fields.blocks.filter((id): id is string => typeof id === "string")
+              : undefined;
             const answer = await enlist({
               becomes: "ticket",
               paneId,

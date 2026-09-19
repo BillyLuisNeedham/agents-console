@@ -144,6 +144,7 @@ async function startServer(
     streamHeartbeatMs?: number;
     onStopRequested?: () => void;
     enlistPollMs?: number;
+    conversationPollMs?: number;
   } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
@@ -4455,6 +4456,515 @@ describe("enlist a pane as a ticket", () => {
     await waitFor(
       () => fake.submitted.some((text) => text.includes("Ticket enlist-1")),
       "the queued teaching Turn",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Enlist a pane as a Conversation (issue #101): POST /api/enlist with
+// becomes=conversation, driven over HTTP against the one shared executing
+// fake. The arm claims the found pane, writes the Conversation record, and
+// delivers the teaching and opening through the Notice path; from then on it
+// is an ordinary Conversation.
+// ---------------------------------------------------------------------------
+
+describe("enlist a pane as a conversation", () => {
+  const fakes: ExecutingFakeHerdr[] = [];
+
+  afterEach(async () => {
+    while (fakes.length > 0) await fakes.pop()!.close();
+  });
+
+  async function fakeHerdr(
+    options?: ExecutingFakeHerdrOptions,
+  ): Promise<ExecutingFakeHerdr> {
+    const fake = await startExecutingFakeHerdr(options);
+    fakes.push(fake);
+    return fake;
+  }
+
+  /** A git-backed terminal pool with one done ticket, so nothing schedules
+   *  under an enlist test's feet. Extra config (a static per-id assign, say)
+   *  merges in. */
+  function gitTerminalPool(config: Partial<PoolConfig> = {}): string {
+    const poolDir = makeServerPool(
+      [{ file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" }],
+      { terminal: "herdr", ...config },
+    );
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: poolDir, stdio: "ignore" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    return poolDir;
+  }
+
+  /** A linked worktree of the pool on its own branch: the as-found arm of
+   *  the branch rule, with a directory the pool's common git dir covers. */
+  function worktreeOn(poolDir: string, branch: string): string {
+    const dir = makeTempDir("enlist-conv-wt-");
+    registerTempDir(dir);
+    spawnSync("git", ["-C", poolDir, "worktree", "add", "-q", "-b", branch, dir], {
+      stdio: "ignore",
+    });
+    return dir;
+  }
+
+  function currentBranchOf(dir: string): string {
+    return spawnSync("git", ["-C", dir, "branch", "--show-current"], {
+      stdio: "pipe",
+    })
+      .stdout.toString()
+      .trim();
+  }
+
+  /** Whether a literal git ref exists (the found branch has no pool branch
+   *  name, so branchExists's id-derived lookup does not fit). */
+  function refExists(dir: string, ref: string): boolean {
+    return (
+      spawnSync("git", ["-C", dir, "rev-parse", "--verify", ref], {
+        stdio: "ignore",
+      }).status === 0
+    );
+  }
+
+  function commitIn(dir: string, file: string, content: string): void {
+    writeFileSync(join(dir, file), content);
+    spawnSync("git", ["-C", dir, "add", "-A"], { stdio: "ignore" });
+    spawnSync("git", ["-C", dir, "commit", "-qm", `add ${file}`], { stdio: "ignore" });
+  }
+
+  const OPENCODE_WORKING = "opencode\nworking on it";
+  const OPENCODE_WAITING = "opencode\nctrl+p commands";
+
+  const enlist = (server: PoolServer, body: Record<string, unknown>) =>
+    fetch(`${server.url}/api/enlist`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  function conversationOf(server: PoolServer) {
+    return server.latest?.state.conversations.find((c) => c.id === "conv-1");
+  }
+
+  async function waitForMs(
+    cond: () => boolean,
+    what: string,
+    ms: number,
+  ): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(10);
+    }
+  }
+
+  async function startConvServer(
+    poolDir: string,
+    herdrSocket: string,
+    harnesses: Record<string, HarnessCommand> = stubHarness(poolDir, {}).harnesses,
+  ): Promise<PoolServer> {
+    const server = await startServer(poolDir, harnesses, {
+      herdrSocket,
+      enlistPollMs: 15,
+      conversationPollMs: 15,
+    });
+    await server.start();
+    return server;
+  }
+
+  it("writes the Conversation live as found, claims the pane, and types the teaching then the opening", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+      sessionId: "sess-c",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+      opening: "hello agent",
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ conversationId: "conv-1" });
+
+    const file = readFileSync(join(poolDir, "conversations", "conv-1.md"), "utf8");
+    expect(file).toContain("id=conv-1 status=live");
+    expect(file).toContain("pane=pane-conv");
+    expect(file).toContain(`directory=${encodeURIComponent(worktree)}`);
+    expect(file).toContain(`branch=${encodeURIComponent("feature/talk")}`);
+    expect(file).toContain("session=sess-c");
+    expect(file).toContain("# A talk");
+    expect(file).toContain("hello agent");
+
+    // No tab was created for the operator's pane; herdr got the identity
+    // report and the relabel.
+    expect(fake.requests.some((r) => r.method === "tab.create")).toBe(false);
+    expect(
+      fake.requests.some(
+        (r) => r.method === "pane.report_agent" && r.params.pane_id === "pane-conv",
+      ),
+    ).toBe(true);
+    const rename = fake.requests.find(
+      (r) => r.method === "tab.rename" && r.params.tab_id === "tab-conv",
+    );
+    expect(rename?.params.label).toBe("conv-1 · A talk");
+
+    await waitFor(
+      () => {
+        const c = conversationOf(server);
+        return c?.status === "live" && c.paneId === "pane-conv" && c.enlisted === true;
+      },
+      "the enlisted Conversation on the snapshot",
+    );
+    const c = conversationOf(server)!;
+    // The Assignment as found: the harness herdr named, no model.
+    expect(c.assignment).toEqual({
+      harness: "opencode",
+      model: null,
+      drivers: "implement",
+    });
+    expect(c.branch).toBe("feature/talk");
+
+    // Peek resolves the found pane through the Conversation's own view.
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=conv-1`);
+    expect(peek.status).toBe(200);
+    expect((await peek.json()).paneId).toBe("pane-conv");
+
+    // The teaching Turn, then the opening Turn, both typed.
+    const teachingAt = fake.submitted.findIndex((text) =>
+      text.includes("You can start follow-up work"),
+    );
+    const openingAt = fake.submitted.findIndex((text) => text === "hello agent");
+    expect(teachingAt).toBeGreaterThanOrEqual(0);
+    expect(openingAt).toBeGreaterThan(teachingAt);
+  });
+
+  it("queues the teaching and opening while the pane is working and types them once waiting", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-busy",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC busy",
+      status: "working",
+      rendered: OPENCODE_WORKING,
+      tabId: "tab-busy",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-busy",
+      title: "Queued talk",
+      opening: "hello turn",
+    });
+    expect(res.status).toBe(201);
+    expect(
+      fake.submitted.some((text) => text.includes("You can start follow-up work")),
+    ).toBe(false);
+
+    // The agent finishes: the pane goes idle, the tick sees it waiting, and
+    // the queued Turns land in order.
+    fake.setPaneContent("pane-busy", OPENCODE_WAITING);
+    await waitFor(
+      () => fake.submitted.some((text) => text.includes("You can start follow-up work")),
+      "the queued teaching Turn",
+    );
+    await waitFor(
+      () => fake.submitted.some((text) => text === "hello turn"),
+      "the queued opening Turn",
+    );
+  });
+
+  it("End merges the found branch and leaves the tab and directory alone", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    commitIn(worktree, "talk.txt", "talk work\n");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+    const enlisted = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+    });
+    expect(enlisted.status).toBe(201);
+
+    const end = await fetch(`${server.url}/api/conversations/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "conv-1" }),
+    });
+    expect(end.status).toBe(202);
+    await waitFor(
+      () => readConversation(join(poolDir, "conversations", "conv-1.md")).status === "ended",
+      "the ended Conversation",
+    );
+
+    // The found branch merged onto the pool's working branch.
+    expect(existsSync(join(poolDir, "talk.txt"))).toBe(true);
+    // The found directory and branch survive, and the operator's tab stays.
+    expect(existsSync(worktree)).toBe(true);
+    expect(currentBranchOf(worktree)).toBe("feature/talk");
+    expect(refExists(poolDir, "feature/talk")).toBe(true);
+    expect(
+      fake.requests.some(
+        (r) => r.method === "tab.close" && r.params.tab_id === "tab-conv",
+      ),
+    ).toBe(false);
+    // Agent identity released.
+    await waitFor(
+      () =>
+        fake.requests.some(
+          (r) => r.method === "pane.release_agent" && r.params.pane_id === "pane-conv",
+        ),
+      "the released identity",
+    );
+  });
+
+  it("a pane going records the Conversation crashed with the branch kept", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    commitIn(worktree, "talk.txt", "talk work\n");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+    const enlisted = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+    });
+    expect(enlisted.status).toBe(201);
+
+    fake.endPane("pane-conv");
+    await waitFor(
+      () => readConversation(join(poolDir, "conversations", "conv-1.md")).status === "crashed",
+      "the crashed Conversation",
+    );
+    expect(refExists(poolDir, "feature/talk")).toBe(true);
+    expect(existsSync(worktree)).toBe(true);
+    expect(
+      fake.requests.some(
+        (r) => r.method === "tab.close" && r.params.tab_id === "tab-conv",
+      ),
+    ).toBe(false);
+  });
+
+  it("re-adopts a live enlisted Conversation after a server restart", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+
+    const first = createPoolServer({
+      poolDir,
+      port: 0,
+      harnesses: stubHarness(poolDir, {}).harnesses,
+      distDir: "/nonexistent",
+      registryPath: fleetRegistry(poolDir),
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      conversationPollMs: 15,
+    });
+    await first.start();
+    const enlisted = await enlist(first, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+    });
+    expect(enlisted.status).toBe(201);
+    // An orderly stop releases the pool lock; the record stays live.
+    await first.shutdown(100);
+
+    const second = await startConvServer(poolDir, fake.socketPath);
+    await waitFor(
+      () => {
+        const c = conversationOf(second);
+        return c?.status === "live" && c.paneId === "pane-conv" && c.enlisted === true;
+      },
+      "the re-adopted Conversation",
+    );
+    expect(readConversation(join(poolDir, "conversations", "conv-1.md")).status).toBe("live");
+  });
+
+  it("Spawns a ticket and receives the Notice when that ticket ends", async () => {
+    // The child's id is deterministic (the pool's first operator-started
+    // Conversation is conv-1, so its first spawn is conv-1-spawn-1), so the
+    // pool's static per-id assign can put it on the stub harness. The stub
+    // checkpoints, which is the ending that reaches a parent as a Notice
+    // whether or not the child got a branch (ticketCheckpointed fires on the
+    // event, unlike ticketEnded which rides the merge).
+    const poolDir = gitTerminalPool({
+      assign: { "conv-1-spawn-1": { harness: "stub", model: "m" } },
+    });
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+    const server = await startConvServer(
+      poolDir,
+      fake.socketPath,
+      stubHarness(poolDir, {
+        "conv-1-spawn-1": { status: "checkpoint", brief: "Needs your input." },
+      }).harnesses,
+    );
+    const enlisted = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+    });
+    expect(enlisted.status).toBe(201);
+
+    writeFileSync(
+      join(poolDir, "runs", "conv-1.spawn.json"),
+      JSON.stringify({
+        spawn: [
+          {
+            title: "Child work",
+            body: "a body carrying more than twenty characters of intent",
+          },
+        ],
+      }),
+    );
+    await waitForMs(
+      () => existsSync(join(poolDir, "issues", "conv-1-spawn-1.md")),
+      "the spawned ticket file",
+      10_000,
+    );
+    await waitForMs(
+      () => fake.submitted.some((text) => text.includes("conv-1-spawn-1")),
+      "the ticket-ended Notice in the pane",
+      20_000,
+    );
+  }, 30_000);
+
+  it("creates the pool branch in place when the pane sits on the merge target", async () => {
+    const poolDir = gitTerminalPool();
+    writeFileSync(join(poolDir, "dirty.txt"), "uncommitted\n");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-main",
+      title: "On main",
+    });
+    expect(res.status).toBe(201);
+
+    const branch = branchFor(poolDir, "conv-1");
+    expect(refExists(poolDir, branch)).toBe(true);
+    expect(currentBranchOf(poolDir)).toBe(branch);
+    // The uncommitted change came along, and the record names the created
+    // branch as the one it was enlisted on.
+    expect(readFileSync(join(poolDir, "dirty.txt"), "utf8")).toBe("uncommitted\n");
+    expect(
+      readConversation(join(poolDir, "conversations", "conv-1.md")).enlisted?.branch,
+    ).toBe(branch);
+    const events = readFileSync(join(poolDir, "runs", "conv-1.events.jsonl"), "utf8");
+    const spawned = events
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find((event) => event.kind === "spawned");
+    expect(spawned.payload.branch_rule).toBe("created");
+  });
+
+  it("a failed enlist in Conversation mode leaves no file and no branch", async () => {
+    const poolDir = gitTerminalPool();
+    writeFileSync(join(poolDir, "dirty.txt"), "uncommitted\n");
+    const fake = await fakeHerdr();
+    // claude's descriptor has no clear keys, so a dropped paste is one
+    // unsuccessful echo attempt rather than three: the failure lands fast.
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "claude",
+      cwd: poolDir,
+      title: "✳ Claude Code",
+      status: "idle",
+      rendered: "Claude Code v1\n❯ ",
+      tabId: "tab-main",
+    });
+    fake.dropPaneInput("pane-main", 10);
+    const server = await startConvServer(poolDir, fake.socketPath);
+
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-main",
+      title: "Never taught",
+      opening: "hello",
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toContain("could not be delivered");
+
+    // No record, no branch, the checkout back where it was, the uncommitted
+    // change untouched, and the reported identity released.
+    expect(existsSync(join(poolDir, "conversations", "conv-1.md"))).toBe(false);
+    expect(branchExists(poolDir, "conv-1")).toBe(false);
+    expect(currentBranchOf(poolDir)).toBe("main");
+    expect(readFileSync(join(poolDir, "dirty.txt"), "utf8")).toBe("uncommitted\n");
+    await waitFor(
+      () =>
+        fake.requests.some(
+          (r) => r.method === "pane.release_agent" && r.params.pane_id === "pane-main",
+        ),
+      "the released identity",
     );
   });
 });

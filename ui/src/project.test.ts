@@ -24,7 +24,9 @@ import {
   projectDetail,
   projectDetailTabs,
   projectEnlistBlocks,
+  projectEnlistForm,
   projectEnlistPicker,
+  ENLIST_BECOMES_HINT,
   projectLogPane,
   projectNeedsInput,
   projectPool,
@@ -107,6 +109,7 @@ function conversation(
     branch: null,
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
+    enlisted: false,
     ...overrides,
   };
 }
@@ -2576,5 +2579,53 @@ describe("enlisted card marker", () => {
         drivers: "implement",
       });
     }
+  });
+
+  it("carries the enlisted flag onto the Conversation card", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          conversations: [
+            conversation("conv-1", {
+              enlisted: true,
+              assignment: { harness: "opencode", model: null, drivers: "implement" },
+            }),
+          ],
+        },
+      }),
+    );
+    const card = view.cards.find(
+      (c) => c.kind === "conversation" && c.conversationId === "conv-1",
+    );
+    expect(card?.kind).toBe("conversation");
+    if (card?.kind === "conversation") {
+      expect(card.enlisted).toBe(true);
+      expect(card.assignment).toEqual({
+        harness: "opencode",
+        model: null,
+        drivers: "implement",
+      });
+    }
+  });
+});
+
+describe("projectEnlistForm", () => {
+  it("Ticket mode shows the spec and the Blocks list, with no note", () => {
+    const view = projectEnlistForm("ticket");
+    expect(view.showsSpec).toBe(true);
+    expect(view.showsBlocks).toBe(true);
+    expect(view.showsOpening).toBe(false);
+    expect(view.note).toBeNull();
+    expect(ENLIST_BECOMES_HINT).toContain("Ticket");
+    expect(ENLIST_BECOMES_HINT).toContain("Conversation");
+  });
+
+  it("Conversation mode shows the opening Turn and the greyed note instead of Blocks", () => {
+    const view = projectEnlistForm("conversation");
+    expect(view.showsSpec).toBe(false);
+    expect(view.showsBlocks).toBe(false);
+    expect(view.showsOpening).toBe(true);
+    expect(view.note).toContain("cannot block");
+    expect(view.note).toContain("Ticket");
   });
 });

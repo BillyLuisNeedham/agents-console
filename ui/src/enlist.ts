@@ -16,8 +16,12 @@
 
 import { h } from "./dom";
 import {
+  ENLIST_BECOMES_HINT,
+  projectEnlistForm,
   projectEnlistPicker,
+  type EnlistBecomes,
   type EnlistBlockRow,
+  type EnlistFormView,
   type EnlistPane,
   type EnlistPickerRow,
   type EnlistRequest,
@@ -35,7 +39,7 @@ export interface EnlistOptions {
   onChange: () => void;
 }
 
-type DraftField = "title" | "spec";
+type DraftField = "title" | "spec" | "opening";
 
 export class EnlistStore {
   private isPickerOpen = false;
@@ -49,8 +53,13 @@ export class EnlistStore {
 
   // The form's session state. Non-null formPaneId means the form is open.
   private formPaneId: string | null = null;
+  // Which kind the picked pane becomes, fixed at submit; the form opens on
+  // Ticket. Title is shared across the switch; spec and opening each belong
+  // to one kind and survive a round trip through the other.
+  private becomes: EnlistBecomes = "ticket";
   private draftTitle = "";
   private draftSpec = "";
+  private draftOpening = "";
   private ticked = new Set<string>();
   private submitting = false;
   private submitError: string | null = null;
@@ -93,13 +102,34 @@ export class EnlistStore {
     return this.formPaneId;
   }
 
+  /** Which kind the form will submit; the form opens on Ticket. */
+  get mode(): EnlistBecomes {
+    return this.becomes;
+  }
+
+  /** The form's shape for the chosen kind, from the pure projection. */
+  formView(): EnlistFormView {
+    return projectEnlistForm(this.becomes);
+  }
+
+  /** Switch the Becomes kind in place. Shared fields keep their draft; each
+   *  kind's own field keeps its own. */
+  setBecomes(becomes: EnlistBecomes): void {
+    if (this.becomes === becomes) return;
+    this.becomes = becomes;
+    this.onChange();
+  }
+
   field(name: DraftField): string {
-    return name === "title" ? this.draftTitle : this.draftSpec;
+    if (name === "title") return this.draftTitle;
+    if (name === "spec") return this.draftSpec;
+    return this.draftOpening;
   }
 
   setField(name: DraftField, value: string): void {
     if (name === "title") this.draftTitle = value;
-    else this.draftSpec = value;
+    else if (name === "spec") this.draftSpec = value;
+    else this.draftOpening = value;
   }
 
   isTicked(id: string): boolean {
@@ -164,7 +194,8 @@ export class EnlistStore {
 
   /**
    * Pick a pane. Only an eligible pane can be picked; picking closes the
-   * picker and opens the form, prefilled from the pane's terminal title.
+   * picker and opens the form, prefilled from the pane's terminal title and
+   * reset to Ticket mode.
    */
   pick(paneId: string): void {
     const pane = this.panes.find((candidate) => candidate.paneId === paneId);
@@ -172,8 +203,10 @@ export class EnlistStore {
     this.picked = paneId;
     this.isPickerOpen = false;
     this.formPaneId = paneId;
+    this.becomes = "ticket";
     this.draftTitle = pane.title;
     this.draftSpec = "";
+    this.draftOpening = "";
     this.ticked = new Set();
     this.submitting = false;
     this.submitError = null;
@@ -183,8 +216,10 @@ export class EnlistStore {
   closeForm(): void {
     if (this.formPaneId === null) return;
     this.formPaneId = null;
+    this.becomes = "ticket";
     this.draftTitle = "";
     this.draftSpec = "";
+    this.draftOpening = "";
     this.ticked = new Set();
     this.submitting = false;
     this.submitError = null;
@@ -197,7 +232,11 @@ export class EnlistStore {
     this.onChange();
   }
 
-  /** Submit the form. A refusal leaves the draft open with the reason inline. */
+  /**
+   * Submit the form. Only the fields for the chosen kind travel: a Ticket
+   * sends title, spec and blocks, a Conversation title and an optional
+   * opening Turn. A refusal leaves the draft open with the reason inline.
+   */
   async submit(): Promise<void> {
     if (this.submitting || this.formPaneId === null) return;
     const title = this.draftTitle.trim();
@@ -210,16 +249,28 @@ export class EnlistStore {
     this.submitError = null;
     this.onChange();
     try {
-      await this.onEnlist({
-        becomes: "ticket",
-        paneId: this.formPaneId,
-        title,
-        spec: this.draftSpec.trim(),
-        blocks: this.blocks(),
-      });
+      if (this.becomes === "conversation") {
+        const opening = this.draftOpening.trim();
+        await this.onEnlist({
+          becomes: "conversation",
+          paneId: this.formPaneId,
+          title,
+          ...(opening ? { opening } : {}),
+        });
+      } else {
+        await this.onEnlist({
+          becomes: "ticket",
+          paneId: this.formPaneId,
+          title,
+          spec: this.draftSpec.trim(),
+          blocks: this.blocks(),
+        });
+      }
       this.formPaneId = null;
+      this.becomes = "ticket";
       this.draftTitle = "";
       this.draftSpec = "";
+      this.draftOpening = "";
       this.ticked = new Set();
     } catch (err) {
       this.submitError = err instanceof Error ? err.message : String(err);
@@ -292,6 +343,7 @@ export class EnlistStore {
   }
 
   private renderForm(blocks: EnlistBlockRow[]): HTMLElement {
+    const view = this.formView();
     const field = (
       name: DraftField,
       label: string,
@@ -317,6 +369,46 @@ export class EnlistStore {
     specInput.addEventListener("input", () =>
       this.setField("spec", specInput.value),
     );
+    const openingInput = h("textarea", { class: "enlist-input enlist-opening" });
+    openingInput.value = this.draftOpening;
+    openingInput.addEventListener("input", () =>
+      this.setField("opening", openingInput.value),
+    );
+
+    const becomesButton = (becomes: EnlistBecomes, label: string): HTMLElement =>
+      h(
+        "button",
+        {
+          class:
+            `btn enlist-becomes-${becomes}` +
+            (this.becomes === becomes ? " active" : ""),
+          type: "button",
+          "aria-pressed": this.becomes === becomes ? "true" : "false",
+          onclick: () => this.setBecomes(becomes),
+        },
+        label,
+      );
+
+    const blockRows =
+      blocks.length === 0
+        ? h("div", { class: "enlist-empty" }, "no unfinished tickets")
+        : h(
+            "div",
+            { class: "enlist-block-rows" },
+            ...blocks.map((block) =>
+              h(
+                "label",
+                { class: "enlist-block" },
+                h("input", {
+                  type: "checkbox",
+                  checked: this.isTicked(block.id),
+                  onchange: () => this.toggleBlock(block.id),
+                }),
+                h("span", { class: "enlist-block-id" }, block.id),
+                h("span", { class: "enlist-block-title" }, block.title),
+              ),
+            ),
+          );
 
     return h(
       "div",
@@ -324,39 +416,42 @@ export class EnlistStore {
       h(
         "div",
         { class: "enlist-head" },
-        h("span", { class: "enlist-title" }, "enlist terminal as ticket"),
+        h("span", { class: "enlist-title" }, "enlist terminal"),
         h(
           "button",
           { class: "btn enlist-close", onclick: () => this.closeForm() },
           "cancel",
         ),
       ),
-      field("title", "title", titleInput),
-      field("spec", "spec", specInput),
       h(
         "div",
-        { class: "enlist-blocks" },
-        h("div", { class: "enlist-field-label" }, "blocks"),
-        blocks.length === 0
-          ? h("div", { class: "enlist-empty" }, "no unfinished tickets")
-          : h(
-              "div",
-              { class: "enlist-block-rows" },
-              ...blocks.map((block) =>
-                h(
-                  "label",
-                  { class: "enlist-block" },
-                  h("input", {
-                    type: "checkbox",
-                    checked: this.isTicked(block.id),
-                    onchange: () => this.toggleBlock(block.id),
-                  }),
-                  h("span", { class: "enlist-block-id" }, block.id),
-                  h("span", { class: "enlist-block-title" }, block.title),
-                ),
-              ),
-            ),
+        { class: "enlist-becomes" },
+        h("div", { class: "enlist-field-label" }, "becomes"),
+        h(
+          "div",
+          { class: "enlist-becomes-switch" },
+          becomesButton("ticket", "ticket"),
+          becomesButton("conversation", "conversation"),
+        ),
+        h("div", { class: "enlist-becomes-hint dim" }, ENLIST_BECOMES_HINT),
       ),
+      field("title", "title", titleInput),
+      view.showsSpec ? field("spec", "spec", specInput) : null,
+      view.showsOpening
+        ? field("opening", "opening (optional)", openingInput)
+        : null,
+      view.showsBlocks
+        ? h(
+            "div",
+            { class: "enlist-blocks" },
+            h("div", { class: "enlist-field-label" }, "blocks"),
+            blockRows,
+          )
+        : h(
+            "div",
+            { class: "enlist-conversation-note dim" },
+            view.note ?? "",
+          ),
       this.submitError
         ? h("div", { class: "error-inline enlist-failure" }, this.submitError)
         : null,

@@ -72,6 +72,7 @@ import {
 import {
   createConversations,
   loadConversations,
+  nextConversationId,
   type ConversationHost,
   type ConversationModule,
   type ConversationView,
@@ -85,7 +86,13 @@ import {
   type AssignmentView,
 } from "./assignment.ts";
 import { createEnlistedAttempts, type EnlistedAttempts } from "./enlisted.ts";
-import { findEnlistablePane, type EnlistRequest, type EnlistResponse } from "./enlist.ts";
+import {
+  findEnlistablePane,
+  type EnlistConversationWireRequest,
+  type EnlistRequest,
+  type EnlistResponse,
+  type EnlistTicketRequest,
+} from "./enlist.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from "./live-attempts.ts";
 import {
@@ -353,6 +360,11 @@ interface RunOptions {
   // state. Production leaves it unset (2 s); a test shortens it so a queued
   // teaching Turn is delivered without a real-time wait.
   enlistPollMs?: number;
+  // How often a live Conversation's tick re-reads its pane for Turn state.
+  // Production leaves it unset (2 s); tests shorten it so an enlisted
+  // Conversation's teaching, opening and Notice Turns land without a
+  // real-time wait.
+  conversationPollMs?: number;
   // The herdr workspace the server was launched in (issue #94), the second
   // candidate for the Pool workspace after the id this pool remembers. It
   // reaches the engine as an option and never as an environment read: the
@@ -400,7 +412,7 @@ export interface PoolRun {
   startConversation: (req: StartConversationRequest) => Promise<ConversationView>;
   /** End a Conversation the operator is done with (conversations.ts). */
   endConversation: (id: string, closing?: string) => Promise<void>;
-  /** Enlist a live herdr pane as a Ticket (issue #101, engine/enlisted.ts). */
+  /** Enlist a live herdr pane as a Ticket or a Conversation (issue #101). */
   enlist: (req: EnlistRequest) => Promise<EnlistResponse>;
 }
 
@@ -779,6 +791,9 @@ export function startPool(options: RunOptions): PoolRun {
       poolDir,
       cwd,
       git,
+      ...(options.conversationPollMs !== undefined
+        ? { pollMs: options.conversationPollMs }
+        : {}),
     },
     conversationHostOf(() => session),
   );
@@ -859,6 +874,11 @@ export function startPool(options: RunOptions): PoolRun {
       Promise.all([
         reconcileTerminalAttempts(session),
         reapHeadlessOrphans(session),
+        // An enlisted Conversation's pane is the operator's and still in
+        // herdr's listing (issue #101): re-adopt its runtime, or crash it
+        // when the pane has gone. Runs beside the attempt reconcile; both
+        // are best-effort against the daemon.
+        session.conversations.adoptEnlistedAtBoot(),
       ]),
     )
     .then(() => undefined);
@@ -936,7 +956,11 @@ function makeHandle(session: Session): PoolRun {
     shutdown: (graceMs) => shutdownSession(session, graceMs),
     startConversation: (req) => session.conversations.start(req),
     endConversation: (id, closing) => session.conversations.end(id, closing),
-    enlist: (req) => enlistTicket(session, req),
+    // The `becomes` the operator fixed at enlist time chooses the arm.
+    enlist: (req) =>
+      req.becomes === "conversation"
+        ? enlistConversation(session, req)
+        : enlistTicket(session, req),
   };
   return handle;
 }
@@ -5800,6 +5824,137 @@ function writeEnlistTicket(
 }
 
 /**
+ * Apply the branch rule (spec "Branch rule") to the pane an enlist picked,
+ * the one piece both arms share. A checkout on the merge target gets a fresh
+ * `pool/<pool>/<id>` at HEAD, checked out in place so uncommitted changes
+ * come along; any other branch is used as found. Returns the branch the
+ * enlisted unit runs on, which rule applied, and whether the engine created
+ * one (so a failed enlist knows to remove what it made).
+ */
+function applyEnlistBranchRule(
+  session: Session,
+  pane: { branch: string; directory: string },
+  id: string,
+): { branch: string; rule: "created" | "as-found"; created: boolean } {
+  const poolBranch = branchFor(session.cwd, id);
+  if (pane.branch !== currentBranch(session.cwd)) {
+    return { branch: pane.branch, rule: "as-found", created: false };
+  }
+  const probe = checkoutNewBranch(pane.directory, poolBranch);
+  if (!probe.ok) {
+    throw new Error(
+      `enlist: could not create branch ${poolBranch} in ${pane.directory} ` +
+        `(${probe.err || probe.out})`,
+    );
+  }
+  return { branch: poolBranch, rule: "created", created: true };
+}
+
+/**
+ * Enlist a live herdr pane as a Conversation (issue #101): re-judge the
+ * picked pane, apply the branch rule, then let the Conversation module claim
+ * the pane and register the runtime the way `start` does after its launch,
+ * skipping the launch. The id is minted here (conv-N, as a started
+ * Conversation) before the branch rule names the pool branch, and passed
+ * through. Nothing is written before the claim; a claim that fails unwinds
+ * the branch the engine may have created, so a failed enlist leaves no file
+ * and no branch.
+ */
+async function enlistConversation(
+  session: Session,
+  req: EnlistConversationWireRequest,
+): Promise<EnlistResponse> {
+  const title = (req.title ?? "").trim();
+  if (!title) throw new Error("enlist: title is required");
+  if (!session.git) {
+    throw new Error(
+      "enlist: the pool has no git checkout, so it cannot give the Conversation a branch",
+    );
+  }
+  if (!attemptEnvOf(session).terminalBacked) {
+    throw new Error(
+      'enlist: the pool is not terminal-backed (set console.json "terminal": "herdr")',
+    );
+  }
+
+  const found = await findEnlistablePane({
+    socketPath: session.herdrSocket,
+    poolDir: session.poolDir,
+    paneId: req.paneId,
+    registeredPanes: registeredPanesOf(session),
+  });
+  if (!found.ok) throw new Error(`enlist: ${found.reason}`);
+  const pane = found.pane;
+
+  // The Conversation id is minted before the branch rule, because the branch
+  // it creates is named for it (as the Ticket arm's is for the enlist id).
+  const existing = loadConversations(join(session.poolDir, "conversations"));
+  const id = nextConversationId(
+    existing,
+    new Set(session.conversations.reservedIds()),
+  );
+
+  const rule = applyEnlistBranchRule(session, pane, id);
+  const branchRule = rule.rule;
+  const usedBranch = rule.branch;
+  const branchCreated = rule.created;
+
+  const result = await session.conversations.enlist({
+    id,
+    paneId: pane.paneId,
+    tabId: pane.tabId,
+    harness: pane.harness,
+    title,
+    ...(req.opening ? { opening: req.opening } : {}),
+    directory: pane.directory,
+    branch: usedBranch,
+    sessionId: pane.sessionId,
+  });
+  if (!result.ok) {
+    if (branchCreated) removeEnlistedBranch(pane.directory, pane.branch, usedBranch);
+    throw new Error(`enlist: ${result.reason}`);
+  }
+
+  // The lifecycle trail, in the same shape a terminal-backed Ticket's events
+  // file has: the pre-existing pane id, the found branch and which branch
+  // rule applied. Written after the claim, so a failure above leaves none.
+  appendEvent(session.runsDir, id, {
+    at: new Date().toISOString(),
+    attempt: 1,
+    kind: "scheduled",
+    payload: {},
+  });
+  appendEvent(session.runsDir, id, {
+    at: new Date().toISOString(),
+    attempt: 1,
+    kind: "spawned",
+    payload: {
+      argv: [],
+      cwd: pane.directory,
+      branch: usedBranch,
+      commitSha: commitShaAt(pane.directory),
+      env: engineEnvSet(spawnEnv(pane.directory)),
+      pane_id: pane.paneId,
+      tab_id: pane.tabId,
+      branch_rule: branchRule,
+    },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      branchRule === "created"
+        ? `conversation ${id}: enlisted from pane ${pane.paneId}; branch ` +
+          `${usedBranch} created at HEAD and checked out in ${pane.directory}`
+        : `conversation ${id}: enlisted from pane ${pane.paneId}; branch ` +
+          `${pane.branch} used as found in ${pane.directory}`,
+    ],
+  });
+  // The module published before the log line was written: emit once more so
+  // the stream carries it now rather than at the next unrelated tick.
+  emitSnapshot(session, session.settledPhase ?? "running");
+  return { conversationId: id };
+}
+
+/**
  * Enlist a live herdr pane as a Ticket (issue #101), the one-shot
  * orchestration behind `POST /api/enlist`: re-judge the picked pane against
  * herdr, apply the branch rule, register the runtime and claim the pane, then
@@ -5812,11 +5967,8 @@ function writeEnlistTicket(
  */
 export async function enlistTicket(
   session: Session,
-  req: EnlistRequest,
+  req: EnlistTicketRequest,
 ): Promise<EnlistResponse> {
-  if (req.becomes !== "ticket") {
-    throw new Error("enlist: only a Ticket can be enlisted for now");
-  }
   const title = (req.title ?? "").trim();
   if (!title) throw new Error("enlist: title is required");
   if (!session.git) {
@@ -5853,24 +6005,10 @@ export async function enlistTicket(
   }
 
   const id = nextEnlistId(session.markers);
-  const poolBranch = branchFor(session.cwd, id);
-  // The branch rule (spec "Branch rule"): a checkout on the merge target
-  // gets a fresh pool branch at HEAD, checked out in place so uncommitted
-  // changes come along; any other branch is the ticket's branch as found.
-  const onMergeTarget = pane.branch === currentBranch(session.cwd);
-  const branchRule: "created" | "as-found" = onMergeTarget ? "created" : "as-found";
-  const usedBranch = onMergeTarget ? poolBranch : pane.branch;
-  let branchCreated = false;
-  if (onMergeTarget) {
-    const probe = checkoutNewBranch(pane.directory, poolBranch);
-    if (!probe.ok) {
-      throw new Error(
-        `enlist: could not create branch ${poolBranch} in ${pane.directory} ` +
-          `(${probe.err || probe.out})`,
-      );
-    }
-    branchCreated = true;
-  }
+  const rule = applyEnlistBranchRule(session, pane, id);
+  const branchRule = rule.rule;
+  const usedBranch = rule.branch;
+  const branchCreated = rule.created;
 
   const issuePath = join(session.issuesDir, `${id}.md`);
   const outcomePath = join(session.runsDir, attemptOutcomeName(id, null, false));
@@ -5895,7 +6033,7 @@ export async function enlistTicket(
     teaching,
   });
   if (!registration.ok) {
-    if (branchCreated) removeEnlistedBranch(pane.directory, pane.branch, poolBranch);
+    if (branchCreated) removeEnlistedBranch(pane.directory, pane.branch, usedBranch);
     throw new Error(`enlist: ${registration.reason}`);
   }
 
@@ -5970,7 +6108,7 @@ export async function enlistTicket(
       log: [
         branchRule === "created"
           ? `ticket ${id}: enlisted from pane ${pane.paneId}; branch ` +
-            `${poolBranch} created at HEAD and checked out in ${pane.directory}`
+            `${usedBranch} created at HEAD and checked out in ${pane.directory}`
           : `ticket ${id}: enlisted from pane ${pane.paneId}; branch ` +
             `${pane.branch} used as found in ${pane.directory}`,
       ],
@@ -5996,7 +6134,7 @@ export async function enlistTicket(
       branchCreated,
       directory: pane.directory,
       foundBranch: pane.branch,
-      poolBranch,
+      poolBranch: usedBranch,
       paneId: pane.paneId,
       harness: pane.harness,
     });

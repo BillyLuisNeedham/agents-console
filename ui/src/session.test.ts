@@ -44,6 +44,7 @@ function conversation(
     branch: null,
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
+    enlisted: false,
     ...overrides,
   };
 }

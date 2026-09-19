@@ -50,9 +50,11 @@ export interface PanesResponse {
 /**
  * The enlist request body (issue #101), declared once here so the server
  * route and the Console type-import the same shape. `becomes` is fixed at
- * enlist time; ticket 03 builds the Ticket arm, ticket 05 widens it to
- * Conversation. The engine re-judges the pane at submit rather than trusting
- * a picker read that may be stale.
+ * enlist time: ticket 03 built the Ticket arm, ticket 05 adds the
+ * Conversation arm. The engine re-judges the pane at submit rather than
+ * trusting a picker read that may be stale. The branch is never on the wire:
+ * the engine resolves the found directory's branch with git and applies the
+ * branch rule itself.
  */
 export interface EnlistTicketRequest {
   becomes: "ticket";
@@ -63,12 +65,22 @@ export interface EnlistTicketRequest {
   blocks?: string[];
 }
 
-export type EnlistRequest = EnlistTicketRequest;
+export interface EnlistConversationWireRequest {
+  becomes: "conversation";
+  paneId: string;
+  title: string;
+  /** The optional first Turn, typed after the teaching Turn. */
+  opening?: string;
+}
+
+export type EnlistRequest =
+  | EnlistTicketRequest
+  | EnlistConversationWireRequest;
 
 /** The enlist answer: the minted id, a 201 on success. */
-export interface EnlistResponse {
-  ticketId: string;
-}
+export type EnlistResponse =
+  | { ticketId: string }
+  | { conversationId: string };
 
 /** One live pane resolved and judged for enlist: the found facts the engine
  *  records, with eligibility already decided. */

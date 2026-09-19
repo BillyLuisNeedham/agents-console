@@ -268,3 +268,92 @@ describe("EnlistStore form", () => {
   });
 });
 
+describe("EnlistStore Becomes switch", () => {
+  it("opens on Ticket, switches to Conversation and back, and keeps the draft where fields are shared", async () => {
+    const { store } = await pickEligible();
+    expect(store.mode).toBe("ticket");
+
+    store.setField("title", "shared title");
+    store.setField("spec", "ticket spec");
+
+    store.setBecomes("conversation");
+    expect(store.mode).toBe("conversation");
+    // Title is shared; spec belongs to Ticket and opening to Conversation.
+    expect(store.field("title")).toBe("shared title");
+    expect(store.field("opening")).toBe("");
+
+    store.setField("opening", "opening turn");
+    store.setBecomes("ticket");
+    expect(store.mode).toBe("ticket");
+    expect(store.field("title")).toBe("shared title");
+    expect(store.field("spec")).toBe("ticket spec");
+    expect(store.field("opening")).toBe("opening turn");
+  });
+
+  it("submits only the Conversation fields, never spec or blocks", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "a talk");
+    store.setField("spec", "not sent");
+    store.toggleBlock("01");
+    store.setBecomes("conversation");
+    store.setField("opening", "hello there");
+
+    const submitting = store.submit();
+    expect(store.isSubmitting).toBe(true);
+    expect(enlists).toHaveLength(1);
+    expect(enlists[0]!.request).toEqual({
+      becomes: "conversation",
+      paneId: "pane-work",
+      title: "a talk",
+      opening: "hello there",
+    });
+
+    enlists[0]!.deferred.resolve({ conversationId: "conv-1" });
+    await submitting;
+    expect(store.isFormOpen).toBe(false);
+    expect(store.isSubmitting).toBe(false);
+    expect(store.submitFailure).toBeNull();
+  });
+
+  it("omits an empty opening Turn from the Conversation request", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "no opening");
+    store.setBecomes("conversation");
+
+    const submitting = store.submit();
+    expect(enlists[0]!.request).toEqual({
+      becomes: "conversation",
+      paneId: "pane-work",
+      title: "no opening",
+    });
+    enlists[0]!.deferred.resolve({ conversationId: "conv-1" });
+    await submitting;
+  });
+
+  it("surfaces a Conversation refusal inline and keeps the draft", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("title", "keep me");
+    store.setBecomes("conversation");
+    store.setField("opening", "my opening");
+
+    const submitting = store.submit();
+    enlists[0]!.deferred.reject(new Error("enlist: pane pane-work is gone"));
+    await submitting;
+
+    expect(store.isFormOpen).toBe(true);
+    expect(store.mode).toBe("conversation");
+    expect(store.submitFailure).toBe("enlist: pane pane-work is gone");
+    expect(store.field("title")).toBe("keep me");
+    expect(store.field("opening")).toBe("my opening");
+  });
+
+  it("a fresh pick opens the form back on Ticket", async () => {
+    const { store } = await pickEligible();
+    store.setBecomes("conversation");
+    store.closeForm();
+    store.pick("pane-work");
+    expect(store.mode).toBe("ticket");
+    expect(store.field("opening")).toBe("");
+  });
+});
+

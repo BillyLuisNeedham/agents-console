@@ -43,7 +43,6 @@ import {
   discardWorktree,
   prepareWorktree,
   removeWorktree,
-  worktreePathFor,
   type MergeResult,
   type WorktreeInfo,
 } from "./worktrees.ts";
@@ -55,9 +54,12 @@ import {
 import {
   attemptTabLabel,
   closeTab,
+  listAgents,
   peekPane,
+  relabelTab,
   releasePaneAgent,
   reportPaneAgent,
+  type HerdrAgent,
   type PaneAgentState,
 } from "./herdr.ts";
 import {
@@ -74,8 +76,8 @@ import {
   type Notice,
 } from "./notices.ts";
 import { typeVerified, INTERACTIVE_PANE_READ_LINES } from "./pane-session.ts";
-import { defaultHarnessDescriptors, idlePatternFor } from "./spawn.ts";
-import { FRESH_TURN, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
+import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
+import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
 import {
   assignmentViewOf,
   DEFAULT_DRIVERS,
@@ -91,6 +93,22 @@ import type { Interrupt, PoolConfig } from "./engine.ts";
 const CONVERSATION_STATUSES = ["live", "ended", "crashed"] as const;
 export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
 
+/**
+ * What an enlisted Conversation was found as (issue #101): the pane the
+ * operator opened, its tab, its directory and branch as found, and the
+ * harness session herdr reported. Absent for a started Conversation, which
+ * has an engine-made worktree of its own; present exactly when the operator
+ * enlisted an existing terminal. A live enlisted record is re-adopted at
+ * boot when its pane is still in herdr's listing.
+ */
+export interface EnlistedConversation {
+  paneId: string;
+  tabId: string | null;
+  directory: string;
+  branch: string;
+  sessionId: string | null;
+}
+
 export interface ConversationRecord {
   id: string;
   file: string;
@@ -101,6 +119,7 @@ export interface ConversationRecord {
   harness: string;
   model: string;
   drivers: string;
+  enlisted?: EnlistedConversation;
 }
 
 export const CONVERSATION_MARKER_RE = /^<!--\s*conversation:\s*(.+?)\s*-->\s*$/;
@@ -133,6 +152,19 @@ function parseConversationMarkerLine(
   const spawnedByRaw = fields.get("spawned-by");
   const spawnedBy =
     spawnedByRaw && spawnedByRaw !== "none" ? decodeURIComponent(spawnedByRaw) : undefined;
+  // Enlist provenance (issue #101): written only for an enlisted
+  // Conversation, so its absence is the ordinary started one.
+  const paneRaw = fields.get("pane");
+  const enlisted =
+    paneRaw && paneRaw !== "none"
+      ? {
+          paneId: decodeURIComponent(paneRaw),
+          tabId: fields.get("tab") ? decodeURIComponent(fields.get("tab")!) : null,
+          directory: decodeURIComponent(fields.get("directory") ?? ""),
+          branch: decodeURIComponent(fields.get("branch") ?? ""),
+          sessionId: fields.get("session") ? decodeURIComponent(fields.get("session")!) : null,
+        }
+      : undefined;
   return {
     id,
     status: status as ConversationStatus,
@@ -140,6 +172,7 @@ function parseConversationMarkerLine(
     harness: decodeURIComponent(fields.get("harness") ?? ""),
     model: decodeURIComponent(fields.get("model") ?? ""),
     drivers: decodeURIComponent(fields.get("drivers") ?? ""),
+    ...(enlisted ? { enlisted } : {}),
   };
 }
 
@@ -151,6 +184,15 @@ function markerLine(rec: Omit<ConversationRecord, "file" | "title" | "opening">)
     `harness=${encodeURIComponent(rec.harness)}`,
     `model=${encodeURIComponent(rec.model)}`,
     `drivers=${encodeURIComponent(rec.drivers)}`,
+    ...(rec.enlisted
+      ? [
+          `pane=${encodeURIComponent(rec.enlisted.paneId)}`,
+          `tab=${rec.enlisted.tabId ? encodeURIComponent(rec.enlisted.tabId) : "none"}`,
+          `directory=${encodeURIComponent(rec.enlisted.directory)}`,
+          `branch=${encodeURIComponent(rec.enlisted.branch)}`,
+          `session=${rec.enlisted.sessionId ? encodeURIComponent(rec.enlisted.sessionId) : "none"}`,
+        ]
+      : []),
   ];
   return `<!-- conversation: ${fields.join(" ")} -->`;
 }
@@ -200,13 +242,24 @@ export function writeConversationStatus(file: string, status: ConversationStatus
   writeFileSync(file, lines.join(newline));
 }
 
-/** The next operator-started id: `conv-N`, one past the highest existing. Spawned Conversations get `<parent>-spawn-N` instead, assigned by nextConversationSpawnId below. */
-export function nextConversationId(existing: ConversationRecord[]): string {
+/** The next operator-started id: `conv-N`, one past the highest existing and
+ *  clear of any start still in flight. Spawned Conversations get
+ *  `<parent>-spawn-N` instead, assigned by nextConversationSpawnId below. */
+export function nextConversationId(
+  existing: ConversationRecord[],
+  reserved: ReadonlySet<string> = new Set(),
+): string {
   const nums = existing
     .map((r) => /^conv-(\d+)$/.exec(r.id))
     .filter((m): m is RegExpExecArray => m !== null)
     .map((m) => Number(m[1]));
-  return `conv-${(nums.length ? Math.max(...nums) : 0) + 1}`;
+  let n = nums.length ? Math.max(...nums) : 0;
+  let id: string;
+  do {
+    n += 1;
+    id = `conv-${n}`;
+  } while (reserved.has(id));
+  return id;
 }
 
 function escapeRegExp(s: string): string {
@@ -248,6 +301,11 @@ export interface ConversationRuntime {
   exitCodePath: string;
   streamPath: string;
   logPath: string;
+  /** True when the operator enlisted a pane they opened (issue #101): the
+   *  worktree is the found directory, the tab and directory are never closed
+   *  or removed, and End merges the found branch and leaves both as they
+   *  are. */
+  enlisted: boolean;
   // The agent identity this Conversation's pane is reported under in
   // herdr's agent sidebar (issue #94): the harness the Assignment resolved,
   // and the pane's tab label as the message every report carries.
@@ -288,6 +346,9 @@ export interface ConversationView {
   branch: string | null;
   turn: { state: TurnSide; lastLine: string; idleSince: string | null };
   children: string[];
+  /** Enlisted from a live herdr pane (issue #101): the card reads "as found"
+   *  where a started Conversation names its model. */
+  enlisted: boolean;
 }
 
 export interface StartConversationRequest {
@@ -315,6 +376,30 @@ export interface TicketLike {
   spawnedBy?: string;
 }
 
+/**
+ * A live pane the operator enlists as a Conversation (issue #101): the found
+ * facts the engine recorded, the operator's title and optional opening Turn,
+ * and an id the engine minted before applying the branch rule (so the pool
+ * branch, the record file and the spawn-proposal path all name it). No assign
+ * and no spawnedBy: an enlisted Conversation is as found.
+ */
+export interface EnlistConversationRegistration {
+  id: string;
+  paneId: string;
+  tabId: string | null;
+  /** herdr's agent label: the harness the pane is running. */
+  harness: string;
+  title: string;
+  opening?: string;
+  directory: string;
+  branch: string;
+  sessionId: string | null;
+}
+
+export type EnlistConversationResult =
+  | { ok: true; view: ConversationView }
+  | { ok: false; reason: string };
+
 // ---------------------------------------------------------------------------
 // The module: what it takes and what it exposes.
 // ---------------------------------------------------------------------------
@@ -330,6 +415,9 @@ export interface ConversationEnv extends AttemptEnv {
   poolDir: string;
   cwd: string;
   git: boolean;
+  /** How often a live Conversation's tick re-reads its pane; 2 s unless a
+   *  test shortens it (the enlisted-attempts module's own pollMs precedent). */
+  pollMs?: number;
 }
 
 /**
@@ -363,14 +451,24 @@ export interface ConversationHost {
 export interface ConversationModule {
   /** Start a Conversation; throws when the pool cannot host one at all. */
   start(req: StartConversationRequest): Promise<ConversationView>;
+  /**
+   * Claim a live pane the operator opened as a Conversation (issue #101),
+   * skipping the launch: settle its Turn state, report the agent identity,
+   * relabel its tab, write the record and queue the teaching and opening
+   * Turns through the Notice path. Resolves a reason on failure, having
+   * removed anything it wrote.
+   */
+  enlist(req: EnlistConversationRegistration): Promise<EnlistConversationResult>;
   /** End a Conversation the operator is done with. */
   end(id: string, closing?: string): Promise<void>;
   /** A merge-conflict or merge-approval answer whose id names a live Conversation. */
   answerMerge(id: string, interrupt: Interrupt, approve: boolean | undefined): void;
   /** Every Conversation the pool knows about, live or not, as the snapshot wants them. */
   views(): ConversationView[];
-  /** Crash every Conversation recorded live by a previous engine run (they do not resume). */
+  /** Crash every Conversation recorded live by a previous engine run (they do not resume), except enlisted ones, which adoptEnlistedAtBoot re-adopts while their pane lives. */
   crashStaleAtBoot(): void;
+  /** Re-adopt live enlisted Conversations whose pane is still in herdr's listing; crash the ones whose pane is gone. Best effort: a daemon that cannot be asked changes nothing. */
+  adoptEnlistedAtBoot(): Promise<void>;
   /** A spawned Ticket reached done: notify its parent Conversation, if any. */
   ticketEnded(marker: TicketLike, branch: string, diffRange: string | null): void;
   /** A spawned Ticket checkpointed: notify its parent Conversation, if any. */
@@ -385,6 +483,7 @@ export interface ConversationModule {
 
 export function createConversations(env: ConversationEnv, host: ConversationHost): ConversationModule {
   const dir = conversationsDir(env.poolDir);
+  const pollMs = env.pollMs ?? CONVERSATION_POLL_MS;
   const runtimes = new Map<string, ConversationRuntime>();
   // Ids of starts still in flight (start is async and its record is
   // written well after the herdr tab opens): engine.ts's spawn counters
@@ -427,6 +526,90 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     );
   }
 
+  /**
+   * One Turn-state read from the pane, publishing when the read changes what
+   * the snapshot shows and reporting the herdr sidebar state on a flip. A
+   * failed read throws and leaves the state as it was; the caller decides
+   * whether that is fatal (the enlist claim) or one tick's blip.
+   */
+  async function readTurn(
+    runtime: ConversationRuntime,
+    descriptor: HarnessDescriptor | null,
+  ): Promise<void> {
+    if (!runtime.paneId) return;
+    const text = await peekPane(
+      env.herdrSocket,
+      runtime.paneId,
+      INTERACTIVE_PANE_READ_LINES,
+    );
+    const { turn, publish: changed } = nextTurnState(
+      runtime.turn,
+      text,
+      descriptor ? idlePatternFor(descriptor) : "",
+      nowIso(),
+    );
+    const flipped = runtime.turn.state !== turn.state;
+    runtime.turn = turn;
+    if (changed) publish();
+    if (flipped) {
+      reportAgent(runtime, turn.state === "waiting" ? "blocked" : "working");
+    }
+  }
+
+  /**
+   * The runtime for an enlisted Conversation (issue #101): the found pane's
+   * facts, the found directory and branch standing in as its worktree, no
+   * tailer and no engine-owned exit-code or Stream file, since the operator
+   * opened the pane. Shared by the live enlist and the boot re-adoption so
+   * the two claims cannot drift.
+   */
+  function enlistedRuntime(rec: {
+    id: string;
+    file: string;
+    paneId: string;
+    tabId: string | null;
+    harness: string;
+    title: string;
+    directory: string;
+    branch: string;
+  }): ConversationRuntime {
+    return {
+      id: rec.id,
+      file: rec.file,
+      paneId: rec.paneId,
+      tabId: rec.tabId,
+      worktree: { path: rec.directory, branch: rec.branch },
+      exitCodePath: join(env.runsDir, `${rec.id}.exit`),
+      streamPath: join(env.runsDir, `${rec.id}.stream.jsonl`),
+      logPath: join(env.runsDir, `${rec.id}.log`),
+      enlisted: true,
+      harness: rec.harness,
+      label: attemptTabLabel(rec.id, rec.title),
+      turn: FRESH_TURN,
+      notices: [],
+      ending: false,
+      release: new AbortController(),
+      timer: null,
+    };
+  }
+
+  /**
+   * Settle a freshly claimed pane's Turn state from consecutive reads (the
+   * same rule turn-state.ts applies on its own tick): one read establishes
+   * the transcript, then IDLE_STABLE_READS more with the idle pattern present
+   * flip the state to waiting. A throw leaves the caller to decide whether
+   * that is fatal (the enlist claim) or one boot's blip (the re-adoption).
+   */
+  async function settleTurn(
+    runtime: ConversationRuntime,
+    descriptor: HarnessDescriptor | null,
+  ): Promise<void> {
+    for (let read = 0; read <= IDLE_STABLE_READS; read++) {
+      await readTurn(runtime, descriptor);
+      if (runtime.turn.state === "waiting") break;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Views.
   // -------------------------------------------------------------------------
@@ -442,7 +625,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
   function viewOf(rec: ConversationRecord, conversations: ConversationRecord[]): ConversationView {
     const runtime = runtimes.get(rec.id);
-    const branch = runtime ? runtime.worktree.branch : branchFor(env.cwd, rec.id);
+    // An enlisted Conversation has no pool branch to derive: the branch it
+    // was found on is the one its record names.
+    const branch = runtime
+      ? runtime.worktree.branch
+      : (rec.enlisted?.branch ?? branchFor(env.cwd, rec.id));
     return {
       id: rec.id,
       title: rec.title,
@@ -460,6 +647,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         ? { state: runtime.turn.state, lastLine: runtime.turn.lastLine, idleSince: runtime.turn.idleSince }
         : { state: "waiting", lastLine: "", idleSince: null },
       children: childrenOf(rec.id, conversations),
+      enlisted: rec.enlisted !== undefined,
     };
   }
 
@@ -478,10 +666,83 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   function crashStaleAtBoot(): void {
     for (const rec of loadConversations(dir)) {
       if (rec.status !== "live") continue;
+      // An enlisted Conversation gets a chance to re-adopt first
+      // (adoptEnlistedAtBoot below): its pane is the operator's, still
+      // alive, and the record names it. A started Conversation does not
+      // resume.
+      if (rec.enlisted) continue;
       writeConversationStatus(rec.file, "crashed");
       event(rec.id, "crash", {
         reason: "engine restarted; Conversations do not resume (the Conversations ADR)",
       });
+    }
+  }
+
+  /**
+   * Re-adopt live enlisted Conversations at boot (issue #101): the operator's
+   * pane may still be there, and the record names it, so a fresh runtime
+   * re-tracks Turn state, delivers Notices and Spawns again. A pane that has
+   * left herdr's listing is the crash ADR-0018 prescribes, branch kept.
+   * Best effort, like the terminal-attempt reconcile beside it: a daemon that
+   * cannot be asked changes nothing, and the records stay live for the next
+   * boot.
+   */
+  async function adoptEnlistedAtBoot(): Promise<void> {
+    if (!env.terminalBacked) return;
+    const live = loadConversations(dir).filter(
+      (rec) => rec.status === "live" && rec.enlisted !== undefined,
+    );
+    if (live.length === 0) return;
+    let agents: HerdrAgent[];
+    try {
+      agents = await listAgents(env.herdrSocket);
+    } catch {
+      return;
+    }
+    const listed = new Map(agents.map((agent) => [agent.paneId, agent]));
+    for (const rec of live) {
+      const found = rec.enlisted!;
+      if (!listed.has(found.paneId)) {
+        // The pane went while the engine was down: crashed, branch kept.
+        writeConversationStatus(rec.file, "crashed");
+        event(rec.id, "crash", { reason: "enlisted pane gone at boot" });
+        continue;
+      }
+      const descriptor = defaultHarnessDescriptors[rec.harness.trim().toLowerCase()];
+      if (!descriptor) {
+        writeConversationStatus(rec.file, "crashed");
+        event(rec.id, "crash", {
+          reason: `no harness the engine knows for enlisted conversation ${rec.id}`,
+        });
+        continue;
+      }
+      const runtime = enlistedRuntime({
+        id: rec.id,
+        file: rec.file,
+        paneId: found.paneId,
+        tabId: found.tabId,
+        harness: rec.harness,
+        title: rec.title,
+        directory: found.directory,
+        branch: found.branch,
+      });
+      try {
+        await settleTurn(runtime, descriptor);
+      } catch {
+        // The pane could not be read: leave the record live, the next boot
+        // tries again rather than destroying a talk that may still be there.
+        continue;
+      }
+      reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
+      runtimes.set(rec.id, runtime);
+      watchForCrash(runtime);
+      host.recordAssignment(rec.id, {
+        harness: rec.harness,
+        model: rec.model,
+        drivers: rec.drivers || DEFAULT_DRIVERS,
+      });
+      runtime.timer = setInterval(() => tick(rec.id), pollMs);
+      publish();
     }
   }
 
@@ -543,7 +804,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       req.id ??
       (req.spawnedBy
         ? nextConversationSpawnId(req.spawnedBy, existing)
-        : nextConversationId(existing));
+        : nextConversationId(existing, reserved));
     // Reserved before the first await, so an adoption that reads the
     // reserved ids right after firing this start already sees it.
     reserved.add(id);
@@ -667,6 +928,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       exitCodePath: handle.ctx.exitCodePath,
       streamPath: handle.ctx.streamPath ?? join(env.runsDir, `${id}.stream.jsonl`),
       logPath: handle.ctx.logPath,
+      enlisted: false,
       harness,
       label: attemptTabLabel(id, req.title),
       turn: FRESH_TURN,
@@ -682,7 +944,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // whose spawned-by names it resolves the same way a grader or spawned
     // ticket inherits from its own parent.
     host.recordAssignment(id, { harness, model, drivers });
-    runtime.timer = setInterval(() => tick(id), CONVERSATION_POLL_MS);
+    runtime.timer = setInterval(() => tick(id), pollMs);
     // start is called directly off the PoolRun handle (the server route, or
     // a fire-and-forget spawn adoption), never through the drive loop, so
     // nothing else emits a snapshot that would tell the SSE stream this
@@ -691,6 +953,142 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // emit.
     publish();
     return viewOf(record, loadConversations(dir));
+  }
+
+  /**
+   * Enlist a live pane the operator opened as a Conversation (issue #101):
+   * the launch `start` does minus the launch. The pane, tab, directory and
+   * branch are taken as found, the agent identity is reported and the tab
+   * relabelled, the record is written, and the Spawn teaching and the
+   * operator's opening Turn are queued through the Notice path (typed now if
+   * the pane is already waiting, otherwise on the tick's next waiting read).
+   *
+   * Resolves a reason rather than throwing when the pane cannot be claimed:
+   * the caller (engine.ts's enlistConversation) unwinds the branch it may
+   * have created and answers its 409. A failure after the record is written
+   * removes the record, its events and the agent identity, so a failed
+   * enlist leaves nothing.
+   */
+  async function enlist(req: EnlistConversationRegistration): Promise<EnlistConversationResult> {
+    if (!env.terminalBacked) {
+      return { ok: false, reason: "the pool is not terminal-backed" };
+    }
+    if (!env.git) {
+      return { ok: false, reason: "the pool has no git checkout" };
+    }
+    const harness = req.harness.trim().toLowerCase();
+    const descriptor = defaultHarnessDescriptors[harness];
+    if (!descriptor) return { ok: false, reason: "no harness the engine knows" };
+
+    // Reserved before the first await: the id is already fixed by the branch
+    // rule the engine applied, so a concurrent start must not mint it too.
+    reserved.add(req.id);
+    try {
+      const file = conversationFile(env.poolDir, req.id);
+      const found: EnlistedConversation = {
+        paneId: req.paneId,
+        tabId: req.tabId,
+        directory: req.directory,
+        branch: req.branch,
+        sessionId: req.sessionId,
+      };
+      const runtime = enlistedRuntime({
+        id: req.id,
+        file,
+        paneId: req.paneId,
+        tabId: req.tabId,
+        harness,
+        title: req.title,
+        directory: req.directory,
+        branch: req.branch,
+      });
+
+      // Settle the Turn state from consecutive reads, exactly as the
+      // enlisted Ticket's claim does: an idle pane is taught now, a working
+      // one queues the Turns for its next waiting read.
+      try {
+        await settleTurn(runtime, descriptor);
+      } catch (err) {
+        return {
+          ok: false,
+          reason: `the pane could not be read (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        };
+      }
+
+      reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
+      if (req.tabId !== null) {
+        void relabelTab(env.herdrSocket, req.tabId, runtime.label).catch(() => {});
+      }
+
+      const opening = req.opening ?? "";
+      const record: ConversationRecord = {
+        id: req.id,
+        file,
+        title: req.title.trim(),
+        opening,
+        status: "live",
+        harness,
+        // The Assignment as found: herdr names no model, so the card reads
+        // "as found" where a started Conversation names one.
+        model: "",
+        drivers: DEFAULT_DRIVERS,
+        enlisted: found,
+      };
+      // The record lands before delivery: deliver reads it for the harness
+      // descriptor, and the card must exist the moment the enlist does.
+      writeConversation(dir, record);
+
+      // The teaching, then the opening Turn, both through the Notice path:
+      // the same queue-then-deliver-while-waiting the spawned Notices use.
+      runtime.notices.push({
+        to: req.id,
+        from: req.id,
+        kind: "enlist-teaching",
+        text: buildConversationTeaching(join(env.runsDir, `${req.id}.spawn.json`)),
+      });
+      if (opening.trim()) {
+        runtime.notices.push({
+          to: req.id,
+          from: req.id,
+          kind: "opening-turn",
+          text: opening,
+        });
+      }
+
+      runtimes.set(req.id, runtime);
+      if (runtime.turn.state === "waiting") {
+        await deliver(req.id);
+        if (runtime.notices.length > 0) {
+          // The teaching never landed: remove the half-written record and
+          // its events, drop the runtime and the identity, and let the
+          // caller unwind the branch it may have created.
+          runtimes.delete(req.id);
+          releaseAgent(runtime.paneId, runtime.harness);
+          try {
+            rmSync(file, { force: true });
+            rmSync(join(env.runsDir, `${req.id}.events.jsonl`), { force: true });
+          } catch {
+            // Best-effort.
+          }
+          return { ok: false, reason: "the teaching Turn could not be delivered" };
+        }
+      }
+      watchForCrash(runtime);
+      // The Assignment under this Conversation's id, as start records it, so
+      // a Ticket it spawns inherits it.
+      host.recordAssignment(req.id, {
+        harness,
+        model: "",
+        drivers: DEFAULT_DRIVERS,
+      });
+      runtime.timer = setInterval(() => tick(req.id), pollMs);
+      publish();
+      return { ok: true, view: viewOf(record, loadConversations(dir)) };
+    } finally {
+      reserved.delete(req.id);
+    }
   }
 
   function watchForCrash(runtime: ConversationRuntime): void {
@@ -718,7 +1116,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // A launch-only run clears its own Live attempt where it records the
     // ending (attempt-run.ts): here, and at End below.
     env.liveAttempts.clear(runtime.id, 1);
-    host.closeAttemptTabs(runtime.id);
+    if (!runtime.enlisted) host.closeAttemptTabs(runtime.id);
     // Before the runtime leaves the map, as in finishEnd: noteEnded reads
     // runtime.notices to drop and log whatever never delivered.
     noteEnded(runtime.id, { branch: runtime.worktree.branch, crashed: true });
@@ -730,13 +1128,29 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // Ending.
   // -------------------------------------------------------------------------
 
+  // An enlisted Conversation's tab and directory were the operator's before
+  // the pool's and stay theirs (issue #101): the engine never closes the tab
+  // and never removes the directory, at End or at any other ending. A
+  // started Conversation keeps the ordinary cleanup.
+  function closeRuntimeTab(runtime: ConversationRuntime): Promise<void> {
+    if (runtime.enlisted || !runtime.tabId) return Promise.resolve();
+    return closeTab(env.herdrSocket, runtime.tabId).catch(() => {});
+  }
+
+  function disposeWorktree(runtime: ConversationRuntime): void {
+    if (runtime.enlisted) return;
+    removeWorktree(env.cwd, runtime.worktree);
+  }
+
   function finishEnd(runtime: ConversationRuntime, merged: boolean): void {
     stopTick(runtime);
     writeConversationStatus(runtime.file, "ended");
     event(runtime.id, "ended", { closing: runtime.closing ?? null, by: "operator", merged });
     releaseAgent(runtime.paneId, runtime.harness);
     env.liveAttempts.clear(runtime.id, 1);
-    host.closeAttemptTabs(runtime.id);
+    // An enlisted Conversation's tab is the operator's and never closes
+    // (issue #101); the engine opened no tab under this id to close either.
+    if (!runtime.enlisted) host.closeAttemptTabs(runtime.id);
     // While the runtime is still in the map: noteEnded reads its notices
     // to drop and log whatever never delivered.
     noteEnded(runtime.id, {
@@ -778,7 +1192,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // coming through here; a second release of a binding already dropped is
     // a no-op, and both are best-effort anyway.
     releaseAgent(runtime.paneId, runtime.harness);
-    if (runtime.tabId) await closeTab(env.herdrSocket, runtime.tabId).catch(() => {});
+    await closeRuntimeTab(runtime);
     // The talk is over: drain the tailer so the derived log is complete.
     await runtime.tailer?.finish().catch(() => {});
 
@@ -786,7 +1200,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     const countProbe = git(env.cwd, ["rev-list", "--count", `${target}..${runtime.worktree.branch}`]);
     const hasCommits = countProbe.ok && Number(countProbe.out) > 0;
     if (!hasCommits) {
-      removeWorktree(env.cwd, runtime.worktree);
+      disposeWorktree(runtime);
       finishEnd(runtime, false);
       return;
     }
@@ -799,7 +1213,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       .chainMerge(async () => {
         const result = mergeBranch(env.cwd, runtime.worktree.branch);
         if (result.ok) {
-          removeWorktree(env.cwd, runtime.worktree);
+          disposeWorktree(runtime);
           event(id, "merged", mergedPayload(result));
           finishEnd(runtime, true);
           return;
@@ -833,7 +1247,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   function mergeConflictInterrupt(runtime: ConversationRuntime, result: MergeResult): Interrupt {
     const parked =
       `the Conversation's work is parked on branch ${runtime.worktree.branch}, ` +
-      `checked out at ${worktreePathFor(env.cwd, runtime.id)}.\n` +
+      `checked out at ${runtime.worktree.path}.\n` +
       (result.detail ? `git said: ${result.detail}\n` : "");
     if (result.reason === "blocked") {
       return {
@@ -894,7 +1308,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       host.raiseInterrupt(mergeConflictInterrupt(runtime, result));
       return;
     }
-    removeWorktree(env.cwd, runtime.worktree);
+    disposeWorktree(runtime);
     event(runtime.id, "merged", mergedPayload(result));
     host.clearInterrupt(
       interrupt,
@@ -918,7 +1332,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       );
       return;
     }
-    removeWorktree(env.cwd, runtime.worktree);
+    disposeWorktree(runtime);
     event(runtime.id, "merged", mergedPayload(result));
     host.clearInterrupt(
       interrupt,
@@ -1185,40 +1599,26 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // Conversation, nor stop this one's own future ticks: swallow and let
     // the next tick try again, the same tolerance peekPane's own callers
     // already apply to a daemon blip.
-    let descriptor;
+    let descriptor: HarnessDescriptor | null;
     try {
-      descriptor = harnessDescriptorFor(runtime);
+      descriptor = harnessDescriptorFor(runtime) ?? null;
     } catch {
       return;
     }
-    const idlePattern = descriptor ? idlePatternFor(descriptor) : "";
-    void peekPane(env.herdrSocket, runtime.paneId, INTERACTIVE_PANE_READ_LINES)
-      .catch(() => null)
-      .then((text) => {
-        try {
-          // The runtime may have ended while this read was in flight (the
-          // tab closes as soon as End is called, well before the pane's
-          // fate is known); re-fetch rather than trusting the closure's
-          // reference.
-          const live = runtimes.get(id);
-          if (text === null || !live || live.ending) return;
-          const { turn, publish: changed } = nextTurnState(live.turn, text, idlePattern, nowIso());
-          const flipped = live.turn.state !== turn.state;
-          live.turn = turn;
-          if (changed) publish();
-          // The Turn flipped, so what herdr's agent sidebar says about this
-          // pane flips with it (issue #94): waiting on the operator is
-          // "blocked", everything else is work in progress.
-          if (flipped) {
-            reportAgent(live, turn.state === "waiting" ? "blocked" : "working");
-          }
-          if (turn.state === "waiting" && live.notices.length > 0) {
-            void deliver(id);
-          }
-          pollSpawnProposals(id);
-        } catch {
-          // See above: one tick's failure is not fatal.
+    void readTurn(runtime, descriptor)
+      .then(() => {
+        // The runtime may have ended while this read was in flight (the tab
+        // closes as soon as End is called, well before the pane's fate is
+        // known); re-fetch rather than trusting the closure's reference.
+        const live = runtimes.get(id);
+        if (!live || live.ending) return;
+        if (live.turn.state === "waiting" && live.notices.length > 0) {
+          void deliver(id);
         }
+        pollSpawnProposals(id);
+      })
+      .catch(() => {
+        // See above: one tick's failure is not fatal.
       });
   }
 
@@ -1228,10 +1628,12 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
   return {
     start,
+    enlist,
     end,
     answerMerge,
     views,
     crashStaleAtBoot,
+    adoptEnlistedAtBoot,
     ticketEnded,
     ticketCheckpointed,
     isLive: (id) => runtimes.has(id),

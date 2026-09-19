@@ -705,6 +705,9 @@ export interface ConversationCardView {
   turn: ConversationTurn;
   /** "4m", "1h 12m"; null while the Turn state is `working` (no idleSince). */
   idleAge: string | null;
+  /** The Conversation was enlisted from a live herdr pane (issue #101): the
+   *  badge reads "as found" where a started Conversation names a model. */
+  enlisted: boolean;
   /** The card's terminal surface, reused from ticket cards; present while
    *  the Conversation is live and carries a pane id. */
   terminal: TerminalSurfaceView | null;
@@ -1036,6 +1039,7 @@ function projectConversation(
     branch: conversation.branch,
     turn: conversation.turn,
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
+    enlisted: conversation.enlisted,
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id]),
     x: pos.x,
@@ -1278,6 +1282,52 @@ export function projectEnlistBlocks(tickets: EnrichedTicketState[]): EnlistBlock
   return tickets
     .filter((ticket) => ticket.status !== "done")
     .map((ticket) => ({ id: ticket.id, title: ticket.title }));
+}
+
+/** The two kinds a picked pane can become, fixed at enlist time (issue #101). */
+export type EnlistBecomes = "ticket" | "conversation";
+
+/** The one-line reminder beside the Becomes switch, so the operator picks the
+ *  right kind without re-reading the glossary. */
+export const ENLIST_BECOMES_HINT =
+  "Ticket ends in an Outcome and can be waited on; Conversation is an open talk that cannot block anything.";
+
+/**
+ * The greyed note that stands where Blocks would be when the form is in
+ * Conversation mode (ADR-0018: a Conversation can never appear in a Ticket's
+ * blocked-by, so nothing may wait on it). It points back to Ticket.
+ */
+export const ENLIST_CONVERSATION_NOTE =
+  "A Conversation cannot block a Ticket (ADR-0018). Switch back to Ticket if other work must wait on this.";
+
+/**
+ * What the Enlist form shows for the chosen Becomes: the fields that belong to
+ * the kind, and the note that replaces Blocks. A pure projection, so the
+ * Console's DOM-free tests pin both modes without rendering. The one-line
+ * hint beside the switch is mode-independent and lives in
+ * ENLIST_BECOMES_HINT rather than on the view.
+ */
+export interface EnlistFormView {
+  /** The spec textarea (Ticket only). */
+  showsSpec: boolean;
+  /** The Blocks tick list (Ticket only). */
+  showsBlocks: boolean;
+  /** The optional opening-Turn textarea (Conversation only). */
+  showsOpening: boolean;
+  /** The greyed note standing in for Blocks in Conversation mode; null in
+   *  Ticket mode, where the tick list shows. */
+  note: string | null;
+}
+
+export function projectEnlistForm(becomes: EnlistBecomes): EnlistFormView {
+  return becomes === "ticket"
+    ? { showsSpec: true, showsBlocks: true, showsOpening: false, note: null }
+    : {
+        showsSpec: false,
+        showsBlocks: false,
+        showsOpening: true,
+        note: ENLIST_CONVERSATION_NOTE,
+      };
 }
 
 export function statusLabel(status: TicketStatus, mergePending = false): string {
