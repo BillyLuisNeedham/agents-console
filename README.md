@@ -63,6 +63,15 @@ left them. Each attempt's pane also appears in herdr's left-hand agent list,
 named for the harness and labelled with the attempt's tab label; a Conversation
 shows as blocked there while it waits on the operator.
 
+## Jev
+
+With `TYPESAFE_API_KEY` set in the environment the Console is launched from,
+the engine can put narrow, typed questions to TypeSafe's Jev (a judgement
+model) where it would otherwise match strings, and the pool log says so at
+boot. Without the key, or whenever Jev cannot answer, every decision takes
+the heuristic path it always had (see
+`docs/adr/0020-jev-gates-paths-engine-writes-status.md`).
+
 ## Run
 
 Runtime is bun.

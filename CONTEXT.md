@@ -216,3 +216,15 @@ _Avoid_: merged attempt (that's the fallback, not the definition)
 The per-ticket assign key that activates verification. N is both the number of parallel Attempts and the number of grader tickets. The key's absence — not a zero, not a false — means the ticket runs ungraded, exactly as before.
 _Avoid_: takes, retries
 
+
+**Jev**:
+TypeSafe's judgement model: a System One model that answers narrow, typed questions over Evidence with calibrated probabilities, never generated text. Optional to a Pool: when no key is configured the engine takes its heuristic paths exactly as it always has. A Jev answer gates which engine path runs; the engine remains the only writer of status.
+_Avoid_: LLM, the AI, TypeSafe (that's the vendor)
+
+**Evidence**:
+The named JSON object a call site hands Jev to answer a question over: only the context relevant to that question. Not State (the run's memory), though it may be assembled from it.
+_Avoid_: state (Jev's own parameter name collides with the run's State), context, prompt
+
+**Judgement**:
+One typed answer from Jev to one question: a Choice (one label, with a probability per label and a confidence), a Noul (a probability that a condition holds), or a Jev Score (an expected position on an ordered rubric, with probabilities and a confidence). Every question over the same Evidence is asked in one request.
+_Avoid_: verdict (that's head-to-head grading), guess, prediction, score (say Jev Score; a Grade has a score too)
