@@ -13,6 +13,7 @@ import {
   DETAIL_MIN_PX,
   earlierLogOffset,
   initialLogWindow,
+  isTerminalBacked,
   joinStreamFiles,
   logAtBottom,
   logTailOffset,
@@ -22,6 +23,7 @@ import {
   poolStatus,
   projectDetail,
   projectDetailTabs,
+  projectEnlistPicker,
   projectLogPane,
   projectNeedsInput,
   projectPool,
@@ -2438,5 +2440,90 @@ describe("poolAssignmentDefaults", () => {
   it("returns nothing when the pool sets no defaults", () => {
     expect(poolAssignmentDefaults({})).toEqual({});
     expect(poolAssignmentDefaults({ harness: "claude" })).toEqual({});
+  });
+});
+
+describe("isTerminalBacked", () => {
+  it("is true only when the pool config says terminal: herdr", () => {
+    expect(isTerminalBacked({ terminal: "herdr" })).toBe(true);
+    expect(isTerminalBacked({})).toBe(false);
+    expect(isTerminalBacked({ terminal: "tmux" })).toBe(false);
+  });
+});
+
+describe("projectEnlistPicker", () => {
+  it("keeps ineligible panes as rows, with their reason, and puts eligible ones first", () => {
+    const rows = projectEnlistPicker([
+      {
+        paneId: "pane-out",
+        harness: "claude",
+        status: "idle",
+        title: "✳ Claude Code",
+        directory: "/other",
+        branch: null,
+        eligible: false,
+        reason: "not a checkout of this pool's repository",
+      },
+      {
+        paneId: "pane-work",
+        harness: "opencode",
+        status: "working",
+        title: "OC | doing work",
+        directory: "/repo/worktree",
+        branch: "feature/x",
+        eligible: true,
+        reason: null,
+      },
+      {
+        paneId: "pane-gemini",
+        harness: "gemini",
+        status: "idle",
+        title: "gemini",
+        directory: "/repo",
+        branch: "main",
+        eligible: false,
+        reason: "no harness the engine knows",
+      },
+    ]);
+    // Eligible first, then the ineligible by harness (claude before gemini).
+    expect(rows.map((r) => r.paneId)).toEqual([
+      "pane-work",
+      "pane-out",
+      "pane-gemini",
+    ]);
+    expect(rows[0]).toEqual({
+      paneId: "pane-work",
+      harness: "opencode",
+      status: "working",
+      title: "OC | doing work",
+      directory: "/repo/worktree",
+      branch: "feature/x",
+      eligible: true,
+      reason: null,
+    });
+    // Every ineligible row keeps its reason; none is dropped.
+    expect(rows.slice(1).every((r) => !r.eligible && r.reason !== null)).toBe(true);
+  });
+
+  it("renders a missing directory and branch as empty strings", () => {
+    const rows = projectEnlistPicker([
+      {
+        paneId: "pane-bare",
+        harness: null,
+        status: "unknown",
+        title: "",
+        directory: null,
+        branch: null,
+        eligible: false,
+        reason: "no harness the engine knows",
+      },
+    ]);
+    expect(rows[0]!.directory).toBe("");
+    expect(rows[0]!.branch).toBe("");
+    expect(rows[0]!.harness).toBeNull();
+  });
+
+  it("is empty when herdr reports no panes", () => {
+    expect(projectEnlistPicker([])).toEqual([]);
   });
 });

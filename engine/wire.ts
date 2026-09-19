@@ -32,6 +32,7 @@ export type { AssignmentView } from "./assignment.ts";
 export type { LiveAttemptRecord } from "./live-attempts.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
+export type { EnlistPane, PanesResponse } from "./enlist.ts";
 
 import type { ConversationView } from "./conversations.ts";
 import type { Interrupt, Outcome, RunPhase } from "./engine.ts";

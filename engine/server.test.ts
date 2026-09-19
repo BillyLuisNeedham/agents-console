@@ -3901,3 +3901,186 @@ describe("conversation endpoints", () => {
     await fake.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Enlist panes endpoint (issue #101): GET /api/panes. The shared executing
+// fake is the one herdr definition this suite drives; the route reads
+// agent.list through it, never a fourth inline fake.
+// ---------------------------------------------------------------------------
+
+describe("enlist panes endpoint", () => {
+  const fakes: ExecutingFakeHerdr[] = [];
+
+  afterEach(async () => {
+    while (fakes.length > 0) await fakes.pop()!.close();
+  });
+
+  async function fakeHerdr(
+    options?: ExecutingFakeHerdrOptions,
+  ): Promise<ExecutingFakeHerdr> {
+    const fake = await startExecutingFakeHerdr(options);
+    fakes.push(fake);
+    return fake;
+  }
+
+  /** A git-backed, terminal-backed pool with one ticket, done by default, so
+   *  no attempt runs unless the marker says ready. */
+  function makeGitTerminalPool(marker?: string): string {
+    const poolDir = makeServerPool(
+      [
+        {
+          file: "01.md",
+          marker:
+            marker ?? "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+      ],
+      { terminal: "herdr" },
+    );
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: poolDir, stdio: "ignore" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    return poolDir;
+  }
+
+  it("lists every pane herdr reports, with the reason beside the ineligible ones", async () => {
+    const poolDir = makeGitTerminalPool();
+    const outside = makeTempDir("outside-repo-");
+    registerTempDir(outside);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-free",
+      agent: "claude",
+      cwd: poolDir,
+      title: "✳ Claude Code",
+      status: "idle",
+    });
+    fake.seedAgent({
+      paneId: "pane-unknown",
+      agent: "gemini",
+      cwd: poolDir,
+      title: "gemini tui",
+      status: "working",
+    });
+    fake.seedAgent({
+      paneId: "pane-outside",
+      agent: "claude",
+      cwd: outside,
+      title: "elsewhere",
+      status: "idle",
+    });
+    const server = await startServer(
+      poolDir,
+      stubHarness(poolDir, {}).harnesses,
+      { herdrSocket: fake.socketPath },
+    );
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/panes`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const byId = (id: string) =>
+      body.panes.find((p: { paneId: string }) => p.paneId === id);
+
+    // Eligible: a known harness, a checkout of this pool's repo, no owner.
+    // The branch is resolved by the engine with git in the pane's directory.
+    expect(byId("pane-free")).toMatchObject({
+      paneId: "pane-free",
+      harness: "claude",
+      status: "idle",
+      title: "✳ Claude Code",
+      directory: poolDir,
+      branch: "main",
+      eligible: true,
+      reason: null,
+    });
+    // An unknown harness stays in the list, greyed with the reason.
+    expect(byId("pane-unknown")).toMatchObject({
+      harness: "gemini",
+      eligible: false,
+      reason: "no harness the engine knows",
+    });
+    // A directory outside this pool's repository.
+    expect(byId("pane-outside")).toMatchObject({
+      harness: "claude",
+      directory: outside,
+      branch: null,
+      eligible: false,
+      reason: "not a checkout of this pool's repository",
+    });
+    // Ineligible panes are returned, never dropped.
+    expect(body.panes).toHaveLength(3);
+  });
+
+  it("reports a pane a live attempt holds as already in the pool", async () => {
+    const poolDir = makeGitTerminalPool(
+      "<!-- state: id=01 blocked-by=none status=ready -->",
+    );
+    const sentinel = join(poolDir, "release-01");
+    const fake = await fakeHerdr();
+    const server = await startServer(
+      poolDir,
+      blockingHarness(poolDir, { "01": { block: true } }, sentinel),
+      { herdrSocket: fake.socketPath },
+    );
+    await server.start();
+    await waitFor(
+      () =>
+        typeof server.latest?.state.tickets.find((t) => t.id === "01")
+          ?.liveAttempt?.paneId === "string",
+      "01's live pane on the snapshot",
+    );
+    const paneId = server.latest!.state.tickets.find((t) => t.id === "01")!
+      .liveAttempt!.paneId!;
+    // The engine reports the pane's agent after the wrapper lands; the fake
+    // binds it, so the pane appears in agent.list as the engine's own.
+    await waitFor(
+      () => fake.requests.some((r) => r.method === "pane.report_agent"),
+      "the attempt's agent report",
+    );
+
+    const res = await fetch(`${server.url}/api/panes`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const pane = body.panes.find((p: { paneId: string }) => p.paneId === paneId);
+    expect(pane).toMatchObject({
+      paneId,
+      eligible: false,
+      reason: "already in the pool",
+    });
+
+    writeFileSync(sentinel, "");
+    await settleOrBeat(server);
+  });
+
+  it("refuses a headless pool with a 409 naming the reason", async () => {
+    const poolDir = makeServerPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/panes`);
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toContain("terminal-backed");
+  });
+
+  it("a daemon failure is a clean 502, not a crash", async () => {
+    const poolDir = makeGitTerminalPool();
+    const fake = await fakeHerdr();
+    fake.fail.add("agent.list");
+    const server = await startServer(
+      poolDir,
+      stubHarness(poolDir, {}).harnesses,
+      { herdrSocket: fake.socketPath },
+    );
+    await server.start();
+
+    const res = await fetch(`${server.url}/api/panes`);
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toContain("agent.list refused");
+  });
+});
