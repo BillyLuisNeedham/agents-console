@@ -118,6 +118,10 @@ export interface FakeHerdrAgentSeed {
   rendered?: string;
   /** The pane's tab id, if a test wants a known one. Defaults to `tab-<paneId>`. */
   tabId?: string;
+  /** The herdr workspace the pane belongs to, when a test seeds one that a
+   *  workspace-scoped `pane.list` must find (boot reconciliation of an
+   *  enlisted pane). Absent seeds a pane with no workspace, as before. */
+  workspaceId?: string;
   /** The harness session herdr reports for the pane, named in provenance. */
   sessionId?: string;
 }
@@ -568,7 +572,7 @@ export async function startExecutingFakeHerdr(
         tabLabels.set(tabId, seed.title ?? "");
         panes.set(seed.paneId, {
           tabId,
-          workspaceId: null,
+          workspaceId: seed.workspaceId ?? null,
           cwd: seed.cwd ?? "/tmp",
           alive: true,
           buffer: "",

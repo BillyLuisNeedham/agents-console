@@ -1995,6 +1995,68 @@ describe("projectPool vitals", () => {
   });
 });
 
+describe("projectPool enlisted attempt", () => {
+  it("shows an enlisted card as found, live, with the found directory's diff", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("enlist-1", {
+            status: "in-progress",
+            enlisted: true,
+            liveAttempt: { attempt: 1, paneId: "pane-op" },
+            assignment: { harness: "opencode", model: null, drivers: "implement" },
+          }),
+        ],
+      },
+    });
+    const view = projectPool(
+      snap,
+      {},
+      { "enlist-1": vitalsState({}, [12, 20]) },
+      {},
+      VITALS_NOW,
+    );
+    const card = view.cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === "enlist-1",
+    );
+    expect(card?.enlisted).toBe(true);
+    // "As found": the harness herdr reported, no model.
+    expect(card?.assignment).toEqual({
+      harness: "opencode",
+      model: null,
+      drivers: "implement",
+    });
+    expect(card?.paneId).toBe("pane-op");
+    expect(card?.vitals?.mode).toBe("live");
+    expect(card?.vitals?.diff).toEqual({ added: 128, removed: 34, fileCount: 6 });
+    expect(card?.vitals?.samples).toEqual([12, 20]);
+  });
+
+  it("projects an enlisted attempt's lifecycle events into the timeline", () => {
+    const view = projectTimeline(
+      {
+        events: [
+          { at: "2026-01-01T00:00:00.000Z", attempt: 1, kind: "scheduled", payload: {} },
+          { at: "2026-01-01T00:00:01.000Z", attempt: 1, kind: "spawned", payload: { pane_id: "pane-op" } },
+          { at: "2026-01-01T00:00:02.000Z", attempt: 1, kind: "exited", payload: { code: 0, status: "done" } },
+          { at: "2026-01-01T00:00:03.000Z", attempt: 1, kind: "merged", payload: {} },
+        ],
+        attempts: [],
+        reconstructed: false,
+        spec: "the spec",
+      },
+      "done",
+    );
+    expect(view.attempts).toHaveLength(1);
+    expect(view.attempts[0].events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "merged",
+    ]);
+  });
+});
+
 describe("projectPool paneId", () => {
   it("carries paneId to the card for terminal-backed attempts and null for headless ones", () => {
     const snap = snapshot({
