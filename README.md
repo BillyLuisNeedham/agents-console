@@ -50,7 +50,7 @@ every other card does. An enlisted Ticket is minted `enlist-N` and unfinished
 tickets can be ticked to wait on it; an enlisted Conversation cannot be waited
 on (ADR-0018). The engine never closes the enlisted tab, never removes its
 directory and never deletes its branch (see
-`docs/adr/0020-enlisted-panes-stay-in-place.md`).
+`docs/adr/0021-enlisted-panes-stay-in-place.md`).
 
 ## Terminal-backed pools
 

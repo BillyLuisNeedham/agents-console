@@ -187,7 +187,7 @@ The Turn the engine types into a parent Conversation when something it spawned e
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
 
 **Enlist**:
-The operator's act of making a live herdr pane they opened themselves a Pool citizen, as a Ticket or a Conversation, chosen at that moment and fixed from then on. The pane, its directory and its branch stay as found; the engine claims the pane, teaches its agent the protocol with a Turn, and from then on the result is an ordinary Ticket or Conversation. The engine never closes the enlisted tab, never removes its directory and never deletes its branch. Introduced by ADR-0020 (`docs/adr/0020-enlisted-panes-stay-in-place.md`), closing issue #101.
+The operator's act of making a live herdr pane they opened themselves a Pool citizen, as a Ticket or a Conversation, chosen at that moment and fixed from then on. The pane, its directory and its branch stay as found; the engine claims the pane, teaches its agent the protocol with a Turn, and from then on the result is an ordinary Ticket or Conversation. The engine never closes the enlisted tab, never removes its directory and never deletes its branch. Introduced by ADR-0021 (`docs/adr/0021-enlisted-panes-stay-in-place.md`), closing issue #101.
 _Avoid_: adopt (the engine's word for taking in Spawn proposals at the boundary and terminal attempts at boot), import, attach, claim (that is one step of an Enlist, not the act)
 
 **Wire shape**:
