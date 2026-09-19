@@ -31,6 +31,56 @@ export interface TicketMarker {
    * for files that carry it.
    */
   enlistedFrom?: string;
+  /**
+   * Set on engine-adopted spawn tickets whose proposal carried an `assign`
+   * (the Conversations ADR extension): the child's own Assignment request,
+   * persisted so `resolveSpawnedTicketAssignment` honours it at every
+   * resolution pass, not only in the run that adopted it. Absent inherits the
+   * parent's Assignment, as ADR-0010 always had it; an operator's
+   * `console.json` assign entry for the id overrides it field-wise.
+   */
+  spawnAssign?: SpawnAssignRequest;
+}
+
+/** A spawn proposal's Assignment request, as carried on a ticket marker. */
+export interface SpawnAssignRequest {
+  harness?: string;
+  model?: string;
+  drivers?: string;
+}
+
+// The marker carries the request as one whitespace-free token (the marker
+// line is split on whitespace, and `drivers` may contain a space), so it is
+// encoded JSON rather than raw. These two functions are the only codec.
+export function encodeSpawnAssign(assign: SpawnAssignRequest): string {
+  return encodeURIComponent(JSON.stringify(assign));
+}
+
+function decodeSpawnAssign(raw: string, file: string): SpawnAssignRequest {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeURIComponent(raw));
+  } catch {
+    throw new Error(
+      `pool load: ${file}: spawn-assign is not valid encoded JSON`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`pool load: ${file}: spawn-assign must be a JSON object`);
+  }
+  const a = parsed as Record<string, unknown>;
+  for (const field of ["harness", "model", "drivers"] as const) {
+    if (a[field] !== undefined && typeof a[field] !== "string") {
+      throw new Error(
+        `pool load: ${file}: spawn-assign.${field} is not a string`,
+      );
+    }
+  }
+  return {
+    ...(typeof a.harness === "string" ? { harness: a.harness } : {}),
+    ...(typeof a.model === "string" ? { model: a.model } : {}),
+    ...(typeof a.drivers === "string" ? { drivers: a.drivers } : {}),
+  };
 }
 
 export const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
@@ -64,6 +114,7 @@ function parseMarkerLine(
     blockedRaw === "none" ? [] : blockedRaw.split(",").filter(Boolean);
   const spawnedBy = fields.get("spawned-by");
   const enlistedFrom = fields.get("enlisted-from");
+  const spawnAssignRaw = fields.get("spawn-assign");
   return {
     id,
     file,
@@ -71,6 +122,9 @@ function parseMarkerLine(
     status: status as TicketStatus,
     ...(spawnedBy ? { spawnedBy } : {}),
     ...(enlistedFrom ? { enlistedFrom } : {}),
+    ...(spawnAssignRaw !== undefined
+      ? { spawnAssign: decodeSpawnAssign(spawnAssignRaw, file) }
+      : {}),
   };
 }
 
