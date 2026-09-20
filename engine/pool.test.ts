@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeSpawnAssign, loadPoolMarkers, readMarker } from "./pool.ts";
+import { loadPoolMarkers, readMarker } from "./pool.ts";
 
 const tempDirs: string[] = [];
 
@@ -77,27 +77,6 @@ describe("spawn namespace reservation", () => {
     );
     const loaded = readMarker(file);
     expect(loaded.spawnedBy).toBe("01");
-  });
-
-  it("round-trips a spawn proposal's assign off the marker, a space in drivers and all", () => {
-    const assign = encodeSpawnAssign({
-      model: "child-model",
-      drivers: "implement code-review",
-    });
-    const file = tempFile(
-      `<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=${assign} -->\n\n# Spawned\n\nbody\n`,
-    );
-    expect(readMarker(file).spawnAssign).toEqual({
-      model: "child-model",
-      drivers: "implement code-review",
-    });
-  });
-
-  it("rejects a malformed spawn-assign on the marker", () => {
-    const file = tempFile(
-      "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=not-json -->\n\n# Spawned\n\nbody\n",
-    );
-    expect(() => readMarker(file)).toThrow(/spawn-assign/);
   });
 
   it("loads an engine-written spawn ticket whose parent is in the pool", () => {

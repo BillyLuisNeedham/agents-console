@@ -7349,59 +7349,6 @@ describe("spawn adoption", () => {
     });
   });
 
-  it("resolves a spawn ticket's persisted proposal assign at a fresh start, with the operator's own entry winning field-wise", async () => {
-    // The Conversations ADR extension: a proposal may carry an `assign`. The
-    // engine persists it on the child's marker (`spawn-assign`), so a restart
-    // (this is a fresh start reading files, not the adopting run's table)
-    // still resolves the child onto it, under any console.json entry for the
-    // exact id.
-    const poolDir = makePool({
-      tickets: [
-        readyTicket("01"),
-        {
-          file: "01-spawn-1.md",
-          marker:
-            "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 " +
-            "spawn-assign=%7B%22harness%22%3A%22stub%22%2C%22model%22%3A%22child-model%22%7D -->",
-          body: "# 01-spawn-1: Adopted earlier\n\nAlready on disk.\n",
-        },
-        {
-          file: "01-spawn-2.md",
-          marker:
-            "<!-- state: id=01-spawn-2 blocked-by=none status=ready spawned-by=01 " +
-            "spawn-assign=%7B%22model%22%3A%22child-model%22%7D -->",
-          body: "# 01-spawn-2: Adopted earlier\n\nAlready on disk.\n",
-        },
-      ],
-      // No defaults: every field resolves through the marker's spawn-assign
-      // or the parent. The operator's entry for 01-spawn-2 still overrides
-      // the proposal's model.
-      config: {
-        assign: {
-          "01": { harness: "stub", model: "parent-model" },
-          "01-spawn-2": { model: "operator-model" },
-        },
-      },
-    });
-    const rig = stubHarness(poolDir, {});
-
-    const run = await approveReview(
-      await runPool({ poolDir, harnesses: rig.harnesses }),
-    );
-
-    const last = run.snapshots[run.snapshots.length - 1]!;
-    expect(last.assignments["01-spawn-1"]).toEqual({
-      harness: "stub",
-      model: "child-model",
-      drivers: "implement",
-    });
-    expect(last.assignments["01-spawn-2"]).toEqual({
-      harness: "stub",
-      model: "operator-model",
-      drivers: "implement",
-    });
-  });
-
   it("adopts a checkpoint attempt's proposals while the run pauses on the interrupt", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01")],

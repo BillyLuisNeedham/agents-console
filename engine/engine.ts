@@ -28,7 +28,6 @@ import {
 import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   MARKER_RE,
-  encodeSpawnAssign,
   loadPoolMarkers,
   parseEnlistId,
   parseSpawnId,
@@ -4120,12 +4119,9 @@ function resolveEngineTicketAssignment(
 // with the proposing ticket standing in for the pool defaults. An assign
 // entry for the spawned id overrides field-wise, everything else inherits
 // the parent, so a discovery chain runs on its parent's harness with zero
-// new config. Since the Conversations ADR, a proposal may carry its own
-// assign, persisted on the marker as `spawnAssign` (writeSpawnTicket): it is
-// the child's request, applied under the operator's console.json entry for
-// the id, which still wins field-wise. verify is honored like any ordinary
-// ticket's (a spawned ticket is ordinary in every way): an operator may set
-// verify on a spawned id before it schedules.
+// new config. verify is honored like any ordinary ticket's (a spawned
+// ticket is ordinary in every way): an operator may set verify on a spawned
+// id before it schedules.
 function resolveSpawnedTicketAssignment(
   config: PoolConfig,
   marker: TicketMarker,
@@ -4134,7 +4130,7 @@ function resolveSpawnedTicketAssignment(
 ): Assignment {
   return resolveAssignment({
     subject: `pool config: ticket ${marker.id}`,
-    request: { ...marker.spawnAssign, ...config.assign?.[marker.id] },
+    request: config.assign?.[marker.id],
     inherited: parent,
     strict: false,
     verify: true,
@@ -6395,10 +6391,7 @@ export function validateOutcome(parsed: unknown): OutcomeResult {
 // The spawned ticket file: an ordinary ticket with the engine-assigned id,
 // the ordinary blocking edge, and spawned-by naming the ticket whose attempt
 // proposed it. The marker field is what loadPoolMarkers requires for the
-// reserved namespace; the body line is the provenance the Detail shows. A
-// proposal that carried an `assign` writes it as `spawn-assign`, the
-// whitespace-free marker token `resolveSpawnedTicketAssignment` reads so the
-// child's own Assignment request survives a reload and a restart.
+// reserved namespace; the body line is the provenance the Detail shows.
 function writeSpawnTicket(
   session: Session,
   parentId: string,
@@ -6409,13 +6402,8 @@ function writeSpawnTicket(
     proposal.blockedBy && proposal.blockedBy.length > 0
       ? proposal.blockedBy.join(",")
       : "none";
-  const assign =
-    proposal.assign && Object.keys(proposal.assign).length > 0
-      ? ` spawn-assign=${encodeSpawnAssign(proposal.assign)}`
-      : "";
   const body =
-    `<!-- state: id=${id} blocked-by=${blockedBy} status=ready ` +
-    `spawned-by=${parentId}${assign} -->\n\n` +
+    `<!-- state: id=${id} blocked-by=${blockedBy} status=ready spawned-by=${parentId} -->\n\n` +
     `# ${id}: ${proposal.title.trim()}\n\n` +
     `**Spawned by** ticket ${parentId} (ADR-0010): the engine wrote this ` +
     "ticket at the super-step boundary from the attempt's Outcome proposal, " +
