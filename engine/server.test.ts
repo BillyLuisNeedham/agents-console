@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -4867,6 +4868,73 @@ describe("enlist a pane as a conversation", () => {
     );
   });
 
+  it("End merges onto the merge target, not into the checkout an enlisted agent works in", async () => {
+    const poolDir = gitTerminalPool();
+    const target = currentBranchOf(poolDir);
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    commitIn(worktree, "talk.txt", "talk work\n");
+    const fake = await fakeHerdr();
+    // An enlisted Ticket already holds the pool checkout on its created
+    // pool branch, with uncommitted work.
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath);
+    expect(
+      (await enlist(server, { becomes: "ticket", paneId: "pane-main", title: "On main", spec: "" }))
+        .status,
+    ).toBe(201);
+    const created = branchFor(poolDir, "enlist-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+    writeFileSync(join(poolDir, "wip.txt"), "uncommitted\n");
+    const headBefore = spawnSync("git", ["-C", poolDir, "rev-parse", "HEAD"], { stdio: "pipe" })
+      .stdout.toString()
+      .trim();
+
+    expect(
+      (await enlist(server, { becomes: "conversation", paneId: "pane-conv", title: "A talk" }))
+        .status,
+    ).toBe(201);
+    const end = await fetch(`${server.url}/api/conversations/end`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "conv-1" }),
+    });
+    expect(end.status).toBe(202);
+    await waitFor(
+      () => readConversation(join(poolDir, "conversations", "conv-1.md")).status === "ended",
+      "the ended Conversation",
+    );
+
+    // The found branch landed on the merge target...
+    const onTarget = spawnSync("git", ["-C", poolDir, "show", `${target}:talk.txt`], {
+      stdio: "pipe",
+    });
+    expect(onTarget.stdout.toString()).toBe("talk work\n");
+    // ...and the enlisted agent's checkout was neither moved nor written.
+    expect(currentBranchOf(poolDir)).toBe(created);
+    expect(
+      spawnSync("git", ["-C", poolDir, "rev-parse", "HEAD"], { stdio: "pipe" }).stdout.toString().trim(),
+    ).toBe(headBefore);
+    expect(existsSync(join(poolDir, "talk.txt"))).toBe(false);
+    expect(readFileSync(join(poolDir, "wip.txt"), "utf8")).toBe("uncommitted\n");
+  });
+
   it("a pane going records the Conversation crashed with the branch kept", async () => {
     const poolDir = gitTerminalPool();
     const worktree = worktreeOn(poolDir, "feature/talk");
@@ -5365,9 +5433,16 @@ describe("enlisted ticket lifecycle", () => {
     expect(res.status).toBe(201);
     const created = branchFor(poolDir, "enlist-1");
     expect(currentBranchOf(poolDir)).toBe(created);
-    // The enlisted agent's uncommitted work, in the checkout the enlist moved.
+    // The enlisted agent's work in the checkout the enlist moved: one commit
+    // on the created pool branch, one uncommitted file.
+    writeFileSync(join(poolDir, "agent.txt"), "agent work\n");
+    spawnSync("git", ["-C", poolDir, "add", "agent.txt"], { stdio: "ignore" });
+    spawnSync("git", ["-C", poolDir, "commit", "-qm", "agent work"], { stdio: "ignore" });
     writeFileSync(join(poolDir, "wip.txt"), "uncommitted\n");
     const headBefore = shaAt(poolDir, "HEAD");
+    // A note on the pool's copy of 01's ticket file, to be reconciled with
+    // the branch's copy at merge (#92) even though the merge runs elsewhere.
+    appendFileSync(join(poolDir, "issues", "01.md"), "\npool note\n");
 
     // An unrelated ticket resumes, runs to done and merges while enlist-1 is
     // still live in that checkout.
@@ -5381,8 +5456,12 @@ describe("enlisted ticket lifecycle", () => {
     const ticketDir = rig.spawned["01"]!.cwd;
     // The attempt never runs in the checkout the enlisted agent works in.
     expect(realpathSync(ticketDir)).not.toBe(realpathSync(poolDir));
+    // The ticket's worktree forks from the merge target, not from the
+    // enlisted agent's branch.
+    expect(existsSync(join(ticketDir, "agent.txt"))).toBe(false);
     writeFileSync(join(ticketDir, "ordinary.txt"), "01 work\n");
-    spawnSync("git", ["-C", ticketDir, "add", "ordinary.txt"], { stdio: "ignore" });
+    appendFileSync(join(ticketDir, "issues", "01.md"), "\nbranch note\n");
+    spawnSync("git", ["-C", ticketDir, "add", "-A"], { stdio: "ignore" });
     spawnSync("git", ["-C", ticketDir, "commit", "-qm", "01 work"], { stdio: "ignore" });
     writeFileSync(go, "");
 
@@ -5395,6 +5474,12 @@ describe("enlisted ticket lifecycle", () => {
       "01's work on the merge target",
     );
     expect(eventsOf(poolDir, "01").map((e) => e.kind)).toContain("merged");
+    // The enlisted agent's commit did not ride into the merge target.
+    expect(fileAt(poolDir, target, "agent.txt")).toBe("");
+    // Both sides' notes on the ticket file survive on the pool copy (#92).
+    const poolCopy = readFileSync(join(poolDir, "issues", "01.md"), "utf8");
+    expect(poolCopy).toContain("pool note");
+    expect(poolCopy).toContain("branch note");
 
     // The enlisted agent's checkout was not moved, not advanced and not
     // written: still on the created pool branch, at the same commit, with
@@ -5403,6 +5488,148 @@ describe("enlisted ticket lifecycle", () => {
     expect(shaAt(poolDir, "HEAD")).toBe(headBefore);
     expect(readFileSync(join(poolDir, "wip.txt"), "utf8")).toBe("uncommitted\n");
     expect(existsSync(join(poolDir, "ordinary.txt"))).toBe(false);
+  });
+
+  it("a re-run of a created-branch enlist waits as a checkpoint until the checkout is off the branch", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const target = currentBranchOf(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    const rig = stubHarness(poolDir, {});
+    const server = await startServer(
+      poolDir,
+      { ...rig.harnesses, opencode: rig.harnesses.stub },
+      { herdrSocket: fake.socketPath, enlistPollMs: 15 },
+    );
+    await server.start();
+    expect(
+      (await enlist(server, { becomes: "ticket", paneId: "pane-main", title: "On main", spec: "" }))
+        .status,
+    ).toBe(201);
+    const created = branchFor(poolDir, "enlist-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+
+    // The pane goes before an Outcome: the checkpoint names the created
+    // branch and warns that a re-run needs it free.
+    fake.endPane("pane-main");
+    await waitFor(
+      () => markerOf(poolDir, "enlist-1").includes("status=checkpoint"),
+      "the pane-gone checkpoint",
+    );
+    const paneGone = server.latest!.state.interrupts.find((i) => i.ticketId === "enlist-1")!;
+    expect(paneGone.body).toContain("branch free");
+
+    // Answering while the checkout still holds the branch: no drive death,
+    // a fresh checkpoint naming the directory, and no attempt launched.
+    const resume = () =>
+      fetch(`${server.url}/api/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticketId: "enlist-1", action: "resume" }),
+      });
+    expect((await resume()).status).toBe(202);
+    await waitFor(
+      () =>
+        server.latest?.state.interrupts.some(
+          (i) => i.ticketId === "enlist-1" && i.body.includes("is checked out in"),
+        ) === true,
+      "the held-branch checkpoint",
+    );
+    expect(markerOf(poolDir, "enlist-1")).toContain("status=checkpoint");
+    expect(rig.spawnOrder).not.toContain("enlist-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+    expect((await fetch(`${server.url}/api/state`)).status).toBe(200);
+    expect(server.latest!.state.log.some((line) => /drive (died|death)/i.test(line))).toBe(false);
+
+    // The operator moves the checkout off the branch and answers again: the
+    // re-run continues on the parked branch and lands on the target.
+    spawnSync("git", ["-C", poolDir, "checkout", "-q", target], { stdio: "ignore" });
+    expect((await resume()).status).toBe(202);
+    await waitFor(() => rig.spawnOrder.includes("enlist-1"), "the re-run");
+    expect(realpathSync(rig.spawned["enlist-1"]!.cwd)).not.toBe(realpathSync(poolDir));
+    await waitFor(
+      () =>
+        server.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status === "done",
+      "the re-run done",
+    );
+    await waitFor(
+      () => eventsOf(poolDir, "enlist-1").some((e) => e.kind === "merged"),
+      "the re-run merged",
+    );
+  });
+
+  it("a Conversation-arm enlist in the pool checkout keeps the captured merge target across a restart", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=checkpoint -->" },
+    ]);
+    const target = currentBranchOf(poolDir);
+    const fake = await fakeHerdr();
+    const rig = stubHarness(poolDir, {});
+    const harnesses = { ...rig.harnesses, opencode: rig.harnesses.stub };
+    const first = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      conversationPollMs: 15,
+    });
+    await first.start();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    expect(
+      (await enlist(first, { becomes: "conversation", paneId: "pane-main", title: "Talk" }))
+        .status,
+    ).toBe(201);
+    const created = branchFor(poolDir, "conv-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+    await first.shutdown();
+    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+
+    const second = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      conversationPollMs: 15,
+    });
+    await second.start();
+    // A lone ticket resumes after the restart: it still gets a worktree
+    // forked from the target, and its merge still lands on the target.
+    const resume = await fetch(`${second.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "resume" }),
+    });
+    expect(resume.status).toBe(202);
+    await waitFor(() => rig.spawned["01"] !== undefined, "01 spawned");
+    expect(realpathSync(rig.spawned["01"]!.cwd)).not.toBe(realpathSync(poolDir));
+    await waitFor(
+      () => second.latest?.state.tickets.find((t) => t.id === "01")?.status === "done",
+      "01 done",
+    );
+    await waitFor(
+      () => eventsOf(poolDir, "01").some((e) => e.kind === "merged"),
+      "01 merged",
+    );
+    expect(currentBranchOf(poolDir)).toBe(created);
+    expect(
+      spawnSync("git", ["-C", poolDir, "merge-base", "--is-ancestor", branchFor(poolDir, "01"), target], {
+        stdio: "ignore",
+      }).status === 0 || !branchExists(poolDir, "01"),
+    ).toBe(true);
   });
 
   it("withholds a ticket blocked by the enlisted one until the merge lands", async () => {

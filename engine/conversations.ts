@@ -447,6 +447,10 @@ export interface ConversationHost {
   closeAttemptTabs(id: string): void;
   /** Run `work` after every merge queued before it, so no two merges touch the checkout at once; settles as `work` does. */
   chainMerge(work: () => Promise<void> | void): Promise<void>;
+  /** The branch the pool merges into: the pool checkout's, or the target an enlist captured when it moved that checkout (issue #101). */
+  mergeTargetBranch(): string;
+  /** Merge `branch` into the merge target, in whichever checkout holds it (issue #101): the engine's, never one an enlisted agent works in. Call inside `chainMerge`. */
+  mergeIntoTarget(branch: string): MergeResult;
   /** Validate and adopt a Conversation's raw spawn proposals (the `spawn` field of its spawn.json): `onRejected` is handed the malformed entries for the module to log before the survivors are queued, adopted at once when the engine is idle. */
   adoptSpawns(parentId: string, raw: unknown, onRejected: (rejections: { index?: number; reason: string }[]) => void): void;
   /** Record a Conversation's resolved Assignment under its id (if not already known) so work it spawns inherits it. */
@@ -1220,7 +1224,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // The talk is over: drain the tailer so the derived log is complete.
     await runtime.tailer?.finish().catch(() => {});
 
-    const target = currentBranch(env.cwd);
+    const target = host.mergeTargetBranch();
     const countProbe = git(env.cwd, ["rev-list", "--count", `${target}..${runtime.worktree.branch}`]);
     const hasCommits = countProbe.ok && Number(countProbe.out) > 0;
     if (!hasCommits) {
@@ -1235,7 +1239,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // for the next caller (the host's contract).
     await host
       .chainMerge(async () => {
-        const result = mergeBranch(env.cwd, runtime.worktree.branch);
+        const result = host.mergeIntoTarget(runtime.worktree.branch);
         if (result.ok) {
           disposeWorktree(runtime);
           event(id, "merged", mergedPayload(result));
@@ -1321,7 +1325,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   }
 
   function resumeMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
-    const result = mergeBranch(env.cwd, runtime.worktree.branch);
+    const result = host.mergeIntoTarget(runtime.worktree.branch);
     if (!result.ok) {
       failedMergeEvent(runtime, result);
       host.clearInterrupt(
@@ -1343,7 +1347,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
   function approveMerge(runtime: ConversationRuntime, interrupt: Interrupt): void {
     commitMerge(runtime.worktree);
-    const result = mergeBranch(env.cwd, runtime.worktree.branch);
+    const result = host.mergeIntoTarget(runtime.worktree.branch);
     if (!result.ok) {
       failedMergeEvent(runtime, result);
       host.clearInterrupt(
@@ -1544,7 +1548,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     if (!marker.spawnedBy || !isKnown(marker.spawnedBy)) return;
     const branch = env.git ? branchFor(env.cwd, marker.id) : "(no git checkout)";
     const diffStat = env.git
-      ? diffStatSummary(env.cwd, `${currentBranch(env.cwd)}...${branch}`)
+      ? diffStatSummary(env.cwd, `${host.mergeTargetBranch()}...${branch}`)
       : "(no git checkout)";
     const text = ticketEndedNoticeText({
       id: marker.id,

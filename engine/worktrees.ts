@@ -189,10 +189,16 @@ function registeredWorktrees(repoRoot: string): RegisteredWorktree[] {
   return trees;
 }
 
+// `base` is the commit a fresh branch starts from: the pool checkout's HEAD
+// unless the engine's merge target lives elsewhere (issue #101: once an
+// enlist has moved the pool checkout onto a created pool branch, HEAD there
+// is the enlisted agent's branch, and a ticket forked from it would carry
+// that agent's commits into the merge target unapproved).
 export function prepareWorktree(
   repoRoot: string,
   ticketId: string,
   attempt?: number,
+  base: string = "HEAD",
 ): WorktreeInfo {
   const branch = branchFor(repoRoot, ticketId, attempt);
   const path = worktreePathFor(repoRoot, ticketId, attempt);
@@ -210,7 +216,7 @@ export function prepareWorktree(
     mkdirSync(dirname(path), { recursive: true });
     const add = branchExists(repoRoot, ticketId, attempt)
       ? git(repoRoot, ["worktree", "add", path, branch])
-      : git(repoRoot, ["worktree", "add", path, "-b", branch, "HEAD"]);
+      : git(repoRoot, ["worktree", "add", path, "-b", branch, base]);
     if (!add.ok) {
       throw new Error(
         `worktree add failed for ticket ${ticketId}: ${add.err || add.out}`,
@@ -236,13 +242,20 @@ export function mergeCheckoutPathFor(repoRoot: string): string {
   );
 }
 
-export function openMergeCheckout(repoRoot: string, branch: string): string {
+// Drop a merge checkout a dead engine left registered, so the merge target
+// is not held between merges: called at boot and before every open.
+export function removeStaleMergeCheckout(repoRoot: string): void {
   const path = mergeCheckoutPathFor(repoRoot);
   git(repoRoot, ["worktree", "prune"]);
   if (registeredWorktrees(repoRoot).some((t) => t.path === path)) {
     git(repoRoot, ["worktree", "remove", "--force", path]);
   }
   rmSync(path, { recursive: true, force: true });
+}
+
+export function openMergeCheckout(repoRoot: string, branch: string): string {
+  const path = mergeCheckoutPathFor(repoRoot);
+  removeStaleMergeCheckout(repoRoot);
   mkdirSync(dirname(path), { recursive: true });
   const add = git(repoRoot, ["worktree", "add", path, branch]);
   if (!add.ok) {
@@ -257,6 +270,17 @@ export function openMergeCheckout(repoRoot: string, branch: string): string {
 // never the branch.
 export function closeMergeCheckout(repoRoot: string, path: string): void {
   git(repoRoot, ["worktree", "remove", "--force", path]);
+}
+
+// The worktree a branch is checked out in, or null when none has it. Git
+// allows a branch in one worktree at a time, so this is where a
+// `worktree add` on that branch would be refused.
+export function branchCheckedOutAt(repoRoot: string, branch: string): string | null {
+  git(repoRoot, ["worktree", "prune"]);
+  const held = registeredWorktrees(repoRoot).find(
+    (t) => t.branch === `refs/heads/${branch}`,
+  );
+  return held ? held.path : null;
 }
 
 // Only called once the branch has merged, so anything left uncommitted in
