@@ -141,9 +141,12 @@ function diffNoteFor(
   reason: string | null,
   shown: number,
   total: number,
+  widened: boolean,
 ): string {
   if (reason !== null) return `no diff: ${reason}`;
-  const base = "changed lines only, no context lines";
+  // The note names the diff the grader actually reads: `-U0` changed lines on
+  // the base budget, context lines on the widening re-ask (ADR-0023).
+  const base = widened ? "the full diff, with context lines" : "changed lines only, no context lines";
   if (shown < total) return `${base}; the diff was cut after its first ${shown} characters of ${total}`;
   return base;
 }
@@ -181,8 +184,9 @@ export function buildEvidence(input: EvidenceInput): BuiltEvidence {
   const summary = input.summary.slice(0, SUMMARY_CHARS);
   const stripped = stripAnsi(input.log);
   const rawDiff = input.diffReason !== null ? "" : dropGeneratedDiffs(input.diff);
+  const widened = input.widened === true;
 
-  let logBudget = input.widened ? LOG_WIDENED_TAIL_CHARS : LOG_TAIL_CHARS;
+  let logBudget = widened ? LOG_WIDENED_TAIL_CHARS : LOG_TAIL_CHARS;
   let log = tailToLineBoundary(stripped, logBudget);
 
   // The diff gets whatever the cap leaves after the other fields, notes
@@ -192,7 +196,7 @@ export function buildEvidence(input: EvidenceInput): BuiltEvidence {
     ticket,
     summary,
     "",
-    diffNoteFor(input.diffReason, 0, rawDiff.length),
+    diffNoteFor(input.diffReason, 0, rawDiff.length, widened),
     log,
     logNoteFor(log.length, stripped.length),
   );
@@ -206,7 +210,7 @@ export function buildEvidence(input: EvidenceInput): BuiltEvidence {
       ticket,
       summary,
       diff,
-      diffNoteFor(input.diffReason, diff.length, rawDiff.length),
+      diffNoteFor(input.diffReason, diff.length, rawDiff.length, widened),
       log,
       logNoteFor(log.length, stripped.length),
     );
@@ -220,7 +224,7 @@ export function buildEvidence(input: EvidenceInput): BuiltEvidence {
 
   const diffTrimmed = diff.length < rawDiff.length;
   const logTrimmed = log.length < stripped.length;
-  const diffNote = diffNoteFor(input.diffReason, diff.length, rawDiff.length);
+  const diffNote = diffNoteFor(input.diffReason, diff.length, rawDiff.length, widened);
   const logNote = logNoteFor(log.length, stripped.length);
   return {
     evidence: {

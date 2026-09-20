@@ -159,5 +159,10 @@ describe("buildEvidence", () => {
     const wideBuilt = buildEvidence({ ...base, log: raw, widened: true });
     expect(String(baseBuilt.evidence.log).length).toBeLessThanOrEqual(20_000);
     expect(String(wideBuilt.evidence.log).length).toBeGreaterThan(20_000);
+    // The note names the diff the widening budget actually carries: the base
+    // budget is `-U0` changed lines, the widened one has context lines.
+    expect(baseBuilt.diffNote).toBe("changed lines only, no context lines");
+    expect(wideBuilt.diffNote).toBe("the full diff, with context lines");
+    expect(wideBuilt.evidence.diff_note).toBe("the full diff, with context lines");
   });
 });
