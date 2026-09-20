@@ -281,6 +281,7 @@ describe("projectPool", () => {
 
 const INTERRUPT_KINDS: InterruptKind[] = [
   "checkpoint",
+  "config",
   "crash",
   "deadlock",
   "merge-conflict",
@@ -326,6 +327,7 @@ describe("interrupt forms", () => {
     );
     expect(actions).toEqual({
       checkpoint: ["resume"],
+      config: ["resume"],
       crash: ["resume"],
       deadlock: ["resume"],
       "merge-conflict": ["resume"],
@@ -341,6 +343,7 @@ describe("interrupt forms", () => {
     );
     expect(titles).toEqual({
       checkpoint: "checkpoint",
+      config: "pool config",
       crash: "harness crash",
       deadlock: "deadlock",
       "merge-conflict": "merge conflict",

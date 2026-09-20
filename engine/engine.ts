@@ -251,6 +251,7 @@ export interface PoolConfig {
 
 export type InterruptKind =
   | "checkpoint"
+  | "config"
   | "crash"
   | "deadlock"
   | "merge-conflict"
@@ -863,9 +864,11 @@ export function startPool(options: RunOptions): PoolRun {
   // spawned-by name a Conversation, not another ticket, and
   // resolveUnseenAssignments below needs that id already resolvable the same
   // way it needs a grader's build ticket resolved before the grader.
+  // A Conversation seeds with whatever it has: an enlisted one names no model
+  // (as found), and its spawns take that one field from the pool defaults.
   const assignments = new Map<string, Assignment>();
   for (const rec of loadConversations(join(poolDir, "conversations"))) {
-    if (!rec.harness || !rec.model) continue;
+    if (!rec.harness) continue;
     assignments.set(rec.id, { harness: rec.harness, model: rec.model, drivers: rec.drivers });
   }
   resolveUnseenAssignments(markers, assignments, config, harnesses);
@@ -1347,6 +1350,11 @@ function planSuperStep(
   // checkpoint instead, until the checkout is off the branch. A step with
   // nothing left to plan is no super-step: no number, no log line.
   const held = ready.filter((marker) => {
+    const missing = missingAssignmentField(session, marker);
+    if (missing !== null) {
+      checkpointUnassigned(session, marker, missing);
+      return true;
+    }
     const at = heldBranchDirectory(session, marker);
     if (at === null) return false;
     checkpointHeldBranch(session, marker, at);
@@ -1460,6 +1468,54 @@ function checkpointHeldBranch(session: Session, marker: TicketMarker, at: string
       `ticket ${marker.id}: branch ${branch} is checked out in ${at}; ` +
         "checkpoint raised instead of a re-run",
     ],
+  });
+}
+
+// The Assignment field a ticket about to schedule has no value for, or null
+// when it would launch. An unassigned ticket (no defaults, no assign entry,
+// a parent with nothing to hand down) renders on the canvas as unassigned
+// (ADR-0013) and is caught here, before its marker flips, rather than at
+// launch where the throw would kill the drive (issue #118).
+function missingAssignmentField(
+  session: Session,
+  marker: TicketMarker,
+): "harness" | "model" | null {
+  const assignment = session.assignments.get(marker.id);
+  if (!assignment?.harness) return "harness";
+  if (!assignment.model) return "model";
+  return null;
+}
+
+// A pool-config gap is the operator's to fill, so it pauses the one ticket
+// as a config interrupt instead of ending the run: the operator sets the
+// field in console.json and answers resume; the marker returns to ready,
+// the next super-step boundary's config reload (ADR-0018) re-resolves the
+// Assignment, and the ticket schedules. Resuming with the file unchanged
+// raises the same interrupt again, naming the same gap.
+function checkpointUnassigned(
+  session: Session,
+  marker: TicketMarker,
+  missing: "harness" | "model",
+): void {
+  const attempt = lastAttempt(session.runsDir, marker.id);
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "unassigned",
+    payload: { missing },
+  });
+  writeMarkerStatus(marker.file, "checkpoint");
+  marker.status = "checkpoint";
+  const body =
+    `ticket ${marker.id} has no ${missing}: set one in console.json ` +
+    `(an assign entry for ${marker.id}, or defaults.${missing}) and answer ` +
+    "resume. The pool reloads console.json at the next super-step boundary " +
+    "and schedules the ticket on what it finds.";
+  landCheckpointBrief(marker.file, body);
+  raiseInterrupt(session, { ticketId: marker.id, kind: "config", body });
+  session.state = applyUpdate(session.state, {
+    tickets: { [marker.id]: "checkpoint" },
+    log: [`ticket ${marker.id}: no ${missing}; config interrupt raised instead of a launch`],
   });
 }
 
@@ -4252,6 +4308,7 @@ function resolveEngineTicketAssignment(
     // Only harness and model may be overridden: the drivers stay the build's.
     request: assign ? { harness: assign.harness, model: assign.model } : undefined,
     inherited: build,
+    defaults: config.defaults,
     strict: false,
     verify: false,
     harnesses,
@@ -4259,12 +4316,13 @@ function resolveEngineTicketAssignment(
 }
 
 // A spawned ticket's assignment (ADR-0010): the ordinary assign machinery
-// with the proposing ticket standing in for the pool defaults. An assign
+// with the proposing ticket standing in ahead of the pool defaults. An assign
 // entry for the spawned id overrides field-wise, everything else inherits
 // the parent, so a discovery chain runs on its parent's harness with zero
-// new config. verify is honored like any ordinary ticket's (a spawned
-// ticket is ordinary in every way): an operator may set verify on a spawned
-// id before it schedules.
+// new config; a field the parent leaves empty (an enlisted Conversation
+// names no model, issue #118) falls through to the defaults. verify is
+// honored like any ordinary ticket's (a spawned ticket is ordinary in every
+// way): an operator may set verify on a spawned id before it schedules.
 function resolveSpawnedTicketAssignment(
   config: PoolConfig,
   marker: TicketMarker,
@@ -4275,6 +4333,7 @@ function resolveSpawnedTicketAssignment(
     subject: `pool config: ticket ${marker.id}`,
     request: config.assign?.[marker.id],
     inherited: parent,
+    defaults: config.defaults,
     strict: false,
     verify: true,
     harnesses,

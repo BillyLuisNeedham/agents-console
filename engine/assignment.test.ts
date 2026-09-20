@@ -31,13 +31,21 @@ describe("resolveAssignment: field-wise overrides", () => {
     });
   });
 
-  it("spawned ticket: request over the parent, never the defaults", () => {
+  it("spawned ticket: request over the parent, the parent over the defaults", () => {
     expect(resolveAssignment({ ...spawned, request: undefined })).toEqual(parent);
     expect(resolveAssignment({ ...spawned, request: { harness: "claude", drivers: "fix" } })).toEqual({
       harness: "claude",
       model: "o3",
       drivers: "fix",
     });
+    // A field the parent leaves empty falls through to the defaults, field
+    // by field (issue #118: an enlisted Conversation names no model).
+    expect(
+      resolveAssignment({ ...spawned, request: undefined, inherited: { ...parent, model: "" }, defaults }),
+    ).toEqual({ harness: "codex", model: "opus", drivers: "implement review" });
+    expect(
+      resolveAssignment({ ...spawned, request: undefined, inherited: { ...parent, model: "" } }),
+    ).toEqual({ ...parent, model: "" });
   });
 
   it("grader: harness and model over the build's, drivers pinned to the build's, verify ignored", () => {

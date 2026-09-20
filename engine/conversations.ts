@@ -848,7 +848,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // `<id>.spawn.json` beside its `.outcome.json`, polled by this
     // Conversation's tick.
     const spawnPath = spawnProposalPath(id);
-    const teaching = buildConversationTeaching(spawnPath);
+    const teaching = buildConversationTeaching(
+      spawnPath,
+      { harness, model, drivers },
+      host.config().defaults,
+    );
     const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
 
     // The launch: one attempt, the well-known file names, no rotation, no
@@ -1070,7 +1074,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         to: req.id,
         from: req.id,
         kind: "enlist-teaching",
-        text: buildConversationTeaching(join(env.runsDir, `${req.id}.spawn.json`)),
+        text: buildConversationTeaching(
+          join(env.runsDir, `${req.id}.spawn.json`),
+          { harness, model: "", drivers: DEFAULT_DRIVERS },
+          host.config().defaults,
+        ),
       });
       if (opening.trim()) {
         runtime.notices.push({
