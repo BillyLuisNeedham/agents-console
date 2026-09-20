@@ -2148,6 +2148,63 @@ describe("verify grading with Jev (ADR-0023)", () => {
       readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
     ).toHaveLength(2);
   }, 15000);
+
+  it("discards attempt 1's composed Grade when attempt 2's ask fails mid-round", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    // Attempt 1 asks first and answers cleanly; attempt 2's ask is the one
+    // that fails. runJevGraders holds attempt 1's composed Grade in a map
+    // until the whole round answers, so the failure on attempt 2 must throw
+    // that Grade away too, never record it beside the grader tickets' Grades:
+    // one round is one instrument (ADR-0006, ADR-0023).
+    const jev = fakeJev({
+      answersFor: () => clean,
+      failFor: (evidence) =>
+        JSON.stringify(evidence).includes("cand-2.txt")
+          ? { cause: "rate-limited" }
+          : undefined,
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    // The whole round fell back, even though attempt 1's ask answered: both
+    // grader tickets exist and ran, and the switch is logged once, against
+    // attempt 2 only.
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(true);
+    expect(rig.spawnOrder.filter((id) => /-grader-\d+$/.test(id))).toHaveLength(2);
+    expect(
+      run.final.log.filter((line) => line.includes("Jev could not grade")),
+    ).toEqual([
+      expect.stringContaining(
+        "Jev could not grade attempt 2 (rate-limited: scripted by the test)",
+      ),
+    ]);
+    expect(
+      run.final.log.filter((line) => line.startsWith("Jev unavailable")),
+    ).toHaveLength(1);
+
+    // Attempt 1's composed Grade left no Jev-graded event: the only grades on
+    // the build ticket are the two provenance-free ones the grader tickets
+    // wrote, so no Selection ever mixes Jev and grader grades.
+    const graded = readEventLines(poolDir, "01").filter((e) => e.kind === "graded");
+    expect(graded).toHaveLength(2);
+    expect(graded.some((e) => e.payload.rubric !== undefined)).toBe(false);
+    expect(
+      graded.sort((a, b) => a.attempt - b.attempt).map((e) => e.payload),
+    ).toEqual([
+      { score: 8, verdict: "pass", reasons: "default grade" },
+      { score: 8, verdict: "pass", reasons: "default grade" },
+    ]);
+  }, 15000);
 });
 
 describe("verify selection", () => {

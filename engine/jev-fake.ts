@@ -179,6 +179,14 @@ export interface PortFakeOptions {
    * map; returning undefined falls back to `answers`.
    */
   answersFor?: (evidence: Evidence) => Record<string, ScriptedAnswer> | undefined;
+  /**
+   * Fail the asks whose Evidence `failFor` selects, for a suite that needs
+   * one port to answer one Attempt and fall back on another (a verify round
+   * is one instrument, so a failure on any Attempt falls the whole round
+   * back). Checked after `cause`, which fails every ask; returning undefined
+   * answers normally. `detail` defaults to "scripted by the test".
+   */
+  failFor?: (evidence: Evidence) => { cause: JevCause; detail?: string } | undefined;
   /** Fall back with this cause on every ask instead of answering. */
   cause?: JevCause;
   /** Report as unconfigured (every ask falls back with `not-configured`). Default: configured. */
@@ -210,6 +218,12 @@ export function fakeJev(options: PortFakeOptions = {}): PortFake {
       if (cause) {
         board.fellBack(cause, "scripted by the test");
         return { ok: false, cause, detail: "scripted by the test" };
+      }
+      const failure = options.failFor?.(evidence);
+      if (failure) {
+        const detail = failure.detail ?? "scripted by the test";
+        board.fellBack(failure.cause, detail);
+        return { ok: false, cause: failure.cause, detail };
       }
       const scripted = options.answersFor?.(evidence) ?? answers;
       const built: Record<string, unknown> = {};
