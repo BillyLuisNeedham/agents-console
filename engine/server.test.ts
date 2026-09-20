@@ -4935,6 +4935,62 @@ describe("enlist a pane as a conversation", () => {
     expect(readFileSync(join(poolDir, "wip.txt"), "utf8")).toBe("uncommitted\n");
   });
 
+  it("a started Conversation forks from the merge target, not from the checkout an enlisted agent works in", async () => {
+    // The started Conversation runs `cat`, which holds its pane open with no
+    // readiness wait (the same trick the Conversation route tests use).
+    const poolDir = gitTerminalPool({ defaults: { harness: "convo", model: "m" } });
+    const target = currentBranchOf(poolDir);
+    const shaOf = (ref: string) =>
+      spawnSync("git", ["-C", poolDir, "rev-parse", ref], { stdio: "pipe" }).stdout.toString().trim();
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    const server = await startConvServer(poolDir, fake.socketPath, { convo: () => ["cat"] });
+    expect(
+      (await enlist(server, { becomes: "ticket", paneId: "pane-main", title: "On main", spec: "" }))
+        .status,
+    ).toBe(201);
+    expect(currentBranchOf(poolDir)).toBe(branchFor(poolDir, "enlist-1"));
+    // The enlisted agent commits on its created pool branch.
+    writeFileSync(join(poolDir, "agent.txt"), "agent work\n");
+    spawnSync("git", ["-C", poolDir, "add", "agent.txt"], { stdio: "ignore" });
+    spawnSync("git", ["-C", poolDir, "commit", "-qm", "agent work"], { stdio: "ignore" });
+    const agentSha = shaOf("HEAD");
+    expect(agentSha).not.toBe(shaOf(target));
+
+    const started = await fetch(`${server.url}/api/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Started" }),
+    });
+    expect(started.status).toBe(201);
+    // The launch records the commit its worktree started from: the target's,
+    // not the enlisted agent's, so nothing of that agent's can ride onto the
+    // target when the Conversation Ends.
+    const spawned = readFileSync(join(poolDir, "runs", "conv-1.events.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find((event) => event.kind === "spawned");
+    expect(spawned.payload.commitSha).toBe(shaOf(target));
+    expect(spawned.payload.commitSha).not.toBe(agentSha);
+    expect(
+      spawnSync(
+        "git",
+        ["-C", poolDir, "merge-base", "--is-ancestor", agentSha, branchFor(poolDir, "conv-1")],
+        { stdio: "ignore" },
+      ).status,
+    ).not.toBe(0);
+    expect(currentBranchOf(poolDir)).toBe(branchFor(poolDir, "enlist-1"));
+  });
+
   it("a pane going records the Conversation crashed with the branch kept", async () => {
     const poolDir = gitTerminalPool();
     const worktree = worktreeOn(poolDir, "feature/talk");

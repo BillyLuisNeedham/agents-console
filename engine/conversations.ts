@@ -35,11 +35,9 @@ import { appendEvent, lastAttempt, type TicketEventKind } from "./events.ts";
 import type { TicketMarker } from "./pool.ts";
 import {
   branchFor,
-  currentBranch,
   commitMerge,
   git,
   blockedMergeExplanation,
-  mergeBranch,
   discardWorktree,
   prepareWorktree,
   removeWorktree,
@@ -835,7 +833,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     existing: ConversationRecord[],
   ): Promise<ConversationView> {
     const { harness, model, drivers } = resolveStartAssignment(req, existing);
-    const worktree = prepareWorktree(env.cwd, id);
+    // Forked from the merge target, not the pool checkout's HEAD: once an
+    // enlist has moved that checkout onto a created pool branch (issue
+    // #101), HEAD there is the enlisted agent's branch, and a Conversation
+    // forked from it would carry that agent's commits onto the target at End.
+    const worktree = prepareWorktree(env.cwd, id, undefined, host.mergeTargetBranch());
     const file = conversationFile(env.poolDir, id);
     const opening = req.opening ?? "";
     // The spawn-teaching paragraph (prompt.ts) always lands, appended to the

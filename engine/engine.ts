@@ -1339,16 +1339,13 @@ function planSuperStep(
   emit: (phase: RunPhase) => void,
   ready: TicketMarker[],
 ): SuperStepPlan {
-  session.superStep += 1;
-  // Every attempt this super-step spawns is numbered before any spawn,
-  // so a verify fan-out cannot race the events counter: attempts run
-  // base..base+N-1 off one nextAttempt read per ticket.
   // A ticket whose branch is checked out in a directory the engine does not
   // own cannot be given a worktree (git allows a branch in one worktree at a
   // time): the enlist branch rule's created pool branch lives in the
   // operator's checkout, and a re-run after that pane went or was let go
   // would reach `prepareWorktree`'s throw and kill the drive. It waits as a
-  // checkpoint instead, until the checkout is off the branch.
+  // checkpoint instead, until the checkout is off the branch. A step with
+  // nothing left to plan is no super-step: no number, no log line.
   const held = ready.filter((marker) => {
     const at = heldBranchDirectory(session, marker);
     if (at === null) return false;
@@ -1356,6 +1353,14 @@ function planSuperStep(
     return true;
   });
   ready = ready.filter((marker) => !held.includes(marker));
+  if (ready.length === 0) {
+    emit("running");
+    return { ready, planned: [], snapshot: session.state };
+  }
+  session.superStep += 1;
+  // Every attempt this super-step spawns is numbered before any spawn,
+  // so a verify fan-out cannot race the events counter: attempts run
+  // base..base+N-1 off one nextAttempt read per ticket.
   const planned = ready.flatMap((marker) => {
     // Verify is ignored for an enlisted ticket (issue #101): its one attempt
     // is already in flight, and a re-run as an ordinary attempt is always a
@@ -1430,18 +1435,25 @@ function heldBranchDirectory(session: Session, marker: TicketMarker): string | n
 
 function checkpointHeldBranch(session: Session, marker: TicketMarker, at: string): void {
   const branch = branchFor(session.cwd, marker.id);
+  const attempt = lastAttempt(session.runsDir, marker.id);
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "branch-held",
+    payload: { branch, directory: at },
+  });
   writeMarkerStatus(marker.file, "checkpoint");
   marker.status = "checkpoint";
   landCheckpointBrief(
     marker.file,
-    `This ticket's branch ${branch} is checked out in ${at}, the checkout ` +
-      "an enlist moved onto it, so the engine cannot open a worktree to " +
-      "re-run the ticket while it is there. The work on the branch is kept. " +
-      "Check another branch out in that directory and answer resume: the " +
-      "re-run then continues on the parked branch as an ordinary " +
-      "engine-launched attempt.",
+    `This ticket's branch ${branch} is checked out in ${at} (the checkout an ` +
+      "enlist moved onto it, or a worktree made by hand), so the engine " +
+      "cannot open a worktree to run the ticket while it is there. The work " +
+      "on the branch is kept. Check another branch out in that directory " +
+      "and answer resume: the run then continues on the parked branch as an " +
+      "ordinary engine-launched attempt.",
   );
-  raiseCheckpoint(session, marker, lastAttempt(session.runsDir, marker.id));
+  raiseCheckpoint(session, marker, attempt);
   session.state = applyUpdate(session.state, {
     tickets: { [marker.id]: "checkpoint" },
     log: [
@@ -2995,7 +3007,10 @@ function paneGoneBrief(session: Session, ticketId: string, branch: string): stri
 // The re-run of a created-branch enlist (spec story 11) needs the branch
 // free: a Brief that offers the re-run says so up front.
 function createdBranchNote(session: Session, ticketId: string, branch: string): string {
-  if (branch !== branchFor(session.cwd, ticketId)) return "";
+  const work = session.enlistedWork.get(ticketId);
+  if (!work || work.branch !== branch || branch !== branchFor(session.cwd, ticketId)) {
+    return "";
+  }
   return (
     ` The enlist created ${branch} in that checkout, and a re-run needs the ` +
     "branch free: check another branch out there first, or the re-run waits " +
