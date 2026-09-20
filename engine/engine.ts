@@ -6674,6 +6674,11 @@ function writeEnlistTicket(
     `(harness ${fields.harness}${sessionNote}) in ${fields.directory}, on ` +
     `branch ${fields.branch}. ${branchNote}\n\n` +
     `${fields.spec.trim()}\n`;
+  // A Seeded Pool (one that opts in via conversations/, per pool.ts) may
+  // boot with no issues/ directory on disk at all; Enlist-as-Ticket is how
+  // such a pool gets its first Ticket, so the directory has to be made here
+  // rather than assumed.
+  mkdirSync(session.issuesDir, { recursive: true });
   writeFileSync(join(session.issuesDir, `${id}.md`), body);
 }
 

@@ -68,8 +68,12 @@ The final human judgment of finished ticket work, after implement tickets have r
 _Avoid_: per-ticket lint, typecheck (those are not Review)
 
 **Pool**:
-The set of tickets one Console run works, identified by its directory on disk. Hermetic: no ticket edges cross pool boundaries. One Console server binds one pool at a time.
+The set of Tickets and Conversations one Console run works, identified by its directory on disk. Hermetic: no ticket edges cross pool boundaries. One Console server binds one pool at a time. A Pool that holds no Tickets at all is still a Pool: see Seeded Pool.
 _Avoid_: project, workspace, queue
+
+**Seeded Pool**:
+A Pool that starts with no Tickets and grows from live work: the operator Enlists herdr panes into it as Conversations, and those Conversations Spawn the Tickets. It opts in by holding a `conversations/` directory, which may be empty; without that directory an empty ticket directory is the "no Tickets written yet" mistake and the Console refuses to start. Ordinary in every other respect, and seeded only at the beginning: the same config, the same server, the same super-steps and merges, and from its first Spawn it holds Tickets like any other Pool. Introduced by ADR-0024 (`docs/adr/0024-a-pool-may-start-with-no-tickets.md`).
+_Avoid_: empty pool (it is empty only at the start), conversation-only pool (it stops being that at the first Spawn), scratch pool, sandbox
 
 **Console**:
 Billy's UI for driving a thread — the agent graph rendered as node cards on a canvas, with interrupts answered inline in the node that raised them or from that node's Detail. One Console process serves exactly one Pool; running several pools means several Consoles, each on its own port.
@@ -171,7 +175,7 @@ A follow-up ticket an attempt proposes in its Outcome and the engine writes into
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 **Conversation**:
-An open-ended talk between the operator and one agent, living in a Pool beside its Tickets. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
+An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
 _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
 
 **Turn**:

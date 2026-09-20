@@ -17,8 +17,20 @@ have one ticket verified, set `verify: N` on its entry under `assign`.
 ## How to start
 
 Point the skill at a pool: `/my-console-runner <path-to-pool>`. It checks the pool, asks
-its questions, writes the two files, starts the server and opens your browser. Run it
+its questions, writes the files, starts the server and opens your browser. Run it
 again on a configured pool to relaunch without the questions.
+
+Before it checks anything it asks which kind of pool you are starting. A **ticket pool**
+already holds the tickets `to-tickets` wrote. A **Seeded Pool** holds none: it starts
+empty and grows from live work. You enlist herdr terminals you already have open into it
+as Conversations, and those Conversations spawn the tickets. Both kinds get the same
+interview, the same files and the same server. On a Seeded Pool the skill creates the
+`issues/` and `conversations/` directories for you, and an empty `issues/` is expected
+rather than a fault.
+
+On a Seeded Pool, `AGENT.md` is read by the tickets your Conversations spawn. Nothing you
+enlist reads it: an enlisted terminal keeps the context it already had, and the engine
+teaches it the protocol by typing into the pane.
 
 If you have saved Setups, the interview opens with Q0: it lists them by name, with a
 "none" option, and asks which one to start from. Choosing a Setup prefills the
