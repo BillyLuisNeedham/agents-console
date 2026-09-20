@@ -1,0 +1,1098 @@
+{
+ "liveRequests": 54,
+ "cells": [
+  {
+   "attempt": "badges-01-large",
+   "budget": "full-diff-20k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 8.266666666666667,
+   "spread": 0.10000000000000142,
+   "scores": [
+    8.3,
+    8.3,
+    8.2
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.9,
+    "claim_fidelity": 0.44999999999999996,
+    "log_health": 0.9133333333333334
+   },
+   "level": {
+    "ticket_fit": 3.8799999999999994,
+    "claim_fidelity": 2.4499999999999997,
+    "log_health": 1.92
+   },
+   "gates": {
+    "contradicted_claim": 0.14,
+    "untouched_criterion": 0.13,
+    "failing_at_end": 0.10666666666666667,
+    "derived_claim_vs_failing_end": 0.10666666666666667
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 33985,
+   "evEst": 27630,
+   "ms": 847.6666666666666,
+   "failures": [],
+   "meta": {
+    "diffChars": 22084,
+    "diffTrimmed": false,
+    "logChars": 80000,
+    "logTrimmed": true,
+    "evidenceChars": 110518,
+    "evidenceTokensEstimate": 27630
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-01-large",
+   "budget": "hunks-10k-tail",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 8.3,
+   "spread": 0,
+   "scores": [
+    8.3
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.94,
+    "claim_fidelity": 0.45,
+    "log_health": 0.92
+   },
+   "level": {
+    "ticket_fit": 3.93,
+    "claim_fidelity": 2.45,
+    "log_health": 1.92
+   },
+   "gates": {
+    "contradicted_claim": 0.14,
+    "untouched_criterion": 0.11,
+    "failing_at_end": 0.1,
+    "derived_claim_vs_failing_end": 0.1
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 21655,
+   "evEst": 16142,
+   "ms": 1086,
+   "failures": [],
+   "meta": {
+    "diffChars": 17301,
+    "diffTrimmed": false,
+    "logChars": 39997,
+    "logTrimmed": true,
+    "evidenceChars": 64568,
+    "evidenceTokensEstimate": 16142
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-01-large",
+   "budget": "hunks-5k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 8.4,
+   "spread": 0,
+   "scores": [
+    8.4,
+    8.4,
+    8.4
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.9566666666666667,
+    "claim_fidelity": 0.5666666666666665,
+    "log_health": 0.8966666666666666
+   },
+   "level": {
+    "ticket_fit": 3.9466666666666668,
+    "claim_fidelity": 2.5666666666666664,
+    "log_health": 1.8966666666666665
+   },
+   "gates": {
+    "contradicted_claim": 0.10000000000000002,
+    "untouched_criterion": 0.12666666666666668,
+    "failing_at_end": 0.10666666666666667,
+    "derived_claim_vs_failing_end": 0.10666666666666667
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": 15275,
+   "evEst": 10974,
+   "ms": 331,
+   "failures": [],
+   "meta": {
+    "diffChars": 17301,
+    "diffTrimmed": false,
+    "logChars": 19976,
+    "logTrimmed": true,
+    "evidenceChars": 43896,
+    "evidenceTokensEstimate": 10974
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary fully borne out; log health: errors fixed, later run clean."
+  },
+  {
+   "attempt": "badges-01-large",
+   "budget": "log-only",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 6.966666666666666,
+   "spread": 0.5999999999999996,
+   "scores": [
+    7.3,
+    6.7,
+    6.9
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.08666666666666667,
+    "claim_fidelity": 0.3233333333333333,
+    "log_health": 0.8666666666666667
+   },
+   "level": {
+    "ticket_fit": 2.81,
+    "claim_fidelity": 2.3233333333333337,
+    "log_health": 1.8666666666666665
+   },
+   "gates": {
+    "contradicted_claim": 0.14333333333333334,
+    "untouched_criterion": 0.22999999999999998,
+    "failing_at_end": 0.10666666666666667,
+    "derived_claim_vs_failing_end": 0.10666666666666667
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit",
+    "claim_fidelity"
+   ],
+   "usage": 33134,
+   "evEst": 26233,
+   "ms": 476.3333333333333,
+   "failures": [],
+   "meta": {
+    "diffChars": 0,
+    "diffTrimmed": false,
+    "logChars": 96872,
+    "logTrimmed": true,
+    "evidenceChars": 104929,
+    "evidenceTokensEstimate": 26233
+   },
+   "reasons": "ticket fit: all criteria met with extra scope; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on ticket_fit, claim_fidelity."
+  },
+  {
+   "attempt": "badges-01-large",
+   "budget": "two-pass",
+   "n": 3,
+   "okN": 0,
+   "meanScore": null,
+   "spread": null,
+   "scores": [],
+   "verdicts": [],
+   "conf": {
+    "ticket_fit": null,
+    "claim_fidelity": null,
+    "log_health": null
+   },
+   "level": {
+    "ticket_fit": null,
+    "claim_fidelity": null,
+    "log_health": null
+   },
+   "gates": {},
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": null,
+   "evEst": null,
+   "ms": 264,
+   "failures": [
+    "invalid-question: pass 1: HTTP 400: 400 {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}",
+    "invalid-question: pass 1: HTTP 400: 400 {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}",
+    "invalid-question: pass 1: HTTP 400: 400 {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}"
+   ],
+   "meta": {
+    "hunks": 26,
+    "hunksOffered": 26,
+    "segments": 24,
+    "segmentsOffered": 17,
+    "segmentsDropped": 7,
+    "pass1Chars": 120880,
+    "pass1Questions": 43
+   }
+  },
+  {
+   "attempt": "badges-02-large-clean",
+   "budget": "hunks-5k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 7.166666666666667,
+   "spread": 0.39999999999999947,
+   "scores": [
+    7.3,
+    6.9,
+    7.3
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.8633333333333333,
+    "claim_fidelity": 0.09000000000000001,
+    "log_health": 0.8166666666666668
+   },
+   "level": {
+    "ticket_fit": 3.8333333333333335,
+    "claim_fidelity": 1.5233333333333334,
+    "log_health": 1.82
+   },
+   "gates": {
+    "contradicted_claim": 0.3633333333333333,
+    "untouched_criterion": 0.17,
+    "failing_at_end": 0.15,
+    "derived_claim_vs_failing_end": 0.15
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 19511,
+   "evEst": 13770,
+   "ms": 595,
+   "failures": [],
+   "meta": {
+    "diffChars": 27460,
+    "diffTrimmed": false,
+    "logChars": 19995,
+    "logTrimmed": true,
+    "evidenceChars": 55080,
+    "evidenceTokensEstimate": 13770
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-03-attempt-1-mid",
+   "budget": "full-diff-20k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 4.7,
+   "spread": 0.20000000000000018,
+   "scores": [
+    4.7,
+    4.8,
+    4.6
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.4533333333333333,
+    "claim_fidelity": 0.6166666666666667,
+    "log_health": 0.71
+   },
+   "level": {
+    "ticket_fit": 2.5566666666666666,
+    "claim_fidelity": 0.3833333333333333,
+    "log_health": 1.7333333333333332
+   },
+   "gates": {
+    "contradicted_claim": 0.7966666666666667,
+    "untouched_criterion": 0.47333333333333333,
+    "failing_at_end": 0.10000000000000002,
+    "derived_claim_vs_failing_end": 0.10000000000000002
+   },
+   "fired": [
+    "contradicted_claim"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit"
+   ],
+   "usage": 24506,
+   "evEst": 19876,
+   "ms": 396.3333333333333,
+   "failures": [],
+   "meta": {
+    "diffChars": 14829,
+    "diffTrimmed": false,
+    "logChars": 55438,
+    "logTrimmed": false,
+    "evidenceChars": 79502,
+    "evidenceTokensEstimate": 19876
+   },
+   "reasons": "ticket fit: all criteria met with extra scope; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims. Note: low confidence on ticket_fit."
+  },
+  {
+   "attempt": "badges-03-attempt-1-mid",
+   "budget": "hunks-10k-tail",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 4.9,
+   "spread": 0,
+   "scores": [
+    4.9
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.32,
+    "claim_fidelity": 0.61,
+    "log_health": 0.8
+   },
+   "level": {
+    "ticket_fit": 2.74,
+    "claim_fidelity": 0.39,
+    "log_health": 1.81
+   },
+   "gates": {
+    "contradicted_claim": 0.76,
+    "untouched_criterion": 0.51,
+    "failing_at_end": 0.16,
+    "derived_claim_vs_failing_end": 0.16
+   },
+   "fired": [
+    "contradicted_claim"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit"
+   ],
+   "usage": 19642,
+   "evEst": 15245,
+   "ms": 354,
+   "failures": [],
+   "meta": {
+    "diffChars": 12048,
+    "diffTrimmed": false,
+    "logChars": 39986,
+    "logTrimmed": true,
+    "evidenceChars": 60980,
+    "evidenceTokensEstimate": 15245
+   },
+   "reasons": "ticket fit: all criteria met with extra scope; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims. Note: low confidence on ticket_fit."
+  },
+  {
+   "attempt": "badges-03-attempt-1-mid",
+   "budget": "hunks-5k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 5.066666666666666,
+   "spread": 0.20000000000000018,
+   "scores": [
+    5,
+    5.2,
+    5
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.24333333333333332,
+    "claim_fidelity": 0.53,
+    "log_health": 0.8033333333333333
+   },
+   "level": {
+    "ticket_fit": 2.7899999999999996,
+    "claim_fidelity": 0.47,
+    "log_health": 1.8466666666666667
+   },
+   "gates": {
+    "contradicted_claim": 0.6966666666666667,
+    "untouched_criterion": 0.49666666666666665,
+    "failing_at_end": 0.10666666666666667,
+    "derived_claim_vs_failing_end": 0.10666666666666667
+   },
+   "fired": [
+    "contradicted_claim"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit"
+   ],
+   "usage": 13973,
+   "evEst": 10126,
+   "ms": 326.6666666666667,
+   "failures": [],
+   "meta": {
+    "diffChars": 12048,
+    "diffTrimmed": false,
+    "logChars": 19997,
+    "logTrimmed": true,
+    "evidenceChars": 40501,
+    "evidenceTokensEstimate": 10126
+   },
+   "reasons": "ticket fit: all criteria met with extra scope; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims. Note: low confidence on ticket_fit."
+  },
+  {
+   "attempt": "badges-03-attempt-1-mid",
+   "budget": "log-only",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 3.4333333333333336,
+   "spread": 0.10000000000000009,
+   "scores": [
+    3.4,
+    3.4,
+    3.5
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0,
+    "claim_fidelity": 0.6533333333333333,
+    "log_health": 0.7666666666666666
+   },
+   "level": {
+    "ticket_fit": 1.2700000000000002,
+    "claim_fidelity": 0.3466666666666667,
+    "log_health": 1.8066666666666666
+   },
+   "gates": {
+    "contradicted_claim": 0.8566666666666666,
+    "untouched_criterion": 0.48333333333333334,
+    "failing_at_end": 0.09000000000000001,
+    "derived_claim_vs_failing_end": 0.09000000000000001
+   },
+   "fired": [
+    "contradicted_claim"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit"
+   ],
+   "usage": 20522,
+   "evEst": 16101,
+   "ms": 364.6666666666667,
+   "failures": [],
+   "meta": {
+    "diffChars": 0,
+    "diffTrimmed": false,
+    "logChars": 55438,
+    "logTrimmed": false,
+    "evidenceChars": 64404,
+    "evidenceTokensEstimate": 16101
+   },
+   "reasons": "ticket fit: most criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims. Note: low confidence on ticket_fit."
+  },
+  {
+   "attempt": "badges-03-attempt-1-mid",
+   "budget": "two-pass",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 4.433333333333334,
+   "spread": 0.09999999999999964,
+   "scores": [
+    4.4,
+    4.5,
+    4.4
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.5633333333333334,
+    "claim_fidelity": 0.65,
+    "log_health": 0.73
+   },
+   "level": {
+    "ticket_fit": 2.31,
+    "claim_fidelity": 0.35000000000000003,
+    "log_health": 1.7633333333333334
+   },
+   "gates": {
+    "contradicted_claim": 0.75,
+    "untouched_criterion": 0.6266666666666666,
+    "failing_at_end": 0.15333333333333332,
+    "derived_claim_vs_failing_end": 0.15333333333333332
+   },
+   "fired": [
+    "contradicted_claim",
+    "untouched_criterion"
+   ],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": 37774.333333333336,
+   "evEst": 11354.666666666666,
+   "ms": 795.6666666666666,
+   "failures": [],
+   "meta": {
+    "diffChars": 11290,
+    "diffTrimmed": false,
+    "logChars": 25756,
+    "logTrimmed": false,
+    "evidenceChars": 45565,
+    "evidenceTokensEstimate": 11392,
+    "hunks": 15,
+    "hunksOffered": 15,
+    "segments": 10,
+    "segmentsOffered": 10,
+    "segmentsDropped": 0,
+    "pass1Chars": 75360,
+    "pass1Questions": 25,
+    "hunksKept": 15,
+    "segmentsKept": 5,
+    "hunkProbabilities": {
+     "h0": 0.84,
+     "h1": 0.82,
+     "h2": 0.93,
+     "h3": 0.73,
+     "h4": 0.74,
+     "h5": 0.73,
+     "h6": 0.54,
+     "h7": 0.84,
+     "h8": 0.73,
+     "h9": 0.69,
+     "h10": 0.92,
+     "h11": 0.69,
+     "h12": 0.63,
+     "h13": 0.69,
+     "h14": 0.67
+    },
+    "segmentProbabilities": {
+     "s0": 0.62,
+     "s1": 0.21,
+     "s2": 0.37,
+     "s3": 0.54,
+     "s4": 0.12,
+     "s5": 0.16,
+     "s6": 0.31,
+     "s7": 0.97,
+     "s8": 0.64,
+     "s9": 0.97
+    }
+   },
+   "reasons": "ticket fit: some criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims and a ticket criterion has no work in the diff."
+  },
+  {
+   "attempt": "badges-03-spawn-1-small",
+   "budget": "full-diff-20k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 8.4,
+   "spread": 0,
+   "scores": [
+    8.4,
+    8.4,
+    8.4
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.93,
+    "claim_fidelity": 0.5433333333333333,
+    "log_health": 0.92
+   },
+   "level": {
+    "ticket_fit": 3.9133333333333336,
+    "claim_fidelity": 2.5433333333333334,
+    "log_health": 1.9266666666666665
+   },
+   "gates": {
+    "contradicted_claim": 0.12666666666666668,
+    "untouched_criterion": 0.18333333333333335,
+    "failing_at_end": 0.03,
+    "derived_claim_vs_failing_end": 0.03
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": 10386,
+   "evEst": 6436,
+   "ms": 353,
+   "failures": [],
+   "meta": {
+    "diffChars": 2411,
+    "diffTrimmed": false,
+    "logChars": 18995,
+    "logTrimmed": false,
+    "evidenceChars": 25741,
+    "evidenceTokensEstimate": 6436
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary fully borne out; log health: errors fixed, later run clean."
+  },
+  {
+   "attempt": "badges-03-spawn-1-small",
+   "budget": "hunks-10k-tail",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 8.2,
+   "spread": 0,
+   "scores": [
+    8.2
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.92,
+    "claim_fidelity": 0.38,
+    "log_health": 0.92
+   },
+   "level": {
+    "ticket_fit": 3.9,
+    "claim_fidelity": 2.38,
+    "log_health": 1.93
+   },
+   "gates": {
+    "contradicted_claim": 0.14,
+    "untouched_criterion": 0.21,
+    "failing_at_end": 0.03,
+    "derived_claim_vs_failing_end": 0.03
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 10047,
+   "evEst": 6120,
+   "ms": 297,
+   "failures": [],
+   "meta": {
+    "diffChars": 1203,
+    "diffTrimmed": false,
+    "logChars": 18995,
+    "logTrimmed": false,
+    "evidenceChars": 24478,
+    "evidenceTokensEstimate": 6120
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-03-spawn-1-small",
+   "budget": "hunks-5k-tail",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 8.1,
+   "spread": 0,
+   "scores": [
+    8.1,
+    8.1,
+    8.1
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.8866666666666667,
+    "claim_fidelity": 0.3133333333333333,
+    "log_health": 0.9233333333333333
+   },
+   "level": {
+    "ticket_fit": 3.86,
+    "claim_fidelity": 2.313333333333333,
+    "log_health": 1.9400000000000002
+   },
+   "gates": {
+    "contradicted_claim": 0.15333333333333332,
+    "untouched_criterion": 0.19999999999999998,
+    "failing_at_end": 0.03,
+    "derived_claim_vs_failing_end": 0.03
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 10047,
+   "evEst": 6120,
+   "ms": 308.6666666666667,
+   "failures": [],
+   "meta": {
+    "diffChars": 1203,
+    "diffTrimmed": false,
+    "logChars": 18995,
+    "logTrimmed": false,
+    "evidenceChars": 24478,
+    "evidenceTokensEstimate": 6120
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-03-spawn-1-small",
+   "budget": "log-only",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 8.166666666666666,
+   "spread": 0.09999999999999964,
+   "scores": [
+    8.2,
+    8.2,
+    8.1
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.8066666666666666,
+    "claim_fidelity": 0.44999999999999996,
+    "log_health": 0.9400000000000001
+   },
+   "level": {
+    "ticket_fit": 3.766666666666667,
+    "claim_fidelity": 2.4499999999999997,
+    "log_health": 1.95
+   },
+   "gates": {
+    "contradicted_claim": 0.11666666666666665,
+    "untouched_criterion": 0.23,
+    "failing_at_end": 0.036666666666666674,
+    "derived_claim_vs_failing_end": 0.036666666666666674
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 9661,
+   "evEst": 5806,
+   "ms": 294,
+   "failures": [],
+   "meta": {
+    "diffChars": 0,
+    "diffTrimmed": false,
+    "logChars": 18995,
+    "logTrimmed": false,
+    "evidenceChars": 23224,
+    "evidenceTokensEstimate": 5806
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "badges-03-spawn-1-small",
+   "budget": "two-pass",
+   "n": 3,
+   "okN": 3,
+   "meanScore": 7.866666666666667,
+   "spread": 0.10000000000000053,
+   "scores": [
+    7.8,
+    7.9,
+    7.9
+   ],
+   "verdicts": [
+    "pass"
+   ],
+   "conf": {
+    "ticket_fit": 0.86,
+    "claim_fidelity": 0.08333333333333333,
+    "log_health": 0.9499999999999998
+   },
+   "level": {
+    "ticket_fit": 3.83,
+    "claim_fidelity": 2.083333333333333,
+    "log_health": 1.9666666666666668
+   },
+   "gates": {
+    "contradicted_claim": 0.13,
+    "untouched_criterion": 0.21666666666666667,
+    "failing_at_end": 0.036666666666666674,
+    "derived_claim_vs_failing_end": 0.036666666666666674
+   },
+   "fired": [],
+   "advisories": [],
+   "lowConfidence": [
+    "claim_fidelity"
+   ],
+   "usage": 18120,
+   "evEst": 6161,
+   "ms": 657.6666666666666,
+   "failures": [],
+   "meta": {
+    "diffChars": 1240,
+    "diffTrimmed": false,
+    "logChars": 19066,
+    "logTrimmed": false,
+    "evidenceChars": 24643,
+    "evidenceTokensEstimate": 6161,
+    "hunks": 7,
+    "hunksOffered": 7,
+    "segments": 4,
+    "segmentsOffered": 4,
+    "segmentsDropped": 0,
+    "pass1Chars": 23970,
+    "pass1Questions": 11,
+    "hunksKept": 7,
+    "segmentsKept": 4,
+    "hunkProbabilities": {
+     "h0": 0.95,
+     "h1": 0.93,
+     "h2": 0.9,
+     "h3": 0.83,
+     "h4": 0.96,
+     "h5": 0.95,
+     "h6": 0.93
+    },
+    "segmentProbabilities": {
+     "s0": 0.97,
+     "s1": 0.96,
+     "s2": 0.97,
+     "s3": 0.98
+    }
+   },
+   "reasons": "ticket fit: all criteria met; claim fidelity: summary broadly matches; log health: errors fixed, later run clean. Note: low confidence on claim_fidelity."
+  },
+  {
+   "attempt": "probe-constructed-fail-then-claim",
+   "budget": "full-diff-20k-tail",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 2.5,
+   "spread": 0,
+   "scores": [
+    2.5
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.71,
+    "claim_fidelity": 0.78,
+    "log_health": 0.85
+   },
+   "level": {
+    "ticket_fit": 2.08,
+    "claim_fidelity": 0.22,
+    "log_health": 0.15
+   },
+   "gates": {
+    "contradicted_claim": 0.92,
+    "untouched_criterion": 0.66,
+    "failing_at_end": 0.96,
+    "derived_claim_vs_failing_end": 0.96
+   },
+   "fired": [
+    "contradicted_claim",
+    "untouched_criterion",
+    "failing_at_end"
+   ],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": 21995,
+   "evEst": 17706,
+   "ms": 1108,
+   "failures": [],
+   "meta": {
+    "diffChars": 14829,
+    "diffTrimmed": false,
+    "logChars": 46880,
+    "logTrimmed": false,
+    "evidenceChars": 70822,
+    "evidenceTokensEstimate": 17706
+   },
+   "reasons": "ticket fit: some criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: run ends in failure. Flagged because the log contradicts a result the summary claims and a ticket criterion has no work in the diff and the last test run or build in the log failed."
+  },
+  {
+   "attempt": "probe-constructed-fail-then-claim",
+   "budget": "hunks-5k-tail",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 2.5,
+   "spread": 0,
+   "scores": [
+    2.5
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.62,
+    "claim_fidelity": 0.83,
+    "log_health": 0.82
+   },
+   "level": {
+    "ticket_fit": 2.15,
+    "claim_fidelity": 0.17,
+    "log_health": 0.18
+   },
+   "gates": {
+    "contradicted_claim": 0.9,
+    "untouched_criterion": 0.74,
+    "failing_at_end": 0.96,
+    "derived_claim_vs_failing_end": 0.96
+   },
+   "fired": [
+    "contradicted_claim",
+    "untouched_criterion",
+    "failing_at_end"
+   ],
+   "advisories": [],
+   "lowConfidence": [],
+   "usage": 13906,
+   "evEst": 10160,
+   "ms": 325,
+   "failures": [],
+   "meta": {
+    "diffChars": 12048,
+    "diffTrimmed": false,
+    "logChars": 19989,
+    "logTrimmed": true,
+    "evidenceChars": 40637,
+    "evidenceTokensEstimate": 10160
+   },
+   "reasons": "ticket fit: some criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: run ends in failure. Flagged because the log contradicts a result the summary claims and a ticket criterion has no work in the diff and the last test run or build in the log failed."
+  },
+  {
+   "attempt": "probe-constructed-fail-then-claim",
+   "budget": "log-only",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 1.3,
+   "spread": 0,
+   "scores": [
+    1.3
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.19,
+    "claim_fidelity": 0.92,
+    "log_health": 0.92
+   },
+   "level": {
+    "ticket_fit": 1.16,
+    "claim_fidelity": 0.08,
+    "log_health": 0.08
+   },
+   "gates": {
+    "contradicted_claim": 0.95,
+    "untouched_criterion": 0.72,
+    "failing_at_end": 0.97,
+    "derived_claim_vs_failing_end": 0.97
+   },
+   "fired": [
+    "contradicted_claim",
+    "untouched_criterion",
+    "failing_at_end"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "ticket_fit"
+   ],
+   "usage": 18011,
+   "evEst": 13931,
+   "ms": 348,
+   "failures": [],
+   "meta": {
+    "diffChars": 0,
+    "diffTrimmed": false,
+    "logChars": 46880,
+    "logTrimmed": false,
+    "evidenceChars": 55724,
+    "evidenceTokensEstimate": 13931
+   },
+   "reasons": "ticket fit: most criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: run ends in failure. Flagged because the log contradicts a result the summary claims and a ticket criterion has no work in the diff and the last test run or build in the log failed. Note: low confidence on ticket_fit."
+  },
+  {
+   "attempt": "probe-constructed-fail-then-claim",
+   "budget": "two-pass",
+   "n": 1,
+   "okN": 1,
+   "meanScore": 3.7,
+   "spread": 0,
+   "scores": [
+    3.7
+   ],
+   "verdicts": [
+    "flag"
+   ],
+   "conf": {
+    "ticket_fit": 0.54,
+    "claim_fidelity": 0.74,
+    "log_health": 0.47
+   },
+   "level": {
+    "ticket_fit": 1.88,
+    "claim_fidelity": 0.26,
+    "log_health": 1.56
+   },
+   "gates": {
+    "contradicted_claim": 0.74,
+    "untouched_criterion": 0.79,
+    "failing_at_end": 0.31,
+    "derived_claim_vs_failing_end": 0.31
+   },
+   "fired": [
+    "contradicted_claim",
+    "untouched_criterion"
+   ],
+   "advisories": [],
+   "lowConfidence": [
+    "log_health"
+   ],
+   "usage": 31038,
+   "evEst": 7712,
+   "ms": 795,
+   "failures": [],
+   "meta": {
+    "diffChars": 11290,
+    "diffTrimmed": false,
+    "logChars": 11255,
+    "logTrimmed": false,
+    "evidenceChars": 30847,
+    "evidenceTokensEstimate": 7712,
+    "hunks": 15,
+    "hunksOffered": 15,
+    "segments": 9,
+    "segmentsOffered": 9,
+    "segmentsDropped": 0,
+    "pass1Chars": 66672,
+    "pass1Questions": 24,
+    "hunksKept": 15,
+    "segmentsKept": 3,
+    "hunkProbabilities": {
+     "h0": 0.82,
+     "h1": 0.75,
+     "h2": 0.92,
+     "h3": 0.6,
+     "h4": 0.62,
+     "h5": 0.59,
+     "h6": 0.5,
+     "h7": 0.82,
+     "h8": 0.61,
+     "h9": 0.64,
+     "h10": 0.89,
+     "h11": 0.66,
+     "h12": 0.64,
+     "h13": 0.61,
+     "h14": 0.62
+    },
+    "segmentProbabilities": {
+     "s0": 0.64,
+     "s1": 0.25,
+     "s2": 0.28,
+     "s3": 0.47,
+     "s4": 0.12,
+     "s5": 0.16,
+     "s6": 0.21,
+     "s7": 0.89,
+     "s8": 0.96
+    }
+   },
+   "reasons": "ticket fit: some criteria unmet; claim fidelity: summary contradicted by the artifacts; log health: errors fixed, later run clean. Flagged because the log contradicts a result the summary claims and a ticket criterion has no work in the diff. Note: low confidence on log_health."
+  }
+ ]
+}
