@@ -225,6 +225,14 @@ _Avoid_: LLM, the AI, TypeSafe (that's the vendor)
 The named JSON object a call site hands Jev to answer a question over: only the context relevant to that question. Not State (the run's memory), though it may be assembled from it.
 _Avoid_: state (Jev's own parameter name collides with the run's State), context, prompt
 
+**Claimed**:
+Text a spawned agent wrote about its own work: an Outcome's summary and the sha it reports, a Brief, a Grade's reasons, a spawn title and body, a resolver's note. A claim is the thing being judged, never the authority a judgement rests on, so it enters an Evidence object in a field of its own and is never joined into a question's instructions. ADR-0022 (`docs/adr/0022-agent-authored-text-is-a-claim.md`).
+_Avoid_: self-report, agent output (too broad), untrusted (says why it matters, not what it is)
+
+**Observed**:
+What the engine or the harness produced rather than an agent: the attempt log, the diff at the commit, the exit status, the sha the engine read back itself. Where Observed and Claimed disagree about the same work, the Observed wins, and the engine asks for that comparison as a judgement of its own rather than trusting a score to absorb it.
+_Avoid_: ground truth, actual, evidence (Evidence is the whole object handed to Jev, not this half of it)
+
 **Judgement**:
 One typed answer from Jev to one question: a Choice (one label, with a probability per label and a confidence), a Noul (a probability that a condition holds), or a Jev Score (an expected position on an ordered rubric, with probabilities and a confidence). Every question over the same Evidence is asked in one request.
 _Avoid_: verdict (that's head-to-head grading), guess, prediction, score (say Jev Score; a Grade has a score too)
