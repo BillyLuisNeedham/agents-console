@@ -37,7 +37,12 @@ import {
   releasePaneAgent,
   reportPaneAgent,
 } from "./herdr.ts";
-import { INTERACTIVE_PANE_READ_LINES, typeVerified } from "./pane-session.ts";
+import {
+  INTERACTIVE_PANE_READ_LINES,
+  READINESS_TIMEOUT_MS,
+  stillWorkingReason,
+  typeVerified,
+} from "./pane-session.ts";
 import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnState } from "./turn-state.ts";
 
@@ -124,6 +129,10 @@ export interface EnlistedEnv {
   herdrSocket: string;
   /** How often the tick re-reads the pane; 2s unless a test shortens it. */
   pollMs?: number;
+  /** How long an enlist waits for a working pane to reach waiting so the
+   *  teaching Turn can be typed; a Launch's readiness bound unless a test
+   *  shortens it. */
+  teachingWaitMs?: number;
 }
 
 export interface EnlistedHost {
@@ -153,8 +162,13 @@ export interface RegisterEnlistedInput {
   directory: string;
   /** Where the agent writes its Outcome; the ending watch reads it. */
   outcomePath: string;
-  /** The teaching Turn to type once the pane is waiting (queued while working). */
-  teaching: string;
+  /**
+   * The teaching Turn to type once the pane is waiting: the claim waits for
+   * a working pane, bounded by `teachingWaitMs`, and refuses when the bound
+   * expires. Null for a pane taught before a restart (boot re-adoption),
+   * which registers the tick and the ending watch and types nothing.
+   */
+  teaching: string | null;
 }
 
 export type EnlistRegistration =
@@ -196,6 +210,7 @@ export function createEnlistedAttempts(
   host: EnlistedHost,
 ): EnlistedAttempts {
   const pollMs = env.pollMs ?? ENLISTED_POLL_MS;
+  const teachingWaitMs = env.teachingWaitMs ?? READINESS_TIMEOUT_MS;
   const runtimes = new Map<string, EnlistedRuntime>();
 
   function reportState(runtime: EnlistedRuntime, state: "working" | "blocked"): void {
@@ -359,20 +374,34 @@ export function createEnlistedAttempts(
       directory: input.directory,
       outcomePath: input.outcomePath,
       turn: FRESH_TURN,
-      queued: [input.teaching],
+      queued: input.teaching === null ? [] : [input.teaching],
       release: new AbortController(),
       timer: null,
     };
 
     // Settle the Turn state from consecutive reads (the same rule
-    // turn-state.ts applies on its own tick), so an idle pane is taught now
-    // and a working pane queues the teaching for its next waiting Turn. One
-    // read establishes the transcript, then IDLE_STABLE_READS more with the
-    // idle pattern present flip the state to waiting.
+    // turn-state.ts applies on its own tick), so an idle pane is taught now.
+    // One read establishes the transcript, then IDLE_STABLE_READS more with
+    // the idle pattern present flip the state to waiting. A pane still
+    // working then is given the same bound a Launch gives a TUI to reach its
+    // ready frame, re-read every poll, so the teaching lands the moment the
+    // agent is waiting on the operator and never mid-reply (spec, story 14);
+    // past the bound the enlist is refused and leaves nothing (spec, "Failed
+    // enlist leaves nothing"), never a Ticket whose agent was not taught.
     try {
       for (let read = 0; read <= IDLE_STABLE_READS; read++) {
         await readTurn(runtime, descriptor);
         if (runtime.turn.state === "waiting") break;
+      }
+      if (input.teaching !== null) {
+        const deadline = Date.now() + teachingWaitMs;
+        while (runtime.turn.state !== "waiting") {
+          if (Date.now() >= deadline) {
+            return { ok: false, reason: stillWorkingReason(teachingWaitMs) };
+          }
+          await sleepAbortable(pollMs, runtime.release.signal);
+          await readTurn(runtime, descriptor);
+        }
       }
     } catch (err) {
       return {
@@ -384,9 +413,6 @@ export function createEnlistedAttempts(
     }
 
     reportState(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
-    if (input.tabId !== null) {
-      void relabelTab(env.herdrSocket, input.tabId, runtime.label).catch(() => {});
-    }
 
     if (runtime.turn.state === "waiting") {
       const delivered = await deliver(runtime, descriptor);
@@ -394,6 +420,12 @@ export function createEnlistedAttempts(
         releaseAgent(runtime);
         return { ok: false, reason: "the teaching Turn could not be delivered" };
       }
+    }
+    // The operator's tab is relabelled only once the claim has held, so a
+    // refused enlist leaves the label as it found it; awaited (still
+    // best-effort) so the claim is whole when the enlist answers.
+    if (input.tabId !== null) {
+      await relabelTab(env.herdrSocket, input.tabId, runtime.label).catch(() => {});
     }
 
     runtimes.set(runtime.id, runtime);

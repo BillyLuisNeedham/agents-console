@@ -126,6 +126,10 @@ export interface PoolServerOptions {
    *  and Notice Turns land without a real-time wait. Production leaves it
    *  unset (2 s). */
   conversationPollMs?: number;
+  /** How long an enlist waits for a working pane to reach waiting before
+   *  refusing (issue #101); tests shrink it. Production leaves it unset (a
+   *  Launch's readiness bound). */
+  enlistTeachingWaitMs?: number;
   /**
    * What a `POST /api/stop` sets in motion once the route has accepted it
    * (issue #97). The CLI passes the same stop-then-exit the signal handler
@@ -1030,6 +1034,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
       ...(options.conversationPollMs !== undefined
         ? { conversationPollMs: options.conversationPollMs }
+        : {}),
+      ...(options.enlistTeachingWaitMs !== undefined
+        ? { enlistTeachingWaitMs: options.enlistTeachingWaitMs }
         : {}),
       ...(jev !== undefined ? { jev } : {}),
       onSnapshot: (snapshot) => {

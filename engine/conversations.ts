@@ -75,7 +75,12 @@ import {
   ticketEndedNoticeText,
   type Notice,
 } from "./notices.ts";
-import { typeVerified, INTERACTIVE_PANE_READ_LINES } from "./pane-session.ts";
+import {
+  INTERACTIVE_PANE_READ_LINES,
+  READINESS_TIMEOUT_MS,
+  stillWorkingReason,
+  typeVerified,
+} from "./pane-session.ts";
 import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
 import {
@@ -418,6 +423,10 @@ export interface ConversationEnv extends AttemptEnv {
   /** How often a live Conversation's tick re-reads its pane; 2 s unless a
    *  test shortens it (the enlisted-attempts module's own pollMs precedent). */
   pollMs?: number;
+  /** How long an enlist waits for a working pane to reach waiting so the
+   *  teaching Turn can be typed (issue #101); a Launch's readiness bound
+   *  unless a test shortens it. */
+  teachingWaitMs?: number;
 }
 
 /**
@@ -484,6 +493,7 @@ export interface ConversationModule {
 export function createConversations(env: ConversationEnv, host: ConversationHost): ConversationModule {
   const dir = conversationsDir(env.poolDir);
   const pollMs = env.pollMs ?? CONVERSATION_POLL_MS;
+  const teachingWaitMs = env.teachingWaitMs ?? READINESS_TIMEOUT_MS;
   const runtimes = new Map<string, ConversationRuntime>();
   // Ids of starts still in flight (start is async and its record is
   // written well after the herdr tab opens): engine.ts's spawn counters
@@ -1004,10 +1014,21 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       });
 
       // Settle the Turn state from consecutive reads, exactly as the
-      // enlisted Ticket's claim does: an idle pane is taught now, a working
-      // one queues the Turns for its next waiting read.
+      // enlisted Ticket's claim does: an idle pane is taught now, and a
+      // working one is given a Launch's readiness bound to reach waiting,
+      // re-read every poll, so the Turns land the moment the agent is
+      // waiting on the operator and never mid-reply. Past the bound the
+      // enlist is refused and leaves nothing.
       try {
         await settleTurn(runtime, descriptor);
+        const deadline = Date.now() + teachingWaitMs;
+        while (runtime.turn.state !== "waiting") {
+          if (Date.now() >= deadline) {
+            return { ok: false, reason: stillWorkingReason(teachingWaitMs) };
+          }
+          await Bun.sleep(pollMs);
+          await readTurn(runtime, descriptor);
+        }
       } catch (err) {
         return {
           ok: false,
@@ -1017,10 +1038,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         };
       }
 
-      reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
-      if (req.tabId !== null) {
-        void relabelTab(env.herdrSocket, req.tabId, runtime.label).catch(() => {});
-      }
+      reportAgent(runtime, "blocked");
 
       const opening = req.opening ?? "";
       const record: ConversationRecord = {
@@ -1074,6 +1092,12 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           }
           return { ok: false, reason: "the teaching Turn could not be delivered" };
         }
+      }
+      // The operator's tab is relabelled only once the claim has held, so a
+      // refused enlist leaves the label as it found it; awaited (still
+      // best-effort) so the claim is whole when the enlist answers.
+      if (req.tabId !== null) {
+        await relabelTab(env.herdrSocket, req.tabId, runtime.label).catch(() => {});
       }
       watchForCrash(runtime);
       // The Assignment under this Conversation's id, as start records it, so

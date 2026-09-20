@@ -220,6 +220,45 @@ export function prepareWorktree(
   return { path, branch };
 }
 
+// The engine's short-lived merge checkout (issue #101, ADR-0021): a linked
+// worktree on the pool's merge target, used only once an enlist has moved
+// the pool's own checkout onto a created pool branch and so handed that
+// checkout to the operator. One fixed path per pool, so a crash between open
+// and close leaves at most one stale worktree, which the next open prunes and
+// replaces. The leading dot keeps it apart from every ticket worktree beside
+// it, since a ticket id never starts with one.
+export function mergeCheckoutPathFor(repoRoot: string): string {
+  return join(
+    gitCommonDir(repoRoot),
+    "pool-worktrees",
+    poolKeyFor(repoRoot),
+    ".merge-checkout",
+  );
+}
+
+export function openMergeCheckout(repoRoot: string, branch: string): string {
+  const path = mergeCheckoutPathFor(repoRoot);
+  git(repoRoot, ["worktree", "prune"]);
+  if (registeredWorktrees(repoRoot).some((t) => t.path === path)) {
+    git(repoRoot, ["worktree", "remove", "--force", path]);
+  }
+  rmSync(path, { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const add = git(repoRoot, ["worktree", "add", path, branch]);
+  if (!add.ok) {
+    throw new Error(
+      `the merge checkout on ${branch} could not be opened: ${add.err || add.out}`,
+    );
+  }
+  return path;
+}
+
+// The merge checkout's branch is the merge target: only the worktree goes,
+// never the branch.
+export function closeMergeCheckout(repoRoot: string, path: string): void {
+  git(repoRoot, ["worktree", "remove", "--force", path]);
+}
+
 // Only called once the branch has merged, so anything left uncommitted in
 // the worktree is debris; --force discards it.
 export function removeWorktree(repoRoot: string, info: WorktreeInfo): void {

@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -145,6 +146,7 @@ async function startServer(
     onStopRequested?: () => void;
     enlistPollMs?: number;
     conversationPollMs?: number;
+    enlistTeachingWaitMs?: number;
   } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
@@ -4474,22 +4476,66 @@ describe("enlist a pane as a ticket", () => {
     });
     await server.start();
 
-    const res = await enlist(server, {
+    // The claim waits for the agent: nothing is typed and nothing is
+    // written while the pane is working.
+    const pending = enlist(server, {
       becomes: "ticket",
       paneId: "pane-busy",
       title: "Queued teaching",
       spec: "",
     });
-    expect(res.status).toBe(201);
+    await Bun.sleep(80);
     expect(fake.submitted.some((text) => text.includes("Ticket enlist-1"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "enlist-1.md"))).toBe(false);
 
-    // The agent finishes: the pane goes idle, the tick sees it waiting, and
-    // the queued teaching lands.
+    // The agent finishes: the pane goes idle, the claim sees it waiting, the
+    // queued teaching lands, and only then does the enlist answer.
     fake.setPaneContent("pane-busy", OPENCODE_WAITING);
-    await waitFor(
-      () => fake.submitted.some((text) => text.includes("Ticket enlist-1")),
-      "the queued teaching Turn",
+    const res = await pending;
+    expect(res.status).toBe(201);
+    expect(fake.submitted.some((text) => text.includes("Ticket enlist-1"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "enlist-1.md"))).toBe(true);
+  });
+
+  it("refuses a pane still working past the teaching wait and leaves nothing behind", async () => {
+    const poolDir = gitTerminalPool();
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-busy",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC busy",
+      status: "working",
+      rendered: OPENCODE_WORKING,
+      tabId: "tab-busy",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      enlistTeachingWaitMs: 120,
+    });
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-busy",
+      title: "Never taught",
+      spec: "",
+      blocks: ["01"],
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toContain("still working");
+    // Nothing typed, nothing written, no edit, no branch, the checkout back
+    // where it was, and the operator's tab neither relabelled nor claimed.
+    expect(fake.submitted.some((text) => text.includes("Ticket enlist-1"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "enlist-1.md"))).toBe(false);
+    expect(readFileSync(join(poolDir, "issues", "01.md"), "utf8")).toContain(
+      "blocked-by=none",
     );
+    expect(branchExists(poolDir, "enlist-1")).toBe(false);
+    expect(currentBranchOf(poolDir)).toBe("main");
+    expect(fake.requests.some((r) => r.method === "tab.rename")).toBe(false);
+    expect(fake.requests.some((r) => r.method === "pane.report_agent")).toBe(false);
   });
 });
 
@@ -4701,20 +4747,25 @@ describe("enlist a pane as a conversation", () => {
     });
     const server = await startConvServer(poolDir, fake.socketPath);
 
-    const res = await enlist(server, {
+    // The claim waits for the agent: nothing is typed and no record is
+    // written while the pane is working.
+    const pending = enlist(server, {
       becomes: "conversation",
       paneId: "pane-busy",
       title: "Queued talk",
       opening: "hello turn",
     });
-    expect(res.status).toBe(201);
+    await Bun.sleep(80);
     expect(
       fake.submitted.some((text) => text.includes("You can start follow-up work")),
     ).toBe(false);
+    expect(conversationOf(server)).toBeUndefined();
 
-    // The agent finishes: the pane goes idle, the tick sees it waiting, and
-    // the queued Turns land in order.
+    // The agent finishes: the pane goes idle, the claim sees it waiting, and
+    // the queued Turns land in order before the enlist answers.
     fake.setPaneContent("pane-busy", OPENCODE_WAITING);
+    const res = await pending;
+    expect(res.status).toBe(201);
     await waitFor(
       () => fake.submitted.some((text) => text.includes("You can start follow-up work")),
       "the queued teaching Turn",
@@ -4723,6 +4774,43 @@ describe("enlist a pane as a conversation", () => {
       () => fake.submitted.some((text) => text === "hello turn"),
       "the queued opening Turn",
     );
+  });
+
+  it("refuses a pane still working past the teaching wait, with no record and no branch", async () => {
+    const poolDir = gitTerminalPool();
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-busy",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC busy",
+      status: "working",
+      rendered: OPENCODE_WORKING,
+      tabId: "tab-busy",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      conversationPollMs: 15,
+      enlistTeachingWaitMs: 120,
+    });
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-busy",
+      title: "Never taught",
+      opening: "hello turn",
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toContain("still working");
+    expect(fake.submitted).toHaveLength(0);
+    expect(conversationOf(server)).toBeUndefined();
+    expect(existsSync(join(poolDir, "conversations", "conv-1.md"))).toBe(false);
+    expect(branchExists(poolDir, "conv-1")).toBe(false);
+    expect(currentBranchOf(poolDir)).toBe("main");
+    expect(fake.requests.some((r) => r.method === "tab.rename")).toBe(false);
+    expect(fake.requests.some((r) => r.method === "pane.report_agent")).toBe(false);
   });
 
   it("End merges the found branch and leaves the tab and directory alone", async () => {
@@ -5242,6 +5330,81 @@ describe("enlisted ticket lifecycle", () => {
     expect(eventsOf(poolDir, "enlist-1").map((e) => e.kind)).toContain("merged");
   });
 
+  it("an ordinary ticket's merge lands on the merge target without moving the checkout an enlisted agent works in", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=checkpoint -->" },
+    ]);
+    const target = currentBranchOf(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    // 01 waits for a go file, so its work can be committed on its branch
+    // while the enlisted agent is still live in the pool's own checkout.
+    const go = join(poolDir, "runs", "go-01");
+    const rig = stubHarness(poolDir, { "01": { waitFor: go } });
+    const server = await startServer(
+      poolDir,
+      { ...rig.harnesses, opencode: rig.harnesses.stub },
+      { herdrSocket: fake.socketPath, enlistPollMs: 15 },
+    );
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-main",
+      title: "On main",
+      spec: "",
+    });
+    expect(res.status).toBe(201);
+    const created = branchFor(poolDir, "enlist-1");
+    expect(currentBranchOf(poolDir)).toBe(created);
+    // The enlisted agent's uncommitted work, in the checkout the enlist moved.
+    writeFileSync(join(poolDir, "wip.txt"), "uncommitted\n");
+    const headBefore = shaAt(poolDir, "HEAD");
+
+    // An unrelated ticket resumes, runs to done and merges while enlist-1 is
+    // still live in that checkout.
+    const resume = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "resume" }),
+    });
+    expect(resume.status).toBe(202);
+    await waitFor(() => rig.spawned["01"] !== undefined, "01 spawned");
+    const ticketDir = rig.spawned["01"]!.cwd;
+    // The attempt never runs in the checkout the enlisted agent works in.
+    expect(realpathSync(ticketDir)).not.toBe(realpathSync(poolDir));
+    writeFileSync(join(ticketDir, "ordinary.txt"), "01 work\n");
+    spawnSync("git", ["-C", ticketDir, "add", "ordinary.txt"], { stdio: "ignore" });
+    spawnSync("git", ["-C", ticketDir, "commit", "-qm", "01 work"], { stdio: "ignore" });
+    writeFileSync(go, "");
+
+    await waitFor(
+      () => server.latest?.state.tickets.find((t) => t.id === "01")?.status === "done",
+      "01 done",
+    );
+    await waitFor(
+      () => fileAt(poolDir, target, "ordinary.txt") === "01 work\n",
+      "01's work on the merge target",
+    );
+    expect(eventsOf(poolDir, "01").map((e) => e.kind)).toContain("merged");
+
+    // The enlisted agent's checkout was not moved, not advanced and not
+    // written: still on the created pool branch, at the same commit, with
+    // its uncommitted work, and without the other ticket's file.
+    expect(currentBranchOf(poolDir)).toBe(created);
+    expect(shaAt(poolDir, "HEAD")).toBe(headBefore);
+    expect(readFileSync(join(poolDir, "wip.txt"), "utf8")).toBe("uncommitted\n");
+    expect(existsSync(join(poolDir, "ordinary.txt"))).toBe(false);
+  });
+
   it("withholds a ticket blocked by the enlisted one until the merge lands", async () => {
     const poolDir = gitTerminalPool([
       {
@@ -5566,6 +5729,153 @@ describe("enlisted ticket lifecycle", () => {
         second.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status ===
         "done",
       "enlist-1 done after the restart",
+    );
+  });
+
+  it("a re-adopted enlisted pane keeps reporting its Turn state after the restart", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    const rig = stubHarness(poolDir, {});
+    const harnesses = { ...rig.harnesses, opencode: rig.harnesses.stub };
+    const first = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await first.start();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+      workspaceId: "ws-operator",
+    });
+    expect(
+      (await enlist(first, { becomes: "ticket", paneId: "pane-op", title: "Report", spec: "" }))
+        .status,
+    ).toBe(201);
+    await first.shutdown();
+    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+
+    const second = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await second.start();
+    await waitFor(
+      () =>
+        second.latest?.state.tickets.find((t) => t.id === "enlist-1")?.liveAttempt
+          ?.paneId === "pane-op",
+      "the re-adopted enlisted attempt",
+    );
+    const lastReport = () => {
+      const reports = fake.requests.filter(
+        (r) => r.method === "pane.report_agent" && r.params.pane_id === "pane-op",
+      );
+      return reports.length > 0 ? reports[reports.length - 1]!.params.state : null;
+    };
+    // The pane is waiting on the operator, so the sidebar reads blocked, not
+    // a working pinned at boot; and it follows the agent from then on.
+    await waitFor(() => lastReport() === "blocked", "blocked after the restart");
+    fake.setPaneContent("pane-op", OPENCODE_WORKING);
+    await waitFor(() => lastReport() === "working", "working once the agent replies");
+    fake.setPaneContent("pane-op", OPENCODE_WAITING);
+    await waitFor(() => lastReport() === "blocked", "blocked once it waits again");
+  });
+
+  it("answering the restart interrupt lets an enlisted pane go without closing it, and the re-run stays out of the found checkout", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    const rig = stubHarness(poolDir, {});
+    const harnesses = { ...rig.harnesses, opencode: rig.harnesses.stub };
+    const first = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await first.start();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+      workspaceId: "ws-operator",
+    });
+    expect(
+      (await enlist(first, { becomes: "ticket", paneId: "pane-op", title: "Let go", spec: "" }))
+        .status,
+    ).toBe(201);
+    await first.shutdown();
+    rmSync(join(poolDir, "runs", "server.pid"), { force: true });
+
+    const second = await startServer(poolDir, harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await second.start();
+    await waitFor(
+      () =>
+        second.latest?.state.interrupts.some(
+          (i) => i.ticketId === "enlist-1" && i.kind === "checkpoint",
+        ) === true,
+      "the adoption interrupt",
+    );
+    const interrupt = second.latest!.state.interrupts.find((i) => i.ticketId === "enlist-1")!;
+    // The interrupt promises what the answer delivers: the pane is let go.
+    expect(interrupt.body).toContain("never closed");
+    expect(interrupt.body).not.toContain("the pane is closed");
+
+    const resume = await fetch(`${second.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "enlist-1", action: "resume" }),
+    });
+    expect(resume.status).toBe(202);
+    await waitFor(
+      () =>
+        eventsOf(poolDir, "enlist-1").some(
+          (e) => e.attempt === 2 && e.kind === "spawned",
+        ),
+      "the re-run as an ordinary engine-launched attempt",
+    );
+
+    // Never closed, the identity released, attempt 1 recorded no exit, and
+    // the re-run launched outside the operator's checkout.
+    expect(
+      fake.requests.some((r) => r.method === "pane.close" && r.params.pane_id === "pane-op"),
+    ).toBe(false);
+    expect(
+      fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-op"),
+    ).toBe(false);
+    expect(
+      fake.requests.some(
+        (r) => r.method === "pane.release_agent" && r.params.pane_id === "pane-op",
+      ),
+    ).toBe(true);
+    const events = eventsOf(poolDir, "enlist-1") as {
+      kind: string;
+      attempt: number;
+      payload: { cwd?: string };
+    }[];
+    expect(events.some((e) => e.kind === "exited" && e.attempt === 1)).toBe(false);
+    const rerun = events.find((e) => e.attempt === 2 && e.kind === "spawned")!;
+    expect(realpathSync(rerun.payload.cwd!)).not.toBe(realpathSync(worktree));
+    expect(existsSync(worktree)).toBe(true);
+    expect(branchNamesIn(poolDir)).toContain("feature/x");
+    await waitFor(
+      () =>
+        second.latest?.state.tickets.find((t) => t.id === "enlist-1")?.status === "done",
+      "the re-run done",
     );
   });
 
