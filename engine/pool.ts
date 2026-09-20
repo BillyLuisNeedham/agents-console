@@ -25,6 +25,12 @@ export interface TicketMarker {
    * -spawn- namespace is reserved for files that carry it.
    */
   spawnedBy?: string;
+  /**
+   * Set on engine-enlisted tickets (issue #101): the herdr pane the operator
+   * picked. The engine writes the field; the `enlist-` namespace is reserved
+   * for files that carry it.
+   */
+  enlistedFrom?: string;
 }
 
 export const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
@@ -57,12 +63,14 @@ function parseMarkerLine(
   const blockedBy =
     blockedRaw === "none" ? [] : blockedRaw.split(",").filter(Boolean);
   const spawnedBy = fields.get("spawned-by");
+  const enlistedFrom = fields.get("enlisted-from");
   return {
     id,
     file,
     blockedBy,
     status: status as TicketStatus,
     ...(spawnedBy ? { spawnedBy } : {}),
+    ...(enlistedFrom ? { enlistedFrom } : {}),
   };
 }
 
@@ -107,6 +115,20 @@ export function parseSpawnId(id: string): { parent: string; n: number } | null {
   const match = SPAWN_ID_RE.exec(id);
   if (!match) return null;
   return { parent: match[1], n: Number(match[2]) };
+}
+
+// The engine's id convention for an enlisted ticket (issue #101): `enlist-N`,
+// N counting per pool across the run. Reserved the same way as `-spawn-N`, so
+// a hand-written ticket may not claim the namespace: an enlisted file carries
+// the pane it came from as `enlisted-from=<paneId>`, and one without it fails
+// the load.
+const ENLIST_ID_RE = /^enlist-(\d+)$/;
+
+/** The N of an `enlist-N` id, or null when the id is not one. Exported so the
+ *  engine mints the next id from this one definition, as it does for Spawn. */
+export function parseEnlistId(id: string): number | null {
+  const match = ENLIST_ID_RE.exec(id);
+  return match ? Number(match[1]) : null;
 }
 
 /**
@@ -164,7 +186,17 @@ export function loadPoolMarkers(
     // writes and name the ticket the id already names. A hand-written file
     // without it fails the load; the engine's own files re-load cleanly.
     const spawn = parseSpawnId(marker.id);
-    if (!spawn) continue;
+    if (!spawn) {
+      if (ENLIST_ID_RE.test(marker.id) && marker.enlistedFrom === undefined) {
+        throw new Error(
+          `pool load: ${marker.file}: the 'enlist-' id namespace is reserved ` +
+            "for engine-enlisted tickets (issue #101); a hand-written ticket " +
+            "may not use it, and an enlisted one carries " +
+            "enlisted-from=<paneId> in its marker",
+        );
+      }
+      continue;
+    }
     if (marker.spawnedBy !== spawn.parent) {
       throw new Error(
         `pool load: ${marker.file}: the '-spawn-' id namespace is reserved ` +

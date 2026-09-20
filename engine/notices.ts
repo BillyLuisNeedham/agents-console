@@ -12,7 +12,18 @@ import { git } from "./worktrees.ts";
 export interface Notice {
   to: string;
   from: string;
-  kind: "ticket-ended" | "conversation-ended";
+  /**
+   * "ticket-ended" and "conversation-ended" are the two things a spawned
+   * child reports back. "enlist-teaching" and "opening-turn" are the Turns an
+   * enlisted Conversation starts with (issue #101): the operator's opening
+   * Turn and the Spawn teaching travel the same queue-then-deliver path as a
+   * Notice, so both land only while the pane is waiting.
+   */
+  kind:
+    | "ticket-ended"
+    | "conversation-ended"
+    | "enlist-teaching"
+    | "opening-turn";
   text: string;
 }
 

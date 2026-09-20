@@ -15,6 +15,7 @@ import {
   type DetailTab,
   type DetailTabView,
   type DetailView,
+  type EnlistBlockRow,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
@@ -29,6 +30,7 @@ import {
   ConversationsTray,
   type ConversationsOptions,
 } from "./conversations";
+import { EnlistStore, type EnlistHandler, type ListPanesHandler } from "./enlist";
 import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
@@ -68,6 +70,8 @@ export interface AppModel {
   error: string | null;
   /** The Stop control and the stopped-server notice (issue #97). */
   stop: StopView;
+  /** The pool is Terminal-backed: the header offers Enlist only then. */
+  terminalBacked: boolean;
   detail: DetailView | null;
   /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
   detailTabs: DetailTabView[] | null;
@@ -85,6 +89,8 @@ export interface AppModel {
   conversationsTray: ConversationTrayRow[];
   /** The pool's default Assignment, shown as the New Conversation form's placeholders. */
   conversationDefaults: { harness?: string; model?: string; drivers?: string };
+  /** The Enlist form's "Blocks" tick list: every ticket not yet done. */
+  enlistBlocks: EnlistBlockRow[];
 }
 
 export interface Handlers {
@@ -108,6 +114,11 @@ export type ConsoleViewOptions = NeedsInputOptions &
     /** "Open in herdr": focus a ticket's or a Conversation's pane; both are
      *  the same server-side seam, keyed by id. Resolves false on failure. */
     onFocusTerminal: (id: string) => Promise<boolean>;
+    /** The Enlist picker's pane read (issue #101): fetched when the picker
+     *  opens, never through the snapshot. */
+    onListPanes: ListPanesHandler;
+    /** The Enlist form's submit (issue #101): the engine writes the ticket. */
+    onEnlist: EnlistHandler;
   };
 
 /**
@@ -126,6 +137,7 @@ export class ConsoleView {
   private readonly drawers = new Drawers();
   private readonly needsInput: NeedsInputTray;
   private readonly conversationsTray: ConversationsTray;
+  private readonly enlist: EnlistStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   // The selection survives the rebuild (snapshots never close the panel or
   // lose the selection); its one-hop flow neighbourhood is recomputed from
@@ -144,10 +156,18 @@ export class ConsoleView {
   constructor(options: ConsoleViewOptions) {
     this.onFocusTerminal = options.onFocusTerminal;
     this.conversationsTray = new ConversationsTray(options);
+    this.enlist = new EnlistStore({
+      onListPanes: options.onListPanes,
+      onEnlist: options.onEnlist,
+      onChange: options.onChange,
+    });
     this.canvas = new Canvas({
       onCardTap: (nodeId) => this.selectNode(nodeId),
       onFocusTerminal: options.onFocusTerminal,
       onNewConversation: () => this.conversationsTray.openForm(),
+      onEnlist: () => {
+        void this.enlist.openPicker();
+      },
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
@@ -208,6 +228,7 @@ export class ConsoleView {
       this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),
       }),
+      this.enlist.render(model.enlistBlocks),
     );
     const content = h(
       "div",

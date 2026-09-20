@@ -93,6 +93,8 @@ const consoleView = new ConsoleView({
   onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
   onChange: () => render(),
   onFocusTerminal: (ticketId) => terminal.focus(ticketId),
+  onListPanes: () => client.listPanes(),
+  onEnlist: (request) => client.enlist(request),
   onStart: (request) => client.startConversation(request),
   onEnd: (conversationId, closing) =>
     client

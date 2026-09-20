@@ -49,7 +49,9 @@
  * (`<ws>:t<N>` / `<ws>:p<N>`), `pane.list` honours a `workspace_id` filter,
  * and `removeWorkspace` closes one out from under a running pool the way an
  * operator does. `pane.report_agent` and `pane.release_agent` are recorded
- * and acknowledged.
+ * and acknowledged, and bind or drop the pane's agent the way herdr does, so
+ * `agent.list` serves the engine-reported agents; `seedAgent` adds an
+ * operator-opened agent (issue #101's picker subject) directly.
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -100,6 +102,42 @@ export interface ExecutingFakeHerdrOptions {
 // so the engine's shell-settle gate sees a shell that has drawn its prompt.
 export const FAKE_SHELL_PROMPT = "$ ";
 
+/**
+ * An agent the daemon's `agent.list` reports for a pane the engine never
+ * opened: the operator's own terminal, the enlist picker's subject. Seeded
+ * directly, where a pane the engine opens is reported through
+ * `pane.report_agent` (and removed again by `pane.release_agent`).
+ */
+export interface FakeHerdrAgentSeed {
+  paneId: string;
+  agent: string | null;
+  status?: string;
+  title?: string;
+  cwd?: string | null;
+  /** What the pane shows: a harness frame for Turn-state reads. Defaults to empty. */
+  rendered?: string;
+  /** The pane's tab id, if a test wants a known one. Defaults to `tab-<paneId>`. */
+  tabId?: string;
+  /** The herdr workspace the pane belongs to, when a test seeds one that a
+   *  workspace-scoped `pane.list` must find (boot reconciliation of an
+   *  enlisted pane). Absent seeds a pane with no workspace, as before. */
+  workspaceId?: string;
+  /** The harness session herdr reports for the pane, named in provenance. */
+  sessionId?: string;
+}
+
+/** One entry in the fake's `agent.list`, in the shape the engine parses. */
+interface FakeAgentRecord {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  harness: string | null;
+  status: string;
+  title: string;
+  directory: string | null;
+  sessionId: string | null;
+}
+
 export interface ExecutingFakeHerdr {
   socketPath: string;
   requests: FakeHerdrRequest[];
@@ -110,6 +148,8 @@ export interface ExecutingFakeHerdr {
   failNextCall: (method: string, times?: number) => void;
   close: () => Promise<void>;
   injectPane: (paneId: string) => void;
+  /** Offer an operator-opened agent on the daemon's `agent.list`. */
+  seedAgent: (seed: FakeHerdrAgentSeed) => void;
   /** Close a workspace out from under the pool, the way an operator does mid-run (issue #94). */
   removeWorkspace: (workspaceId: string) => void;
   /** The workspace ids the fake currently holds, seeded plus created. */
@@ -117,6 +157,8 @@ export interface ExecutingFakeHerdr {
   endPane: (paneId: string) => void;
   setPaneContent: (paneId: string, text: string) => void;
   dropPaneInput: (paneId: string, count: number) => void;
+  /** The tab's current label, from `tab.create` or a later `tab.rename`. */
+  tabLabel: (tabId: string) => string | null;
 }
 
 export async function startExecutingFakeHerdr(
@@ -150,6 +192,14 @@ export async function startExecutingFakeHerdr(
   };
   const requests: FakeHerdrRequest[] = [];
   const submitted: string[] = [];
+  // The agents `agent.list` reports (issue #101): engine-reported ones (a
+  // pane the fake created and the engine called `pane.report_agent` about)
+  // and operator ones seeded by a test. Released or ended panes leave it,
+  // as they leave herdr's sidebar.
+  const agents = new Map<string, FakeAgentRecord>();
+  // Each tab's label, so `tab.rename` has somewhere to land and a test can
+  // read what the engine renamed an enlisted pane's tab to (issue #101).
+  const tabLabels = new Map<string, string>();
   let minted = 0;
   const panes = new Map<
     string,
@@ -182,6 +232,7 @@ export async function startExecutingFakeHerdr(
       pane.alive = false;
       pane.proc?.kill();
     }
+    agents.delete(paneId);
     broadcast(event, { pane_id: paneId, workspace_id: "w1" });
   };
   // herdr pushes every event to every subscriber; the engine filters. A
@@ -254,6 +305,7 @@ export async function startExecutingFakeHerdr(
         // a tab landed off the ids alone (issue #94).
         const tabId = workspaceId !== null ? `${workspaceId}:t${minted}` : `tab-${minted}`;
         const paneId = workspaceId !== null ? `${workspaceId}:p${minted}` : `pane-${minted}`;
+        tabLabels.set(tabId, String(msg.params.label ?? ""));
         panes.set(paneId, {
           tabId,
           workspaceId,
@@ -301,9 +353,60 @@ export async function startExecutingFakeHerdr(
             label: typeof msg.params.label === "string" ? msg.params.label : "",
           },
         });
-      } else if (msg.method === "pane.report_agent" || msg.method === "pane.release_agent") {
-        // Recorded in `requests` like every call; the daemon answers ok.
+      } else if (msg.method === "pane.report_agent") {
+        // Recorded in `requests` like every call; the daemon answers ok and,
+        // like herdr, binds the agent to the pane so `agent.list` lists it.
+        const paneId = String(msg.params.pane_id ?? "");
+        const pane = panes.get(paneId);
+        const agent = typeof msg.params.agent === "string" ? msg.params.agent : null;
+        if (pane && agent !== null) {
+          agents.set(paneId, {
+            paneId,
+            tabId: pane.tabId,
+            workspaceId: pane.workspaceId ?? "w1",
+            harness: agent,
+            status: typeof msg.params.state === "string" ? msg.params.state : "working",
+            title: typeof msg.params.message === "string" ? msg.params.message : "",
+            directory: pane.cwd,
+            sessionId:
+              typeof msg.params.session_id === "string" ? msg.params.session_id : null,
+          });
+        }
         respond({ type: "ok" });
+      } else if (msg.method === "pane.release_agent") {
+        // The attempt ended: its pane leaves herdr's sidebar, as it leaves
+        // `agent.list` here.
+        agents.delete(String(msg.params.pane_id ?? ""));
+        respond({ type: "ok" });
+      } else if (msg.method === "tab.rename") {
+        // The enlist claim renames the operator's tab to the attempt label
+        // (issue #101). Recorded in `requests` like every call; the daemon
+        // answers ok and its listing shows the new label.
+        const tabId = String(msg.params.tab_id ?? "");
+        if (tabLabels.has(tabId)) {
+          tabLabels.set(tabId, String(msg.params.label ?? ""));
+        }
+        respond({ type: "ok" });
+      } else if (msg.method === "agent.list") {
+        respond({
+          type: "agent_list",
+          agents: [...agents.values()].map((entry) => ({
+            pane_id: entry.paneId,
+            tab_id: entry.tabId,
+            workspace_id: entry.workspaceId,
+            terminal_id: `term-${entry.paneId}`,
+            session_id: entry.sessionId,
+            agent: entry.harness,
+            display_agent: entry.harness,
+            agent_status: entry.status,
+            cwd: entry.directory,
+            foreground_cwd: entry.directory,
+            terminal_title: entry.title,
+            terminal_title_stripped: entry.title,
+            focused: false,
+            revision: 0,
+          })),
+        });
       } else if (msg.method === "pane.list") {
         const scope =
           typeof msg.params.workspace_id === "string" ? msg.params.workspace_id : null;
@@ -418,10 +521,11 @@ export async function startExecutingFakeHerdr(
         // issue #61): they leave the listing and one `tab_closed` goes out,
         // with no `pane_closed` for any of them.
         const tabId = String(msg.params.tab_id ?? "");
-        for (const pane of panes.values()) {
+        for (const [paneId, pane] of panes.entries()) {
           if (pane.tabId !== tabId) continue;
           pane.alive = false;
           pane.proc?.kill();
+          agents.delete(paneId);
         }
         respond({ type: "ok" });
         broadcast("tab_closed", { tab_id: tabId, workspace_id: "w1" });
@@ -458,6 +562,43 @@ export async function startExecutingFakeHerdr(
           resolve();
         });
       }),
+    seedAgent: (seed) => {
+      // An operator-opened agent is a real pane too, not just a listing
+      // entry: enlist reads its rendered frame for Turn state and types the
+      // teaching Turn into it (issue #101). A seed for a pane the fake
+      // already has (one the engine opened) only rebinds the agent.
+      if (!panes.has(seed.paneId)) {
+        const tabId = seed.tabId ?? `tab-${seed.paneId}`;
+        tabLabels.set(tabId, seed.title ?? "");
+        panes.set(seed.paneId, {
+          tabId,
+          workspaceId: seed.workspaceId ?? null,
+          cwd: seed.cwd ?? "/tmp",
+          alive: true,
+          buffer: "",
+          rendered: seed.rendered ?? "",
+          booted: true,
+          dropInputs: 0,
+          hideInputs: 0,
+          inputArea: "",
+          hideEcho: false,
+          swallow: false,
+          createdAt: 0,
+        });
+      }
+      const pane = panes.get(seed.paneId);
+      agents.set(seed.paneId, {
+        paneId: seed.paneId,
+        tabId: pane?.tabId ?? seed.tabId ?? `tab-${seed.paneId}`,
+        workspaceId: pane?.workspaceId ?? "w-seed",
+        harness: seed.agent,
+        status: seed.status ?? "idle",
+        title: seed.title ?? "",
+        directory:
+          seed.cwd !== undefined ? seed.cwd : (pane?.cwd ?? "/tmp"),
+        sessionId: seed.sessionId ?? null,
+      });
+    },
     injectPane: (paneId) => {
       panes.set(paneId, {
         tabId: "tab-ghost",
@@ -491,5 +632,6 @@ export async function startExecutingFakeHerdr(
       const pane = panes.get(paneId);
       if (pane) pane.dropInputs += count;
     },
+    tabLabel: (tabId) => tabLabels.get(tabId) ?? null,
   };
 }

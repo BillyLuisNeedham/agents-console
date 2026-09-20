@@ -52,7 +52,18 @@ const READINESS_POLL_MS = 500;
 // A TUI that cannot reach its ready frame within this bound is botched: the
 // caller closes the pane and the spawn surfaces as a failure, never a
 // silently idle tab.
-const READINESS_TIMEOUT_MS = 60_000;
+// Exported because an enlist (issue #101) gives a working pane the same bound
+// to reach waiting so the teaching Turn can be typed; `stillWorkingReason` is
+// the refusal both enlist arms answer with when it expires.
+export const READINESS_TIMEOUT_MS = 60_000;
+
+export function stillWorkingReason(waitMs: number): string {
+  const bound = waitMs >= 1000 ? `${Math.round(waitMs / 1000)} s` : `${waitMs} ms`;
+  return (
+    `the pane was still working after ${bound}, so the teaching Turn could ` +
+    "not be typed; enlist it once its agent is waiting on you"
+  );
+}
 // claude's first-run trust dialog marks a directory claude has not seen; the
 // "No, exit" button label names it, and answering it needs pacing — a key
 // sent too early is dropped (prototype finding).

@@ -8,7 +8,10 @@
 
 import type {
   ConversationView,
+  EnlistRequest,
+  EnlistResponse,
   EnrichedSnapshot,
+  PanesResponse,
   ResumeAction,
   StartConversationRequest,
   TerminalPeekResponse,
@@ -268,6 +271,30 @@ export class PoolClient {
   }
 
   /**
+   * The live herdr panes an enlist could take in (issue #101), fetched when
+   * the picker opens rather than through the snapshot: the list is ephemeral
+   * and not pool state. Each pane carries the engine's verdict and, when it
+   * is ineligible, the reason beside it. A headless pool refuses with a 409
+   * `reason`; a daemon failure is a 502 `error`.
+   */
+  async listPanes(): Promise<PanesResponse> {
+    const res = await fetch(`${this.base}/api/panes`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const reason =
+        body && typeof (body as { reason?: unknown }).reason === "string"
+          ? (body as { reason: string }).reason
+          : null;
+      const error =
+        body && typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      throw new Error(reason ?? error ?? `list panes failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /**
    * Start a Conversation (ADR-0018). 409 with a reason when the pool is not
    * terminal-backed; the reason (or a generic message) becomes the thrown
    * Error's message, which the New Conversation form shows inline.
@@ -307,6 +334,29 @@ export class PoolClient {
     if (!res.ok) throw new Error(`end conversation failed: ${res.status}`);
     const body = await res.json();
     return body.snapshot;
+  }
+
+  /**
+   * Enlist a live herdr pane as a Ticket (issue #101). 409 with a reason
+   * when the engine refuses (the pane is gone, already in the pool, a branch
+   * could not be made, the teaching Turn never landed); the reason becomes
+   * the thrown Error's message, which the Enlist form shows inline.
+   */
+  async enlist(request: EnlistRequest): Promise<EnlistResponse> {
+    const res = await fetch(`${this.base}/api/enlist`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const reason =
+        body && typeof (body as { reason?: unknown }).reason === "string"
+          ? (body as { reason: string }).reason
+          : null;
+      throw new Error(reason ?? `enlist failed: ${res.status}`);
+    }
+    return res.json();
   }
 
   /**

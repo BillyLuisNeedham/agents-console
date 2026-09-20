@@ -32,6 +32,7 @@ function snap(seq: number): EnrichedSnapshot {
           blockedBy: [],
           status: "ready",
           mergePending: false,
+          enlisted: false,
           assignment: { harness: null, model: null, drivers: "implement" },
           liveAttempt: null,
         },
@@ -453,6 +454,7 @@ describe("PoolClient Conversations routes (issue #60)", () => {
       branch: null,
       turn: { state: "working", lastLine: "", idleSince: null },
       children: [],
+      enlisted: false,
     };
     const { fetch, calls } = jsonFetch(201, { conversation });
     globalThis.fetch = fetch;
