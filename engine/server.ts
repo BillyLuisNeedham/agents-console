@@ -80,6 +80,7 @@ import {
   focusPane,
   peekPane,
 } from "./herdr.ts";
+import { listEnlistPanes, type EnlistRequest, type EnlistResponse } from "./enlist.ts";
 import { createJev, type Jev } from "./jev.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
@@ -116,6 +117,19 @@ export interface PoolServerOptions {
   jev?: Jev;
   /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
+  /** How often an enlisted attempt re-reads its pane for Turn state (issue
+   *  #101); tests shrink it so a queued teaching Turn lands without a
+   *  real-time wait. Production leaves it unset (2 s). */
+  enlistPollMs?: number;
+  /** How often a live Conversation re-reads its pane for Turn state (issue
+   *  #101); tests shrink it so an enlisted Conversation's teaching, opening
+   *  and Notice Turns land without a real-time wait. Production leaves it
+   *  unset (2 s). */
+  conversationPollMs?: number;
+  /** How long an enlist waits for a working pane to reach waiting before
+   *  refusing (issue #101); tests shrink it. Production leaves it unset (a
+   *  Launch's readiness bound). */
+  enlistTeachingWaitMs?: number;
   /**
    * What a `POST /api/stop` sets in motion once the route has accepted it
    * (issue #97). The CLI passes the same stop-then-exit the signal handler
@@ -168,6 +182,10 @@ export interface PoolServer {
    *  whatever the engine's endConversation throws (no live conversation
    *  with that id). */
   endConversation: (id: string, closing?: string) => Promise<void>;
+  /** Enlist a live herdr pane as a Ticket (issue #101), for tests that would
+   *  rather call through than round-trip HTTP. Throws "pool not started" or
+   *  the engine's own reason, which the POST route maps to a 409. */
+  enlist: (req: EnlistRequest) => Promise<EnlistResponse>;
 }
 
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
@@ -198,6 +216,9 @@ function enrich(
           ...UNASSIGNED_ASSIGNMENT_VIEW,
         },
         liveAttempt: snapshot.liveAttempts[m.id] ?? null,
+        // An enlisted ticket (issue #101) reads "as found" where a spawned
+        // one names its model: the marker field is the durable fact.
+        enlisted: m.enlistedFrom !== undefined,
       })),
       conversations: snapshot.conversations,
       log: snapshot.state.log,
@@ -1010,6 +1031,13 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       harnesses,
       herdrSocket,
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
+      ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
+      ...(options.conversationPollMs !== undefined
+        ? { conversationPollMs: options.conversationPollMs }
+        : {}),
+      ...(options.enlistTeachingWaitMs !== undefined
+        ? { enlistTeachingWaitMs: options.enlistTeachingWaitMs }
+        : {}),
       ...(jev !== undefined ? { jev } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
@@ -1099,16 +1127,24 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return run.endConversation(id, closing);
   }
 
+  // Enlist (issue #101): the same thin proxy shape as startConversation,
+  // behind POST /api/enlist below.
+  async function enlist(req: EnlistRequest): Promise<EnlistResponse> {
+    const run = currentRun;
+    if (!run) throw new Error("pool not started");
+    return run.enlist(req);
+  }
+
   // The shared first half of both terminal endpoints: the id (a ticket's or,
   // since issue #60, a Conversation's) -> pane translation, read from the
   // last snapshot alone: a ticket's Live attempt pane or a Conversation
-  // view's pane, both the engine's own record of what it spawned. Unknown
+  // view's pane, both the engine's own record of the panes it holds. Unknown
   // ids take the same "no pane" answer as headless, finished, and
   // never-spawned ones and ended Conversations, so the endpoints never
-  // reveal which ids exist and every no-pane case is one shape. The
-  // spawned-only guarantee (user story 12) is the record's provenance: the
-  // engine registers a pane only when it opened the tab itself, so there
-  // is nothing to allowlist against.
+  // reveal which ids exist and every no-pane case is one shape. Since issue
+  // #101 the guarantee is engine registration, not who opened the tab: an
+  // enlisted pane is registered by the engine exactly as a spawned one is,
+  // so it resolves here and a pane the engine never registered never does.
   function resolveTerminalRequest(ticketId: string):
     | { ok: true; paneId: string }
     | { ok: false; status: number; error: string } {
@@ -1358,6 +1394,68 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
         }
 
+        // Enlist a live herdr pane as a Ticket or a Conversation (issue #101).
+        // The body is the one wire shape engine/enlist.ts declares; `becomes`
+        // is fixed at enlist time and chooses the arm. A well-formed request
+        // the pool refuses (pane gone, already in the pool, branch creation
+        // failing, teaching undeliverable) is the Conversation start route's
+        // 409 `reason` envelope, so the Console's form surfaces it inline.
+        if (pathname === "/api/enlist" && req.method === "POST") {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const paneId = typeof fields.paneId === "string" ? fields.paneId : "";
+          if (!paneId) {
+            return Response.json({ reason: "paneId is required" }, { status: 400 });
+          }
+          const title = typeof fields.title === "string" ? fields.title : "";
+          // `becomes` is fixed at enlist time and the wire type is a two
+          // member union, so an absent or misspelled value is refused rather
+          // than defaulted to a Ticket: enlisting is not undoable, and
+          // silently picking the kind that has an end is the wrong guess to
+          // make on the operator's behalf.
+          if (fields.becomes !== "ticket" && fields.becomes !== "conversation") {
+            return Response.json(
+              { reason: 'becomes must be "ticket" or "conversation"' },
+              { status: 400 },
+            );
+          }
+          try {
+            if (fields.becomes === "conversation") {
+              const opening =
+                typeof fields.opening === "string" ? fields.opening : undefined;
+              const answer = await enlist({
+                becomes: "conversation",
+                paneId,
+                title,
+                ...(opening !== undefined ? { opening } : {}),
+              });
+              return Response.json(answer, { status: 201 });
+            }
+            const spec = typeof fields.spec === "string" ? fields.spec : "";
+            const blocks = Array.isArray(fields.blocks)
+              ? fields.blocks.filter((id): id is string => typeof id === "string")
+              : undefined;
+            const answer = await enlist({
+              becomes: "ticket",
+              paneId,
+              title,
+              spec,
+              ...(blocks !== undefined ? { blocks } : {}),
+            });
+            return Response.json(answer, { status: 201 });
+          } catch (err) {
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
         if (pathname === "/api/conversations/end" && req.method === "POST") {
           let body: unknown;
           try {
@@ -1433,7 +1531,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         // "Open in herdr": focus the attempt's pane, jumping the operator's
-        // herdr TUI to the attempt's tab. Same translation and spawned-only
+        // herdr TUI to the attempt's tab. Same translation and registration
         // guard as peek; a mutating call, so POST only.
         if (pathname === "/api/terminal/focus" && req.method === "POST") {
           const ticketId = url.searchParams.get("ticket") ?? "";
@@ -1447,6 +1545,48 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           try {
             await focusPane(herdrSocket, resolved.paneId);
             return Response.json({ ok: true, paneId: resolved.paneId });
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 502 },
+            );
+          }
+        }
+
+        // Enlist discovery (issue #101): the live herdr panes, read over the
+        // socket on request and never through the snapshot (pane lists are
+        // ephemeral). Only a terminal-backed pool has panes to offer, so a
+        // headless one refuses with the same `reason` envelope the
+        // Conversation routes use; the Console hides the button anyway.
+        // Eligibility is the engine's judgement (engine/enlist.ts); the
+        // registered pane ids are the engine's own record, read from the last
+        // snapshot: a ticket's Live attempt pane and a live Conversation's.
+        if (pathname === "/api/panes") {
+          if (readConfig(poolDir).terminal !== "herdr") {
+            return Response.json(
+              {
+                reason:
+                  "enlist requires a terminal-backed pool " +
+                  '(set console.json "terminal": "herdr")',
+              },
+              { status: 409 },
+            );
+          }
+          const registeredPanes = new Set<string>();
+          for (const ticket of latest?.state.tickets ?? []) {
+            const paneId = ticket.liveAttempt?.paneId;
+            if (paneId) registeredPanes.add(paneId);
+          }
+          for (const conversation of latest?.state.conversations ?? []) {
+            if (conversation.paneId) registeredPanes.add(conversation.paneId);
+          }
+          try {
+            const panes = await listEnlistPanes({
+              socketPath: herdrSocket,
+              poolDir,
+              registeredPanes,
+            });
+            return Response.json(panes);
           } catch (err) {
             return Response.json(
               { error: err instanceof Error ? err.message : String(err) },
@@ -1557,6 +1697,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     settled,
     startConversation,
     endConversation,
+    enlist,
     url: `http://localhost:${server.port}`,
     close: async () => {
       await server.stop(true);

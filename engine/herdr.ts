@@ -434,6 +434,69 @@ export async function listPaneIds(
 }
 
 /**
+ * One pane as herdr's `agent.list` reports it (the enlist picker's raw
+ * material, issue #101). herdr lists an entry per pane it binds an agent to,
+ * whether the engine reported the agent or herdr detected one itself; the
+ * fields are the ones the picker shows. `directory` is the pane's cwd (herdr
+ * reports no branch, so the engine resolves that itself).
+ */
+export interface HerdrAgent {
+  paneId: string;
+  /** The pane's tab: what an enlist relabels (`relabelTab`), null when the
+   *  daemon does not report one. */
+  tabId: string | null;
+  harness: string | null;
+  status: string;
+  title: string;
+  directory: string | null;
+  /** The harness session herdr reports for the pane, when it reports one:
+   *  named in an enlisted ticket's provenance. Null when absent (the fake
+   *  and some daemon versions carry no such field). */
+  sessionId: string | null;
+}
+
+/** The string field of an `AgentInfo`-shaped record, or null. */
+function stringField(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * The live agents herdr holds, from `agent.list`: every pane with an agent
+ * bound to it, engine-reported or herdr-detected. The enlist route reads it
+ * through the engine, never the Console, and judges eligibility itself
+ * (engine/enlist.ts). A daemon answer missing the `agents` array reads as
+ * none, the way `listPaneIds` reads a missing `panes` array.
+ */
+export async function listAgents(socketPath: string): Promise<HerdrAgent[]> {
+  const list = await herdrRpc(socketPath, "agent.list", {});
+  const agents =
+    typeof list === "object" && list !== null
+      ? (list as { agents?: unknown }).agents
+      : undefined;
+  if (!Array.isArray(agents)) return [];
+  return (agents as Record<string, unknown>[]).flatMap((agent) => {
+    const paneId = stringField(agent.pane_id);
+    if (paneId === null) return [];
+    return [
+      {
+        paneId,
+        tabId: stringField(agent.tab_id),
+        harness: stringField(agent.agent),
+        status: stringField(agent.agent_status) ?? "unknown",
+        title:
+          stringField(agent.terminal_title) ??
+          stringField(agent.terminal_title_stripped) ??
+          stringField(agent.title) ??
+          stringField(agent.name) ??
+          "",
+        directory: stringField(agent.cwd) ?? stringField(agent.foreground_cwd),
+        sessionId: stringField(agent.session_id) ?? stringField(agent.session),
+      },
+    ];
+  });
+}
+
+/**
  * Send input to a pane, exactly as the operator's keystrokes would land. A
  * literal `\r` inside text is pasted data, not a submit (verified herdr
  * behaviour), so a command line travels as text and its Enter as a key. The
@@ -647,4 +710,24 @@ export async function closeTab(
   tabId: string,
 ): Promise<void> {
   await herdrRpc(socketPath, "tab.close", { tab_id: tabId });
+}
+
+/**
+ * Relabel a tab (`tab.rename`): the enlist claim renames the operator's
+ * existing tab to the attempt label the engine would have given a tab it
+ * opened itself (ADR-0015), so an enlisted pane reads like a spawned one in
+ * the tab bar. Best-effort, like every herdr call here: a daemon that refuses
+ * it leaves the operator's original label in place, not a broken enlist.
+ *
+ * Inference: the real daemon's relabel method name is unverified in this
+ * repository; the shared executing fake is the one contract this call is
+ * exercised against, and it answers `tab.rename` with `{ tab_id, label }`.
+ * If the daemon spells it otherwise, this is the one line to change.
+ */
+export async function relabelTab(
+  socketPath: string,
+  tabId: string,
+  label: string,
+): Promise<void> {
+  await herdrRpc(socketPath, "tab.rename", { tab_id: tabId, label });
 }

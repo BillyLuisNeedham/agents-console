@@ -13,6 +13,7 @@ import {
   DETAIL_MIN_PX,
   earlierLogOffset,
   initialLogWindow,
+  isTerminalBacked,
   joinStreamFiles,
   logAtBottom,
   logTailOffset,
@@ -22,6 +23,10 @@ import {
   poolStatus,
   projectDetail,
   projectDetailTabs,
+  projectEnlistBlocks,
+  projectEnlistForm,
+  projectEnlistPicker,
+  ENLIST_BECOMES_HINT,
   projectLogPane,
   projectNeedsInput,
   projectPool,
@@ -83,6 +88,7 @@ function ticket(
     blockedBy: [],
     status: "ready",
     mergePending: false,
+    enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
     ...overrides,
@@ -103,6 +109,7 @@ function conversation(
     branch: null,
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
+    enlisted: false,
     ...overrides,
   };
 }
@@ -1991,6 +1998,68 @@ describe("projectPool vitals", () => {
   });
 });
 
+describe("projectPool enlisted attempt", () => {
+  it("shows an enlisted card as found, live, with the found directory's diff", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("enlist-1", {
+            status: "in-progress",
+            enlisted: true,
+            liveAttempt: { attempt: 1, paneId: "pane-op" },
+            assignment: { harness: "opencode", model: null, drivers: "implement" },
+          }),
+        ],
+      },
+    });
+    const view = projectPool(
+      snap,
+      {},
+      { "enlist-1": vitalsState({}, [12, 20]) },
+      {},
+      VITALS_NOW,
+    );
+    const card = view.cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === "enlist-1",
+    );
+    expect(card?.enlisted).toBe(true);
+    // "As found": the harness herdr reported, no model.
+    expect(card?.assignment).toEqual({
+      harness: "opencode",
+      model: null,
+      drivers: "implement",
+    });
+    expect(card?.paneId).toBe("pane-op");
+    expect(card?.vitals?.mode).toBe("live");
+    expect(card?.vitals?.diff).toEqual({ added: 128, removed: 34, fileCount: 6 });
+    expect(card?.vitals?.samples).toEqual([12, 20]);
+  });
+
+  it("projects an enlisted attempt's lifecycle events into the timeline", () => {
+    const view = projectTimeline(
+      {
+        events: [
+          { at: "2026-01-01T00:00:00.000Z", attempt: 1, kind: "scheduled", payload: {} },
+          { at: "2026-01-01T00:00:01.000Z", attempt: 1, kind: "spawned", payload: { pane_id: "pane-op" } },
+          { at: "2026-01-01T00:00:02.000Z", attempt: 1, kind: "exited", payload: { code: 0, status: "done" } },
+          { at: "2026-01-01T00:00:03.000Z", attempt: 1, kind: "merged", payload: {} },
+        ],
+        attempts: [],
+        reconstructed: false,
+        spec: "the spec",
+      },
+      "done",
+    );
+    expect(view.attempts).toHaveLength(1);
+    expect(view.attempts[0].events.map((e) => e.kind)).toEqual([
+      "scheduled",
+      "spawned",
+      "exited",
+      "merged",
+    ]);
+  });
+});
+
 describe("projectPool paneId", () => {
   it("carries paneId to the card for terminal-backed attempts and null for headless ones", () => {
     const snap = snapshot({
@@ -2438,5 +2507,187 @@ describe("poolAssignmentDefaults", () => {
   it("returns nothing when the pool sets no defaults", () => {
     expect(poolAssignmentDefaults({})).toEqual({});
     expect(poolAssignmentDefaults({ harness: "claude" })).toEqual({});
+  });
+});
+
+describe("isTerminalBacked", () => {
+  it("is true only when the pool config says terminal: herdr", () => {
+    expect(isTerminalBacked({ terminal: "herdr" })).toBe(true);
+    expect(isTerminalBacked({})).toBe(false);
+    expect(isTerminalBacked({ terminal: "tmux" })).toBe(false);
+  });
+});
+
+describe("projectEnlistPicker", () => {
+  it("keeps ineligible panes as rows, with their reason, and puts eligible ones first", () => {
+    const rows = projectEnlistPicker([
+      {
+        paneId: "pane-out",
+        harness: "claude",
+        status: "idle",
+        title: "✳ Claude Code",
+        directory: "/other",
+        branch: null,
+        eligible: false,
+        reason: "not a checkout of this pool's repository",
+      },
+      {
+        paneId: "pane-work",
+        harness: "opencode",
+        status: "working",
+        title: "OC | doing work",
+        directory: "/repo/worktree",
+        branch: "feature/x",
+        eligible: true,
+        reason: null,
+      },
+      {
+        paneId: "pane-gemini",
+        harness: "gemini",
+        status: "idle",
+        title: "gemini",
+        directory: "/repo",
+        branch: "main",
+        eligible: false,
+        reason: "no harness the engine knows",
+      },
+    ]);
+    // Eligible first, then the ineligible by harness (claude before gemini).
+    expect(rows.map((r) => r.paneId)).toEqual([
+      "pane-work",
+      "pane-out",
+      "pane-gemini",
+    ]);
+    expect(rows[0]).toEqual({
+      paneId: "pane-work",
+      harness: "opencode",
+      status: "working",
+      title: "OC | doing work",
+      directory: "/repo/worktree",
+      branch: "feature/x",
+      eligible: true,
+      reason: null,
+    });
+    // Every ineligible row keeps its reason; none is dropped.
+    expect(rows.slice(1).every((r) => !r.eligible && r.reason !== null)).toBe(true);
+  });
+
+  it("renders a missing directory and branch as empty strings", () => {
+    const rows = projectEnlistPicker([
+      {
+        paneId: "pane-bare",
+        harness: null,
+        status: "unknown",
+        title: "",
+        directory: null,
+        branch: null,
+        eligible: false,
+        reason: "no harness the engine knows",
+      },
+    ]);
+    expect(rows[0]!.directory).toBe("");
+    expect(rows[0]!.branch).toBe("");
+    expect(rows[0]!.harness).toBeNull();
+  });
+
+  it("is empty when herdr reports no panes", () => {
+    expect(projectEnlistPicker([])).toEqual([]);
+  });
+});
+
+describe("projectEnlistBlocks", () => {
+  it("lists every ticket not yet done, in pool order", () => {
+    const rows = projectEnlistBlocks([
+      ticket("01", { status: "ready" }),
+      ticket("02", { status: "done" }),
+      ticket("03", { status: "checkpoint" }),
+      ticket("04", { status: "in-progress" }),
+    ]);
+    expect(rows).toEqual([
+      { id: "01", title: "ticket 01" },
+      { id: "03", title: "ticket 03" },
+      { id: "04", title: "ticket 04" },
+    ]);
+  });
+
+  it("is empty when every ticket is done", () => {
+    expect(projectEnlistBlocks([ticket("01", { status: "done" })])).toEqual([]);
+  });
+});
+
+describe("enlisted card marker", () => {
+  it("carries the enlisted flag onto the ticket card", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [
+            ticket("enlist-1", {
+              enlisted: true,
+              assignment: { harness: "opencode", model: null, drivers: "implement" },
+            }),
+          ],
+        },
+      }),
+    );
+    const card = view.cards.find(
+      (c) => c.kind === "ticket" && c.ticketId === "enlist-1",
+    );
+    expect(card?.kind).toBe("ticket");
+    if (card?.kind === "ticket") {
+      expect(card.enlisted).toBe(true);
+      expect(card.assignment).toEqual({
+        harness: "opencode",
+        model: null,
+        drivers: "implement",
+      });
+    }
+  });
+
+  it("carries the enlisted flag onto the Conversation card", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          conversations: [
+            conversation("conv-1", {
+              enlisted: true,
+              assignment: { harness: "opencode", model: null, drivers: "implement" },
+            }),
+          ],
+        },
+      }),
+    );
+    const card = view.cards.find(
+      (c) => c.kind === "conversation" && c.conversationId === "conv-1",
+    );
+    expect(card?.kind).toBe("conversation");
+    if (card?.kind === "conversation") {
+      expect(card.enlisted).toBe(true);
+      expect(card.assignment).toEqual({
+        harness: "opencode",
+        model: null,
+        drivers: "implement",
+      });
+    }
+  });
+});
+
+describe("projectEnlistForm", () => {
+  it("Ticket mode shows the spec and the Blocks list, with no note", () => {
+    const view = projectEnlistForm("ticket");
+    expect(view.showsSpec).toBe(true);
+    expect(view.showsBlocks).toBe(true);
+    expect(view.showsOpening).toBe(false);
+    expect(view.note).toBeNull();
+    expect(ENLIST_BECOMES_HINT).toContain("Ticket");
+    expect(ENLIST_BECOMES_HINT).toContain("Conversation");
+  });
+
+  it("Conversation mode shows the opening Turn and the greyed note instead of Blocks", () => {
+    const view = projectEnlistForm("conversation");
+    expect(view.showsSpec).toBe(false);
+    expect(view.showsBlocks).toBe(false);
+    expect(view.showsOpening).toBe(true);
+    expect(view.note).toContain("cannot block");
+    expect(view.note).toContain("Ticket");
   });
 });

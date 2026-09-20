@@ -60,6 +60,11 @@ const EVENT_KINDS = [
   "ended",
   "notice",
   "notice-dropped",
+  // The ticket's solo branch is checked out in a directory the engine does
+  // not own (issue #101: the checkout an enlist moved onto its created pool
+  // branch), so no worktree could be opened and the ticket waits as a
+  // checkpoint until the branch is free.
+  "branch-held",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

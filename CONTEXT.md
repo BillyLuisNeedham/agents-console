@@ -186,6 +186,10 @@ _Avoid_: Turn (that is the exchange itself), idle (the agent waits for the opera
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
 
+**Enlist**:
+The operator's act of making a live herdr pane they opened themselves a Pool citizen, as a Ticket or a Conversation, chosen at that moment and fixed from then on. The pane, its directory and its branch stay as found; the engine claims the pane, teaches its agent the protocol with a Turn, and from then on the result is an ordinary Ticket or Conversation. The engine never closes the enlisted tab, never removes its directory and never deletes its branch. Introduced by ADR-0021 (`docs/adr/0021-enlisted-panes-stay-in-place.md`), closing issue #101.
+_Avoid_: adopt (the engine's word for taking in Spawn proposals at the boundary and terminal attempts at boot), import, attach, claim (that is one step of an Enlist, not the act)
+
 **Wire shape**:
 The declared shape of one message between engine and Console: the snapshot, a response envelope, a request body. Each is declared once, on the engine side; the Console type-imports it, so drift between the two is a compile error, not a silent copy.
 _Avoid_: DTO, schema, contract (all too generic)
