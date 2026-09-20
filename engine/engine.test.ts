@@ -1903,6 +1903,253 @@ describe("lone attempt resolution", () => {
   }, 15000);
 });
 
+// Jev grading (ADR-0023): with a key the engine grades every Attempt in code
+// from the benched rubric and writes no grader tickets; without one, or when
+// an ask falls back, the grader tickets are the path. One instrument per
+// round, never both.
+describe("verify grading with Jev (ADR-0023)", () => {
+  const verifyConfig = (n: number): PoolConfig => ({
+    ...stubConfig,
+    assign: { "01": { verify: n } },
+  });
+
+  // A clean pass, scripted for every rubric question the engine asks.
+  const clean = {
+    ticket_fit: 4,
+    claim_fidelity: 3,
+    log_health: 3,
+    contradicted_claim: 0.1,
+    untouched_criterion: 0.1,
+    failing_at_end: 0.1,
+    summary_claims_tests_pass: 0.1,
+    no_test_run: 0.1,
+    evidence_too_thin: 0.1,
+  };
+
+  it("grades every Attempt through Jev, writes no grader tickets, and selects from the composed scores", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    // One port answers both Attempts: the first its Evidence names cand-1 and
+    // earns a full ticket fit, the second lands low, so the composed scores
+    // separate by more than the outright margin.
+    const jev = fakeJev({
+      answersFor: (evidence) =>
+        JSON.stringify(evidence).includes("cand-1.txt")
+          ? clean
+          : { ...clean, ticket_fit: 1 },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    // The round was graded by Jev: no grader ticket file, no grader process,
+    // no grader card and no head-to-head card (the margin is outright).
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "01-head-to-head.md"))).toBe(false);
+    expect(rig.spawnOrder.filter((id) => /-grader-\d+$/.test(id))).toEqual([]);
+    expect(run.final.tickets).toEqual({ "01": "done" });
+    expect(run.final.log).toContain("ticket 01: grading 2 attempts with Jev");
+
+    // A graded event per Attempt, carrying the composed score, verdict,
+    // reasons and provenance.
+    const graded = readEventLines(poolDir, "01")
+      .filter((e) => e.kind === "graded")
+      .sort((a, b) => a.attempt - b.attempt);
+    expect(graded.map((e) => e.attempt)).toEqual([1, 2]);
+    expect(graded[0]?.payload).toMatchObject({
+      score: 9.4,
+      verdict: "pass",
+      rubric: "jev-grader-rubric/2026-09-20.1",
+      model: "jev-latest",
+      evidenceBudget: "base",
+    });
+    expect(String(graded[0]?.payload.reasons)).toContain("ticket fit: all criteria met");
+    expect(graded[1]?.payload.score).toBe(6.7);
+    expect(graded[1]?.payload.verdict).toBe("pass");
+
+    // Selection used the composed scores: attempt 1 takes it outright.
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "selected")?.payload,
+    ).toEqual({ score: 9.4, margin: 2.7, rule: "outright" });
+    expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
+    expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+    expect(Object.keys(run.final.outcomes)).toEqual(["01"]);
+  }, 15000);
+
+  it("keeps the grader-ticket path when the pool has no Jev key", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      jev: fakeJev({ configured: false }),
+    });
+
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(true);
+    expect(rig.spawnOrder.filter((id) => /-grader-\d+$/.test(id))).toHaveLength(2);
+    expect(run.final.log).toContain(
+      "ticket 01: grading 2 attempts with grader tickets 01-grader-1, 01-grader-2",
+    );
+    // The agent grader's Grade validates without provenance, as before.
+    const graded = readEventLines(poolDir, "01").find((e) => e.kind === "graded");
+    expect(graded?.payload).toEqual({
+      score: 8,
+      verdict: "pass",
+      reasons: "default grade",
+    });
+  }, 15000);
+
+  it("flags a passing weighted score when a passing-tests claim sits beside a failing final run", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    // The fixture: an Outcome whose summary claims a green suite, over a log
+    // whose last test run shows one failure.
+    const failLog = join(poolDir, "fail.log");
+    writeFileSync(failLog, "bun test\n482 pass\n1 fail\n1 error\n");
+    const rig = gitStubHarness(poolDir, {
+      "01": {
+        workFile: "cand.txt",
+        commitMsg: "cand",
+        outcome: { summary: "All tests pass: 483 pass, 0 fail.", commitSha: null },
+        noiseFile: failLog,
+      },
+    });
+    const jev = fakeJev({
+      answersFor: (evidence) => {
+        const text = JSON.stringify(evidence);
+        const contradicted =
+          text.includes("All tests pass") && text.includes("1 fail");
+        return {
+          ticket_fit: 4,
+          claim_fidelity: 3,
+          // Level 2: errors fixed, later run clean, so the weighted score is
+          // a pass. The gates below are the only reason to flag.
+          log_health: 2,
+          contradicted_claim: contradicted ? 0.9 : 0.1,
+          untouched_criterion: 0.1,
+          failing_at_end: contradicted ? 0.95 : 0.1,
+          summary_claims_tests_pass: contradicted ? 0.95 : 0.1,
+          no_test_run: 0.1,
+          evidence_too_thin: 0.1,
+        };
+      },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+    const graded = readEventLines(poolDir, "01").find((e) => e.kind === "graded")!;
+    expect(Number(graded.payload.score)).toBeGreaterThan(6);
+    expect(graded.payload.verdict).toBe("flag");
+    const reasons = String(graded.payload.reasons);
+    expect(reasons).toContain("the log contradicts a result the summary claims");
+    expect(reasons).toContain(
+      "the summary claims passing tests while the last run in the log failed",
+    );
+    // No grader ticket was written for the round.
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(false);
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+  }, 15000);
+
+  it("widens once on trimmed Evidence, then accepts a flagged low-confidence Grade", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(1),
+    });
+    // A log larger than the 20,000-character base tail, so the first Evidence
+    // is trimmed and the widening re-ask is allowed.
+    const bigLog = join(poolDir, "big.log");
+    writeFileSync(bigLog, `${"x".repeat(30_000)}\n`);
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "cand.txt", commitMsg: "cand", noiseFile: bigLog },
+    });
+    const lowFit = {
+      type: "score" as const,
+      score: 3.75,
+      confidence: 0.4,
+      probabilities: { "0": 0.15, "1": 0.15, "2": 0.15, "3": 0.15, "4": 0.4 },
+      legend: {},
+    };
+    const jev = fakeJev({
+      answersFor: () => ({ ...clean, ticket_fit: lowFit }),
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    // Exactly two asks for the one Attempt: the base one and the widening.
+    expect(jev.asks).toHaveLength(2);
+    expect(String(jev.asks[1]!.evidence.log).length).toBeGreaterThan(
+      String(jev.asks[0]!.evidence.log).length,
+    );
+    const graded = readEventLines(poolDir, "01").find((e) => e.kind === "graded")!;
+    expect(graded.payload.verdict).toBe("flag");
+    expect(graded.payload.evidenceBudget).toBe("widened");
+    const reasons = String(graded.payload.reasons);
+    expect(reasons).toContain(
+      "Flagged because ticket fit was judged with too little confidence.",
+    );
+    expect(reasons).toContain("low confidence on ticket_fit");
+    expect(run.interrupts[0]?.kind).toBe("checkpoint");
+  }, 15000);
+
+  it("falls back to grader tickets when a Jev ask fails, with the cause logged once", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    const jev = fakeJev({ cause: "rate-limited" });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    // The whole round fell back: the grader tickets exist and ran, and no
+    // graded event came from Jev.
+    expect(existsSync(join(poolDir, "issues", "01-grader-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-grader-2.md"))).toBe(true);
+    expect(rig.spawnOrder.filter((id) => /-grader-\d+$/.test(id))).toHaveLength(2);
+    expect(
+      run.final.log.filter((line) => line.includes("Jev could not grade")),
+    ).toEqual([
+      expect.stringContaining(
+        "Jev could not grade attempt 1 (rate-limited: scripted by the test)",
+      ),
+    ]);
+    // The port's own notice board logged the cause once, not once per ask.
+    expect(
+      run.final.log.filter((line) => line.startsWith("Jev unavailable")),
+    ).toHaveLength(1);
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "graded"),
+    ).toHaveLength(2);
+  }, 15000);
+});
+
 describe("verify selection", () => {
   const verifyConfig = (n: number): PoolConfig => ({
     ...stubConfig,

@@ -246,6 +246,8 @@ Then write the pool's `verify` skill beside `AGENT.md`: copy
 nothing to fill in. It seeds the grading instructions a grader agent follows when a ticket opts
 into verification: does the work match the ticket, do the outputs match the agent's claims, are
 there error signals in the log, with terminal output trusted over the agent's self-assessment.
+When the pool has a Jev key this file serves the fallback grader only: the engine grades the
+Attempts itself, and `verify.md` is left unused for that round.
 
 No question is asked about any of this. Activation is the per-ticket `verify: N` key, set on that
 ticket's entry under `assign` in `console.json`: N parallel attempts and N grader tickets, then

@@ -1302,6 +1302,60 @@ describe("projectTimeline", () => {
     expect(spawned.reassignment).toBeNull();
   });
 
+  it("carries a Jev Grade's provenance through to the Detail's grade", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "graded", {
+          score: 9.4,
+          verdict: "pass",
+          reasons: "ticket fit: all criteria met.",
+          rubric: "jev-grader-rubric/2026-09-20.1",
+          model: "jev-latest",
+          evidenceBudget: "base",
+        }),
+      ]),
+      "done",
+    );
+    const [graded] = view.attempts[0].events;
+    expect(graded.grade).toEqual({
+      score: 9.4,
+      verdict: "pass",
+      reasons: "ticket fit: all criteria met.",
+      rubric: "jev-grader-rubric/2026-09-20.1",
+      model: "jev-latest",
+      evidenceBudget: "base",
+    });
+    // A mistyped provenance field is left off, never a torn-grade failure.
+    const partial = projectTimeline(
+      response([
+        event(1, "graded", {
+          score: 8,
+          verdict: "flag",
+          reasons: "reasons",
+          rubric: 42,
+          evidenceBudget: "huge",
+        }),
+      ]),
+      "done",
+    );
+    expect(partial.attempts[0].events[0]!.grade).toEqual({
+      score: 8,
+      verdict: "flag",
+      reasons: "reasons",
+    });
+  });
+
+  it("still decodes an agent Grade with no provenance", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "graded", { score: 8, verdict: "pass", reasons: "clean diff" }),
+      ]),
+      "done",
+    );
+    const [graded] = view.attempts[0].events;
+    expect(graded.grade).toEqual({ score: 8, verdict: "pass", reasons: "clean diff" });
+  });
+
   it("leaves a torn payload undecoded, so the plain event row still shows", () => {
     const view = projectTimeline(
       response([

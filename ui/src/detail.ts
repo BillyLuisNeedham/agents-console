@@ -845,8 +845,15 @@ function canvasHeaderBottom(): number {
 
 // One grade under its attempt's graded event: the score and verdict on one
 // line, the grader's reasons below. This is the "why the winner won" record,
-// read from the same append-only events file after the run has ended.
+// read from the same append-only events file after the run has ended. A Jev
+// Grade (ADR-0023) also carries provenance, shown small and dim beside it, so
+// a score always says which instrument produced it.
 function renderGrade(grade: TimelineGradeView): HTMLElement {
+  const provenance = [
+    grade.rubric,
+    grade.model,
+    grade.evidenceBudget ? `${grade.evidenceBudget} evidence` : undefined,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0);
   return h(
     "div",
     { class: "timeline-grade" },
@@ -856,5 +863,8 @@ function renderGrade(grade: TimelineGradeView): HTMLElement {
       `${grade.score}/10 ${grade.verdict}`,
     ),
     h("span", { class: "timeline-grade-reasons" }, grade.reasons),
+    ...(provenance.length
+      ? [h("span", { class: "timeline-grade-provenance" }, provenance.join(" · "))]
+      : []),
   );
 }

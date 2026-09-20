@@ -172,6 +172,13 @@ function confidenceOf(probabilities: Record<string, number>): number {
 export interface PortFakeOptions {
   /** Answers by question id, as for the wire fake. */
   answers?: Record<string, ScriptedAnswer>;
+  /**
+   * A per-ask answer script chosen from the Evidence, for a suite that needs
+   * one port to answer two Attempts differently (a verify round grades each
+   * Attempt over its own Evidence). Wins over `answers` when it returns a
+   * map; returning undefined falls back to `answers`.
+   */
+  answersFor?: (evidence: Evidence) => Record<string, ScriptedAnswer> | undefined;
   /** Fall back with this cause on every ask instead of answering. */
   cause?: JevCause;
   /** Report as unconfigured (every ask falls back with `not-configured`). Default: configured. */
@@ -204,15 +211,17 @@ export function fakeJev(options: PortFakeOptions = {}): PortFake {
         board.fellBack(cause, "scripted by the test");
         return { ok: false, cause, detail: "scripted by the test" };
       }
+      const scripted = options.answersFor?.(evidence) ?? answers;
       const built: Record<string, unknown> = {};
       for (const [id, question] of Object.entries(questions)) {
-        built[id] = answerFor(question, answers[id]);
+        built[id] = answerFor(question, scripted[id]);
       }
       board.succeeded();
       return {
         ok: true,
         answers: built as unknown as SystemOneResult<Q>["answers"],
         usage: { input_tokens: 0, output_tokens: 0 },
+        model: JEV_MODEL,
       };
     },
   };

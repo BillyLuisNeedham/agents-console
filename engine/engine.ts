@@ -141,7 +141,9 @@ export type { HarnessCommand } from "./spawn.ts";
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper } from "./pane-session.ts";
 import type { LaunchCadence } from "./pane-session.ts";
-import { createJev, JEV_MODEL, type Jev, type JevNotice } from "./jev.ts";
+import { createJev, JEV_MODEL, type Jev, type JevCause, type JevNotice } from "./jev.ts";
+import { buildEvidence } from "./jev-evidence.ts";
+import { compose, QUESTIONS, RUBRIC_VERSION, THRESHOLDS } from "./jev-rubric.ts";
 export type {
   ConversationRecord,
   ConversationStatus,
@@ -1680,7 +1682,40 @@ async function runSuperStep(
       .filter((r) => r.marker.id === marker.id)
       .map((r) => r.plan.attempt)
       .sort((a, b) => a - b);
-    const grades = await runGraders(session, marker, attempts, emit);
+    // The grading path switch (ADR-0023): with a Jev key the round is graded
+    // in code, every Attempt over its own Evidence, and no grader tickets are
+    // written. Without a key, or when any ask falls back, the grader tickets
+    // run exactly as before; never both in one round. The fallback's cause
+    // reaches the pool log once through the port's own notice board; the
+    // line here names the attempt and the switch.
+    let grades: Map<number, Grade>;
+    if (session.jev.configured) {
+      const jevGrading = await runJevGraders(session, marker, attempts);
+      if (jevGrading.ok) {
+        grades = jevGrading.grades;
+        for (const attempt of attempts) {
+          const grade = grades.get(attempt);
+          if (grade) recordJevGrade(session, marker, attempt, grade, emit);
+        }
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${marker.id}: grading ${attempts.length} ` +
+              `attempt${attempts.length === 1 ? "" : "s"} with Jev`,
+          ],
+        });
+      } else {
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${marker.id}: Jev could not grade attempt ` +
+              `${jevGrading.attempt} (${jevGrading.cause}: ` +
+              `${jevGrading.detail}); falling back to grader tickets`,
+          ],
+        });
+        grades = await runGraders(session, marker, attempts, emit);
+      }
+    } else {
+      grades = await runGraders(session, marker, attempts, emit);
+    }
     // Lone-attempt resolution (ticket 05): with one attempt and one
     // grade there is nothing to select between, so the grade decides
     // at the ticket: flag → checkpoint, pass → done.
@@ -4180,15 +4215,27 @@ const GRADER_DRIVER = "verify";
 // (ticket 06).
 const HEAD_TO_HEAD_DRIVER = "head-to-head";
 
-// One grader's assessment of one attempt (the Grade in CONTEXT.md): the
-// score, the verdict, and short reasons, carried in the grader's Outcome
-// JSON under a `grade` key and copied by the engine into the graded
-// attempt's record.
-interface Grade {
+// One assessment of one attempt (the Grade in CONTEXT.md): the score, the
+// verdict, and short reasons, landed on the graded attempt's record. An agent
+// grader carries it in its Outcome JSON under a `grade` key; a Jev-graded
+// Grade is composed in engine code (ADR-0023). This is the wire shape the
+// Console type-imports (wire.ts), so the three provenance fields a Jev Grade
+// adds are declared here once and are optional: an agent-graded Grade has
+// none and validates exactly as before.
+export interface Grade {
   score: number;
   verdict: "pass" | "flag";
   reasons: string;
+  /** The rubric version that composed it, e.g. `jev-grader-rubric/2026-09-20.1`. */
+  rubric?: string;
+  /** The model the API reported it answered with. */
+  model?: string;
+  /** Which Evidence budget the Grade came from: the base one or the widening re-ask. */
+  evidenceBudget?: EvidenceBudget;
 }
+
+/** The two Evidence budgets a Jev Grade can record. */
+export type EvidenceBudget = "base" | "widened";
 
 // The attempt log handed to a grader is capped at roughly 20k tokens, at the
 // usual ~4 characters per token.
@@ -4550,7 +4597,16 @@ function validateGrade(
     return { ok: false, reason: "grader outcome is a checkpoint, not a grade" };
   }
   const grade = (
-    parsed as { grade?: { score?: unknown; verdict?: unknown; reasons?: unknown } }
+    parsed as {
+      grade?: {
+        score?: unknown;
+        verdict?: unknown;
+        reasons?: unknown;
+        rubric?: unknown;
+        model?: unknown;
+        evidenceBudget?: unknown;
+      };
+    }
   )?.grade;
   if (typeof grade !== "object" || grade === null) {
     return { ok: false, reason: "outcome carries no grade object" };
@@ -4569,11 +4625,20 @@ function validateGrade(
   if (typeof grade.reasons !== "string") {
     return { ok: false, reason: "grade has no reasons string" };
   }
-  return {
-    ok: true,
-    outcome: base.outcome,
-    grade: { score: grade.score, verdict: grade.verdict, reasons: grade.reasons },
+  // Provenance (ADR-0023) is optional: an agent grader writes none and the
+  // Grade validates unchanged. When a Jev Grade does carry the three fields,
+  // they pass through so the graded event keeps them.
+  const valid: Grade = {
+    score: grade.score,
+    verdict: grade.verdict,
+    reasons: grade.reasons,
   };
+  if (typeof grade.rubric === "string") valid.rubric = grade.rubric;
+  if (typeof grade.model === "string") valid.model = grade.model;
+  if (grade.evidenceBudget === "base" || grade.evidenceBudget === "widened") {
+    valid.evidenceBudget = grade.evidenceBudget;
+  }
+  return { ok: true, outcome: base.outcome, grade: valid };
 }
 
 // The attempt log's tail, capped at about 20k tokens, so a huge log cannot
@@ -4611,6 +4676,168 @@ function attemptDiff(
   const diff = git(session.cwd, ["diff", `${base.out}..${branch}`]);
   if (!diff.ok) return "(no diff: git diff failed)\n";
   return diff.out;
+}
+
+// The Attempt diff split into its text and why there is none, the shape the
+// Evidence builder wants: `-U0` changed lines on the base budget, context
+// lines on the widening re-ask (ADR-0023). The full-context variant exists
+// only for that re-ask; the grader tickets keep their own `attemptDiff`.
+function attemptDiffParts(
+  session: Session,
+  buildId: string,
+  attempt: number,
+  noContext: boolean,
+): { diff: string; reason: string | null } {
+  if (!session.git) return { diff: "", reason: "the pool does not run in git" };
+  const branch = branchFor(session.cwd, buildId, attempt);
+  if (!branchExists(session.cwd, buildId, attempt)) {
+    return { diff: "", reason: `no attempt branch ${branch}` };
+  }
+  const base = git(session.cwd, ["merge-base", "HEAD", branch]);
+  if (!base.ok) {
+    return { diff: "", reason: "no common ancestor with the attempt branch" };
+  }
+  const args = ["diff", ...(noContext ? ["-U0"] : []), `${base.out}..${branch}`];
+  const diff = git(session.cwd, args);
+  if (!diff.ok) return { diff: "", reason: "git diff failed" };
+  return { diff: diff.out, reason: null };
+}
+
+// The attempt's Outcome summary, the agent's claim about its own work, read
+// from the attempt-numbered outcome file. Never the whole outcome: only the
+// summary is Evidence.
+function attemptOutcomeSummary(
+  session: Session,
+  buildId: string,
+  attempt: number,
+): string {
+  const raw = readOptional(
+    join(session.runsDir, attemptOutcomeName(buildId, attempt, false)),
+  );
+  if (raw === null) return "";
+  try {
+    const parsed = JSON.parse(raw) as { summary?: unknown };
+    return typeof parsed?.summary === "string" ? parsed.summary : "";
+  } catch {
+    return "";
+  }
+}
+
+// One Attempt's Evidence at one budget (ADR-0023, REPORT.md section 2): the
+// Ticket text, the summary claim, the changed-lines or full-context diff, and
+// the ANSI-stripped log tail, all through the pure builder.
+function buildAttemptEvidence(
+  session: Session,
+  build: TicketMarker,
+  attempt: number,
+  widened: boolean,
+): ReturnType<typeof buildEvidence> {
+  const { diff, reason } = attemptDiffParts(session, build.id, attempt, !widened);
+  return buildEvidence({
+    ticket: readOptional(build.file) ?? "",
+    summary: attemptOutcomeSummary(session, build.id, attempt),
+    diff,
+    diffReason: reason,
+    log:
+      readOptional(
+        join(session.runsDir, attemptLogName(build.id, attempt, false)),
+      ) ?? "(no attempt log was recorded)\n",
+    widened,
+  });
+}
+
+// The graded event's payload: the Grade plus whichever provenance fields it
+// carries. An agent-graded Grade has none, so its payload is byte-for-byte
+// the three fields it always was.
+function gradedPayload(grade: Grade): Record<string, unknown> {
+  return {
+    score: grade.score,
+    verdict: grade.verdict,
+    reasons: grade.reasons,
+    ...(grade.rubric !== undefined ? { rubric: grade.rubric } : {}),
+    ...(grade.model !== undefined ? { model: grade.model } : {}),
+    ...(grade.evidenceBudget !== undefined
+      ? { evidenceBudget: grade.evidenceBudget }
+      : {}),
+  };
+}
+
+// The Jev grading path (ADR-0023): grade every Attempt of one verify round in
+// code, over its own Evidence, with no grader ticket. One round is graded by
+// one instrument: any ask that cannot be answered, for any cause, abandons
+// the whole round (no grade is recorded) and the caller runs the grader
+// agents instead. Returns the composed Grades by attempt number.
+type JevGrading =
+  | { ok: true; grades: Map<number, Grade> }
+  | { ok: false; attempt: number; cause: JevCause; detail: string };
+
+async function runJevGraders(
+  session: Session,
+  build: TicketMarker,
+  attempts: number[],
+): Promise<JevGrading> {
+  const grades = new Map<number, Grade>();
+  for (const attempt of attempts) {
+    const base = buildAttemptEvidence(session, build, attempt, false);
+    let result = await session.jev.ask(base.evidence, QUESTIONS);
+    if (!result.ok) {
+      return { ok: false, attempt, cause: result.cause, detail: result.detail };
+    }
+    let model = result.model;
+    let budget: EvidenceBudget = "base";
+    // Low ticket-fit confidence on trimmed Evidence widens once, then accepts
+    // whatever comes back (ADR-0023): the grade is marked low-confidence and
+    // flagged, never handed to a second instrument.
+    if (
+      result.answers.ticket_fit.confidence < THRESHOLDS.lowConfidence &&
+      base.trimmed
+    ) {
+      const widened = buildAttemptEvidence(session, build, attempt, true);
+      result = await session.jev.ask(widened.evidence, QUESTIONS);
+      if (!result.ok) {
+        return { ok: false, attempt, cause: result.cause, detail: result.detail };
+      }
+      model = result.model;
+      budget = "widened";
+    }
+    const composed = compose(result.answers);
+    grades.set(attempt, {
+      score: composed.score10,
+      verdict: composed.verdict,
+      reasons: composed.reasons,
+      rubric: RUBRIC_VERSION,
+      model,
+      evidenceBudget: budget,
+    });
+  }
+  return { ok: true, grades };
+}
+
+// Record one Jev-composed Grade exactly where a grader ticket's Grade lands:
+// the graded event on the build ticket's file, carrying the composed score,
+// verdict, reasons and provenance. No grader ticket exists to write a status
+// for; the build ticket stays in-progress until selection decides.
+function recordJevGrade(
+  session: Session,
+  build: TicketMarker,
+  attempt: number,
+  grade: Grade,
+  emit: (phase: RunPhase) => void,
+): void {
+  appendEvent(session.runsDir, build.id, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "graded",
+    payload: gradedPayload(grade),
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${build.id}: attempt ${attempt} graded: score ${grade.score}, ` +
+        `verdict ${grade.verdict} (Jev ${grade.rubric ?? RUBRIC_VERSION}, ` +
+        `${grade.evidenceBudget ?? "base"} evidence)`,
+    ],
+  });
+  emit("running");
 }
 
 // The grader ticket file: a real ticket in the pool's directory, with the

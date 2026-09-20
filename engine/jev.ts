@@ -112,7 +112,13 @@ export type JevCause =
 
 /** The Judgements for one ask, or the one cause it produced none. */
 export type JevResult<Q extends Questions> =
-  | { ok: true; answers: SystemOneResult<Q>["answers"]; usage: Usage }
+  | {
+      ok: true;
+      answers: SystemOneResult<Q>["answers"];
+      usage: Usage;
+      /** The model the API reports it answered with; the Grade's provenance records it. */
+      model: string;
+    }
   | { ok: false; cause: JevCause; detail: string };
 
 /** What subscribers hear: a cause the first time it bites, and one recovery once asks succeed again. */
@@ -227,7 +233,12 @@ export function createJev(options: JevOptions = {}): Jev {
       const malformed = checkAnswers(questions, result);
       if (malformed) return fallBack("malformed", malformed);
       board.succeeded();
-      return { ok: true, answers: result.answers, usage: result.usage };
+      return {
+        ok: true,
+        answers: result.answers,
+        usage: result.usage,
+        model: result.model,
+      };
     },
   };
 }

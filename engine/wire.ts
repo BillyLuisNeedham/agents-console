@@ -21,6 +21,8 @@ export type {
   StartConversationRequest,
 } from "./conversations.ts";
 export type {
+  EvidenceBudget,
+  Grade,
   Interrupt,
   InterruptKind,
   Outcome,
