@@ -19,7 +19,6 @@ import {
   createPoolServer,
   LOG_CHUNK_BYTES,
   TERMINAL_MIN_BUN_VERSION,
-  TERMINAL_PEEK_LINES,
   terminalRuntimeRefusal,
   type PoolServer,
   type PoolServerOptions,
@@ -2523,30 +2522,29 @@ describe("terminal endpoints", () => {
     };
   }
 
+  // The route's own reads are the viewport ones (issue #122); the launch's
+  // shell-settle reads on the same pane are `recent` and not the route's.
   const peekReads = (fake: ExecutingFakeHerdr) =>
-    fake.requests.filter((r) => r.method === "pane.read" && r.params.lines === TERMINAL_PEEK_LINES);
+    fake.requests.filter((r) => r.method === "pane.read" && r.params.source === "visible");
 
-  it("peek translates the ticket id to its live pane and serves the pane's recent output", async () => {
+  it("peek translates the ticket id to its live pane and reads its viewport live: no engine loop watches a spawned attempt", async () => {
     const { server, fake, paneId, release } = await livePool();
     fake.setPaneContent(paneId, "working\nstill working");
 
     const res = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ticket: "01", paneId, text: "working\nstill working" });
-    // The wire call is the prototype's verified peek shape. The line count is
-    // at least a terminal height: a TUI fills the pane, and pane.read returns
-    // only the last N rendered rows, so a small count reads empty or a footer
-    // sliver (prototype/tui-prompt-paste/FINDINGS.md section 2, proven).
-    expect(TERMINAL_PEEK_LINES).toBeGreaterThanOrEqual(80);
+    // The read is of the viewport only, with no line count (issue #122): a
+    // scrollback read moves the viewport of an operator sitting in the pane,
+    // and the viewport is all the card's Peek shows anyway.
     expect(peekReads(fake)).toEqual([
       {
         method: "pane.read",
         params: {
           pane_id: paneId,
-          source: "recent",
+          source: "visible",
           format: "text",
           strip_ansi: true,
-          lines: TERMINAL_PEEK_LINES,
         },
       },
     ]);
@@ -4296,6 +4294,68 @@ describe("enlist a pane as a ticket", () => {
 
   });
 
+  it("peek serves the engine's own viewport read of an enlisted pane and never reads it a second time (issue #122)", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = makeTempDir("enlist-worktree-");
+    registerTempDir(worktree);
+    spawnSync(
+      "git",
+      ["-C", poolDir, "worktree", "add", "-q", "-b", "feature/x", worktree],
+      { stdio: "ignore" },
+    );
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | doing work",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    // A tick too slow to fire inside the test: what the register holds is
+    // the claim's own settling reads, so a peek that read herdr live would
+    // show as a new pane.read, and one served from the register as none.
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 60_000,
+    });
+    await server.start();
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-op",
+      title: "Do the thing",
+      spec: "the spec body",
+    });
+    expect(res.status).toBe(201);
+    await waitFor(
+      () =>
+        server.latest?.state.tickets.some(
+          (t) => t.id === "enlist-1" && t.liveAttempt?.paneId === "pane-op",
+        ) ?? false,
+      "the enlisted card on the snapshot",
+    );
+
+    const readsBefore = fake.requests.filter((r) => r.method === "pane.read").length;
+    const first = await (await fetch(`${server.url}/api/terminal/peek?ticket=enlist-1`)).json();
+    expect(first.paneId).toBe("pane-op");
+    expect(first.text).toContain("ctrl+p commands");
+    // The pane moves on; the peek shows the engine's last read of it, not a
+    // fresh one, and herdr was not asked.
+    fake.setPaneContent("pane-op", "opencode\nsomething new\nctrl+p commands");
+    const second = await (await fetch(`${server.url}/api/terminal/peek?ticket=enlist-1`)).json();
+    expect(second.text).toBe(first.text);
+    expect(fake.requests.filter((r) => r.method === "pane.read").length).toBe(readsBefore);
+    // The engine's Turn-state reads of the pane are viewport reads with no
+    // line count (the echo check of the typed teaching Turn keeps its
+    // launch-time `recent` read; see pane-session.ts).
+    const turnReads = fake.requests.filter(
+      (r) => r.method === "pane.read" && r.params.pane_id === "pane-op" && r.params.source === "visible",
+    );
+    expect(turnReads.length).toBeGreaterThan(0);
+    for (const read of turnReads) expect("lines" in read.params).toBe(false);
+  });
+
   it("refuses a becomes the wire type does not declare, rather than defaulting to a Ticket", async () => {
     const poolDir = gitTerminalPool();
     const fake = await fakeHerdr();
@@ -4802,6 +4862,61 @@ describe("enlist a pane as a conversation", () => {
     const openingAt = fake.submitted.findIndex((text) => text === "hello agent");
     expect(teachingAt).toBeGreaterThanOrEqual(0);
     expect(openingAt).toBeGreaterThan(teachingAt);
+  });
+
+  it("peek serves the engine's own viewport read of an enlisted Conversation's pane, and forgets it at End (issue #122)", async () => {
+    const poolDir = gitTerminalPool();
+    const worktree = worktreeOn(poolDir, "feature/talk");
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-conv",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC | talk",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-conv",
+    });
+    // As in the enlisted-ticket case: a tick too slow to fire, so the
+    // register holds the claim's settling reads and a live read would show
+    // as a new pane.read.
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      conversationPollMs: 60_000,
+    });
+    await server.start();
+    const res = await enlist(server, {
+      becomes: "conversation",
+      paneId: "pane-conv",
+      title: "A talk",
+    });
+    expect(res.status).toBe(201);
+    await waitForMs(
+      () => conversationOf(server)?.paneId === "pane-conv",
+      "the enlisted Conversation on the snapshot",
+      4_000,
+    );
+
+    const readsBefore = fake.requests.filter((r) => r.method === "pane.read").length;
+    const first = await (await fetch(`${server.url}/api/terminal/peek?ticket=conv-1`)).json();
+    expect(first.paneId).toBe("pane-conv");
+    expect(first.text).toContain("ctrl+p commands");
+    fake.setPaneContent("pane-conv", "opencode\nsomething new\nctrl+p commands");
+    const second = await (await fetch(`${server.url}/api/terminal/peek?ticket=conv-1`)).json();
+    expect(second.text).toBe(first.text);
+    expect(fake.requests.filter((r) => r.method === "pane.read").length).toBe(readsBefore);
+    const turnReads = fake.requests.filter(
+      (r) => r.method === "pane.read" && r.params.pane_id === "pane-conv" && r.params.source === "visible",
+    );
+    expect(turnReads.length).toBeGreaterThan(0);
+    for (const read of turnReads) expect("lines" in read.params).toBe(false);
+
+    // End: the pane leaves the view, so the route answers no-pane, and it
+    // never consults a register entry (the engine dropped it with the tick).
+    await server.endConversation("conv-1");
+    const ended = await fetch(`${server.url}/api/terminal/peek?ticket=conv-1`);
+    expect(ended.status).toBe(404);
+    expect(fake.requests.filter((r) => r.method === "pane.read").length).toBe(readsBefore);
   });
 
   it("queues the teaching and opening while the pane is working and types them once waiting", async () => {

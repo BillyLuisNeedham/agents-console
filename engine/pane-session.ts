@@ -10,7 +10,13 @@
  */
 
 import { existsSync, rmSync } from "node:fs";
-import { closePane, paneSendInput, peekPane, waitForPaneEnd } from "./herdr.ts";
+import {
+  closePane,
+  paneSendInput,
+  peekPane,
+  waitForPaneEnd,
+  type PaneReadSource,
+} from "./herdr.ts";
 
 /**
  * The launch half's cadences (issue #102): how the engine waits for a fresh
@@ -42,8 +48,14 @@ export const DEFAULT_LAUNCH_CADENCE: LaunchCadence = {
 // The pane-read line count for readiness and echo polling: a freshly spawned
 // pane renders mostly blank rows above its prompt, so a small read returns
 // empty (prototype finding); 200 lines covers the TUI's input area and the
-// recent transcript whatever the pane's height.
+// recent transcript whatever the pane's height. These launch-time reads keep
+// herdr's `recent` source deliberately (issue #122): the tab is one the
+// engine opened and nobody is sitting in yet, so reaching into scrollback
+// moves no operator's viewport, where the steady-state loops that watch a
+// pane an operator may be typing in read only the viewport (herdr.ts's
+// PaneReadSource).
 export const INTERACTIVE_PANE_READ_LINES = 200;
+const LAUNCH_READ: PaneReadSource = { source: "recent", lines: INTERACTIVE_PANE_READ_LINES };
 // Readiness requires the ready pattern on this many consecutive reads, ~this
 // far apart: a single match can be a boot flicker, and empty reads are not
 // ready (prototype finding).
@@ -158,7 +170,7 @@ export async function waitForShellSettled(
   let stable = 0;
   while (Date.now() < deadline) {
     const text = (
-      await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(() => "")
+      await peekPane(socketPath, paneId, LAUNCH_READ).catch(() => "")
     ).trim();
     if (text !== "" && text === last) {
       stable += 1;
@@ -275,12 +287,12 @@ export async function waitForReadiness(
       if (existsSync(exitCodePath)) return "exited";
       let text: string;
       if (lost) {
-        text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
+        text = await peekPane(socketPath, paneId, LAUNCH_READ).catch(
           () => "",
         );
       } else {
         const settled = await Promise.race([
-          peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).then(
+          peekPane(socketPath, paneId, LAUNCH_READ).then(
             (t) => ({ text: t }) as const,
             () => ({ text: "" }) as const,
           ),
@@ -339,7 +351,7 @@ async function paneShows(
 ): Promise<boolean> {
   const deadline = Date.now() + PROMPT_ECHO_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const text = await peekPane(socketPath, paneId, INTERACTIVE_PANE_READ_LINES).catch(
+    const text = await peekPane(socketPath, paneId, LAUNCH_READ).catch(
       () => "",
     );
     if (targets.some((target) => viewportShows(text, target))) return true;

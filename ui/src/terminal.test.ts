@@ -160,6 +160,79 @@ describe("TerminalSurface store", () => {
     expect(store.state()["01"]?.text).toBe("");
   });
 
+  it("notifies only when a peek's text or status changed, not on every response", async () => {
+    let text = "first";
+    let changes = 0;
+    const store = new TerminalSurface({
+      peek: () => Promise.resolve(peekResponse(text)),
+      focus: () => Promise.resolve(),
+      onChange: () => {
+        changes += 1;
+      },
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({ "01": "pane-7" }));
+    await ticks();
+    // Several polls, one landing: pending -> live "first" once, then the same
+    // text again and again with no repaint (issue #122: each repaint rebuilds
+    // the page under the operator's caret).
+    expect(changes).toBe(1);
+    text = "second";
+    await ticks();
+    expect(changes).toBe(2);
+    expect(store.state()["01"]?.text).toBe("second");
+    store.dispose();
+  });
+
+  it("notifies once on a failure, then once more when the pane recovers", async () => {
+    let changes = 0;
+    const failPeek = new Set(["01"]);
+    const store = new TerminalSurface({
+      peek: (id) =>
+        failPeek.has(id)
+          ? Promise.reject(new Error("peek failed"))
+          : Promise.resolve(peekResponse("back")),
+      focus: () => Promise.resolve(),
+      onChange: () => {
+        changes += 1;
+      },
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({ "01": "pane-7" }));
+    await ticks();
+    expect(store.state()["01"]?.status).toBe("unavailable");
+    expect(changes).toBe(1);
+    failPeek.clear();
+    await ticks();
+    store.dispose();
+    expect(store.state()["01"]?.status).toBe("live");
+    expect(changes).toBe(2);
+  });
+
+  it("drops a read that lands after the pane re-spawned or left", async () => {
+    let settle!: (value: TerminalPeekResponse) => void;
+    const store = new TerminalSurface({
+      peek: () =>
+        new Promise<TerminalPeekResponse>((resolve) => {
+          settle = resolve;
+        }),
+      focus: () => Promise.resolve(),
+      onChange: () => {},
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({ "01": "pane-7" }));
+    // The attempt re-spawns while pane-7's read is still out; the stale
+    // answer must not overwrite pane-8's fresh pending entry.
+    store.update(snap({ "01": "pane-8" }));
+    settle(peekResponse("old pane's last words"));
+    await Bun.sleep(1);
+    expect(store.state()["01"]).toMatchObject({ paneId: "pane-8", status: "pending", text: "" });
+    store.dispose();
+  });
+
   it("marks a failed peek unavailable and keeps polling, recovering on the next success", async () => {
     const h = makeStore({ "01": "pane-7" }, { failPeek: new Set(["01"]) });
     await ticks();

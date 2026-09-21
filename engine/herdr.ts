@@ -300,29 +300,47 @@ export async function workspaceExists(
 }
 
 /**
- * Read a pane's recent output for the card's read-only peek: `pane.read`
- * with source `recent`, text format, ANSI stripped, a small line count.
- * Resolves with the text; an empty read (a freshly created background tab
- * returns empty for its first seconds while herdr warms up its viewport,
- * verified behaviour) resolves to empty text, never an error. `revision`
- * is deliberately not part of the return: the prototype verified it stays
- * stagnant while output grows, so freshness comes from re-polling and
- * comparing text, never from the revision counter.
+ * Which of herdr's pane snapshots a read takes (issue #122, ADR-0021's
+ * amendment). `visible` is the viewport and nothing above it, what the
+ * operator sees; herdr sizes it to the pane, so it takes no line count.
+ * `recent` is the last `lines` rendered rows, reaching into scrollback.
+ *
+ * Reading scrollback moves the viewport of a pane an operator sits in: on a
+ * Mac each `recent` read scrolled the pane up and back under their hands.
+ * So the steady-state watch of a pane the operator may be typing in (an
+ * enlisted attempt's, a Conversation's, the card Peek's) reads `visible`,
+ * and only the launch-time reads of a tab the engine opened and nobody is in
+ * (pane-session.ts's readiness and echo polling) still read `recent`: a
+ * fresh pane's viewport is mostly blank above its prompt, and the prototype
+ * found small reads of it come back empty.
+ */
+export type PaneReadSource =
+  | { source: "visible" }
+  | { source: "recent"; lines: number };
+
+/**
+ * Read a pane's output: `pane.read` from the given source, text format, ANSI
+ * stripped. Resolves with the text; an empty read (a freshly created
+ * background tab returns empty for its first seconds while herdr warms up
+ * its viewport, verified behaviour) resolves to empty text, never an error.
+ * `revision` is deliberately not part of the return: the prototype verified
+ * it stays stagnant while output grows, so freshness comes from re-polling
+ * and comparing text, never from the revision counter.
  */
 export async function peekPane(
   socketPath: string,
   paneId: string,
-  lines: number,
+  read: PaneReadSource,
 ): Promise<string> {
   const res = await herdrRpc(socketPath, "pane.read", {
     pane_id: paneId,
-    source: "recent",
+    source: read.source,
     format: "text",
     strip_ansi: true,
-    lines,
+    ...(read.source === "recent" ? { lines: read.lines } : {}),
   });
-  const read = (res as { read?: { text?: unknown } } | null)?.read;
-  return typeof read?.text === "string" ? read.text : "";
+  const got = (res as { read?: { text?: unknown } } | null)?.read;
+  return typeof got?.text === "string" ? got.text : "";
 }
 
 /**

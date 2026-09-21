@@ -73,12 +73,8 @@ import {
   ticketEndedNoticeText,
   type Notice,
 } from "./notices.ts";
-import {
-  INTERACTIVE_PANE_READ_LINES,
-  READINESS_TIMEOUT_MS,
-  stillWorkingReason,
-  typeVerified,
-} from "./pane-session.ts";
+import type { PaneReadRegister } from "./pane-reads.ts";
+import { READINESS_TIMEOUT_MS, stillWorkingReason, typeVerified } from "./pane-session.ts";
 import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
 import {
@@ -418,6 +414,8 @@ export interface ConversationEnv extends AttemptEnv {
   poolDir: string;
   cwd: string;
   git: boolean;
+  /** Where each tick's viewport read is recorded for the card Peek (issue #122). */
+  paneReads: PaneReadRegister;
   /** How often a live Conversation's tick re-reads its pane; 2 s unless a
    *  test shortens it (the enlisted-attempts module's own pollMs precedent). */
   pollMs?: number;
@@ -543,22 +541,26 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
    * the snapshot shows and reporting the herdr sidebar state on a flip. A
    * failed read throws and leaves the state as it was; the caller decides
    * whether that is fatal (the enlist claim) or one tick's blip.
+   *
+   * The read is of the viewport only (`visible`, issue #122): Turn state
+   * needs no more than the prompt area at the bottom, and a scrollback read
+   * moves the viewport of the operator sitting in the pane. What was read
+   * is recorded for the card Peek, so this is the one read of the pane per
+   * tick.
    */
   async function readTurn(
     runtime: ConversationRuntime,
     descriptor: HarnessDescriptor | null,
   ): Promise<void> {
     if (!runtime.paneId) return;
-    const text = await peekPane(
-      env.herdrSocket,
-      runtime.paneId,
-      INTERACTIVE_PANE_READ_LINES,
-    );
+    const text = await peekPane(env.herdrSocket, runtime.paneId, { source: "visible" });
+    const at = nowIso();
+    env.paneReads.record(runtime.paneId, text, at);
     const { turn, publish: changed } = nextTurnState(
       runtime.turn,
       text,
       descriptor ? idlePatternFor(descriptor) : "",
-      nowIso(),
+      at,
     );
     const flipped = runtime.turn.state !== turn.state;
     runtime.turn = turn;
@@ -743,6 +745,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       } catch {
         // The pane could not be read: leave the record live, the next boot
         // tries again rather than destroying a talk that may still be there.
+        // No tick follows, so nothing may serve what the reads recorded.
+        env.paneReads.forget(found.paneId);
         continue;
       }
       reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
@@ -1029,23 +1033,26 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       // re-read every poll, so the Turns land the moment the agent is
       // waiting on the operator and never mid-reply. Past the bound the
       // enlist is refused and leaves nothing.
+      // A refused enlist leaves nothing, the settling reads' register entry
+      // included: no tick will follow them, so nothing may serve them.
+      const refuse = (reason: string): EnlistConversationResult => {
+        env.paneReads.forget(req.paneId);
+        return { ok: false, reason };
+      };
       try {
         await settleTurn(runtime, descriptor);
         const deadline = Date.now() + teachingWaitMs;
         while (runtime.turn.state !== "waiting") {
           if (Date.now() >= deadline) {
-            return { ok: false, reason: stillWorkingReason(teachingWaitMs) };
+            return refuse(stillWorkingReason(teachingWaitMs));
           }
           await Bun.sleep(pollMs);
           await readTurn(runtime, descriptor);
         }
       } catch (err) {
-        return {
-          ok: false,
-          reason: `the pane could not be read (${
-            err instanceof Error ? err.message : String(err)
-          })`,
-        };
+        return refuse(
+          `the pane could not be read (${err instanceof Error ? err.message : String(err)})`,
+        );
       }
 
       reportAgent(runtime, "blocked");
@@ -1104,7 +1111,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           } catch {
             // Best-effort.
           }
-          return { ok: false, reason: "the teaching Turn could not be delivered" };
+          return refuse("the teaching Turn could not be delivered");
         }
       }
       // The operator's tab is relabelled only once the claim has held, so a
@@ -1139,9 +1146,16 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       .catch(() => {});
   }
 
+  /**
+   * Stop the tick and forget the pane's recorded read with it: the tick is
+   * the register's only writer for this pane, so once it stops (End, crash,
+   * shutdown) the Peek must read live or find nothing, never a viewport
+   * frozen at the last tick.
+   */
   function stopTick(runtime: ConversationRuntime): void {
     if (runtime.timer !== null) clearInterval(runtime.timer);
     runtime.timer = null;
+    if (runtime.paneId) env.paneReads.forget(runtime.paneId);
   }
 
   function markCrashed(runtime: ConversationRuntime, ending: PaneEnding): void {

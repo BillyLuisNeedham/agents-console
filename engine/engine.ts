@@ -104,6 +104,7 @@ import {
 } from "./enlist.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from "./live-attempts.ts";
+import { createPaneReadRegister, type PaneRead, type PaneReadRegister } from "./pane-reads.ts";
 import {
   createMergeHoldWatch,
   deriveMergeHold,
@@ -439,6 +440,13 @@ export interface PoolRun {
   endConversation: (id: string, closing?: string) => Promise<void>;
   /** Enlist a live herdr pane as a Ticket or a Conversation (issue #101). */
   enlist: (req: EnlistRequest) => Promise<EnlistResponse>;
+  /**
+   * The engine's last viewport read of a pane one of its loops watches (an
+   * enlisted attempt's or a Conversation's; pane-reads.ts), or null for a
+   * pane no loop watches. The server's peek route serves a recorded read
+   * rather than reading the pane a second time (issue #122).
+   */
+  paneRead: (paneId: string) => PaneRead | null;
 }
 
 const reduceTickets = (
@@ -719,6 +727,11 @@ interface Session {
   // engine types into it. Built once at startPool, reached through the
   // operations it exposes.
   enlisted: EnlistedAttempts;
+  // The pane read register (issue #122, pane-reads.ts): the last viewport
+  // read of every pane the enlisted and Conversation ticks watch, written by
+  // those ticks and read by the handle's paneRead for the server's peek
+  // route, so a pane an operator sits in is read once per tick.
+  paneReads: PaneReadRegister;
   // The found work of every enlisted ticket (issue #101, ticket 04): the
   // branch and directory the pane was enlisted from. Kept engine-side because
   // the enlisted ticket has no pool worktree and no `pool/<pool>/<id>` branch
@@ -882,9 +895,13 @@ export function startPool(options: RunOptions): PoolRun {
   const liveAttempts = createLiveAttempts(() =>
     emitSnapshot(session, session.settledPhase ?? "running"),
   );
+  // One register for both modules: the peek route resolves a pane by id and
+  // does not care which loop watches it.
+  const paneReads = createPaneReadRegister();
   const enlisted = createEnlistedAttempts(
     {
       herdrSocket,
+      paneReads,
       ...(options.enlistPollMs !== undefined ? { pollMs: options.enlistPollMs } : {}),
       ...(options.enlistTeachingWaitMs !== undefined
         ? { teachingWaitMs: options.enlistTeachingWaitMs }
@@ -910,6 +927,7 @@ export function startPool(options: RunOptions): PoolRun {
       poolDir,
       cwd,
       git,
+      paneReads,
       ...(options.conversationPollMs !== undefined
         ? { pollMs: options.conversationPollMs }
         : {}),
@@ -970,6 +988,7 @@ export function startPool(options: RunOptions): PoolRun {
     orphans: [],
     liveAttempts,
     enlisted,
+    paneReads,
     enlistedWork: new Map(),
     mergeTarget: null,
     ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
@@ -1101,6 +1120,7 @@ function makeHandle(session: Session): PoolRun {
       req.becomes === "conversation"
         ? enlistConversation(session, req)
         : enlistTicket(session, req),
+    paneRead: (paneId) => session.paneReads.latest(paneId),
   };
   return handle;
 }

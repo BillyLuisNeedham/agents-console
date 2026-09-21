@@ -198,10 +198,12 @@ export interface TicketBodyResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * The peek endpoint's answer for one ticket: the attempt pane's recent
- * output as plain text (ANSI stripped server-side, TERMINAL_PEEK_LINES
- * rows). The UI keys every terminal call by ticket id; the server resolves
- * and guards the pane.
+ * The peek endpoint's answer for one ticket: the pane's viewport as plain
+ * text (ANSI stripped herdr-side), the engine's own last read of it when a
+ * loop of the engine's watches the pane and a live viewport read otherwise
+ * (issue #122). The UI keys every terminal call by ticket id; the server
+ * resolves and guards the pane, and which of the two served it is not the
+ * UI's concern.
  */
 export interface TerminalPeekResponse {
   ticket: string;

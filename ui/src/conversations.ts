@@ -15,6 +15,7 @@ import {
   type StartConversationRequest,
 } from "./project";
 import { h } from "./dom";
+import { FOCUS_KEY_ATTR } from "./focus";
 
 export type StartConversationHandler = (
   request: StartConversationRequest,
@@ -243,10 +244,13 @@ export class ConversationsTray {
   }
 
   private renderForm(defaults: ConversationAssignmentDefaults): HTMLElement {
+    // Every field is keyed so the rebuild on each poll tick hands focus and
+    // caret back (focus.ts); the text itself lives in the draft.
     const title = h("input", {
       class: "field conversations-field",
       type: "text",
       placeholder: "title",
+      [FOCUS_KEY_ATTR]: "conversation-form:title",
       disabled: this.submitting,
     }) as HTMLInputElement;
     title.value = this.draft.title;
@@ -255,6 +259,7 @@ export class ConversationsTray {
     const opening = h("textarea", {
       class: "field conversations-field",
       placeholder: "opening turn (optional)",
+      [FOCUS_KEY_ATTR]: "conversation-form:opening",
       rows: 3,
       disabled: this.submitting,
     }) as HTMLTextAreaElement;
@@ -295,6 +300,7 @@ export class ConversationsTray {
       class: "field conversations-field",
       type: "text",
       placeholder: placeholder ?? name,
+      [FOCUS_KEY_ATTR]: `conversation-form:${name}`,
       disabled: this.submitting,
     }) as HTMLInputElement;
     input.value = this.draft[name];

@@ -15,6 +15,7 @@
  */
 
 import { h } from "./dom";
+import { FOCUS_KEY_ATTR } from "./focus";
 import {
   ENLIST_BECOMES_HINT,
   projectEnlistForm,
@@ -351,20 +352,29 @@ export class EnlistStore {
         input,
       );
 
+    // Every field is keyed so the rebuild on each poll tick hands focus and
+    // caret back (focus.ts); the values live in the draft.
     const titleInput = h("input", {
       class: "enlist-input",
       type: "text",
       value: this.draftTitle,
+      [FOCUS_KEY_ATTR]: "enlist-form:title",
     });
     titleInput.addEventListener("input", () =>
       this.setField("title", titleInput.value),
     );
-    const specInput = h("textarea", { class: "enlist-input enlist-spec" });
+    const specInput = h("textarea", {
+      class: "enlist-input enlist-spec",
+      [FOCUS_KEY_ATTR]: "enlist-form:spec",
+    });
     specInput.value = this.draftSpec;
     specInput.addEventListener("input", () =>
       this.setField("spec", specInput.value),
     );
-    const openingInput = h("textarea", { class: "enlist-input enlist-opening" });
+    const openingInput = h("textarea", {
+      class: "enlist-input enlist-opening",
+      [FOCUS_KEY_ATTR]: "enlist-form:opening",
+    });
     openingInput.value = this.draftOpening;
     openingInput.addEventListener("input", () =>
       this.setField("opening", openingInput.value),
@@ -397,6 +407,7 @@ export class EnlistStore {
                 h("input", {
                   type: "checkbox",
                   checked: this.isTicked(block.id),
+                  [FOCUS_KEY_ATTR]: `enlist-form:block:${block.id}`,
                   onchange: () => this.toggleBlock(block.id),
                 }),
                 h("span", { class: "enlist-block-id" }, block.id),
