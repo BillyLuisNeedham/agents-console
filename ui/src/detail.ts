@@ -2,12 +2,10 @@
  * Detail: the right-hand panel for the selected card. One module owns the
  * panel render, the width drag on its left edge, fullscreen, the interrupt
  * forms, and the note drafts, as instance state on the class the composition
- * root creates once per session. State survives the full-DOM rebuild on
- * every snapshot: the dragged width and the fullscreen flag re-apply to the
- * fresh panel, and a note being typed lives in the drafts map with focus and
- * cursor restored across the swap. Selection changes arrive through the
- * `onClose` callback and `exitFullscreen`; the composition owns the
- * selection itself.
+ * root creates once per session, so every render says the same thing: the
+ * dragged width, the fullscreen flag, and a note being typed all render from
+ * here. Selection changes arrive through the `onClose` callback and
+ * `exitFullscreen`; the composition owns the selection itself.
  */
 
 import {
@@ -33,7 +31,6 @@ import {
 import { noteLogScroll } from "./log-pane";
 import { renderTerminalSurface } from "./terminal";
 import { h } from "./dom";
-import { FOCUS_KEY_ATTR } from "./focus";
 
 // One global localStorage key (not per pool) remembers the dragged width
 // across reloads.
@@ -70,7 +67,7 @@ export class Detail {
   private drag: { startX: number; startWidth: number } | null = null;
   // Fullscreen fixes the Detail over the content area below the toolbar
   // (canvas and drawers covered, toolbar visible and live) without
-  // unmounting it, so SSE rebuilds, interrupt forms, and log tailing all
+  // unmounting it, so snapshots, interrupt forms, and log tailing all
   // keep working. Esc, the toggle, or selecting another card exits; exiting
   // restores the dragged width.
   private fullscreen = false;
@@ -110,21 +107,11 @@ export class Detail {
     this.fullscreen = false;
   }
 
-  /** Drop an in-flight width drag: a full-DOM rebuild pulls the floor away. */
-  cancelDrag(): void {
-    this.drag = null;
-  }
-
   /** Drop drafts whose interrupt resolved (or whose ticket left the pool). */
   pruneDrafts(pendingTicketIds: ReadonlySet<string>): void {
     for (const id of [...this.drafts.keys()]) {
       if (!pendingTicketIds.has(id)) this.drafts.delete(id);
     }
-  }
-
-  /** Re-apply fullscreen after a rebuild, so the panel never unmounts. */
-  afterRender(): void {
-    if (this.fullscreen) this.applyFullscreen();
   }
 
   render(model: DetailModel, handlers: DetailHandlers): HTMLElement {
@@ -134,6 +121,7 @@ export class Detail {
     detail.classList.add("detail-open");
     if (this.fullscreen) {
       detail.classList.add("detail-fullscreen");
+      detail.style.top = `${canvasHeaderBottom()}px`;
     } else {
       detail.style.width = `${clampDetailWidth(this.width, currentMaxPx())}px`;
     }
@@ -177,12 +165,35 @@ export class Detail {
   // the panel. Rendered only while a Detail is open, so a closed panel
   // leaves no orphan strip.
   renderHandle(): HTMLElement {
-    const handle = h("div", {
+    return h("div", {
       class: "detail-handle",
       title: "drag to resize detail",
+      onpointerdown: (event: PointerEvent) => {
+        if (this.drag || this.fullscreen) return;
+        this.drag = {
+          startX: event.clientX,
+          startWidth: clampDetailWidth(this.width, currentMaxPx()),
+        };
+        try {
+          (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+        } catch {
+          // pointer already gone
+        }
+      },
+      onpointermove: (event: PointerEvent) => {
+        if (!this.drag) return;
+        const dx = event.clientX - this.drag.startX;
+        this.width = clampDetailWidth(this.drag.startWidth - dx, currentMaxPx());
+        this.applyWidth();
+      },
+      onpointerup: () => {
+        this.drag = null;
+        this.writeStoredWidth();
+      },
+      onpointercancel: () => {
+        this.drag = null;
+      },
     });
-    this.bindHandle(handle);
-    return handle;
   }
 
   // -------------------------------------------------------------------------
@@ -220,13 +231,11 @@ export class Detail {
       class: "interrupt-note",
       placeholder:
         interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
-      // Focus and caret survive the rebuild by this key (focus.ts).
-      [FOCUS_KEY_ATTR]: `${interrupt.ticketId}:detail`,
       rows: 3,
-    }) as HTMLTextAreaElement;
-    note.value = this.drafts.get(interrupt.ticketId) ?? "";
-    note.addEventListener("input", () => {
-      this.drafts.set(interrupt.ticketId, note.value);
+      value: this.drafts.get(interrupt.ticketId) ?? "",
+      oninput: (event: Event) => {
+        this.drafts.set(interrupt.ticketId, (event.currentTarget as HTMLTextAreaElement).value);
+      },
     });
     box.append(note);
     box.append(
@@ -370,7 +379,7 @@ export class Detail {
   // Content is fetched as byte ranges and already ANSI-stripped server-side.
   // A "load earlier" button prepends the previous window while the opened
   // view stays anchored; the scroll listener drives the pin that decides
-  // whether rebuilds follow the tail. While a fetch is in flight the
+  // whether renders follow the tail. While a fetch is in flight the
   // previously loaded content stays visible.
   private renderLogPane(
     logPane: LogPaneView,
@@ -407,12 +416,15 @@ export class Detail {
     }
     const pre = h(
       "pre",
-      { class: "log-pane-content" },
+      {
+        class: "log-pane-content",
+        onscroll: (event: Event) => {
+          const el = event.currentTarget as HTMLElement;
+          noteLogScroll(el.scrollTop, el.clientHeight, el.scrollHeight);
+        },
+      },
       logPane.content.length > 0 ? logPane.content : "(no output yet)",
     );
-    pre.addEventListener("scroll", () => {
-      noteLogScroll(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
-    });
     pane.append(pre);
     if (logPane.hasMore) {
       pane.append(h("div", { class: "dim log-pane-more" }, "loading more..."));
@@ -651,13 +663,15 @@ export class Detail {
     const closing = h("textarea", {
       class: "interrupt-note",
       placeholder: "closing note (optional)",
-      [FOCUS_KEY_ATTR]: `${detail.conversationId}:closing`,
       rows: 2,
       disabled: detail.endView.ending,
-    }) as HTMLTextAreaElement;
-    closing.value = this.conversationEndDrafts.get(detail.conversationId) ?? "";
-    closing.addEventListener("input", () => {
-      this.conversationEndDrafts.set(detail.conversationId, closing.value);
+      value: this.conversationEndDrafts.get(detail.conversationId) ?? "",
+      oninput: (event: Event) => {
+        this.conversationEndDrafts.set(
+          detail.conversationId,
+          (event.currentTarget as HTMLTextAreaElement).value,
+        );
+      },
     });
     const box = h(
       "div",
@@ -735,34 +749,6 @@ export class Detail {
     for (const el of document.querySelectorAll<HTMLElement>(".detail-open")) {
       el.style.width = width;
     }
-  }
-
-  private bindHandle(handle: HTMLElement): void {
-    handle.addEventListener("pointerdown", (event) => {
-      if (this.drag || this.fullscreen) return;
-      this.drag = {
-        startX: event.clientX,
-        startWidth: clampDetailWidth(this.width, currentMaxPx()),
-      };
-      try {
-        handle.setPointerCapture(event.pointerId);
-      } catch {
-        // pointer already gone
-      }
-    });
-    handle.addEventListener("pointermove", (event) => {
-      if (!this.drag) return;
-      const dx = event.clientX - this.drag.startX;
-      this.width = clampDetailWidth(this.drag.startWidth - dx, currentMaxPx());
-      this.applyWidth();
-    });
-    handle.addEventListener("pointerup", () => {
-      this.drag = null;
-      this.writeStoredWidth();
-    });
-    handle.addEventListener("pointercancel", () => {
-      this.drag = null;
-    });
   }
 
   // One writer for the fullscreen toggle's label and tooltip, so the render

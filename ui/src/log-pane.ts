@@ -8,7 +8,7 @@
  * answering after a newer window began — even a re-open of the same attempt —
  * is dropped by the shared stale-answer generation guard. The fetch is
  * injected at construction, so the guards run under unit tests with fake
- * fetches; the scroll pin and the prepend anchor live here too, so the view
+ * fetches; the tail pin and the prepend anchor live here too, so the view
  * only renders and the bootstrap only drives.
  */
 
@@ -236,7 +236,7 @@ export class LogPane {
    * Prepend the window before the oldest byte held ("load earlier"). The
    * fetch is bounded by `firstOffset`, so the range cannot overlap the held
    * content. The anchor captured before the mutation keeps the opened view
-   * put across the rebuild.
+   * put once the render lands the taller content.
    */
   async loadEarlier(ticketId: string, attempt: number): Promise<void> {
     if (this.earlierInFlight) return;
@@ -364,16 +364,17 @@ export class LogPane {
 // Scroll pin and prepend anchor
 // ---------------------------------------------------------------------------
 
-// Module scope so the full-DOM rebuild on every snapshot keeps the pin and
-// the reading position. The pane follows the tail only while pinned at the
-// bottom; scrolling up unpins, scrolling back into the bottom slack resumes.
+// The pane's node persists across renders, so a reading position off the
+// tail keeps itself; what the render cannot know is whether to follow the
+// tail as it grows. The pane follows only while pinned at the bottom;
+// scrolling up unpins, scrolling back into the bottom slack resumes.
 // Switching ticket or attempt resets to following.
 let paneKey: string | null = null;
 let pinned = true;
-let scrollTop = 0;
 // Armed between a "load earlier" content change and the render that shows
-// it: the prepend's added height is applied to the scroll position so the
-// opened view stays anchored on the same line.
+// it. The pane holds one text node, so the browser's own scroll anchoring
+// has nothing to anchor on when that node grows at the top: the prepend's
+// added height is applied by hand so the opened view stays on the same line.
 let anchor: { prevHeight: number; prevTop: number } | null = null;
 
 /**
@@ -396,19 +397,17 @@ export function noteLogScroll(
   scrollHeight: number,
 ): void {
   pinned = logAtBottom(top, clientHeight, scrollHeight);
-  scrollTop = top;
 }
 
 /**
- * Re-applies pin, reading position, and a pending prepend anchor to the
- * freshly rebuilt log pane after every render. `key` identifies the pane's
- * ticket and attempt; a changed key resets to following the tail.
+ * After a render: follow the tail if pinned, or land a pending prepend
+ * anchor. `key` identifies the pane's ticket and attempt; a changed key
+ * resets to following the tail.
  */
-export function restoreLogScroll(key: string | null): void {
+export function settleLogScroll(key: string | null): void {
   if (key !== paneKey) {
     paneKey = key;
     pinned = true;
-    scrollTop = 0;
     anchor = null;
   }
   if (typeof document === "undefined") return;
@@ -419,15 +418,7 @@ export function restoreLogScroll(key: string | null): void {
     pre.scrollTop = Math.max(0, anchor.prevTop + delta);
     anchor = null;
     pinned = logAtBottom(pre.scrollTop, pre.clientHeight, pre.scrollHeight);
-    scrollTop = pre.scrollTop;
     return;
   }
-  if (pinned) {
-    pre.scrollTop = pre.scrollHeight;
-  } else {
-    pre.scrollTop = Math.min(
-      scrollTop,
-      Math.max(0, pre.scrollHeight - pre.clientHeight),
-    );
-  }
+  if (pinned) pre.scrollTop = pre.scrollHeight;
 }

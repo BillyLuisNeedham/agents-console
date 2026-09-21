@@ -3,8 +3,8 @@
  * inspector side by side. One module owns the strip's render, the shared vh
  * height, and the resize drag on its top edge, as instance state on the
  * class the composition root creates once per session, so the dragged
- * height survives the full-DOM rebuild on every snapshot. Open and closed
- * stay in the app model; this module owns only the height.
+ * height is rendered from state on every snapshot. Open and closed stay in
+ * the app model; this module owns only the height.
  */
 
 import {
@@ -32,17 +32,33 @@ export class Drawers {
   private height = DRAWER_DEFAULT_VH;
   private drag: { startY: number; startHeight: number } | null = null;
 
-  /** Drop an in-flight resize drag: a full-DOM rebuild pulls the floor away. */
-  cancelDrag(): void {
-    this.drag = null;
-  }
-
   render(model: DrawersModel, handlers: DrawersHandlers): HTMLElement {
     const handle = h("div", {
       class: "drawer-handle",
       title: "drag to resize drawers",
+      onpointerdown: (event: PointerEvent) => {
+        if (this.drag) return;
+        this.drag = { startY: event.clientY, startHeight: this.height };
+        try {
+          (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+        } catch {
+          // pointer already gone
+        }
+      },
+      onpointermove: (event: PointerEvent) => {
+        if (!this.drag) return;
+        const dy = event.clientY - this.drag.startY;
+        const vhPerPx = 100 / window.innerHeight;
+        this.height = clampDrawersHeight(this.drag.startHeight - dy * vhPerPx);
+        this.applyHeight();
+      },
+      onpointerup: () => {
+        this.drag = null;
+      },
+      onpointercancel: () => {
+        this.drag = null;
+      },
     });
-    this.bindHandle(handle);
     const row = h(
       "div",
       { class: "drawer-row" },
@@ -96,30 +112,5 @@ export class Drawers {
     )) {
       body.style.height = height;
     }
-  }
-
-  private bindHandle(handle: HTMLElement): void {
-    handle.addEventListener("pointerdown", (event) => {
-      if (this.drag) return;
-      this.drag = { startY: event.clientY, startHeight: this.height };
-      try {
-        handle.setPointerCapture(event.pointerId);
-      } catch {
-        // pointer already gone
-      }
-    });
-    handle.addEventListener("pointermove", (event) => {
-      if (!this.drag) return;
-      const dy = event.clientY - this.drag.startY;
-      const vhPerPx = 100 / window.innerHeight;
-      this.height = clampDrawersHeight(this.drag.startHeight - dy * vhPerPx);
-      this.applyHeight();
-    });
-    handle.addEventListener("pointerup", () => {
-      this.drag = null;
-    });
-    handle.addEventListener("pointercancel", () => {
-      this.drag = null;
-    });
   }
 }
