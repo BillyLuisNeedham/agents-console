@@ -4133,6 +4133,35 @@ describe("enlist a pane as a ticket", () => {
     return poolDir;
   }
 
+  /** A Seeded Pool (pool.ts: a pool that starts with no Tickets and grows by
+   *  Enlist and Spawn): a git-backed pool that opts in with a conversations/
+   *  directory and, unlike makeServerPool/gitTerminalPool, never creates an
+   *  issues/ directory at all (absent, not merely empty) — the fixture for
+   *  the writeEnlistTicket ENOENT regression (Enlist-as-Ticket into a pool
+   *  that has never had a Ticket before). */
+  function seededGitPool(): string {
+    const poolDir = makeTempDir("seeded-pool-");
+    registerTempDir(poolDir);
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
+        "model=m drivers=implement -->\n\n# Talk\n\n\n",
+    );
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ ...STUB_DEFAULTS, terminal: "herdr" }, null, 2),
+    );
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: poolDir, stdio: "ignore" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pool@test"]);
+    git(["config", "user.name", "pool"]);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "init"]);
+    return poolDir;
+  }
+
   function currentBranchOf(dir: string): string {
     return spawnSync("git", ["-C", dir, "branch", "--show-current"], {
       stdio: "pipe",
@@ -4538,6 +4567,47 @@ describe("enlist a pane as a ticket", () => {
     expect(currentBranchOf(poolDir)).toBe("main");
     expect(fake.requests.some((r) => r.method === "tab.rename")).toBe(false);
     expect(fake.requests.some((r) => r.method === "pane.report_agent")).toBe(false);
+  });
+
+  // Regression: a Seeded Pool (pool.ts) may legitimately boot with no
+  // issues/ directory on disk at all — a pool that hosts only Conversations
+  // opts in by having a conversations/ directory instead. writeEnlistTicket
+  // used to write straight into session.issuesDir with no mkdir first, so
+  // Enlisting a pane as a Ticket into such a pool threw ENOENT and the
+  // enlist unwound into a 409.
+  it("creates the issues/ directory when enlisting a Ticket into a Seeded Pool that has none yet", async () => {
+    const poolDir = seededGitPool();
+    expect(existsSync(join(poolDir, "issues"))).toBe(false);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-main",
+      agent: "opencode",
+      cwd: poolDir,
+      title: "OC on main",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-main",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+    });
+    await server.start();
+
+    const res = await enlist(server, {
+      becomes: "ticket",
+      paneId: "pane-main",
+      title: "First ticket ever",
+      spec: "the spec body",
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ ticketId: "enlist-1" });
+
+    const ticketFile = readFileSync(join(poolDir, "issues", "enlist-1.md"), "utf8");
+    expect(ticketFile).toContain(
+      "<!-- state: id=enlist-1 blocked-by=none status=in-progress enlisted-from=pane-main -->",
+    );
+    expect(ticketFile).toContain("# enlist-1: First ticket ever");
   });
 });
 

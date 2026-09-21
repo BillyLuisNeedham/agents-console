@@ -1,18 +1,30 @@
 ---
 name: my-console-runner
-description: Point the Console at an existing ticket pool: detect, interview, write console.json and AGENT.md, launch the server.
+description: Point the Console at a pool, whether it already holds tickets or starts seeded and empty: detect, interview, write console.json and AGENT.md, launch the server.
 disable-model-invocation: true
 ---
 
-Tickets already exist. This skill connects them to the Console.
+This skill connects a pool to the Console. A pool reaches it one of two ways.
+
+A **ticket pool** already holds its tickets, written by `to-tickets`. This is the common path.
+
+A **Seeded Pool** holds none. It starts empty and grows from live work: the human Enlists herdr
+panes into it as Conversations, and those Conversations Spawn the tickets (ADR-0024). The skill
+creates the directories, runs the same interview, and launches the same server.
+
+You ask which one before you detect anything, because an empty ticket directory means opposite
+things on the two paths and only the human knows which.
 
 The pool's ticket directory is called `issues/` on disk — a legacy name; prose says ticket.
 
-It is the sibling of `my-issue-runner`: same detection, same interview, same pool on disk. Where
-my-issue-runner writes `run.sh`, this skill writes `console.json` and `AGENT.md` into the pool
-directory, then starts the Console server bound to that pool and opens the browser. **Never write
-tickets here.** An empty or markerless pool is a reason to stop and say so, not a reason to invent
-tickets.
+It is the sibling of `my-issue-runner`: the same pool on disk, and the same interview on the ticket
+path. Where my-issue-runner writes `run.sh`, this skill writes `console.json` and `AGENT.md` into
+the pool directory, then starts the Console server bound to that pool and opens the browser.
+
+**The engine writes every ticket, and this skill writes none.** On a ticket pool `to-tickets` wrote
+them; on a Seeded Pool the engine writes them when a Conversation Spawns one, and when a pane is
+enlisted as a ticket. A ticket pool with nothing in it, or a ticket without a state marker, is a
+reason to stop and say so.
 
 The engine is one versioned copy per machine, its location read from the `engine=` line in
 `~/.console-runner` (`engine/` for the server, `ui/` for the Console). If the file or the line is
@@ -27,15 +39,25 @@ its own git worktree, on the harness and model `console.json` assigns. Anything 
 becomes an interrupt on that ticket's card: a checkpoint Brief, a merge-approval, a crash, a
 deadlock, the final Review. Answering an interrupt resumes the pool.
 
+A Conversation runs beside all that and holds nothing up: it has no blockers, never joins a
+super-step, is never verified or graded, and ends only when the human ends it (ADR-0018).
+
 ## 0. Pointed at a configured pool
 
 If the pool directory already holds `console.json` and `AGENT.md`, say so, show the config's
 defaults and assignments, and ask one question: relaunch as-is, or re-interview. A relaunch goes
 straight to step 6. A re-interview runs steps 1 to 5 and overwrites both files.
 
-## 1. Detect
+## 1. Ask which pool, then detect
 
-Look these up. Asking for them wastes a question:
+One question comes before the lookups, because the disk cannot answer it:
+
+**Which kind of pool is this: a ticket pool, or a Seeded Pool?** Recommend what the directory
+suggests. Tickets in `issues/` means a ticket pool. An empty `issues/`, or no pool directory at
+all, means you are probably being asked for a Seeded Pool. Take the answer over the suggestion:
+the human's intent decides this, and the disk only hints.
+
+Then look these up. Asking for them wastes a question:
 
 - how many tickets sit in the pool's `issues/` directory, and whether every one carries a line 1
   state marker
@@ -50,11 +72,22 @@ Look these up. Asking for them wastes a question:
 - whether herdr is installed and its daemon live: the `herdr` binary on PATH, and a socket at
   `~/.config/herdr/herdr.sock`
 
-Report all ten back in one short brief and get it confirmed. If the pool has no `issues/`
-directory, no tickets in it, or any ticket without a state marker, say which and stop: the human
-fixes the pool, or `to-tickets` writes it again. If the worktree is dirty, recommend committing
-before launch: tickets commit to the current branch, and an unattended agent can sweep unrelated
-changes into a commit that says it is the work of a ticket.
+Report all ten back in one short brief and get it confirmed.
+
+On a **ticket pool**, stop if the pool has no `issues/` directory, no tickets in it, or any ticket
+without a state marker. Say which, and the human fixes the pool or `to-tickets` writes it again.
+
+On a **Seeded Pool**, an empty `issues/` is the point, so report it as the point. The ticket count,
+the `blocked-by` edges and the per-ticket overrides of question 3 have nothing to describe yet; say
+so and move on. Everything else in the list still counts, and herdr counts for more than usual:
+Enlist is how this pool grows, so a missing binary or a dead socket is worth raising before launch
+rather than after.
+
+If the pool's own checkout is dirty, recommend committing before launch: tickets commit to the
+current branch, and an unattended agent can sweep unrelated changes into a commit that says it is
+the work of a ticket. A herdr pane the human means to Enlist is the exception and keeps its
+uncommitted work. That work is usually why the pane is worth enlisting, and the engine records the
+pane's directory and branch as found and writes into neither (ADR-0021).
 
 ## 2. Ask
 
@@ -96,6 +129,10 @@ Eight questions follow Q0, each with your recommendation attached:
    surface do anything, and it costs nothing when the daemon is absent, since the engine falls
    back to headless with a visible warning. A yes becomes `"terminal": "herdr"`; a no writes no
    key.
+
+On a Seeded Pool, question 3 has nothing to override yet: write an empty `assign` and add entries
+by hand as Spawned tickets arrive. The pool re-reads that slice at every super-step boundary
+(ADR-0018), so the edit lands with no restart.
 
 Recommend the orchestrator's own model for every subagent unless there is a reason to go smaller.
 Delegating a skill to a cheaper model moves the substance of a ticket onto that model, which is
@@ -144,7 +181,12 @@ stop for it.
 
 ## 4. Generate
 
-Write `console.json` into the pool directory. All seven answers land here as data:
+On a Seeded Pool, create `issues/` and `conversations/` in the pool directory first. The
+`conversations/` directory is the opt-in the engine reads, and an empty one counts: it is what
+tells the Console that an empty `issues/` is intended rather than a pool whose tickets were never
+written (ADR-0024). `issues/` is where an enlisted ticket, and every Spawned ticket, is written.
+
+Write `console.json` into the pool directory. All eight answers land here as data:
 
 ```json
 {
@@ -193,6 +235,12 @@ Below the marker:
 - which tickets are expected to stop: from the checkpoint definition, so a checkpoint on those
   reads as correct rather than as a failure
 
+`AGENT.md` reaches one surface: a ticket the engine launched itself. A Conversation is taught by
+its own opening Turn and never sees this file, and an enlisted pane of either kind keeps the
+context it already had and is taught the protocol with a Turn. So on a Seeded Pool nobody the human
+Enlists ever reads `AGENT.md`. Write it for the tickets those Conversations Spawn, which do read
+it, and say so when you ask for the pool prose, so the human writes for the right audience.
+
 Then write the pool's `verify` skill beside `AGENT.md`: copy
 [`verify.template.md`](verify.template.md) into the pool directory as `verify.md`, verbatim,
 nothing to fill in. It seeds the grading instructions a grader agent follows when a ticket opts
@@ -203,8 +251,10 @@ No question is asked about any of this. Activation is the per-ticket `verify: N`
 ticket's entry under `assign` in `console.json`: N parallel attempts and N grader tickets, then
 selection. Absent the key a ticket runs exactly as it does today, so writing the skill is harmless
 for pools that never set it. The interview never asks for the key; set it by editing `console.json`
-when a ticket is wanted verified. If `verify.md` already sits beside `AGENT.md`, name it and leave
-it alone: a re-interview must not clobber criteria tuned by hand.
+when a ticket is wanted verified. An enlisted ticket is the exception: its agent is already running
+in a pane the human opened, so there is nothing to run N of, and the engine ignores `verify: N` on
+one and logs that once at enlist (ADR-0021). If `verify.md` already sits beside `AGENT.md`, name it
+and leave it alone: a re-interview must not clobber criteria tuned by hand.
 
 ## 5. Save the Setup
 
@@ -321,12 +371,23 @@ Leave these alone rather than rediscovering them:
   Cursor's documentation and is unproven.
 - Upstream outcomes are injected into each ticket's prompt at spawn time, so downstream agents
   build on what upstream agents did.
-- A ticket that exits without an outcome status in its outcome JSON is a crash and surfaces as an
-  interrupt carrying the log path.
+- A ticket the engine launched that exits without an outcome status in its outcome JSON is a crash
+  and surfaces as an interrupt carrying the log path. An enlisted ticket has no wrapper and so no
+  exit to read: its ending is raced between a valid Outcome on disk and its pane leaving herdr's
+  listing, and a pane that goes before the Outcome lands the ticket in a checkpoint saying so, with
+  the branch kept (ADR-0021). A Conversation has no Outcome at all and ends when the human ends it.
 - A merge conflict spawns the resolver agent; its resolution comes to the human as an approval
   interrupt, and rejecting hands the conflicted state over with the attempt noted.
 - Line-1 markers are dual-written alongside the sqlite checkpoint and are the truth on conflict,
   so the pool on disk is always inspectable.
+- Enlist takes a live herdr pane the human opened themselves and makes it a Pool citizen, as a
+  ticket or a Conversation, chosen at that moment and fixed from then on (ADR-0021). The pane, its
+  directory and its branch are recorded as found; the engine never closes the tab, never removes
+  the directory and never deletes the branch. The one thing it changes is the branch, and only for
+  a pane sitting on the merge target: that one gets `pool/<pool>/<id>` created at its HEAD and
+  checked out in place, which carries the uncommitted work with it. Enlisted ids live in the
+  reserved `enlist-N` namespace. The Console drives all of this from its own surface, so the skill
+  only makes sure herdr is there for it.
 - Per-ticket logs land in the pool's `runs/` directory, same as my-issue-runner writes them.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
   super-step boundary (ADR-0018): an edit lands on any ticket with no Attempt in flight — a
