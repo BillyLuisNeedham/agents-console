@@ -1196,10 +1196,10 @@ body {
 
 /* Fullscreen is a Detail mode, not browser fullscreen: the class fixes the
    Detail over everything below the toolbar (canvas and bottom drawers covered,
-   toolbar visible and live) without unmounting it, so SSE rebuilds, interrupt
-   forms, and log tailing all keep working. The inline top, set by
-   applyDetailFullscreen, is the canvas-header's measured bottom edge; the
-   static top: 0 here is only a fallback before that inline style lands. */
+   toolbar visible and live) without unmounting it, so snapshots, interrupt
+   forms, and log tailing all keep working. The inline top is rendered from
+   the canvas-header's measured bottom edge; the static top: 0 here is only a
+   fallback before that inline style lands. */
 .detail-fullscreen {
   position: fixed;
   top: 0;

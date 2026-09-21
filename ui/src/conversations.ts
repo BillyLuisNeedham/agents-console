@@ -15,7 +15,6 @@ import {
   type StartConversationRequest,
 } from "./project";
 import { h } from "./dom";
-import { FOCUS_KEY_ATTR } from "./focus";
 
 export type StartConversationHandler = (
   request: StartConversationRequest,
@@ -244,27 +243,27 @@ export class ConversationsTray {
   }
 
   private renderForm(defaults: ConversationAssignmentDefaults): HTMLElement {
-    // Every field is keyed so the rebuild on each poll tick hands focus and
-    // caret back (focus.ts); the text itself lives in the draft.
+    // The text lives in the draft; each field renders from it and reports
+    // back into it.
     const title = h("input", {
       class: "field conversations-field",
       type: "text",
       placeholder: "title",
-      [FOCUS_KEY_ATTR]: "conversation-form:title",
       disabled: this.submitting,
-    }) as HTMLInputElement;
-    title.value = this.draft.title;
-    title.addEventListener("input", () => this.setField("title", title.value));
+      value: this.draft.title,
+      oninput: (event: Event) =>
+        this.setField("title", (event.currentTarget as HTMLInputElement).value),
+    });
 
     const opening = h("textarea", {
       class: "field conversations-field",
       placeholder: "opening turn (optional)",
-      [FOCUS_KEY_ATTR]: "conversation-form:opening",
       rows: 3,
       disabled: this.submitting,
-    }) as HTMLTextAreaElement;
-    opening.value = this.draft.opening;
-    opening.addEventListener("input", () => this.setField("opening", opening.value));
+      value: this.draft.opening,
+      oninput: (event: Event) =>
+        this.setField("opening", (event.currentTarget as HTMLTextAreaElement).value),
+    });
 
     return h(
       "div",
@@ -296,22 +295,21 @@ export class ConversationsTray {
   }
 
   private assignField(name: "harness" | "model" | "drivers", placeholder?: string): HTMLInputElement {
-    const input = h("input", {
+    return h("input", {
       class: "field conversations-field",
       type: "text",
       placeholder: placeholder ?? name,
-      [FOCUS_KEY_ATTR]: `conversation-form:${name}`,
       disabled: this.submitting,
-    }) as HTMLInputElement;
-    input.value = this.draft[name];
-    input.addEventListener("input", () => this.setField(name, input.value));
-    return input;
+      value: this.draft[name],
+      oninput: (event: Event) =>
+        this.setField(name, (event.currentTarget as HTMLInputElement).value),
+    });
   }
 
   private renderRow(row: ConversationTrayRow, handlers: ConversationsHandlers): HTMLElement {
     return h(
       "div",
-      { class: "conversations-row" },
+      { class: "conversations-row", key: row.id },
       h(
         "button",
         {

@@ -7,8 +7,8 @@
  * the cards' surfaces project from. A ticket whose pane leaves the snapshot (the
  * attempt ended, or the ticket left the pool) is pruned, so its polling
  * stops with its surface; a re-spawned attempt's new pane id resets the
- * entry to pending. Module scope in the bootstrap, so a full-DOM rebuild
- * never drops the entries. The renderer shapes the surface: a dim,
+ * entry to pending. Module scope in the bootstrap, so no render drops the
+ * entries. The renderer shapes the surface: a dim,
  * pointer-events-none peek viewport (typing happens in herdr, never here),
  * the "Open in herdr" jump, and the copyable attach-command chip.
  */
@@ -191,9 +191,10 @@ export class TerminalSurface {
   }
 
   // A peek's outcome lands on the entry, and the view repaints only when
-  // the surface it projects (status or text) actually moved: a full-DOM
-  // rebuild on every poll response for a pane that printed nothing new is
-  // what tears focus out of the operator's hands every 2s (issue #122).
+  // the surface it projects (status or text) actually moved: a render on
+  // every poll response for a pane that printed nothing new is work for
+  // nothing, and before the morph it tore focus out of the operator's hands
+  // every 2s (issue #122).
   private settle(
     ticketId: string,
     paneId: string,

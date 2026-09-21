@@ -15,7 +15,6 @@
  */
 
 import { h } from "./dom";
-import { FOCUS_KEY_ATTR } from "./focus";
 import {
   ENLIST_BECOMES_HINT,
   projectEnlistForm,
@@ -310,11 +309,13 @@ export class EnlistStore {
   }
 
   private renderRow(row: EnlistPickerRow): HTMLElement {
-    const element = h(
+    return h(
       "div",
       {
         class: `enlist-row${row.eligible ? "" : " enlist-row-ineligible"}`,
+        key: row.paneId,
         title: row.eligible ? row.title : (row.reason ?? ""),
+        onclick: row.eligible ? () => this.pick(row.paneId) : null,
       },
       h(
         "div",
@@ -332,10 +333,6 @@ export class EnlistStore {
         ? null
         : h("div", { class: "enlist-reason" }, row.reason ?? ""),
     );
-    if (row.eligible) {
-      element.addEventListener("click", () => this.pick(row.paneId));
-    }
-    return element;
   }
 
   private renderForm(blocks: EnlistBlockRow[]): HTMLElement {
@@ -352,33 +349,26 @@ export class EnlistStore {
         input,
       );
 
-    // Every field is keyed so the rebuild on each poll tick hands focus and
-    // caret back (focus.ts); the values live in the draft.
+    // The values live in the draft; each field renders from it and reports
+    // back into it.
+    const typed = (name: DraftField) => (event: Event) =>
+      this.setField(name, (event.currentTarget as HTMLInputElement).value);
     const titleInput = h("input", {
       class: "enlist-input",
       type: "text",
       value: this.draftTitle,
-      [FOCUS_KEY_ATTR]: "enlist-form:title",
+      oninput: typed("title"),
     });
-    titleInput.addEventListener("input", () =>
-      this.setField("title", titleInput.value),
-    );
     const specInput = h("textarea", {
       class: "enlist-input enlist-spec",
-      [FOCUS_KEY_ATTR]: "enlist-form:spec",
+      value: this.draftSpec,
+      oninput: typed("spec"),
     });
-    specInput.value = this.draftSpec;
-    specInput.addEventListener("input", () =>
-      this.setField("spec", specInput.value),
-    );
     const openingInput = h("textarea", {
       class: "enlist-input enlist-opening",
-      [FOCUS_KEY_ATTR]: "enlist-form:opening",
+      value: this.draftOpening,
+      oninput: typed("opening"),
     });
-    openingInput.value = this.draftOpening;
-    openingInput.addEventListener("input", () =>
-      this.setField("opening", openingInput.value),
-    );
 
     const becomesButton = (becomes: EnlistBecomes, label: string): HTMLElement =>
       h(
@@ -403,11 +393,10 @@ export class EnlistStore {
             ...blocks.map((block) =>
               h(
                 "label",
-                { class: "enlist-block" },
+                { class: "enlist-block", key: block.id },
                 h("input", {
                   type: "checkbox",
                   checked: this.isTicked(block.id),
-                  [FOCUS_KEY_ATTR]: `enlist-form:block:${block.id}`,
                   onchange: () => this.toggleBlock(block.id),
                 }),
                 h("span", { class: "enlist-block-id" }, block.id),

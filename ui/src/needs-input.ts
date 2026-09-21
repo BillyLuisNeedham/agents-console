@@ -12,13 +12,12 @@
  * failed answer marks its own row inline ("answer failed · retry") without
  * disturbing the others. The header's bulk action fires every open
  * resume-kind row at once, each with its own note. Clicking a row's ticket
- * id selects the card and opens its Detail. State survives the full-DOM
- * rebuild on every snapshot: drafts, the collapsed flag, and the failure
+ * id selects the card and opens its Detail. State outlives any one render:
+ * drafts, the collapsed flag, and the failure
  * marks live on the instance, and a note being typed keeps focus and cursor
  * across the swap.
  */
 
-import { FOCUS_KEY_ATTR } from "./focus";
 import { h } from "./dom";
 import {
   bulkResumeRows,
@@ -243,7 +242,7 @@ export class NeedsInputTray {
   ): HTMLElement {
     return h(
       "div",
-      { class: "needs-input-row needs-input-row-conversation" },
+      { class: "needs-input-row needs-input-row-conversation", key: row.cardId },
       h(
         "button",
         {
@@ -285,16 +284,17 @@ export class NeedsInputTray {
       class: "interrupt-note needs-input-note",
       type: "text",
       placeholder: row.interrupt.form.notePlaceholder ?? "note",
-      [FOCUS_KEY_ATTR]: `${row.ticketId}:tray`,
       disabled: waiting,
-    }) as HTMLInputElement;
-    note.value = this.note(row.ticketId);
-    note.addEventListener("input", () => this.setNote(row.ticketId, note.value));
+      value: this.note(row.ticketId),
+      oninput: (event: Event) =>
+        this.setNote(row.ticketId, (event.currentTarget as HTMLInputElement).value),
+    });
     const elements = [
       h(
         "div",
         {
           class: "needs-input-row" + (waiting ? " needs-input-row-waiting" : ""),
+          key: row.cardId,
         },
         h(
           "button",

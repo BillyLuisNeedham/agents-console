@@ -2,10 +2,13 @@
  * Canvas: the graph canvas and its mechanics. One module owns pan, zoom,
  * node drag, edge routing, and the persisted card positions, as instance
  * state on the class the composition root creates once per session. The
- * render is a function of model + selection; the pointer and wheel listeners
- * bind to the freshly rebuilt viewport after every render. A card tap (a
- * press that never crosses the drag threshold) reports through the
- * `onCardTap` callback; selection itself belongs to the composition.
+ * render is a function of model + selection, the pan and a drag in flight
+ * included, so the morph that commits it finds the tree already saying what
+ * the mechanics did; the pointer and wheel handlers ride the viewport as
+ * props and follow it from render to render. The edges are the one thing
+ * drawn after the commit, since their routes need the cards laid out. A
+ * card tap (a press that never crosses the drag threshold) reports through
+ * the `onCardTap` callback; selection itself belongs to the composition.
  */
 
 import {
@@ -118,17 +121,30 @@ function sparkline(samples: number[]): SVGSVGElement {
  * harness nor model is an unassigned ticket and reads a muted word instead;
  * a resolved-null field renders by omission, so no bare separator is
  * stranded. One line, the model ellipsizing before the rest; a click
- * toggles the full wrapped text in place. An enlisted ticket (issue #101)
- * has no model by construction, so `asFound` puts the words "as found" where
- * the model would read.
+ * toggles the full wrapped text. Whether it is expanded is state the Canvas
+ * holds per card and the render draws, so the morph keeps it from one
+ * render to the next instead of the next tick folding it back. An enlisted
+ * ticket (issue #101) has no model by construction, so `asFound` puts the
+ * words "as found" where the model would read.
  */
 function renderAssignmentBadge(
   assignment: AssignmentView,
+  expanded: boolean,
+  onToggle: () => void,
   asFound = false,
 ): HTMLElement {
-  const badge = h("div", { class: "assignment-badge" });
-  if (assignment.harness === null && assignment.model === null && !asFound) {
-    badge.classList.add("assignment-badge-unassigned");
+  const unassigned = assignment.harness === null && assignment.model === null && !asFound;
+  const badge = h("div", {
+    class: [
+      "assignment-badge",
+      expanded ? "assignment-badge-expanded" : null,
+      unassigned ? "assignment-badge-unassigned" : null,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    onclick: onToggle,
+  });
+  if (unassigned) {
     badge.append(UNASSIGNED_LABEL);
   } else {
     const fields: { class: string; value: string }[] = [];
@@ -151,9 +167,6 @@ function renderAssignmentBadge(
       );
     }
   }
-  badge.addEventListener("click", () =>
-    badge.classList.toggle("assignment-badge-expanded"),
-  );
   return badge;
 }
 
@@ -252,6 +265,9 @@ export class Canvas {
   private edgeMode: EdgeMode = "ortho";
   private canvas: CanvasBind | null = null;
   private drag: Drag | null = null;
+  /** Cards whose Assignment badge the operator has clicked open. */
+  private readonly expandedBadges = new Set<string>();
+  private readonly onChange: () => void;
   private readonly onCardTap: (nodeId: string) => void;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
@@ -262,6 +278,8 @@ export class Canvas {
   private readonly onConfirmStop: () => void;
 
   constructor(options: {
+    /** Canvas-held view state changed (a badge toggled): render again. */
+    onChange: () => void;
     onCardTap: (nodeId: string) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
@@ -278,6 +296,7 @@ export class Canvas {
     onCancelStop: () => void;
     onConfirmStop: () => void;
   }) {
+    this.onChange = options.onChange;
     this.onCardTap = options.onCardTap;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
@@ -302,12 +321,22 @@ export class Canvas {
     for (const id of [...this.nodePos.keys()]) {
       if (!liveIds.has(id)) this.nodePos.delete(id);
     }
+    for (const id of [...this.expandedBadges]) {
+      if (!liveIds.has(id)) this.expandedBadges.delete(id);
+    }
     this.seedPositions(cards);
   }
 
-  /** Drop an in-flight drag: a full-DOM rebuild pulls the floor away. */
-  cancelDrag(): void {
-    this.endDrag();
+  private assignmentBadge(card: TicketCardView | ConversationCardView): HTMLElement {
+    return renderAssignmentBadge(
+      card.assignment,
+      this.expandedBadges.has(card.id),
+      () => {
+        if (!this.expandedBadges.delete(card.id)) this.expandedBadges.add(card.id);
+        this.onChange();
+      },
+      card.enlisted,
+    );
   }
 
   /** The canvas is gone from the DOM (error or empty pool): unbind it. */
@@ -328,13 +357,25 @@ export class Canvas {
     const size = this.worldSize(model.cards);
     const world = h("div", {
       class: "canvas-world",
-      style: `width:${size.width}px;height:${size.height}px`,
+      style: `width:${size.width}px;height:${size.height}px;transform:${this.transform()}`,
     });
     world.append(
       this.makeSvg(),
       ...model.cards.map((card) => this.renderCard(card, selection)),
     );
-    const viewport = h("div", { class: "canvas-viewport" }, world);
+    const panning = this.drag?.kind === "pan" && this.drag.moved;
+    const viewport = h(
+      "div",
+      {
+        class: "canvas-viewport" + (panning ? " canvas-panning" : ""),
+        onpointerdown: (event: PointerEvent) => this.pointerDown(event),
+        onpointermove: (event: PointerEvent) => this.pointerMove(event),
+        onpointerup: (event: PointerEvent) => this.endDrag(event),
+        onpointercancel: (event: PointerEvent) => this.endDrag(event),
+        onwheel: (event: WheelEvent) => this.wheel(event),
+      },
+      world,
+    );
     main.append(this.renderCanvasHeader(model));
     const stopped = this.renderStoppedNotice(model);
     if (stopped) main.append(stopped);
@@ -343,8 +384,10 @@ export class Canvas {
   }
 
   /**
-   * Bind the mechanics to the freshly rebuilt viewport: seed the pan on first
-   * mount, draw the edges, and listen for drag, pan, and zoom gestures.
+   * Bind the mechanics to the viewport now on the page: seed the pan on
+   * first mount (it needs the viewport's width), fit the world to its cards,
+   * and draw the edges. The gesture handlers are already on the viewport,
+   * put there by the render.
    */
   bindCanvas(
     viewport: HTMLElement,
@@ -364,105 +407,28 @@ export class Canvas {
       this.view.seeded = true;
       this.view.x = Math.max(8, (viewport.clientWidth - WORLD_MIN_WIDTH) / 2);
       this.view.y = 8;
+      this.applyTransform();
     }
-    this.applyTransform();
     this.fitWorld(world);
     this.drawEdges(world, edges, selectedId);
     this.updateEdges();
-
-    viewport.addEventListener("pointerdown", (event) => {
-      if (this.drag) return;
-      const target = event.target instanceof Element ? event.target : null;
-      const card = target?.closest(".node-card");
-      const interactive = target?.closest(
-        "button, input, select, textarea, a, summary, label, .assignment-badge",
-      );
-      if (card instanceof HTMLElement && !interactive) {
-        const id = card.dataset.nodeId ?? "";
-        this.drag = {
-          kind: "node",
-          nodeId: id,
-          startX: event.clientX,
-          startY: event.clientY,
-          startNode: { ...(this.nodePos.get(id) ?? { x: 0, y: 0 }) },
-          moved: false,
-        };
-      } else if (!card) {
-        this.drag = {
-          kind: "pan",
-          startX: event.clientX,
-          startY: event.clientY,
-          startView: { x: this.view.x, y: this.view.y },
-          moved: false,
-        };
-      } else {
-        return;
-      }
-      try {
-        viewport.setPointerCapture(event.pointerId);
-      } catch {
-        // pointer already gone
-      }
-    });
-
-    viewport.addEventListener("pointermove", (event) => {
-      if (!this.drag || !this.canvas) return;
-      const dx = event.clientX - this.drag.startX;
-      const dy = event.clientY - this.drag.startY;
-      if (!this.drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-      this.drag.moved = true;
-      if (this.drag.kind === "node") {
-        const next = {
-          x: this.drag.startNode.x + dx / this.view.zoom,
-          y: this.drag.startNode.y + dy / this.view.zoom,
-        };
-        this.nodePos.set(this.drag.nodeId, next);
-        const el = this.canvas.nodesById.get(this.drag.nodeId);
-        if (el) {
-          el.style.left = `${next.x}px`;
-          el.style.top = `${next.y}px`;
-          el.classList.add("node-card-dragging");
-        }
-        this.fitWorld(this.canvas.world);
-        this.updateEdges();
-      } else {
-        this.view.x = this.drag.startView.x + dx;
-        this.view.y = this.drag.startView.y + dy;
-        this.canvas.viewport.classList.add("canvas-panning");
-        this.applyTransform();
-      }
-    });
-
-    viewport.addEventListener("pointerup", (event) => this.endDrag(event));
-    viewport.addEventListener("pointercancel", (event) => this.endDrag(event));
-    viewport.addEventListener(
-      "wheel",
-      (event) => {
-        event.preventDefault();
-        const rect = viewport.getBoundingClientRect();
-        const next = zoomAtCursor(
-          this.view,
-          { x: event.clientX - rect.left, y: event.clientY - rect.top },
-          Math.exp(-event.deltaY * 0.0015),
-        );
-        this.view.x = next.x;
-        this.view.y = next.y;
-        this.view.zoom = next.zoom;
-        this.applyTransform();
-      },
-      { passive: false },
-    );
   }
 
   // -------------------------------------------------------------------------
   // Cards
   // -------------------------------------------------------------------------
 
+  // The selection's highlight and the drag in flight, both rendered from
+  // state so a render landing mid-gesture says what the pointer is doing.
   private flowClass(id: string, selection: CanvasSelection): string {
-    if (id === selection.selectedId) return " node-card-selected";
-    if (selection.inflow.has(id)) return " node-card-inflow";
-    if (selection.outflow.has(id)) return " node-card-outflow";
-    return "";
+    const dragging =
+      this.drag?.kind === "node" && this.drag.nodeId === id && this.drag.moved
+        ? " node-card-dragging"
+        : "";
+    if (id === selection.selectedId) return " node-card-selected" + dragging;
+    if (selection.inflow.has(id)) return " node-card-inflow" + dragging;
+    if (selection.outflow.has(id)) return " node-card-outflow" + dragging;
+    return dragging;
   }
 
   private posOf(card: Positioned): Point {
@@ -515,6 +481,7 @@ export class Canvas {
               : " ticket-card-interrupt"
             : "") +
           this.flowClass(card.id, selection),
+        key: card.id,
         "data-node-id": card.id,
         "data-ticket-id": card.ticketId,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
@@ -526,7 +493,7 @@ export class Canvas {
         // The Assignment badge rides the view model like the Vitals footer,
         // so it renders inside the card render and holds its row directly
         // under the head whether or not a live attempt puts Vitals below.
-        renderAssignmentBadge(card.assignment, card.enlisted),
+        this.assignmentBadge(card),
         h("div", { class: "card-text ticket-card-summary" }, card.title),
         blockers,
         card.grade
@@ -540,7 +507,7 @@ export class Canvas {
             )
           : null,
         // The Vitals footer rides the view model, so it renders inside the
-        // card render and survives the full-DOM rebuild like everything else.
+        // card render like everything else.
         card.vitals ? renderVitals(card.vitals) : null,
         // The terminal surface (ADR-0014) rides the view model the same way:
         // present only while the attempt is terminal-backed and running.
@@ -577,6 +544,7 @@ export class Canvas {
               : " node-card-utility-interrupt"
             : "") +
           this.flowClass(card.id, selection),
+        key: card.id,
         "data-node-id": card.id,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
       },
@@ -610,7 +578,7 @@ export class Canvas {
       ),
     );
     const body: (Node | string | null)[] = [
-      renderAssignmentBadge(card.assignment, card.enlisted),
+      this.assignmentBadge(card),
       h("div", { class: "card-text conversation-card-title" }, card.title),
     ];
     if (card.status === "live") {
@@ -662,6 +630,7 @@ export class Canvas {
         class:
           `node-card conversation-card conversation-card-${card.status}` +
           this.flowClass(card.id, selection),
+        key: card.id,
         "data-node-id": card.id,
         "data-conversation-id": card.conversationId,
         style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
@@ -692,10 +661,10 @@ export class Canvas {
     const edgeToggle = h("input", {
       type: "checkbox",
       checked: this.edgeMode === "ortho",
-    }) as HTMLInputElement;
-    edgeToggle.addEventListener("change", () => {
-      this.edgeMode = edgeToggle.checked ? "ortho" : "straight";
-      this.updateEdges();
+      onchange: (event: Event) => {
+        this.edgeMode = (event.currentTarget as HTMLInputElement).checked ? "ortho" : "straight";
+        this.updateEdges();
+      },
     });
     return h(
       "div",
@@ -916,9 +885,93 @@ export class Canvas {
   // Transform, edges, and drag
   // -------------------------------------------------------------------------
 
+  // A press on a card starts a node drag, a press on blank space a pan;
+  // either captures the pointer on the viewport, which keeps its node across
+  // the renders that land while the pointer is down.
+  private pointerDown(event: PointerEvent): void {
+    if (this.drag) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const card = target?.closest(".node-card");
+    const interactive = target?.closest(
+      "button, input, select, textarea, a, summary, label, .assignment-badge",
+    );
+    if (card instanceof HTMLElement && !interactive) {
+      const id = card.dataset.nodeId ?? "";
+      this.drag = {
+        kind: "node",
+        nodeId: id,
+        startX: event.clientX,
+        startY: event.clientY,
+        startNode: { ...(this.nodePos.get(id) ?? { x: 0, y: 0 }) },
+        moved: false,
+      };
+    } else if (!card) {
+      this.drag = {
+        kind: "pan",
+        startX: event.clientX,
+        startY: event.clientY,
+        startView: { x: this.view.x, y: this.view.y },
+        moved: false,
+      };
+    } else {
+      return;
+    }
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    } catch {
+      // pointer already gone
+    }
+  }
+
+  private pointerMove(event: PointerEvent): void {
+    if (!this.drag || !this.canvas) return;
+    const dx = event.clientX - this.drag.startX;
+    const dy = event.clientY - this.drag.startY;
+    if (!this.drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    this.drag.moved = true;
+    if (this.drag.kind === "node") {
+      const next = {
+        x: this.drag.startNode.x + dx / this.view.zoom,
+        y: this.drag.startNode.y + dy / this.view.zoom,
+      };
+      this.nodePos.set(this.drag.nodeId, next);
+      const el = this.canvas.nodesById.get(this.drag.nodeId);
+      if (el) {
+        el.style.left = `${next.x}px`;
+        el.style.top = `${next.y}px`;
+        el.classList.add("node-card-dragging");
+      }
+      this.fitWorld(this.canvas.world);
+      this.updateEdges();
+    } else {
+      this.view.x = this.drag.startView.x + dx;
+      this.view.y = this.drag.startView.y + dy;
+      this.canvas.viewport.classList.add("canvas-panning");
+      this.applyTransform();
+    }
+  }
+
+  private wheel(event: WheelEvent): void {
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const next = zoomAtCursor(
+      this.view,
+      { x: event.clientX - rect.left, y: event.clientY - rect.top },
+      Math.exp(-event.deltaY * 0.0015),
+    );
+    this.view.x = next.x;
+    this.view.y = next.y;
+    this.view.zoom = next.zoom;
+    this.applyTransform();
+  }
+
+  private transform(): string {
+    return `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.zoom})`;
+  }
+
   private applyTransform(): void {
     if (!this.canvas) return;
-    this.canvas.world.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.zoom})`;
+    this.canvas.world.style.transform = this.transform();
     this.paintStrokeScale();
   }
 

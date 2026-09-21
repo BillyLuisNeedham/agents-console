@@ -24,7 +24,8 @@ import {
   type TimelineView,
 } from "./project";
 import { flowNeighbourhood, type TopologyEdge } from "./geometry";
-import { restoreLogScroll } from "./log-pane";
+import { settleLogScroll } from "./log-pane";
+import { commit } from "./morph";
 import { Canvas } from "./canvas";
 import {
   ConversationsTray,
@@ -35,7 +36,6 @@ import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
-import { captureFocus, restoreFocus } from "./focus";
 
 /** The Stop control's three states (issue #97): the button, the inline
  *  "Really stop?" confirmation, and the POST in flight. */
@@ -125,10 +125,14 @@ export type ConsoleViewOptions = NeedsInputOptions &
 /**
  * The per-session view state: one instance created by the bootstrap, holding
  * the selection plus the three sub-views with their own state, so a session's
- * dragged positions, panel width, drawer height, and note drafts survive the
- * full-DOM rebuild on every snapshot; the keyed field being typed into gets
- * its focus and caret back the same way (focus.ts). The tray's answer seam
- * and re-render trigger are wired here once, the LogPane way: async IO plus
+ * dragged positions, panel width, drawer height, and note drafts render the
+ * same on every snapshot. Every render builds the whole page afresh with
+ * `h`, and the commit morphs the page already on screen to match it
+ * (morph.ts, ADR-0025): a node that is still wanted is the same node, so
+ * scroll positions, focus and caret, hover, and a drag in flight survive on
+ * their own. What runs after the commit is what needs layout: the log pane's
+ * tail pin and the canvas's edge routes. The tray's answer seam and
+ * re-render trigger are wired here once, the LogPane way: async IO plus
  * change notification belong to the module, not the render pass.
  */
 export class ConsoleView {
@@ -141,8 +145,8 @@ export class ConsoleView {
   private readonly conversationsTray: ConversationsTray;
   private readonly enlist: EnlistStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
-  // The selection survives the rebuild (snapshots never close the panel or
-  // lose the selection); its one-hop flow neighbourhood is recomputed from
+  // The selection outlives any one render (snapshots never close the panel
+  // or lose the selection); its one-hop flow neighbourhood is recomputed from
   // the model's edges on every render, so a live snapshot re-derives the
   // highlight instead of stripping it.
   private selectedNodeId: string | null = null;
@@ -164,6 +168,7 @@ export class ConsoleView {
       onChange: options.onChange,
     });
     this.canvas = new Canvas({
+      onChange: options.onChange,
       onCardTap: (nodeId) => this.selectNode(nodeId),
       onFocusTerminal: options.onFocusTerminal,
       onNewConversation: () => this.conversationsTray.openForm(),
@@ -187,9 +192,6 @@ export class ConsoleView {
   }
 
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
-    this.canvas.cancelDrag();
-    this.drawers.cancelDrag();
-    this.detail.cancelDrag();
     this.onSelectNode = handlers.onSelectNode;
     this.stopHandlers = handlers;
     this.canvas.sync(model.cards);
@@ -200,10 +202,6 @@ export class ConsoleView {
     this.conversationsTray.pruneEndFailures(
       new Set(model.conversationsTray.map((row) => row.id)),
     );
-    // The field being typed into (a note, the New Conversation form, the
-    // Enlist form) is keyed by data-focus-key; its focus and caret come back
-    // after the swap, its text having lived in the stores all along.
-    const focus = captureFocus(document);
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
     const selection = {
       selectedId: this.selectedNodeId,
@@ -241,10 +239,9 @@ export class ConsoleView {
       model.detail ? this.detail.renderHandle() : null,
       this.detail.render(model, detailHandlers),
     );
-    root.replaceChildren(
+    commit(root, () =>
       h("div", { class: "shell" }, content, this.drawers.render(model, handlers)),
     );
-    this.detail.afterRender();
     const logPaneKey =
       model.detail?.kind === "ticket" &&
       model.logPane &&
@@ -253,8 +250,7 @@ export class ConsoleView {
         ? `${model.detail.ticketId}:${model.logPane.selectedAttempt}` +
           (model.logPane.stream ? ":stream" : "")
         : null;
-    restoreLogScroll(logPaneKey);
-    restoreFocus(root, focus);
+    settleLogScroll(logPaneKey);
     const world = root.querySelector(".canvas-world");
     const viewport = root.querySelector(".canvas-viewport");
     if (world instanceof HTMLElement && viewport instanceof HTMLElement) {
