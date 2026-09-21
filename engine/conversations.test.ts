@@ -24,6 +24,7 @@ import {
   type ConversationRecord,
 } from "./conversations.ts";
 import { readEvents } from "./events.ts";
+import { INTERACTIVE_PANE_READ_LINES } from "./pane-session.ts";
 import { branchExists, branchFor, worktreePathFor } from "./worktrees.ts";
 import {
   cleanupPools,
@@ -388,6 +389,55 @@ describe("Conversation launch", () => {
       expect(
         run.snapshots.some((s) => s.conversations.some((c) => c.id === view.id && c.status === "live")),
       ).toBe(true);
+
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+describe("Conversation Turn-state reads (issue #122)", () => {
+  it("the tick reads the viewport only and records it for the Peek; End forgets it", async () => {
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+        conversationPollMs: 20,
+      });
+      const view = await run.startConversation({ title: "Peek me" });
+      const paneId = view.paneId!;
+      await waitFor(() => run.paneRead(paneId) !== null);
+
+      // The tick's reads are of the viewport and carry no line count: the
+      // operator may be sitting in this pane, and a scrollback read moves
+      // their viewport. The launch's own reads (shell settle, echo) keep
+      // their `recent` read of a tab nobody is in yet.
+      const reads = fake.requests.filter(
+        (r) => r.method === "pane.read" && r.params.pane_id === paneId,
+      );
+      const visible = reads.filter((r) => r.params.source === "visible");
+      expect(visible.length).toBeGreaterThan(0);
+      for (const read of visible) {
+        expect(read.params).toEqual({
+          pane_id: paneId,
+          source: "visible",
+          format: "text",
+          strip_ansi: true,
+        });
+      }
+      for (const read of reads.filter((r) => r.params.source === "recent")) {
+        expect(read.params.lines).toBe(INTERACTIVE_PANE_READ_LINES);
+      }
+      // What the register holds is the pane as the fake renders it once
+      // booted (its input area, empty here), stamped with the read's time.
+      expect(run.paneRead(paneId)).toEqual({ text: "", at: expect.any(String) });
+
+      await run.endConversation(view.id);
+      expect(run.paneRead(paneId)).toBeNull();
 
       await run.shutdown(0);
     } finally {

@@ -618,21 +618,6 @@ function readTicketActivity(
 export const ACTIVITY_CACHE_TTL_MS = 1000;
 
 // ---------------------------------------------------------------------------
-// Terminal endpoints (peek and focus)
-// ---------------------------------------------------------------------------
-
-/**
- * The card's read-only preview shows this many lines of the pane's recent
- * output. On a terminal-backed attempt the harness fills the pane with a
- * full-screen TUI, and `pane.read source=recent` returns only the last N
- * rendered rows (prototype/tui-prompt-paste/FINDINGS.md section 2, proven):
- * a small line count reads empty on a fresh pane or a footer sliver on a live
- * TUI. This must be at least a terminal height so the peek shows the TUI's
- * working area, while staying a bounded glance rather than a full log.
- */
-export const TERMINAL_PEEK_LINES = 80;
-
-// ---------------------------------------------------------------------------
 // Grades endpoint
 // ---------------------------------------------------------------------------
 
@@ -1494,12 +1479,18 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           return Response.json(readTicketActivityCached(ticketId));
         }
 
-        // The card's read-only peek: the attempt pane's recent output as
-        // plain text (ANSI stripped herdr-side, a small line count). An
-        // empty read (a background tab still warming up) is empty text,
-        // not an error; a daemon failure is a clean 502 the card renders
-        // as "pane unavailable". Nothing here reads pane.read's revision:
-        // it is verified stagnant, so freshness is the card re-polling and
+        // The card's Peek: the pane's viewport as plain text (ANSI stripped
+        // herdr-side). A pane an operator sits in is read once per tick and
+        // for one purpose (issue #122): when the engine's own loop watches
+        // the pane (an enlisted Ticket's, a Conversation's) the answer is
+        // that loop's last recorded read and herdr is not asked again. A
+        // spawned terminal-backed attempt has no loop, so it is read live,
+        // and of the viewport only: a scrollback read moves the operator's
+        // viewport, which is the bug this route used to cause twice over.
+        // An empty read (a background tab still warming up) is empty text,
+        // not an error; a daemon failure is a clean 502 the card renders as
+        // "pane unavailable". Nothing here reads pane.read's revision: it is
+        // verified stagnant, so freshness is the card re-polling and
         // comparing text.
         if (pathname === "/api/terminal/peek") {
           const ticketId = url.searchParams.get("ticket") ?? "";
@@ -1511,11 +1502,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             );
           }
           try {
-            const text = await peekPane(
-              herdrSocket,
-              resolved.paneId,
-              TERMINAL_PEEK_LINES,
-            );
+            const recorded = currentRun?.paneRead(resolved.paneId) ?? null;
+            const text =
+              recorded?.text ??
+              (await peekPane(herdrSocket, resolved.paneId, { source: "visible" }));
             const body: TerminalPeekResponse = {
               ticket: ticketId,
               paneId: resolved.paneId,

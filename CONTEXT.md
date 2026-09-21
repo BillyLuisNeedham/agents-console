@@ -190,6 +190,10 @@ _Avoid_: message (a chat term), prompt (that is only the first Turn), super-step
 Which side of its current Turn a Conversation is on: working (the agent is replying) or waiting (on the operator), with the last line the agent showed and, when waiting, since when. Read from the pane by the engine, never reported by the agent. A Notice is delivered only while the Conversation is waiting.
 _Avoid_: Turn (that is the exchange itself), idle (the agent waits for the operator; it is not idle), status (that is live, ended or crashed)
 
+**Peek**:
+The Console's read-only view of a pane's visible viewport, on the card and in its Detail: what the operator would see in herdr right now, never the scrollback. For a pane the engine already watches for Turn state, the Peek is that watch's last read, so herdr is read once per pane; the engine reads only what the operator sees, because a scrollback read moves the pane under the operator. Amended into ADR-0021 (`docs/adr/0021-enlisted-panes-stay-in-place.md`), closing issue #122.
+_Avoid_: terminal (that is the herdr pane itself), preview, tail (the Peek is the viewport, not the last N lines of history)
+
 **Notice**:
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)

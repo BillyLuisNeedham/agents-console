@@ -24,6 +24,12 @@
  * changes nothing about the ticket. `waitForEnlistedEnding` is exported so
  * boot re-adoption, which has no runtime here, waits the same way.
  *
+ * The tick reads the pane's viewport and nothing above it (issue #122): the
+ * operator sits in an enlisted pane, and a scrollback read moves their
+ * viewport. Each read is recorded in the pane read register (pane-reads.ts)
+ * so the Console's card Peek is served from it and the pane is read once per
+ * tick; the entry goes when the tick stops.
+ *
  * The module mirrors conversations.ts in shape (env + host, a per-id runtime,
  * a fixed-interval tick).
  */
@@ -37,12 +43,8 @@ import {
   releasePaneAgent,
   reportPaneAgent,
 } from "./herdr.ts";
-import {
-  INTERACTIVE_PANE_READ_LINES,
-  READINESS_TIMEOUT_MS,
-  stillWorkingReason,
-  typeVerified,
-} from "./pane-session.ts";
+import type { PaneReadRegister } from "./pane-reads.ts";
+import { READINESS_TIMEOUT_MS, stillWorkingReason, typeVerified } from "./pane-session.ts";
 import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnState } from "./turn-state.ts";
 
@@ -127,6 +129,8 @@ function neverEnding(): Promise<never> {
 
 export interface EnlistedEnv {
   herdrSocket: string;
+  /** Where each tick's viewport read is recorded for the card Peek (issue #122). */
+  paneReads: PaneReadRegister;
   /** How often the tick re-reads the pane; 2s unless a test shortens it. */
   pollMs?: number;
   /** How long an enlist waits for a working pane to reach waiting so the
@@ -231,21 +235,25 @@ export function createEnlistedAttempts(
     ).catch(() => {});
   }
 
-  /** One Turn-state read from the pane; a failed read leaves the state as it was. */
+  /**
+   * One Turn-state read from the pane; a failed read leaves the state as it
+   * was. The read is of the viewport only (`visible`): Turn state needs no
+   * more than the prompt area at the bottom, and a scrollback read moves the
+   * operator's viewport (issue #122). What was read is recorded for the card
+   * Peek, so this is the one read of the pane per tick.
+   */
   async function readTurn(
     runtime: EnlistedRuntime,
     descriptor: HarnessDescriptor,
   ): Promise<void> {
-    const text = await peekPane(
-      env.herdrSocket,
-      runtime.paneId,
-      INTERACTIVE_PANE_READ_LINES,
-    );
+    const text = await peekPane(env.herdrSocket, runtime.paneId, { source: "visible" });
+    const at = new Date().toISOString();
+    env.paneReads.record(runtime.paneId, text, at);
     const { turn, publish } = nextTurnState(
       runtime.turn,
       text,
       idlePatternFor(descriptor),
-      new Date().toISOString(),
+      at,
     );
     const flipped = runtime.turn.state !== turn.state;
     runtime.turn = turn;
@@ -353,9 +361,16 @@ export function createEnlistedAttempts(
     host.trailingExit(runtime.id);
   }
 
+  /**
+   * Stop the tick and forget the pane's recorded read with it: the tick is
+   * the register's only writer for this pane, so once it stops the Peek
+   * must read live or find nothing, never a viewport frozen at the last
+   * tick.
+   */
   function stopTick(runtime: EnlistedRuntime): void {
     if (runtime.timer !== null) clearInterval(runtime.timer);
     runtime.timer = null;
+    env.paneReads.forget(runtime.paneId);
   }
 
   async function register(input: RegisterEnlistedInput): Promise<EnlistRegistration> {
@@ -388,6 +403,12 @@ export function createEnlistedAttempts(
     // agent is waiting on the operator and never mid-reply (spec, story 14);
     // past the bound the enlist is refused and leaves nothing (spec, "Failed
     // enlist leaves nothing"), never a Ticket whose agent was not taught.
+    // A refused enlist leaves nothing, the settling reads' register entry
+    // included: no tick will follow them, so nothing may serve them.
+    const refuse = (reason: string): EnlistRegistration => {
+      env.paneReads.forget(runtime.paneId);
+      return { ok: false, reason };
+    };
     try {
       for (let read = 0; read <= IDLE_STABLE_READS; read++) {
         await readTurn(runtime, descriptor);
@@ -397,19 +418,16 @@ export function createEnlistedAttempts(
         const deadline = Date.now() + teachingWaitMs;
         while (runtime.turn.state !== "waiting") {
           if (Date.now() >= deadline) {
-            return { ok: false, reason: stillWorkingReason(teachingWaitMs) };
+            return refuse(stillWorkingReason(teachingWaitMs));
           }
           await sleepAbortable(pollMs, runtime.release.signal);
           await readTurn(runtime, descriptor);
         }
       }
     } catch (err) {
-      return {
-        ok: false,
-        reason: `the pane could not be read (${
-          err instanceof Error ? err.message : String(err)
-        })`,
-      };
+      return refuse(
+        `the pane could not be read (${err instanceof Error ? err.message : String(err)})`,
+      );
     }
 
     reportState(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
@@ -418,7 +436,7 @@ export function createEnlistedAttempts(
       const delivered = await deliver(runtime, descriptor);
       if (!delivered) {
         releaseAgent(runtime);
-        return { ok: false, reason: "the teaching Turn could not be delivered" };
+        return refuse("the teaching Turn could not be delivered");
       }
     }
     // The operator's tab is relabelled only once the claim has held, so a
