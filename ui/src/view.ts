@@ -35,6 +35,7 @@ import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
+import { captureFocus, restoreFocus } from "./focus";
 
 /** The Stop control's three states (issue #97): the button, the inline
  *  "Really stop?" confirmation, and the POST in flight. */
@@ -125,9 +126,10 @@ export type ConsoleViewOptions = NeedsInputOptions &
  * The per-session view state: one instance created by the bootstrap, holding
  * the selection plus the three sub-views with their own state, so a session's
  * dragged positions, panel width, drawer height, and note drafts survive the
- * full-DOM rebuild on every snapshot. The tray's answer seam and re-render
- * trigger are wired here once, the LogPane way: async IO plus change
- * notification belong to the module, not the render pass.
+ * full-DOM rebuild on every snapshot; the keyed field being typed into gets
+ * its focus and caret back the same way (focus.ts). The tray's answer seam
+ * and re-render trigger are wired here once, the LogPane way: async IO plus
+ * change notification belong to the module, not the render pass.
  */
 export class ConsoleView {
   private readonly canvas: Canvas;
@@ -198,8 +200,10 @@ export class ConsoleView {
     this.conversationsTray.pruneEndFailures(
       new Set(model.conversationsTray.map((row) => row.id)),
     );
-    const noteFocus = this.detail.captureNoteFocus();
-    const trayFocus = this.needsInput.captureNoteFocus();
+    // The field being typed into (a note, the New Conversation form, the
+    // Enlist form) is keyed by data-focus-key; its focus and caret come back
+    // after the swap, its text having lived in the stores all along.
+    const focus = captureFocus(document);
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
     const selection = {
       selectedId: this.selectedNodeId,
@@ -250,8 +254,7 @@ export class ConsoleView {
           (model.logPane.stream ? ":stream" : "")
         : null;
     restoreLogScroll(logPaneKey);
-    this.detail.restoreNoteFocus(root, noteFocus);
-    this.needsInput.restoreNoteFocus(root, trayFocus);
+    restoreFocus(root, focus);
     const world = root.querySelector(".canvas-world");
     const viewport = root.querySelector(".canvas-viewport");
     if (world instanceof HTMLElement && viewport instanceof HTMLElement) {

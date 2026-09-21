@@ -33,6 +33,7 @@ import {
 import { noteLogScroll } from "./log-pane";
 import { renderTerminalSurface } from "./terminal";
 import { h } from "./dom";
+import { FOCUS_KEY_ATTR } from "./focus";
 
 // One global localStorage key (not per pool) remembers the dragged width
 // across reloads.
@@ -62,13 +63,6 @@ export interface DetailHandlers {
   onEndConversation: (conversationId: string, closing?: string) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
-}
-
-/** A note textarea's focus, captured before a rebuild and restored after. */
-export interface NoteFocus {
-  key: string;
-  start: number;
-  end: number;
 }
 
 export class Detail {
@@ -125,37 +119,6 @@ export class Detail {
   pruneDrafts(pendingTicketIds: ReadonlySet<string>): void {
     for (const id of [...this.drafts.keys()]) {
       if (!pendingTicketIds.has(id)) this.drafts.delete(id);
-    }
-  }
-
-  /**
-   * Remember a note being typed before the rebuild: the text lives in the
-   * drafts map, focus and cursor are restored after the swap.
-   */
-  captureNoteFocus(): NoteFocus | null {
-    const active = document.activeElement;
-    if (active instanceof HTMLTextAreaElement && active.dataset.noteKey) {
-      return {
-        key: active.dataset.noteKey,
-        start: active.selectionStart,
-        end: active.selectionEnd,
-      };
-    }
-    return null;
-  }
-
-  /** Restore a captured note focus onto the freshly rebuilt textarea. */
-  restoreNoteFocus(root: HTMLElement, focus: NoteFocus | null): void {
-    if (!focus) return;
-    const next = root.querySelector<HTMLTextAreaElement>(
-      `textarea[data-note-key="${CSS.escape(focus.key)}"]`,
-    );
-    if (next) {
-      next.focus();
-      next.setSelectionRange(
-        Math.min(focus.start, next.value.length),
-        Math.min(focus.end, next.value.length),
-      );
     }
   }
 
@@ -257,7 +220,8 @@ export class Detail {
       class: "interrupt-note",
       placeholder:
         interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
-      "data-note-key": `${interrupt.ticketId}:detail`,
+      // Focus and caret survive the rebuild by this key (focus.ts).
+      [FOCUS_KEY_ATTR]: `${interrupt.ticketId}:detail`,
       rows: 3,
     }) as HTMLTextAreaElement;
     note.value = this.drafts.get(interrupt.ticketId) ?? "";
@@ -687,6 +651,7 @@ export class Detail {
     const closing = h("textarea", {
       class: "interrupt-note",
       placeholder: "closing note (optional)",
+      [FOCUS_KEY_ATTR]: `${detail.conversationId}:closing`,
       rows: 2,
       disabled: detail.endView.ending,
     }) as HTMLTextAreaElement;

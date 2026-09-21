@@ -691,6 +691,13 @@ body {
   padding: 4px 6px;
   max-height: 96px;
   overflow: hidden;
+  /* Pinned to the bottom: the peek text is the pane's visible viewport, and
+     the prompt sits on its last lines, so a longer read overflows off the
+     top and clips there rather than hiding the prompt below the fold. A
+     column flex box aligned to its end does that without any scrolling. */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;

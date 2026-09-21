@@ -174,32 +174,39 @@ export class TerminalSurface {
     this.peekFetch(ticketId)
       .then((response) => {
         const text = typeof response.text === "string" ? response.text : "";
-        this.entries.set(ticketId, {
-          paneId,
-          // An empty read (a background tab still warming up, per the
-          // prototype's herdr findings) is "waiting", never an error.
-          status: text === "" ? "waiting" : "live",
-          text,
-          justFocused: this.entries.get(ticketId)?.justFocused ?? false,
-        });
-        this.notify();
+        // An empty read (a background tab still warming up, per the
+        // prototype's herdr findings) is "waiting", never an error.
+        this.settle(ticketId, paneId, text === "" ? "waiting" : "live", text);
       })
       .catch(() => {
         // A missing or unreadable pane renders "pane unavailable" and
         // disables the focus button; polling continues so a transient
         // daemon failure recovers, and the snapshot drops the entry for
         // good once the attempt truly ends.
-        this.entries.set(ticketId, {
-          paneId,
-          status: "unavailable",
-          text: "",
-          justFocused: this.entries.get(ticketId)?.justFocused ?? false,
-        });
-        this.notify();
+        this.settle(ticketId, paneId, "unavailable", "");
       })
       .finally(() => {
         this.inFlight.delete(ticketId);
       });
+  }
+
+  // A peek's outcome lands on the entry, and the view repaints only when
+  // the surface it projects (status or text) actually moved: a full-DOM
+  // rebuild on every poll response for a pane that printed nothing new is
+  // what tears focus out of the operator's hands every 2s (issue #122).
+  private settle(
+    ticketId: string,
+    paneId: string,
+    status: TerminalSurfaceView["status"],
+    text: string,
+  ): void {
+    const previous = this.entries.get(ticketId);
+    // The entry left (the attempt ended) or re-spawned under another pane
+    // while this read was out: a stale answer never revives or overwrites it.
+    if (!previous || previous.paneId !== paneId) return;
+    if (previous.status === status && previous.text === text) return;
+    this.entries.set(ticketId, { ...previous, status, text });
+    this.notify();
   }
 }
 

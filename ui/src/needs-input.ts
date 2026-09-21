@@ -18,7 +18,7 @@
  * across the swap.
  */
 
-import type { NoteFocus } from "./detail";
+import { FOCUS_KEY_ATTR } from "./focus";
 import { h } from "./dom";
 import {
   bulkResumeRows,
@@ -121,41 +121,6 @@ export class NeedsInputTray {
   private prune<V>(map: Map<string, V>, pendingTicketIds: ReadonlySet<string>): void {
     for (const id of [...map.keys()]) {
       if (!pendingTicketIds.has(id)) map.delete(id);
-    }
-  }
-
-  /**
-   * Remember a note being typed before the rebuild: the text lives in the
-   * drafts map, focus and cursor are restored after the swap. The tray's
-   * note is a single-line input (the prototype's row shape), so this
-   * captures input elements; the Detail's capture covers its textareas.
-   */
-  captureNoteFocus(): NoteFocus | null {
-    const active = document.activeElement;
-    if (active instanceof HTMLInputElement && active.dataset.noteKey) {
-      return {
-        key: active.dataset.noteKey,
-        // A text input always reports a selection; the null arm is for
-        // input types without one, which the tray never renders.
-        start: active.selectionStart ?? 0,
-        end: active.selectionEnd ?? 0,
-      };
-    }
-    return null;
-  }
-
-  /** Restore a captured note focus onto the freshly rebuilt input. */
-  restoreNoteFocus(root: HTMLElement, focus: NoteFocus | null): void {
-    if (!focus) return;
-    const next = root.querySelector<HTMLInputElement>(
-      `input[data-note-key="${CSS.escape(focus.key)}"]`,
-    );
-    if (next) {
-      next.focus();
-      next.setSelectionRange(
-        Math.min(focus.start, next.value.length),
-        Math.min(focus.end, next.value.length),
-      );
     }
   }
 
@@ -320,7 +285,7 @@ export class NeedsInputTray {
       class: "interrupt-note needs-input-note",
       type: "text",
       placeholder: row.interrupt.form.notePlaceholder ?? "note",
-      "data-note-key": `${row.ticketId}:tray`,
+      [FOCUS_KEY_ATTR]: `${row.ticketId}:tray`,
       disabled: waiting,
     }) as HTMLInputElement;
     note.value = this.note(row.ticketId);
