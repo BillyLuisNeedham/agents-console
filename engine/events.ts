@@ -65,6 +65,10 @@ const EVENT_KINDS = [
   // branch), so no worktree could be opened and the ticket waits as a
   // checkpoint until the branch is free.
   "branch-held",
+  // The ticket was about to schedule with no harness or model (issue #118:
+  // a spawn off an enlisted Conversation, or a pool with no defaults), so
+  // it waits as a config interrupt instead of a launch that would throw.
+  "unassigned",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

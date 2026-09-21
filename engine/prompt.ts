@@ -224,9 +224,29 @@ export function buildEnlistTeaching(parts: {
  * literally here so the two surfaces cannot drift; prompt.test.ts pins both
  * against their exported constants the way it already does for buildPrompt.
  */
-export function buildConversationTeaching(spawnPath: string): string {
+export interface TeachingAssignment {
+  harness: string;
+  model: string;
+  drivers: string;
+}
+
+// What the teaching says a field is: an enlisted pane names no model, and
+// the pool may name no defaults at all, so the empty case is spelled out
+// rather than left as a blank the agent would read past.
+function describeAssignment(a: Partial<TeachingAssignment> | undefined): string {
+  const field = (value: string | undefined) => (value ? value : "(none)");
+  return `harness ${field(a?.harness)}, model ${field(a?.model)}, drivers ${field(a?.drivers)}`;
+}
+
+export function buildConversationTeaching(
+  spawnPath: string,
+  own: TeachingAssignment,
+  defaults: Partial<TeachingAssignment> | undefined,
+): string {
   return [
     "---",
+    "",
+    "Load the my-console-citizen skill: it is how to work inside this pool.",
     "",
     "You can start follow-up work without leaving this conversation. Write " +
       `JSON to ${spawnPath}: {"spawn": [...]}, one entry per follow-up, each ` +
@@ -239,7 +259,13 @@ export function buildConversationTeaching(spawnPath: string): string {
       'another Conversation (an entry naming one is dropped and logged). ' +
       '"kind" defaults to "ticket"; "conversation" starts a new open-ended ' +
       'talk instead of a Ticket. "assign" is optional; when absent the ' +
-      "follow-up inherits this Conversation's own Assignment.",
+      "follow-up inherits this Conversation's own Assignment, and any field " +
+      "that leaves empty falls through to the pool defaults.",
+    "",
+    `This Conversation's Assignment: ${describeAssignment(own)}. ` +
+      `The pool defaults: ${describeAssignment(defaults)}. Set "assign" only ` +
+      "for a field the follow-up needs different; when no model would " +
+      "resolve, ask the operator here before you write the file.",
     "",
     "The engine polls for this file, reads it, and deletes it once read: " +
       "write it whenever you like, mid-conversation, not only once. Caps: " +

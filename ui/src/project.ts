@@ -98,6 +98,7 @@ const REJECT: InterruptFormAction = { action: "reject", label: "reject", tone: "
 
 const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
   checkpoint: { title: "checkpoint", actions: [RESUME] },
+  config: { title: "pool config", actions: [RESUME] },
   crash: { title: "harness crash", actions: [RESUME] },
   deadlock: { title: "deadlock", actions: [RESUME] },
   "merge-conflict": { title: "merge conflict", actions: [RESUME] },

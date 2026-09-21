@@ -76,8 +76,9 @@ export interface ResolveAssignmentParams {
   // What the unit inherits when the request is silent: the parent Ticket
   // or Conversation of a spawned unit, the build ticket of a judge.
   inherited?: Pick<Assignment, "harness" | "model" | "drivers">;
-  // The pool defaults, applied last. Absent for a spawned Ticket and a
-  // judge, whose parent stands in for the defaults.
+  // The pool defaults, applied last, field by field: a parent or build
+  // ticket that leaves a field empty (an enlisted Conversation names no
+  // model) hands that one field to the defaults rather than blocking them.
   defaults?: { harness?: string; model?: string; drivers?: string };
   // Strict resolution refuses an empty harness or model; lenient resolution
   // returns them empty so the misconfiguration renders instead of failing
@@ -89,13 +90,19 @@ export interface ResolveAssignmentParams {
   harnesses: Record<string, HarnessCommand>;
 }
 
+function firstSet(...values: (string | undefined)[]): string | undefined {
+  return values.find((value) => value !== undefined && value !== "");
+}
+
 export function resolveAssignment(params: ResolveAssignmentParams): Assignment {
   const { subject, inherited, defaults, harnesses } = params;
   const request = params.request ?? {};
-  const harness = request.harness ?? inherited?.harness ?? defaults?.harness ?? "";
-  const model = request.model ?? inherited?.model ?? defaults?.model ?? "";
+  // An empty string is no value: an enlisted Conversation records model ""
+  // (as found), and that field must fall through, not stop the chain.
+  const harness = firstSet(request.harness, inherited?.harness, defaults?.harness) ?? "";
+  const model = firstSet(request.model, inherited?.model, defaults?.model) ?? "";
   const drivers =
-    request.drivers ?? inherited?.drivers ?? defaults?.drivers ?? DEFAULT_DRIVERS;
+    firstSet(request.drivers, inherited?.drivers, defaults?.drivers) ?? DEFAULT_DRIVERS;
   if (params.strict && !harness) {
     throw new Error(
       `${subject} no harness resolved (set assign.harness, inherit ` +

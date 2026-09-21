@@ -369,7 +369,7 @@ describe("pool loading", () => {
     ).rejects.toThrow(/no Issue files/);
   });
 
-  it("renders an unresolvable-harness ticket unassigned on the snapshot, and dies naming the fix when it schedules", async () => {
+  it("renders an unassigned ticket on the snapshot, then holds it as a config interrupt naming the fix instead of dying", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -378,23 +378,97 @@ describe("pool loading", () => {
         },
       ],
     });
+    const rig = stubHarness(poolDir, {});
     // Resolution is total (the unassigned record rides the snapshot with
-    // nulls), so the pool starts and the pool config error fires when the
-    // ticket schedules, at the spawn that cannot run.
-    const run = startPool({ poolDir, harnesses: stubHarness(poolDir, {}).harnesses });
-    await expect(run.settled).rejects.toThrow(
-      /pool config: ticket 01 has no harness/,
-    );
+    // nulls), so the pool starts; the gap is caught when the ticket would
+    // schedule, before its marker flips, and the drive stays alive (issue
+    // #118).
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+    expect(rig.spawnList).toHaveLength(0);
     const last = run.snapshots[run.snapshots.length - 1]!;
-    expect(last.phase).toBe("dead");
     expect(last.assignments["01"]).toEqual({
       harness: null,
       model: null,
       drivers: "implement",
     });
+    expect(run.interrupts).toEqual([
+      {
+        ticketId: "01",
+        kind: "config",
+        body:
+          "ticket 01 has no harness: set one in console.json (an assign entry " +
+          "for 01, or defaults.harness) and answer resume. The pool reloads " +
+          "console.json at the next super-step boundary and schedules the " +
+          "ticket on what it finds.",
+      },
+    ]);
+    expect(run.final.tickets).toEqual({ "01": "checkpoint" });
+    expect(markerLine(poolDir, "01-a.md")).toContain("status=checkpoint");
     expect(run.final.log).toContain(
-      "pool dead: pool config: ticket 01 has no harness (set one in console.json assign or defaults)",
+      "ticket 01: no harness; config interrupt raised instead of a launch",
     );
+    expect(readEventLines(poolDir, "01").map((e) => e.kind)).toEqual(["unassigned"]);
+
+    // The operator fills the gap and resumes: the boundary's config reload
+    // (ADR-0018) re-resolves the ticket and it schedules on the new config.
+    writeFileSync(join(poolDir, "console.json"), JSON.stringify(stubConfig));
+    const done = await approveReview(await run.resume("01"));
+    expect(done.phase).toBe("done");
+    expect(rig.spawnList).toHaveLength(1);
+    expect(rig.spawnList[0]!.model).toBe("stub-model");
+    expect(done.final.tickets).toEqual({ "01": "done" });
+  });
+
+  it("resumes a config interrupt with the file unchanged by raising it again, still alive", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "stub" } },
+    });
+    const rig = stubHarness(poolDir, {});
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "config"]]);
+    expect(run.interrupts[0]!.body).toStartWith("ticket 01 has no model:");
+
+    const again = await run.resume("01");
+    expect(again.phase).toBe("quiescent");
+    expect(again.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "config"]]);
+    expect(rig.spawnList).toHaveLength(0);
+  });
+
+  it("runs a ticket spawned by an enlisted Conversation on the pool defaults for the model it never had (issue #118)", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "conv-1-spawn-1.md",
+          marker:
+            "<!-- state: id=conv-1-spawn-1 blocked-by=none status=ready spawned-by=conv-1 -->",
+          body: "# conv-1-spawn-1: Proposed from an enlisted pane\n\nAlready on disk.\n",
+        },
+      ],
+      config: { defaults: { harness: "stub", model: "default-model" } },
+    });
+    // An enlisted Conversation's record names its harness and no model (as
+    // found); it seeds the boot resolution with exactly that, and the spawn
+    // takes the one missing field from the defaults.
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub model= drivers=implement -->\n\n# conv-1\n",
+    );
+    const rig = stubHarness(poolDir, {});
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: rig.harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawnList).toHaveLength(1);
+    expect(rig.spawnList[0]!.model).toBe("default-model");
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["conv-1-spawn-1"]).toEqual({
+      harness: "stub",
+      model: "default-model",
+      drivers: "implement",
+    });
   });
 });
 

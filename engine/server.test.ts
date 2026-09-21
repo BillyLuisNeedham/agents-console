@@ -333,7 +333,7 @@ describe("pool server", () => {
     });
   });
 
-  it("renders an unassigned ticket with null harness and model, and dies naming the fix when it schedules", async () => {
+  it("renders an unassigned ticket with null harness and model, and holds it as a config interrupt naming the fix", async () => {
     const poolDir = makeServerPool(
       [
         { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -345,19 +345,20 @@ describe("pool server", () => {
     const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
 
     await server.start();
-    await expect(server.settled()).rejects.toThrow(
-      /pool config: ticket 01 has no harness/,
-    );
+    const first = await server.settled();
     // The unassigned record rode the snapshot as the pool started; the run
-    // then died at the spawn the ticket cannot run, with the fix named.
-    expect(server.latest?.phase).toBe("dead");
-    expect(server.latest?.state.tickets[0]!.assignment).toEqual({
+    // then paused the one ticket with the fix named, and stayed alive
+    // (issue #118).
+    expect(first.phase).toBe("quiescent");
+    expect(first.state.tickets[0]!.assignment).toEqual({
       harness: null,
       model: null,
       drivers: "implement",
     });
-    expect(server.latest?.state.log).toContain(
-      "pool dead: pool config: ticket 01 has no harness (set one in console.json assign or defaults)",
+    expect(first.state.tickets[0]!.status).toBe("checkpoint");
+    expect(first.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "config"]]);
+    expect(first.state.interrupts[0]!.body).toStartWith(
+      "ticket 01 has no harness: set one in console.json",
     );
   });
 

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { SPAWN_BODY_MIN_CHARS } from "./engine.ts";
-import { buildConversationTeaching, buildHeadToHeadPrompt, buildPrompt } from "./prompt.ts";
+import {
+  buildConversationTeaching as build,
+  buildHeadToHeadPrompt,
+  buildPrompt,
+} from "./prompt.ts";
 
 function prompt(): string {
   return buildPrompt({
@@ -82,6 +86,24 @@ describe("buildPrompt spawn teaching", () => {
 
 describe("buildConversationTeaching", () => {
   const spawnPath = "/tmp/pool/runs/conv-1.spawn.json";
+  const own = { harness: "claude", model: "opus", drivers: "implement" };
+  const defaults = { harness: "opencode", model: "deepseek", drivers: "implement" };
+  const buildConversationTeaching = (path: string) => build(path, own, defaults);
+
+  it("states the Conversation's own Assignment, the pool defaults, the fall-through, and the citizen skill", () => {
+    const body = build(spawnPath, own, defaults);
+    expect(body).toContain("Load the my-console-citizen skill");
+    expect(body).toContain("This Conversation's Assignment: harness claude, model opus, drivers implement.");
+    expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
+    expect(body).toContain("falls through to the pool defaults");
+    expect(body).toContain("ask the operator here before you write the file");
+  });
+
+  it("spells out an empty field rather than leaving a blank: an enlisted pane names no model, a pool may name no defaults", () => {
+    const body = build(spawnPath, { ...own, model: "" }, undefined);
+    expect(body).toContain("This Conversation's Assignment: harness claude, model (none), drivers implement.");
+    expect(body).toContain("The pool defaults: harness (none), model (none), drivers (none).");
+  });
 
   it("names the spawn.json path and the proposal shape, including kind and assign", () => {
     const body = buildConversationTeaching(spawnPath);
