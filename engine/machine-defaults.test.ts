@@ -9,7 +9,7 @@ import {
   readMachineDefaults,
   validateMachineDefaults,
   writeMachineDefaults,
-} from "./machine-defaults";
+} from "./machine-defaults.ts";
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), "machine-defaults-"));
