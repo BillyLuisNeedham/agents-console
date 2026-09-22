@@ -1213,6 +1213,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         effective: {
           port: boundPort,
           terminal: bootConfig.terminal ?? null,
+          stale: staleBootOnlyKeys(pool.config, boundPort),
         },
       },
       machine: {
@@ -1222,6 +1223,34 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       },
       harnesses: Object.keys(harnesses).sort(),
     };
+  }
+
+  /**
+   * The boot-only keys whose saved value is not what this process is running
+   * on, so the Console can badge them as waiting for a Restart. Derived here
+   * rather than from what a save changed, because the difference outlives
+   * the tab that made it: a reload, a second tab, or an edit made by hand in
+   * the file all have to show the same badge.
+   *
+   * Port is judged by where a Restart would actually put the Console rather
+   * than by whether the pin changed: pinning the port the pool already runs
+   * on moves nothing. Clearing a pin moves nothing either, because the
+   * handover pins the running port so the waiting tab finds the Console
+   * again; a cleared pin takes effect at the next cold Boot instead, which
+   * is the one place this readout and the operator's intent part company.
+   */
+  function staleBootOnlyKeys(config: PoolConfig, boundPort: number): string[] {
+    const stale: string[] = [];
+    for (const key of BOOT_ONLY_KEYS) {
+      if (key === "port") {
+        if (relaunchPort(boundPort) !== boundPort) stale.push(key);
+      } else if (key === "terminal") {
+        if ((config.terminal ?? null) !== (bootConfig.terminal ?? null)) stale.push(key);
+      } else if (JSON.stringify(config[key]) !== JSON.stringify(bootConfig[key])) {
+        stale.push(key);
+      }
+    }
+    return stale;
   }
 
   /**

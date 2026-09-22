@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "boot": "bun run engine/boot-cli.ts",
     "fleet": "bun run engine/fleet-cli.ts"
   },
   "devDependencies": {

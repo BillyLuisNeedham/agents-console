@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Boot (issue #121): start a Console for a pool from any project checkout.
+#
+# This is a shim and nothing more. It finds the agent-console checkout it was
+# installed from and hands its arguments to engine/boot-cli.ts, which does all
+# the work. It resolves its own real path first because the supported install
+# is a symlink in ~/.local/bin, and $0 there points at the link rather than at
+# the repository the engine lives in.
+set -euo pipefail
+
+self="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1 && readlink -f "$self" >/dev/null 2>&1; then
+  self="$(readlink -f "$self")"
+else
+  # macOS readlink has no -f. Follow the chain by hand instead, resolving each
+  # link against the directory it was found in.
+  while [ -L "$self" ]; do
+    link="$(readlink "$self")"
+    case "$link" in
+      /*) self="$link" ;;
+      *) self="$(cd "$(dirname "$self")" && pwd)/$link" ;;
+    esac
+  done
+  self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
+fi
+
+ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+
+bun="bun"
+if ! command -v bun >/dev/null 2>&1; then
+  if [ -x "$HOME/.bun/bin/bun" ]; then
+    bun="$HOME/.bun/bin/bun"
+  else
+    echo "agent-console: bun is not on PATH and ~/.bun/bin/bun is not there either" >&2
+    exit 1
+  fi
+fi
+
+exec "$bun" run "$ROOT/engine/boot-cli.ts" "$@"

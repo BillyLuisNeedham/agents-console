@@ -311,7 +311,14 @@ export interface PoolSettingsView {
   path: string;
   config: PoolConfig;
   bootOnly: string[];
-  effective: { port: number; terminal: "herdr" | null };
+  effective: {
+    port: number;
+    terminal: "herdr" | null;
+    /** The boot-only keys whose saved value is not what is running, so the
+     *  badge survives a reload and catches a hand edit, not only a save made
+     *  in this tab. A subset of `bootOnly`. */
+    stale: string[];
+  };
 }
 
 /** The machine's half: `defaults` is what is in force (the legacy runner

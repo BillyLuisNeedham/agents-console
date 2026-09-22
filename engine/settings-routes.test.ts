@@ -156,6 +156,9 @@ describe("GET /api/settings", () => {
     expect(settings.pool.effective.port).toBe(Number(new URL(server.url).port));
     expect(settings.pool.effective.port).not.toBe(8790);
     expect(settings.pool.effective.terminal).toBeNull();
+    // The saved pin is not the port this process bound, so a Restart would
+    // move the Console and the pane says so.
+    expect(settings.pool.effective.stale).toEqual(["port"]);
 
     // The machine half: the legacy file behind the JSON one, and the JSON
     // file's own fields (none yet) reported separately, because the pane
@@ -170,7 +173,68 @@ describe("GET /api/settings", () => {
 
   it("reports the terminal this process booted with", async () => {
     const { server } = await startRig({ terminal: "herdr" }, { start: false });
-    expect((await getSettings(server)).pool.effective.terminal).toBe("herdr");
+    const effective = (await getSettings(server)).pool.effective;
+    expect(effective.terminal).toBe("herdr");
+    expect(effective.stale).toEqual([]);
+  });
+
+  // The badge has to outlive the tab that earned it: a reload, a second tab,
+  // and a hand edit of the file all owe the operator the same answer.
+  it("names a boot-only key edited since boot, whoever edited it", async () => {
+    const { poolDir, server } = await startRig({ terminal: "herdr" });
+    expect((await getSettings(server)).pool.effective.stale).toEqual([]);
+
+    // Saved through the pane.
+    expect(
+      (await putJson(server, "/api/settings/pool", { config: { selection: "human" } })).status,
+    ).toBe(200);
+    expect((await getSettings(server)).pool.effective.stale).toEqual(["selection"]);
+
+    // Edited by hand, which no save in this tab could have told the Console
+    // about. Dropping terminal is stale even though the run is still
+    // terminal-backed: that is precisely what a Restart would change.
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ ...STUB_DEFAULTS, roster: "- deepseek" }, null, 2),
+    );
+    expect((await getSettings(server)).pool.effective.stale).toEqual([
+      "roster",
+      "terminal",
+    ]);
+
+    // Putting it back is not stale, so the badge clears rather than latching.
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ ...STUB_DEFAULTS, terminal: "herdr" }, null, 2),
+    );
+    expect((await getSettings(server)).pool.effective.stale).toEqual([]);
+  });
+
+  // The port is judged by where a Restart would actually put the Console,
+  // not by whether the pin changed: pinning the port the pool already runs
+  // on moves nothing, and clearing a pin moves nothing either, because the
+  // Restart pins what it is running on so the tab finds it again. A cleared
+  // pin takes effect at the next cold Boot instead.
+  it("judges the port by where a relaunch would bind, not by the pin alone", async () => {
+    const { poolDir, server } = await startRig();
+    const bound = Number(new URL(server.url).port);
+
+    expect(
+      (await putJson(server, "/api/settings/pool", { config: { port: bound } })).status,
+    ).toBe(200);
+    expect((await getSettings(server)).pool.effective.stale).toEqual([]);
+
+    expect((await putJson(server, "/api/settings/pool", { config: { port: null } })).status).toBe(
+      200,
+    );
+    expect(onDisk(poolDir).port).toBeUndefined();
+    expect((await getSettings(server)).pool.effective.stale).toEqual([]);
+
+    // A pin that is not the running port is the case the badge exists for.
+    expect((await putJson(server, "/api/settings/pool", { config: { port: 8790 } })).status).toBe(
+      200,
+    );
+    expect((await getSettings(server)).pool.effective.stale).toEqual(["port"]);
   });
 });
 
