@@ -98,6 +98,22 @@ _Avoid_: config (that's the raw file the Assignment is resolved from), profile
 The Interrupt the engine raises on a Ticket about to schedule with no harness or model, in the engine's own voice like a persistence interrupt, naming the missing field and the console.json fix. The Ticket waits as a checkpoint; resume returns it to ready, and the next super-step boundary's Config reload re-resolves its Assignment. Resuming with the file unchanged raises the same interrupt again. A pool-config gap pauses one Ticket and never ends the run. Introduced by ADR-0022 (`docs/adr/0022-a-config-gap-pauses-the-ticket-not-the-run.md`), closing issue #118.
 _Avoid_: dead drive (that was the old outcome), pool config error (the log line, not the pause)
 
+**Pool settings**:
+The operator's editable view of one Pool's config in the Console: pool defaults, resolver, terminal, port, selection, roster and agents. Editing the assignment slice takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
+_Avoid_: config (that's the raw file), preferences, options
+
+**Machine defaults**:
+The per-machine harness, model, drivers, terminal and engine path that a new Pool inherits when nothing more specific says otherwise, kept in one file under `~/.agent-graphs/`. Editable from the Console beside the Pool settings. Not a Setup (a Setup is a named bundle you choose; Machine defaults apply without choosing).
+_Avoid_: runner (there is no runner; the engine's term is harness), global config
+
+**Boot**:
+Starting a Console for a Pool without an agent, by running `agent-console` from a project's checkout. The Pool is a directory under the project's `.scratch/`; the script relaunches the one that is there, offers a choice when there are several, and creates one when there are none, with the checkout's current branch as the base its Attempts branch from. It prefills from the Pool's own config, then a chosen Setup, then Machine defaults, then detection, interviews only for what is still missing (the whole interview when nothing prefills), rebuilds the UI when stale, starts the server and opens the Console. A Pool is removed by deleting its directory. Not a Launch (that's an Attempt's harness starting).
+_Avoid_: launch (an Attempt's), spawn (a Ticket an Attempt proposes), run.sh (retired), skill (the skill now only writes the prose files)
+
+**Restart**:
+The Console stopping its own server with a farewell and handing off to Boot for the same Pool, so boot-only Pool settings and a fresh build take effect. Allowed while Attempts are live, behind the same inline confirm as Stop; headless Attempts are killed and terminal-backed ones stay in their tabs and are reconciled, as on any restart.
+_Avoid_: reload (that's Config reload), reboot
+
 **Config reload**:
 The engine's re-read of the Pool config file at a super-step boundary. Only the assignment slice reloads (defaults, assign, resolver); roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
 _Avoid_: hot reload (implies a watcher; there is none), restart
