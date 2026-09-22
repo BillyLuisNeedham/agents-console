@@ -105,7 +105,7 @@ describe("pool resolution", () => {
     const resolution = resolvePool({ cwd: top, repo: probe(top, "feature/Add Boot Script") });
     expect(resolution).toMatchObject({
       kind: "create",
-      suggested: "featureadd-boot-script",
+      suggested: "feature-add-boot-script",
     });
   });
 
@@ -134,6 +134,7 @@ describe("pool resolution", () => {
 
   it("slugifies a name to something a directory can be called", () => {
     expect(slugify("My Pool_Name!")).toBe("my-pool-name");
+    expect(slugify("feature/try-boot")).toBe("feature-try-boot");
     expect(slugify("  ")).toBe("");
   });
 });

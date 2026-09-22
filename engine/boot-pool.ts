@@ -39,12 +39,14 @@ export function countTickets(dir: string): number {
   }
 }
 
-/** A name a directory can carry: lowercase, hyphens, nothing else. */
+/** A name a directory can carry: lowercase, hyphens, nothing else. A
+ * branch's slashes become hyphens too, so `feature/try-boot` reads as
+ * `feature-try-boot` rather than running its words together. */
 export function slugify(name: string): string {
   return name
     .trim()
     .toLowerCase()
-    .replace(/[\s_]+/g, "-")
+    .replace(/[\s_/]+/g, "-")
     .replace(/[^a-z0-9-]/g, "")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");

@@ -1254,20 +1254,19 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   }
 
   /**
-   * Where the tab should look for the Console once Boot has relaunched it.
-   * The order is the port resolution's own (ports.ts): a `--port` this CLI
-   * was started with is passed through to Boot and wins, then the pin in
-   * console.json, then this server's bound port, which Boot's own resolution
-   * will land on again. The pin is re-read from disk because the pane may
-   * have saved a new one a moment ago, and that is exactly the save a
-   * Restart exists to apply. Port 0 is never a pin, so it is not one here.
+   * Where the tab should look for the Console once Boot has relaunched it:
+   * the pin in console.json, re-read from disk because the pane may have
+   * saved a new one a moment ago and that save is exactly what a Restart
+   * exists to apply; otherwise this server's bound port, which already
+   * reflects any `--port` this CLI was started with. The bound port must
+   * not outrank the pin: every Restart hands Boot a `--port`, so if the
+   * command line won here a pin saved after the first Restart could never
+   * take effect. Port 0 is never a pin, so it is not one here.
    */
   function relaunchPort(boundPort: number): number {
-    const cliPin =
-      options.port !== undefined && options.port !== 0 ? options.port : undefined;
-    if (cliPin !== undefined) return cliPin;
     try {
-      return readPoolSettings(poolDir).config.port ?? boundPort;
+      const pin = readPoolSettings(poolDir).config.port;
+      return pin !== undefined && pin !== 0 ? pin : boundPort;
     } catch {
       // A console.json edited into a broken state since boot: the bound port
       // is still the honest answer, and the Boot script will say the rest.

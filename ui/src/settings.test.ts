@@ -49,7 +49,7 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
         roster: "two engineers",
       },
       bootOnly: ["roster", "agents", "selection", "terminal", "port"],
-      effective: { port: 4300, terminal: null },
+      effective: { port: 4300, terminal: null, stale: [] },
       ...overrides.pool,
     },
     machine: {
@@ -221,54 +221,21 @@ describe("machineDefaultsFrom", () => {
 });
 
 describe("projectRestartBadges", () => {
-  const effective = { port: 4300, terminal: null } as const;
-
-  it("badges nothing when the file and the running server agree", () => {
-    expect(
-      [...projectRestartBadges({ config: { port: 4300 }, effective, changedHere: [] })],
-    ).toEqual([]);
+  it("badges nothing when the engine reports nothing stale", () => {
+    expect([...projectRestartBadges([])]).toEqual([]);
   });
 
-  it("badges the port only when the file names a different one", () => {
-    expect(
-      projectRestartBadges({ config: { port: 4400 }, effective, changedHere: [] }).has(
-        "port",
-      ),
-    ).toBe(true);
+  it("badges every boot-only key the engine names", () => {
+    expect([...projectRestartBadges(["port", "roster"])].sort()).toEqual([
+      "port",
+      "roster",
+    ]);
   });
 
-  it("never badges an unset port, which the server already resolved", () => {
-    expect(
-      projectRestartBadges({ config: {}, effective, changedHere: [] }).has("port"),
-    ).toBe(false);
-  });
-
-  it("badges the terminal when the file turns it on under a headless server", () => {
-    expect(
-      projectRestartBadges({
-        config: { terminal: "herdr" },
-        effective,
-        changedHere: [],
-      }).has("terminal"),
-    ).toBe(true);
-  });
-
-  it("badges roster, agents and selection from what a save changed here", () => {
-    const badges = projectRestartBadges({
-      config: {},
-      effective,
-      changedHere: ["roster", "selection"],
-    });
-    expect([...badges].sort()).toEqual(["roster", "selection"]);
-  });
-
-  it("ignores a port or terminal recorded as changed here, since effective decides", () => {
-    const badges = projectRestartBadges({
-      config: { port: 4300 },
-      effective,
-      changedHere: ["port", "terminal"],
-    });
-    expect([...badges]).toEqual([]);
+  it("drops a key outside the badge vocabulary rather than trusting the wire", () => {
+    // `stale` is a list of plain strings; a key the pane has no field for
+    // would badge nothing anyway, so it never reaches the lookup.
+    expect([...projectRestartBadges(["port", "assign", "defaults"])]).toEqual(["port"]);
   });
 });
 
@@ -405,46 +372,38 @@ describe("SettingsStore", () => {
     expect(rig.store.poolField("model")).toBe("sonnet");
   });
 
-  it("badges a boot-only key a save in this session changed", async () => {
+  it("badges what the engine reports stale after a save", async () => {
     const rig = await opened();
     expect([...rig.store.badges()]).toEqual([]);
     rig.store.setPoolField("roster", "three engineers");
     const save = rig.store.savePool();
     const saved = settings();
     saved.pool.config.roster = "three engineers";
+    saved.pool.effective.stale = ["roster"];
     rig.poolSaves[0]!.deferred.resolve(saved);
     await save;
     expect(rig.store.badges().has("roster")).toBe(true);
   });
 
-  it("keeps the roster badge once raised, since the server reports no effective roster", async () => {
-    const rig = await opened();
-    rig.store.setPoolField("roster", "three engineers");
-    const first = rig.store.savePool();
-    const saved = settings();
-    saved.pool.config.roster = "three engineers";
-    rig.poolSaves[0]!.deferred.resolve(saved);
-    await first;
-    rig.store.setPoolField("model", "haiku");
-    const second = rig.store.savePool();
-    rig.poolSaves[1]!.deferred.resolve(saved);
-    await second;
-    expect(rig.store.badges().has("roster")).toBe(true);
+  it("badges a key a save never touched, so a hand edit or another tab shows", async () => {
+    // The engine derives `stale` from the file against what it booted with,
+    // so a pool whose config was edited outside this page badges on the very
+    // first read, with no save in this session to have noticed it.
+    const edited = settings();
+    edited.pool.effective.stale = ["agents", "terminal"];
+    const rig = await opened(edited);
+    expect([...rig.store.badges()].sort()).toEqual(["agents", "terminal"]);
   });
 
-  it("badges the port against what the server is running, and clears it when they agree again", async () => {
-    const rig = await opened();
-    rig.store.setPoolField("port", "4400");
-    const save = rig.store.savePool();
-    const moved = settings();
-    moved.pool.config.port = 4400;
-    rig.poolSaves[0]!.deferred.resolve(moved);
-    await save;
+  it("clears a badge when a save puts the value back", async () => {
+    const stale = settings();
+    stale.pool.effective.stale = ["port"];
+    const rig = await opened(stale);
     expect(rig.store.badges().has("port")).toBe(true);
     rig.store.setPoolField("port", "4300");
-    const back = rig.store.savePool();
-    rig.poolSaves[1]!.deferred.resolve(settings());
-    await back;
+    const save = rig.store.savePool();
+    rig.poolSaves[0]!.deferred.resolve(settings());
+    await save;
     expect(rig.store.badges().has("port")).toBe(false);
   });
 
@@ -541,6 +500,7 @@ describe("SettingsStore.render", () => {
   it("badges a boot-only field in the form itself", async () => {
     const moved = settings();
     moved.pool.config.port = 4400;
+    moved.pool.effective.stale = ["port"];
     const rig = await opened(moved);
     const { root, paint } = mount(rig.store);
     paint();

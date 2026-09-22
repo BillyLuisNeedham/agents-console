@@ -603,8 +603,13 @@ export async function runBoot(options: RunOptions): Promise<number> {
     mkdirSync(join(poolDir, "issues"), { recursive: true });
     if (result.seeded) mkdirSync(join(poolDir, "conversations"), { recursive: true });
     const merged = mergeConsoleConfig(existingConfig, result.answers);
-    writeConsoleConfig(poolDir, merged);
-    io.log(`wrote ${join(poolDir, "console.json")}`);
+    // A relaunch whose answers all came from the file itself has nothing to
+    // write; saying "wrote" then would read as a change the operator did
+    // not make.
+    if (JSON.stringify(merged) !== JSON.stringify(existingConfig)) {
+      writeConsoleConfig(poolDir, merged);
+      io.log(`wrote ${join(poolDir, "console.json")}`);
+    }
     if (result.asked || !hadConfig) {
       writeProseFiles(poolDir, engineDir, io, {
         detection,

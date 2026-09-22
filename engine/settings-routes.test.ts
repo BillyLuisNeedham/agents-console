@@ -442,6 +442,35 @@ describe("POST /api/restart (#121)", () => {
     expect(await res.json()).toEqual({ ok: true, port: 8791 });
   });
 
+  // Every Restart hands Boot a --port, so the port this process was started
+  // with must not outrank a pin saved since: if it did, a pin saved after the
+  // first Restart could never take effect.
+  it("lets a pin saved through the pane outrank the port this process was started with", async () => {
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: READY }],
+      config: { ...STUB_DEFAULTS },
+    });
+    const server = createPoolServer({
+      poolDir,
+      port: 8794,
+      harnesses: stubHarness(poolDir, {}).harnesses,
+      distDir: "/nonexistent",
+      registryPath: join(poolDir, "fleet.json"),
+      machineDefaultsPaths: machineHome(),
+      onRestartRequested: () => {},
+    });
+    servers.push(server);
+    await server.start();
+    await server.settled();
+    expect(Number(new URL(server.url).port)).toBe(8794);
+
+    expect((await putJson(server, "/api/settings/pool", { config: { port: 8795 } })).status).toBe(
+      200,
+    );
+    const res = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(await res.json()).toEqual({ ok: true, port: 8795 });
+  });
+
   it("hands a restart to onRestartRequested exactly once, even on a double POST", async () => {
     let restarts = 0;
     const { server } = await startRig({}, { onRestartRequested: () => { restarts += 1; } });

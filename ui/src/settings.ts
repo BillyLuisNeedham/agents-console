@@ -227,16 +227,6 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   return defaults;
 }
 
-/** Which boot-only keys a save changed, for the badges the server cannot
- *  report an effective value for. */
-function changedBootOnly(
-  before: PoolConfig,
-  after: PoolConfig,
-): BootOnlyKey[] {
-  const keys: BootOnlyKey[] = ["roster", "agents", "selection"];
-  return keys.filter((key) => (before[key] ?? null) !== (after[key] ?? null));
-}
-
 function sameDraft<T extends object>(a: T, b: T): boolean {
   return (Object.keys(a) as (keyof T)[]).every((key) => a[key] === b[key]);
 }
@@ -259,11 +249,6 @@ export class SettingsStore {
   private machineBaseline: MachineDraft = { ...EMPTY_MACHINE_DRAFT };
   private machineState: SaveState = "idle";
   private machineError: string | null = null;
-
-  // Boot-only keys a save changed in this session. The server reports no
-  // effective value for these, so the badge stands on what this page did
-  // until a Restart reloads it.
-  private readonly changedHere = new Set<BootOnlyKey>();
 
   private readonly onGetSettings: GetSettingsHandler;
   private readonly onSavePool: SavePoolHandler;
@@ -336,16 +321,16 @@ export class SettingsStore {
   }
 
   /**
-   * The boot-only keys waiting on a Restart. Empty before the first read:
-   * with nothing on disk to compare against, there is nothing to badge.
+   * The boot-only keys waiting on a Restart, as the engine reports them.
+   * Empty before the first read: with nothing read off disk, there is
+   * nothing to badge. Every read and every save re-reads the file and
+   * re-derives the list, so the badges follow the file rather than this
+   * session's history, and a key edited by hand or by another tab badges
+   * here too.
    */
   badges(): Set<BootOnlyKey> {
     if (!this.data) return new Set();
-    return projectRestartBadges({
-      config: this.data.pool.config,
-      effective: this.data.pool.effective,
-      changedHere: this.changedHere,
-    });
+    return projectRestartBadges(this.data.pool.effective.stale);
   }
 
   /**
@@ -442,15 +427,11 @@ export class SettingsStore {
       this.onChange();
       return;
     }
-    const before = this.data?.pool.config ?? {};
     this.poolState = "saving";
     this.poolError = null;
     this.onChange();
     try {
       const response = await this.onSavePool(poolPatchFrom(this.poolDraft));
-      for (const key of changedBootOnly(before, response.pool.config)) {
-        this.changedHere.add(key);
-      }
       this.apply(response);
       this.poolState = "saved";
     } catch (err) {

@@ -1242,10 +1242,10 @@ export function isTerminalBacked(config: Record<string, unknown>): boolean {
 /**
  * The keys a running server cannot pick up from a Config reload, as the
  * badge logic names them. The engine's BOOT_ONLY_KEYS says the same thing and
- * the payload's `bootOnly` carries it, but that is a const rather than a
- * type, and the Console type-imports the engine and never bundles it, so the
- * union is spelled again here. The two badge rules below tell these keys
- * apart, which a list read off the wire could not.
+ * the payload carries it twice over, as `bootOnly` and as the `effective.stale`
+ * subset the badges read, but both are arrays of plain strings: the union is
+ * spelled again here so the pane's badge lookups are checked against a closed
+ * set rather than against whatever the wire happened to send.
  */
 export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port";
 
@@ -1268,36 +1268,32 @@ export interface PoolConfigPatch {
   checkpoint?: string | null;
 }
 
-/** What the badge projection needs: the saved config, what the server is
- *  actually running, and the boot-only keys a save changed in this session. */
-export interface RestartBadgeInput {
-  config: PoolConfig;
-  effective: { port: number; terminal: "herdr" | null };
-  changedHere: Iterable<BootOnlyKey>;
-}
-
 /**
- * Which boot-only keys are waiting on a Restart. Port and terminal are
- * compared against what the server is actually running, so setting one back
- * to the running value clears its badge; roster, agents and selection have no
- * effective value the server can report (the roster was baked into prompts
- * already running, the agents list into the spawn seam), so they are flagged
- * once a save in this session changed them and stay flagged until the
- * Restart reloads the page. An unset port means "auto", which the server
- * already resolved, so it never disagrees.
+ * Which boot-only keys are waiting on a Restart, narrowed from the engine's
+ * `effective.stale` to the union the pane badges. The engine derives that
+ * list by comparing the file against what this process actually booted with,
+ * which is strictly more than a tab can know on its own: the badge survives a
+ * reload, shows in a second tab, and catches an edit made in the file by hand.
+ *
+ * Port is the one key whose reading is not the obvious one, and the engine
+ * owns that judgement rather than this projection. It reports staleness as
+ * "a Restart would move the Console", so a pin matching the running port is
+ * not stale, and clearing a pin is not stale either, because the handover
+ * pins the running port so the restarting tab can find the server again. A
+ * cleared pin takes effect at the next cold Boot instead.
  */
-export function projectRestartBadges(input: RestartBadgeInput): Set<BootOnlyKey> {
-  const badges = new Set<BootOnlyKey>(input.changedHere);
-  // The badge set carries only boot-only keys; anything else a caller
-  // happened to record is not a badge.
-  for (const key of [...badges]) {
-    if (key !== "roster" && key !== "agents" && key !== "selection") badges.delete(key);
-  }
-  if (typeof input.config.port === "number" && input.config.port !== input.effective.port) {
-    badges.add("port");
-  }
-  if ((input.config.terminal ?? null) !== input.effective.terminal) {
-    badges.add("terminal");
+export function projectRestartBadges(stale: readonly string[]): Set<BootOnlyKey> {
+  const badges = new Set<BootOnlyKey>();
+  for (const key of stale) {
+    if (
+      key === "roster" ||
+      key === "agents" ||
+      key === "selection" ||
+      key === "terminal" ||
+      key === "port"
+    ) {
+      badges.add(key);
+    }
   }
   return badges;
 }
