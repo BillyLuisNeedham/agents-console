@@ -15,6 +15,7 @@ import type {
   EnrichedTicketState,
   Interrupt,
   Outcome,
+  PoolConfig,
   QueuedAnswer,
   ResumeAction,
   RunPhase,
@@ -43,10 +44,16 @@ export type {
   EnrichedSnapshot,
   EnrichedTicketState,
   InterruptKind,
+  MachineDefaults,
+  MachineDefaultsView,
   PanesResponse,
+  PoolConfig,
+  PoolSettingsView,
   QueuedAnswer,
+  RestartResponse,
   ResumeAction,
   RunPhase,
+  SettingsResponse,
   StartConversationRequest,
   TerminalPeekResponse,
   TicketActivityResponse,
@@ -1226,79 +1233,32 @@ export function isTerminalBacked(config: Record<string, unknown>): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Settings (ADR-0026, issue #121): Pool settings and Machine defaults as the
-// Settings pane reads and writes them. Declared here rather than type-imported
-// from the engine's wire module because the pane is the only client of these
-// routes and the shapes are the file formats themselves, which the engine
-// reads back off disk; the engine's handler answers this payload verbatim.
+// Settings (ADR-0026, issue #121): the wire shapes are the engine's, declared
+// beside the module that validates and writes the file and re-exported above.
+// What lives here is the Console's own half: which boot-only keys are waiting
+// on a Restart, and the patch body the Settings pane sends.
 // ---------------------------------------------------------------------------
 
-/** The per-machine defaults a new Pool inherits, one file under ~/.agent-graphs/. */
-export interface MachineDefaults {
-  harness?: string;
-  model?: string;
-  drivers?: string;
-  /** Present and "herdr" for a machine that boots Terminal-backed pools. */
-  terminal?: "herdr";
-  /** The engine checkout a Boot runs the server from. */
-  engine?: string;
-}
-
-/** The Assignment resolver: a harness name, "none" to opt out, or the pair. */
-export type PoolResolver = string | { harness?: string; model?: string };
-
 /**
- * The slice of a Pool's console.json the Settings pane edits. The file holds
- * more than this (per-ticket `assign` above all, which belongs to the Ticket
- * and stays in its Detail), so the index signature keeps an unknown key from
- * making the whole config untyped.
+ * The keys a running server cannot pick up from a Config reload, as the
+ * badge logic names them. The engine's BOOT_ONLY_KEYS says the same thing and
+ * the payload's `bootOnly` carries it, but that is a const rather than a
+ * type, and the Console type-imports the engine and never bundles it, so the
+ * union is spelled again here. The two badge rules below tell these keys
+ * apart, which a list read off the wire could not.
  */
-export interface PoolSettingsConfig {
-  defaults?: { harness?: string; model?: string; drivers?: string };
-  resolver?: PoolResolver;
-  terminal?: "herdr";
-  port?: number;
-  selection?: "auto" | "human";
-  roster?: string;
-  /** The agents roster as a JSON string, stored verbatim. */
-  agents?: string;
-  reviewer?: string;
-  checkpoint?: string;
-  [key: string]: unknown;
-}
-
-/** The keys a running server cannot pick up from a Config reload. */
 export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port";
 
-/** What GET /api/settings serves: the pool's file, the machine's, and the
- *  harnesses the pane offers in its selects. */
-export interface SettingsResponse {
-  pool: {
-    path: string;
-    config: PoolSettingsConfig;
-    /** The boot-only key names, as the engine names them. */
-    bootOnly: string[];
-    /** What the running server actually has, for the badge comparison. */
-    effective: { port: number; terminal: "herdr" | null };
-  };
-  machine: {
-    path: string;
-    /** The merged view, legacy fallback included: shown as placeholders. */
-    defaults: MachineDefaults;
-    /** What the file itself holds: what the pane edits and displays. */
-    own: MachineDefaults;
-  };
-  harnesses: string[];
-}
-
 /**
- * The PUT /api/settings/pool body's `config`. A key sent as null or "" is
- * removed from the file (port back to auto, terminal back to headless);
- * `defaults` travels whole, its own fields blanked the same way.
+ * The PUT /api/settings/pool body's `config`. The engine takes any subset of
+ * its settings keys and leaves the rest alone; the pane shows them all at
+ * once, so it sends them all, a key as null when the operator emptied it
+ * (port back to auto, terminal back to headless). `defaults` travels whole,
+ * its own fields blanked the same way.
  */
 export interface PoolConfigPatch {
   defaults?: { harness: string; model: string; drivers: string };
-  resolver?: PoolResolver | null;
+  resolver?: PoolConfig["resolver"] | null;
   terminal?: "herdr" | null;
   port?: number | null;
   selection?: "auto" | "human" | null;
@@ -1308,16 +1268,10 @@ export interface PoolConfigPatch {
   checkpoint?: string | null;
 }
 
-/** What POST /api/restart answers: the port the relaunched server will use. */
-export interface RestartResponse {
-  ok: true;
-  port: number;
-}
-
 /** What the badge projection needs: the saved config, what the server is
  *  actually running, and the boot-only keys a save changed in this session. */
 export interface RestartBadgeInput {
-  config: PoolSettingsConfig;
+  config: PoolConfig;
   effective: { port: number; terminal: "herdr" | null };
   changedHere: Iterable<BootOnlyKey>;
 }

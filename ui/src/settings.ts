@@ -20,8 +20,8 @@ import {
   projectRestartBadges,
   type BootOnlyKey,
   type MachineDefaults,
+  type PoolConfig,
   type PoolConfigPatch,
-  type PoolSettingsConfig,
   type SettingsResponse,
 } from "./project";
 import type { RestartView } from "./view";
@@ -106,7 +106,7 @@ const EMPTY_MACHINE_DRAFT: MachineDraft = {
 };
 
 /** The pool draft the file's config seeds, every absent key an empty field. */
-export function poolDraftFrom(config: PoolSettingsConfig): PoolDraft {
+export function poolDraftFrom(config: PoolConfig): PoolDraft {
   const defaults = config.defaults ?? {};
   const resolver = config.resolver;
   let resolverHarness = "";
@@ -230,8 +230,8 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
 /** Which boot-only keys a save changed, for the badges the server cannot
  *  report an effective value for. */
 function changedBootOnly(
-  before: PoolSettingsConfig,
-  after: PoolSettingsConfig,
+  before: PoolConfig,
+  after: PoolConfig,
 ): BootOnlyKey[] {
   const keys: BootOnlyKey[] = ["roster", "agents", "selection"];
   return keys.filter((key) => (before[key] ?? null) !== (after[key] ?? null));
