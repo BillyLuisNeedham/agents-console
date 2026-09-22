@@ -52,7 +52,7 @@ interface Rig {
 
 async function startRig(
   config: Partial<PoolConfig> = {},
-  options: { onRestartRequested?: () => void; start?: boolean } = {},
+  options: { onRestartRequested?: (port: number) => void; start?: boolean } = {},
 ): Promise<Rig> {
   const poolDir = makePool({
     tickets: [{ file: "01-a.md", marker: READY }],
@@ -194,6 +194,56 @@ describe("PUT /api/settings/pool", () => {
     expect(onDisk(poolDir)).toEqual(settings.pool.config as never);
   });
 
+  // The Console sends the whole editable slice on every save, null for every
+  // field the operator left empty, so this is the request shape in practice
+  // rather than a sparse patch.
+  it("takes the whole editable slice with nulls for the empty fields, and keeps the rest of the file", async () => {
+    const { poolDir, server } = await startRig({
+      port: 8790,
+      terminal: "herdr",
+      roster: "- deepseek",
+      selection: "human",
+      assign: { "01": { harness: "stub", verify: 2 } },
+    });
+
+    const res = await putJson(server, "/api/settings/pool", {
+      config: {
+        defaults: { harness: "stub", model: "m", drivers: "" },
+        resolver: "none",
+        terminal: null,
+        port: null,
+        selection: null,
+        roster: null,
+        agents: null,
+        reviewer: "acceptance criteria only",
+        checkpoint: null,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as SettingsResponse).pool.config).toEqual({
+      defaults: { harness: "stub", model: "m" },
+      assign: { "01": { harness: "stub", verify: 2 } },
+      resolver: "none",
+      reviewer: "acceptance criteria only",
+    });
+    expect(onDisk(poolDir)).toEqual({
+      defaults: { harness: "stub", model: "m" },
+      assign: { "01": { harness: "stub", verify: 2 } },
+      resolver: "none",
+      reviewer: "acceptance criteria only",
+    });
+  });
+
+  it("removes defaults entirely when every one of its fields is empty", async () => {
+    const { poolDir, server } = await startRig();
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { defaults: { harness: "", model: "", drivers: "" } },
+    });
+    expect(res.status).toBe(200);
+    expect(onDisk(poolDir)).toEqual({});
+  });
+
   it("refuses a harness the pool does not know with a 400 that names the field", async () => {
     const { poolDir, server } = await startRig();
     const before = onDisk(poolDir);
@@ -296,17 +346,25 @@ describe("POST /api/restart (#121)", () => {
   // The port is the one thing a reconnecting tab cannot work out for itself:
   // a Restart is how a newly pinned port takes effect, so the reply names it.
   it("names the pinned port a relaunch will bind, and this server's own when nothing is pinned", async () => {
-    const pinned = await startRig({ port: 8790 }, { onRestartRequested: () => {} });
+    const handed: number[] = [];
+    const record = (port: number): void => {
+      handed.push(port);
+    };
+
+    const pinned = await startRig({ port: 8790 }, { onRestartRequested: record });
     const res = await fetch(`${pinned.server.url}/api/restart`, { method: "POST" });
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ ok: true, port: 8790 });
 
-    const free = await startRig({}, { onRestartRequested: () => {} });
+    const free = await startRig({}, { onRestartRequested: record });
     const own = await fetch(`${free.server.url}/api/restart`, { method: "POST" });
-    expect(await own.json()).toEqual({
-      ok: true,
-      port: Number(new URL(free.server.url).port),
-    });
+    const ownPort = Number(new URL(free.server.url).port);
+    expect(await own.json()).toEqual({ ok: true, port: ownPort });
+
+    // The handover is given the same number the tab was promised, so Boot
+    // cannot come back on a port nobody is watching.
+    await waitFor(() => handed.length === 2, "both restart callbacks to fire");
+    expect(handed).toEqual([8790, ownPort]);
   });
 
   // A port saved through the pane a moment ago is the port the relaunch will

@@ -159,9 +159,11 @@ export interface PoolServerOptions {
    * server runs its own `shutdown()` in place and stays in the process,
    * which is what an in-process test wants. A Restart is a Stop plus a
    * relaunch, so the farewell on the stream is identical and the tab that
-   * asked is the one that knows the difference.
+   * asked is the one that knows the difference. It is handed the port the
+   * route promised the tab, so the relaunch and the acknowledgement can
+   * never name two different ports.
    */
-  onRestartRequested?: () => void;
+  onRestartRequested?: (relaunchPort: number) => void;
   /**
    * Where the Machine defaults live (issue #121). Tests point this at a temp
    * home so the Settings routes never read or write the developer's own
@@ -1292,8 +1294,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // teardown, and whichever arrived first decides whether a Console comes
   // back. Absent an owner the server shuts itself down in place, which is
   // what an in-process test wants; nothing relaunches it there.
-  const requestRestart = (): void => {
-    if (options.onRestartRequested) options.onRestartRequested();
+  const requestRestart = (relaunchPort: number): void => {
+    if (options.onRestartRequested) options.onRestartRequested(relaunchPort);
     else void shutdown();
   };
   const stopUnderWay = (): boolean => stopRequested || stopping !== null;
@@ -1363,7 +1365,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             stopRequested = true;
             // Off the request's own turn, so the 202 is on the wire before
             // serving stops underneath it.
-            setTimeout(requestRestart, 0);
+            setTimeout(() => requestRestart(port), 0);
           }
           return Response.json({ ok: true, port } satisfies RestartResponse, {
             status: 202,
@@ -1931,10 +1933,10 @@ function runServerCli(): void {
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       jev,
       onStopRequested: () => stopAndExit("stop requested from the Console"),
-      onRestartRequested: () => {
+      onRestartRequested: (relaunchPort) => {
         console.log("restart requested from the Console: handing off to Boot");
         stopAndExit("restart requested from the Console", () =>
-          handOffToBoot(poolDir, port),
+          handOffToBoot(poolDir, relaunchPort),
         );
       },
     });
@@ -1957,11 +1959,17 @@ function runServerCli(): void {
  * free on its own, so nothing here has to sequence against the shutdown that
  * just finished. Detached with its output appended to the pool's boot log,
  * because the terminal this server was launched from is about to get its
- * prompt back and the relaunch has to outlive it. A `--port` this CLI was
- * started with is passed on, so a one-off port override survives the
- * Restart the way the operator set it.
+ * prompt back and the relaunch has to outlive it.
+ *
+ * The port is the one the route already promised the tab, and it is passed
+ * on as a pin even when nothing in console.json pinned it: the tab watches
+ * that exact port for the Console coming back, so Boot binding a different
+ * one leaves it waiting on a server that will never answer. The cost is that
+ * a port stolen in the gap fails the relaunch loudly in the boot log rather
+ * than being hunted around, which is ADR-0001's own bargain for a pinned
+ * port and a narrow window besides: this process released it a moment ago.
  */
-function handOffToBoot(poolDir: string, port: number | undefined): void {
+function handOffToBoot(poolDir: string, port: number): void {
   const runsDir = join(poolDir, "runs");
   mkdirSync(runsDir, { recursive: true });
   const bootLog = openSync(join(runsDir, "boot.log"), "a");
@@ -1974,7 +1982,8 @@ function handOffToBoot(poolDir: string, port: number | undefined): void {
       poolDir,
       "--yes",
       "--relaunch",
-      ...(port !== undefined ? ["--port", String(port)] : []),
+      // Port 0 is "any free port", never a pin, so it is never passed on.
+      ...(port > 0 ? ["--port", String(port)] : []),
     ],
     {
       cwd: join(import.meta.dir, ".."),
