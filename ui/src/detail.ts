@@ -18,6 +18,7 @@ import {
   statusLabel,
   ticketBodyHtml,
   UNASSIGNED_LABEL,
+  type AssignmentSource,
   type ConversationDetailView,
   type DetailTab,
   type DetailTabView,
@@ -30,6 +31,7 @@ import {
 } from "./project";
 import { noteLogScroll } from "./log-pane";
 import { renderTerminalSurface } from "./terminal";
+import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -60,6 +62,13 @@ export interface DetailHandlers {
   onEndConversation: (conversationId: string, closing?: string) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
+  /**
+   * The Reassign store (issue #126), passed in rather than owned: the Detail
+   * has no onChange of its own, and a Save that enables on dirty has to
+   * re-render the moment a field moves. The store holds the drafts, the
+   * harness list and the save state; this pane only draws them.
+   */
+  reassign: ReassignStore;
 }
 
 export class Detail {
@@ -444,7 +453,14 @@ export class Detail {
     body.append(this.renderDetailTabs(tabs, detail.ticketId, handlers));
     const active = tabs.find((tab) => tab.active)?.id ?? "spec";
     if (active === "spec") {
-      body.append(this.renderSpecTab(detail, model.detailBody, model.detailBodyError));
+      body.append(
+        this.renderSpecTab(
+          detail,
+          model.detailBody,
+          model.detailBodyError,
+          handlers.reassign,
+        ),
+      );
     } else if (active === "progress") {
       body.append(
         this.renderProgressTab(detail, model.timeline, model.logPane, handlers),
@@ -488,11 +504,14 @@ export class Detail {
   }
 
   // The Spec tab: the ticket's markdown body rendered to HTML, preceded by
-  // the blockers line.
+  // the blockers line and the Reassign section. Reassign lives here rather
+  // than on Progress because it says how the ticket's next Attempt will run,
+  // not how the one that ran went.
   private renderSpecTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
     body: string | null | undefined,
     error: string | null,
+    reassign: ReassignStore,
   ): HTMLElement {
     const panel = this.detailPanel(
       h(
@@ -502,6 +521,7 @@ export class Detail {
           ? `blocked by ${detail.blockedBy.join(", ")}`
           : "no blockers",
       ),
+      this.renderReassign(detail, reassign),
     );
     if (detail.blockedByCheckpoint.length > 0) {
       panel.append(
@@ -564,6 +584,258 @@ export class Detail {
       panel.append(this.renderLogPane(logPane, detail.ticketId, handlers));
     }
     return panel;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reassign (CONTEXT.md: Reassign; issue #126)
+  // -------------------------------------------------------------------------
+
+  // The ticket's Assignment, editable when the engine says a write would
+  // take effect at the next boundary and read-only with its one-line reason
+  // when it would not. Each field carries the pill that says where its value
+  // came from, so the operator can see at a glance whether editing the pool
+  // defaults would move this ticket or whether it is pinned away from them.
+  // Emptying a field is how a ticket stops being pinned on it.
+  private renderReassign(
+    detail: Extract<DetailView, { kind: "ticket" }>,
+    store: ReassignStore,
+  ): HTMLElement {
+    const view = detail.reassign;
+    // An enlisted ticket runs as it was found, so the engine fixes its model,
+    // drivers and verify and refuses a write to any of them: the editor
+    // offers its harness and shows the other three the way an ineligible
+    // ticket shows all four.
+    const seed: ReassignSeed = {
+      assignment: detail.assignment,
+      verify: view.verify,
+      harnessOnly: detail.enlisted,
+    };
+    const head = h(
+      "div",
+      { class: "reassign-section-head" },
+      h("span", { class: "reassign-section-title" }, "reassign"),
+    );
+    if (!view.eligible) {
+      return h(
+        "section",
+        { class: "reassign-section", key: "reassign-section" },
+        head,
+        h(
+          "div",
+          { class: "reassign-readonly" },
+          this.renderReadonlyField("harness", detail.assignment.harness, view.sources.harness),
+          this.renderReadonlyField("model", detail.assignment.model, view.sources.model),
+          this.renderReadonlyField("drivers", detail.assignment.drivers, view.sources.drivers),
+          this.renderReadonlyField(
+            "verify",
+            view.verify === null ? null : String(view.verify),
+            view.verify === null ? "unset" : "pinned",
+          ),
+        ),
+        h(
+          "div",
+          { class: "dim reassign-reason" },
+          view.reason ?? "this ticket cannot be reassigned right now",
+        ),
+      );
+    }
+    const ticketId = detail.ticketId;
+    const state = store.saveState(ticketId);
+    const dirty = store.isDirty(ticketId, seed);
+    const failure = store.saveFailure(ticketId);
+    return h(
+      "section",
+      { class: "reassign-section", key: "reassign-section" },
+      head,
+      this.renderReassignField(
+        detail,
+        store,
+        seed,
+        "harness",
+        harnessSelect(
+          "reassign-detail-harness",
+          store.harnesses,
+          store.field(ticketId, "harness", seed),
+          (value) => store.setField(ticketId, "harness", value, seed),
+        ),
+      ),
+      detail.enlisted
+        ? h(
+            "div",
+            { class: "reassign-readonly", key: "reassign-fixed" },
+            this.renderReadonlyField("model", detail.assignment.model, view.sources.model),
+            this.renderReadonlyField(
+              "drivers",
+              detail.assignment.drivers,
+              view.sources.drivers,
+            ),
+            this.renderReadonlyField(
+              "verify",
+              view.verify === null ? null : String(view.verify),
+              view.verify === null ? "unset" : "pinned",
+            ),
+          )
+        : null,
+      detail.enlisted
+        ? null
+        : this.renderReassignField(
+            detail,
+            store,
+            seed,
+            "model",
+            h("input", {
+              class: "settings-input reassign-input",
+              key: "reassign-detail-model",
+              type: "text",
+              placeholder: "(inherited)",
+              value: store.field(ticketId, "model", seed),
+              oninput: (event: Event) =>
+                store.setField(
+                  ticketId,
+                  "model",
+                  (event.currentTarget as HTMLInputElement).value,
+                  seed,
+                ),
+            }),
+          ),
+      detail.enlisted
+        ? null
+        : this.renderReassignField(
+            detail,
+            store,
+            seed,
+            "drivers",
+            h("input", {
+              class: "settings-input reassign-input",
+              key: "reassign-detail-drivers",
+              type: "text",
+              placeholder: "(inherited)",
+              value: store.field(ticketId, "drivers", seed),
+              oninput: (event: Event) =>
+                store.setField(
+                  ticketId,
+                  "drivers",
+                  (event.currentTarget as HTMLInputElement).value,
+                  seed,
+                ),
+            }),
+          ),
+      detail.enlisted
+        ? null
+        : this.renderReassignField(
+            detail,
+            store,
+            seed,
+            "verify",
+            h("input", {
+              class: "settings-input settings-port reassign-input",
+              key: "reassign-detail-verify",
+              type: "number",
+              min: "1",
+              placeholder: "(none)",
+              value: store.field(ticketId, "verify", seed),
+              oninput: (event: Event) =>
+                store.setField(
+                  ticketId,
+                  "verify",
+                  (event.currentTarget as HTMLInputElement).value,
+                  seed,
+                ),
+            }),
+          ),
+      h(
+        "div",
+        { class: "reassign-save-row", key: "reassign-save-row" },
+        h(
+          "button",
+          {
+            class: "btn btn-primary reassign-save",
+            type: "button",
+            disabled: state === "saving" || !dirty,
+            onclick: () => void store.save(ticketId, seed),
+          },
+          state === "saving" ? "saving…" : "Save",
+        ),
+        state === "saved" && !dirty
+          ? h("span", { class: "reassign-saved dim" }, "saved")
+          : null,
+        failure
+          ? h("span", { class: "error-inline reassign-failure" }, failure)
+          : null,
+      ),
+      // An eligible ticket can still carry a caveat: an enlisted one says
+      // which of its fields the engine holds fixed.
+      view.reason
+        ? h("div", { class: "dim reassign-note", key: "reassign-note" }, view.reason)
+        : detail.enlisted
+          ? h(
+              "div",
+              { class: "dim reassign-note", key: "reassign-note" },
+              "this ticket runs as it was found: only its harness can be reassigned",
+            )
+          : null,
+    );
+  }
+
+  private renderReadonlyField(
+    label: string,
+    value: string | null,
+    source: AssignmentSource,
+  ): HTMLElement {
+    return h(
+      "div",
+      { class: "reassign-readonly-field", key: `reassign-readonly-${label}` },
+      h("span", { class: "reassign-field-label" }, label),
+      h("span", { class: "reassign-readonly-value" }, value ?? UNASSIGNED_LABEL),
+      renderSource(source),
+    );
+  }
+
+  // One editable field: its label, the pill saying where the value in force
+  // came from, a clear affordance while the ticket pins it, and the control.
+  private renderReassignField(
+    detail: Extract<DetailView, { kind: "ticket" }>,
+    store: ReassignStore,
+    seed: ReassignSeed,
+    name: "harness" | "model" | "drivers" | "verify",
+    control: HTMLElement,
+  ): HTMLElement {
+    const source: AssignmentSource =
+      name === "verify"
+        ? detail.reassign.verify === null
+          ? "unset"
+          : "pinned"
+        : detail.reassign.sources[name];
+    const held = store.field(detail.ticketId, name, seed);
+    return h(
+      "label",
+      { class: "reassign-edit-field", key: `reassign-field-${name}` },
+      h(
+        "span",
+        { class: "reassign-field-label" },
+        h("span", {}, name),
+        renderSource(source),
+        source === "pinned"
+          ? h(
+              "button",
+              {
+                class: "btn reassign-clear",
+                key: `reassign-clear-${name}`,
+                type: "button",
+                disabled: held.trim() === "",
+                title:
+                  "clear this field so the ticket follows its parent or the pool defaults again",
+                onclick: (event: Event) => {
+                  event.preventDefault();
+                  store.clearField(detail.ticketId, name, seed);
+                },
+              },
+              "clear",
+            )
+          : null,
+      ),
+      control,
+    );
   }
 
   // The Outcome tab: the summary and commit sha once the ticket has

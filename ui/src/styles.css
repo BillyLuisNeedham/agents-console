@@ -2310,3 +2310,311 @@ textarea.conversations-field {
 .settings-restart-failure {
   font-size: 11px;
 }
+
+/* ------------------------------------------------------------ reassign */
+
+/* Reassign (CONTEXT.md: Reassign; issue #126). Two surfaces share these
+   classes: the small editor in the ticket Detail's Spec tab, and the bulk
+   dialog, a third absolute pane over the canvas column beside the Settings
+   pane and the Enlist picker. Source pills borrow the Settings badge's shape
+   and take their colour from the provenance, so "pinned" reads as the one
+   state that stops a ticket following the pool defaults. */
+
+.reassign-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.reassign-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.reassign-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.reassign-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.reassign-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.reassign-clear {
+  font-size: 10px;
+  padding: 0 5px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.reassign-input {
+  max-width: 320px;
+}
+
+.reassign-select {
+  max-width: 260px;
+}
+
+.reassign-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.reassign-saved {
+  color: var(--status-done);
+}
+
+.reassign-failure {
+  font-size: 11px;
+}
+
+.reassign-note,
+.reassign-reason {
+  font-size: 11px;
+}
+
+.reassign-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.reassign-readonly-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.reassign-readonly-value {
+  font-size: 12px;
+}
+
+/* A field's provenance. Pinned is the one that reads as a decision the
+   operator made; the rest are where the value fell through from. */
+.reassign-source-pinned {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reassign-source-inherited {
+  border-color: var(--accent-purple);
+  color: var(--accent-purple);
+}
+
+.reassign-source-default {
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.reassign-source-unset {
+  border-color: var(--status-pending);
+  color: var(--status-pending);
+}
+
+/* The bulk dialog: the Settings pane's card, one step further forward so it
+   sits over the pane that opened it. Its row list scrolls on its own so the
+   head and the form below stay put however many tickets are listed. */
+.reassign-dialog {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 27;
+  width: min(720px, calc(100% - 24px));
+  max-height: calc(100% - 100px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+.reassign-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.reassign-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.reassign-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}
+
+.reassign-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.reassign-list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.reassign-count {
+  font-size: 11px;
+}
+
+.reassign-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: auto;
+  min-height: 0;
+  max-height: 34vh;
+  padding-right: 4px;
+}
+
+.reassign-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel-2);
+  cursor: pointer;
+}
+
+.reassign-row:hover {
+  border-color: var(--accent);
+}
+
+.reassign-tick {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.reassign-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.reassign-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.reassign-row-id {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reassign-row-title {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reassign-row-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reassign-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reassign-pill-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.reassign-pill-value {
+  font-size: 11px;
+}
+
+.reassign-row-note {
+  font-size: 11px;
+}
+
+.reassign-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.reassign-form-note {
+  font-size: 11px;
+}
+
+.reassign-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reassign-field .reassign-field-label {
+  min-width: 64px;
+}
+
+.reassign-modes {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.reassign-mode.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reassign-apply-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.reassign-result {
+  font-size: 11px;
+  color: var(--status-done);
+}

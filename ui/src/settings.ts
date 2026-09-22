@@ -43,6 +43,9 @@ export interface SettingsOptions {
   onGetSettings: GetSettingsHandler;
   onSavePool: SavePoolHandler;
   onSaveMachine: SaveMachineHandler;
+  /** Open the Reassign bulk dialog (issue #126). The pane offers the button
+   *  and nothing more: the dialog is its own pane with its own store. */
+  onOpenReassign: () => void;
   /** Pane state changed outside a render: the composition re-renders. */
   onChange: () => void;
 }
@@ -253,12 +256,14 @@ export class SettingsStore {
   private readonly onGetSettings: GetSettingsHandler;
   private readonly onSavePool: SavePoolHandler;
   private readonly onSaveMachine: SaveMachineHandler;
+  private readonly onOpenReassign: () => void;
   private readonly onChange: () => void;
 
   constructor(options: SettingsOptions) {
     this.onGetSettings = options.onGetSettings;
     this.onSavePool = options.onSavePool;
     this.onSaveMachine = options.onSaveMachine;
+    this.onOpenReassign = options.onOpenReassign;
     this.onChange = options.onChange;
   }
 
@@ -485,6 +490,7 @@ export class SettingsStore {
               "div",
               { class: "settings-body", key: "settings-body" },
               this.renderPoolForm(this.data),
+              this.renderReassignSection(),
               this.renderMachineForm(this.data),
             )
           : h("div", { class: "settings-empty" }, "no settings");
@@ -670,6 +676,43 @@ export class SettingsStore {
         this.poolState,
         this.poolError,
         () => void this.savePool(),
+      ),
+    );
+  }
+
+  /**
+   * Reassign (CONTEXT.md: Reassign; issue #126), beside the pool defaults
+   * because it is the other half of the same question: the defaults move
+   * every ticket that follows them, and reassigning a ticket is how it stops
+   * following them. The section says only that, and opens the dialog that
+   * does the work.
+   */
+  private renderReassignSection(): HTMLElement {
+    return h(
+      "section",
+      { class: "settings-section", key: "settings-reassign" },
+      h(
+        "div",
+        { class: "settings-section-head" },
+        h("span", { class: "settings-section-title" }, "reassign tickets"),
+      ),
+      h(
+        "div",
+        { class: "settings-note dim" },
+        "pinning tickets stops them following the pool defaults for the fields you set; edit the defaults instead to move every unpinned ticket",
+      ),
+      h(
+        "div",
+        { class: "settings-save-row", key: "settings-reassign-row" },
+        h(
+          "button",
+          {
+            class: "btn settings-reassign-open",
+            type: "button",
+            onclick: () => this.onOpenReassign(),
+          },
+          "Reassign tickets…",
+        ),
       ),
     );
   }

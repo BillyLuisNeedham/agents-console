@@ -149,6 +149,13 @@ describe("Canvas across a morphing render", () => {
         mergePending: false,
         assignment: { harness: "claude", model: "opus", drivers: "tdd" },
         enlisted: false,
+        reassign: {
+          eligible: false,
+          reason: "an Attempt is in flight",
+          verify: null,
+          sources: { harness: "pinned", model: "default", drivers: "default" },
+        },
+        hasLiveAttempt: true,
         outcome: null,
         interrupt: null,
         grade: null,

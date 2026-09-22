@@ -106,7 +106,6 @@ export function writePoolSettings(
   patch: Record<string, unknown>,
   options: WritePoolSettingsOptions,
 ): PoolConfig {
-  const path = poolSettingsPath(poolDir);
   const existing = readPoolSettings(poolDir).config;
   const next: Record<string, unknown> = { ...existing };
 
@@ -119,13 +118,24 @@ export function writePoolSettings(
   }
 
   const config = next as PoolConfig;
-  // Written whole through a rename so a reader (the engine's own Config
-  // reload, at a boundary that may land mid-write) never sees half a file.
+  writeConfigAtomically(poolDir, config);
+  return config;
+}
+
+/**
+ * The pool's config file, replaced whole through a rename so a reader never
+ * sees half a file. The engine's own Config reload (ADR-0018) re-reads at a
+ * super-step boundary that may land mid-write, so every writer of
+ * console.json in this server goes through here: the Settings pane above,
+ * and Reassign's `assign` entries in reassign.ts (issue #126), rather than
+ * each keeping four lines that have to stay in step.
+ */
+export function writeConfigAtomically(poolDir: string, config: PoolConfig): void {
+  const path = poolSettingsPath(poolDir);
   mkdirSync(poolDir, { recursive: true });
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
   renameSync(tmp, path);
-  return config;
 }
 
 // One key's value, validated: `undefined` means remove the key. Empty is
@@ -182,7 +192,7 @@ function normaliseDefaults(
     }
     if (entry.trim()) out[field] = entry.trim();
   }
-  if (out.harness) requireKnownHarness("defaults.harness", out.harness, harnesses);
+  if (out.harness) requireKnownHarness("pool settings: defaults.harness", out.harness, harnesses);
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
@@ -198,7 +208,7 @@ function normaliseResolver(
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed === "") return undefined;
-    if (trimmed !== "none") requireKnownHarness("resolver", trimmed, harnesses);
+    if (trimmed !== "none") requireKnownHarness("pool settings: resolver", trimmed, harnesses);
     return trimmed;
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -217,7 +227,7 @@ function normaliseResolver(
     if (entry.trim()) out[field] = entry.trim();
   }
   if (out.harness && out.harness !== "none") {
-    requireKnownHarness("resolver.harness", out.harness, harnesses);
+    requireKnownHarness("pool settings: resolver.harness", out.harness, harnesses);
   }
   return Object.keys(out).length === 0 ? undefined : out;
 }
@@ -291,11 +301,24 @@ function normaliseAgents(value: unknown): string | undefined {
   return trimmed;
 }
 
-function requireKnownHarness(field: string, harness: string, harnesses: string[]): void {
+/**
+ * The one check that a named harness is one this pool knows, shared by the
+ * Settings pane's `defaults.harness` and resolver and by Reassign's per-ticket
+ * harness (issue #126). `subject` is the whole prefix the message opens with
+ * ("pool settings: defaults.harness", "reassign: harness"), so each caller
+ * names the field in its own voice. An empty table skips the check, which is
+ * what a caller with no harness table wants rather than a refusal of every
+ * harness.
+ */
+export function requireKnownHarness(
+  subject: string,
+  harness: string,
+  harnesses: string[],
+): void {
   if (harnesses.length === 0) return;
   if (harnesses.includes(harness)) return;
   throw new Error(
-    `pool settings: ${field} names unknown harness '${harness}'. ` +
+    `${subject} names unknown harness '${harness}'. ` +
       `Known: ${[...harnesses].sort().join(", ")}`,
   );
 }

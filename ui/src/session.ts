@@ -23,6 +23,7 @@ import {
   projectDetail,
   projectDetailTabs,
   projectEnlistBlocks,
+  projectReassignTickets,
   projectLogPane,
   projectNeedsInput,
   projectPool,
@@ -650,6 +651,9 @@ export class ConsoleSession {
         : {},
       enlistBlocks: this.snapshot
         ? projectEnlistBlocks(this.snapshot.state.tickets)
+        : [],
+      reassignTickets: this.snapshot
+        ? projectReassignTickets(this.snapshot.state.tickets)
         : [],
     };
   }

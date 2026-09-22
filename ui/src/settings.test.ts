@@ -72,6 +72,7 @@ function harness() {
     deferred: Deferred<SettingsResponse>;
   }[] = [];
   let changes = 0;
+  let opens = 0;
   const store = new SettingsStore({
     onGetSettings: () => {
       const d = deferred<SettingsResponse>();
@@ -88,11 +89,21 @@ function harness() {
       machineSaves.push({ defaults, deferred: d });
       return d.promise;
     },
+    onOpenReassign: () => {
+      opens += 1;
+    },
     onChange: () => {
       changes += 1;
     },
   });
-  return { store, reads, poolSaves, machineSaves, changes: () => changes };
+  return {
+    store,
+    reads,
+    poolSaves,
+    machineSaves,
+    changes: () => changes,
+    opens: () => opens,
+  };
 }
 
 /** An opened store already holding an answer. */

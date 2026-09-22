@@ -114,6 +114,10 @@ _Avoid_: launch (an Attempt's), spawn (a Ticket an Attempt proposes), run.sh (re
 The Console stopping its own server with a farewell and handing off to Boot for the same Pool, so boot-only Pool settings and a fresh build take effect. Allowed while Attempts are live, behind the same inline confirm as Stop; headless Attempts are killed and terminal-backed ones stay in their tabs and are reconciled, as on any restart. Introduced by ADR-0026.
 _Avoid_: reload (that's Config reload), reboot
 
+**Reassign**:
+The operator changing a Ticket's Assignment from the Console, one Ticket from its Detail or many at once from the Pool settings, by writing that Ticket's assign entry field by field: set a field, leave it, or clear it so the Ticket follows its parent or the pool defaults again. Only a Ticket with no Attempt in flight can be reassigned; the change lands in the file at once and the engine picks it up at the next Config reload, the same seam a hand edit uses. Reassigning pins a Ticket, so it stops following the pool defaults for the fields it sets; editing the defaults instead moves every unpinned Ticket. Not a Setup (a saved bundle chosen when a Pool is made) and not a Config reload (the engine's read, not the operator's write).
+_Avoid_: change setup, switch runner, override (the file's word is assign)
+
 **Config reload**:
 The engine's re-read of the Pool config file at a super-step boundary. Only the assignment slice reloads (defaults, assign, resolver); roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
 _Avoid_: hot reload (implies a watcher; there is none), restart

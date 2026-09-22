@@ -89,7 +89,9 @@ import {
   assignmentViewOf,
   DEFAULT_DRIVERS,
   resolveAssignment,
+  resolveAssignmentSources,
   type Assignment,
+  type AssignmentSources,
   type AssignmentView,
 } from "./assignment.ts";
 import {
@@ -154,7 +156,12 @@ export type {
   StartConversationRequest,
 } from "./conversations.ts";
 export type { TurnSide, TurnState } from "./turn-state.ts";
-export type { Assignment, AssignmentView } from "./assignment.ts";
+export type {
+  Assignment,
+  AssignmentSource,
+  AssignmentSources,
+  AssignmentView,
+} from "./assignment.ts";
 
 // The attempt's result, written by the agent as JSON at the outcome path its
 // prompt names and read by the engine at attempt exit. `status` is the
@@ -4321,8 +4328,11 @@ function parseHeadToHeadId(id: string): string | null {
 }
 
 // The build ticket behind an engine-written ticket id, grader or head-to-head;
-// null for an ordinary ticket the pool's own directory defines.
-function engineTicketBuildId(id: string): string | null {
+// null for an ordinary ticket the pool's own directory defines. Exported for
+// Reassign (issue #126), which must never offer an engine-owned ticket to the
+// operator: the one place the two id conventions are decoded, rather than the
+// Console keeping its own copy of the regexes.
+export function engineTicketBuildId(id: string): string | null {
   return parseGraderId(id)?.buildId ?? parseHeadToHeadId(id);
 }
 
@@ -4404,6 +4414,11 @@ function resolveAssignmentsInto(
   assignments: Map<string, Assignment>,
   config: PoolConfig,
   harnesses: Record<string, HarnessCommand>,
+  // Reassign (issue #126) wants to tell the operator which layer supplied
+  // each field. It is filled here rather than by a second pass of its own so
+  // the dispatch below (grader, spawned, enlisted, ordinary) is written once
+  // and a provenance answer can never disagree with the value beside it.
+  sources?: Map<string, AssignmentSources>,
 ): void {
   let progressed = true;
   while (progressed) {
@@ -4424,6 +4439,21 @@ function resolveAssignmentsInto(
             ? resolveEngineTicketAssignment(config, marker, build, harnesses)
             : resolveTicketAssignment(marker, config, harnesses),
         );
+        const assign = config.assign?.[marker.id];
+        sources?.set(
+          marker.id,
+          resolveAssignmentSources({
+            // The same narrowed request the engine resolver takes: a judge
+            // may override harness and model, never the build's drivers.
+            request: build
+              ? assign
+                ? { harness: assign.harness, model: assign.model }
+                : undefined
+              : assign,
+            ...(build ? { inherited: build } : {}),
+            ...(config.defaults ? { defaults: config.defaults } : {}),
+          }),
+        );
         progressed = true;
         continue;
       }
@@ -4433,6 +4463,14 @@ function resolveAssignmentsInto(
         assignments.set(
           marker.id,
           resolveSpawnedTicketAssignment(config, marker, parent, harnesses),
+        );
+        sources?.set(
+          marker.id,
+          resolveAssignmentSources({
+            request: config.assign?.[marker.id],
+            inherited: parent,
+            ...(config.defaults ? { defaults: config.defaults } : {}),
+          }),
         );
         progressed = true;
         continue;
@@ -4449,10 +4487,27 @@ function resolveAssignmentsInto(
           model: "",
           drivers: DEFAULT_DRIVERS,
         });
+        // Only the harness came through the config; the other two are the
+        // as-found rule above, so no layer of the file supplied them.
+        sources?.set(marker.id, {
+          harness: resolveAssignmentSources({
+            request: config.assign?.[marker.id],
+            ...(config.defaults ? { defaults: config.defaults } : {}),
+          }).harness,
+          model: "unset",
+          drivers: "default",
+        });
         progressed = true;
         continue;
       }
       assignments.set(marker.id, resolveTicketAssignment(marker, config, harnesses));
+      sources?.set(
+        marker.id,
+        resolveAssignmentSources({
+          request: config.assign?.[marker.id],
+          ...(config.defaults ? { defaults: config.defaults } : {}),
+        }),
+      );
       progressed = true;
     }
   }
@@ -4463,6 +4518,37 @@ function resolveAssignmentsInto(
         `${unresolved.map((m) => m.id).join(", ")} (a spawned-by cycle?)`,
     );
   }
+}
+
+/**
+ * Every ticket's Assignment as a given config resolves it, with the layer
+ * each field came from beside it (Reassign, issue #126). The same pass the
+ * engine runs at boot and at a Config reload, over a config the caller
+ * supplies rather than the session's: the Console resolves the file as it
+ * stands now so a saved Reassign shows on the card before the next boundary,
+ * and dry-runs a proposed file before writing it.
+ *
+ * `seed` is what reloadConfigAtBoundary seeds its own dry run with: the
+ * frozen record of every ticket the reload will not re-resolve. A seeded id
+ * is left exactly as given and its children inherit from it, so the Console
+ * shows what the engine will use rather than what the file alone would say.
+ * A seeded id gets no `sources` entry, because no layer of the file supplied
+ * it.
+ *
+ * Throws exactly what the engine's own reload would: an unknown harness or an
+ * invalid verify anywhere in the pool rejects the whole resolution, which is
+ * the point of dry-running it.
+ */
+export function resolvePoolAssignments(
+  markers: TicketMarker[],
+  config: PoolConfig,
+  harnesses: Record<string, HarnessCommand>,
+  seed?: ReadonlyMap<string, Assignment>,
+): { assignments: Map<string, Assignment>; sources: Map<string, AssignmentSources> } {
+  const assignments = new Map<string, Assignment>(seed ?? []);
+  const sources = new Map<string, AssignmentSources>();
+  resolveAssignmentsInto(markers, assignments, config, harnesses, sources);
+  return { assignments, sources };
 }
 
 // Resolution for marker ids the assignment map does not know yet, run once
@@ -7762,7 +7848,16 @@ export function resolveTicketAssignment(
  * and validated exactly once.
  */
 export function readConfig(poolDir: string): PoolConfig {
-  const raw = readOptional(join(poolDir, "console.json"));
+  return parseConfig(readOptional(join(poolDir, "console.json")), poolDir);
+}
+
+/**
+ * The same parse, over text the caller already has. The Console reads the
+ * file itself to key a cache on its exact bytes (issue #126), and parsing
+ * that same text here is what keeps the cache key and the parsed config from
+ * ever describing two different reads of the file.
+ */
+export function parseConfig(raw: string | null, poolDir: string): PoolConfig {
   if (!raw) return {};
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

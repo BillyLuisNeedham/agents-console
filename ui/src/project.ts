@@ -7,6 +7,7 @@
 import { marked } from "marked";
 import type { Point, TopologyEdge } from "./geometry";
 import type {
+  AssignmentSources,
   AssignmentView,
   ConversationStatus,
   ConversationView,
@@ -20,6 +21,7 @@ import type {
   ResumeAction,
   RunPhase,
   StartConversationRequest,
+  TicketReassignView,
   TicketActivityResponse,
   TicketEvent,
   TicketEventsResponse,
@@ -35,6 +37,8 @@ import type {
 // ---------------------------------------------------------------------------
 
 export type {
+  AssignmentSource,
+  AssignmentSources,
   AssignmentView,
   ConversationStatus,
   ConversationView,
@@ -50,6 +54,8 @@ export type {
   PoolConfig,
   PoolSettingsView,
   QueuedAnswer,
+  ReassignRequest,
+  ReassignResponse,
   RestartResponse,
   ResumeAction,
   RunPhase,
@@ -63,6 +69,7 @@ export type {
   TicketEventsResponse,
   TicketGradeSummary,
   TicketLogResponse,
+  TicketReassignView,
   TicketStatus,
   TurnSide,
 } from "../../engine/wire.ts";
@@ -640,6 +647,17 @@ export interface TicketCardView {
   /** The ticket was enlisted from a live herdr pane (issue #101): the badge
    *  reads "as found" where a spawned ticket names a model. */
   enlisted: boolean;
+  /**
+   * Reassign (issue #126): whether this ticket's assign entry can be
+   * rewritten now, why not when it cannot, its own verify count, and where
+   * each field of `assignment` came from. Display-only on the card; the
+   * editor is the Detail's Reassign section and the Settings pane's bulk
+   * dialog, and both read it from here through the Detail projection.
+   */
+  reassign: TicketReassignView;
+  /** An Attempt is in flight. The card shows nothing new for it; the Detail
+   *  uses it to say why a ticket is read-only rather than guessing. */
+  hasLiveAttempt: boolean;
   outcome: Outcome | null;
   interrupt: InterruptView | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
@@ -990,6 +1008,8 @@ function projectTicket(
     mergePending: ticket.mergePending,
     assignment: ticket.assignment,
     enlisted: ticket.enlisted,
+    reassign: ticket.reassign,
+    hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,
@@ -1358,6 +1378,54 @@ export function projectEnlistBlocks(tickets: EnrichedTicketState[]): EnlistBlock
     .map((ticket) => ({ id: ticket.id, title: ticket.title }));
 }
 
+// ---------------------------------------------------------------------------
+// Reassign (CONTEXT.md: Reassign; issue #126): the rows the bulk dialog in
+// the Settings pane lists. Every judgement is the engine's, carried on the
+// snapshot: which tickets can be reassigned, where each Assignment field
+// came from, and the caveat on an eligible one. Nothing is re-derived here.
+// ---------------------------------------------------------------------------
+
+/** One reassignable ticket, as the bulk dialog lists it. */
+export interface ReassignTicketRow {
+  id: string;
+  title: string;
+  status: TicketStatus;
+  /** The Assignment in force, the same record the card shows. */
+  assignment: AssignmentView;
+  /** Where each field of `assignment` came from, for the row's pills. */
+  sources: AssignmentSources;
+  /** The ticket's own verify count; null when it has none. */
+  verify: number | null;
+  /** Enlisted from a live herdr pane (issue #101): it runs as it was found,
+   *  so the engine fixes its model, drivers and verify and only its harness
+   *  can be reassigned. */
+  enlisted: boolean;
+  /** The engine's caveat on an eligible ticket, or null. */
+  reason: string | null;
+}
+
+/**
+ * Every ticket the engine says can be reassigned, in snapshot order. An
+ * ineligible ticket is left out entirely: the bulk dialog only offers what a
+ * write would reach, and the Detail says why a single ticket is read-only.
+ */
+export function projectReassignTickets(
+  tickets: EnrichedTicketState[],
+): ReassignTicketRow[] {
+  return tickets
+    .filter((ticket) => ticket.reassign.eligible)
+    .map((ticket) => ({
+      id: ticket.id,
+      title: ticket.title,
+      status: ticket.status,
+      assignment: ticket.assignment,
+      sources: ticket.reassign.sources,
+      verify: ticket.reassign.verify,
+      enlisted: ticket.enlisted,
+      reason: ticket.reassign.reason,
+    }));
+}
+
 /** The two kinds a picked pane can become, fixed at enlist time (issue #101). */
 export type EnlistBecomes = "ticket" | "conversation";
 
@@ -1501,6 +1569,18 @@ export interface TicketDetailView {
    *  timeline's winner badge. Null when the ticket is ungraded or no
    *  selection has landed: no badge renders. */
   winner: number | null;
+  /** The ticket's resolved Assignment, the same record the card shows: the
+   *  Reassign editor prefills from it (issue #126). */
+  assignment: AssignmentView;
+  /** Mirrors the card's enlisted flag, so the Reassign section can say that
+   *  an enlisted ticket's saved change waits on the engine. */
+  enlisted: boolean;
+  /** Eligibility, its reason, the ticket's own verify count and the
+   *  Assignment's per-field provenance (issue #126). */
+  reassign: TicketReassignView;
+  /** An Attempt is in flight: the Reassign editor stands aside for the
+   *  read-only view while one is. */
+  hasLiveAttempt: boolean;
 }
 
 interface UtilityDetailView {
@@ -1553,6 +1633,10 @@ export function projectDetail(
       outcome: card.outcome,
       interrupt: card.interrupt,
       winner: card.grade?.winner ?? null,
+      assignment: card.assignment,
+      enlisted: card.enlisted,
+      reassign: card.reassign,
+      hasLiveAttempt: card.hasLiveAttempt,
     };
   }
   if (card.kind === "conversation") {

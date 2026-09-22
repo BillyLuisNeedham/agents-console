@@ -25,6 +25,16 @@ function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
         enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
         liveAttempt: null,
+        reassign: {
+          eligible: status !== "done",
+          reason: null,
+          verify: null,
+          sources: {
+            harness: "default" as const,
+            model: "default" as const,
+            drivers: "default" as const,
+          },
+        },
       })),
       conversations: [],
       log: [],
