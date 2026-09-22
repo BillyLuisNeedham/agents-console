@@ -24,7 +24,11 @@ const ENV_READERS = new Set([
   // resolving it where the seed lands is what lets the test preload fence
   // every suite off the operator's real file (issue #127, ADR-0025).
   "claude-trust.ts",
-  // The test preload sets that variable for every test run.
+  // The daemon's socket follows HERDR_SOCKET_PATH, herdr's own variable,
+  // for the same reason: it is what lets the test preload keep every suite
+  // out of the operator's live herdr.
+  "herdr.ts",
+  // The test preload sets both variables for every test run.
   "test-preload.ts",
 ]);
 

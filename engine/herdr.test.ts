@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ATTEMPT_TAB_LABEL_MAX,
+  HERDR_SOCKET_DEFAULT,
   PANE_AGENT_SOURCE,
   attemptTabLabel,
   closeTab,
@@ -441,5 +442,17 @@ describe("waitForPaneEnd", () => {
     // liveness check on the ack is the only thing that can see it.
     const fake = await startFakeHerdr({ listOnly: [] });
     expect(await waitForPaneEnd(fake.socketPath, "pane-1")).toBe("exited");
+  });
+});
+
+describe("HERDR_SOCKET_DEFAULT in a test run", () => {
+  // Four tests once built terminal-backed pools with no fake, reached the
+  // operator's live daemon through this default, and left a `pool-XXXXXX`
+  // workspace behind on every run. The preload points it at scratch.
+  it("is pointed away from the operator's daemon by the preload", () => {
+    expect(process.env.HERDR_SOCKET_PATH).toBeTruthy();
+    expect(HERDR_SOCKET_DEFAULT).toBe(process.env.HERDR_SOCKET_PATH!);
+    expect(existsSync(HERDR_SOCKET_DEFAULT)).toBe(false);
+    expect(HERDR_SOCKET_DEFAULT.startsWith(join(homedir(), ".config"))).toBe(false);
   });
 });
