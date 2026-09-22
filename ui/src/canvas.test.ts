@@ -4,7 +4,7 @@ import { describe, expect, it } from "bun:test";
 import { Canvas, canvasStatusText, type CanvasModel } from "./canvas";
 import { commit as commitTree } from "./morph";
 import { useDom } from "./test-dom";
-import type { StopView } from "./view";
+import type { RestartView, StopView } from "./view";
 
 useDom();
 
@@ -24,6 +24,16 @@ function stop(overrides: Partial<StopView> = {}): StopView {
   };
 }
 
+function restart(overrides: Partial<RestartView> = {}): RestartView {
+  return {
+    offered: false,
+    state: "idle",
+    failure: null,
+    waiting: false,
+    ...overrides,
+  };
+}
+
 function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
   return {
     cards: [],
@@ -33,6 +43,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     seq: 7,
     error: null,
     stop: stop(),
+    restart: restart(),
     terminalBacked: false,
     ...overrides,
   };
@@ -72,6 +83,19 @@ describe("canvasStatusText", () => {
       ),
     ).toBe("pool · stopped · from this page");
   });
+
+  it("reads a farewell as restarting for the tab that asked for one", () => {
+    expect(
+      canvasStatusText(
+        model({
+          phase: "stopped",
+          connected: false,
+          stop: stop({ stoppedFromHere: true }),
+          restart: restart({ waiting: true }),
+        }),
+      ),
+    ).toBe("pool · restarting...");
+  });
 });
 
 /** A canvas mounted the way the composition root mounts it: render, morph
@@ -83,6 +107,7 @@ function mountCanvas(model: CanvasModel): { canvas: Canvas; root: HTMLElement; c
     onFocusTerminal: async () => true,
     onNewConversation: () => {},
     onEnlist: () => {},
+    onOpenSettings: () => {},
     onEndConversation: () => {},
     onArmStop: () => {},
     onCancelStop: () => {},

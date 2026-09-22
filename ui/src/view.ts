@@ -32,6 +32,12 @@ import {
   type ConversationsOptions,
 } from "./conversations";
 import { EnlistStore, type EnlistHandler, type ListPanesHandler } from "./enlist";
+import {
+  SettingsStore,
+  type GetSettingsHandler,
+  type SaveMachineHandler,
+  type SavePoolHandler,
+} from "./settings";
 import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
@@ -57,6 +63,21 @@ export interface StopView {
   relaunch: string | null;
 }
 
+/**
+ * The Restart control's view slice (ADR-0026, issue #121). `offered` gates
+ * the control on a live stream in any phase, since a boot-only key takes
+ * effect no other way; `state` is the same inline confirmation machine the
+ * Stop control uses; `failure` is a refusal's reason, shown beside the
+ * button; `waiting` marks the tab that asked, which is the one tab that can
+ * honestly say the server is coming back rather than gone.
+ */
+export interface RestartView {
+  offered: boolean;
+  state: StopState;
+  failure: string | null;
+  waiting: boolean;
+}
+
 export interface AppModel {
   phase: RunPhase | null;
   phaseLabel: string;
@@ -71,6 +92,8 @@ export interface AppModel {
   error: string | null;
   /** The Stop control and the stopped-server notice (issue #97). */
   stop: StopView;
+  /** The Settings pane's Restart control and the restarting notice (ADR-0026). */
+  restart: RestartView;
   /** The pool is Terminal-backed: the header offers Enlist only then. */
   terminalBacked: boolean;
   detail: DetailView | null;
@@ -108,6 +131,11 @@ export interface Handlers {
   onArmStop: () => void;
   onCancelStop: () => void;
   onConfirmStop: () => void;
+  /** The Restart control's three intents (ADR-0026), the Stop control's
+   *  shape exactly. Cancel sends nothing. */
+  onArmRestart: () => void;
+  onCancelRestart: () => void;
+  onConfirmRestart: () => void;
 }
 
 export type ConsoleViewOptions = NeedsInputOptions &
@@ -120,6 +148,11 @@ export type ConsoleViewOptions = NeedsInputOptions &
     onListPanes: ListPanesHandler;
     /** The Enlist form's submit (issue #101): the engine writes the ticket. */
     onEnlist: EnlistHandler;
+    /** The Settings pane's read and its two writes (ADR-0026), fetched when
+     *  the pane opens rather than through the snapshot. */
+    onGetSettings: GetSettingsHandler;
+    onSavePoolSettings: SavePoolHandler;
+    onSaveMachineDefaults: SaveMachineHandler;
   };
 
 /**
@@ -144,6 +177,7 @@ export class ConsoleView {
   private readonly needsInput: NeedsInputTray;
   private readonly conversationsTray: ConversationsTray;
   private readonly enlist: EnlistStore;
+  private readonly settings: SettingsStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   // The selection outlives any one render (snapshots never close the panel
   // or lose the selection); its one-hop flow neighbourhood is recomputed from
@@ -167,6 +201,12 @@ export class ConsoleView {
       onEnlist: options.onEnlist,
       onChange: options.onChange,
     });
+    this.settings = new SettingsStore({
+      onGetSettings: options.onGetSettings,
+      onSavePool: options.onSavePoolSettings,
+      onSaveMachine: options.onSaveMachineDefaults,
+      onChange: options.onChange,
+    });
     this.canvas = new Canvas({
       onChange: options.onChange,
       onCardTap: (nodeId) => this.selectNode(nodeId),
@@ -175,6 +215,7 @@ export class ConsoleView {
       onEnlist: () => {
         void this.enlist.openPicker();
       },
+      onOpenSettings: () => this.settings.toggle(),
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
@@ -231,6 +272,7 @@ export class ConsoleView {
         onSelect: (cardId) => this.selectNode(cardId),
       }),
       this.enlist.render(model.enlistBlocks),
+      this.settings.render(model.restart, handlers),
     );
     const content = h(
       "div",

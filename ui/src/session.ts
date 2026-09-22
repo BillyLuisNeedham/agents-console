@@ -34,6 +34,7 @@ import {
   type PoolCardView,
   type PoolTabStatus,
   type PoolView,
+  type RestartResponse,
   type ResumeAction,
   type TabOverride,
   type TerminalSurfaceView,
@@ -73,6 +74,21 @@ export interface ConsoleSessionOptions {
   /** Stop this pool's server (issue #97). Resolves when the server has
    *  accepted the stop, rejects with the refusal's reason. */
   stop: () => Promise<void>;
+  /** Restart this pool's server (ADR-0026). Resolves with the port the
+   *  relaunched server will use; rejects with the refusal's reason. */
+  restart: () => Promise<RestartResponse>;
+  /** Whether a server is answering on a port. Resolving false (or throwing)
+   *  means nothing is there yet; the bootstrap owns the fetch, since the
+   *  probe crosses an origin and the session holds no DOM or location. */
+  probeServer?: (port: number) => Promise<boolean>;
+  /** The relaunched server answered: hand the page over to it. The
+   *  bootstrap owns this too, for the same reason. */
+  onRelaunched?: (port: number) => void;
+  /** The relaunch poll's cadence, injectable so tests need not wait. */
+  restartPollMs?: number;
+  /** How long the poll keeps trying before it gives up and lets the
+   *  ordinary stopped notice print the relaunch command. */
+  restartWaitMs?: number;
   /** Open the snapshot stream; returns a function that closes it. */
   stream: (handlers: {
     onSnapshot: (snapshot: EnrichedSnapshot) => void;
@@ -95,6 +111,12 @@ export interface ConsoleSessionOptions {
 // on reconnect) cancels it, and reconnect clears one already showing.
 const STREAM_GRACE_MS = 4000;
 
+// The relaunch poll after a Restart (ADR-0026): a Boot that has to rebuild a
+// stale UI takes tens of seconds, so the window is generous, and the cadence
+// is slow enough to cost nothing while it waits.
+const RESTART_POLL_MS = 1000;
+const RESTART_WAIT_MS = 60_000;
+
 // The stale-answer guard's keys: one for the selected card's timeline loads,
 // one for the ticket-body loads.
 const TIMELINE_KEY = "timeline";
@@ -112,6 +134,11 @@ export class ConsoleSession {
   private readonly getGrades: ConsoleSessionOptions["getGrades"];
   private readonly answerSeam: ConsoleSessionOptions["answer"];
   private readonly stopSeam: ConsoleSessionOptions["stop"];
+  private readonly restartSeam: ConsoleSessionOptions["restart"];
+  private readonly probeServer: ConsoleSessionOptions["probeServer"];
+  private readonly onRelaunched: ConsoleSessionOptions["onRelaunched"];
+  private readonly restartPollMs: number;
+  private readonly restartWaitMs: number;
   private readonly streamSeam: ConsoleSessionOptions["stream"];
   private readonly vitals: SessionVitals;
   private readonly terminal: SessionTerminal;
@@ -134,6 +161,21 @@ export class ConsoleSession {
   private stopState: StopState = "idle";
   private stopFailure: string | null = null;
   private stoppedFromHere = false;
+
+  // The Restart control's state (ADR-0026). The same three-state inline
+  // confirm as Stop, but offered in any phase: a boot-only key takes effect
+  // no other way, and a pool that is running is exactly when the operator
+  // notices the key is wrong. `restartWaiting` marks the tab that asked and
+  // is now polling for the server Boot brings back; every other tab sees an
+  // ordinary stop and its usual retry finds the same server.
+  private restartState: StopState = "idle";
+  private restartFailure: string | null = null;
+  private restartWaiting = false;
+  private restartPort: number | null = null;
+  private restartPoll: ReturnType<typeof setTimeout> | null = null;
+  // One poll chain at a time: the accept and the farewell both start it, and
+  // the second must not lay a second chain over the first.
+  private restartPolling = false;
 
   // The selected card's timeline: the events fetch answers on its own
   // cadence, and a slow answer answering after a newer selection (or a newer
@@ -179,6 +221,11 @@ export class ConsoleSession {
     this.getGrades = options.getGrades;
     this.answerSeam = options.answer;
     this.stopSeam = options.stop;
+    this.restartSeam = options.restart;
+    this.probeServer = options.probeServer;
+    this.onRelaunched = options.onRelaunched;
+    this.restartPollMs = options.restartPollMs ?? RESTART_POLL_MS;
+    this.restartWaitMs = options.restartWaitMs ?? RESTART_WAIT_MS;
     this.streamSeam = options.stream;
     this.vitals = options.vitals;
     this.terminal = options.terminal;
@@ -217,6 +264,10 @@ export class ConsoleSession {
       this.stoppedFromHere = false;
       this.stopState = "idle";
       this.stopFailure = null;
+      this.cancelRelaunchPoll();
+      this.restartWaiting = false;
+      this.restartState = "idle";
+      this.restartFailure = null;
     } else if (this.stopState === "armed" && snapshot.phase !== "done") {
       // Stop is offered only on a done pool, so a phase that moved off done
       // withdraws the offer and the armed confirmation goes with it. A
@@ -229,6 +280,13 @@ export class ConsoleSession {
     this.terminal.update(snapshot);
     this.tabStatus = poolStatus(snapshot);
     this.poolName = snapshot.poolName;
+    if (snapshot.phase === "stopped" && this.restartWaiting && this.restartPort !== null) {
+      // The farewell of the restart this tab asked for: from here the old
+      // server is gone and only the new one can answer, so start watching
+      // for it. Idempotent, since a replayed `stopped` snapshot would
+      // otherwise start a second poll.
+      this.awaitRelaunch(this.restartPort);
+    }
     if (this.selectedId) void this.loadTimeline();
     this.refreshGrades();
     this.onChange();
@@ -369,6 +427,101 @@ export class ConsoleSession {
     this.onChange();
   }
 
+  /** Arm the Restart control's inline confirmation. Nothing is sent. */
+  armRestart(): void {
+    this.restartState = "armed";
+    this.restartFailure = null;
+    this.onChange();
+  }
+
+  /** Disarm it. Nothing is sent, on the way in or out. */
+  cancelRestart(): void {
+    this.restartState = "idle";
+    this.restartFailure = null;
+    this.onChange();
+  }
+
+  /**
+   * Send the restart. The 202 carries the port the relaunched server will
+   * use, which is the port this tab then watches: a restart that changed the
+   * port moves the page to the new origin, and one that did not still needs
+   * the page to wait, because the server it is talking to is about to exit.
+   * The control stays on "restarting..." from here until the new server
+   * answers or the wait runs out; a refusal disarms and shows its reason
+   * beside the button, never on the global banner.
+   */
+  async confirmRestart(): Promise<void> {
+    this.restartState = "requesting";
+    this.restartFailure = null;
+    this.onChange();
+    try {
+      const response = await this.restartSeam();
+      this.restartWaiting = true;
+      this.restartPort = response.port;
+      // The farewell usually lands first and starts the poll; a server that
+      // exits without one (or a stream already down) would leave nothing to
+      // start it, so the accept starts it too. `awaitRelaunch` is idempotent.
+      this.awaitRelaunch(response.port);
+    } catch (err) {
+      this.restartState = "idle";
+      this.restartFailure = err instanceof Error ? err.message : String(err);
+    }
+    this.onChange();
+  }
+
+  /**
+   * Poll the port the restart named until a server answers there, then hand
+   * the page over to it. Nothing answering inside the window ends the wait
+   * rather than retrying forever: the restarting notice gives way to the
+   * ordinary stopped one, which prints the command for relaunching by hand.
+   */
+  private awaitRelaunch(port: number): void {
+    if (this.restartPolling) return;
+    if (!this.probeServer || !this.onRelaunched) return;
+    this.restartPolling = true;
+    const deadline = Date.now() + this.restartWaitMs;
+    const tick = async (): Promise<void> => {
+      this.restartPoll = null;
+      if (!this.restartWaiting) {
+        this.restartPolling = false;
+        return;
+      }
+      let alive = false;
+      try {
+        alive = await this.probeServer!(port);
+      } catch {
+        alive = false;
+      }
+      if (!this.restartWaiting) {
+        this.restartPolling = false;
+        return;
+      }
+      if (alive) {
+        this.restartWaiting = false;
+        this.restartPolling = false;
+        this.onRelaunched!(port);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        this.restartWaiting = false;
+        this.restartPolling = false;
+        this.restartState = "idle";
+        this.onChange();
+        return;
+      }
+      this.restartPoll = setTimeout(() => void tick(), this.restartPollMs);
+    };
+    this.restartPoll = setTimeout(() => void tick(), this.restartPollMs);
+  }
+
+  private cancelRelaunchPoll(): void {
+    this.restartPolling = false;
+    if (this.restartPoll !== null) {
+      clearTimeout(this.restartPoll);
+      this.restartPoll = null;
+    }
+  }
+
   /** Surface a failure on the global banner (the fire-and-forget paths). */
   reportError(message: string): void {
     this.error = message;
@@ -444,6 +597,15 @@ export class ConsoleSession {
         relaunch: this.snapshot
           ? `bun run engine/server.ts --pool ${this.snapshot.poolDir}`
           : null,
+      },
+      restart: {
+        // Offered on a live stream in any phase, and kept while this tab
+        // waits for the relaunch, so the control can say "restarting..."
+        // after the stream has gone with the old server.
+        offered: this.connected || this.restartWaiting,
+        state: this.restartState,
+        failure: this.restartFailure,
+        waiting: this.restartWaiting,
       },
       terminalBacked: this.snapshot
         ? isTerminalBacked(this.snapshot.state.config)

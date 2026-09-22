@@ -10,6 +10,7 @@ import {
   type TicketBodyResponse,
   type TicketEventKind,
   type TicketEventsResponse,
+  type RestartResponse,
   type TicketGradeSummary,
 } from "./project";
 
@@ -114,12 +115,18 @@ function rig() {
   const bodies = new Map<string, Deferred<TicketBodyResponse | null>[]>();
   const logCalls: string[] = [];
   const stops: Deferred<void>[] = [];
+  const restarts: Deferred<RestartResponse>[] = [];
+  const probes: number[] = [];
+  const relaunched: number[] = [];
   const streamHandlers: {
     onSnapshot: (snapshot: EnrichedSnapshot) => void;
     onError: (message: string) => void;
   }[] = [];
   let projectCalls = 0;
   let changes = 0;
+  // What the relaunch probe answers; a test flips it to stand the new server
+  // up part way through the poll.
+  let probeAnswer = false;
   const options: ConsoleSessionOptions = {
     getState: () => Promise.resolve(null),
     getEvents: (id) => {
@@ -149,6 +156,22 @@ function rig() {
       stops.push(d);
       return d.promise;
     },
+    // The restart seam parks the same way, so a test can watch the control
+    // sit on "restarting..." before the 202 lands (ADR-0026).
+    restart: () => {
+      const d = deferred<RestartResponse>();
+      restarts.push(d);
+      return d.promise;
+    },
+    probeServer: (port) => {
+      probes.push(port);
+      return Promise.resolve(probeAnswer);
+    },
+    onRelaunched: (port) => {
+      relaunched.push(port);
+    },
+    restartPollMs: 1,
+    restartWaitMs: 40,
     stream: (handlers) => {
       streamHandlers.push(handlers);
       return () => {};
@@ -169,6 +192,12 @@ function rig() {
     bodies,
     logCalls,
     stops,
+    restarts,
+    probes,
+    relaunched,
+    setProbeAnswer: (value: boolean) => {
+      probeAnswer = value;
+    },
     streamHandlers,
     projectCalls: () => projectCalls,
     changes: () => changes,
@@ -490,6 +519,153 @@ describe("stop control (issue #97)", () => {
       expect(timers.pending).toHaveLength(1);
       timers.runAll();
       expect(session.model({}).error).toBe("pool stream disconnected");
+    } finally {
+      timers.restore();
+    }
+  });
+});
+
+describe("restart control (ADR-0026)", () => {
+  /** Let the poll's async tick run to its next parked await. */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  }
+
+  function connected(phase: "running" | "done" = "running") {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.connect();
+    session.setSnapshot(snapshot({ phase }));
+    return { r, session };
+  }
+
+  it("offers Restart in any phase, unlike Stop", () => {
+    const { session } = connected("running");
+    expect(session.model({}).restart.offered).toBe(true);
+    expect(session.model({}).stop.offered).toBe(false);
+    session.setSnapshot(snapshot({ phase: "done" }));
+    expect(session.model({}).restart.offered).toBe(true);
+  });
+
+  it("withdraws the offer on a dead stream, the way Stop does", () => {
+    const timers = captureTimers();
+    try {
+      const { r, session } = connected();
+      r.streamHandlers[0]!.onError("pool stream disconnected");
+      expect(session.model({}).restart.offered).toBe(false);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("arms and cancels the inline confirmation without sending anything", () => {
+    const { r, session } = connected();
+    session.armRestart();
+    expect(session.model({}).restart.state).toBe("armed");
+    session.cancelRestart();
+    expect(session.model({}).restart.state).toBe("idle");
+    expect(r.restarts).toHaveLength(0);
+  });
+
+  it("keeps an armed confirmation across a phase change, since Restart is offered throughout", () => {
+    const { session } = connected("running");
+    session.armRestart();
+    session.setSnapshot(snapshot({ phase: "done" }));
+    expect(session.model({}).restart.state).toBe("armed");
+  });
+
+  it("shows a refusal beside the button and never enters the wait", async () => {
+    const { r, session } = connected();
+    const settled = session.confirmRestart();
+    expect(session.model({}).restart.state).toBe("requesting");
+    r.restarts[0]!.reject(new Error("no boot script on this pool"));
+    await settled;
+    const model = session.model({});
+    expect(model.restart.state).toBe("idle");
+    expect(model.restart.failure).toBe("no boot script on this pool");
+    expect(model.restart.waiting).toBe(false);
+    // A refused restart is not a broken pool: nothing reaches the banner.
+    expect(model.error).toBeNull();
+  });
+
+  it("reads the farewell as a restart for the tab that asked", async () => {
+    const timers = captureTimers();
+    try {
+      const { r, session } = connected();
+      const settled = session.confirmRestart();
+      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      await settled;
+      expect(session.model({}).restart.waiting).toBe(true);
+      session.setSnapshot(snapshot({ phase: "stopped" }));
+      const model = session.model({});
+      expect(model.phase).toBe("stopped");
+      expect(model.restart.waiting).toBe(true);
+      // The control survives the stream going down with the old server, so
+      // it can keep saying "restarting...".
+      expect(model.restart.offered).toBe(true);
+      expect(model.restart.state).toBe("requesting");
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("hands the page over once a server answers on the port the restart named", async () => {
+    const timers = captureTimers();
+    try {
+      const { r, session } = connected();
+      const settled = session.confirmRestart();
+      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      await settled;
+      session.setSnapshot(snapshot({ phase: "stopped" }));
+      // Nothing is listening yet: the poll keeps its place.
+      timers.runAll();
+      await settle();
+      expect(r.probes).toEqual([4311]);
+      expect(r.relaunched).toEqual([]);
+      r.setProbeAnswer(true);
+      timers.runAll();
+      await settle();
+      expect(r.relaunched).toEqual([4311]);
+      expect(session.model({}).restart.waiting).toBe(false);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("gives up after the wait, so the ordinary stopped notice takes over", async () => {
+    const timers = captureTimers();
+    try {
+      const r = rig();
+      const session = new ConsoleSession({ ...r.options, restartWaitMs: -1 });
+      session.connect();
+      session.setSnapshot(snapshot({ phase: "running" }));
+      const settled = session.confirmRestart();
+      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      await settled;
+      timers.runAll();
+      await settle();
+      const model = session.model({});
+      expect(model.restart.waiting).toBe(false);
+      expect(model.restart.state).toBe("idle");
+      expect(r.relaunched).toEqual([]);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("starts over when a live snapshot lands, the way the stop control does", async () => {
+    const timers = captureTimers();
+    try {
+      const { r, session } = connected();
+      const settled = session.confirmRestart();
+      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      await settled;
+      session.setSnapshot(snapshot({ phase: "stopped" }));
+      session.setSnapshot(snapshot({ phase: "running" }));
+      const model = session.model({});
+      expect(model.restart.waiting).toBe(false);
+      expect(model.restart.state).toBe("idle");
+      expect(model.stop.stoppedFromHere).toBe(false);
     } finally {
       timers.restore();
     }

@@ -2097,3 +2097,216 @@ textarea.conversations-field {
   font-size: 11px;
   color: var(--status-running);
 }
+
+/* -------------------------------------------------------- settings pane */
+
+/* The Settings pane (ADR-0026, issue #121): a modal over the canvas column
+   holding the pool's config and the machine defaults, each with its own Save,
+   and the Restart control in the footer. Wider than the Enlist picker because
+   the prose fields are textareas, and its body scrolls on its own so the head
+   and the footer stay put. */
+.settings-pane {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  width: min(680px, calc(100% - 24px));
+  max-height: calc(100% - 100px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.settings-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  min-height: 0;
+  padding-right: 4px;
+}
+
+.settings-empty {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}
+
+.settings-failure {
+  font-size: 11px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-path {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-note {
+  font-size: 11px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.settings-hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* A boot-only key the running server does not have yet. */
+.settings-badge {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--status-running);
+  border-radius: 999px;
+  color: var(--status-running);
+}
+
+.settings-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  width: 100%;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings-area {
+  min-height: 52px;
+  resize: vertical;
+}
+
+.settings-port {
+  max-width: 220px;
+}
+
+.settings-select {
+  max-width: 260px;
+}
+
+.settings-pair {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.settings-pair-model {
+  flex: 1;
+}
+
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.settings-check input {
+  accent-color: var(--accent);
+}
+
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.settings-saved {
+  font-size: 11px;
+  color: var(--status-done);
+}
+
+.settings-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.settings-restart {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-restart-prompt {
+  font-size: 11px;
+  color: var(--interrupt);
+  white-space: nowrap;
+}
+
+.settings-restart-off {
+  font-size: 11px;
+}
+
+.settings-restart-failure {
+  font-size: 11px;
+}

@@ -21,6 +21,12 @@ import type {
   TicketGradeSummary,
   TicketLogResponse,
 } from "../../engine/wire.ts";
+import type {
+  MachineDefaults,
+  PoolConfigPatch,
+  RestartResponse,
+  SettingsResponse,
+} from "./project";
 
 const DEFAULT_BASE = "";
 const STREAM_PATH = "/api/stream";
@@ -355,6 +361,77 @@ export class PoolClient {
           ? (body as { reason: string }).reason
           : null;
       throw new Error(reason ?? `enlist failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /**
+   * The Settings pane's read (ADR-0026): the pool's own config, the machine
+   * defaults (merged and as the file holds them), and the harnesses the pane
+   * offers. Fetched when the pane opens, never through the snapshot: settings
+   * are files on disk, not pool state.
+   */
+  async getSettings(): Promise<SettingsResponse> {
+    const res = await fetch(`${this.base}/api/settings`);
+    if (!res.ok) throw new Error(`settings failed: ${res.status}`);
+    return res.json();
+  }
+
+  /**
+   * Write a patch of the pool's config. A key sent as null or "" is removed
+   * from the file. A rejected patch answers 400 with its reason in `error`,
+   * and that reason becomes the thrown Error's message so the pane can show
+   * it inline beside Save, the way a refused stop shows beside its button.
+   * The response is the same payload the read serves, so the pane re-seeds
+   * from what is now on disk rather than from what it sent.
+   */
+  async savePoolSettings(config: PoolConfigPatch): Promise<SettingsResponse> {
+    return this.putSettings("/api/settings/pool", { config });
+  }
+
+  /** Write the machine defaults file. Same shapes and refusal as above. */
+  async saveMachineDefaults(defaults: MachineDefaults): Promise<SettingsResponse> {
+    return this.putSettings("/api/settings/machine", { defaults });
+  }
+
+  private async putSettings(
+    path: string,
+    body: unknown,
+  ): Promise<SettingsResponse> {
+    const res = await fetch(`${this.base}${path}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => null);
+      const error =
+        payload && typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : null;
+      throw new Error(error ?? `settings save failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /**
+   * Restart this pool's server (ADR-0026). The server answers 202 with the
+   * port the relaunched server will use, then sends its farewell `stopped`
+   * snapshot and exits; a Boot script brings it back within a few seconds,
+   * longer when the UI build is stale and Boot rebuilds it. Resolving means
+   * only that the restart was accepted; the tab learns the rest from the
+   * farewell and from polling the port this answers with. A refusal carries
+   * its reason in `error`, shown inline beside the control.
+   */
+  async restart(): Promise<RestartResponse> {
+    const res = await fetch(`${this.base}/api/restart`, { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const error =
+        body && typeof (body as { error?: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : null;
+      throw new Error(error ?? `pool restart failed: ${res.status}`);
     }
     return res.json();
   }

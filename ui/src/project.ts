@@ -1225,6 +1225,129 @@ export function isTerminalBacked(config: Record<string, unknown>): boolean {
   return config.terminal === "herdr";
 }
 
+// ---------------------------------------------------------------------------
+// Settings (ADR-0026, issue #121): Pool settings and Machine defaults as the
+// Settings pane reads and writes them. Declared here rather than type-imported
+// from the engine's wire module because the pane is the only client of these
+// routes and the shapes are the file formats themselves, which the engine
+// reads back off disk; the engine's handler answers this payload verbatim.
+// ---------------------------------------------------------------------------
+
+/** The per-machine defaults a new Pool inherits, one file under ~/.agent-graphs/. */
+export interface MachineDefaults {
+  harness?: string;
+  model?: string;
+  drivers?: string;
+  /** Present and "herdr" for a machine that boots Terminal-backed pools. */
+  terminal?: "herdr";
+  /** The engine checkout a Boot runs the server from. */
+  engine?: string;
+}
+
+/** The Assignment resolver: a harness name, "none" to opt out, or the pair. */
+export type PoolResolver = string | { harness?: string; model?: string };
+
+/**
+ * The slice of a Pool's console.json the Settings pane edits. The file holds
+ * more than this (per-ticket `assign` above all, which belongs to the Ticket
+ * and stays in its Detail), so the index signature keeps an unknown key from
+ * making the whole config untyped.
+ */
+export interface PoolSettingsConfig {
+  defaults?: { harness?: string; model?: string; drivers?: string };
+  resolver?: PoolResolver;
+  terminal?: "herdr";
+  port?: number;
+  selection?: "auto" | "human";
+  roster?: string;
+  /** The agents roster as a JSON string, stored verbatim. */
+  agents?: string;
+  reviewer?: string;
+  checkpoint?: string;
+  [key: string]: unknown;
+}
+
+/** The keys a running server cannot pick up from a Config reload. */
+export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port";
+
+/** What GET /api/settings serves: the pool's file, the machine's, and the
+ *  harnesses the pane offers in its selects. */
+export interface SettingsResponse {
+  pool: {
+    path: string;
+    config: PoolSettingsConfig;
+    /** The boot-only key names, as the engine names them. */
+    bootOnly: string[];
+    /** What the running server actually has, for the badge comparison. */
+    effective: { port: number; terminal: "herdr" | null };
+  };
+  machine: {
+    path: string;
+    /** The merged view, legacy fallback included: shown as placeholders. */
+    defaults: MachineDefaults;
+    /** What the file itself holds: what the pane edits and displays. */
+    own: MachineDefaults;
+  };
+  harnesses: string[];
+}
+
+/**
+ * The PUT /api/settings/pool body's `config`. A key sent as null or "" is
+ * removed from the file (port back to auto, terminal back to headless);
+ * `defaults` travels whole, its own fields blanked the same way.
+ */
+export interface PoolConfigPatch {
+  defaults?: { harness: string; model: string; drivers: string };
+  resolver?: PoolResolver | null;
+  terminal?: "herdr" | null;
+  port?: number | null;
+  selection?: "auto" | "human" | null;
+  roster?: string | null;
+  agents?: string | null;
+  reviewer?: string | null;
+  checkpoint?: string | null;
+}
+
+/** What POST /api/restart answers: the port the relaunched server will use. */
+export interface RestartResponse {
+  ok: true;
+  port: number;
+}
+
+/** What the badge projection needs: the saved config, what the server is
+ *  actually running, and the boot-only keys a save changed in this session. */
+export interface RestartBadgeInput {
+  config: PoolSettingsConfig;
+  effective: { port: number; terminal: "herdr" | null };
+  changedHere: Iterable<BootOnlyKey>;
+}
+
+/**
+ * Which boot-only keys are waiting on a Restart. Port and terminal are
+ * compared against what the server is actually running, so setting one back
+ * to the running value clears its badge; roster, agents and selection have no
+ * effective value the server can report (the roster was baked into prompts
+ * already running, the agents list into the spawn seam), so they are flagged
+ * once a save in this session changed them and stay flagged until the
+ * Restart reloads the page. An unset port means "auto", which the server
+ * already resolved, so it never disagrees.
+ */
+export function projectRestartBadges(input: RestartBadgeInput): Set<BootOnlyKey> {
+  const badges = new Set<BootOnlyKey>(input.changedHere);
+  // The badge set carries only boot-only keys; anything else a caller
+  // happened to record is not a badge.
+  for (const key of [...badges]) {
+    if (key !== "roster" && key !== "agents" && key !== "selection") badges.delete(key);
+  }
+  if (typeof input.config.port === "number" && input.config.port !== input.effective.port) {
+    badges.add("port");
+  }
+  if ((input.config.terminal ?? null) !== input.effective.terminal) {
+    badges.add("terminal");
+  }
+  return badges;
+}
+
 /** One row of the Enlist picker: a live herdr pane as the operator reads it. */
 export interface EnlistPickerRow {
   paneId: string;

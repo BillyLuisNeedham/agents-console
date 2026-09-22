@@ -76,6 +76,9 @@ const session = new ConsoleSession({
     client.getLog(ticketId, attempt, offset, end, stream),
   answer: (ticketId, action, note) => client.answer(ticketId, action, note),
   stop: () => client.stop(),
+  restart: () => client.restart(),
+  probeServer: (port) => probeServer(port),
+  onRelaunched: (port) => handOverTo(port),
   stream: (handlers) => client.stream(handlers),
   vitals,
   terminal,
@@ -95,6 +98,9 @@ const consoleView = new ConsoleView({
   onFocusTerminal: (ticketId) => terminal.focus(ticketId),
   onListPanes: () => client.listPanes(),
   onEnlist: (request) => client.enlist(request),
+  onGetSettings: () => client.getSettings(),
+  onSavePoolSettings: (config) => client.savePoolSettings(config),
+  onSaveMachineDefaults: (defaults) => client.saveMachineDefaults(defaults),
   onStart: (request) => client.startConversation(request),
   onEnd: (conversationId, closing) =>
     client
@@ -108,6 +114,46 @@ import.meta.hot?.dispose(() => {
   vitals.dispose();
   terminal.dispose();
 });
+
+/** The port this page is served from, the scheme's default when implicit. */
+function currentPort(): string {
+  if (location.port) return location.port;
+  return location.protocol === "https:" ? "443" : "80";
+}
+
+/**
+ * Whether a server is answering on a port, for the relaunch poll after a
+ * Restart. A restart that changed the port makes this a cross-origin
+ * request, and the pool server sends no CORS headers, so the response would
+ * be unreadable; `no-cors` asks for an opaque one instead, which is all the
+ * probe needs. Resolving at all means something accepted the connection;
+ * nothing listening rejects.
+ */
+async function probeServer(port: number): Promise<boolean> {
+  const url = `${location.protocol}//${location.hostname}:${port}/api/state`;
+  try {
+    await fetch(url, { mode: "no-cors", cache: "no-store" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The relaunched server is up: hand the page over to it. A new port is a new
+ * origin, so the page goes there. The same port reloads rather than leaning
+ * on the stream's own retry, because a Restart is the moment Boot rebuilds a
+ * stale UI: the bytes this page is running may be the ones it just replaced,
+ * and only a reload picks up the new ones. It is safe at this point because
+ * nothing is in flight, the old server having already exited.
+ */
+function handOverTo(port: number): void {
+  if (String(port) !== currentPort()) {
+    location.assign(`${location.protocol}//${location.hostname}:${port}${location.pathname}`);
+    return;
+  }
+  location.reload();
+}
 
 function render(): void {
   // The tab title and favicon follow the latest snapshot's pool status; the
@@ -141,6 +187,14 @@ function render(): void {
     onCancelStop: () => session.cancelStop(),
     onConfirmStop: () => {
       void session.confirmStop();
+    },
+    // The Restart control (ADR-0026), in the Settings pane's footer. Same
+    // shape as Stop: `confirmRestart` catches its own refusal into the
+    // message beside the button, so there is nothing to report here.
+    onArmRestart: () => session.armRestart(),
+    onCancelRestart: () => session.cancelRestart(),
+    onConfirmRestart: () => {
+      void session.confirmRestart();
     },
   });
 }
