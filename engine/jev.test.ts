@@ -10,10 +10,12 @@ import {
   choice,
   createJev,
   JEV_BASE_URL,
+  JEV_CHARS_PER_TOKEN,
   JEV_LIMITS,
   JEV_MODEL,
   noul,
   score,
+  type Evidence,
   type Jev,
   type JevNotice,
   type Questions,
@@ -161,6 +163,26 @@ describe("createJev: fallback causes", () => {
     }
   });
 
+  it("a 400 carrying max_tokens_exceeded is evidence-too-large with the body preserved", async () => {
+    const jev = configured(
+      startFakeJev({ fail: { status: 400, body: { detail: { error_type: "max_tokens_exceeded" } } } }),
+    );
+    const result = await jev.ask(EVIDENCE, QUESTIONS);
+    expect(result).toMatchObject({ ok: false, cause: "evidence-too-large" });
+    if (result.ok) throw new Error("answered");
+    expect(result.detail).toContain("max_tokens_exceeded");
+    // A 400 for any other reason stays invalid-question.
+    const other = configured(
+      startFakeJev({ fail: { status: 400, body: { detail: { error_type: "bad_question" } } } }),
+    );
+    expect(await other.ask(EVIDENCE, QUESTIONS)).toMatchObject({ ok: false, cause: "invalid-question" });
+    // And 422 never becomes a size rejection, whatever it carries.
+    const unprocessable = configured(
+      startFakeJev({ fail: { status: 422, body: { detail: { error_type: "max_tokens_exceeded" } } } }),
+    );
+    expect(await unprocessable.ask(EVIDENCE, QUESTIONS)).toMatchObject({ ok: false, cause: "invalid-question" });
+  });
+
   it("a 200 whose body is not JSON is malformed", async () => {
     const jev = configured(startFakeJev({ garbage: true }));
     expect(await jev.ask(EVIDENCE, QUESTIONS)).toMatchObject({ ok: false, cause: "malformed" });
@@ -203,9 +225,41 @@ describe("createJev: limits, checked before the wire", () => {
   it("Evidence past the token estimate is evidence-too-large", async () => {
     const fake = startFakeJev();
     const jev = configured(fake);
-    const huge = { log: "x".repeat(JEV_LIMITS.evidenceTokens * 4 + 100) };
+    const huge = {
+      log: "x".repeat(Math.ceil(JEV_LIMITS.evidenceTokens * JEV_CHARS_PER_TOKEN) + 100),
+    };
     expect(await jev.ask(huge, QUESTIONS)).toMatchObject({ ok: false, cause: "evidence-too-large" });
     expect(fake.requests).toHaveLength(0);
+  });
+
+  it("about 120k characters of real Evidence is evidence-too-large before the wire", async () => {
+    const fake = startFakeJev();
+    const jev = configured(fake);
+    // The size a live bench measured on 2026-09-20: it passed the old
+    // four-characters-per-token guess at about 30k and was rejected by the
+    // API at about 35k real tokens.
+    const evidence = evidenceOf(120_000);
+    expect(JSON.stringify(evidence).length).toBe(120_000);
+    expect(await jev.ask(evidence, QUESTIONS)).toMatchObject({ ok: false, cause: "evidence-too-large" });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("the estimate counts the longest question as well as the Evidence", async () => {
+    const fake = startFakeJev();
+    const jev = configured(fake);
+    // Evidence one margin short of the budget on its own: it fits with a
+    // short question and does not once a long question joins it.
+    const budgetChars = Math.floor(JEV_LIMITS.evidenceTokens * JEV_CHARS_PER_TOKEN);
+    const evidence = evidenceOf(budgetChars - 1_000);
+    const long = "Describe what happened to this attempt in complete sentences. ".repeat(20);
+    expect(await jev.ask(evidence, { why: choice(long, { finished: null, stuck: null }) })).toMatchObject({
+      ok: false,
+      cause: "evidence-too-large",
+    });
+    expect(fake.requests).toHaveLength(0);
+    // The same Evidence with a short question fits, in one request.
+    expect((await jev.ask(evidence, { why: choice("Why?", { finished: null, stuck: null }) })).ok).toBe(true);
+    expect(fake.requests).toHaveLength(1);
   });
 });
 
@@ -271,4 +325,11 @@ describe("fakeJev, the port fake", () => {
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+/** Evidence whose serialised JSON is exactly `length` characters: repetitive English, like a log read. */
+function evidenceOf(length: number): Evidence {
+  const sentence = "the agent is waiting on the operator. ";
+  const filler = sentence.repeat(Math.ceil(length / sentence.length) + 1);
+  return { log: filler.slice(0, length - 10) };
 }

@@ -71,7 +71,10 @@ export const JEV_BASE_URL = "https://api.typesafe.ai";
 export const JEV_LIMITS = {
   /** Tokens per request: Evidence, questions and answers together. */
   requestTokens: 64_000,
-  /** Tokens the Evidence alone may take. */
+  /**
+   * Tokens the Evidence plus the single longest question may take; the
+   * docs state the state budget as the two together, not the Evidence alone.
+   */
   evidenceTokens: 32_000,
   /** Labels one Choice may offer. */
   choiceOptionsMax: 255,
@@ -79,8 +82,15 @@ export const JEV_LIMITS = {
   scoreLevelsMin: 2,
   scoreLevelsMax: 10,
 } as const;
-/** The estimate the size checks use: roughly four characters per token. */
-export const JEV_CHARS_PER_TOKEN = 4;
+/**
+ * The estimate the size checks use: characters per token. Measured on real
+ * Attempt artifacts (ANSI-stripped logs plus unified diffs, English prose
+ * and TypeScript) on 2026-09-20, the API counts about 3.5 characters per
+ * token, not the round 4 a rough guess gives. Pinned tighter than that
+ * guess so Evidence this check accepts is not rejected by the API for size
+ * (3 would buy more margin at the cost of rejecting Evidence that fits).
+ */
+export const JEV_CHARS_PER_TOKEN = 3.5;
 /** Cost per million input tokens in USD; output is free. Informational. */
 export const JEV_INPUT_USD_PER_MILLION_TOKENS = 0.042;
 /** Typical round-trip latency, for the reader deciding where a call belongs. */
@@ -102,7 +112,13 @@ export type JevCause =
 
 /** The Judgements for one ask, or the one cause it produced none. */
 export type JevResult<Q extends Questions> =
-  | { ok: true; answers: SystemOneResult<Q>["answers"]; usage: Usage }
+  | {
+      ok: true;
+      answers: SystemOneResult<Q>["answers"];
+      usage: Usage;
+      /** The model the API reports it answered with; the Grade's provenance records it. */
+      model: string;
+    }
   | { ok: false; cause: JevCause; detail: string };
 
 /** What subscribers hear: a cause the first time it bites, and one recovery once asks succeed again. */
@@ -205,7 +221,7 @@ export function createJev(options: JevOptions = {}): Jev {
     subscribe: board.subscribe,
     async ask(evidence, questions) {
       if (!client) return fallBack("not-configured", "no TYPESAFE_API_KEY at launch");
-      const rejected = checkQuestions(questions) ?? checkEvidence(evidence);
+      const rejected = checkQuestions(questions) ?? checkEvidence(evidence, questions);
       if (rejected) return fallBack(rejected.cause, rejected.detail);
       let result: SystemOneResult<typeof questions>;
       try {
@@ -217,7 +233,12 @@ export function createJev(options: JevOptions = {}): Jev {
       const malformed = checkAnswers(questions, result);
       if (malformed) return fallBack("malformed", malformed);
       board.succeeded();
-      return { ok: true, answers: result.answers, usage: result.usage };
+      return {
+        ok: true,
+        answers: result.answers,
+        usage: result.usage,
+        model: result.model,
+      };
     },
   };
 }
@@ -253,15 +274,23 @@ function checkQuestions(questions: Questions): Rejection | null {
   return null;
 }
 
-function checkEvidence(evidence: Evidence): Rejection | null {
+function checkEvidence(evidence: Evidence, questions: Questions): Rejection | null {
   if (evidence === null || typeof evidence !== "object" || Array.isArray(evidence)) {
     return { cause: "invalid-question", detail: "Evidence must be a named JSON object" };
   }
-  const tokens = Math.ceil(JSON.stringify(evidence).length / JEV_CHARS_PER_TOKEN);
+  // The documented 32k budget is the Evidence plus the single longest
+  // question, so both go into the estimate; the questions object itself is
+  // not counted, since only one travels beside the Evidence in a request.
+  const evidenceChars = JSON.stringify(evidence).length;
+  const longestQuestionChars = Math.max(
+    0,
+    ...Object.values(questions).map((question) => JSON.stringify(question).length),
+  );
+  const tokens = Math.ceil((evidenceChars + longestQuestionChars) / JEV_CHARS_PER_TOKEN);
   if (tokens > JEV_LIMITS.evidenceTokens) {
     return {
       cause: "evidence-too-large",
-      detail: `about ${tokens} tokens of Evidence, limit ${JEV_LIMITS.evidenceTokens}`,
+      detail: `about ${tokens} tokens of Evidence plus the longest question, limit ${JEV_LIMITS.evidenceTokens}`,
     };
   }
   return null;
@@ -273,6 +302,12 @@ function classifyError(err: unknown): Rejection {
     return { cause: "bad-key", detail: `HTTP ${err.status}` };
   }
   if (err instanceof RateLimitError) return { cause: "rate-limited", detail: "HTTP 429" };
+  // The API reports an oversized request as HTTP 400 with the reason in the
+  // body, not 422. Read that body so the call site's fallback takes its size
+  // branch rather than its invalid-question branch.
+  if (err instanceof BadRequestError && errorTypeOf(err) === "max_tokens_exceeded") {
+    return { cause: "evidence-too-large", detail: `HTTP ${err.status}: ${message}` };
+  }
   if (err instanceof BadRequestError || err instanceof UnprocessableEntityError) {
     return { cause: "invalid-question", detail: `HTTP ${err.status}: ${message}` };
   }
@@ -282,6 +317,21 @@ function classifyError(err: unknown): Rejection {
   if (err instanceof APIConnectionError) return { cause: "unreachable", detail: message };
   if (err instanceof APIError) return { cause: "unreachable", detail: `HTTP ${err.status}` };
   return { cause: "malformed", detail: message };
+}
+
+/**
+ * The `error_type` a rejected request's body carries, when it carries one.
+ * The API writes `{"detail":{"error_type":"..."}}`; `max_tokens_exceeded` is
+ * how it says the request did not fit the model's window. The body is
+ * untrusted, so every step is guarded.
+ */
+function errorTypeOf(err: APIError): string | undefined {
+  const body = err.body;
+  if (body === null || typeof body !== "object") return undefined;
+  const detail = (body as { detail?: unknown }).detail;
+  if (detail === null || typeof detail !== "object") return undefined;
+  const errorType = (detail as { error_type?: unknown }).error_type;
+  return typeof errorType === "string" ? errorType : undefined;
 }
 
 /** The response is trusted only once every question has an answer of its own type and shape. */

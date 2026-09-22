@@ -66,9 +66,11 @@ The script also copies [`verify.template.md`](verify.template.md) into the pool 
 verbatim, when there is none. It seeds the grading instructions a grader agent follows when a
 ticket opts into verification: does the work match the ticket, do the outputs match the agent's
 claims, are there error signals in the log, with terminal output trusted over the agent's
-self-assessment. Verification is activated per ticket by a `verify: N` key on that ticket's entry
-under `assign` in `console.json`, set by hand when a ticket is wanted verified. If `verify.md` is
-already there, leave it alone: criteria tuned by hand must not be clobbered.
+self-assessment. When the pool has a Jev key this file serves the fallback grader only: the engine
+grades the Attempts itself, and `verify.md` is left unused for that round. Verification is
+activated per ticket by a `verify: N` key on that ticket's entry under `assign` in `console.json`,
+set by hand when a ticket is wanted verified. If `verify.md` is already there, leave it alone:
+criteria tuned by hand must not be clobbered.
 
 ## Check the drivers before the first super-step
 
