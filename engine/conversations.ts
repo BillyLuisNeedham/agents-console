@@ -62,6 +62,7 @@ import {
 } from "./herdr.ts";
 import {
   launchAttempt,
+  withLaunchDetail,
   type AttemptEnv,
   type AttemptHandle,
   type PaneTailer,
@@ -926,7 +927,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       writeConversationStatus(file, "crashed");
       event(id, "crash", {
         code: handle.code,
-        reason: exitCrashReason(handle.code, handle.ctx.exitCodePath, "harness", handle.paneId),
+        reason: withLaunchDetail(
+          exitCrashReason(handle.code, handle.ctx.exitCodePath, "harness", handle.paneId),
+          handle,
+        ),
       });
       // The launch reported the pane's agent the moment the wrapper landed
       // (attempt-run.ts); this Conversation never got further, so the

@@ -23,6 +23,7 @@
  */
 
 import {
+  appendFileSync,
   closeSync,
   createWriteStream,
   existsSync,
@@ -104,7 +105,12 @@ import {
   TranscriptLineBuffer,
   deriveStreamLine,
 } from "./streamlog.ts";
-import { commitShaAt } from "./worktrees.ts";
+import { commitShaAt, isPoolWorktree } from "./worktrees.ts";
+import {
+  defaultClaudeConfigPath,
+  seedClaudeFolderTrust,
+  type FolderTrustSeed,
+} from "./claude-trust.ts";
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -161,6 +167,12 @@ export interface AttemptEnv {
    * botched launch in milliseconds; the engine leaves it unset.
    */
   launchCadence?: Partial<LaunchCadence>;
+  /**
+   * Where claude's per-machine config lives, for the folder-trust seed
+   * (claude-trust.ts); a test points it at a scratch file, the engine
+   * leaves it unset for `~/.claude.json`.
+   */
+  claudeConfigPath?: string;
 }
 
 // How many times a terminal-backed launch opens a fresh tab before giving
@@ -268,7 +280,16 @@ export type AttemptHandle =
       headlessExit: Promise<number> | null;
       tailer: PaneTailer | null;
     })
-  | (AttemptHandleBase & { kind: "ended"; code: number });
+  | (AttemptHandleBase & {
+      kind: "ended";
+      code: number;
+      /**
+       * What the launch saw when it ended with the engine's own code: the
+       * Blocking dialog on the pane, named (issue #127). Appended to the
+       * crash reason so the ending says what stood in the way.
+       */
+      detail?: string;
+    });
 
 /** The exit facts every site reads (ADR-0012), plus the result. */
 export interface AttemptFacts {
@@ -387,6 +408,37 @@ export function readLogTail(logPath: string): string[] {
   return lines.slice(-LOG_TAIL_LINES);
 }
 
+/**
+ * A crash reason with what the launch saw appended (issue #127): "TUI
+ * never became ready: workspace trust dialog was on screen". The reason's
+ * own words are the Attempt-ending module's; only the launch knows the
+ * pane's frame, so the join is here.
+ */
+export function withLaunchDetail(reason: string, handle: AttemptHandle): string {
+  return handle.kind === "ended" && handle.detail !== undefined
+    ? `${reason}: ${handle.detail}`
+    : reason;
+}
+
+// The heading the pane's last frame is written under in an otherwise empty
+// derived log, so a reader knows the lines are the engine's observation of
+// the pane, not the harness's stream.
+export const PANE_FRAME_LOG_HEADING = "[engine] the pane showed:";
+
+// The `spawned` event's record of the folder-trust seed (issue #127), one
+// word or a skip with its reason, so a launch that met the dialog anyway
+// can be read back against what the seed did.
+function folderTrustNote(seed: FolderTrustSeed): string {
+  return seed.outcome === "skipped" ? `skipped: ${seed.reason}` : seed.outcome;
+}
+
+function paneFrameLogBlock(frame: string): string {
+  const lines = frame.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  return `${PANE_FRAME_LOG_HEADING}\n${lines.slice(-LOG_TAIL_LINES + 1).join("\n")}\n`;
+}
+
 // ---------------------------------------------------------------------------
 // The three operations
 // ---------------------------------------------------------------------------
@@ -444,6 +496,12 @@ export async function launchAttempt<R extends { ok: true }>(
   };
   const command = harnessCommandFor(env.harnesses, spec, id);
   const batchArgv = (): string[] => command(ctx);
+  // The folder-trust seed's outcome (issue #127), set on the terminal-backed
+  // path before its tab opens and recorded on the `spawned` event. A
+  // headless pool never seeds (`claude -p` skips the dialog itself); a
+  // terminal-backed launch that falls back to headless after the seed
+  // leaves its add-only entry behind, and the event says so.
+  let folderTrust: FolderTrustSeed | undefined;
   const recordSpawned = (
     argv: string[],
     terminal: AttemptTerminal | undefined,
@@ -454,7 +512,10 @@ export async function launchAttempt<R extends { ok: true }>(
       at: new Date().toISOString(),
       attempt: spec.attempt,
       kind: "spawned",
-      payload: spawnedPayload(argv, ctx, spec.branch, terminal, terminalError, pid),
+      payload: {
+        ...spawnedPayload(argv, ctx, spec.branch, terminal, terminalError, pid),
+        ...(folderTrust !== undefined ? { folder_trust: folderTrustNote(folderTrust) } : {}),
+      },
     });
     // Live from the moment the spawn is on the log, with the pane the event
     // records: a fallback that nulled the event's pane_id is headless here
@@ -514,6 +575,16 @@ export async function launchAttempt<R extends { ok: true }>(
   // engine's own code, as a readiness timeout always has.
   const cadence: LaunchCadence = { ...DEFAULT_LAUNCH_CADENCE, ...env.launchCadence };
   const interactiveArgv = interactiveHarnessCommand(env.harnesses, spec.harness)(ctx);
+  // Folder trust (issue #127, ADR-0025): an interactive claude in a
+  // directory it has never seen opens on its workspace trust dialog, and
+  // every pool worktree is such a directory. The engine made the worktree,
+  // so it vouches for it before the tab opens; the seed's outcome rides the
+  // `spawned` event. The operator's own checkout is never seeded: a dialog
+  // there is answered in the pane, as a seed another session overwrote is.
+  folderTrust =
+    spec.harness === "claude" && isPoolWorktree(spec.cwd)
+      ? seedClaudeFolderTrust(spec.cwd, env.claudeConfigPath ?? defaultClaudeConfigPath())
+      : undefined;
   let terminal: AttemptTerminal & { paneId: string; tabId: string };
   let landed: boolean;
   for (let attempt = 1; ; attempt++) {
@@ -591,12 +662,23 @@ export async function launchAttempt<R extends { ok: true }>(
   const tailer = ctx.streamPath
     ? startPaneStreamTail(ctx.streamPath, ctx.logPath)
     : null;
-  const failure = await deliverPrompt(env.herdrSocket, terminal.paneId, ctx, spec.prompt);
+  const failure = await deliverPrompt(env.herdrSocket, terminal.paneId, ctx, spec.prompt, cadence);
   if (failure !== undefined) {
-    if (isBotchedSpawnCode(failure)) {
+    if (isBotchedSpawnCode(failure.code)) {
       void closePane(env.herdrSocket, terminal.paneId).catch(() => {});
     }
     if (tailer) await tailer.finish().catch(() => {});
+    // The pane's last frame goes to the derived log when the drain left it
+    // empty (issue #127): a TUI that never reached its prompt streams
+    // nothing the derivation keeps, so without this the crash's tail, the
+    // interrupt body and the Console's log view all show a blank where the
+    // dialog that stopped the launch stood.
+    if (
+      failure.frame !== undefined &&
+      !readLogTail(ctx.logPath).some((line) => line.trim() !== "")
+    ) {
+      appendFileSync(ctx.logPath, paneFrameLogBlock(failure.frame));
+    }
     return {
       kind: "ended",
       env,
@@ -604,7 +686,8 @@ export async function launchAttempt<R extends { ok: true }>(
       ctx,
       paneId: terminal.paneId,
       tabId: terminal.tabId,
-      code: failure,
+      code: failure.code,
+      ...(failure.detail !== undefined ? { detail: failure.detail } : {}),
     };
   }
   return {
@@ -640,7 +723,10 @@ export async function awaitAttempt<R extends { ok: true }>(
     result = readAttemptResult(ctx.outcomePath, validate);
     crashReason =
       code !== 0
-        ? attemptCrashReason(env.children, code, ctx.exitCodePath, spec.crashSubject, handle.paneId)
+        ? withLaunchDetail(
+            attemptCrashReason(env.children, code, ctx.exitCodePath, spec.crashSubject, handle.paneId),
+            handle,
+          )
         : result.ok
           ? null
           : result.reason;
@@ -920,20 +1006,32 @@ function isBotchedSpawnCode(code: number): boolean {
  * plain prompt skips the readiness wait but is still typed, the operator's
  * words being the point.
  */
+/**
+ * How a prompt delivery failed: the code the launch ends with, and, when
+ * the readiness wait saw something, what stood on the pane (issue #127): a
+ * sentence naming it for the crash reason and the frame itself for the log.
+ */
+interface DeliveryFailure {
+  code: number;
+  detail?: string;
+  frame?: string;
+}
+
 async function deliverPrompt(
   socketPath: string,
   paneId: string,
   ctx: SpawnContext,
   prompt: AttemptSpec["prompt"],
-): Promise<number | undefined> {
+  cadence: LaunchCadence,
+): Promise<DeliveryFailure | undefined> {
   try {
-    return await deliverPromptInner(socketPath, paneId, ctx, prompt);
+    return await deliverPromptInner(socketPath, paneId, ctx, prompt, cadence);
   } catch {
     // A send failed mid-delivery (the daemon died after the wrapper was
     // sent): the prompt never landed. One attempt's terminal trouble must
     // never take the drive down, so this surfaces as the botched-spawn
     // failure rather than a throw.
-    return SPAWN_INTERACTIVE_PROMPT_FAILED;
+    return { code: SPAWN_INTERACTIVE_PROMPT_FAILED };
   }
 }
 
@@ -942,7 +1040,8 @@ async function deliverPromptInner(
   paneId: string,
   ctx: SpawnContext,
   prompt: AttemptSpec["prompt"],
-): Promise<number | undefined> {
+  cadence: LaunchCadence,
+): Promise<DeliveryFailure | undefined> {
   const descriptor = defaultHarnessDescriptors[ctx.harness];
   if (!descriptor && prompt.kind === "driver") return undefined;
   if (descriptor) {
@@ -952,13 +1051,31 @@ async function deliverPromptInner(
       ctx.harness,
       descriptor.readyPattern,
       ctx.exitCodePath,
+      cadence,
     );
     // The harness exited before its TUI came up: the wrapper's exit-code
     // file holds its code, and that code, not a botched-spawn sentinel, is
     // the attempt's ending, exactly as a headless spawn that died on launch
     // reports (a 0 with no result lands on the missing-outcome path).
-    if (readiness === "exited") return readExitCode(ctx.exitCodePath);
-    if (readiness !== "ready") return SPAWN_INTERACTIVE_READY_FAILED;
+    if (readiness.kind === "exited") return { code: await readExitCode(ctx.exitCodePath) };
+    if (readiness.kind === "blocked") {
+      return {
+        code: SPAWN_INTERACTIVE_READY_FAILED,
+        detail: readiness.detail,
+        frame: readiness.frame,
+      };
+    }
+    if (readiness.kind === "timed-out") {
+      return {
+        code: SPAWN_INTERACTIVE_READY_FAILED,
+        detail:
+          readiness.dialog !== null
+            ? `the ${readiness.dialog} was answered and the ready frame still never came`
+            : undefined,
+        frame: readiness.frame,
+      };
+    }
+    if (readiness.kind !== "ready") return { code: SPAWN_INTERACTIVE_READY_FAILED };
   }
   const clearKeys = descriptor?.clearKeys ?? [];
   if (prompt.kind === "plain") {
@@ -968,7 +1085,7 @@ async function deliverPromptInner(
     if (await typeVerified(socketPath, paneId, ctx.body, echoTargets, clearKeys)) {
       return undefined;
     }
-    return SPAWN_INTERACTIVE_PROMPT_FAILED;
+    return { code: SPAWN_INTERACTIVE_PROMPT_FAILED };
   }
   const shaped = descriptor!.promptShaping.interactive(ctx);
   // The fallback's prompt file, written by the engine so the path is known
@@ -994,7 +1111,7 @@ async function deliverPromptInner(
   if (await typeVerified(socketPath, paneId, shaped, echoTargets, clearKeys)) {
     return undefined;
   }
-  if (clearKeys.length === 0) return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  if (clearKeys.length === 0) return { code: SPAWN_INTERACTIVE_PROMPT_FAILED };
   // Full-prompt pasting failed: the file-referencing fallback, short enough
   // to survive any input-buffer cap (prototype finding, all three harnesses).
   // The command carries the attempt's own driver, so a grader, resolver, or
@@ -1006,7 +1123,7 @@ async function deliverPromptInner(
   if (await typeVerified(socketPath, paneId, fallback, [promptFile], [])) {
     return undefined;
   }
-  return SPAWN_INTERACTIVE_PROMPT_FAILED;
+  return { code: SPAWN_INTERACTIVE_PROMPT_FAILED };
 }
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import {
   LAUNCH_TRIES,
+  PANE_FRAME_LOG_HEADING,
   awaitAttempt,
   launchAttempt,
   readAttemptResult,
@@ -160,6 +161,9 @@ function envFor(
       settleTimeoutMs: 1_000,
       landedTimeoutMs: 3_000,
       landedPollMs: 20,
+      dialogSettleMs: 20,
+      dialogKeyGapMs: 20,
+      dialogConfirmMs: 20,
     },
   };
 }
@@ -1584,4 +1588,241 @@ describe("Botched launch (issue #102)", () => {
     if (handle.kind === "live") await handle.tailer?.finish();
     await fake.close();
   }, 20000);
+});
+
+describe("claude's Blocking dialogs on launch (issue #127)", () => {
+  // The frames claude 2.1.276 paints before its prompt, read off a live
+  // pane on 2026-09-22: the workspace trust dialog opens with the highlight
+  // on "No, exit", so a blind enter would exit claude; the engine moves the
+  // highlight, reads the pane back, and confirms only once the highlighted
+  // row names the option it wants. The fake acts on no key but enter, so
+  // the test moves the highlight itself when it sees the down key, exactly
+  // the read-between-keys the engine relies on.
+  const trustDialog = (highlighted: "No, exit" | "Yes, I trust this folder"): string =>
+    [
+      "Accessing workspace:",
+      "/tmp/pool-worktrees/abcd1234/01",
+      "Quick safety check: Is this a project you created or one you trust? (Like your own code,",
+      "a well-known open source project, or work from your team). If not, take a moment to",
+      "review what's in this folder first.",
+      "Claude Code'll be able to read, edit, and execute files here.",
+      "Security guide",
+      `${highlighted === "No, exit" ? "❯" : " "} No, exit`,
+      `${highlighted === "Yes, I trust this folder" ? "❯" : " "} Yes, I trust this folder`,
+      "Enter to confirm · Esc to cancel",
+      "",
+    ].join("\n");
+  const bypassWarning = [
+    "WARNING: Claude Code running in Bypass Permissions mode",
+    "In Bypass Permissions mode, Claude Code will not ask for your approval before running",
+    "potentially dangerous commands.",
+    "❯ No, exit",
+    "  Yes, I accept",
+    "",
+  ].join("\n");
+  const claudeReady = `${defaultHarnessDescriptors.claude.readyPattern}2.1.276\n❯ `;
+
+  // Every key send after the wrapper's own enter: the dialog answer, then
+  // the typed prompt's enter.
+  const keySends = (fake: ExecutingFakeHerdr): string[][] =>
+    fake.requests
+      .filter((r) => r.method === "pane.send_input")
+      .slice(1)
+      .map((r) => (Array.isArray(r.params.keys) ? (r.params.keys as string[]) : []))
+      .filter((keys) => keys.length > 0);
+
+  it("answers the workspace trust dialog by name, reading the highlight between the keys", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { outcome: doneOutcome, hold: true });
+    const fake = await startFakeHerdr({ rendered: trustDialog("No, exit") });
+
+    const running = runAttempt(
+      envFor(rig, { claude: command }, fake.socketPath),
+      ticketSpec(rig, "claude"),
+      validateOutcome,
+    );
+    // The engine sends down and reads back; only then does the highlight
+    // move, and only then is enter sent.
+    await until(() => keySends(fake).some((k) => k.includes("down")), "the down key");
+    expect(keySends(fake).some((k) => k.includes("enter"))).toBe(false);
+    fake.setPaneContent("w1:p1", trustDialog("Yes, I trust this folder"));
+    await until(() => keySends(fake).some((k) => k.includes("enter")), "the confirm");
+    fake.setPaneContent("w1:p1", claudeReady);
+    const run = await running;
+
+    expect(run.ok).toBe(true);
+    expect(run.crashReason).toBeNull();
+    // One down, one confirm, then the prompt's own enter: the dialog was
+    // answered exactly once, however many polls saw it.
+    expect(keySends(fake)).toEqual([["down"], ["enter"], ["enter"]]);
+  }, 20000);
+
+  it("leaves the dialog unanswered when the highlight does not move, and the ending says so", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    // The highlight never moves: a build that dropped the down key, or one
+    // that reordered the buttons so down landed somewhere else.
+    const fake = await startFakeHerdr({ rendered: trustDialog("No, exit") });
+    const started = Date.now();
+
+    const handle = await launchAttempt(
+      envFor(rig, { claude: command }, fake.socketPath),
+      ticketSpec(rig, "claude"),
+    );
+    expect(handle.kind).toBe("ended");
+    // Decided at once, not at the readiness timeout.
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const run = await awaitAttempt(handle, validateOutcome);
+
+    expect(run.ok).toBe(false);
+    expect(run.crashReason).toBe(
+      "TUI never became ready: the workspace trust dialog was on screen and the " +
+        'highlight did not move to "Yes, I trust this folder", so it was left unanswered',
+    );
+    // Down was sent; enter never was, so claude was not told "No, exit".
+    expect(keySends(fake)).toEqual([["down"]]);
+    // The derived log, empty because no harness stream ever came, carries
+    // the frame the engine saw, so the crash's tail and the interrupt body
+    // show the dialog rather than a blank.
+    expect(run.logTail[0]).toBe(PANE_FRAME_LOG_HEADING);
+    expect(run.logTail.some((line) => line.includes("Quick safety check"))).toBe(true);
+    expect(run.logTail.some((line) => line.includes("❯ No, exit"))).toBe(true);
+    await until(
+      () => fake.requests.some((r) => r.method === "pane.close"),
+      "the botched launch's pane close",
+    );
+  }, 20000);
+
+  it("never answers the bypass-permissions warning and ends the launch at once, naming it", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    const fake = await startFakeHerdr({ rendered: bypassWarning });
+    const started = Date.now();
+
+    const handle = await launchAttempt(
+      envFor(rig, { claude: command }, fake.socketPath),
+      ticketSpec(rig, "claude"),
+    );
+    expect(handle.kind).toBe("ended");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const run = await awaitAttempt(handle, validateOutcome);
+
+    expect(run.ok).toBe(false);
+    expect(run.crashReason).toBe(
+      "TUI never became ready: the bypass-permissions warning was on screen, " +
+        "which only the operator may answer",
+    );
+    // Not a key was sent at it.
+    expect(keySends(fake)).toEqual([]);
+    expect(run.logTail.some((line) => line.includes("Bypass Permissions mode"))).toBe(true);
+  }, 20000);
+
+  it("ignores a dialog-shaped frame on another harness", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { hold: true });
+    // opencode's pane happens to show claude's words (an operator's scrollback,
+    // say): the dialog table is claude's alone, so the wait keeps polling
+    // for opencode's own ready frame and the pane ending is the ending.
+    const fake = await startFakeHerdr({ rendered: bypassWarning });
+
+    const launching = launchAttempt(
+      envFor(rig, { opencode: command }, fake.socketPath),
+      ticketSpec(rig, "opencode"),
+    );
+    await until(
+      () => fake.requests.filter((r) => r.method === "pane.read").length >= 3,
+      "the readiness poll",
+    );
+    fake.endPane("w1:p1");
+    const handle = await launching;
+    expect(handle.kind).toBe("ended");
+    const run = await awaitAttempt(handle, validateOutcome);
+    expect(run.crashReason).toBe("TUI never became ready");
+    expect(keySends(fake)).toEqual([]);
+  }, 20000);
+});
+
+describe("folder trust for the worktrees the engine makes (issue #127)", () => {
+  const claudeReady = `${defaultHarnessDescriptors.claude.readyPattern}2.1.276\n❯ `;
+
+  function configAt(rig: Rig, projects: Record<string, unknown> = {}): string {
+    const path = join(rig.dir, "claude.json");
+    writeFileSync(path, JSON.stringify({ numStartups: 3, projects }, null, 2));
+    return path;
+  }
+
+  function poolWorktree(rig: Rig): string {
+    const cwd = join(rig.dir, "pool-worktrees", "abcd1234", "01");
+    mkdirSync(cwd, { recursive: true });
+    return cwd;
+  }
+
+  it("seeds claude's trust for a pool worktree and records the seed on the spawned event", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { outcome: doneOutcome, hold: true });
+    const fake = await startFakeHerdr({ rendered: claudeReady });
+    const config = configAt(rig);
+    const cwd = poolWorktree(rig);
+
+    const run = await runAttempt(
+      { ...envFor(rig, { claude: command }, fake.socketPath), claudeConfigPath: config },
+      ticketSpec(rig, "claude", { cwd }),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    const projects = JSON.parse(readFileSync(config, "utf8")).projects;
+    expect(projects[cwd].hasTrustDialogAccepted).toBe(true);
+    const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.folder_trust).toBe("seeded");
+  }, 20000);
+
+  it("records a seed that could not land, and leaves the pane's dialog handling to the launch", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { outcome: doneOutcome, hold: true });
+    const fake = await startFakeHerdr({ rendered: claudeReady });
+    const missing = join(rig.dir, "no-such-claude.json");
+    const cwd = poolWorktree(rig);
+
+    const run = await runAttempt(
+      { ...envFor(rig, { claude: command }, fake.socketPath), claudeConfigPath: missing },
+      ticketSpec(rig, "claude", { cwd }),
+      validateOutcome,
+    );
+
+    expect(run.ok).toBe(true);
+    expect(existsSync(missing)).toBe(false);
+    const spawned = readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!;
+    expect(spawned.payload.folder_trust).toBe(`skipped: ${missing} does not exist`);
+  }, 20000);
+
+  it("never seeds the operator's own checkout, nor for another harness", async () => {
+    const rig = makeRig();
+    const { command } = harnessStub(rig.dir, { outcome: doneOutcome, hold: true });
+    const config = configAt(rig);
+    const before = readFileSync(config, "utf8");
+
+    // claude in the pool checkout (a lone ready ticket runs there).
+    let fake = await startFakeHerdr({ rendered: claudeReady });
+    let run = await runAttempt(
+      { ...envFor(rig, { claude: command }, fake.socketPath), claudeConfigPath: config },
+      ticketSpec(rig, "claude"),
+      validateOutcome,
+    );
+    expect(run.ok).toBe(true);
+    expect(readEvents(rig.runsDir, "01").find((e) => e.kind === "spawned")!.payload.folder_trust).toBeUndefined();
+    await fake.close();
+
+    // opencode in a pool worktree: its trust is its own affair.
+    fake = await startFakeHerdr({
+      rendered: `${defaultHarnessDescriptors.opencode.readyPattern}\n❯ `,
+    });
+    run = await runAttempt(
+      { ...envFor(rig, { opencode: command }, fake.socketPath), claudeConfigPath: config },
+      ticketSpec(rig, "opencode", { cwd: poolWorktree(rig), attempt: 2 }),
+      validateOutcome,
+    );
+    expect(run.ok).toBe(true);
+    expect(readFileSync(config, "utf8")).toBe(before);
+  }, 30000);
 });

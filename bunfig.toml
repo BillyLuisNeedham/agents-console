@@ -1,0 +1,5 @@
+[test]
+# Every test run starts from engine/test-preload.ts, which points the tools
+# whose per-machine files the engine writes at scratch locations, so a suite
+# can never touch the operator's own config (issue #127).
+preload = ["./engine/test-preload.ts"]
