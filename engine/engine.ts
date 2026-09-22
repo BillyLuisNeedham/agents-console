@@ -1806,16 +1806,19 @@ async function runSuperStep(
       const jevGrading = await runJevGraders(session, marker, attempts);
       if (jevGrading.ok) {
         grades = jevGrading.grades;
-        for (const attempt of attempts) {
-          const grade = grades.get(attempt);
-          if (grade) recordJevGrade(session, marker, attempt, grade, emit);
-        }
+        // Named before the per-attempt lines, so the pool log reads in
+        // order; it is written only once the whole round has an answer,
+        // because a fallback means the round was never Jev's.
         session.state = applyUpdate(session.state, {
           log: [
             `ticket ${marker.id}: grading ${attempts.length} ` +
               `attempt${attempts.length === 1 ? "" : "s"} with Jev`,
           ],
         });
+        for (const attempt of attempts) {
+          const grade = grades.get(attempt);
+          if (grade) recordJevGrade(session, marker, attempt, grade, emit);
+        }
       } else {
         session.state = applyUpdate(session.state, {
           log: [
@@ -5638,6 +5641,13 @@ interface Selection {
   rule: "outright" | "fallback";
 }
 
+// The spread between two Grade scores, to the one decimal a composed Jev
+// score carries (ADR-0023). Plain subtraction puts 8.2 - 6.2 just under 2,
+// inside the head-to-head band, and prints float noise into the pool log.
+function scoreGap(a: number, b: number): number {
+  return Math.round(Math.abs(a - b) * 10) / 10;
+}
+
 // The total order the spec fixes: highest score wins, an exact tie goes to
 // the earlier attempt. Nothing else breaks it, so the same grades always
 // select the same attempt.
@@ -5649,7 +5659,7 @@ function selectWinner(
   );
   const winner = ranked[0];
   const margin =
-    ranked.length > 1 ? winner.grade.score - ranked[1].grade.score : null;
+    ranked.length > 1 ? scoreGap(winner.grade.score, ranked[1].grade.score) : null;
   return {
     attempt: winner.attempt,
     score: winner.grade.score,
@@ -5707,7 +5717,7 @@ async function selectAndMergeWinner(
       picked = {
         attempt: verdict.attempt,
         score: grades.get(verdict.attempt)!.score,
-        margin: Math.abs(ranked[0].grade.score - ranked[1].grade.score),
+        margin: scoreGap(ranked[0].grade.score, ranked[1].grade.score),
         rule: "head-to-head",
       };
       why =
@@ -6126,7 +6136,7 @@ async function runHeadToHead(
     tickets: { [h2hId]: "in-progress" as const },
     log: [
       `ticket ${build.id}: margin ` +
-        `${top.grade.score - runnerUp.grade.score} is below the outright ` +
+        `${scoreGap(top.grade.score, runnerUp.grade.score)} is below the outright ` +
         `band; spawning head-to-head ${h2hId} between attempts ` +
         `${top.attempt} and ${runnerUp.attempt}`,
     ],

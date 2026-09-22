@@ -2033,6 +2033,10 @@ describe("verify grading with Jev (ADR-0023)", () => {
     expect(rig.spawnOrder.filter((id) => /-grader-\d+$/.test(id))).toEqual([]);
     expect(run.final.tickets).toEqual({ "01": "done" });
     expect(run.final.log).toContain("ticket 01: grading 2 attempts with Jev");
+    // The round is named before its per-attempt lines, so the log reads in order.
+    expect(run.final.log.indexOf("ticket 01: grading 2 attempts with Jev")).toBeLessThan(
+      run.final.log.findIndex((line) => line.startsWith("ticket 01: attempt 1 graded")),
+    );
 
     // A graded event per Attempt, carrying the composed score, verdict,
     // reasons and provenance.
@@ -2058,6 +2062,40 @@ describe("verify grading with Jev (ADR-0023)", () => {
     expect(existsSync(join(poolDir, "cand-1.txt"))).toBe(true);
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
     expect(Object.keys(run.final.outcomes)).toEqual(["01"]);
+  }, 15000);
+
+  it("takes a composed spread of exactly two points outright, not by float subtraction", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        { workFile: "cand-1.txt", commitMsg: "cand-1" },
+        { workFile: "cand-2.txt", commitMsg: "cand-2" },
+      ],
+    });
+    // Jev Scores are expected levels, so composed scores carry a decimal:
+    // 8.2 and 6.2 sit exactly two points apart, but 8.2 - 6.2 in floating
+    // point is 1.9999999999999991, just inside the head-to-head band.
+    const level = (score: number) => ({ score, confidence: 0.9 });
+    const jev = fakeJev({
+      answersFor: (evidence) =>
+        JSON.stringify(evidence).includes("cand-1.txt")
+          ? { ...clean, ticket_fit: level(4), claim_fidelity: level(3), log_health: level(1.2) }
+          : { ...clean, ticket_fit: level(4), claim_fidelity: level(1.2), log_health: level(1) },
+    });
+
+    await runPool({ poolDir, harnesses: rig.harnesses, jev });
+
+    const graded = readEventLines(poolDir, "01")
+      .filter((e) => e.kind === "graded")
+      .sort((a, b) => a.attempt - b.attempt);
+    expect(graded.map((e) => e.payload.score)).toEqual([8.2, 6.2]);
+    expect(existsSync(join(poolDir, "issues", "01-head-to-head.md"))).toBe(false);
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "selected")?.payload,
+    ).toEqual({ score: 8.2, margin: 2, rule: "outright" });
   }, 15000);
 
   it("keeps the grader-ticket path when the pool has no Jev key", async () => {
