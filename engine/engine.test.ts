@@ -24,6 +24,7 @@ import {
   type PoolRun,
 } from "./engine.ts";
 import { SqliteCheckpointStore, type CheckpointStore } from "./checkpoints.ts";
+import { writeReassign } from "./reassign.ts";
 import { appendEvent } from "./events.ts";
 import { loadPoolMarkers, writeMarkerStatus, type TicketMarker } from "./pool.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
@@ -3220,6 +3221,50 @@ describe("config reload (ADR-0018)", () => {
     expect(
       readEventLines(poolDir, "01").some((e) => e.kind === "reassigned"),
     ).toBe(true);
+  });
+
+  // The Console's Reassign (issue #126) writes the same file a hand edit
+  // does and nothing else: this proves the write alone is enough, with no
+  // engine-side push, and that the boundary logs the `reassigned` event.
+  it("picks up a Console Reassign of a ready ticket at the next boundary", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    const rig = stubHarness(poolDir, {});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeReassign(
+            poolDir,
+            { tickets: ["02"], fields: { model: "model-b", verify: null } },
+            {
+              markers: loadPoolMarkers(join(poolDir, "issues")),
+              harnesses: rig.harnesses,
+              liveAttempts: new Set(["01"]),
+              statuses: { "01": "in-progress", "02": "ready" },
+              engineAssignments: {
+                "01": { harness: "stub", model: "model-a", drivers: "implement" },
+              },
+            },
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(rig.spawned["02"].model).toBe("model-b");
+    const reassigned = readEventLines(poolDir, "02").filter(
+      (e) => e.kind === "reassigned",
+    );
+    expect(reassigned).toHaveLength(1);
+    expect(reassigned[0]!.payload).toEqual({
+      from: { harness: "stub", model: "model-a", drivers: "implement" },
+      to: { harness: "stub", model: "model-b", drivers: "implement" },
+    });
   });
 
   it("keeps an in-flight Attempt's Assignment despite an edit, then uses the new config once resumed", async () => {

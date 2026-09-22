@@ -18,6 +18,7 @@ import type {
   EnrichedSnapshot,
   EnrichedTicketState,
   ConversationView,
+  SettingsResponse,
   TicketEvent,
   TicketEventsResponse,
 } from "../src/project";
@@ -39,16 +40,28 @@ function lines(prefix: string, n: number): string {
 }
 
 function ticket(id: string, overrides: Partial<EnrichedTicketState> = {}): EnrichedTicketState {
-  return {
+  const base = {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
-    status: "ready",
+    status: "ready" as const,
     mergePending: false,
     enlisted: false,
     assignment: { harness: "claude", model: "opus", drivers: "implement" },
     liveAttempt: null,
     ...overrides,
+  };
+  // The Reassign view the wire carries (issue #126): derived so a done or
+  // in-flight fixture ticket is not claimed as reassignable.
+  const eligible = base.liveAttempt === null && base.status !== "done";
+  return {
+    ...base,
+    reassign: base.reassign ?? {
+      eligible,
+      reason: eligible ? null : "an Attempt is in flight",
+      verify: null,
+      sources: { harness: "default", model: "pinned", drivers: "default" },
+    },
   };
 }
 
@@ -88,6 +101,13 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // Extra interrupted tickets so the Needs input tray overflows its max-height.
     ...Array.from({ length: 12 }, (_, i) =>
       ticket(`t-${i + 8}`, { status: "in-progress", liveAttempt: { attempt: 1, paneId: null } }),
+    ),
+    // Extra ready tickets so the Reassign dialog's row list overflows its own
+    // max-height: only a ticket with no Attempt in flight is reassignable, and
+    // every in-progress ticket above carries one.
+    ...Array.from({ length: 12 }, (_, i) =>
+      // One of them enlisted, so the dialog renders its "harness only" tag.
+      ticket(`t-${i + 20}`, { status: "ready", enlisted: i === 0 }),
     ),
   ];
   return {
@@ -165,6 +185,23 @@ function logChunk(offset: number, end?: number): LogChunk {
   };
 }
 
+// The Settings pane's read, which the Reassign surfaces borrow for their
+// harness list (issue #126).
+const SETTINGS: SettingsResponse = {
+  pool: {
+    path: "/tmp/harness-pool/console.json",
+    config: { defaults: { harness: "claude", model: "opus" }, port: 4300 },
+    bootOnly: ["roster", "agents", "selection", "terminal", "port"],
+    effective: { port: 4300, terminal: "herdr", stale: [] },
+  },
+  machine: {
+    path: "/home/me/.agent-graphs/defaults.json",
+    defaults: { harness: "claude" },
+    own: { harness: "claude" },
+  },
+  harnesses: ["claude", "opencode"],
+};
+
 const TICKET_BODY =
   "# A long spec\n\n" +
   Array.from({ length: 20 }, (_, i) => `Paragraph ${i + 1} of the spec, long enough to wrap.`).join(
@@ -189,6 +226,7 @@ const session = new ConsoleSession({
   getLog: (_ticketId, _attempt, offset, end) => Promise.resolve(logChunk(offset, end)),
   answer: () => Promise.resolve(current),
   stop: () => Promise.resolve(),
+  restart: () => Promise.resolve({ ok: true, port: 4300 }),
   stream: () => () => {},
   vitals: { update() {}, state: () => ({}) },
   terminal: { update() {}, state: () => ({}) },
@@ -213,6 +251,11 @@ const view = new ConsoleView({
       })),
     }),
   onEnlist: () => Promise.resolve({ ok: true } as never),
+  onGetSettings: () => Promise.resolve(SETTINGS),
+  onSavePoolSettings: () => Promise.resolve(SETTINGS),
+  onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
+  onReassign: () =>
+    Promise.resolve({ applied: [], skipped: [], snapshot: current }),
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
 });
@@ -229,6 +272,9 @@ const handlers: Handlers = {
   onArmStop: () => {},
   onCancelStop: () => {},
   onConfirmStop: () => {},
+  onArmRestart: () => {},
+  onCancelRestart: () => {},
+  onConfirmRestart: () => {},
 };
 
 let renders = 0;
@@ -252,6 +298,9 @@ const SCROLL_SELECTORS = [
   ".needs-input-tray",
   ".conversations-tray",
   ".enlist-picker",
+  // The Reassign bulk dialog's row list (issue #126): its own scroll region
+  // so the head and the form below it stay put however many tickets list.
+  ".reassign-rows",
 ];
 
 /** Selectors in styles.css that no live module renders; listed so the
@@ -537,6 +586,13 @@ async function main(): Promise<void> {
   await settleAll();
   // Open the Enlist picker the way the operator does: the header button.
   q<HTMLButtonElement>(".canvas-enlist")?.click();
+  await settleAll();
+  // And the Reassign bulk dialog the way the operator does: the Settings
+  // pane's button (issue #126). Both panes stay open for the scenarios, so
+  // their scroll regions are measured alongside the trays'.
+  q<HTMLButtonElement>(".canvas-settings")?.click();
+  await settleAll();
+  q<HTMLButtonElement>(".settings-reassign-open")?.click();
   await settleAll();
 
   await runScenario("progress tab", async () => {

@@ -45,6 +45,15 @@ export type {
   SettingsResponse,
 } from "./pool-settings.ts";
 export type { MachineDefaults } from "./machine-defaults.ts";
+// Reassign (issue #126): the per-ticket view the snapshot carries and the
+// write body and answer of PUT /api/reassign live beside the writer.
+export type {
+  AssignmentSource,
+  AssignmentSources,
+  ReassignRequest,
+  ReassignResponse,
+  TicketReassignView,
+} from "./reassign.ts";
 export type { PoolConfig } from "./engine.ts";
 
 import type { ConversationView } from "./conversations.ts";
@@ -54,6 +63,7 @@ import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
+import type { TicketReassignView } from "./reassign.ts";
 
 /** The action a resume request carries (POST /api/resume): `approve` and
  *  `reject` answer the review gate and merge-approval interrupts; plain
@@ -93,6 +103,16 @@ export interface EnrichedTicketState {
    * durable `enlisted-from` field.
    */
   enlisted: boolean;
+  /**
+   * Reassign (issue #126): whether a write to this ticket's assign entry
+   * would take effect at the next boundary, why not when it would not, the
+   * ticket's own verify count, and where each field of `assignment` came
+   * from. For a ticket with no Attempt in flight, `assignment` is resolved
+   * from the config file as it stands now, so a Reassign shows on the card
+   * at once rather than at the next boundary; an in-flight ticket keeps
+   * the engine's frozen record.
+   */
+  reassign: TicketReassignView;
 }
 
 export interface EnrichedSnapshot {

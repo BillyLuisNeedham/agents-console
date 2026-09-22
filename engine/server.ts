@@ -34,6 +34,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
+  parseConfig,
   readConfig,
   REVIEW_TICKET_ID,
   loadPoolTickets,
@@ -47,6 +48,16 @@ import {
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
 import { UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
+import {
+  ReassignRefusal,
+  reassignViews,
+  writeReassign,
+  type ReassignContext,
+  type ReassignRequest,
+  type ReassignResponse,
+  type TicketReassignEntry,
+  type TicketReassignView,
+} from "./reassign.ts";
 import {
   attemptLogName,
   attemptStreamName,
@@ -93,6 +104,7 @@ import {
 } from "./machine-defaults.ts";
 import {
   BOOT_ONLY_KEYS,
+  poolSettingsPath,
   readPoolSettings,
   writePoolSettings,
   type RestartResponse,
@@ -222,12 +234,28 @@ export interface PoolServer {
   enlist: (req: EnlistRequest) => Promise<EnlistResponse>;
 }
 
+// The Reassign row a ticket the module did not answer for falls back to: it
+// is not reassignable, because nothing here can say that a write would reach
+// it. Only a meta id that arrived between the views and this map can hit it.
+const UNKNOWN_REASSIGN: TicketReassignView = {
+  eligible: false,
+  reason: "not yet known to the pool config",
+  verify: null,
+  // Drivers always resolve to something, so "unset" is a value the resolver
+  // never reports for them and the badge would never otherwise show.
+  sources: { harness: "unset", model: "unset", drivers: "default" },
+};
+
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
 function enrich(
   snapshot: PoolSnapshot,
   meta: TicketMarker[],
   poolName: string,
   poolDir: string,
+  // Reassign (issue #126): one row per ticket, resolved from the config file
+  // rather than from the engine's session, so a save shows on the card before
+  // the boundary that will actually apply it.
+  reassign: Map<string, TicketReassignEntry>,
 ): EnrichedSnapshot {
   const hold = new Set(snapshot.mergeHold);
   return {
@@ -236,24 +264,33 @@ function enrich(
     poolName,
     poolDir,
     state: {
-      tickets: meta.map((m) => ({
-        id: m.id,
-        title: m.title,
-        blockedBy: m.blockedBy,
-        status: snapshot.state.tickets[m.id] ?? "ready",
-        mergePending: hold.has(m.id),
-        // A meta id the engine has not resolved yet (a hand-written file
-        // seen between the meta refresh and the boundary that adopts it)
-        // reads as unassigned until the record lands; the engine's map is
-        // the only derivation, and the engine owns the unassigned record.
-        assignment: snapshot.assignments[m.id] ?? {
-          ...UNASSIGNED_ASSIGNMENT_VIEW,
-        },
-        liveAttempt: snapshot.liveAttempts[m.id] ?? null,
-        // An enlisted ticket (issue #101) reads "as found" where a spawned
-        // one names its model: the marker field is the durable fact.
-        enlisted: m.enlistedFrom !== undefined,
-      })),
+      tickets: meta.map((m) => {
+        const row = reassign.get(m.id);
+        return {
+          id: m.id,
+          title: m.title,
+          blockedBy: m.blockedBy,
+          status: snapshot.state.tickets[m.id] ?? "ready",
+          mergePending: hold.has(m.id),
+          // A reassignable ticket's Assignment comes from the config file as
+          // it stands now (issue #126), so a Reassign shows on the card at
+          // once rather than at the next boundary. Everywhere else the
+          // engine's record is the truth: an Attempt in flight froze its
+          // Assignment, and a meta id the engine has not resolved yet (a
+          // hand-written file seen between the meta refresh and the boundary
+          // that adopts it) reads as unassigned until the record lands, the
+          // engine owning the unassigned record.
+          assignment: row?.assignment ??
+            snapshot.assignments[m.id] ?? {
+              ...UNASSIGNED_ASSIGNMENT_VIEW,
+            },
+          liveAttempt: snapshot.liveAttempts[m.id] ?? null,
+          // An enlisted ticket (issue #101) reads "as found" where a spawned
+          // one names its model: the marker field is the durable fact.
+          enlisted: m.enlistedFrom !== undefined,
+          reassign: row?.reassign ?? UNKNOWN_REASSIGN,
+        };
+      }),
       conversations: snapshot.conversations,
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
@@ -1011,8 +1048,86 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   }
 
   let latest: EnrichedSnapshot | null = null;
+  // The last engine snapshot as it arrived, kept so a Reassign write can
+  // rebuild the enriched snapshot from the file it just wrote without waiting
+  // for the run to tick: a quiescent pool has no next tick to wait for.
+  let lastRaw: PoolSnapshot | null = null;
   let currentRun: PoolRun | null = null;
   let started = false;
+
+  // The pool config, parsed once per distinct file text. Every snapshot tick
+  // wants it (Reassign resolves each ticket's Assignment from the file), and
+  // the file changes rarely, so the read stays and the parse is cached.
+  // Keyed on the text rather than on an mtime so a hand edit and a save are
+  // both caught, however fast they land.
+  let configCache: { text: string; config: PoolConfig | null; error: string | null } = {
+    text: "",
+    config: {},
+    error: null,
+  };
+  function currentConfig(): { config: PoolConfig | null; error: string | null } {
+    let text = "";
+    try {
+      const path = poolSettingsPath(poolDir);
+      text = existsSync(path) ? readFileSync(path, "utf8") : "";
+    } catch (err) {
+      return { config: null, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (text !== configCache.text) {
+      try {
+        // The text just read, not a second read of the file: a rewrite
+        // between the two would leave the cache key describing one version
+        // of console.json and the parsed config another.
+        configCache = { text, config: parseConfig(text, poolDir), error: null };
+      } catch (err) {
+        configCache = {
+          text,
+          config: null,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+    return { config: configCache.config, error: configCache.error };
+  }
+
+  /** Every ticket's Reassign row for one engine snapshot (issue #126). */
+  function reassignRows(
+    snapshot: PoolSnapshot,
+    markers: TicketMarker[],
+  ): Map<string, TicketReassignEntry> {
+    const { config, error } = currentConfig();
+    return reassignViews({
+      markers,
+      config,
+      configError: error,
+      harnesses,
+      liveAttempts: liveAttemptIds(snapshot),
+      statuses: snapshot.state.tickets,
+      engineAssignments: snapshot.assignments,
+    });
+  }
+
+  function liveAttemptIds(snapshot: PoolSnapshot): Set<string> {
+    return new Set(
+      Object.entries(snapshot.liveAttempts)
+        .filter(([, record]) => record != null)
+        .map(([id]) => id),
+    );
+  }
+
+  /**
+   * Rebuild the enriched snapshot from the last engine snapshot and the
+   * config file as it is right now, and push it to every open tab. A
+   * Reassign write calls this so its own answer, and every other tab, shows
+   * the new Assignment immediately; the engine's next boundary is what
+   * actually moves the run, and it will emit the `reassigned` events then.
+   */
+  function reenrich(): EnrichedSnapshot | null {
+    if (!lastRaw) return latest;
+    refreshMeta();
+    broadcast(enrich(lastRaw, meta, poolName, poolDir, reassignRows(lastRaw, meta)));
+    return latest;
+  }
 
   // Every open snapshot stream, each with the teardown of its own heartbeat
   // so a shutdown can end the streams cleanly rather than leaving them to be
@@ -1067,7 +1182,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       ...(jev !== undefined ? { jev } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
-        broadcast(enrich(snapshot, meta, poolName, poolDir));
+        lastRaw = snapshot;
+        broadcast(
+          enrich(snapshot, meta, poolName, poolDir, reassignRows(snapshot, meta)),
+        );
       },
     });
     return latest!;
@@ -1439,6 +1557,49 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json(
               { error: err instanceof Error ? err.message : String(err) },
               { status: 400 },
+            );
+          }
+        }
+
+        // Reassign (issue #126). The write is an edit of the same console.json
+        // the Settings pane edits, so it answers in the settings convention:
+        // 400 { error } for a refused request, 500 for a file this server can
+        // no longer read. The engine picks the write up at its next Config
+        // reload and emits the `reassigned` events itself (ADR-0018); nothing
+        // here reaches into the run. The answer carries a freshly enriched
+        // snapshot so the cards show the new Assignment without waiting for
+        // that boundary, which a quiescent pool would never reach.
+        if (pathname === "/api/reassign" && req.method === "PUT") {
+          try {
+            if (!lastRaw) throw new Error("reassign: pool not started");
+            const body = (await req.json()) as Partial<ReassignRequest>;
+            if (typeof body !== "object" || body === null || Array.isArray(body)) {
+              throw new Error("reassign: body must be an object");
+            }
+            refreshMeta();
+            const context: ReassignContext = {
+              markers: meta,
+              harnesses,
+              liveAttempts: liveAttemptIds(lastRaw),
+              statuses: lastRaw.state.tickets,
+              engineAssignments: lastRaw.assignments,
+            };
+            const outcome = writeReassign(
+              poolDir,
+              { tickets: body.tickets as string[], fields: body.fields ?? {} },
+              context,
+            );
+            const snapshot = reenrich();
+            if (!snapshot) throw new Error("reassign: pool not started");
+            const answer: ReassignResponse = { ...outcome, snapshot };
+            return Response.json(answer);
+          } catch (err) {
+            // 400 only for a request this server genuinely refused. A file it
+            // cannot read or write, and a pool that never started, are its own
+            // failures and must not read back as the operator's mistake.
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: err instanceof ReassignRefusal ? 400 : 500 },
             );
           }
         }

@@ -33,6 +33,16 @@ function snap(
         enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
         liveAttempt: paneId === undefined ? null : { attempt: 1, paneId },
+        reassign: {
+          eligible: paneId === undefined,
+          reason: paneId === undefined ? null : "an Attempt is in flight",
+          verify: null,
+          sources: {
+            harness: "default" as const,
+            model: "default" as const,
+            drivers: "default" as const,
+          },
+        },
       })),
       conversations: Object.entries(conversationPanes).map(([id, paneId]) => ({
         id,

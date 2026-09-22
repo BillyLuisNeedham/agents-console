@@ -185,6 +185,12 @@ describe("NeedsInputTray waiting rows", () => {
             enlisted: false,
             assignment: { harness: null, model: null, drivers: "implement" },
             liveAttempt: null,
+            reassign: {
+              eligible: true,
+              reason: null,
+              verify: null,
+              sources: { harness: "default", model: "default", drivers: "default" },
+            },
           },
           {
             id: "B",
@@ -195,6 +201,12 @@ describe("NeedsInputTray waiting rows", () => {
             enlisted: false,
             assignment: { harness: null, model: null, drivers: "implement" },
             liveAttempt: null,
+            reassign: {
+              eligible: true,
+              reason: null,
+              verify: null,
+              sources: { harness: "default", model: "default", drivers: "default" },
+            },
           },
         ],
         conversations: [],

@@ -19,6 +19,7 @@ import {
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
+  type ReassignTicketRow,
   type ResumeAction,
   type RunPhase,
   type TimelineView,
@@ -38,6 +39,7 @@ import {
   type SaveMachineHandler,
   type SavePoolHandler,
 } from "./settings";
+import { ReassignStore, type ReassignHandler } from "./reassign";
 import { Detail, type DetailHandlers } from "./detail";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
@@ -115,6 +117,9 @@ export interface AppModel {
   conversationDefaults: { harness?: string; model?: string; drivers?: string };
   /** The Enlist form's "Blocks" tick list: every ticket not yet done. */
   enlistBlocks: EnlistBlockRow[];
+  /** Reassign (issue #126): every ticket the engine says can be reassigned,
+   *  as the bulk dialog lists them. */
+  reassignTickets: ReassignTicketRow[];
 }
 
 export interface Handlers {
@@ -153,6 +158,9 @@ export type ConsoleViewOptions = NeedsInputOptions &
     onGetSettings: GetSettingsHandler;
     onSavePoolSettings: SavePoolHandler;
     onSaveMachineDefaults: SaveMachineHandler;
+    /** The Reassign write (issue #126). It answers with a fresh snapshot,
+     *  which the bootstrap pushes through setSnapshot. */
+    onReassign: ReassignHandler;
   };
 
 /**
@@ -178,6 +186,7 @@ export class ConsoleView {
   private readonly conversationsTray: ConversationsTray;
   private readonly enlist: EnlistStore;
   private readonly settings: SettingsStore;
+  private readonly reassign: ReassignStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   // The selection outlives any one render (snapshots never close the panel
   // or lose the selection); its one-hop flow neighbourhood is recomputed from
@@ -201,10 +210,16 @@ export class ConsoleView {
       onEnlist: options.onEnlist,
       onChange: options.onChange,
     });
+    this.reassign = new ReassignStore({
+      onGetSettings: options.onGetSettings,
+      onReassign: options.onReassign,
+      onChange: options.onChange,
+    });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,
       onSavePool: options.onSavePoolSettings,
       onSaveMachine: options.onSaveMachineDefaults,
+      onOpenReassign: () => this.reassign.openDialog(),
       onChange: options.onChange,
     });
     this.canvas = new Canvas({
@@ -243,6 +258,14 @@ export class ConsoleView {
     this.conversationsTray.pruneEndFailures(
       new Set(model.conversationsTray.map((row) => row.id)),
     );
+    // A Reassign draft belongs to a ticket a write could still reach; one
+    // that started an Attempt or finished loses its draft rather than
+    // holding an edit that can no longer land.
+    this.reassign.pruneDrafts(new Set(model.reassignTickets.map((row) => row.id)));
+    // The harness list is read once, when a Reassign surface first needs it.
+    if (model.detail?.kind === "ticket" && model.detail.reassign.eligible) {
+      this.reassign.ensureHarnesses();
+    }
     const hood = flowNeighbourhood(model.edges, this.selectedNodeId);
     const selection = {
       selectedId: this.selectedNodeId,
@@ -256,6 +279,7 @@ export class ConsoleView {
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),
+      reassign: this.reassign,
     };
     // The two trays overlay the canvas column, not the window: anchored to
     // its edges they stay clear of the Detail beside it, however wide the
@@ -273,6 +297,7 @@ export class ConsoleView {
       }),
       this.enlist.render(model.enlistBlocks),
       this.settings.render(model.restart, handlers),
+      this.reassign.render(model.reassignTickets),
     );
     const content = h(
       "div",

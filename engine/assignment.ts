@@ -90,8 +90,66 @@ export interface ResolveAssignmentParams {
   harnesses: Record<string, HarnessCommand>;
 }
 
+/**
+ * Where one resolved field came from (Reassign, issue #126): the unit's own
+ * request layer (a Ticket's `assign` entry, so the Console calls it pinned),
+ * what it inherits from its parent or build ticket, the pool defaults, or
+ * nowhere at all. Declared here rather than beside the Console's Reassign
+ * types because it names the layers of the resolver below, and reassign.ts
+ * re-exports it to the wire.
+ */
+export type AssignmentSource = "pinned" | "inherited" | "default" | "unset";
+
+export interface AssignmentSources {
+  harness: AssignmentSource;
+  model: AssignmentSource;
+  drivers: AssignmentSource;
+}
+
+// The layers firstSet walks, in order, so the index it lands on names the
+// layer without anyone comparing values. An inherited value that happens to
+// equal the default is a real distinction here and would be lost by any
+// after-the-fact string comparison.
+const LAYERS = ["pinned", "inherited", "default"] as const satisfies readonly AssignmentSource[];
+
+function firstSetIndex(values: (string | undefined)[]): number {
+  return values.findIndex((value) => value !== undefined && value !== "");
+}
+
 function firstSet(...values: (string | undefined)[]): string | undefined {
-  return values.find((value) => value !== undefined && value !== "");
+  const index = firstSetIndex(values);
+  return index === -1 ? undefined : values[index];
+}
+
+function sourceOf(...values: (string | undefined)[]): AssignmentSource {
+  const index = firstSetIndex(values);
+  return index === -1 ? "unset" : LAYERS[index]!;
+}
+
+/**
+ * Which layer supplied each field of the Assignment resolveAssignment would
+ * return for the same three layers, so the Console can say "pinned" or
+ * "inherited" beside a value rather than re-deriving the rule (issue #126).
+ * One ordering serves both: this reads the same firstSet the resolver does.
+ *
+ * `drivers` never resolves to nothing (the engine falls back to `implement`),
+ * so a drivers field no layer sets reads as "default" rather than "unset":
+ * the value beside the pill is real, and editing the pool defaults moves it,
+ * which is exactly what "default" tells the operator.
+ */
+export function resolveAssignmentSources(params: {
+  request: AssignmentRequest | undefined;
+  inherited?: Pick<Assignment, "harness" | "model" | "drivers">;
+  defaults?: { harness?: string; model?: string; drivers?: string };
+}): AssignmentSources {
+  const request = params.request ?? {};
+  const { inherited, defaults } = params;
+  const drivers = sourceOf(request.drivers, inherited?.drivers, defaults?.drivers);
+  return {
+    harness: sourceOf(request.harness, inherited?.harness, defaults?.harness),
+    model: sourceOf(request.model, inherited?.model, defaults?.model),
+    drivers: drivers === "unset" ? "default" : drivers,
+  };
 }
 
 export function resolveAssignment(params: ResolveAssignmentParams): Assignment {

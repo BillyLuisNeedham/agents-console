@@ -101,6 +101,14 @@ const consoleView = new ConsoleView({
   onGetSettings: () => client.getSettings(),
   onSavePoolSettings: (config) => client.savePoolSettings(config),
   onSaveMachineDefaults: (defaults) => client.saveMachineDefaults(defaults),
+  // Reassign (issue #126): the write answers with a fresh snapshot, so the
+  // cards show the new Assignment the moment the file is on disk rather than
+  // at the next boundary.
+  onReassign: (request) =>
+    client.reassign(request).then((response) => {
+      session.setSnapshot(response.snapshot);
+      return response;
+    }),
   onStart: (request) => client.startConversation(request),
   onEnd: (conversationId, closing) =>
     client

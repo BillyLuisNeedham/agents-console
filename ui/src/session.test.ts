@@ -14,21 +14,41 @@ import {
   type TicketGradeSummary,
 } from "./project";
 
+/** The Reassign view the wire carries per ticket (issue #126), derived so a
+ *  done or in-flight fixture ticket is not claimed as reassignable. */
+function reassignOf(ticket: {
+  status: EnrichedTicketState["status"];
+  liveAttempt: EnrichedTicketState["liveAttempt"];
+}): EnrichedTicketState["reassign"] {
+  const eligible = ticket.liveAttempt === null && ticket.status !== "done";
+  return {
+    eligible,
+    reason: eligible
+      ? null
+      : ticket.status === "done"
+        ? "a done ticket keeps the Assignment it ran on"
+        : "an Attempt is in flight",
+    verify: null,
+    sources: { harness: "default", model: "default", drivers: "default" },
+  };
+}
+
 function ticket(
   id: string,
   overrides: Partial<EnrichedTicketState> = {},
 ): EnrichedTicketState {
-  return {
+  const base = {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
-    status: "ready",
+    status: "ready" as const,
     mergePending: false,
     enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
     ...overrides,
   };
+  return { ...base, reassign: base.reassign ?? reassignOf(base) };
 }
 
 function conversation(

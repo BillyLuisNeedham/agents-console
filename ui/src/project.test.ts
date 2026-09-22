@@ -25,6 +25,7 @@ import {
   projectDetailTabs,
   projectEnlistBlocks,
   projectEnlistForm,
+  projectReassignTickets,
   projectEnlistPicker,
   ENLIST_BECOMES_HINT,
   projectLogPane,
@@ -78,21 +79,42 @@ const LAYOUT = {
   reviewY: 1200,
 } as const;
 
+
+/** The Reassign view the wire carries per ticket (issue #126), derived so a
+ *  done or in-flight fixture ticket is not claimed as reassignable. */
+function reassignOf(ticket: {
+  status: EnrichedTicketState["status"];
+  liveAttempt: EnrichedTicketState["liveAttempt"];
+}): EnrichedTicketState["reassign"] {
+  const eligible = ticket.liveAttempt === null && ticket.status !== "done";
+  return {
+    eligible,
+    reason: eligible
+      ? null
+      : ticket.status === "done"
+        ? "a done ticket keeps the Assignment it ran on"
+        : "an Attempt is in flight",
+    verify: null,
+    sources: { harness: "default", model: "default", drivers: "default" },
+  };
+}
+
 function ticket(
   id: string,
   overrides: Partial<EnrichedTicketState> = {},
 ): EnrichedTicketState {
-  return {
+  const base = {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
-    status: "ready",
+    status: "ready" as const,
     mergePending: false,
     enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
     ...overrides,
   };
+  return { ...base, reassign: base.reassign ?? reassignOf(base) };
 }
 
 function conversation(
@@ -965,6 +987,51 @@ describe("projectDetail", () => {
     expect(detailOf(snapshot(), "ticket:zzz")).toBeNull();
   });
 
+  it("carries the Assignment and its Reassign view, so the editor prefills", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("A", {
+            assignment: { harness: "claude", model: "opus", drivers: "tdd" },
+            enlisted: true,
+            reassign: {
+              eligible: true,
+              reason: null,
+              verify: 2,
+              sources: { harness: "pinned", model: "default", drivers: "inherited" },
+            },
+          }),
+        ],
+      },
+    });
+    const detail = detailOf(snap, "ticket:A");
+    expect(detail?.kind === "ticket" && detail.assignment).toEqual({
+      harness: "claude",
+      model: "opus",
+      drivers: "tdd",
+    });
+    expect(detail?.kind === "ticket" && detail.enlisted).toBe(true);
+    expect(detail?.kind === "ticket" && detail.hasLiveAttempt).toBe(false);
+    expect(detail?.kind === "ticket" && detail.reassign.verify).toBe(2);
+    expect(detail?.kind === "ticket" && detail.reassign.sources.harness).toBe("pinned");
+  });
+
+  it("marks a ticket with an Attempt in flight, which the editor stands aside for", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [
+          ticket("A", {
+            status: "in-progress",
+            liveAttempt: { attempt: 1, paneId: null },
+          }),
+        ],
+      },
+    });
+    const detail = detailOf(snap, "ticket:A");
+    expect(detail?.kind === "ticket" && detail.hasLiveAttempt).toBe(true);
+    expect(detail?.kind === "ticket" && detail.reassign.eligible).toBe(false);
+  });
+
   it("carries the grades endpoint's winner for the timeline's badge", () => {
     const snap = snapshot({ state: { tickets: [ticket("A"), ticket("B")] } });
     const grades = { A: { attempt: 2, score: 9, verdict: "pass", winner: 2 } };
@@ -992,6 +1059,15 @@ describe("projectDetailTabs", () => {
       outcome: null,
       interrupt,
       winner: null,
+      assignment: { harness: "claude", model: "opus", drivers: "implement" },
+      enlisted: false,
+      reassign: {
+        eligible: status !== "done",
+        reason: null,
+        verify: null,
+        sources: { harness: "default", model: "default", drivers: "default" },
+      },
+      hasLiveAttempt: false,
     };
   }
 
@@ -2595,6 +2671,57 @@ describe("projectEnlistPicker", () => {
 
   it("is empty when herdr reports no panes", () => {
     expect(projectEnlistPicker([])).toEqual([]);
+  });
+});
+
+describe("projectReassignTickets", () => {
+  const sources = {
+    harness: "pinned" as const,
+    model: "default" as const,
+    drivers: "default" as const,
+  };
+
+  it("lists only the tickets the engine says can be reassigned, in pool order", () => {
+    const rows = projectReassignTickets([
+      ticket("01", { status: "ready" }),
+      ticket("02", { status: "done" }),
+      ticket("03", {
+        status: "in-progress",
+        liveAttempt: { attempt: 1, paneId: null },
+      }),
+      ticket("04", { status: "checkpoint" }),
+    ]);
+    expect(rows.map((row) => row.id)).toEqual(["01", "04"]);
+  });
+
+  it("carries the Assignment, its provenance, the verify count and the caveat", () => {
+    const rows = projectReassignTickets([
+      ticket("01", {
+        title: "wire the reassign route",
+        assignment: { harness: "claude", model: "opus", drivers: "tdd" },
+        enlisted: true,
+        reassign: {
+          eligible: true,
+          reason: "enlisted: the write waits for the engine",
+          verify: 2,
+          sources,
+        },
+      }),
+    ]);
+    expect(rows[0]).toEqual({
+      id: "01",
+      title: "wire the reassign route",
+      status: "ready",
+      assignment: { harness: "claude", model: "opus", drivers: "tdd" },
+      sources,
+      verify: 2,
+      enlisted: true,
+      reason: "enlisted: the write waits for the engine",
+    });
+  });
+
+  it("lists nothing for a pool with no reassignable ticket", () => {
+    expect(projectReassignTickets([ticket("01", { status: "done" })])).toEqual([]);
   });
 });
 

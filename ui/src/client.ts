@@ -12,6 +12,8 @@ import type {
   EnlistResponse,
   EnrichedSnapshot,
   PanesResponse,
+  ReassignRequest,
+  ReassignResponse,
   ResumeAction,
   StartConversationRequest,
   TerminalPeekResponse,
@@ -386,18 +388,40 @@ export class PoolClient {
    * from what is now on disk rather than from what it sent.
    */
   async savePoolSettings(config: PoolConfigPatch): Promise<SettingsResponse> {
-    return this.putSettings("/api/settings/pool", { config });
+    return this.putJson("/api/settings/pool", { config }, "settings save failed");
   }
 
   /** Write the machine defaults file. Same shapes and refusal as above. */
   async saveMachineDefaults(defaults: MachineDefaults): Promise<SettingsResponse> {
-    return this.putSettings("/api/settings/machine", { defaults });
+    return this.putJson("/api/settings/machine", { defaults }, "settings save failed");
   }
 
-  private async putSettings(
+  /**
+   * Reassign (issue #126): rewrite the `assign` entries of the named tickets,
+   * field by field. A key absent from `fields` leaves that field alone, a
+   * value sets it, and null clears it so the ticket follows its parent or the
+   * pool defaults again. A refused write (a ticket that would end unassigned,
+   * an unknown harness or ticket, a bad verify) answers 400 with its reason in
+   * `error`, which becomes the thrown Error's message so the editor can show
+   * it inline; nothing is written in that case. The answer carries the fresh
+   * snapshot, which the caller pushes through setSnapshot so the cards show
+   * the new Assignment at once.
+   */
+  async reassign(request: ReassignRequest): Promise<ReassignResponse> {
+    return this.putJson("/api/reassign", request, "reassign failed");
+  }
+
+  /**
+   * The shared write: PUT JSON, and on a refusal pull `error` out of the JSON
+   * body and throw it as the Error's message, so the control that asked for
+   * the write can show the engine's own reason beside itself rather than on
+   * the global banner.
+   */
+  private async putJson<T>(
     path: string,
     body: unknown,
-  ): Promise<SettingsResponse> {
+    fallback: string,
+  ): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -409,7 +433,7 @@ export class PoolClient {
         payload && typeof (payload as { error?: unknown }).error === "string"
           ? (payload as { error: string }).error
           : null;
-      throw new Error(error ?? `settings save failed: ${res.status}`);
+      throw new Error(error ?? `${fallback}: ${res.status}`);
     }
     return res.json();
   }
