@@ -132,6 +132,17 @@ export function worktreePathFor(
   );
 }
 
+/**
+ * Whether `path` is a directory the engine made for an Attempt: every pool
+ * worktree lives under the repo's `pool-worktrees` root (worktreePathFor),
+ * and nothing else does. The test the engine's folder-trust seed
+ * (claude-trust.ts) keys on: it vouches only for directories it created,
+ * never for the operator's own checkout.
+ */
+export function isPoolWorktree(path: string): boolean {
+  return path.split(/[\\/]/).includes("pool-worktrees");
+}
+
 export function branchExists(
   repoRoot: string,
   ticketId: string,

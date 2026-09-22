@@ -19,6 +19,13 @@ const ENV_READERS = new Set([
   // The child harness environment is the parent's, plus PWD; and the spawn
   // event records the delta against it.
   "spawn.ts",
+  // claude's config file is found the way claude's own process finds it,
+  // from CLAUDE_CONFIG_DIR: the variable is claude's, not the engine's, and
+  // resolving it where the seed lands is what lets the test preload fence
+  // every suite off the operator's real file (issue #127, ADR-0025).
+  "claude-trust.ts",
+  // The test preload sets that variable for every test run.
+  "test-preload.ts",
 ]);
 
 /** The engine files that may import the judgement SDK: the port and its wire fake. */

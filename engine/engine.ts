@@ -1752,7 +1752,9 @@ async function runSuperStep(
       raiseInterrupt(session, {
         ticketId: result.marker.id,
         kind: "crash",
-        body: crashInterruptBody(result),
+        // An in-progress result is a crash, and every crash path records
+        // its reason; the fallback only satisfies the type.
+        body: crashInterruptBody({ ...result, crashReason: result.crashReason ?? "crashed" }),
       });
     }
   }
@@ -3012,7 +3014,7 @@ function recordAdoptedExit(
     raiseInterrupt(session, {
       ticketId,
       kind: "crash",
-      body: crashInterruptBody({ logPath, logTail, outcomePath, outcomeExists }),
+      body: crashInterruptBody({ crashReason, logPath, logTail, outcomePath, outcomeExists }),
     });
   } else if (status === "checkpoint") {
     raiseCheckpoint(session, marker, attempt);
@@ -3246,7 +3248,7 @@ function endEnlistedAttempt(
     raiseInterrupt(session, {
       ticketId,
       kind: "crash",
-      body: crashInterruptBody({ logPath: "", logTail: [], outcomePath, outcomeExists }),
+      body: crashInterruptBody({ crashReason, logPath: "", logTail: [], outcomePath, outcomeExists }),
     });
     finishAdoptedFinalize(session);
     return;
@@ -6429,6 +6431,9 @@ interface TicketResult {
   logTail: string[];
   outcomePath: string;
   outcomeExists: boolean;
+  // The crash reason the crash event recorded, null on a clean exit; the
+  // interrupt body leads with it (issue #127).
+  crashReason: string | null;
 }
 
 /**
@@ -6500,6 +6505,7 @@ function closeAttemptTabs(session: Session, ticketId: string): void {
 
 /** The exit facts a crash interrupt body quotes (ADR-0012), frozen at raise time. */
 interface CrashFacts {
+  crashReason: string;
   logPath: string;
   logTail: string[];
   outcomePath: string;
@@ -6507,15 +6513,18 @@ interface CrashFacts {
 }
 
 /**
- * The crash interrupt body (ADR-0012): the log path, a blank line, the tail
- * the crash event carries, and the outcome-file line, so the Needs-input
- * surface answers "what happened" without the operator opening files. The
- * body persists with the pool state, so the tail freezes at raise time;
- * accepted and desired.
+ * The crash interrupt body (ADR-0012): the crash reason, the log path, a
+ * blank line, the tail the crash event carries, and the outcome-file line,
+ * so the Needs-input surface answers "what happened" without the operator
+ * opening files. The reason leads (issue #127): it is the one line that
+ * says why, and until it was here a launch that died on a dialog read as
+ * a bare log path over an empty tail. The body persists with the pool
+ * state, so the tail freezes at raise time; accepted and desired.
  */
 function crashInterruptBody(result: CrashFacts): string {
   const tail = result.logTail.join("\n");
   return (
+    `crash: ${result.crashReason}\n` +
     `${result.logPath}\n\n` +
     (tail ? `${tail}\n\n` : "") +
     `outcome file: ${result.outcomePath} ` +
@@ -7797,6 +7806,7 @@ async function runTicket(
     logTail: run.logTail,
     outcomePath: run.outcomePath,
     outcomeExists: run.outcomeExists,
+    crashReason: run.crashReason,
     spawnProposals:
       run.ok && !plan.verify ? (run.result.outcome.spawn ?? []) : undefined,
     update: {

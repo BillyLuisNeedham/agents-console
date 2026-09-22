@@ -875,6 +875,7 @@ describe("verify fan-out", () => {
     expect(crashes).toHaveLength(1);
     expect(crashes[0].ticketId).toBe("01");
     expect(crashes[0].body).toBe(
+      "crash: harness exited 3\n" +
       join(poolDir, "runs", "01.attempt-1.log") +
         "\n\n" +
         "outcome file: " +
@@ -4023,6 +4024,7 @@ describe("harness CLIs", () => {
         ticketId: "01",
         kind: "crash",
         body:
+          "crash: harness exited 1\n" +
           join(crashDir, "runs", "01.log") +
           "\n\n" +
           "fake claude ran\n\n" +
@@ -4425,6 +4427,7 @@ describe("spawn and exit facts", () => {
       outcomeExists: false,
     });
     expect(run.interrupts[0]?.body).toBe(
+      "crash: harness exited 7\n" +
       join(poolDir, "runs", "01.log") +
         "\n\n" +
         "first-out-line\nsecond-out-line\n\n" +
@@ -6125,6 +6128,7 @@ describe("interrupts", () => {
         ticketId: "01",
         kind: "crash",
         body:
+          "crash: harness exited 1\n" +
           join(poolDir, "runs", "01.log") +
           "\n\n" +
           "outcome file: " +
@@ -6159,6 +6163,7 @@ describe("interrupts", () => {
         ticketId: "01",
         kind: "crash",
         body:
+          "crash: no outcome written\n" +
           join(poolDir, "runs", "01.log") +
           "\n\n" +
           "outcome file: " +

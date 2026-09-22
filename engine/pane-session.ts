@@ -35,6 +35,16 @@ export interface LaunchCadence {
   landedTimeoutMs: number;
   /** Between Stream-file probes. */
   landedPollMs: number;
+  /**
+   * The workspace trust dialog's pacing (issue #127): how long the dialog
+   * is given to render its controls before the first key, the gap between
+   * moving the highlight and confirming, and how long the TUI is given to
+   * leave the dialog after the confirm. The prototype's numbers; a key sent
+   * before the dialog settles is dropped.
+   */
+  dialogSettleMs: number;
+  dialogKeyGapMs: number;
+  dialogConfirmMs: number;
 }
 
 export const DEFAULT_LAUNCH_CADENCE: LaunchCadence = {
@@ -43,6 +53,9 @@ export const DEFAULT_LAUNCH_CADENCE: LaunchCadence = {
   settleTimeoutMs: 10_000,
   landedTimeoutMs: 10_000,
   landedPollMs: 50,
+  dialogSettleMs: 1_500,
+  dialogKeyGapMs: 800,
+  dialogConfirmMs: 2_000,
 };
 
 // The pane-read line count for readiness and echo polling: a freshly spawned
@@ -76,12 +89,50 @@ export function stillWorkingReason(waitMs: number): string {
     "not be typed; enlist it once its agent is waiting on you"
   );
 }
-// claude's first-run trust dialog marks a directory claude has not seen; the
-// "No, exit" button label names it, and answering it needs pacing — a key
-// sent too early is dropped (prototype finding).
-const TRUST_DIALOG_PATTERN = "No, exit";
-const TRUST_DIALOG_SETTLE_MS = 1_500;
-const TRUST_DIALOG_KEY_GAP_MS = 500;
+/**
+ * A screen claude puts up before its prompt that holds the Launch until it
+ * is answered (issue #127). Each is known by a line of its own body, never
+ * a button label: the workspace dialog's cancel button reads "No, exit" on
+ * a fresh directory and "No, continue without these permissions" once the
+ * directory is trusted, and the other two dialogs carry "No, exit" as well,
+ * so a label names the wrong dialog as easily as the right one. `accept`
+ * is the option the engine may choose, or null for a dialog only the
+ * operator may answer: bypass mode and managed settings are the operator's
+ * risk to accept, never the engine's.
+ *
+ * Read from Claude Code 2.1.276 (the mise install on 2026-09-22): the
+ * workspace dialog's heading and both buttons were confirmed on a live
+ * pane; the other two headings come from the binary's strings. When a
+ * build drifts, this table is the one place to re-read.
+ */
+interface BlockingDialog {
+  name: string;
+  heading: string;
+  accept: string | null;
+}
+export const CLAUDE_BLOCKING_DIALOGS: readonly BlockingDialog[] = [
+  {
+    name: "workspace trust dialog",
+    heading: "Quick safety check",
+    accept: "Yes, I trust this folder",
+  },
+  {
+    name: "bypass-permissions warning",
+    heading: "WARNING: Claude Code running in Bypass Permissions mode",
+    accept: null,
+  },
+  {
+    name: "managed-settings trust dialog",
+    heading: "Managed settings require approval",
+    accept: null,
+  },
+];
+// How many polls a dialog may stay on screen after it was answered before
+// the wait gives up on it: the confirm was sent and paced, so a dialog still
+// up after this is one the keys did not reach, not one still rendering.
+const DIALOG_LINGER_POLLS = 4;
+// The row glyph claude's select puts before the highlighted option.
+const HIGHLIGHT_GLYPH = "❯";
 // How many times a typed paste is retried (with a clear in between) before
 // the caller gives up, and how long echo verification may wait per attempt.
 const PROMPT_TYPED_ATTEMPTS = 3;
@@ -245,17 +296,26 @@ export async function sendWrapperToPane(
   }
 }
 
-// How the readiness wait ended: the ready frame confirmed, the wrapper's
-// exit-code file appeared (the harness exited first), the pane ended with no
-// file behind it, or the timeout.
-export type Readiness = "ready" | "exited" | "pane-ended" | "timed-out";
+/**
+ * How the readiness wait ended: the ready frame confirmed, the wrapper's
+ * exit-code file appeared (the harness exited first), the pane ended with
+ * no file behind it, a Blocking dialog the engine may not or could not
+ * answer, or the timeout. The last two carry the pane's last frame and, when
+ * one was seen, the dialog's name, so the ending can say what was on
+ * screen instead of only that the TUI never came up (issue #127).
+ */
+export type Readiness =
+  | { kind: "ready" }
+  | { kind: "exited" }
+  | { kind: "pane-ended" }
+  | { kind: "blocked"; dialog: string; detail: string; frame: string }
+  | { kind: "timed-out"; dialog: string | null; frame: string };
 
 /**
  * Wait for the harness's ready frame on the pane's rendered content: the
  * ready pattern on READINESS_CONFIRMATIONS consecutive reads, with empty
  * reads not ready (a fresh pane renders mostly blank) and a single match
- * discounted as a boot flicker (prototype findings). claude's first-run trust
- * dialog is answered inside the wait, paced so the keys land. A pane that
+ * discounted as a boot flicker (prototype findings). A pane that
  * ends before the TUI comes up is a botched spawn, failed fast rather than
  * polled to the timeout, and so is a wrapper that finishes before it: the
  * exit-code file appearing means `script` has already returned — the harness
@@ -269,6 +329,14 @@ export type Readiness = "ready" | "exited" | "pane-ended" | "timed-out";
  * (ADR-0014: neither observation trusted alone). A lost pane-end subscription
  * (an old daemon, or a restart) just stops the watch and keeps polling the
  * content.
+ *
+ * claude's Blocking dialogs (CLAUDE_BLOCKING_DIALOGS) are handled inside
+ * the wait. The workspace trust dialog is answered once, by name and with
+ * the highlight verified before the confirm; the clock restarts after the
+ * answer, since the timeout exists to catch a wedged harness and a dialog
+ * that was answered has cost nothing the harness did. A dialog the engine
+ * may not answer, one whose highlight would not move, or one still up after
+ * its answer ends the wait as `blocked` at once rather than at the timeout.
  */
 export async function waitForReadiness(
   socketPath: string,
@@ -276,15 +344,19 @@ export async function waitForReadiness(
   harness: string,
   readyPattern: string,
   exitCodePath: string,
+  cadence: LaunchCadence = DEFAULT_LAUNCH_CADENCE,
 ): Promise<Readiness> {
-  const deadline = Date.now() + READINESS_TIMEOUT_MS;
+  let deadline = Date.now() + READINESS_TIMEOUT_MS;
   let stable = 0;
   let lost = false;
+  const answered = new Set<string>();
+  let lingering = 0;
+  let lastFrame = "";
   const controller = new AbortController();
   const paneEnd = waitForPaneEnd(socketPath, paneId, controller.signal);
   try {
     while (Date.now() < deadline) {
-      if (existsSync(exitCodePath)) return "exited";
+      if (existsSync(exitCodePath)) return { kind: "exited" };
       let text: string;
       if (lost) {
         text = await peekPane(socketPath, paneId, LAUNCH_READ).catch(
@@ -303,39 +375,95 @@ export async function waitForReadiness(
             lost = true;
             continue;
           }
-          return existsSync(exitCodePath) ? "exited" : "pane-ended";
+          return existsSync(exitCodePath) ? { kind: "exited" } : { kind: "pane-ended" };
         }
         text = settled.text;
       }
-      if (harness === "claude" && text.includes(TRUST_DIALOG_PATTERN)) {
-        await answerTrustDialog(socketPath, paneId);
+      if (text.trim() !== "") lastFrame = text;
+      const dialog = harness === "claude" ? blockingDialogOn(text) : null;
+      if (dialog !== null) {
         stable = 0;
+        if (dialog.accept === null) {
+          return {
+            kind: "blocked",
+            dialog: dialog.name,
+            detail: `the ${dialog.name} was on screen, which only the operator may answer`,
+            frame: text,
+          };
+        }
+        if (answered.has(dialog.name)) {
+          if (++lingering >= DIALOG_LINGER_POLLS) {
+            return {
+              kind: "blocked",
+              dialog: dialog.name,
+              detail: `the ${dialog.name} was still on screen after it was answered`,
+              frame: text,
+            };
+          }
+        } else {
+          answered.add(dialog.name);
+          lingering = 0;
+          const accepted = await answerBlockingDialog(socketPath, paneId, dialog.accept, cadence);
+          if (accepted !== "accepted") {
+            return {
+              kind: "blocked",
+              dialog: dialog.name,
+              detail:
+                `the ${dialog.name} was on screen and the highlight did not move to ` +
+                `"${dialog.accept}", so it was left unanswered`,
+              frame: accepted.frame,
+            };
+          }
+          deadline = Date.now() + READINESS_TIMEOUT_MS;
+        }
       } else {
         stable = text.includes(readyPattern) ? stable + 1 : 0;
       }
-      if (stable >= READINESS_CONFIRMATIONS) return "ready";
+      if (stable >= READINESS_CONFIRMATIONS) return { kind: "ready" };
       await sleep(READINESS_POLL_MS);
     }
-    return "timed-out";
+    return { kind: "timed-out", dialog: [...answered].at(-1) ?? null, frame: lastFrame };
   } finally {
     controller.abort();
   }
 }
 
+/** The Blocking dialog whose heading is on the pane, if any. */
+export function blockingDialogOn(text: string): BlockingDialog | null {
+  return CLAUDE_BLOCKING_DIALOGS.find((d) => text.includes(d.heading)) ?? null;
+}
+
 /**
- * Answer claude's first-run trust dialog (prototype finding): settle so the
- * dialog's controls render, move the selection to "Yes, I trust this folder"
- * with down, and confirm with enter. Sending a key before the dialog settles
- * is dropped, so the steps are paced.
+ * Answer a Blocking dialog by choosing the named option (prototype finding,
+ * issue #127): settle so the dialog's controls render, move the highlight
+ * with down, read the pane back and require the highlighted row to name the
+ * option, then confirm with enter and give the TUI time to leave the dialog.
+ * The read between the keys is what keeps a build that reorders the buttons
+ * from being answered blind: enter is never sent at a row that does not
+ * read `accept`. Sending a key before the dialog settles is dropped, so the
+ * steps are paced.
  */
-async function answerTrustDialog(
+async function answerBlockingDialog(
   socketPath: string,
   paneId: string,
-): Promise<void> {
-  await sleep(TRUST_DIALOG_SETTLE_MS);
+  accept: string,
+  cadence: LaunchCadence,
+): Promise<"accepted" | { frame: string }> {
+  await sleep(cadence.dialogSettleMs);
   await paneSendInput(socketPath, paneId, { keys: ["down"] }).catch(() => {});
-  await sleep(TRUST_DIALOG_KEY_GAP_MS);
+  await sleep(cadence.dialogKeyGapMs);
+  const frame = await peekPane(socketPath, paneId, LAUNCH_READ).catch(() => "");
+  if (!highlightedRowReads(frame, accept)) return { frame };
   await paneSendInput(socketPath, paneId, { keys: ["enter"] }).catch(() => {});
+  await sleep(cadence.dialogConfirmMs);
+  return "accepted";
+}
+
+/** Whether the row claude highlights (its `❯` row) names `option`. */
+export function highlightedRowReads(frame: string, option: string): boolean {
+  return frame
+    .split("\n")
+    .some((line) => line.includes(HIGHLIGHT_GLYPH) && line.includes(option));
 }
 
 /**

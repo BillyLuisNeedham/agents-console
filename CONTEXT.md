@@ -154,6 +154,14 @@ _Avoid_: spawn (that's a proposed follow-up ticket), start (the operator starts 
 A Launch whose wrapper command never ran, so no harness ever started: the pane's shell was still starting when the command was typed and swallowed part of it. Retried into a fresh tab a bounded number of times before it counts as the Attempt's crash; never graded, and a Conversation it fails leaves no worktree or branch behind, since nothing ever ran in them. Distinct from a harness that ran and died, whose own exit code is the ending.
 _Avoid_: spawn race (the mechanism, not the thing), dead on arrival, readiness timeout (a launch whose harness ran but never painted; that one is not retried)
 
+**Folder trust**:
+claude's per-directory record that someone has vouched for a directory: asked for with a dialog the first time claude is started interactively there, and skipped ever after. The engine vouches for the directories it makes, the pool worktrees, before an Attempt's tab opens; it never vouches for the operator's own checkout, and never withdraws a vouch. Introduced by ADR-0025 (`docs/adr/0025-engine-vouches-for-the-worktrees-it-makes.md`), closing issue #127.
+_Avoid_: workspace trust (claude's own name for the dialog; a Pool workspace is a herdr container), permissions (what trust unlocks, not the vouch), trust seed (the act of recording a vouch, not the vouch)
+
+**Blocking dialog**:
+A screen a harness puts up before its prompt that holds the Launch until it is answered. The engine answers only claude's Folder trust dialog, by the option's name and never blind; every other Blocking dialog is the operator's to answer, so a Launch that meets one ends as a crash that names the dialog. Not a readiness timeout (the harness is waiting, not wedged) and not an Interrupt (the engine raises those; a harness raises this).
+_Avoid_: prompt (the harness's input line), modal, trust dialog (one Blocking dialog among several)
+
 **Attempt ending**:
 The observation that an Attempt is over. Headless, that is the harness's child exiting. A Terminal-backed attempt has no child, so its ending is whichever of three forms is observed first: herdr reporting the pane's end, the attempt's exit code landing on disk, or the pane found gone with no exit code behind it, which is a crash. The forms are raced, never ranked, because each is blind where another sees; only the exit code landing does not depend on the daemon still talking to us. Recorded in the fifth amendment to ADR-0014, "Attempts may run terminal-backed in herdr panes".
 _Avoid_: exit (one form of an ending, not the ending), timeout (there is none; liveness is the signal), completion (an ending may be a crash), Outcome (the attempt's account of its result; an ending only says it stopped)
