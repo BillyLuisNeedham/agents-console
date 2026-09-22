@@ -33,6 +33,19 @@ export type { LiveAttemptRecord } from "./live-attempts.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
 export type { EnlistPane, PanesResponse, EnlistRequest, EnlistResponse } from "./enlist.ts";
+// The Settings pane (issue #121): the Pool settings payload and the two
+// write bodies live beside the module that validates and writes them, and
+// the Machine defaults shape beside the file it describes.
+export type {
+  MachineDefaultsRequest,
+  MachineDefaultsView,
+  PoolSettingsRequest,
+  PoolSettingsView,
+  RestartResponse,
+  SettingsResponse,
+} from "./pool-settings.ts";
+export type { MachineDefaults } from "./machine-defaults.ts";
+export type { PoolConfig } from "./engine.ts";
 
 import type { ConversationView } from "./conversations.ts";
 import type { Interrupt, Outcome, RunPhase } from "./engine.ts";

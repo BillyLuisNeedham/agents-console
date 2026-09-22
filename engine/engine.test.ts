@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   PERSISTENCE_TICKET_ID,
   REVIEW_TICKET_ID,
@@ -9611,6 +9611,7 @@ describe("worktrees", () => {
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
       issueRunnerPath: runnerFile,
+      machineDefaultsPath: join(dirname(runnerFile), "no-such-defaults.json"),
     });
 
     expect(run.interrupts[0]?.kind).toBe("merge-approval");

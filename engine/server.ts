@@ -25,13 +25,14 @@
 import {
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   readConfig,
   REVIEW_TICKET_ID,
@@ -82,6 +83,21 @@ import {
 } from "./herdr.ts";
 import { listEnlistPanes, type EnlistRequest, type EnlistResponse } from "./enlist.ts";
 import { createJev, type Jev } from "./jev.ts";
+import {
+  defaultMachineDefaultsPaths,
+  readMachineDefaults,
+  readMachineDefaultsFile,
+  writeMachineDefaults,
+  type MachineDefaults,
+  type MachineDefaultsPaths,
+} from "./machine-defaults.ts";
+import {
+  BOOT_ONLY_KEYS,
+  readPoolSettings,
+  writePoolSettings,
+  type RestartResponse,
+  type SettingsResponse,
+} from "./pool-settings.ts";
 import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 // The one git use left in this file is the activity endpoint's diff summary;
@@ -137,6 +153,22 @@ export interface PoolServerOptions {
    * in the process, which is what an in-process test wants.
    */
   onStopRequested?: () => void;
+  /**
+   * What a `POST /api/restart` sets in motion once the route has accepted it
+   * (issue #121). The CLI passes a stop-then-hand-off-to-Boot; absent, the
+   * server runs its own `shutdown()` in place and stays in the process,
+   * which is what an in-process test wants. A Restart is a Stop plus a
+   * relaunch, so the farewell on the stream is identical and the tab that
+   * asked is the one that knows the difference.
+   */
+  onRestartRequested?: () => void;
+  /**
+   * Where the Machine defaults live (issue #121). Tests point this at a temp
+   * home so the Settings routes never read or write the developer's own
+   * file. Defaults to `~/.agent-graphs/defaults.json` with the two legacy
+   * runner files behind it.
+   */
+  machineDefaultsPaths?: MachineDefaultsPaths;
 }
 
 /**
@@ -886,7 +918,12 @@ function versionBelow(version: string, floor: string): boolean {
 
 export function createPoolServer(options: PoolServerOptions): PoolServer {
   const poolDir = resolve(options.poolDir);
-  const refusal = terminalRuntimeRefusal(readConfig(poolDir), Bun.version);
+  // The config as this process booted with it. The terminal refusal, the port
+  // resolution and the Settings pane's `effective` all read this one parse:
+  // the boot-only keys (ADR-0018) are frozen for the life of the run, so a
+  // later re-read could only disagree with what is actually running.
+  const bootConfig = readConfig(poolDir);
+  const refusal = terminalRuntimeRefusal(bootConfig, Bun.version);
   if (refusal !== null) throw new Error(refusal);
   const registryPath = options.registryPath ?? defaultRegistryPath();
   acquirePoolLock(poolDir, registryPath);
@@ -895,6 +932,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const herdrSocket = options.herdrSocket ?? HERDR_SOCKET_DEFAULT;
   const herdrWorkspace = options.herdrWorkspace;
   const jev = options.jev;
+  const machineDefaultsPaths =
+    options.machineDefaultsPaths ?? defaultMachineDefaultsPaths();
   const streamHeartbeatMs =
     options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
   // The pool's ticket metadata, as the engine parses it from the Issue files —
@@ -1148,9 +1187,66 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return { ok: true, paneId };
   }
 
+  // ---------------------------------------------------------------------
+  // Settings (issue #121)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Everything the Settings pane draws, in one payload: the pool's config as
+   * it is on disk right now, which of its keys a save will not reach until a
+   * Restart, what this process actually booted with, the Machine defaults in
+   * force beside the file's own fields, and the harness names to offer.
+   *
+   * The pool half is re-read on every request rather than served from boot:
+   * the pane has to show a hand edit, and a save has to be reflected back
+   * from the file it just wrote, not from this process's memory of it.
+   */
+  function settingsPayload(boundPort: number): SettingsResponse {
+    const pool = readPoolSettings(poolDir);
+    return {
+      pool: {
+        path: pool.path,
+        config: pool.config,
+        bootOnly: [...BOOT_ONLY_KEYS],
+        effective: {
+          port: boundPort,
+          terminal: bootConfig.terminal ?? null,
+        },
+      },
+      machine: {
+        path: machineDefaultsPaths.file,
+        defaults: readMachineDefaults(machineDefaultsPaths),
+        own: readMachineDefaultsFile(machineDefaultsPaths.file),
+      },
+      harnesses: Object.keys(harnesses).sort(),
+    };
+  }
+
+  /**
+   * Where the tab should look for the Console once Boot has relaunched it.
+   * The order is the port resolution's own (ports.ts): a `--port` this CLI
+   * was started with is passed through to Boot and wins, then the pin in
+   * console.json, then this server's bound port, which Boot's own resolution
+   * will land on again. The pin is re-read from disk because the pane may
+   * have saved a new one a moment ago, and that is exactly the save a
+   * Restart exists to apply. Port 0 is never a pin, so it is not one here.
+   */
+  function relaunchPort(boundPort: number): number {
+    const cliPin =
+      options.port !== undefined && options.port !== 0 ? options.port : undefined;
+    if (cliPin !== undefined) return cliPin;
+    try {
+      return readPoolSettings(poolDir).config.port ?? boundPort;
+    } catch {
+      // A console.json edited into a broken state since boot: the bound port
+      // is still the honest answer, and the Boot script will say the rest.
+      return boundPort;
+    }
+  }
+
   const resolution = resolvePort(
     options.port,
-    readConfig(poolDir).port,
+    bootConfig.port,
     options.defaultPort ?? DEFAULT_PORT,
   );
   let server: Bun.Server<undefined>;
@@ -1189,6 +1285,15 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let stopRequested = false;
   const requestStop = (): void => {
     if (options.onStopRequested) options.onStopRequested();
+    else void shutdown();
+  };
+  // A Restart is the same stop with a relaunch behind it (issue #121), so it
+  // shares the latch above: a Stop and a Restart racing each other land one
+  // teardown, and whichever arrived first decides whether a Console comes
+  // back. Absent an owner the server shuts itself down in place, which is
+  // what an in-process test wants; nothing relaunches it there.
+  const requestRestart = (): void => {
+    if (options.onRestartRequested) options.onRestartRequested();
     else void shutdown();
   };
   const stopUnderWay = (): boolean => stopRequested || stopping !== null;
@@ -1240,6 +1345,97 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             setTimeout(requestStop, 0);
           }
           return Response.json({ stopping: true }, { status: 202 });
+        }
+
+        // Restart this server from the Console (issue #121): stop with the
+        // same farewell a Stop sends, then hand off to Boot for the same
+        // Pool, so boot-only Pool settings and a fresh UI build take effect.
+        // Allowed in any phase, unlike Stop: a Restart is how a live run
+        // picks up a new port or terminal setting, and the operator has
+        // already passed the Console's inline confirm to get here. Headless
+        // attempts are killed by the shutdown and terminal-backed ones stay
+        // in their tabs to be re-adopted, exactly as on any other restart.
+        // The 202 names the port the relaunch will listen on, which is the
+        // one piece a reconnecting tab cannot work out for itself.
+        if (pathname === "/api/restart" && req.method === "POST") {
+          const port = relaunchPort(bunServer.port ?? resolution.port);
+          if (!stopUnderWay()) {
+            stopRequested = true;
+            // Off the request's own turn, so the 202 is on the wire before
+            // serving stops underneath it.
+            setTimeout(requestRestart, 0);
+          }
+          return Response.json({ ok: true, port } satisfies RestartResponse, {
+            status: 202,
+          });
+        }
+
+        // The Settings pane's reads and writes (issue #121). The pool's
+        // config file stays the source of truth: this is a second way to
+        // edit it, never a second copy of it.
+        if (pathname === "/api/settings" && req.method === "GET") {
+          try {
+            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
+          } catch (err) {
+            // Only a console.json hand-edited into a broken state since boot
+            // reaches here: the server parsed it to start at all.
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 500 },
+            );
+          }
+        }
+
+        // A patch, not a replacement: `assign` and any key this server does
+        // not know survive the write (pool-settings.ts). The assignment slice
+        // of what lands here (defaults, resolver) reaches the run on its own,
+        // without a restart: the engine re-reads console.json from disk at
+        // every super-step boundary and compares it against the text it last
+        // considered (ADR-0018), so nothing between here and there caches the
+        // file in a way that could swallow this write. The boot-only keys
+        // need the Restart, which is what `bootOnly` in the reply is for.
+        if (pathname === "/api/settings/pool" && req.method === "PUT") {
+          try {
+            const body = (await req.json()) as { config?: unknown };
+            const patch = body?.config;
+            if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+              throw new Error("settings: config must be an object");
+            }
+            writePoolSettings(poolDir, patch as Record<string, unknown>, {
+              harnesses: Object.keys(harnesses),
+            });
+            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 400 },
+            );
+          }
+        }
+
+        // The Machine defaults are written whole, the way the file itself is
+        // (machine-defaults.ts): the pane shows every field, so a field left
+        // empty is the operator clearing it. The legacy runner files are
+        // never written, only read behind this one.
+        if (pathname === "/api/settings/machine" && req.method === "PUT") {
+          try {
+            const body = (await req.json()) as { defaults?: unknown };
+            const defaults = body?.defaults;
+            if (
+              typeof defaults !== "object" ||
+              defaults === null ||
+              Array.isArray(defaults)
+            ) {
+              throw new Error("settings: defaults must be an object");
+            }
+            writeMachineDefaults(defaults as MachineDefaults, machineDefaultsPaths.file);
+            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
+          } catch (err) {
+            return Response.json(
+              { error: err instanceof Error ? err.message : String(err) },
+              { status: 400 },
+            );
+          }
         }
 
         if (pathname === "/api/resume" && req.method === "POST") {
@@ -1735,6 +1931,12 @@ function runServerCli(): void {
       ...(herdrWorkspace !== undefined ? { herdrWorkspace } : {}),
       jev,
       onStopRequested: () => stopAndExit("stop requested from the Console"),
+      onRestartRequested: () => {
+        console.log("restart requested from the Console: handing off to Boot");
+        stopAndExit("restart requested from the Console", () =>
+          handOffToBoot(poolDir, port),
+        );
+      },
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
@@ -1743,27 +1945,74 @@ function runServerCli(): void {
   void server.start().then(() => {
     console.log(`pool server on ${server.url} (${poolDir})`);
   });
-  installShutdownHandlers(stopAndExit);
+  // Wrapped rather than passed straight through: a signal handler is called
+  // with (signal, code), and the second argument must not arrive as this
+  // stop's after-stop hook.
+  installShutdownHandlers((reason) => stopAndExit(reason));
+}
+
+/**
+ * The Restart's second half (issue #121): start Boot for the same Pool and
+ * let this process go. Boot waits for the pool lock and the port to come
+ * free on its own, so nothing here has to sequence against the shutdown that
+ * just finished. Detached with its output appended to the pool's boot log,
+ * because the terminal this server was launched from is about to get its
+ * prompt back and the relaunch has to outlive it. A `--port` this CLI was
+ * started with is passed on, so a one-off port override survives the
+ * Restart the way the operator set it.
+ */
+function handOffToBoot(poolDir: string, port: number | undefined): void {
+  const runsDir = join(poolDir, "runs");
+  mkdirSync(runsDir, { recursive: true });
+  const bootLog = openSync(join(runsDir, "boot.log"), "a");
+  const child = Bun.spawn(
+    [
+      "bun",
+      "run",
+      join(import.meta.dir, "boot-cli.ts"),
+      "--pool",
+      poolDir,
+      "--yes",
+      "--relaunch",
+      ...(port !== undefined ? ["--port", String(port)] : []),
+    ],
+    {
+      cwd: join(import.meta.dir, ".."),
+      stdout: bootLog,
+      stderr: bootLog,
+      stdin: "ignore",
+      detached: true,
+    },
+  );
+  child.unref();
 }
 
 /**
  * The CLI's one way out (ADR-0017): stop the attempts, release the pool,
- * exit. A signal and a Console stop (issue #97) both take it, and a second
- * arrival during the stop is ignored rather than cutting the stop short. A
- * stop that hangs past its bound exits anyway, so the operator is never
- * left with a server that will not die.
+ * exit. A signal, a Console stop (issue #97) and a Console restart (issue
+ * #121) all take it, and a second arrival during the stop is ignored rather
+ * than cutting the stop short. A stop that hangs past its bound exits
+ * anyway, so the operator is never left with a server that will not die.
+ * `afterStop` is the Restart's handover to Boot, run once the stop has
+ * finished and immediately before the exit.
  */
 function shutdownThenExit(
   server: () => PoolServer,
-): (reason: string) => void {
+): (reason: string, afterStop?: () => void) => void {
   let stopping = false;
-  return (reason) => {
+  return (reason, afterStop) => {
     if (stopping) return;
     stopping = true;
     console.log(`${reason}: stopping attempts, then exiting`);
     const bound = setTimeout(() => process.exit(1), SHUTDOWN_HARD_LIMIT_MS);
     void server().shutdown().then(
-      () => process.exit(0),
+      () => {
+        // A Restart's handover, run only on the orderly path: a stop that
+        // hangs past its bound exits without relaunching rather than leaving
+        // two Consoles racing for one pool, and the operator boots again.
+        afterStop?.();
+        process.exit(0);
+      },
       (err) => {
         console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);

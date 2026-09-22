@@ -9,8 +9,12 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
+import {
+  defaultMachineDefaultsPaths,
+  readMachineDefaults,
+  type MachineDefaultsPaths,
+} from "./machine-defaults.ts";
 import {
   appendEvent,
   attemptExitCodeName,
@@ -248,6 +252,12 @@ export interface PoolConfig {
   // named herdr tab per attempt and records its pane id on the spawned
   // event. Absent means headless, exactly as before.
   terminal?: "herdr";
+  // Prose the setup skill writes here and the engine never reads: agents meet
+  // both through the pool's AGENT.md. Declared so the Console's Settings pane
+  // (issue #121) edits them as Pool settings rather than as unknown keys it
+  // has to carry blind.
+  reviewer?: string;
+  checkpoint?: string;
 }
 
 export type InterruptKind =
@@ -361,7 +371,14 @@ interface RunOptions {
   poolDir: string;
   harnesses?: Record<string, HarnessCommand>;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
+  /** The legacy `~/.issue-runner` file, still the fallback for a harness or
+   *  model the Machine defaults file does not carry. Tests point it at a
+   *  temp file. */
   issueRunnerPath?: string;
+  /** The Machine defaults file (issue #121), which wins field by field over
+   *  the legacy one above. Tests point it at a temp file so the resolver's
+   *  fallback never reads the developer's own. */
+  machineDefaultsPath?: string;
   // The checkpoint store seam: tests substitute a store whose write throws
   // on demand to prove a persist failure retries, then interrupts, and never
   // closes the store. Defaults to the real sqlite store.
@@ -667,7 +684,10 @@ interface Session {
   // drive starts; every read goes through handleOf, which guards that.
   handle: PoolRun | null;
   onSnapshot?: (snapshot: PoolSnapshot) => void;
-  issueRunnerPath: string;
+  /** Where the Machine defaults live (issue #121): the JSON file of record
+   *  plus the two legacy runner files behind it. The resolver's harness and
+   *  model fallback reads through these. */
+  machineDefaults: MachineDefaultsPaths;
   // Where terminal-backed attempts reach the herdr daemon (ADR-0014).
   herdrSocket: string;
   // The launch half's timings, when a test overrides them (RunOptions).
@@ -965,7 +985,15 @@ export function startPool(options: RunOptions): PoolRun {
     answerWaiters: new Map(),
     handle: null,
     onSnapshot: options.onSnapshot,
-    issueRunnerPath: options.issueRunnerPath ?? join(homedir(), ".issue-runner"),
+    machineDefaults: {
+      ...defaultMachineDefaultsPaths(),
+      ...(options.machineDefaultsPath !== undefined
+        ? { file: options.machineDefaultsPath }
+        : {}),
+      ...(options.issueRunnerPath !== undefined
+        ? { issueRunner: options.issueRunnerPath }
+        : {}),
+    },
     herdrSocket,
     ...(options.launchCadence ? { launchCadence: options.launchCadence } : {}),
     poolWorkspace: {
@@ -3935,8 +3963,8 @@ interface ResolverAttempt {
 }
 
 // The resolver agent for a conflicting merge: the harness comes from
-// console.json's resolver= key, falling back to the ~/.issue-runner default,
-// with the model resolved the same way. An explicit "none" (or empty) resolver
+// console.json's resolver= key, falling back to the Machine defaults, with
+// the model resolved the same way. An explicit "none" (or empty) resolver
 // opts out of the resolver, so the conflict takes the manual path; an explicit
 // resolver that names an unknown harness fails fast, matching how a ticket's
 // unknown harness is rejected. No configured resolver at all also means the
@@ -3954,9 +3982,12 @@ function resolveResolver(session: Session): ResolverSpec | null {
   let harness = explicit;
   let model = spec.model?.trim() || config.defaults?.model;
   if (!harness || !model) {
-    const runner = readIssueRunner(session.issueRunnerPath);
-    if (!harness) harness = runner?.harness;
-    if (!model) model = runner?.model;
+    // The Machine defaults (issue #121), with the legacy `~/.issue-runner`
+    // file filled in behind them field by field: a machine that never wrote
+    // the new file resolves exactly as it always did.
+    const machine = readMachineDefaults(session.machineDefaults);
+    if (!harness) harness = machine.harness;
+    if (!model) model = machine.model;
   }
   if (!harness || !model) return null;
   if (!session.harnesses[harness]) {
@@ -3969,18 +4000,6 @@ function resolveResolver(session: Session): ResolverSpec | null {
     return null;
   }
   return { harness, model };
-}
-
-function readIssueRunner(
-  path: string,
-): { harness?: string; model?: string } | null {
-  if (!existsSync(path)) return null;
-  const fields = new Map<string, string>();
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const eq = line.indexOf("=");
-    if (eq > 0) fields.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
-  }
-  return { harness: fields.get("harness"), model: fields.get("model") };
 }
 
 // The resolver's result: a `resolved` boolean and an optional note. Not an

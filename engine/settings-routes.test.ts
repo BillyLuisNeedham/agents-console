@@ -1,0 +1,361 @@
+/// <reference types="bun" />
+
+/**
+ * The Settings and Restart routes (issue #121). The Console's Settings pane
+ * is a second way to edit the pool's own config file, never a second copy of
+ * it, so these cases are mostly about what a write leaves alone. Restart is
+ * the Stop route's twin with one deliberate difference: any phase may take
+ * it, because a Restart is how a live run picks up a boot-only setting.
+ */
+
+import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createPoolServer, type PoolServer } from "./server.ts";
+import type { PoolConfig } from "./engine.ts";
+import type { SettingsResponse } from "./pool-settings.ts";
+import type { MachineDefaults, MachineDefaultsPaths } from "./machine-defaults.ts";
+import {
+  STUB_DEFAULTS,
+  cleanupPools,
+  makePool,
+  registerTempDir,
+  stubHarness,
+} from "./pool-fixture.ts";
+import { makeTempDir } from "./tmp.ts";
+
+const servers: PoolServer[] = [];
+
+afterEach(async () => {
+  await cleanupPools(servers);
+});
+
+const READY = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+/** A temp home for the Machine defaults, so no test reads or writes the
+ *  developer's own `~/.agent-graphs/defaults.json`. */
+function machineHome(): MachineDefaultsPaths {
+  const home = makeTempDir("machine-home-");
+  registerTempDir(home);
+  return {
+    file: join(home, "defaults.json"),
+    issueRunner: join(home, ".issue-runner"),
+    consoleRunner: join(home, ".console-runner"),
+  };
+}
+
+interface Rig {
+  poolDir: string;
+  server: PoolServer;
+  machine: MachineDefaultsPaths;
+}
+
+async function startRig(
+  config: Partial<PoolConfig> = {},
+  options: { onRestartRequested?: () => void; start?: boolean } = {},
+): Promise<Rig> {
+  const poolDir = makePool({
+    tickets: [{ file: "01-a.md", marker: READY }],
+    config: { ...STUB_DEFAULTS, ...config },
+  });
+  const machine = machineHome();
+  const server = createPoolServer({
+    poolDir,
+    port: 0,
+    harnesses: stubHarness(poolDir, {}).harnesses,
+    distDir: "/nonexistent",
+    registryPath: join(poolDir, "fleet.json"),
+    machineDefaultsPaths: machine,
+    ...(options.onRestartRequested
+      ? { onRestartRequested: options.onRestartRequested }
+      : {}),
+  });
+  servers.push(server);
+  if (options.start !== false) {
+    await server.start();
+    await server.settled();
+  }
+  return { poolDir, server, machine };
+}
+
+function onDisk(poolDir: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(poolDir, "console.json"), "utf8"));
+}
+
+async function getSettings(server: PoolServer): Promise<SettingsResponse> {
+  const res = await fetch(`${server.url}/api/settings`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as SettingsResponse;
+}
+
+function putJson(server: PoolServer, path: string, body: unknown): Promise<Response> {
+  return fetch(`${server.url}${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function waitFor(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(10);
+  }
+}
+
+/** Read a snapshot stream to its end, or until the deadline. */
+async function drainStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms = 10_000,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) return text;
+    const step = await Promise.race([
+      reader.read().then(
+        (r) => (r.done ? ({ kind: "end" } as const) : ({ kind: "chunk", value: r.value } as const)),
+        () => ({ kind: "end" }) as const,
+      ),
+      Bun.sleep(left).then(() => ({ kind: "end" }) as const),
+    ]);
+    if (step.kind !== "chunk") return text;
+    text += decoder.decode(step.value, { stream: true });
+  }
+}
+
+describe("GET /api/settings", () => {
+  it("serves the pool's config, the boot-only keys, what this process booted with, and the harnesses", async () => {
+    const { poolDir, server, machine } = await startRig({
+      port: 8790,
+      terminal: undefined,
+      assign: { "01": { harness: "stub", verify: 2 } },
+    });
+    writeFileSync(machine.issueRunner, "harness=opencode\nmodel=oc/flash\n");
+
+    const settings = await getSettings(server);
+
+    expect(settings.pool.path).toBe(join(poolDir, "console.json"));
+    expect(settings.pool.config).toEqual({
+      defaults: { harness: "stub", model: "m" },
+      port: 8790,
+      assign: { "01": { harness: "stub", verify: 2 } },
+    });
+    expect(settings.pool.bootOnly).toEqual([
+      "roster",
+      "agents",
+      "selection",
+      "terminal",
+      "port",
+    ]);
+    // The saved port is 8790 and this process bound an ephemeral one, which
+    // is exactly the disagreement the pane badges as "on the next Restart".
+    expect(settings.pool.effective.port).toBe(Number(new URL(server.url).port));
+    expect(settings.pool.effective.port).not.toBe(8790);
+    expect(settings.pool.effective.terminal).toBeNull();
+
+    // The machine half: the legacy file behind the JSON one, and the JSON
+    // file's own fields (none yet) reported separately, because the pane
+    // writes back only its own.
+    expect(settings.machine.path).toBe(machine.file);
+    expect(settings.machine.defaults).toEqual({ harness: "opencode", model: "oc/flash" });
+    expect(settings.machine.own).toEqual({});
+
+    expect(settings.harnesses).toContain("stub");
+    expect([...settings.harnesses]).toEqual([...settings.harnesses].sort());
+  });
+
+  it("reports the terminal this process booted with", async () => {
+    const { server } = await startRig({ terminal: "herdr" }, { start: false });
+    expect((await getSettings(server)).pool.effective.terminal).toBe("herdr");
+  });
+});
+
+describe("PUT /api/settings/pool", () => {
+  it("writes the patch, preserves assign, and answers with the whole payload", async () => {
+    const { poolDir, server } = await startRig({
+      assign: { "01": { harness: "stub", verify: 2 } },
+    });
+
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { defaults: { harness: "stub", model: "m2" }, roster: "- deepseek" },
+    });
+    expect(res.status).toBe(200);
+    const settings = (await res.json()) as SettingsResponse;
+
+    expect(settings.pool.config).toEqual({
+      defaults: { harness: "stub", model: "m2" },
+      assign: { "01": { harness: "stub", verify: 2 } },
+      roster: "- deepseek",
+    });
+    expect(onDisk(poolDir)).toEqual(settings.pool.config as never);
+  });
+
+  it("refuses a harness the pool does not know with a 400 that names the field", async () => {
+    const { poolDir, server } = await startRig();
+    const before = onDisk(poolDir);
+
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { defaults: { harness: "gpt", model: "m" } },
+    });
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("defaults.harness");
+    expect(onDisk(poolDir)).toEqual(before);
+  });
+
+  it("refuses a body without a config object", async () => {
+    const { server } = await startRig();
+    const res = await putJson(server, "/api/settings/pool", { config: "everything" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("config");
+  });
+});
+
+describe("PUT /api/settings/machine", () => {
+  it("writes the injected file and answers with the whole payload", async () => {
+    const { server, machine } = await startRig();
+    expect(existsSync(machine.file)).toBe(false);
+
+    const res = await putJson(server, "/api/settings/machine", {
+      defaults: { harness: "claude", model: "opus", terminal: "herdr" } satisfies MachineDefaults,
+    });
+
+    expect(res.status).toBe(200);
+    const settings = (await res.json()) as SettingsResponse;
+    expect(settings.machine.own).toEqual({
+      harness: "claude",
+      model: "opus",
+      terminal: "herdr",
+    });
+    expect(JSON.parse(readFileSync(machine.file, "utf8"))).toEqual(settings.machine.own as never);
+  });
+
+  it("refuses an illegal terminal with a 400 and leaves the file alone", async () => {
+    const { server, machine } = await startRig();
+    const res = await putJson(server, "/api/settings/machine", {
+      defaults: { harness: "claude", terminal: "tmux" },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("terminal");
+    expect(existsSync(machine.file)).toBe(false);
+  });
+});
+
+describe("POST /api/restart (#121)", () => {
+  // Stop refuses every phase but done, because any other phase may have work
+  // in flight. Restart is the opposite: it exists to bring a live pool back
+  // on new boot-only settings, and the operator has already confirmed.
+  it("is accepted before the pool has started, where a stop is refused", async () => {
+    let restarts = 0;
+    const { server } = await startRig({}, { start: false, onRestartRequested: () => { restarts += 1; } });
+
+    const stop = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(stop.status).toBe(409);
+
+    const restart = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(restart.status).toBe(202);
+    await waitFor(() => restarts > 0, "the restart callback to fire");
+  });
+
+  it("is accepted while an attempt is in flight", async () => {
+    let restarts = 0;
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: READY }],
+      config: STUB_DEFAULTS,
+    });
+    const sentinel = join(poolDir, "go");
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      harnesses: stubHarness(poolDir, { "01": { waitFor: sentinel } }).harnesses,
+      distDir: "/nonexistent",
+      registryPath: join(poolDir, "fleet.json"),
+      machineDefaultsPaths: machineHome(),
+      onRestartRequested: () => {
+        restarts += 1;
+      },
+    });
+    servers.push(server);
+    await server.start();
+    await waitFor(() => server.latest?.phase === "running", "the attempt to be in flight");
+
+    const res = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(res.status).toBe(202);
+    await waitFor(() => restarts > 0, "the restart callback to fire");
+
+    // Release the held attempt rather than leaving a live harness for the
+    // teardown to race; the callback owns the stop, so this server is still up.
+    writeFileSync(sentinel, "go");
+    expect((await fetch(`${server.url}/api/state`)).status).toBe(200);
+  }, 20_000);
+
+  // The port is the one thing a reconnecting tab cannot work out for itself:
+  // a Restart is how a newly pinned port takes effect, so the reply names it.
+  it("names the pinned port a relaunch will bind, and this server's own when nothing is pinned", async () => {
+    const pinned = await startRig({ port: 8790 }, { onRestartRequested: () => {} });
+    const res = await fetch(`${pinned.server.url}/api/restart`, { method: "POST" });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ok: true, port: 8790 });
+
+    const free = await startRig({}, { onRestartRequested: () => {} });
+    const own = await fetch(`${free.server.url}/api/restart`, { method: "POST" });
+    expect(await own.json()).toEqual({
+      ok: true,
+      port: Number(new URL(free.server.url).port),
+    });
+  });
+
+  // A port saved through the pane a moment ago is the port the relaunch will
+  // bind, so the answer reads the file rather than this process's memory.
+  it("names a port saved through the pane, not the one this process booted with", async () => {
+    const { server } = await startRig({}, { onRestartRequested: () => {} });
+    expect((await putJson(server, "/api/settings/pool", { config: { port: 8791 } })).status).toBe(
+      200,
+    );
+    const res = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(await res.json()).toEqual({ ok: true, port: 8791 });
+  });
+
+  it("hands a restart to onRestartRequested exactly once, even on a double POST", async () => {
+    let restarts = 0;
+    const { server } = await startRig({}, { onRestartRequested: () => { restarts += 1; } });
+
+    const first = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    const second = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+
+    await waitFor(() => restarts > 0, "the restart callback to fire");
+    await Bun.sleep(100);
+    expect(restarts).toBe(1);
+
+    // The callback owns the stop, so this server is untouched.
+    expect((await fetch(`${server.url}/api/state`)).status).toBe(200);
+    expect(server.latest?.phase).not.toBe("stopped");
+  });
+
+  // ADR-0019's farewell is owed to a Restart exactly as to a Stop: the tab
+  // that asked knows it was a restart, and every other tab sees the same
+  // orderly goodbye rather than a dropped connection.
+  it("sends the farewell `stopped` snapshot and ends the stream", async () => {
+    const { server } = await startRig();
+
+    const stream = await fetch(`${server.url}/api/stream`);
+    const reader = stream.body!.getReader();
+
+    const res = await fetch(`${server.url}/api/restart`, { method: "POST" });
+    expect(res.status).toBe(202);
+
+    const text = await drainStream(reader);
+    expect(text).toContain('"phase":"stopped"');
+
+    // Joining the in-flight stop (shutdown is latched) makes the port
+    // assertion exact rather than racy.
+    await server.shutdown();
+    await expect(fetch(`${server.url}/api/state`)).rejects.toThrow();
+  }, 20_000);
+});
