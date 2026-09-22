@@ -563,6 +563,7 @@ describe("Conversation ending", () => {
         harnesses: { ...convoHarnesses, "resolver-stub": resolverHarness },
         herdrSocket: fake.socketPath,
         issueRunnerPath: join(resolverStubPath, "no-such-issue-runner"),
+        machineDefaultsPath: join(resolverStubPath, "no-such-defaults.json"),
       });
       const view = await run.startConversation({ title: "Conflicting talk" });
       const worktree = worktreePathFor(poolDir, view.id);

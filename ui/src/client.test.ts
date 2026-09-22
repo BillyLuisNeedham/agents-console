@@ -7,7 +7,11 @@ import {
   STREAM_HEARTBEAT_MS,
   STREAM_SILENCE_FACTOR,
 } from "./client";
-import type { ConversationView, EnrichedSnapshot } from "./project";
+import type {
+  ConversationView,
+  EnrichedSnapshot,
+  SettingsResponse,
+} from "./project";
 
 // The client's stream seam: a fake fetch feeding controllable byte streams,
 // and fake timers to drive the silence watchdog, so the self-healing behavior
@@ -564,5 +568,106 @@ describe("PoolClient.stop (issue #97)", () => {
     globalThis.fetch = (() =>
       Promise.reject(new Error("fetch failed"))) as unknown as typeof globalThis.fetch;
     await expect(new PoolClient().stop()).rejects.toThrow("fetch failed");
+  });
+});
+describe("PoolClient settings and restart (ADR-0026)", () => {
+  const SETTINGS: SettingsResponse = {
+    pool: {
+      path: "/tmp/pool/console.json",
+      config: { defaults: { harness: "claude" }, port: 4300 },
+      bootOnly: ["roster", "agents", "selection", "terminal", "port"],
+      effective: { port: 4300, terminal: null, stale: [] },
+    },
+    machine: {
+      path: "/home/me/.agent-graphs/defaults.json",
+      defaults: { harness: "claude", engine: "/repo/engine" },
+      own: { harness: "claude" },
+    },
+    harnesses: ["claude", "opencode"],
+  };
+
+  function jsonFetch(status: number, body: unknown, bodyFails = false) {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: () =>
+          bodyFails ? Promise.reject(new Error("not json")) : Promise.resolve(body),
+      } as unknown as Response);
+    }) as unknown as typeof globalThis.fetch;
+    return { fetch, calls };
+  }
+
+  it("reads the settings payload verbatim", async () => {
+    const { fetch, calls } = jsonFetch(200, SETTINGS);
+    globalThis.fetch = fetch;
+    const result = await new PoolClient().getSettings();
+    expect(calls[0]!.url).toBe("/api/settings");
+    expect(result).toEqual(SETTINGS);
+  });
+
+  it("PUTs a pool patch under `config` and answers with the re-read payload", async () => {
+    const { fetch, calls } = jsonFetch(200, SETTINGS);
+    globalThis.fetch = fetch;
+    const result = await new PoolClient().savePoolSettings({ port: null });
+    expect(calls[0]!.url).toBe("/api/settings/pool");
+    expect(calls[0]!.init?.method).toBe("PUT");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({
+      config: { port: null },
+    });
+    expect(result).toEqual(SETTINGS);
+  });
+
+  it("PUTs machine defaults under `defaults`", async () => {
+    const { fetch, calls } = jsonFetch(200, SETTINGS);
+    globalThis.fetch = fetch;
+    await new PoolClient().saveMachineDefaults({ harness: "opencode" });
+    expect(calls[0]!.url).toBe("/api/settings/machine");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({
+      defaults: { harness: "opencode" },
+    });
+  });
+
+  it("surfaces a 400's error as the thrown Error's message", async () => {
+    const { fetch } = jsonFetch(400, { error: "port 80 is privileged" });
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().savePoolSettings({ port: 80 })).rejects.toThrow(
+      "port 80 is privileged",
+    );
+  });
+
+  it("falls back to a generic message when a refusal carries no error body", async () => {
+    const { fetch } = jsonFetch(500, null, true);
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().saveMachineDefaults({})).rejects.toThrow(
+      "settings save failed: 500",
+    );
+  });
+
+  it("POSTs /api/restart and answers with the port the relaunch will use", async () => {
+    const { fetch, calls } = jsonFetch(202, { ok: true, port: 4311 });
+    globalThis.fetch = fetch;
+    const result = await new PoolClient().restart();
+    expect(calls[0]!.url).toBe("/api/restart");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(result.port).toBe(4311);
+  });
+
+  it("surfaces a refused restart's reason", async () => {
+    const { fetch } = jsonFetch(409, { error: "no boot script on this pool" });
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().restart()).rejects.toThrow(
+      "no boot script on this pool",
+    );
+  });
+
+  it("falls back to a generic message for a refusal with no reason", async () => {
+    const { fetch } = jsonFetch(500, null, true);
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().restart()).rejects.toThrow(
+      "pool restart failed: 500",
+    );
   });
 });

@@ -15,6 +15,7 @@ import type {
   EnrichedTicketState,
   Interrupt,
   Outcome,
+  PoolConfig,
   QueuedAnswer,
   ResumeAction,
   RunPhase,
@@ -43,10 +44,16 @@ export type {
   EnrichedSnapshot,
   EnrichedTicketState,
   InterruptKind,
+  MachineDefaults,
+  MachineDefaultsView,
   PanesResponse,
+  PoolConfig,
+  PoolSettingsView,
   QueuedAnswer,
+  RestartResponse,
   ResumeAction,
   RunPhase,
+  SettingsResponse,
   StartConversationRequest,
   TerminalPeekResponse,
   TicketActivityResponse,
@@ -1223,6 +1230,72 @@ export function poolAssignmentDefaults(
  */
 export function isTerminalBacked(config: Record<string, unknown>): boolean {
   return config.terminal === "herdr";
+}
+
+// ---------------------------------------------------------------------------
+// Settings (ADR-0026, issue #121): the wire shapes are the engine's, declared
+// beside the module that validates and writes the file and re-exported above.
+// What lives here is the Console's own half: which boot-only keys are waiting
+// on a Restart, and the patch body the Settings pane sends.
+// ---------------------------------------------------------------------------
+
+/**
+ * The keys a running server cannot pick up from a Config reload, as the
+ * badge logic names them. The engine's BOOT_ONLY_KEYS says the same thing and
+ * the payload carries it twice over, as `bootOnly` and as the `effective.stale`
+ * subset the badges read, but both are arrays of plain strings: the union is
+ * spelled again here so the pane's badge lookups are checked against a closed
+ * set rather than against whatever the wire happened to send.
+ */
+export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port";
+
+/**
+ * The PUT /api/settings/pool body's `config`. The engine takes any subset of
+ * its settings keys and leaves the rest alone; the pane shows them all at
+ * once, so it sends them all, a key as null when the operator emptied it
+ * (port back to auto, terminal back to headless). `defaults` travels whole,
+ * its own fields blanked the same way.
+ */
+export interface PoolConfigPatch {
+  defaults?: { harness: string; model: string; drivers: string };
+  resolver?: PoolConfig["resolver"] | null;
+  terminal?: "herdr" | null;
+  port?: number | null;
+  selection?: "auto" | "human" | null;
+  roster?: string | null;
+  agents?: string | null;
+  reviewer?: string | null;
+  checkpoint?: string | null;
+}
+
+/**
+ * Which boot-only keys are waiting on a Restart, narrowed from the engine's
+ * `effective.stale` to the union the pane badges. The engine derives that
+ * list by comparing the file against what this process actually booted with,
+ * which is strictly more than a tab can know on its own: the badge survives a
+ * reload, shows in a second tab, and catches an edit made in the file by hand.
+ *
+ * Port is the one key whose reading is not the obvious one, and the engine
+ * owns that judgement rather than this projection. It reports staleness as
+ * "a Restart would move the Console", so a pin matching the running port is
+ * not stale, and clearing a pin is not stale either, because the handover
+ * pins the running port so the restarting tab can find the server again. A
+ * cleared pin takes effect at the next cold Boot instead.
+ */
+export function projectRestartBadges(stale: readonly string[]): Set<BootOnlyKey> {
+  const badges = new Set<BootOnlyKey>();
+  for (const key of stale) {
+    if (
+      key === "roster" ||
+      key === "agents" ||
+      key === "selection" ||
+      key === "terminal" ||
+      key === "port"
+    ) {
+      badges.add(key);
+    }
+  }
+  return badges;
 }
 
 /** One row of the Enlist picker: a live herdr pane as the operator reads it. */

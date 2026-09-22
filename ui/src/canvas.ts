@@ -26,7 +26,7 @@ import {
   type UtilityCardView,
   type VitalsView,
 } from "./project";
-import type { StopView } from "./view";
+import type { RestartView, StopView } from "./view";
 import {
   edgePath,
   layoutStorageKey,
@@ -226,6 +226,10 @@ export interface CanvasModel {
   seq: number;
   error: string | null;
   stop: StopView;
+  /** The Restart control's slice (ADR-0026): the canvas renders none of the
+   *  control (it lives in the Settings pane) but the status line and the
+   *  stopped notice both read `waiting`, the mark of the tab that asked. */
+  restart: RestartView;
   /** The pool is Terminal-backed (ADR-0014): the header offers Enlist only
    *  then, so a headless pool is never shown an action it cannot perform. */
   terminalBacked: boolean;
@@ -240,6 +244,11 @@ export interface CanvasModel {
  */
 export function canvasStatusText(model: CanvasModel): string {
   if (model.phase === "stopped") {
+    // A Restart is a stop with a relaunch behind it, so the tab that asked
+    // for one reads the same farewell as "restarting", not "stopped": the
+    // server is coming back, and saying otherwise would be wrong for the
+    // few seconds Boot takes.
+    if (model.restart.waiting) return "pool · restarting...";
     return model.stop.stoppedFromHere ? "pool · stopped · from this page" : "pool · stopped";
   }
   return model.connected
@@ -272,6 +281,7 @@ export class Canvas {
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
   private readonly onEnlist: () => void;
+  private readonly onOpenSettings: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
@@ -287,6 +297,9 @@ export class Canvas {
     /** The header's "Enlist terminal" button (issue #101): opens the pane
      *  picker. Offered only on a Terminal-backed pool. */
     onEnlist: () => void;
+    /** The header's "Settings" button (ADR-0026): opens the Settings pane.
+     *  Always offered; a headless pool has settings too. */
+    onOpenSettings: () => void;
     /** A Conversation card's End button. Fire-and-forget: the Conversations
      *  store tracks the in-flight/failure state the card reads back. */
     onEndConversation: (conversationId: string) => void;
@@ -301,6 +314,7 @@ export class Canvas {
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
     this.onEnlist = options.onEnlist;
+    this.onOpenSettings = options.onOpenSettings;
     this.onEndConversation = options.onEndConversation;
     this.onArmStop = options.onArmStop;
     this.onCancelStop = options.onCancelStop;
@@ -709,6 +723,15 @@ export class Canvas {
         h(
           "button",
           {
+            class: "btn canvas-settings",
+            title: "pool settings and machine defaults",
+            onclick: () => this.onOpenSettings(),
+          },
+          "Settings",
+        ),
+        h(
+          "button",
+          {
             class: "btn btn-primary canvas-new-conversation",
             title: "start a new Conversation",
             onclick: () => this.onNewConversation(),
@@ -805,6 +828,22 @@ export class Canvas {
    */
   private renderStoppedNotice(model: CanvasModel): HTMLElement | null {
     if (model.phase !== "stopped") return null;
+    if (model.restart.waiting) {
+      // The tab that asked for the Restart is polling for the relaunched
+      // server and will move to it (or to its new port) when it answers, so
+      // the relaunch command would be an instruction to do what is already
+      // happening. If the wait times out, `waiting` drops and the notice
+      // below takes over with the command.
+      return h(
+        "div",
+        { class: "canvas-stopped canvas-restarting" },
+        h(
+          "span",
+          { class: "canvas-stopped-text" },
+          "This Console is restarting its server. It reconnects on its own once Boot has it back up; a stale UI build makes that take a little longer.",
+        ),
+      );
+    }
     return h(
       "div",
       { class: "canvas-stopped" },

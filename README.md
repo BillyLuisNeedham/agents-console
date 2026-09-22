@@ -76,6 +76,17 @@ the heuristic path it always had (see
 
 Runtime is bun.
 
+The everyday way in is `agent-console`, the Boot script. Run it from a project
+checkout and it finds the pool (the working directory when that is a pool, the
+one under the checkout's `.scratch/` when there is one, otherwise a choice or a
+new one), prefills its config from the pool, a Setup and the machine defaults,
+asks only for what is left, rebuilds the Console when the build is stale, starts
+the server and opens the browser. It takes
+`[pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]`.
+`skills/link.sh` puts it on PATH; from this checkout it is `bun run boot -- <dir>`.
+
+The pieces it drives, for running them by hand:
+
 ```sh
 bun install                             # engine deps
 bun install --cwd ui                    # UI deps
