@@ -15,6 +15,7 @@ import {
   REVIEW_TICKET_ID,
   addBlockerToTicket,
   interactiveWrapper,
+  RESIZE_RELAY,
   resolveTicketAssignment,
   runPool,
   startPool,
@@ -5857,8 +5858,19 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       expect(readFileSync(ctx.exitCodePath, "utf8").trim()).toBe("3");
       return readFileSync(recorded, "utf8").split("\n").slice(0, -1);
     };
-    // BSD script (macOS): the file, then the command's words, verbatim.
-    expect(scriptArgv("darwin")).toEqual(["-eqF", streamPath, ...argv]);
+    // BSD script (macOS): the file, then the resize relay (issue #136)
+    // handed the pane's terminal as the pane's shell named it (`tty` has
+    // none to name here), then the command's words, verbatim.
+    const darwin = scriptArgv("darwin");
+    expect(darwin.slice(0, 6)).toEqual([
+      "-eqF",
+      streamPath,
+      "sh",
+      "-c",
+      RESIZE_RELAY,
+      "sh",
+    ]);
+    expect(darwin.slice(7)).toEqual(argv);
     // util-linux script: the command as one shell string after -c, then
     // the file.
     expect(scriptArgv("linux")).toEqual([
@@ -5871,6 +5883,96 @@ describe("terminal-backed engine mechanics (ADR-0014)", () => {
       interactiveWrapper(argv, ctx, process.platform),
     );
   });
+
+  it("the darwin resize relay execs the harness with its exit code, and starts no loop without a terminal (issue #136)", () => {
+    // Under the stand-in script above the relay never runs, so its own
+    // contract is pinned here: the pane's shell had no terminal to name,
+    // so no loop is started, the argv reaches the harness intact, and the
+    // harness's code is the relay's (the exec), which is what script's `-e`
+    // then carries to the exit-code write.
+    const result = Bun.spawnSync([
+      "sh",
+      "-c",
+      RESIZE_RELAY,
+      "sh",
+      "not a tty",
+      "sh",
+      "-c",
+      'printf "%s|" "$@"; exit 7',
+      "sh",
+      "grok 4.6",
+      "it's",
+    ]);
+    expect(result.exitCode).toBe(7);
+    expect(result.stdout.toString()).toBe("grok 4.6|it's|");
+  });
+
+  // Real PTYs, made and resized with util-linux script and GNU `stty -F`,
+  // so this runs on Linux only; the relay itself is POSIX sh and stty, which
+  // BSD reads the same way.
+  it.skipIf(process.platform !== "linux")(
+    "the darwin resize relay copies each pane resize onto the harness's PTY and signals it (issue #136)",
+    async () => {
+      const dir = makeTempDir("relay-");
+      registerTempDir(dir);
+      const panePath = join(dir, "pane.tty");
+      const out = join(dir, "harness.out");
+      const quiet = { stdin: "ignore", stdout: "ignore", stderr: "ignore" } as const;
+      // The pane: a PTY that only names itself and waits.
+      const pane = Bun.spawn(
+        ["script", "-qfc", `tty > '${panePath}'; sleep 30`, "/dev/null"],
+        quiet,
+      );
+      const children = [pane];
+      try {
+        const until = async (cond: () => boolean, what: string) => {
+          const deadline = Date.now() + 8000;
+          while (!cond()) {
+            if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+            await Bun.sleep(50);
+          }
+        };
+        await until(
+          () => existsSync(panePath) && readFileSync(panePath, "utf8").trim() !== "",
+          "the pane's terminal",
+        );
+        const paneTty = readFileSync(panePath, "utf8").trim();
+        const resizePane = (rows: number, cols: number) =>
+          expect(
+            Bun.spawnSync(["stty", "-F", paneTty, "rows", `${rows}`, "columns", `${cols}`])
+              .exitCode,
+          ).toBe(0);
+        resizePane(30, 100);
+        // The harness's PTY: script with no terminal of its own forwards no
+        // resize, as BSD script never does. The harness reports each
+        // SIGWINCH and its size.
+        const harness = `trap 'echo WINCH' WINCH; while :; do stty size; sleep 0.1; done`;
+        const inner = [
+          "sh",
+          "-c",
+          RESIZE_RELAY,
+          "sh",
+          paneTty,
+          "sh",
+          "-c",
+          harness,
+        ]
+          .map((w) => `'${w.replace(/'/g, `'\\''`)}'`)
+          .join(" ");
+        children.push(Bun.spawn(["script", "-qfc", inner, out], quiet));
+        const seen = () => (existsSync(out) ? readFileSync(out, "utf8") : "");
+        await until(() => seen().includes("30 100"), "the launch size");
+        resizePane(40, 120);
+        await until(() => seen().includes("40 120"), "the first resize");
+        resizePane(25, 70);
+        await until(() => seen().includes("25 70"), "the second resize");
+        expect(seen().match(/WINCH/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+      } finally {
+        for (const child of children) child.kill();
+      }
+    },
+    15000,
+  );
 
   it("closes the attempt's tab when the ticket merges", async () => {
     // Two independent tickets land in one super-step, so each attempt gets

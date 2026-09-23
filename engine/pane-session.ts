@@ -161,6 +161,32 @@ function shellQuote(arg: string): string {
 }
 
 /**
+ * The shell a darwin harness runs behind, inside script's PTY (issue #136).
+ * BSD script sizes its child's PTY once, at launch, and never forwards the
+ * pane's later resizes, so the TUI goes on drawing at a width the pane no
+ * longer has and its lines wrap into a scramble. The relay takes the pane's
+ * own terminal as its first argument, backgrounds a loop that copies that
+ * terminal's size onto the PTY it sits on whenever the two differ (setting
+ * the size is what signals the harness to redraw), and execs the rest of its
+ * argv as the harness. The loop shares the harness's process group, the
+ * foreground one on that PTY, so the resize is never refused as a background
+ * write; it ends when the harness does, holds none of script's descriptors
+ * open, skips a size of zero, and never starts when the pane's shell had no
+ * terminal to name. POSIX sh and stty only (`rows`/`columns`/`size` read the
+ * same in BSD and GNU stty), and no single quote, so it rides as one word.
+ * Exported for the relay test in engine.test.ts.
+ */
+export const RESIZE_RELAY =
+  'o=$1; shift; p=$$; if [ -c "$o" ]; then ' +
+  "while kill -0 $p 2>/dev/null; do " +
+  's=$(stty size <"$o" 2>/dev/null); ' +
+  'case $s in ""|"0 "*|*" 0") ;; ' +
+  '*) [ "$s" = "$(stty size </dev/tty 2>/dev/null)" ] || ' +
+  'stty rows "${s% *}" columns "${s#* }" </dev/tty 2>/dev/null ;; esac; ' +
+  "sleep 0.5; done </dev/null >/dev/null 2>&1 & fi; " +
+  'exec "$@"';
+
+/**
  * The ADR-0016 wrapper shell a pane runs, as one line of bash: the
  * interactive argv under `script`, which allocates the PTY the TUI requires,
  * passes the session through to the pane live, and records both directions to
@@ -177,7 +203,10 @@ function shellQuote(arg: string): string {
  * trailing exit-code write stays, firing whenever the session eventually
  * exits, for crash forensics; there is no `exit`, so a ticket's pane stays
  * open after the attempt completes and a Conversation's pane stays open for
- * as long as the operator talks. Exported for the per-platform shape test in
+ * as long as the operator talks. BSD script also never passes a resize on
+ * (issue #136), so on darwin the harness runs behind the RESIZE_RELAY, handed
+ * the pane's own terminal as the pane's shell names it (`"$(tty)"`, the one
+ * word the shell expands). Exported for the per-platform shape test in
  * engine.test.ts: neither form fails until it reaches a real pane.
  */
 export function interactiveWrapper(
@@ -191,7 +220,7 @@ export function interactiveWrapper(
   const file = shellQuote(ctx.streamPath ?? ctx.logPath);
   const record =
     platform === "darwin"
-      ? `script -eqF ${file} ${command}`
+      ? `script -eqF ${file} sh -c ${shellQuote(RESIZE_RELAY)} sh "$(tty)" ${command}`
       : `script -eqfc ${shellQuote(command)} ${file}`;
   return `${record}; echo $? > ${shellQuote(ctx.exitCodePath)}`;
 }
