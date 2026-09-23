@@ -31,7 +31,8 @@ export type {
 } from "./engine.ts";
 export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
-export type { LiveAttemptRecord } from "./live-attempts.ts";
+export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
+export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
 export type { EnlistPane, PanesResponse, EnlistRequest, EnlistResponse } from "./enlist.ts";
@@ -63,6 +64,7 @@ import type { Interrupt, Outcome, RunPhase } from "./engine.ts";
 import type { TicketStatus } from "./pool.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
+import type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
 import type { TicketReassignView } from "./reassign.ts";
@@ -82,11 +84,11 @@ export interface EnrichedTicketState {
   title: string;
   blockedBy: string[];
   status: TicketStatus;
-  /** True when the ticket is done but its branch has not landed in the
-   *  merge target (ADR-0014): the "done, merge pending" card label. A
-   *  lookup into the snapshot's Merge hold, the engine's one derivation;
-   *  every UI surface reads this field and never git. */
-  mergePending: boolean;
+  /** Where the ticket stands in the Merge queue (issue #129): null unless
+   *  it is done and its branch has not landed in the merge target
+   *  (ADR-0014). A lookup into the snapshot's Merge queue, the engine's one
+   *  derivation; every UI surface reads this field and never git. */
+  mergeState: MergeQueueState | null;
   /** The ticket's resolved Assignment record (ADR-0013), served verbatim. */
   assignment: AssignmentView;
   /**
@@ -95,7 +97,8 @@ export interface EnrichedTicketState {
    * engine's snapshot while the attempt runs; null once it has ended, so a
    * finished card's terminal surface and its polling stop, and null for a
    * ticket with nothing running. A headless attempt is live with a null
-   * pane.
+   * pane. Its role says whether it is the Ticket's own agent or a resolver
+   * on the Ticket's conflicted merge (issue #129).
    */
   liveAttempt: LiveAttemptRecord | null;
   /**
@@ -134,6 +137,9 @@ export interface EnrichedSnapshot {
     log: string[];
     outcomes: Record<string, Outcome>;
     interrupts: Interrupt[];
+    /** The Merge queue (issue #129): every held ticket, head first, in the
+     *  order the engine works through them. Empty when no hold stands. */
+    mergeQueue: MergeQueueEntry[];
     /** Accepted answers still waiting for processing (the Queued answers). */
     queuedAnswers: QueuedAnswer[];
     config: Record<string, unknown>;

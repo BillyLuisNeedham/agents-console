@@ -39,13 +39,18 @@ function lines(prefix: string, n: number): string {
   return Array.from({ length: n }, (_, i) => `${prefix} line ${i + 1}`).join("\n");
 }
 
+/** A Ticket's own agent live on the snapshot, as the engine registers it. */
+function agentAttempt(attempt: number, paneId: string | null): EnrichedTicketState["liveAttempt"] {
+  return { attempt, paneId, role: "agent", startedAt: "2026-09-23T10:00:00.000Z" };
+}
+
 function ticket(id: string, overrides: Partial<EnrichedTicketState> = {}): EnrichedTicketState {
   const base = {
     id,
     title: `ticket ${id}`,
     blockedBy: [],
     status: "ready" as const,
-    mergePending: false,
+    mergeState: null,
     enlisted: false,
     assignment: { harness: "claude", model: "opus", drivers: "implement" },
     liveAttempt: null,
@@ -86,21 +91,21 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     ticket("t-1", {
       title: changedTitle ?? "ticket t-1",
       status: "in-progress",
-      liveAttempt: { attempt: 1, paneId: null },
+      liveAttempt: agentAttempt(1, null),
     }),
     ticket("t-2", { status: "done" }),
     ticket("t-3", {
       status: "in-progress",
       blockedBy: ["t-2"],
-      liveAttempt: { attempt: 2, paneId: null },
+      liveAttempt: agentAttempt(2, null),
     }),
-    ticket("t-4", { status: "in-progress", blockedBy: ["t-1"], liveAttempt: { attempt: 1, paneId: null } }),
-    ticket("t-5", { status: "in-progress", blockedBy: ["t-1", "t-2"], liveAttempt: { attempt: 1, paneId: null } }),
+    ticket("t-4", { status: "in-progress", blockedBy: ["t-1"], liveAttempt: agentAttempt(1, null) }),
+    ticket("t-5", { status: "in-progress", blockedBy: ["t-1", "t-2"], liveAttempt: agentAttempt(1, null) }),
     ticket("t-6", { status: "ready", blockedBy: ["t-3", "t-4"] }),
     ticket("t-7", { status: "ready", blockedBy: ["t-5"] }),
     // Extra interrupted tickets so the Needs input tray overflows its max-height.
     ...Array.from({ length: 12 }, (_, i) =>
-      ticket(`t-${i + 8}`, { status: "in-progress", liveAttempt: { attempt: 1, paneId: null } }),
+      ticket(`t-${i + 8}`, { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
     ),
     // Extra ready tickets so the Reassign dialog's row list overflows its own
     // max-height: only a ticket with no Attempt in flight is reassignable, and
@@ -144,6 +149,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
           body: lines("crash", 3),
         })),
       ],
+      mergeQueue: [],
       queuedAnswers: [],
       config: { terminal: "herdr" },
     },

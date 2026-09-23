@@ -11,11 +11,23 @@
  * Nothing here is persisted: a restart knows only what it re-adopts.
  */
 
+/**
+ * What a live Attempt is doing for its Ticket (issue #129): the Ticket's own
+ * work, or a resolver staging the resolution of its conflicted merge. A
+ * done card with a live resolver is a merge being resolved, not a Ticket
+ * re-running, and the Console says so only because the engine says so here.
+ */
+export type AttemptRole = "agent" | "resolver";
+
 /** One live Attempt as the snapshot carries it; `tabId` stays engine-side. */
 export interface LiveAttemptRecord {
   attempt: number;
   /** The herdr pane the Attempt runs in; null when headless. */
   paneId: string | null;
+  role: AttemptRole;
+  /** When the engine registered the Attempt live (ISO): the Console ticks
+   *  the elapsed time from it client-side, so no emit is spent on a clock. */
+  startedAt: string;
 }
 
 interface LiveAttemptEntry extends LiveAttemptRecord {
@@ -23,8 +35,20 @@ interface LiveAttemptEntry extends LiveAttemptRecord {
 }
 
 export interface LiveAttempts {
-  /** An Attempt spawned: its number and, for a Terminal-backed attempt, its pane. */
-  register(id: string, attempt: number, pane: { paneId: string | null; tabId: string | null }): void;
+  /**
+   * An Attempt spawned: its number and, for a Terminal-backed attempt, its
+   * pane. The role defaults to the Ticket's own agent and the start to now.
+   */
+  register(
+    id: string,
+    attempt: number,
+    pane: {
+      paneId: string | null;
+      tabId: string | null;
+      role?: AttemptRole;
+      startedAt?: string;
+    },
+  ): void;
   /** The Attempt ended; a number never registered is a no-op. */
   clear(id: string, attempt: number): void;
   /** Whether any Attempt of this id is live. */
@@ -53,7 +77,13 @@ export function createLiveAttempts(onChange?: () => void): LiveAttempts {
         attempts = new Map();
         live.set(id, attempts);
       }
-      attempts.set(attempt, { attempt, paneId: pane.paneId, tabId: pane.tabId });
+      attempts.set(attempt, {
+        attempt,
+        paneId: pane.paneId,
+        tabId: pane.tabId,
+        role: pane.role ?? "agent",
+        startedAt: pane.startedAt ?? new Date().toISOString(),
+      });
       onChange?.();
     },
     clear(id, attempt) {
@@ -73,7 +103,14 @@ export function createLiveAttempts(onChange?: () => void): LiveAttempts {
         for (const entry of attempts.values()) {
           if (top === null || entry.attempt > top.attempt) top = entry;
         }
-        if (top) out[id] = { attempt: top.attempt, paneId: top.paneId };
+        if (top) {
+          out[id] = {
+            attempt: top.attempt,
+            paneId: top.paneId,
+            role: top.role,
+            startedAt: top.startedAt,
+          };
+        }
       }
       return out;
     },

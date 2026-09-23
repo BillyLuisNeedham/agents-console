@@ -22,6 +22,7 @@ import {
   phaseLabel,
   poolStatus,
   projectDetail,
+  resolverFiles,
   projectDetailTabs,
   projectEnlistBlocks,
   projectEnlistForm,
@@ -99,6 +100,11 @@ function reassignOf(ticket: {
   };
 }
 
+/** A Ticket's own agent live on the snapshot, as the engine registers it. */
+function agentAttempt(attempt: number, paneId: string | null): EnrichedTicketState["liveAttempt"] {
+  return { attempt, paneId, role: "agent", startedAt: "2026-09-23T10:00:00.000Z" };
+}
+
 function ticket(
   id: string,
   overrides: Partial<EnrichedTicketState> = {},
@@ -108,7 +114,7 @@ function ticket(
     title: `ticket ${id}`,
     blockedBy: [],
     status: "ready" as const,
-    mergePending: false,
+    mergeState: null,
     enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
@@ -153,6 +159,7 @@ function snapshot(
       log: [],
       outcomes: {},
       interrupts: [],
+      mergeQueue: [],
       queuedAnswers: [],
       config: {},
       ...overrides.state,
@@ -576,6 +583,7 @@ describe("projectNeedsInput", () => {
       state: {
         tickets: [ticket("A")],
         interrupts: [],
+        mergeQueue: [],
         queuedAnswers: [],
       },
     });
@@ -1022,7 +1030,7 @@ describe("projectDetail", () => {
         tickets: [
           ticket("A", {
             status: "in-progress",
-            liveAttempt: { attempt: 1, paneId: null },
+            liveAttempt: agentAttempt(1, null),
           }),
         ],
       },
@@ -1053,7 +1061,8 @@ describe("projectDetailTabs", () => {
       ticketId,
       title: `ticket ${ticketId}`,
       status,
-      mergePending: false,
+      mergeState: null,
+      resolver: null,
       blockedBy: [],
       blockedByCheckpoint: [],
       outcome: null,
@@ -1168,44 +1177,128 @@ describe("statusLabel", () => {
     expect(statusLabel("checkpoint")).toBe("checkpoint");
   });
 
-  it("reads done, merge pending for a done ticket whose branch has not landed", () => {
-    expect(statusLabel("done", true)).toBe("done, merge pending");
-    expect(statusLabel("done", false)).toBe("done");
-    // Only a done ticket carries it: the derivation never sets the flag on
-    // any other status, and the label does not leak if one ever did.
-    expect(statusLabel("ready", true)).toBe("ready");
+  it("names where a held ticket stands in the Merge queue (#129), never a bare merge pending", () => {
+    expect(statusLabel("done", "resolving")).toBe("resolving merge conflict");
+    expect(statusLabel("done", "awaiting-approval")).toBe("merge approval: needs you");
+    expect(statusLabel("done", "needs-you")).toBe("merge conflict: needs you");
+    expect(statusLabel("done", "queued")).toBe("merge queued");
+    expect(statusLabel("done", "stalled")).toBe("merge stalled: nothing running");
+    expect(statusLabel("done", null)).toBe("done");
+    // Only a done ticket carries it: the engine never queues any other
+    // status, and the label does not leak if one ever did.
+    expect(statusLabel("ready", "queued")).toBe("ready");
   });
 });
 
-describe("merge pending projection", () => {
-  it("carries the server-derived flag onto the card and Detail; absent reads false", () => {
-    const snap = snapshot({
-      phase: "quiescent",
-      state: {
-        tickets: [
-          ticket("01", { status: "done", mergePending: true }),
-          ticket("02", { status: "done" }),
-          ticket("03", { status: "ready" }),
-        ],
-      },
-    });
-    const cardOf = (id: string): TicketCardView | undefined =>
-      projectPool(snap).cards.find(
-        (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
-      );
-    // The held ticket's card state word: what the canvas renders from.
-    expect(cardOf("01")?.mergePending).toBe(true);
-    expect(statusLabel(cardOf("01")!.status, cardOf("01")!.mergePending)).toBe(
-      "done, merge pending",
+const RESOLVER_START = "2026-09-23T10:00:00.000Z";
+const RESOLVER_NOW = Date.parse("2026-09-23T10:10:05.000Z");
+
+function resolverAttempt(paneId: string | null = "w2A:pE"): EnrichedTicketState["liveAttempt"] {
+  return { attempt: 3, paneId, role: "resolver", startedAt: RESOLVER_START };
+}
+
+describe("merge queue projection (#129)", () => {
+  const snap = snapshot({
+    phase: "running",
+    state: {
+      tickets: [
+        ticket("02", { status: "done", mergeState: "resolving", liveAttempt: resolverAttempt() }),
+        ticket("04", { status: "done", mergeState: "queued" }),
+        ticket("05", { status: "done", mergeState: "queued" }),
+        ticket("06", { status: "done" }),
+        ticket("07", {
+          status: "in-progress",
+          liveAttempt: { attempt: 1, paneId: "p7", role: "agent", startedAt: RESOLVER_START },
+        }),
+      ],
+      mergeQueue: [
+        { ticketId: "02", state: "resolving" },
+        { ticketId: "04", state: "queued" },
+        { ticketId: "05", state: "queued" },
+      ],
+    },
+  });
+  const cardOf = (id: string): TicketCardView | undefined =>
+    projectPool(snap, {}, {}, {}, RESOLVER_NOW).cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
     );
-    // A plain done ticket labels plain; the projection re-derives nothing.
-    expect(cardOf("02")?.mergePending).toBe(false);
-    expect(cardOf("03")?.mergePending).toBe(false);
-    // The Detail mirrors the card.
-    const detail = detailOf(snap, "ticket:01");
-    expect(detail?.kind === "ticket" && detail.mergePending).toBe(true);
-    const plain = detailOf(snap, "ticket:02");
-    expect(plain?.kind === "ticket" && plain.mergePending).toBe(false);
+
+  it("carries the engine's state onto the card and the Detail; a plain done ticket carries none", () => {
+    expect(cardOf("02")?.mergeState).toBe("resolving");
+    expect(cardOf("04")?.mergeState).toBe("queued");
+    expect(cardOf("06")?.mergeState).toBeNull();
+    const detail = detailOf(snap, "ticket:04");
+    expect(detail?.kind === "ticket" && detail.mergeState).toBe("queued");
+  });
+
+  it("marks the resolver on the card and the Detail, with its elapsed time, and never an agent", () => {
+    expect(cardOf("02")?.resolver).toEqual({
+      attempt: 3,
+      paneId: "w2A:pE",
+      startedAt: RESOLVER_START,
+      elapsed: "10m 5s",
+    });
+    expect(cardOf("07")?.resolver).toBeNull();
+    expect(cardOf("04")?.resolver).toBeNull();
+    const detail = projectDetail(projectPool(snap, {}, {}, {}, RESOLVER_NOW).cards, "ticket:02");
+    expect(detail?.kind === "ticket" && detail.resolver?.elapsed).toBe("10m 5s");
+  });
+
+  it("shows a done card's Vitals while its resolver runs, with the time it has been running", () => {
+    const view = projectPool(snap, {}, { "02": vitalsState({ running: true }) }, {}, RESOLVER_NOW);
+    const card = view.cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === "02",
+    );
+    expect(card?.vitals?.mode).toBe("live");
+    expect(card?.vitals?.elapsed).toBe("resolving 10m 5s");
+  });
+
+  it("names the head and the tickets behind it in the header line while the hold stands", () => {
+    expect(projectPool(snap, {}, {}, {}, RESOLVER_NOW).mergeQueueLine).toBe(
+      "merge hold: 02 resolving (10m) · 04, 05 queued",
+    );
+  });
+
+  it("words the header by what the head waits on, and hides it when nothing is held", () => {
+    const line = (mergeQueue: EnrichedSnapshot["state"]["mergeQueue"]) =>
+      projectPool(snapshot({ state: { mergeQueue } }), {}, {}, {}, RESOLVER_NOW).mergeQueueLine;
+    expect(
+      line([
+        { ticketId: "02", state: "awaiting-approval" },
+        { ticketId: "04", state: "needs-you" },
+        { ticketId: "05", state: "queued" },
+      ]),
+    ).toBe("merge hold: 02 awaiting approval · 04 needs you · 05 queued");
+    expect(
+      line([
+        { ticketId: "02", state: "stalled" },
+        { ticketId: "03", state: "stalled" },
+      ]),
+    ).toBe("merge hold: 02, 03 stalled, nothing running");
+    // A resolver not yet live (the engine is launching it) has no time yet.
+    expect(line([{ ticketId: "09", state: "resolving" }])).toBe("merge hold: 09 resolving");
+    expect(line([])).toBeNull();
+  });
+});
+
+describe("resolverFiles", () => {
+  it("reads the conflicted files off the resolver event of the resolver's attempt", () => {
+    const timeline = projectTimeline(
+      {
+        events: [
+          { at: RESOLVER_START, attempt: 2, kind: "merge-conflict", payload: { files: ["a.ts"] } },
+          { at: RESOLVER_START, attempt: 3, kind: "resolver", payload: { files: ["a.ts", "b.ts"], cwd: "/w", branch: "pool/02" } },
+          { at: RESOLVER_START, attempt: 3, kind: "spawned", payload: {} },
+        ],
+        attempts: [],
+        reconstructed: false,
+        spec: "",
+      },
+      "done",
+    );
+    expect(resolverFiles(timeline, 3)).toEqual(["a.ts", "b.ts"]);
+    expect(resolverFiles(timeline, 4)).toEqual([]);
+    expect(resolverFiles(null, 3)).toEqual([]);
   });
 });
 
@@ -2139,7 +2232,7 @@ describe("projectPool enlisted attempt", () => {
           ticket("enlist-1", {
             status: "in-progress",
             enlisted: true,
-            liveAttempt: { attempt: 1, paneId: "pane-op" },
+            liveAttempt: agentAttempt(1, "pane-op"),
             assignment: { harness: "opencode", model: null, drivers: "implement" },
           }),
         ],
@@ -2200,7 +2293,7 @@ describe("projectPool paneId", () => {
         tickets: [
           // The enriched snapshot serves paneId only on terminal-backed
           // attempts; headless tickets lack the field entirely.
-          ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
+          ticket("01", { status: "in-progress", liveAttempt: agentAttempt(1, "pane-7") }),
           ticket("02", { status: "in-progress" }),
         ],
       },
@@ -2227,7 +2320,7 @@ describe("projectPool terminal surface", () => {
     const snap = terminalSnap([
       // The enriched snapshot serves paneId only on terminal-backed running
       // attempts; the surface appears with it.
-      ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
+      ticket("01", { status: "in-progress", liveAttempt: agentAttempt(1, "pane-7") }),
       ticket("02", { status: "in-progress" }),
     ]);
     const view = projectPool(snap, {}, {}, {});
@@ -2243,7 +2336,7 @@ describe("projectPool terminal surface", () => {
 
   it("threads the store's peek text and focus confirmation into the surface", () => {
     const snap = terminalSnap([
-      ticket("01", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "pane-7" } }),
+      ticket("01", { status: "in-progress", liveAttempt: agentAttempt(1, "pane-7") }),
     ]);
     const terminal: Record<string, TerminalSurfaceView> = {
       "01": { paneId: "pane-7", status: "live", text: "output", justFocused: true },
@@ -2391,7 +2484,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
 
   it("gives a row the terminal pitch while any ticket in it runs a pane-backed attempt", () => {
     const tickets = [
-      ticket("A", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "w17:p2" } }),
+      ticket("A", { status: "in-progress", liveAttempt: agentAttempt(1, "w17:p2") }),
       ticket("A2"),
       ticket("B", { blockedBy: ["A"] }),
       ticket("C", { blockedBy: ["B"] }),
@@ -2409,7 +2502,7 @@ describe("layout: a row's pitch fits its tallest card", () => {
     const running = projectPool(
       snapshot({
         state: {
-          tickets: [ticket("A", { status: "in-progress", liveAttempt: { attempt: 1, paneId: "w17:p2" } }), ticket("B", { blockedBy: ["A"] })],
+          tickets: [ticket("A", { status: "in-progress", liveAttempt: agentAttempt(1, "w17:p2") }), ticket("B", { blockedBy: ["A"] })],
         },
       }),
     );
@@ -2428,7 +2521,12 @@ describe("layout: a row's pitch fits its tallest card", () => {
       chain.push(
         ticket(`T${i}`, {
           status: "in-progress",
-          liveAttempt: { attempt: 1, paneId: `w1:p${i}` },
+          liveAttempt: {
+            attempt: 1,
+            paneId: `w1:p${i}`,
+            role: "agent",
+            startedAt: "2026-09-23T10:00:00.000Z",
+          },
           blockedBy: i === 0 ? [] : [`T${i - 1}`],
         }),
       );
@@ -2741,7 +2839,7 @@ describe("projectReassignTickets", () => {
       ticket("02", { status: "done" }),
       ticket("03", {
         status: "in-progress",
-        liveAttempt: { attempt: 1, paneId: null },
+        liveAttempt: agentAttempt(1, null),
       }),
       ticket("04", { status: "checkpoint" }),
     ]);

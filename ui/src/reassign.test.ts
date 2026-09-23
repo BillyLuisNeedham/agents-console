@@ -52,6 +52,7 @@ const SNAPSHOT = {
     log: [],
     outcomes: {},
     interrupts: [],
+    mergeQueue: [],
     queuedAnswers: [],
     config: {},
   },

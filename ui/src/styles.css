@@ -313,6 +313,16 @@ body {
   flex-shrink: 0;
 }
 
+/* The Merge queue line (issue #129): present only while the hold stands. */
+.canvas-merge-queue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-size: 12px;
+}
+
 .canvas-tools {
   display: flex;
   align-items: center;
@@ -660,6 +670,19 @@ body {
   opacity: 0.55;
 }
 
+/* A resolver on a done card (issue #129): its running time takes the first
+   line of the footer, so the readout row below keeps its width. */
+.vitals-resolver {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.vitals-elapsed {
+  flex-basis: 100%;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .vitals-spark {
   flex: none;
   margin-left: auto;
@@ -959,6 +982,39 @@ body {
   font-weight: 700;
 }
 
+/* A held ticket's Merge queue state (issue #129). A resolver at work is
+   live work and a stall is the operator's to see, so neither card fades the
+   way a finished one does; a queued ticket stays faded, since nothing runs
+   for it. The two interrupt states take the interrupt card styling. */
+.ticket-card-merge-resolving,
+.ticket-card-merge-stalled {
+  opacity: 1;
+}
+
+.ticket-card-merge-resolving {
+  border-color: var(--status-running);
+}
+
+.ticket-card-merge-stalled {
+  border-color: var(--interrupt);
+}
+
+.ticket-merge-resolving {
+  color: var(--status-running);
+  font-weight: 700;
+}
+
+.ticket-merge-queued {
+  color: var(--text-dim);
+}
+
+.ticket-merge-awaiting-approval,
+.ticket-merge-needs-you,
+.ticket-merge-stalled {
+  color: var(--interrupt);
+  font-weight: 700;
+}
+
 /* --------------------------------------------------------- interrupt forms */
 
 /* A pending interrupt wins over the status styling: a conflicted merge can
@@ -1241,6 +1297,39 @@ body {
 
 .detail-status {
   font-size: 12px;
+}
+
+/* The resolver on a held ticket's merge (issue #129). */
+.detail-resolver {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.detail-resolver-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-resolver-open {
+  white-space: nowrap;
+}
+
+.detail-resolver-elapsed {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.detail-resolver-files ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 
 .detail-channels {

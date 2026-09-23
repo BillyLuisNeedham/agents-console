@@ -16,6 +16,9 @@ import type {
   EnrichedTicketState,
   Grade,
   Interrupt,
+  LiveAttemptRecord,
+  MergeQueueEntry,
+  MergeQueueState,
   Outcome,
   PoolConfig,
   QueuedAnswer,
@@ -52,6 +55,8 @@ export type {
   InterruptKind,
   MachineDefaults,
   MachineDefaultsView,
+  MergeQueueEntry,
+  MergeQueueState,
   PanesResponse,
   PoolConfig,
   PoolSettingsView,
@@ -173,6 +178,9 @@ interface TimelineEventView {
   timeLabel: string;
   grade: TimelineGradeView | null;
   reassignment: string | null;
+  /** The files a merge-conflict, merge-blocked or resolver event names;
+   *  null on every other kind, and on a payload without a string list. */
+  files: string[] | null;
 }
 
 function formatEventTime(iso: string): string {
@@ -235,7 +243,28 @@ function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
     grade: event.kind === "graded" ? gradeFromPayload(event.payload) : null,
     reassignment:
       event.kind === "reassigned" ? reassignmentFromPayload(event.payload) : null,
+    files: FILE_EVENT_KINDS.has(event.kind) ? filesFromPayload(event.payload) : null,
   };
+}
+
+const FILE_EVENT_KINDS = new Set(["merge-conflict", "merge-blocked", "resolver"]);
+
+function filesFromPayload(payload: Record<string, unknown>): string[] | null {
+  const files = payload.files;
+  if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) return null;
+  return files;
+}
+
+/**
+ * The conflicted files a resolver Attempt was handed (issue #129): read off
+ * the resolver event of that Attempt in the ticket's timeline, the events
+ * file's durable record. Empty until the timeline has loaded, and for an
+ * Attempt that is not a resolver's.
+ */
+export function resolverFiles(timeline: TimelineView | null, attempt: number): string[] {
+  const row = timeline?.attempts.find((a) => a.number === attempt);
+  const event = row?.events.find((e) => e.kind === "resolver");
+  return event?.files ?? [];
 }
 
 interface TimelineAttemptView {
@@ -527,6 +556,9 @@ export interface VitalsStalenessView {
 
 export interface VitalsView {
   mode: VitalsMode;
+  /** How long a resolver on a done card has been running ("resolving 10m
+   *  5s", issue #129); null for every other live Attempt. */
+  elapsed: string | null;
   /** Totals for the `+a −r · N files` readout; null reads "no changes yet". */
   diff: VitalsDiffView | null;
   staleness: VitalsStalenessView | null;
@@ -552,6 +584,14 @@ function vitalsIdleCopy(ms: number): string {
   return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
 }
 
+/** The header's coarser duration: "45s", "10m", "1h 12m". */
+function shortDurationCopy(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /**
  * The next sparkline sample list: one push per poll of the activity endpoint,
  * capped at the last VITALS_MAX_SAMPLES samples (~80s at the 2s cadence).
@@ -571,20 +611,26 @@ export function pushVitalsSample(samples: number[], total: number): number[] {
  * frozen on a checkpoint whose latest response says nothing is live, and
  * hidden for done and ready tickets, for an in-progress ticket that is not
  * running (a crashed attempt parked at in-progress is not live work), and
- * whenever no payload has arrived: the no-empty-flash rule.
+ * whenever no payload has arrived: the no-empty-flash rule. The one done
+ * ticket that shows them is one whose resolver the engine says is live
+ * (issue #129): the footer then also says how long it has been running.
  */
 export function projectVitals(
   input: VitalsState | null,
   status: TicketStatus,
   now: number,
+  resolverStartedAt: string | null = null,
 ): VitalsView | null {
   if (!input) return null;
-  if (status === "done" || status === "ready") return null;
+  if (status === "ready") return null;
+  if (status === "done" && (resolverStartedAt === null || !input.activity.running)) return null;
   const live = input.activity.running;
   if (status === "in-progress" && !live) return null;
   const diff = input.activity.diff;
+  const started = resolverStartedAt === null ? Number.NaN : Date.parse(resolverStartedAt);
   return {
     mode: live ? "live" : "frozen",
+    elapsed: Number.isNaN(started) ? null : `resolving ${vitalsIdleCopy(now - started)}`,
     diff:
       diff && diff.added + diff.removed > 0
         ? { added: diff.added, removed: diff.removed, fileCount: diff.files.length }
@@ -648,9 +694,13 @@ export interface TicketCardView {
    *  the operator's to clear. Empty unless this ticket is still waiting. */
   blockedByCheckpoint: string[];
   status: TicketStatus;
-  /** Done with its branch still unmerged: the card's state word reads
-   *  "done, merge pending". Derived server-side; the card only shows it. */
-  mergePending: boolean;
+  /** Where the ticket stands in the Merge queue (issue #129), null unless it
+   *  is held: the card's state word names it. The engine's; the card only
+   *  shows it. */
+  mergeState: MergeQueueState | null;
+  /** The resolver running on the ticket's conflicted merge, when the
+   *  engine's live attempt is one; null for the Ticket's own agent. */
+  resolver: ResolverView | null;
   /** The ticket's resolved Assignment (ADR-0013), rendered verbatim. */
   assignment: AssignmentView;
   /** The ticket was enlisted from a live herdr pane (issue #101): the badge
@@ -690,6 +740,29 @@ export interface TicketCardView {
   terminal: TerminalSurfaceView | null;
   x: number;
   y: number;
+}
+
+/**
+ * A live resolver Attempt as the card and the Detail show it (issue #129):
+ * its number, its pane when terminal-backed (the "open resolver" jump), and
+ * how long it has been running, ticked from the engine's start stamp.
+ */
+export interface ResolverView {
+  attempt: number;
+  paneId: string | null;
+  startedAt: string;
+  elapsed: string;
+}
+
+function projectResolver(live: LiveAttemptRecord | null, now: number): ResolverView | null {
+  if (live?.role !== "resolver") return null;
+  const started = Date.parse(live.startedAt);
+  return {
+    attempt: live.attempt,
+    paneId: live.paneId,
+    startedAt: live.startedAt,
+    elapsed: Number.isNaN(started) ? "" : vitalsIdleCopy(now - started),
+  };
 }
 
 export type TerminalSurfaceStatus = "pending" | "live" | "waiting" | "unavailable";
@@ -759,6 +832,8 @@ export interface PoolView {
   cards: PoolCardView[];
   edges: TopologyEdge[];
   log: string[];
+  /** The canvas header's Merge queue line (issue #129); null with no hold. */
+  mergeQueueLine: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,7 +1089,8 @@ function projectTicket(
     blockedBy: ticket.blockedBy,
     blockedByCheckpoint: checkpointBlockers(ticket, state),
     status: ticket.status,
-    mergePending: ticket.mergePending,
+    mergeState: ticket.mergeState,
+    resolver: projectResolver(ticket.liveAttempt, now),
     assignment: ticket.assignment,
     enlisted: ticket.enlisted,
     reassign: ticket.reassign,
@@ -1022,7 +1098,12 @@ function projectTicket(
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state),
     grade,
-    vitals: projectVitals(vitals, ticket.status, now),
+    vitals: projectVitals(
+      vitals,
+      ticket.status,
+      now,
+      ticket.liveAttempt?.role === "resolver" ? ticket.liveAttempt.startedAt : null,
+    ),
     paneId: ticket.liveAttempt?.paneId ?? null,
     terminal: projectTerminalSurface(ticket.liveAttempt?.paneId ?? null, terminal),
     x: pos.x,
@@ -1147,7 +1228,43 @@ export function projectPool(
       ...projectConversationEdges(conversations, tickets),
     ],
     log: snapshot.state.log,
+    mergeQueueLine: mergeQueueLine(snapshot, now),
   };
+}
+
+/** How the header words a Merge queue state after the ticket ids. */
+const MERGE_QUEUE_HEADER: Record<MergeQueueState, string> = {
+  resolving: "resolving",
+  "awaiting-approval": "awaiting approval",
+  "needs-you": "needs you",
+  queued: "queued",
+  stalled: "stalled, nothing running",
+};
+
+/**
+ * The header line while the Merge hold stands (issue #129): the queue in the
+ * engine's order, head first, with runs of the same state folded together
+ * ("merge hold: 02 resolving (10m) · 04, 05, 09 queued"). A live resolver
+ * carries its running time; one the engine is still launching has none yet.
+ * Null when nothing is held, so the line is gone with the hold.
+ */
+function mergeQueueLine(snapshot: EnrichedSnapshot, now: number): string | null {
+  const queue = snapshot.state.mergeQueue;
+  if (queue.length === 0) return null;
+  const runs: MergeQueueEntry[][] = [];
+  for (const entry of queue) {
+    const last = runs[runs.length - 1];
+    if (last && last[0].state === entry.state && entry.state !== "resolving") last.push(entry);
+    else runs.push([entry]);
+  }
+  const parts = runs.map((run) => {
+    const words = `${run.map((e) => e.ticketId).join(", ")} ${MERGE_QUEUE_HEADER[run[0].state]}`;
+    if (run[0].state !== "resolving") return words;
+    const live = snapshot.state.tickets.find((t) => t.id === run[0].ticketId)?.liveAttempt;
+    const started = live?.role === "resolver" ? Date.parse(live.startedAt) : Number.NaN;
+    return Number.isNaN(started) ? words : `${words} (${shortDurationCopy(now - started)})`;
+  });
+  return `merge hold: ${parts.join(" · ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,8 +1598,25 @@ export function projectEnlistForm(becomes: EnlistBecomes): EnlistFormView {
       };
 }
 
-export function statusLabel(status: TicketStatus, mergePending = false): string {
-  if (status === "done" && mergePending) return "done, merge pending";
+/**
+ * A held ticket's state word, one per Merge queue state (issue #129). The
+ * two that wait on the operator read the way their interrupts are titled
+ * ("merge approval", "merge conflict"), so the card, the Detail and the
+ * Needs input tray name the same thing.
+ */
+const MERGE_STATE_LABELS: Record<MergeQueueState, string> = {
+  resolving: "resolving merge conflict",
+  "awaiting-approval": "merge approval: needs you",
+  "needs-you": "merge conflict: needs you",
+  queued: "merge queued",
+  stalled: "merge stalled: nothing running",
+};
+
+export function statusLabel(
+  status: TicketStatus,
+  mergeState: MergeQueueState | null = null,
+): string {
+  if (status === "done" && mergeState) return MERGE_STATE_LABELS[mergeState];
   return status === "in-progress" ? "running" : status;
 }
 
@@ -1568,8 +1702,10 @@ export interface TicketDetailView {
   ticketId: string;
   title: string;
   status: TicketStatus;
-  /** Mirrors the card's: done with its branch still unmerged. */
-  mergePending: boolean;
+  /** Mirrors the card's: where the ticket stands in the Merge queue. */
+  mergeState: MergeQueueState | null;
+  /** Mirrors the card's: the resolver running on the ticket's merge. */
+  resolver: ResolverView | null;
   blockedBy: string[];
   blockedByCheckpoint: string[];
   outcome: Outcome | null;
@@ -1636,7 +1772,8 @@ export function projectDetail(
       ticketId: card.ticketId,
       title: card.title,
       status: card.status,
-      mergePending: card.mergePending,
+      mergeState: card.mergeState,
+      resolver: card.resolver,
       blockedBy: card.blockedBy,
       blockedByCheckpoint: card.blockedByCheckpoint,
       outcome: card.outcome,

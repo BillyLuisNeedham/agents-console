@@ -2,7 +2,8 @@
  * Vitals store: the client side of the client-polled liveness readout
  * (ADR 0011). Polls the activity endpoint for every ticket that can hold a
  * live attempt (status in-progress, or checkpoint where a resolver may be
- * in flight, which only the response's running flag can tell), every 2s and
+ * in flight, which only the response's running flag can tell, or a done
+ * ticket whose live attempt the engine marks a resolver, issue #129), every 2s and
  * once per pool snapshot. A response that says nothing is live drops the
  * ticket from the 2s cadence until the next snapshot re-arms it, so a silent
  * pool costs no git spawns, and no polling happens at all when no candidate
@@ -49,6 +50,8 @@ export class Vitals {
   private readonly inFlight = new Set<string>();
   private candidates = new Set<string>();
   private statuses = new Map<string, TicketStatus>();
+  /** A live resolver's start per ticket, for the done cards it shows on. */
+  private resolvers = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: VitalsOptions) {
@@ -74,8 +77,15 @@ export class Vitals {
     for (const id of [...this.samples.keys()]) {
       if (!known.has(id)) this.samples.delete(id);
     }
+    this.resolvers = new Map(
+      tickets.flatMap((t) =>
+        t.liveAttempt?.role === "resolver" ? [[t.id, t.liveAttempt.startedAt] as const] : [],
+      ),
+    );
     this.candidates = new Set(
-      tickets.filter((t) => CANDIDATE_STATUSES.has(t.status)).map((t) => t.id),
+      tickets
+        .filter((t) => CANDIDATE_STATUSES.has(t.status) || this.resolvers.has(t.id))
+        .map((t) => t.id),
     );
     this.statuses = new Map(tickets.map((t) => [t.id, t.status]));
     for (const id of [...this.active]) {
@@ -111,7 +121,8 @@ export class Vitals {
       const payload = this.payloads.get(id);
       const status = this.statuses.get(id);
       if (!payload || !status) continue;
-      if (projectVitals({ activity: payload, samples: [] }, status, Date.now())) {
+      const resolver = this.resolvers.get(id) ?? null;
+      if (projectVitals({ activity: payload, samples: [] }, status, Date.now(), resolver)) {
         this.notify();
         return;
       }

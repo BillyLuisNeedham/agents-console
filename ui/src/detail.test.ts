@@ -42,6 +42,7 @@ const SNAPSHOT = {
     log: [],
     outcomes: {},
     interrupts: [],
+    mergeQueue: [],
     queuedAnswers: [],
     config: {},
   },
@@ -66,7 +67,8 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
     ticketId: "A",
     title: "ticket A",
     status: "ready",
-    mergePending: false,
+    mergeState: null,
+    resolver: null,
     blockedBy: [],
     blockedByCheckpoint: [],
     outcome: null,
@@ -127,6 +129,7 @@ function rig(detail: TicketDetailView) {
     onSelectTab: () => {},
     onEndConversation: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
+    onFocusResolver: () => Promise.resolve(true),
     reassign: store,
   };
   const root = document.createElement("div");
