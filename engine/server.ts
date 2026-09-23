@@ -9,10 +9,10 @@
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
  * server enriches the former into an array of {id, title, blockedBy, status,
- * mergePending, assignment, liveAttempt} so the projection can draw
+ * mergeState, assignment, liveAttempt} so the projection can draw
  * blocked-by edges, show titles, render the record verbatim, and reach a
  * terminal-backed attempt's herdr pane (ADR-0014). Every fact on that array
- * is the engine's: the merge hold and the live attempt ride the engine's
+ * is the engine's: the merge queue and the live attempt ride the engine's
  * snapshot, so nothing here reads git or the events files to build it, and
  * the replay surfaces serve the last snapshot as it is. The metadata
  * (title, spec, blockedBy) is the engine's own marker parsing, re-read from
@@ -257,7 +257,7 @@ function enrich(
   // the boundary that will actually apply it.
   reassign: Map<string, TicketReassignEntry>,
 ): EnrichedSnapshot {
-  const hold = new Set(snapshot.mergeHold);
+  const merge = new Map(snapshot.mergeQueue.map((entry) => [entry.ticketId, entry.state]));
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
@@ -271,7 +271,7 @@ function enrich(
           title: m.title,
           blockedBy: m.blockedBy,
           status: snapshot.state.tickets[m.id] ?? "ready",
-          mergePending: hold.has(m.id),
+          mergeState: merge.get(m.id) ?? null,
           // A reassignable ticket's Assignment comes from the config file as
           // it stands now (issue #126), so a Reassign shows on the card at
           // once rather than at the next boundary. Everywhere else the
@@ -295,6 +295,7 @@ function enrich(
       log: snapshot.state.log,
       outcomes: snapshot.state.outcomes,
       interrupts: snapshot.state.interrupts,
+      mergeQueue: snapshot.mergeQueue,
       queuedAnswers: snapshot.queuedAnswers,
       config: snapshot.state.config as unknown as Record<string, unknown>,
     },

@@ -45,6 +45,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     stop: stop(),
     restart: restart(),
     terminalBacked: false,
+    mergeQueueLine: null,
     ...overrides,
   };
 }
@@ -146,7 +147,8 @@ describe("Canvas across a morphing render", () => {
         blockedBy: [],
         blockedByCheckpoint: [],
         status: "in-progress",
-        mergePending: false,
+        mergeState: null,
+        resolver: null,
         assignment: { harness: "claude", model: "opus", drivers: "tdd" },
         enlisted: false,
         reassign: {

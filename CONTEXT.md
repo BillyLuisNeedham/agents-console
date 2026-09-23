@@ -171,8 +171,12 @@ An Attempt whose engine stopped while it ran. A headless orphan is stopped by th
 _Avoid_: zombie (a zombie is dead; an orphan is alive and working), leaked process, stray agent
 
 **Merge hold**:
-The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card reads "done, merge pending". Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
+The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card names where it stands in the Merge queue. Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
 _Avoid_: block (that's a ticket dependency), gate (per-ticket gating was the rejected alternative)
+
+**Merge queue**:
+The ordered line of done-but-unmerged tickets the Merge hold is waiting on, in the order the engine takes their merges on. The ticket at the head is the one whose merge is moving: being merged, being resolved by a resolver Attempt, or waiting on the operator at a merge-approval or merge-conflict interrupt. A ticket left waiting on the operator keeps its place while the engine moves on to the next, so more than one ticket can be waiting on the operator at once. Every ticket behind the head is queued, with nothing running on its behalf. A head with no resolver running and no interrupt raised is stalled, which the Console names rather than hides. Derived by the engine alongside the Merge hold, never persisted. Every held ticket's card says which of these it is, and the pool header names the head and the tickets behind it while the hold stands. Amends ADR-0014, closing issue #129.
+_Avoid_: merge pending (it hid which of these a ticket was), backlog
 
 **Ticket log**:
 The complete record of a ticket's work — every attempt's log plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail. Since ADR-0012 the per-attempt log is derived live from the attempt's Stream file, not raw harness bytes.

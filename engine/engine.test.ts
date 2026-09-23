@@ -9132,6 +9132,8 @@ describe("worktrees", () => {
     expect(interrupt.kind).toBe("merge-conflict");
     expect(interrupt.body).toContain("shared.txt");
     expect(interrupt.body).toContain(branchFor(poolDir, "02"));
+    // The Merge queue names the operator as what the head waits on (#129).
+    expect(run.snapshots.at(-1)?.mergeQueue).toEqual([{ ticketId: "02", state: "needs-you" }]);
     // The working branch was left clean: no half-merged state, 01's content
     // in place, 03 merged past the conflict, 02's branch parked for a human.
     expect(
@@ -9824,6 +9826,70 @@ describe("worktrees", () => {
     expect(
       existsSync(worktreePathFor(poolDir, "02")),
     ).toBe(false);
+  }, 15000);
+
+  it("publishes the Merge queue in the order it resolves, with the resolver marked on the live attempt (#129)", async () => {
+    const { poolDir } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
+        config: resolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const clash = (id: string) => ({
+      waitMerged: "work-01",
+      workFile: "shared.txt",
+      workLine: `from-${id}`,
+      overwrite: true,
+      commitMsg: `work-${id}`,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "shared.txt", workLine: "from-01", overwrite: true, commitMsg: "work-01" },
+      "02": clash("02"),
+      "03": clash("03"),
+    });
+    const resolution = (id: string) => ({
+      resolved: true,
+      conflictFile: "shared.txt",
+      resolution: `resolved-${id}`,
+      note: `resolved ${id}`,
+    });
+    const resolver = resolverStub(poolDir, { "02": resolution("02"), "03": resolution("03") });
+
+    const run = startPool({ poolDir, harnesses: { ...rig.harnesses, ...resolver.harnesses } });
+    await waitFor(() => run.interrupts.filter((i) => i.kind === "merge-approval").length === 2);
+
+    // 02 and 03 both conflict with 01; which exits first is the race, and
+    // the queue's order is whichever it was: the order the resolvers ran.
+    const [first, second] = resolver.spawnOrder;
+    expect([first, second].sort()).toEqual(["02", "03"]);
+    const queues = run.snapshots.map((s) => s.mergeQueue);
+    // While the first resolver runs, the second waits behind it with
+    // nothing running, and the live attempt says it is a resolver.
+    const firstResolving = run.snapshots.find(
+      (s) => s.liveAttempts[first]?.role === "resolver",
+    );
+    expect(firstResolving?.mergeQueue).toEqual([
+      { ticketId: first, state: "resolving" },
+      { ticketId: second, state: "queued" },
+    ]);
+    expect(queues).toContainEqual([
+      { ticketId: first, state: "awaiting-approval" },
+      { ticketId: second, state: "resolving" },
+    ]);
+    expect(run.snapshots.at(-1)?.mergeQueue).toEqual([
+      { ticketId: first, state: "awaiting-approval" },
+      { ticketId: second, state: "awaiting-approval" },
+    ]);
+    // Nothing held reads as an empty queue, and no ticket's agent is ever
+    // marked a resolver.
+    expect(run.snapshots[0].mergeQueue).toEqual([]);
+    for (const snapshot of run.snapshots) {
+      for (const [id, live] of Object.entries(snapshot.liveAttempts)) {
+        expect(live.role).toBe(snapshot.state.tickets[id] === "done" ? "resolver" : "agent");
+      }
+    }
+    await run.shutdown(1_000);
   }, 15000);
 
   it("reject reopens the ticket, lifts the hold, and the re-run's merge completes the pool", async () => {

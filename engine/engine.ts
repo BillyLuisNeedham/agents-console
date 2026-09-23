@@ -113,10 +113,13 @@ import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from ".
 import { createPaneReadRegister, type PaneRead, type PaneReadRegister } from "./pane-reads.ts";
 import {
   createMergeHoldWatch,
+  createMergeLine,
   deriveMergeHold,
   gitMergeHoldProbe,
   type HoldHost,
   type MergeHoldWatch,
+  type MergeLine,
+  type MergeQueueEntry,
   throughMergeHold,
 } from "./merge-hold.ts";
 import {
@@ -371,9 +374,13 @@ export interface PoolSnapshot {
   liveAttempts: Record<string, LiveAttemptRecord>;
   // The Merge hold (ADR-0014, merge-hold.ts): the done-but-unmerged ticket
   // ids, derived fresh at every emit from the statuses and branch state and
-  // never persisted or checkpointed, so the server's "done, merge pending"
-  // label is this one derivation and spawns no git of its own.
+  // never persisted or checkpointed, so the server's card labels are this
+  // one derivation and spawn no git of their own.
   mergeHold: string[];
+  // The Merge queue (issue #129, merge-hold.ts): the same ids in the order
+  // the engine works through them, head first, each named by where its
+  // merge stands. Derived beside the hold at every emit, never persisted.
+  mergeQueue: MergeQueueEntry[];
 }
 
 interface RunOptions {
@@ -722,6 +729,11 @@ interface Session {
   // loop or from an adopted attempt's finalize, chains onto this so two
   // merges never run their git work concurrently on the main checkout.
   mergeChain: Promise<void>;
+  // The Merge queue's in-memory line (merge-hold.ts): the order merges were
+  // taken onto the chain above, which of them the engine is still working,
+  // and the one it is resolving now. Never persisted: a restart finds held
+  // tickets with no place in the line, which is what they then are.
+  mergeLine: MergeLine;
   // ADR-0018's config reload: the raw console.json text last considered at a
   // super-step boundary, whether it was accepted, rejected, or found
   // unchanged. Comparing against this (not against the last *accepted* text)
@@ -1018,6 +1030,7 @@ export function startPool(options: RunOptions): PoolRun {
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
     mergeChain: Promise.resolve(),
+    mergeLine: createMergeLine(),
     lastConfigText,
     jev: options.jev ?? createJev(),
     jevUnsubscribe: () => {},
@@ -1295,6 +1308,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   // The hold is derived fresh here and nowhere persisted (ADR-0014); the
   // watch notes what went out so a merge done by hand can move it.
   const hold = mergeHold(session);
+  const liveAttempts = session.liveAttempts.records((id) => session.conversations.isLive(id));
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
@@ -1305,8 +1319,17 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
     ),
     conversations: session.conversations.views(),
     // A Conversation's pane rides its own view above.
-    liveAttempts: session.liveAttempts.records((id) => session.conversations.isLive(id)),
+    liveAttempts,
     mergeHold: hold,
+    mergeQueue: session.mergeLine.queue(
+      hold,
+      new Set(
+        Object.entries(liveAttempts)
+          .filter(([, live]) => live.role === "resolver")
+          .map(([id]) => id),
+      ),
+      session.state.interrupts,
+    ),
   };
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
@@ -1638,6 +1661,9 @@ async function runSuperStep(
           return result;
         }
         if (result.plan.worktree && result.status === "done") {
+          // Its place in the Merge queue is the order it joins the chain,
+          // which is also the order the conflict loop below resolves in.
+          session.mergeLine.taken(marker.id);
           mergeQueue = mergeQueue.then(() => {
             // Captured just before the merge, inside the serialized chain:
             // HEAD may have moved since this ticket's attempt exited (an
@@ -1699,6 +1725,7 @@ async function runSuperStep(
   session.state = joined;
   for (const merge of merges) {
     if (merge.result.ok) {
+      session.mergeLine.settled(merge.marker.id);
       appendEvent(session.runsDir, merge.marker.id, {
         at: new Date().toISOString(),
         attempt: merge.attempt,
@@ -3067,6 +3094,7 @@ function recordAdoptedExit(
       path: worktreePathFor(session.cwd, ticketId),
       branch: branchFor(session.cwd, ticketId),
     };
+    session.mergeLine.taken(ticketId);
     const next = session.mergeChain.then(async () => {
       // Captured inside the serialized chain, right before the merge: HEAD
       // may have moved since this ticket's attempt was adopted (another
@@ -3076,6 +3104,7 @@ function recordAdoptedExit(
       const beforeSha = mergeTargetSha(session);
       const merge = mergeTicket(session, marker, worktree);
       if (merge.ok) {
+        session.mergeLine.settled(ticketId);
         appendEvent(session.runsDir, ticketId, {
           at: new Date().toISOString(),
           attempt,
@@ -3334,9 +3363,11 @@ function chainEnlistedMerge(
   attempt: number,
   branch: string,
 ): void {
+  session.mergeLine.taken(marker.id);
   const next = session.mergeChain.then(async () => {
     const merge = mergeWithIssueAside(session, marker, branch);
     if (merge.ok) {
+      session.mergeLine.settled(marker.id);
       appendEvent(session.runsDir, marker.id, {
         at: new Date().toISOString(),
         attempt,
@@ -4083,6 +4114,22 @@ async function handleMergeConflict(
   result: MergeResult,
   attempt: number,
 ): Promise<void> {
+  // However the handling ends (an interrupt raised on every path, or a
+  // throw), the engine is finished with this merge: the Merge queue reads
+  // the interrupt from here on, or a stall if there is none.
+  try {
+    await routeMergeConflict(session, marker, result, attempt);
+  } finally {
+    session.mergeLine.settled(marker.id);
+  }
+}
+
+async function routeMergeConflict(
+  session: Session,
+  marker: TicketMarker,
+  result: MergeResult,
+  attempt: number,
+): Promise<void> {
   recordFailedMerge(session, marker.id, attempt, result);
   // A blocked merge never started (#92): there is no conflicted state for
   // a resolver to reproduce (it would only report "already up to date"),
@@ -4107,6 +4154,11 @@ async function handleMergeConflict(
     );
     return;
   }
+  // The head of the Merge queue is resolving from here, before the resolver
+  // is live: a terminal launch takes seconds, and a card reading queued (or
+  // stalled) through them would be the blindness issue #129 names.
+  session.mergeLine.resolving(marker.id);
+  emitSnapshot(session, session.settledPhase ?? "running");
   const resolverAttempt = await runResolver(
     session,
     marker,

@@ -29,6 +29,16 @@
  * engine-run flow's recompute is its spawn set. Either way a hold that
  * re-engages between the wait's exit and the recompute is a re-wait, never
  * a set handed back under a hold.
+ *
+ * The Merge queue (CONTEXT.md, amending ADR-0014 for issue #129) lives here
+ * too: the hold set put in the order the engine actually works through it,
+ * each ticket named by where its merge stands. The engine records, in
+ * memory only, the order it took merges on (the serialised merge chain's
+ * order, which is attempt-exit order, and the order the post-join conflict
+ * loop runs resolvers in), which of them it has not finished with, and
+ * which one it is resolving now; the queue is derived from those, the live
+ * resolvers and the open interrupts at every emit, beside the hold, and is
+ * never persisted.
  */
 
 import type { TicketStatus } from "./pool.ts";
@@ -196,4 +206,89 @@ function sameSet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const seen = new Set(a);
   return b.every((id) => seen.has(id));
+}
+
+/**
+ * Where one held ticket's merge stands (CONTEXT.md: Merge queue). The first
+ * three are a head, a merge that is moving: a resolver on it (or the engine
+ * launching one), or the operator's answer awaited at a merge-approval or a
+ * merge-conflict interrupt. `queued` is behind the engine's own work, with
+ * nothing running on its behalf. `stalled` is held with none of those: no
+ * resolver, no interrupt, and no merge the engine has taken on and not yet
+ * finished with (issue #87's case, named here, not fixed).
+ */
+export type MergeQueueState =
+  | "resolving"
+  | "awaiting-approval"
+  | "needs-you"
+  | "queued"
+  | "stalled";
+
+/** One held ticket in the Merge queue, as the snapshot carries it. */
+export interface MergeQueueEntry {
+  ticketId: string;
+  state: MergeQueueState;
+}
+
+/**
+ * The engine's record of the merges it has taken on, in memory only. The
+ * order is the order `taken` was called in: the moment a done ticket's
+ * merge joins the serialised merge chain, which is attempt-exit order, and
+ * the order the conflict loop then resolves them in. A ticket held after a
+ * restart was never taken, so it has no place in the line and sorts after
+ * it by id.
+ */
+export interface MergeLine {
+  /** The ticket's merge joined the merge chain: it goes to the back of the line. */
+  taken(id: string): void;
+  /** The engine is handling the ticket's conflict: launching or running its resolver. */
+  resolving(id: string): void;
+  /** The engine is finished with the ticket's merge: it landed, or an interrupt now owns it. */
+  settled(id: string): void;
+  /**
+   * The Merge queue: the held ids in line order, each with its state. The
+   * resolvers are the ids with a live resolver Attempt; the interrupts are
+   * the pool's open ones. A read only: calling it twice gives the same
+   * answer. The line needs no pruning, since `taken` keeps one entry per
+   * id and so it never outgrows the pool; ids that are not held are left
+   * out of the answer, not out of the line.
+   */
+  queue(
+    hold: readonly string[],
+    resolvers: ReadonlySet<string>,
+    interrupts: readonly { ticketId: string; kind: string }[],
+  ): MergeQueueEntry[];
+}
+
+export function createMergeLine(): MergeLine {
+  let order: string[] = [];
+  const pending = new Set<string>();
+  let active: string | null = null;
+  return {
+    taken(id) {
+      order = order.filter((o) => o !== id);
+      order.push(id);
+      pending.add(id);
+    },
+    resolving(id) {
+      active = id;
+    },
+    settled(id) {
+      pending.delete(id);
+      if (active === id) active = null;
+    },
+    queue(hold, resolvers, interrupts) {
+      const held = new Set(hold);
+      const lined = order.filter((id) => held.has(id));
+      const rest = hold.filter((id) => !order.includes(id)).sort();
+      const stateOf = (id: string): MergeQueueState => {
+        if (active === id || resolvers.has(id)) return "resolving";
+        const kinds = new Set(interrupts.filter((i) => i.ticketId === id).map((i) => i.kind));
+        if (kinds.has("merge-approval")) return "awaiting-approval";
+        if (kinds.has("merge-conflict")) return "needs-you";
+        return pending.has(id) ? "queued" : "stalled";
+      };
+      return [...lined, ...rest].map((ticketId) => ({ ticketId, state: stateOf(ticketId) }));
+    },
+  };
 }

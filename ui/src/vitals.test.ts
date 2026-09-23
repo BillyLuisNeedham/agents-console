@@ -9,7 +9,10 @@ import type { EnrichedSnapshot, TicketActivityResponse, TicketStatus } from "./p
 
 const POLL_MS = 5;
 
-function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
+function snap(
+  tickets: Record<string, TicketStatus>,
+  resolvers: string[] = [],
+): EnrichedSnapshot {
   return {
     seq: 1,
     phase: "running",
@@ -21,10 +24,17 @@ function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
         title: `ticket ${id}`,
         blockedBy: [],
         status,
-        mergePending: false,
+        mergeState: resolvers.includes(id) ? ("resolving" as const) : null,
         enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
-        liveAttempt: null,
+        liveAttempt: resolvers.includes(id)
+          ? {
+              attempt: 2,
+              paneId: null,
+              role: "resolver" as const,
+              startedAt: new Date().toISOString(),
+            }
+          : null,
         reassign: {
           eligible: status !== "done",
           reason: null,
@@ -40,6 +50,7 @@ function snap(tickets: Record<string, TicketStatus>): EnrichedSnapshot {
       log: [],
       outcomes: {},
       interrupts: [],
+      mergeQueue: [],
       queuedAnswers: [],
       config: {},
     },
@@ -91,6 +102,23 @@ describe("Vitals store", () => {
     await ticks();
     h.store.dispose();
     expect(new Set(h.fetched)).toEqual(new Set(["01", "02"]));
+  });
+
+  it("polls a done ticket while the engine marks its live attempt a resolver (#129)", async () => {
+    const fetched: string[] = [];
+    const store = new Vitals({
+      fetch: (ticketId) => {
+        fetched.push(ticketId);
+        return Promise.resolve(response(true));
+      },
+      onChange: () => {},
+      pollMs: POLL_MS,
+    });
+    store.update(snap({ "02": "done", "04": "done" }, ["02"]));
+    await ticks();
+    store.dispose();
+    expect(new Set(fetched)).toEqual(new Set(["02"]));
+    expect(fetched.length).toBeGreaterThan(1);
   });
 
   it("drops a ticket from the cadence once its response says nothing is live", async () => {

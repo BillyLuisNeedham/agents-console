@@ -508,8 +508,9 @@ export async function launchAttempt<R extends { ok: true }>(
     terminalError?: string,
     pid?: number,
   ): void => {
+    const at = new Date().toISOString();
     appendEvent(env.runsDir, id, {
-      at: new Date().toISOString(),
+      at,
       attempt: spec.attempt,
       kind: "spawned",
       payload: {
@@ -524,6 +525,8 @@ export async function launchAttempt<R extends { ok: true }>(
     env.liveAttempts.register(id, spec.attempt, {
       paneId: headlessRun ? null : terminal.paneId,
       tabId: headlessRun ? null : terminal.tabId,
+      role: spec.naming.resolver ? "resolver" : "agent",
+      startedAt: at,
     });
   };
   const headless = (

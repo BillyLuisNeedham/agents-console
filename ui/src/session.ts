@@ -611,6 +611,7 @@ export class ConsoleSession {
       terminalBacked: this.snapshot
         ? isTerminalBacked(this.snapshot.state.config)
         : false,
+      mergeQueueLine: this.view?.mergeQueueLine ?? null,
       detail,
       detailTabs:
         detail?.kind === "ticket" ? projectDetailTabs(detail, this.tabOverride) : null,

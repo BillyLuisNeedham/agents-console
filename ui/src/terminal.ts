@@ -218,6 +218,9 @@ export class TerminalSurface {
 export interface TerminalSurfaceActions {
   /** "Open in herdr": focuses the attempt's pane; resolves false on failure. */
   onFocus: () => Promise<boolean>;
+  /** The focus button's words when the pane is not the Ticket's own agent's:
+   *  "open resolver" for a resolver on its merge (issue #129). */
+  focusLabel?: string;
 }
 
 /**
@@ -259,12 +262,14 @@ export function renderTerminalSurface(
           class: "btn terminal-focus",
           type: "button",
           disabled: view.status === "unavailable",
-          title: "focus the attempt's tab in the herdr TUI",
+          title: actions.focusLabel
+            ? `${actions.focusLabel}: focus its tab in the herdr TUI`
+            : "focus the attempt's tab in the herdr TUI",
           onclick: () => {
             void actions.onFocus();
           },
         },
-        "Open in herdr",
+        actions.focusLabel ?? "Open in herdr",
       ),
       h(
         "button",

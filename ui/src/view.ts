@@ -98,6 +98,8 @@ export interface AppModel {
   restart: RestartView;
   /** The pool is Terminal-backed: the header offers Enlist only then. */
   terminalBacked: boolean;
+  /** The canvas header's Merge queue line (issue #129); null with no hold. */
+  mergeQueueLine: string | null;
   detail: DetailView | null;
   /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
   detailTabs: DetailTabView[] | null;
@@ -279,6 +281,7 @@ export class ConsoleView {
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),
+      onFocusResolver: (ticketId: string) => this.onFocusTerminal(ticketId),
       reassign: this.reassign,
     };
     // The two trays overlay the canvas column, not the window: anchored to

@@ -15,6 +15,7 @@ import {
   DETAIL_MAX_FRACTION,
   DETAIL_MIN_PX,
   parseStoredDetailWidth,
+  resolverFiles,
   statusLabel,
   ticketBodyHtml,
   UNASSIGNED_LABEL,
@@ -62,6 +63,9 @@ export interface DetailHandlers {
   onEndConversation: (conversationId: string, closing?: string) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
+  /** "open resolver" on a ticket whose merge a resolver is resolving
+   *  (issue #129): the same focus seam the card's button uses, by ticket id. */
+  onFocusResolver: (ticketId: string) => Promise<boolean>;
   /**
    * The Reassign store (issue #126), passed in rather than owned: the Detail
    * has no onChange of its own, and a Save that enables on dirty has to
@@ -548,10 +552,11 @@ export class Detail {
     return panel;
   }
 
-  // The Progress tab: the status, the interrupt form (the Detail's only
-  // action surface) and the timeline, with attempt rows opening raw logs in
-  // the pane below. A never-run ticket's timeline carries its own "no
-  // attempts yet" marker, and its log pane stays closed.
+  // The Progress tab: the status, the resolver running on the ticket's merge
+  // when there is one, the interrupt form (the Detail's only action surface)
+  // and the timeline, with attempt rows opening raw logs in the pane below.
+  // A never-run ticket's timeline carries its own "no attempts yet" marker,
+  // and its log pane stays closed.
   private renderProgressTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
     timeline: TimelineView | null,
@@ -562,10 +567,17 @@ export class Detail {
       h("div", { class: "dim" }, "status"),
       h(
         "div",
-        { class: `detail-status ticket-state-${detail.status}` },
-        statusLabel(detail.status, detail.mergePending),
+        {
+          class:
+            `detail-status ticket-state-${detail.status}` +
+            (detail.mergeState ? ` ticket-merge-${detail.mergeState}` : ""),
+        },
+        statusLabel(detail.status, detail.mergeState),
       ),
     );
+    if (detail.resolver) {
+      panel.append(this.renderResolver(detail.ticketId, detail.resolver, timeline, handlers));
+    }
     if (detail.interrupt) {
       panel.append(this.renderInterrupt(detail.interrupt, handlers));
     }
@@ -584,6 +596,54 @@ export class Detail {
       panel.append(this.renderLogPane(logPane, detail.ticketId, handlers));
     }
     return panel;
+  }
+
+  // The resolver on a held ticket's merge (issue #129): how long it has run,
+  // the files it was handed (the timeline's resolver event, so empty until
+  // the events land), and a jump to its herdr tab. A headless resolver has
+  // no tab to open; its output is the log pane's, below.
+  private renderResolver(
+    ticketId: string,
+    resolver: NonNullable<Extract<DetailView, { kind: "ticket" }>["resolver"]>,
+    timeline: TimelineView | null,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const files = resolverFiles(timeline, resolver.attempt);
+    return h(
+      "section",
+      { class: "detail-resolver", key: "detail-resolver" },
+      h(
+        "div",
+        { class: "detail-resolver-head" },
+        h(
+          "span",
+          { class: "detail-resolver-elapsed" },
+          `resolver · attempt ${resolver.attempt} · running ${resolver.elapsed}`,
+        ),
+        resolver.paneId !== null
+          ? h(
+              "button",
+              {
+                class: "btn detail-resolver-open",
+                type: "button",
+                title: "focus the resolver's tab in the herdr TUI",
+                onclick: () => {
+                  void handlers.onFocusResolver(ticketId);
+                },
+              },
+              "open resolver",
+            )
+          : null,
+      ),
+      files.length > 0
+        ? h(
+            "div",
+            { class: "detail-resolver-files" },
+            h("div", { class: "dim" }, `conflicted files (${files.length})`),
+            h("ul", {}, ...files.map((file) => h("li", { key: file }, h("code", {}, file)))),
+          )
+        : null,
+    );
   }
 
   // -------------------------------------------------------------------------

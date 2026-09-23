@@ -1068,13 +1068,13 @@ describe("grades endpoint", () => {
   });
 });
 
-describe("merge pending enrichment", () => {
+describe("merge queue enrichment", () => {
   const DONE_01 = "<!-- state: id=01 blocked-by=none status=done -->";
 
   interface EnrichedTicketWire {
     id: string;
     status: string;
-    mergePending: boolean;
+    mergeState: string | null;
   }
 
   /**
@@ -1137,11 +1137,14 @@ describe("merge pending enrichment", () => {
     // first snapshot's hold set, never from a settle.
     await server.start();
 
-    // Parked and unmerged: the snapshot's hold set carries the label.
+    // Parked and unmerged: the snapshot's Merge queue carries the label. The
+    // engine never took this merge on (the park was made by hand before
+    // boot) and nothing is raised on it, so it reads stalled, issue #87's
+    // case named rather than hidden.
     expect(server.latest?.state.tickets[0]).toMatchObject({
       id: "01",
       status: "done",
-      mergePending: true,
+      mergeState: "stalled",
     });
 
     // A manual CLI merge, branch kept and now an ancestor of the working
@@ -1153,12 +1156,12 @@ describe("merge pending enrichment", () => {
     let tickets: EnrichedTicketWire[] = [];
     await waitFor(() => {
       tickets = server.latest?.state.tickets ?? [];
-      return tickets[0]?.mergePending === false;
+      return tickets[0]?.mergeState === null;
     }, "the hold to lift on the snapshot after the manual merge");
     expect((await ticketsOf(server))[0]).toMatchObject({
       id: "01",
       status: "done",
-      mergePending: false,
+      mergeState: null,
     });
     // The gone-branch reading (a deleted branch is landed) is pinned in
     // merge-hold.test.ts, on the one derivation this label comes from.
@@ -1193,10 +1196,16 @@ describe("merge pending enrichment", () => {
       (await ticketsOf(server)).map((t) => [t.id, t]),
     );
     // Unmerged anywhere: pending.
-    expect(byId.get("01")).toMatchObject({ status: "done", mergePending: true });
+    expect(byId.get("01")).toMatchObject({ status: "done", mergeState: "stalled" });
     // Merged into main but not into feature/x: still pending. The target is
     // the working branch, not main.
-    expect(byId.get("02")).toMatchObject({ status: "done", mergePending: true });
+    expect(byId.get("02")).toMatchObject({ status: "done", mergeState: "stalled" });
+    // Neither was ever taken onto the merge chain, so the queue orders them
+    // by id behind a line that is empty.
+    expect(server.latest?.state.mergeQueue).toEqual([
+      { ticketId: "01", state: "stalled" },
+      { ticketId: "02", state: "stalled" },
+    ]);
   });
 
   it("drops the label when the ticket reopens: a restart re-derives and the re-run's merge lands", async () => {
@@ -1206,7 +1215,7 @@ describe("merge pending enrichment", () => {
     await first.start();
     expect((await ticketsOf(first))[0]).toMatchObject({
       status: "done",
-      mergePending: true,
+      mergeState: "stalled",
     });
     await first.close();
 
@@ -1223,7 +1232,7 @@ describe("merge pending enrichment", () => {
     // ticket is done again with nothing pending.
     expect((await ticketsOf(second))[0]).toMatchObject({
       status: "done",
-      mergePending: false,
+      mergeState: null,
     });
     expect(existsSync(worktreePathFor(root, "01"))).toBe(false);
   });
@@ -2577,7 +2586,7 @@ describe("terminal endpoints", () => {
     );
     await server.start();
     await waitFor(() => liveAttemptOf(server, "01") != null, "01's headless attempt to be live");
-    expect(liveAttemptOf(server, "01")).toEqual({ attempt: 1, paneId: null });
+    expect(liveAttemptOf(server, "01")).toMatchObject({ attempt: 1, paneId: null, role: "agent" });
 
     for (const ticket of ["01", "99"]) {
       const peek = await fetch(`${server.url}/api/terminal/peek?ticket=${ticket}`);
@@ -2911,6 +2920,8 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
     expect(server.latest?.state.tickets.find((t) => t.id === "02")?.liveAttempt).toEqual({
       attempt: 1,
       paneId: pane02,
+      role: "agent",
+      startedAt: expect.any(String),
     });
     // Every attempt of a terminal-backed pool opens its own named tab, so
     // each ticket's current attempt carries a distinct recovered pane id.
@@ -2953,7 +2964,12 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
       () => server.latest?.state.tickets[0]?.liveAttempt != null,
       "the headless attempt to be live on the snapshot",
     );
-    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({
+      attempt: 1,
+      paneId: null,
+      role: "agent",
+      startedAt: expect.any(String),
+    });
     writeFileSync(sentinel, "");
     const snapshot = await server.settled();
     expect(snapshot.state.tickets[0]!.liveAttempt).toBeNull();
@@ -2980,7 +2996,12 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
       () => server.latest?.state.tickets[0]?.liveAttempt != null,
       "the fallback attempt to be live on the snapshot",
     );
-    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({
+      attempt: 1,
+      paneId: null,
+      role: "agent",
+      startedAt: expect.any(String),
+    });
     writeFileSync(sentinel, "");
     const snapshot = await server.settled();
     // The fallback still completes; the spawned event's pane_id is null.
@@ -3023,7 +3044,12 @@ describe("liveAttempt enrichment (terminal-backed attempts)", () => {
       () => server.latest?.state.tickets[0]?.liveAttempt != null,
       "the fallback attempt to be live on the snapshot",
     );
-    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({ attempt: 1, paneId: null });
+    expect(server.latest?.state.tickets[0]!.liveAttempt).toEqual({
+      attempt: 1,
+      paneId: null,
+      role: "agent",
+      startedAt: expect.any(String),
+    });
     writeFileSync(sentinel, "");
     const snapshot = await server.settled();
     // The fallback still completes; the spawned event records the fallback

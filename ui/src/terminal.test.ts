@@ -29,10 +29,13 @@ function snap(
         title: `ticket ${id}`,
         blockedBy: [],
         status: "in-progress" as const,
-        mergePending: false,
+        mergeState: null,
         enlisted: false,
         assignment: { harness: null, model: null, drivers: "implement" },
-        liveAttempt: paneId === undefined ? null : { attempt: 1, paneId },
+        liveAttempt:
+          paneId === undefined
+            ? null
+            : { attempt: 1, paneId, role: "agent" as const, startedAt: "2026-09-23T10:00:00.000Z" },
         reassign: {
           eligible: paneId === undefined,
           reason: paneId === undefined ? null : "an Attempt is in flight",
@@ -59,6 +62,7 @@ function snap(
       log: [],
       outcomes: {},
       interrupts: [],
+      mergeQueue: [],
       queuedAnswers: [],
       config: {},
     },

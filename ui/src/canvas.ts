@@ -84,7 +84,8 @@ function renderVitals(vitals: VitalsView): HTMLElement {
     : null;
   return h(
     "div",
-    { class: `vitals vitals-${vitals.mode}` },
+    { class: `vitals vitals-${vitals.mode}` + (vitals.elapsed ? " vitals-resolver" : "") },
+    vitals.elapsed ? h("span", { class: "vitals-elapsed" }, vitals.elapsed) : null,
     diff,
     stale,
     sparkline(vitals.samples),
@@ -233,6 +234,9 @@ export interface CanvasModel {
   /** The pool is Terminal-backed (ADR-0014): the header offers Enlist only
    *  then, so a headless pool is never shown an action it cannot perform. */
   terminalBacked: boolean;
+  /** The Merge queue line (issue #129): shown under the status while the
+   *  Merge hold stands, absent otherwise. */
+  mergeQueueLine: string | null;
 }
 
 /**
@@ -463,8 +467,12 @@ export class Canvas {
       h("span", { class: "node-card-id" }, card.ticketId),
       h(
         "span",
-        { class: `node-card-state ticket-state-${card.status}` },
-        statusLabel(card.status, card.mergePending),
+        {
+          class:
+            `node-card-state ticket-state-${card.status}` +
+            (card.mergeState ? ` ticket-merge-${card.mergeState}` : ""),
+        },
+        statusLabel(card.status, card.mergeState),
       ),
     );
     if (card.interrupt) {
@@ -489,6 +497,7 @@ export class Canvas {
       {
         class:
           `node-card ticket-card ticket-card-${card.status}` +
+          (card.mergeState ? ` ticket-card-merge-${card.mergeState}` : "") +
           (card.interrupt
             ? card.interrupt.queued
               ? " ticket-card-queued"
@@ -528,6 +537,7 @@ export class Canvas {
         card.terminal
           ? renderTerminalSurface(card.terminal, {
               onFocus: () => this.onFocusTerminal(card.ticketId),
+              ...(card.resolver ? { focusLabel: "open resolver" } : {}),
             })
           : null,
       ),
@@ -684,6 +694,9 @@ export class Canvas {
       "div",
       { class: "canvas-header" },
       h("span", { class: "dim" }, canvasStatusText(model)),
+      model.mergeQueueLine
+        ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
+        : null,
       model.error ? h("span", { class: "error-inline" }, model.error) : null,
       h(
         "div",
