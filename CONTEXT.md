@@ -237,11 +237,11 @@ _Avoid_: DTO, schema, contract (all too generic)
 ## Verification
 
 **Verify**:
-Optional per-ticket machinery that checks whether finished Attempt work actually satisfies its ticket, instead of trusting the agent's done-claim. A ticket opts in by setting `verify: N` in its assign block — N parallel Attempts, one grader ticket per Attempt, then Selection. Absent the key, the ticket runs exactly as it always has. The pool's `verify` skill, written beside AGENT.md at Console setup, holds the grading instructions a grader agent follows.
+Optional per-ticket machinery that checks whether finished Attempt work actually satisfies its ticket, instead of trusting the agent's done-claim. A ticket opts in by setting `verify: N` in its assign block — N parallel Attempts, then grading and Selection. With a Jev key the engine grades each Attempt in code and no grader ticket exists; without a key, one grader ticket per Attempt is the fallback. Absent the key, the ticket runs exactly as it always has. The pool's `verify` skill, written beside AGENT.md at Console setup, holds the grading instructions the fallback grader agent follows.
 _Avoid_: verifier node, judge (a judge is a model, not this machinery)
 
 **Grade**:
-One grader's assessment of one Attempt: a score (0–10), a verdict (pass or flag), and short reasons. The grader is itself a ticket — an ordinary assignment, so its harness and model are chosen through the normal assign machinery. The grade lands in the graded Attempt's record, visible in the ticket's Detail. With `verify: 1`, a failing Grade becomes the Brief of a checkpoint interrupt.
+One assessment of one Attempt: a score (0–10), a verdict (pass or flag), and short reasons. With a Jev key, Jev grades every Attempt in engine code from an engine-owned, versioned rubric, and the Grade records that rubric version, the response's model and its Evidence budget. Without a key the grader agent is the fallback: an ordinary ticket and assignment, so its harness and model are chosen through the normal assign machinery. The grade lands in the graded Attempt's record, visible in the ticket's Detail. With `verify: 1`, a failing Grade becomes the Brief of a checkpoint interrupt.
 _Avoid_: rating, review (Review is the human's final judgment)
 
 **Selection**:

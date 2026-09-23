@@ -14,6 +14,7 @@ import type {
   EnlistPane,
   EnrichedSnapshot,
   EnrichedTicketState,
+  Grade,
   Interrupt,
   Outcome,
   PoolConfig,
@@ -47,6 +48,7 @@ export type {
   EnlistResponse,
   EnrichedSnapshot,
   EnrichedTicketState,
+  Grade,
   InterruptKind,
   MachineDefaults,
   MachineDefaultsView,
@@ -154,13 +156,10 @@ export const UNASSIGNED_LABEL = "unassigned";
 // ---------------------------------------------------------------------------
 
 /** A grade as the timeline shows it under its attempt's graded event: the
- *  full payload, reasons included. The card's TicketGradeSummary is the
- *  summary shape; this is the record. */
-export interface TimelineGradeView {
-  score: number;
-  verdict: string;
-  reasons: string;
-}
+ *  full payload, reasons and provenance included. The same wire shape the
+ *  engine declares once (wire.ts's Grade); the card's TicketGradeSummary is
+ *  the summary shape, this is the record. */
+export type TimelineGradeView = Grade;
 
 /**
  * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`
@@ -183,10 +182,13 @@ function formatEventTime(iso: string): string {
 }
 
 /** The graded event's payload as a grade, or null when a field is missing or
- *  mistyped. The engine writes all three fields, so a null here means a torn
- *  or foreign line, and the timeline falls back to the plain event row. */
+ *  mistyped. The engine writes the three core fields always and the three
+ *  provenance fields on a Jev Grade (ADR-0023), so a null here means a torn
+ *  or foreign line, and the timeline falls back to the plain event row. A
+ *  provenance field that is missing or mistyped is simply left off; the core
+ *  three decide whether the row is a grade at all. */
 function gradeFromPayload(payload: Record<string, unknown>): TimelineGradeView | null {
-  const { score, verdict, reasons } = payload;
+  const { score, verdict, reasons, rubric, model, evidenceBudget } = payload;
   if (
     typeof score !== "number" ||
     typeof verdict !== "string" ||
@@ -194,7 +196,14 @@ function gradeFromPayload(payload: Record<string, unknown>): TimelineGradeView |
   ) {
     return null;
   }
-  return { score, verdict, reasons };
+  if (verdict !== "pass" && verdict !== "flag") return null;
+  const grade: TimelineGradeView = { score, verdict, reasons };
+  if (typeof rubric === "string") grade.rubric = rubric;
+  if (typeof model === "string") grade.model = model;
+  if (evidenceBudget === "base" || evidenceBudget === "widened") {
+    grade.evidenceBudget = evidenceBudget;
+  }
+  return grade;
 }
 
 // A config reload's `reassigned` event (ADR-0018), as one readable line: "harness
