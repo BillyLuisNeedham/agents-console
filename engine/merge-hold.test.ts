@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   createMergeHoldWatch,
+  createMergeLine,
   deriveMergeHold,
   type HoldHost,
   type MergeHoldProbe,
@@ -265,5 +266,97 @@ describe("wait-and-recompute rule", () => {
     expect(h.drains).toBe(3);
     // The engagement's emit, plus one for the applied answer.
     expect(h.emits).toBe(2);
+  });
+});
+
+describe("merge queue derivation", () => {
+  const noResolvers = new Set<string>();
+
+  it("orders the held tickets the way the engine took their merges on, and queues the ones it has not reached", () => {
+    const line = createMergeLine();
+    line.taken("05");
+    line.taken("02");
+    line.taken("09");
+    line.resolving("05");
+    expect(line.queue(["02", "05", "09"], new Set(["05"]), [])).toEqual([
+      { ticketId: "05", state: "resolving" },
+      { ticketId: "02", state: "queued" },
+      { ticketId: "09", state: "queued" },
+    ]);
+  });
+
+  it("reads resolving from the engine's own handling before the resolver is live, so a slow launch is not a stall", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.resolving("02");
+    expect(line.queue(["02"], noResolvers, [])).toEqual([{ ticketId: "02", state: "resolving" }]);
+  });
+
+  it("names the interrupt a settled head waits at, and keeps its place in the line", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.taken("04");
+    line.taken("05");
+    line.resolving("02");
+    line.settled("02");
+    line.resolving("04");
+    line.settled("04");
+    expect(
+      line.queue(["02", "04", "05"], noResolvers, [
+        { ticketId: "04", kind: "merge-conflict" },
+        { ticketId: "02", kind: "merge-approval" },
+      ]),
+    ).toEqual([
+      { ticketId: "02", state: "awaiting-approval" },
+      { ticketId: "04", state: "needs-you" },
+      { ticketId: "05", state: "queued" },
+    ]);
+  });
+
+  it("calls a held ticket with nothing running, nothing raised and nothing taken on stalled (#87)", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.settled("02");
+    expect(line.queue(["02", "03"], noResolvers, [{ ticketId: "03", kind: "crash" }])).toEqual([
+      { ticketId: "02", state: "stalled" },
+      { ticketId: "03", state: "stalled" },
+    ]);
+  });
+
+  it("puts a held ticket the engine never took on after the line, by id, the way a restart finds them", () => {
+    const line = createMergeLine();
+    line.taken("07");
+    expect(line.queue(["09", "03", "07"], noResolvers, [])).toEqual([
+      { ticketId: "07", state: "queued" },
+      { ticketId: "03", state: "stalled" },
+      { ticketId: "09", state: "stalled" },
+    ]);
+  });
+
+  it("reads a live resolver as resolving even when the engine never took the merge on (a boot adoption)", () => {
+    const line = createMergeLine();
+    expect(line.queue(["02"], new Set(["02"]), [{ ticketId: "02", kind: "merge-conflict" }])).toEqual([
+      { ticketId: "02", state: "resolving" },
+    ]);
+  });
+
+  it("leaves out a ticket that landed, and a re-taken ticket joins the back of the line", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.taken("04");
+    line.settled("02");
+    expect(line.queue(["04"], noResolvers, [])).toEqual([{ ticketId: "04", state: "queued" }]);
+    line.taken("02");
+    expect(line.queue(["02", "04"], noResolvers, [])).toEqual([
+      { ticketId: "04", state: "queued" },
+      { ticketId: "02", state: "queued" },
+    ]);
+  });
+
+  it("is empty when nothing is held, whatever the engine is doing", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.resolving("02");
+    expect(line.queue([], new Set(["02"]), [])).toEqual([]);
   });
 });
