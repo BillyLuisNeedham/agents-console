@@ -248,8 +248,10 @@ export interface MergeLine {
   /**
    * The Merge queue: the held ids in line order, each with its state. The
    * resolvers are the ids with a live resolver Attempt; the interrupts are
-   * the pool's open ones. Line entries that are neither held nor still
-   * being worked are dropped here, so the line never outgrows the pool.
+   * the pool's open ones. A read only: calling it twice gives the same
+   * answer. The line needs no pruning, since `taken` keeps one entry per
+   * id and so it never outgrows the pool; ids that are not held are left
+   * out of the answer, not out of the line.
    */
   queue(
     hold: readonly string[],
@@ -277,7 +279,6 @@ export function createMergeLine(): MergeLine {
     },
     queue(hold, resolvers, interrupts) {
       const held = new Set(hold);
-      order = order.filter((id) => held.has(id) || pending.has(id));
       const lined = order.filter((id) => held.has(id));
       const rest = hold.filter((id) => !order.includes(id)).sort();
       const stateOf = (id: string): MergeQueueState => {

@@ -353,6 +353,20 @@ describe("merge queue derivation", () => {
     ]);
   });
 
+  it("is a read: two consecutive queue calls agree, and a dropped ticket keeps its place if held again", () => {
+    const line = createMergeLine();
+    line.taken("02");
+    line.taken("04");
+    line.settled("02");
+    const interrupts = [{ ticketId: "04", kind: "merge-conflict" }];
+    const first = line.queue(["04"], noResolvers, interrupts);
+    expect(line.queue(["04"], noResolvers, interrupts)).toEqual(first);
+    expect(line.queue(["02", "04"], noResolvers, interrupts)).toEqual([
+      { ticketId: "02", state: "stalled" },
+      { ticketId: "04", state: "needs-you" },
+    ]);
+  });
+
   it("is empty when nothing is held, whatever the engine is doing", () => {
     const line = createMergeLine();
     line.taken("02");
