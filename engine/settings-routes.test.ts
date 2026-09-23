@@ -23,11 +23,14 @@ import {
   stubHarness,
 } from "./pool-fixture.ts";
 import { makeTempDir } from "./tmp.ts";
+import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "./herdr-executing-fake.ts";
 
 const servers: PoolServer[] = [];
+const fakes: ExecutingFakeHerdr[] = [];
 
 afterEach(async () => {
   await cleanupPools(servers);
+  while (fakes.length > 0) await fakes.pop()!.close();
 });
 
 const READY = "<!-- state: id=01 blocked-by=none status=ready -->";
@@ -59,9 +62,14 @@ async function startRig(
     config: { ...STUB_DEFAULTS, ...config },
   });
   const machine = machineHome();
+  // Every rig gets its own herdr: a `terminal: herdr` rig left on the default
+  // socket would open real workspaces and tabs in the operator's daemon.
+  const fake = await startExecutingFakeHerdr();
+  fakes.push(fake);
   const server = createPoolServer({
     poolDir,
     port: 0,
+    herdrSocket: fake.socketPath,
     harnesses: stubHarness(poolDir, {}).harnesses,
     distDir: "/nonexistent",
     registryPath: join(poolDir, "fleet.json"),

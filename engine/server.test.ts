@@ -3741,7 +3741,8 @@ describe("conversation endpoints", () => {
 
   it("rejects a missing title with 400 before ever touching the engine", async () => {
     const poolDir = makeConvoPool();
-    const server = await startServer(poolDir, convoHarnesses);
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
     await server.start();
 
     const res = await fetch(`${server.url}/api/conversations`, {
@@ -3751,11 +3752,13 @@ describe("conversation endpoints", () => {
     });
     expect(res.status).toBe(400);
     expect((await res.json()).reason).toContain("title is required");
+    await fake.close();
   });
 
   it("ending an unknown conversation id is a 404", async () => {
     const poolDir = makeConvoPool();
-    const server = await startServer(poolDir, convoHarnesses);
+    const fake = await startLaunchFakeHerdr();
+    const server = startConvoServer(poolDir, fake.socketPath);
     await server.start();
 
     const res = await fetch(`${server.url}/api/conversations/end`, {
@@ -3765,6 +3768,7 @@ describe("conversation endpoints", () => {
     });
     expect(res.status).toBe(404);
     expect((await res.json()).reason).toContain("no live conversation");
+    await fake.close();
   });
 
   it("create, then end, round trip through the HTTP routes", async () => {

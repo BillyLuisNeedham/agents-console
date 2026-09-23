@@ -37,8 +37,15 @@ import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** The daemon's socket under the user's config dir; overridable per run (tests, other layouts). */
-export const HERDR_SOCKET_DEFAULT = join(homedir(), ".config/herdr/herdr.sock");
+/**
+ * The daemon's socket when a run names none: HERDR_SOCKET_PATH when set,
+ * herdr's own variable (it exports it into every pane it runs, so a Console
+ * started inside herdr talks to that daemon), else the socket under the
+ * user's config dir. The test preload points the variable at scratch, so a
+ * test that forgets its fake reaches no daemon rather than the operator's.
+ */
+export const HERDR_SOCKET_DEFAULT =
+  process.env.HERDR_SOCKET_PATH?.trim() || join(homedir(), ".config/herdr/herdr.sock");
 
 /** Attempt tab labels cap at this many characters (`~40` per the spec). */
 export const ATTEMPT_TAB_LABEL_MAX = 40;
