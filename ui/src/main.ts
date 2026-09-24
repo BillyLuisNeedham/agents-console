@@ -7,7 +7,7 @@
 
 import "./styles.css";
 import { PoolClient } from "./client";
-import { POOL_TAB_COLORS, type EnrichedSnapshot } from "./project";
+import { POOL_TAB_COLORS, poolTabTitle, type EnrichedSnapshot } from "./project";
 import { ConsoleSession } from "./session";
 import { TerminalSurface } from "./terminal";
 import { ConsoleView } from "./view";
@@ -168,7 +168,7 @@ function render(): void {
   // session computes it, the DOM write is the bootstrap's.
   const status = session.tabStatus;
   if (status && session.poolName) {
-    document.title = `${status.word} — ${session.poolName}`;
+    document.title = poolTabTitle(session.poolName, status);
     setFavicon(status.color);
   }
   consoleView.render(root, session.model(consoleView.conversationEndState()), {

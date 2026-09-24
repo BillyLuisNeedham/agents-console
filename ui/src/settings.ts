@@ -55,6 +55,8 @@ export type SaveState = "idle" | "saving" | "saved";
 
 /** The Pool settings form's text and toggle fields, all held as drafts. */
 export interface PoolDraft {
+  /** The Pool title (issue #100): empty means none, and the directory names the pool. */
+  title: string;
   harness: string;
   model: string;
   drivers: string;
@@ -86,6 +88,7 @@ export type MachineTextField = Exclude<keyof MachineDraft, "terminal">;
 const RESOLVER_NONE = "none";
 
 const EMPTY_POOL_DRAFT: PoolDraft = {
+  title: "",
   harness: "",
   model: "",
   drivers: "",
@@ -121,6 +124,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     resolverModel = resolver.model ?? "";
   }
   return {
+    title: config.title ?? "",
     harness: defaults.harness ?? "",
     model: defaults.model ?? "",
     drivers: defaults.drivers ?? "",
@@ -212,6 +216,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     agents: orNull(draft.agents),
     reviewer: orNull(draft.reviewer),
     checkpoint: orNull(draft.checkpoint),
+    title: orNull(draft.title),
   };
 }
 
@@ -228,6 +233,12 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   if (engine) defaults.engine = engine;
   if (draft.terminal) defaults.terminal = "herdr";
   return defaults;
+}
+
+/** The pool directory's name, from the path of its console.json. */
+function poolDirName(configPath: string): string {
+  const parts = configPath.split("/").filter((part) => part !== "");
+  return parts.at(-2) ?? "";
 }
 
 function sameDraft<T extends object>(a: T, b: T): boolean {
@@ -560,6 +571,13 @@ export class SettingsStore {
         h("span", { class: "settings-section-title" }, "pool settings"),
         h("span", { class: "settings-path dim" }, data.pool.path),
       ),
+      // First, because it is the one setting about which pool this is. It
+      // takes effect on save, with no badge: the header, the tab and a Pool
+      // workspace the Console made all follow it at once (issue #100).
+      text("title", "title", {
+        placeholder: poolDirName(data.pool.path),
+        hint: "display only",
+      }),
       this.renderField(
         "pool-harness",
         "harness",

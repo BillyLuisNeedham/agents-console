@@ -38,6 +38,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
   return {
     cards: [],
     connected: true,
+    poolName: null,
     phase: "running",
     phaseLabel: "running",
     seq: 7,
@@ -96,6 +97,50 @@ describe("canvasStatusText", () => {
         }),
       ),
     ).toBe("pool · restarting...");
+  });
+});
+
+describe("the pool's name in the header (issue #100)", () => {
+  it("leads every status line with the Pool title, or the directory it falls back to", () => {
+    expect(canvasStatusText(model({ poolName: "Jev as the grader" }))).toBe(
+      "Jev as the grader · running · snapshot 7",
+    );
+    expect(
+      canvasStatusText(model({ poolName: "Jev as the grader", connected: false })),
+    ).toBe("Jev as the grader · connecting");
+    expect(
+      canvasStatusText(
+        model({ poolName: "Jev as the grader", phase: "stopped", phaseLabel: "stopped" }),
+      ),
+    ).toBe("Jev as the grader · stopped");
+    expect(
+      canvasStatusText(
+        model({
+          poolName: ".scratch/jev-integration",
+          phase: "stopped",
+          stop: stop({ stoppedFromHere: true }),
+        }),
+      ),
+    ).toBe(".scratch/jev-integration · stopped · from this page");
+  });
+
+  it("names the pool in the stopped notice", () => {
+    const { root, commit } = mountCanvas(
+      model({
+        cards: [{ kind: "utility", id: "u-1", label: "grader", interrupt: null, x: 100, y: 100 }],
+        poolName: "Jev as the grader",
+        phase: "stopped",
+        phaseLabel: "stopped",
+        connected: false,
+        stop: stop({ relaunch: "bun run engine/server.ts --pool /tmp/pool" }),
+      }),
+    );
+    commit();
+    const notice = root.querySelector(".canvas-stopped-text")?.textContent ?? "";
+    expect(notice).toStartWith("The server for Jev as the grader has stopped.");
+    expect(root.querySelector(".canvas-stopped-command")?.textContent).toBe(
+      "bun run engine/server.ts --pool /tmp/pool",
+    );
   });
 });
 

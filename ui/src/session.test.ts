@@ -242,6 +242,18 @@ describe("one derivation per cycle", () => {
   });
 });
 
+describe("the pool's name (issue #100)", () => {
+  it("names the pool by its title, follows a retitle, and falls back to the directory", () => {
+    const session = new ConsoleSession(rig().options);
+    expect(session.model({}).poolName).toBeNull();
+    session.setSnapshot(snapshot({ poolTitle: "Jev as the grader" }));
+    expect(session.poolName).toBe("Jev as the grader");
+    expect(session.model({}).poolName).toBe("Jev as the grader");
+    session.setSnapshot(snapshot({ poolTitle: null }));
+    expect(session.model({}).poolName).toBe("repo/pool");
+  });
+});
+
 describe("selection", () => {
   it("fetches the selected ticket's events and body", () => {
     const r = rig();

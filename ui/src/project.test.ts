@@ -20,7 +20,9 @@ import {
   nextNodeSelection,
   parseStoredDetailWidth,
   phaseLabel,
+  poolDisplayName,
   poolStatus,
+  poolTabTitle,
   projectDetail,
   resolverFiles,
   projectDetailTabs,
@@ -1300,6 +1302,21 @@ describe("resolverFiles", () => {
     expect(resolverFiles(timeline, 3)).toEqual(["a.ts", "b.ts"]);
     expect(resolverFiles(timeline, 4)).toEqual([]);
     expect(resolverFiles(null, 3)).toEqual([]);
+  });
+});
+
+describe("poolDisplayName and poolTabTitle (issue #100)", () => {
+  it("names the pool by its title, falling back to the directory", () => {
+    expect(poolDisplayName(snapshot({ poolTitle: "Jev as the grader" }))).toBe(
+      "Jev as the grader",
+    );
+    expect(poolDisplayName(snapshot())).toBe("repo/pool");
+  });
+
+  it("puts the pool before its status in the browser tab", () => {
+    expect(poolTabTitle("Jev as the grader", { word: "running", color: "#d29922" })).toBe(
+      "Jev as the grader — running",
+    );
   });
 });
 

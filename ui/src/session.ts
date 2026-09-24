@@ -17,6 +17,7 @@ import {
   joinStreamFiles,
   phaseLabel,
   poolAssignmentDefaults,
+  poolDisplayName,
   poolStatus,
   projectConversationsNeedsInput,
   projectConversationsTray,
@@ -213,6 +214,7 @@ export class ConsoleSession {
   // The browser tab's status, recomputed on every applied snapshot; the
   // bootstrap renders them into the title and favicon (DOM is its own).
   tabStatus: PoolTabStatus | null = null;
+  /** The pool as the Console names it: its Pool title, else its directory. */
   poolName: string | null = null;
 
   constructor(options: ConsoleSessionOptions) {
@@ -280,7 +282,7 @@ export class ConsoleSession {
     this.vitals.update(snapshot);
     this.terminal.update(snapshot);
     this.tabStatus = poolStatus(snapshot);
-    this.poolName = snapshot.poolName;
+    this.poolName = poolDisplayName(snapshot);
     if (snapshot.phase === "stopped" && this.restartWaiting && this.restartPort !== null) {
       // The farewell of the restart this tab asked for: from here the old
       // server is gone and only the new one can answer, so start watching
@@ -573,6 +575,7 @@ export class ConsoleSession {
           )
         : null;
     return {
+      poolName: this.poolName,
       phase: this.view?.phase ?? null,
       phaseLabel: this.view ? phaseLabel(this.view.phase) : "connecting",
       cards,
