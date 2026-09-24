@@ -14,13 +14,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
+/** The longest title kept; a longer one is cut, not refused. */
+export const TITLE_MAX = 80;
+
 /**
  * A title as it is kept: one line, runs of whitespace (newlines included)
- * collapsed to a single space and the ends trimmed. Empty is no title.
+ * collapsed to a single space, any other control character dropped (the
+ * title is also a herdr workspace label, drawn in a terminal), cut to
+ * TITLE_MAX characters and the ends trimmed. Empty is no title.
  */
 export function normaliseTitle(value: string): string | null {
-  const line = value.replace(/\s+/g, " ").trim();
-  return line === "" ? null : line;
+  const line = value.replace(/\s+/g, " ").replace(/\p{Cc}/gu, "");
+  const cut = [...line].slice(0, TITLE_MAX).join("").trim();
+  return cut === "" ? null : cut;
 }
 
 /** The title a parsed config carries, or null when it has none. */
