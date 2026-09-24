@@ -79,8 +79,8 @@ export async function stopFakeHerdrs(): Promise<void> {
  * the workspace the call names (issue #94), which also keys the minted ids so
  * a test can see where a tab landed; `workspace.get` answers for a workspace
  * the fake holds and errors for one it does not; `workspace.create` mints
- * one; `pane.list` serves the created panes plus any foreign panes the test
- * seeds (live-agent panes the pool must never touch), filtered by
+ * one and `workspace.rename` relabels one it holds; `pane.list` serves the
+ * created panes plus any foreign panes the test seeds (live-agent panes the pool must never touch), filtered by
  * `workspace_id` when the call scopes itself; `pane.report_agent` and
  * `pane.release_agent` are recorded and acknowledged, the way the daemon
  * takes an identity a client asserts; `tab.close` drops the tab's
@@ -231,6 +231,22 @@ export function startFakeHerdr(options?: {
               root_pane: { pane_id, tab_id, workspace_id: workspace.workspace_id },
             },
           };
+        } else if (msg.method === "workspace.rename") {
+          // The Pool title's relabel (issue #100): the daemon's listing shows
+          // the new label, and renaming a workspace it does not hold errors.
+          const workspace = workspaces.find(
+            (w) => w.workspace_id === msg.params.workspace_id,
+          );
+          if (workspace) workspace.label = String(msg.params.label ?? "");
+          response = workspace
+            ? { id: msg.id, result: { type: "ok" } }
+            : {
+                id: msg.id,
+                error: {
+                  code: -32001,
+                  message: `no such workspace ${String(msg.params.workspace_id)}`,
+                },
+              };
         } else if (msg.method === "pane.report_agent" || msg.method === "pane.release_agent") {
           // Recorded above like every call; the daemon's own answer is an ok.
           response = { id: msg.id, result: { type: "ok" } };

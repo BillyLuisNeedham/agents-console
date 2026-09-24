@@ -52,10 +52,13 @@ import {
   closePane,
   closeTab,
   listPaneIds,
+  relabelWorkspace,
   releasePaneAgent,
   resolvePoolWorkspace,
   workspaceExists,
+  type PoolWorkspaceOrigin,
 } from "./herdr.ts";
+import { poolWorkspaceLabel, titleOf } from "./pool-title.ts";
 import {
   attemptStreamPath,
   readLogTail,
@@ -270,6 +273,11 @@ export interface PoolConfig {
   // has to carry blind.
   reviewer?: string;
   checkpoint?: string;
+  // The Pool title (issue #100, pool-title.ts): one line the operator gives
+  // the pool so several can be told apart. Display-only: the directory stays
+  // the pool's identity. Read live by the server for the Console, and by the
+  // engine for the label of a Pool workspace it created.
+  title?: string;
 }
 
 export type InterruptKind =
@@ -480,6 +488,13 @@ export interface PoolRun {
    * rather than reading the pane a second time (issue #122).
    */
   paneRead: (paneId: string) => PaneRead | null;
+  /**
+   * The Pool title changed (issue #100): relabel the Pool workspace to it,
+   * or to the directory's name when the title was cleared, but only when
+   * the Console created that workspace. Resolves once the relabel has been
+   * tried; never rejects, a refusal being a pool log line.
+   */
+  retitle: (title: string | null) => Promise<void>;
 }
 
 const reduceTickets = (
@@ -1024,6 +1039,10 @@ export function startPool(options: RunOptions): PoolRun {
       id: null,
       launch: options.herdrWorkspace ?? null,
       reresolving: null,
+      created: false,
+      label: null,
+      wanted: poolWorkspaceLabel(titleOf(config), poolDir),
+      relabelling: Promise.resolve(),
     },
     pendingSpawns: [],
     spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
@@ -1171,6 +1190,7 @@ function makeHandle(session: Session): PoolRun {
         ? enlistConversation(session, req)
         : enlistTicket(session, req),
     paneRead: (paneId) => session.paneReads.latest(paneId),
+    retitle: (title) => retitlePoolWorkspace(session, title),
   };
   return handle;
 }
@@ -2337,16 +2357,49 @@ interface PoolWorkspaceState {
   launch: string | null;
   /** A re-resolve in flight, shared by every spawn that raced into the same refusal. */
   reresolving: Promise<string | null> | null;
+  /**
+   * Whether the Console created this workspace (issue #100), this boot or an
+   * earlier one as the remembered file records. Only a created workspace is
+   * ever relabelled: the launch workspace, and any workspace the pool was
+   * told about rather than made, keep the label the operator gave them.
+   */
+  created: boolean;
+  /** The label the Console last gave this workspace, or null when it never gave one. */
+  label: string | null;
+  /** The label it should carry now: the Pool title, else the directory's name. */
+  wanted: string;
+  /** The relabel chain, so two quick title edits land in the order they were made. */
+  relabelling: Promise<void>;
 }
 
-function readRememberedPoolWorkspace(runsDir: string): string | null {
+/** What the runs directory remembers about the Pool workspace. */
+interface RememberedPoolWorkspace {
+  id: string;
+  /** The Console created it (issue #100). A file from before titles says nothing, which reads as false. */
+  created: boolean;
+  label: string | null;
+}
+
+function readRememberedPoolWorkspace(runsDir: string): RememberedPoolWorkspace | null {
   try {
     const raw = readOptional(join(runsDir, POOL_WORKSPACE_FILE));
     if (raw === null) return null;
-    const parsed = JSON.parse(raw) as { workspace_id?: unknown };
-    return typeof parsed.workspace_id === "string" && parsed.workspace_id !== ""
-      ? parsed.workspace_id
-      : null;
+    const parsed = JSON.parse(raw) as {
+      workspace_id?: unknown;
+      created?: unknown;
+      label?: unknown;
+    };
+    if (typeof parsed.workspace_id !== "string" || parsed.workspace_id === "") {
+      return null;
+    }
+    // Provenance is recorded, never guessed: a file that does not say the
+    // Console made the workspace is read as the operator's, so a pool
+    // remembered from before titles never has its workspace relabelled.
+    return {
+      id: parsed.workspace_id,
+      created: parsed.created === true,
+      label: typeof parsed.label === "string" ? parsed.label : null,
+    };
   } catch {
     // Unreadable, torn, or holding something that is not an id: the pool
     // simply forgets where its tabs were and resolves afresh, the same
@@ -2358,11 +2411,23 @@ function readRememberedPoolWorkspace(runsDir: string): string | null {
 
 // Written tmp + rename, the way every runtime file the engine rewrites is
 // (queued-answers.json, the fleet registry): a crash mid-write leaves the
-// previous id, never half of one.
-function rememberPoolWorkspace(runsDir: string, workspaceId: string): void {
+// previous id, never half of one. A workspace the Console created carries
+// that fact and the label it last gave it (issue #100), so a later boot
+// knows it may relabel it; any other is the bare id, as before titles.
+function rememberPoolWorkspace(
+  runsDir: string,
+  workspace: RememberedPoolWorkspace,
+): void {
   const path = join(runsDir, POOL_WORKSPACE_FILE);
   const temp = `${path}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ workspace_id: workspaceId })}\n`);
+  const record = workspace.created
+    ? {
+        workspace_id: workspace.id,
+        created: true,
+        ...(workspace.label !== null ? { label: workspace.label } : {}),
+      }
+    : { workspace_id: workspace.id };
+  writeFileSync(temp, `${JSON.stringify(record)}\n`);
   renameSync(temp, path);
 }
 
@@ -2376,7 +2441,11 @@ function rememberPoolWorkspace(runsDir: string, workspaceId: string): void {
  */
 function persistPoolWorkspace(session: Session, workspaceId: string): void {
   try {
-    rememberPoolWorkspace(session.runsDir, workspaceId);
+    rememberPoolWorkspace(session.runsDir, {
+      id: workspaceId,
+      created: session.poolWorkspace.created,
+      label: session.poolWorkspace.label,
+    });
   } catch (err) {
     session.state = applyUpdate(session.state, {
       log: [
@@ -2407,19 +2476,23 @@ async function resolvePoolWorkspaceForSession(session: Session): Promise<void> {
     const { workspaceId, origin } = await resolvePoolWorkspace(
       session.herdrSocket,
       {
-        remembered,
+        remembered: remembered?.id ?? null,
         launch: session.poolWorkspace.launch,
-        label: basename(session.poolDir),
+        label: session.poolWorkspace.wanted,
         cwd: session.cwd,
       },
     );
     session.poolWorkspace.id = workspaceId;
+    adoptWorkspaceProvenance(session, origin, remembered);
     persistPoolWorkspace(session, workspaceId);
     if (origin === "created") {
       session.state = applyUpdate(session.state, {
         log: [`Pool workspace ${workspaceId} created for this pool's tabs`],
       });
     }
+    // A title edited while the Console was down reaches a workspace it made
+    // on an earlier boot here; one it just made already carries it.
+    await relabelPoolWorkspace(session);
   } catch (err) {
     session.poolWorkspace.id = null;
     session.state = applyUpdate(session.state, {
@@ -2469,13 +2542,14 @@ function reresolvePoolWorkspace(
     if (await workspaceExists(session.herdrSocket, staleId)) {
       return staleId;
     }
-    const { workspaceId } = await resolvePoolWorkspace(session.herdrSocket, {
+    const { workspaceId, origin } = await resolvePoolWorkspace(session.herdrSocket, {
       remembered: null,
       launch: session.poolWorkspace.launch,
-      label: basename(session.poolDir),
+      label: session.poolWorkspace.wanted,
       cwd: session.cwd,
     });
     session.poolWorkspace.id = workspaceId;
+    adoptWorkspaceProvenance(session, origin, null);
     persistPoolWorkspace(session, workspaceId);
     session.state = applyUpdate(session.state, {
       log: [
@@ -2500,6 +2574,82 @@ function reresolvePoolWorkspace(
     });
   session.poolWorkspace.reresolving = attempt;
   return attempt;
+}
+
+/**
+ * Record where the resolved Pool workspace came from (issue #100). Created
+ * now: the Console made it, labelled with what it wants. Remembered: the
+ * file says whether the Console made it and what it last called it. Launch:
+ * the operator's workspace, never relabelled.
+ */
+function adoptWorkspaceProvenance(
+  session: Session,
+  origin: PoolWorkspaceOrigin,
+  remembered: RememberedPoolWorkspace | null,
+): void {
+  const workspace = session.poolWorkspace;
+  if (origin === "created") {
+    workspace.created = true;
+    workspace.label = workspace.wanted;
+  } else if (origin === "remembered" && remembered !== null) {
+    workspace.created = remembered.created;
+    workspace.label = remembered.label;
+  } else {
+    workspace.created = false;
+    workspace.label = null;
+  }
+}
+
+/**
+ * Bring a Console-created Pool workspace's label in line with the Pool title
+ * (issue #100). A no-op when there is no workspace, when the Console did not
+ * create it (the launch workspace, a remembered one it was only told about;
+ * an enlisted pane's workspace is never the Pool workspace at all), or when
+ * it already carries the label it should. A workspace relabelled in herdr by
+ * hand keeps that label until the title next changes, because the check is
+ * against the label the Console last gave it, not the one herdr shows now.
+ * Best-effort like every herdr call: a refusal is a pool log line.
+ */
+async function relabelPoolWorkspace(session: Session): Promise<void> {
+  const workspace = session.poolWorkspace;
+  const workspaceId = workspace.id;
+  if (workspaceId === null || !workspace.created) return;
+  const wanted = workspace.wanted;
+  if (workspace.label === wanted) return;
+  try {
+    await relabelWorkspace(session.herdrSocket, workspaceId, wanted);
+  } catch (err) {
+    session.state = applyUpdate(session.state, {
+      log: [
+        `Pool workspace ${workspaceId} could not be relabelled "${wanted}" ` +
+          `(${err instanceof Error ? err.message : String(err)})`,
+      ],
+    });
+    return;
+  }
+  // The workspace may have been re-resolved while the call was out; what
+  // was just relabelled is only recorded if it is still the Pool workspace.
+  if (workspace.id !== workspaceId) return;
+  workspace.label = wanted;
+  persistPoolWorkspace(session, workspaceId);
+  session.state = applyUpdate(session.state, {
+    log: [`Pool workspace ${workspaceId} relabelled "${wanted}"`],
+  });
+}
+
+/**
+ * The handle's `retitle` (issue #100): take the new label and relabel once
+ * boot resolution has settled, chained so edits land in the order made.
+ */
+function retitlePoolWorkspace(session: Session, title: string | null): Promise<void> {
+  const workspace = session.poolWorkspace;
+  workspace.wanted = poolWorkspaceLabel(title, session.poolDir);
+  if (!attemptEnvOf(session).terminalBacked) return Promise.resolve();
+  workspace.relabelling = workspace.relabelling
+    .then(() => workspace.ready)
+    .then(() => relabelPoolWorkspace(session))
+    .catch(() => undefined);
+  return workspace.relabelling;
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   herdrRpc,
   listPaneIds,
   openAttemptTab,
+  relabelWorkspace,
   releasePaneAgent,
   reportPaneAgent,
   resolvePoolWorkspace,
@@ -226,6 +227,24 @@ describe("resolvePoolWorkspace", () => {
         launch: null,
       }),
     ).rejects.toThrow(/workspace\.create failed.*daemon says no/);
+  });
+});
+
+describe("relabelWorkspace", () => {
+  it("renames the workspace by id with workspace.rename", async () => {
+    const fake = await startFakeHerdr({ workspaces: [{ workspace_id: "w1", label: "old" }] });
+    await relabelWorkspace(fake.socketPath, "w1", "Jev as the grader");
+    expect(fake.requests).toEqual([
+      { method: "workspace.rename", params: { workspace_id: "w1", label: "Jev as the grader" } },
+    ]);
+    expect(fake.workspaces[0]?.label).toBe("Jev as the grader");
+  });
+
+  it("rejects when the daemon holds no such workspace", async () => {
+    const fake = await startFakeHerdr();
+    await expect(relabelWorkspace(fake.socketPath, "w9", "x")).rejects.toThrow(
+      /no such workspace w9/,
+    );
   });
 });
 

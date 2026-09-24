@@ -47,8 +47,9 @@
  * `workspace.create` mints `w<N>`, `tab.create` refuses a workspace the
  * daemon does not hold and otherwise mints its ids inside it
  * (`<ws>:t<N>` / `<ws>:p<N>`), `pane.list` honours a `workspace_id` filter,
- * and `removeWorkspace` closes one out from under a running pool the way an
- * operator does. `pane.report_agent` and `pane.release_agent` are recorded
+ * `removeWorkspace` closes one out from under a running pool the way an
+ * operator does, and `workspace.rename` relabels one it holds (issue #100).
+ * `pane.report_agent` and `pane.release_agent` are recorded
  * and acknowledged, and bind or drop the pane's agent the way herdr does, so
  * `agent.list` serves the engine-reported agents; `seedAgent` adds an
  * operator-opened agent (issue #101's picker subject) directly.
@@ -154,6 +155,10 @@ export interface ExecutingFakeHerdr {
   removeWorkspace: (workspaceId: string) => void;
   /** The workspace ids the fake currently holds, seeded plus created. */
   workspaceIds: () => string[];
+  /** A workspace's current label, from `workspace.create` or a later
+   *  `workspace.rename` (issue #100); null for one it does not hold, and ""
+   *  for a seeded one nobody has labelled. */
+  workspaceLabel: (workspaceId: string) => string | null;
   endPane: (paneId: string) => void;
   setPaneContent: (paneId: string, text: string) => void;
   dropPaneInput: (paneId: string, count: number) => void;
@@ -176,6 +181,11 @@ export async function startExecutingFakeHerdr(
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
   const workspaces = new Set(options?.workspaces ?? []);
+  // Each workspace's label, so `workspace.rename` has somewhere to land and
+  // a test can read what the engine relabelled the Pool workspace to.
+  const workspaceLabels = new Map<string, string>(
+    [...workspaces].map((id) => [id, ""]),
+  );
   let mintedWorkspaces = 0;
   // The input area as pane.read shows it: verbatim, or drawn as a bordered
   // box that wraps each line at `wrapWidth` columns.
@@ -346,13 +356,25 @@ export async function startExecutingFakeHerdr(
       } else if (msg.method === "workspace.create") {
         mintedWorkspaces += 1;
         const workspaceId = `w${mintedWorkspaces}`;
+        const label = typeof msg.params.label === "string" ? msg.params.label : "";
         workspaces.add(workspaceId);
-        respond({
-          workspace: {
-            workspace_id: workspaceId,
-            label: typeof msg.params.label === "string" ? msg.params.label : "",
-          },
-        });
+        workspaceLabels.set(workspaceId, label);
+        respond({ workspace: { workspace_id: workspaceId, label } });
+      } else if (msg.method === "workspace.rename") {
+        // The Pool title's relabel (issue #100): a workspace the daemon holds
+        // takes the new label; one it does not is refused.
+        const workspaceId = String(msg.params.workspace_id ?? "");
+        if (workspaces.has(workspaceId)) {
+          workspaceLabels.set(workspaceId, String(msg.params.label ?? ""));
+          respond({ type: "ok" });
+        } else {
+          socket.end(
+            JSON.stringify({
+              id: msg.id,
+              error: { code: -32001, message: `no such workspace ${workspaceId}` },
+            }) + "\n",
+          );
+        }
       } else if (msg.method === "pane.report_agent") {
         // Recorded in `requests` like every call; the daemon answers ok and,
         // like herdr, binds the agent to the pane so `agent.list` lists it.
@@ -622,8 +644,10 @@ export async function startExecutingFakeHerdr(
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
     removeWorkspace: (workspaceId) => {
       workspaces.delete(workspaceId);
+      workspaceLabels.delete(workspaceId);
     },
     workspaceIds: () => [...workspaces],
+    workspaceLabel: (workspaceId) => workspaceLabels.get(workspaceId) ?? null,
     setPaneContent: (paneId, text) => {
       const pane = panes.get(paneId);
       if (pane) pane.rendered = text;
