@@ -51,6 +51,7 @@ interface Rig {
   poolDir: string;
   server: PoolServer;
   machine: MachineDefaultsPaths;
+  herdr: ExecutingFakeHerdr;
 }
 
 async function startRig(
@@ -83,7 +84,7 @@ async function startRig(
     await server.start();
     await server.settled();
   }
-  return { poolDir, server, machine };
+  return { poolDir, server, machine, herdr: fake };
 }
 
 function onDisk(poolDir: string): Record<string, unknown> {
@@ -334,6 +335,54 @@ describe("PUT /api/settings/pool", () => {
     const res = await putJson(server, "/api/settings/pool", { config: "everything" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("config");
+  });
+});
+
+describe("the Pool title (issue #100)", () => {
+  it("carries the title on every snapshot, and null when the pool has none", async () => {
+    const titled = await startRig({ title: "Jev as the grader" });
+    expect(titled.server.latest?.poolTitle).toBe("Jev as the grader");
+    const untitled = await startRig();
+    expect(untitled.server.latest?.poolTitle).toBeNull();
+    expect(untitled.server.latest?.poolName).toBeTruthy();
+  });
+
+  it("saves a title as one line and shows it at once, with no boundary to wait for", async () => {
+    const { poolDir, server } = await startRig({ title: "Old title" });
+
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { title: "  New\n  title " },
+    });
+    expect(res.status).toBe(200);
+    expect(onDisk(poolDir).title).toBe("New title");
+    // Not a boot-only key: nothing is badged for a Restart.
+    expect(((await res.json()) as SettingsResponse).pool.effective.stale).toEqual([]);
+    expect(server.latest?.poolTitle).toBe("New title");
+
+    // Cleared, the key goes and the Console falls back to the directory.
+    await putJson(server, "/api/settings/pool", { config: { title: null } });
+    expect("title" in onDisk(poolDir)).toBe(false);
+    expect(server.latest?.poolTitle).toBeNull();
+  });
+
+  it("relabels the Pool workspace the Console created when the title is saved", async () => {
+    const { server, herdr } = await startRig({ terminal: "herdr", title: "Old title" });
+    const created = herdr.requests.find((r) => r.method === "workspace.create");
+    expect(created?.params.label).toBe("Old title");
+    const workspaceId = herdr.workspaceIds()[0]!;
+
+    await putJson(server, "/api/settings/pool", { config: { title: "New title" } });
+    await waitFor(
+      () => herdr.workspaceLabel(workspaceId) === "New title",
+      "the workspace relabel",
+    );
+  });
+
+  it("refuses a title that is not a string", async () => {
+    const { server } = await startRig();
+    const res = await putJson(server, "/api/settings/pool", { config: { title: 7 } });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("title");
   });
 });
 

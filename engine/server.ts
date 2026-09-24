@@ -47,6 +47,7 @@ import {
   type StartConversationRequest,
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
+import { titleOf } from "./pool-title.ts";
 import { UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
 import {
   ReassignRefusal,
@@ -256,12 +257,16 @@ function enrich(
   // rather than from the engine's session, so a save shows on the card before
   // the boundary that will actually apply it.
   reassign: Map<string, TicketReassignEntry>,
+  // The Pool title (issue #100), read from the config file as it stands now
+  // for the same reason: a title saved from Settings shows at once.
+  poolTitle: string | null,
 ): EnrichedSnapshot {
   const merge = new Map(snapshot.mergeQueue.map((entry) => [entry.ticketId, entry.state]));
   return {
     seq: snapshot.seq,
     phase: snapshot.phase,
     poolName,
+    poolTitle,
     poolDir,
     state: {
       tickets: meta.map((m) => {
@@ -1091,6 +1096,29 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return { config: configCache.config, error: configCache.error };
   }
 
+  // The Pool title (issue #100) as the config file last parsed it, and the
+  // one the engine was last told. A file that no longer parses keeps the
+  // last good title rather than blanking the header over a torn write.
+  let poolTitle = titleOf(bootConfig);
+
+  /**
+   * The Pool title for the next snapshot, read through the same cached parse
+   * Reassign uses. A title that moved since the last snapshot, whether saved
+   * from Settings or edited by hand, is handed to the run so a Pool
+   * workspace the Console created is relabelled to it; the engine decides
+   * whether the workspace is its to relabel.
+   */
+  function titleNow(): string | null {
+    const { config } = currentConfig();
+    if (config === null) return poolTitle;
+    const title = titleOf(config);
+    if (title !== poolTitle) {
+      poolTitle = title;
+      void currentRun?.retitle(title);
+    }
+    return poolTitle;
+  }
+
   /** Every ticket's Reassign row for one engine snapshot (issue #126). */
   function reassignRows(
     snapshot: PoolSnapshot,
@@ -1126,7 +1154,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   function reenrich(): EnrichedSnapshot | null {
     if (!lastRaw) return latest;
     refreshMeta();
-    broadcast(enrich(lastRaw, meta, poolName, poolDir, reassignRows(lastRaw, meta)));
+    broadcast(
+      enrich(lastRaw, meta, poolName, poolDir, reassignRows(lastRaw, meta), titleNow()),
+    );
     return latest;
   }
 
@@ -1185,7 +1215,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         refreshMeta();
         lastRaw = snapshot;
         broadcast(
-          enrich(snapshot, meta, poolName, poolDir, reassignRows(snapshot, meta)),
+          enrich(
+            snapshot,
+            meta,
+            poolName,
+            poolDir,
+            reassignRows(snapshot, meta),
+            titleNow(),
+          ),
         );
       },
     });
@@ -1553,6 +1590,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             writePoolSettings(poolDir, patch as Record<string, unknown>, {
               harnesses: Object.keys(harnesses),
             });
+            // The Pool title (issue #100) is the one setting with no seam to
+            // wait for: every open tab shows it from this push, and the
+            // push is what hands a changed title to the run.
+            reenrich();
             return Response.json(settingsPayload(bunServer.port ?? resolution.port));
           } catch (err) {
             return Response.json(

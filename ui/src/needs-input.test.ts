@@ -173,6 +173,7 @@ describe("NeedsInputTray waiting rows", () => {
       seq: 0,
       phase: "running",
       poolName: "repo/pool",
+      poolTitle: null,
       poolDir: "/tmp/pool",
       state: {
         tickets: [

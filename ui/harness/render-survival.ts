@@ -119,6 +119,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     seq,
     phase: "running",
     poolName: "harness/render-survival",
+    poolTitle: null,
     poolDir: "/tmp/harness-pool",
     state: {
       tickets,

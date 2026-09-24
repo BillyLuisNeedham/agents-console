@@ -125,6 +125,10 @@ export interface EnrichedSnapshot {
   phase: RunPhase;
   /** The pool's display name: the last two path segments of the pool directory. */
   poolName: string;
+  /** The Pool title (issue #100) from the pool's config as it stands now, or
+   *  null when it has none; the Console shows it ahead of `poolName`, which
+   *  it falls back to. Display-only: the directory stays the identity. */
+  poolTitle: string | null;
   /** The pool directory the server was launched on, verbatim: what a
    *  relaunch after a Console stop (issue #97) passes to `--pool`. */
   poolDir: string;

@@ -17,6 +17,7 @@ function snap(
     seq: 1,
     phase: "running",
     poolName: "repo/pool",
+    poolTitle: null,
     poolDir: "/tmp/pool",
     state: {
       tickets: Object.entries(tickets).map(([id, status]) => ({
