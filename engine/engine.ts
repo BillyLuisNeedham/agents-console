@@ -149,7 +149,7 @@ import {
 export type { HarnessCommand } from "./spawn.ts";
 // Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
-export { interactiveWrapper } from "./pane-session.ts";
+export { interactiveWrapper, RESIZE_RELAY } from "./pane-session.ts";
 import type { LaunchCadence } from "./pane-session.ts";
 import { createJev, JEV_MODEL, type Jev, type JevCause, type JevNotice } from "./jev.ts";
 import { buildEvidence } from "./jev-evidence.ts";
