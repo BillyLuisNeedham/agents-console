@@ -13,8 +13,10 @@ import { join } from "node:path";
 import {
   createPool,
   ensureScratchExcluded,
+  freeSlug,
   isPoolDir,
   nearestExisting,
+  poolChoiceLine,
   resolvePool,
   slugify,
   type RepoProbe,
@@ -40,7 +42,7 @@ import {
   tailOf,
   waitForPidRelease,
 } from "./boot-launch.ts";
-import { interview, parseBootArgs, type BootIo } from "./boot-cli.ts";
+import { interview, nameNewPool, parseBootArgs, type BootIo } from "./boot-cli.ts";
 
 function temp(prefix = "boot-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -136,6 +138,103 @@ describe("pool resolution", () => {
     expect(slugify("My Pool_Name!")).toBe("my-pool-name");
     expect(slugify("feature/try-boot")).toBe("feature-try-boot");
     expect(slugify("  ")).toBe("");
+  });
+});
+
+describe("Pool titles in Boot (issue #100)", () => {
+  function pen(answers: Record<string, string>): BootIo & { asked: string[]; warned: string[] } {
+    const asked: string[] = [];
+    const warned: string[] = [];
+    return {
+      asked,
+      warned,
+      ask: async (question, fallback) => {
+        asked.push(question);
+        return answers[question] ?? fallback;
+      },
+      log: () => {},
+      warn: (line) => warned.push(line),
+    };
+  }
+
+  it("lists a titled pool by its title with the directory beside it", () => {
+    const scratch = join(temp(), ".scratch");
+    const titled = ticketPool(scratch, "jev-integration");
+    writeFileSync(join(titled, "console.json"), JSON.stringify({ title: "Jev as the grader" }));
+    const untitled = ticketPool(scratch, "other");
+    expect(poolChoiceLine(titled)).toBe("Jev as the grader (jev-integration)");
+    expect(poolChoiceLine(untitled)).toBe("other");
+  });
+
+  it("lists a pool whose config does not parse by its directory, rather than refusing the list", () => {
+    const pool = ticketPool(join(temp(), ".scratch"), "broken");
+    writeFileSync(join(pool, "console.json"), "{ not json");
+    expect(poolChoiceLine(pool)).toBe("broken");
+  });
+
+  it("asks for the title first and derives the directory from it", async () => {
+    const scratch = join(temp(), ".scratch");
+    const io = pen({ "title for the new pool (blank for none)": "  Jev as the grader " });
+    const named = await nameNewPool(io, { scratch, suggested: "feature-x", unattended: false });
+    expect(io.asked).toEqual([
+      "title for the new pool (blank for none)",
+      "directory for the new pool",
+    ]);
+    expect(named).toEqual({ title: "Jev as the grader", slug: "jev-as-the-grader" });
+  });
+
+  it("keeps the branch's directory and no title when the title is left blank", async () => {
+    const scratch = join(temp(), ".scratch");
+    const named = await nameNewPool(pen({}), { scratch, suggested: "feature-x", unattended: false });
+    expect(named).toEqual({ title: null, slug: "feature-x" });
+  });
+
+  it("takes a directory the operator types over the derived one", async () => {
+    const scratch = join(temp(), ".scratch");
+    const named = await nameNewPool(
+      pen({
+        "title for the new pool (blank for none)": "Jev as the grader",
+        "directory for the new pool": "Jev Pool",
+      }),
+      { scratch, suggested: "feature-x", unattended: false },
+    );
+    expect(named).toEqual({ title: "Jev as the grader", slug: "jev-pool" });
+  });
+
+  it("never lands a new pool in a directory that is already there", async () => {
+    const scratch = join(temp(), ".scratch");
+    mkdirSync(join(scratch, "jev-as-the-grader"), { recursive: true });
+    mkdirSync(join(scratch, "taken"), { recursive: true });
+    expect(freeSlug(scratch, "jev-as-the-grader")).toBe("jev-as-the-grader-2");
+    expect(freeSlug(scratch, "fresh")).toBe("fresh");
+
+    const derived = await nameNewPool(
+      pen({ "title for the new pool (blank for none)": "Jev as the grader" }),
+      { scratch, suggested: "feature-x", unattended: false },
+    );
+    expect(derived.slug).toBe("jev-as-the-grader-2");
+
+    const io = pen({ "directory for the new pool": "taken" });
+    const typed = await nameNewPool(io, { scratch, suggested: "feature-x", unattended: false });
+    expect(typed.slug).toBe("taken-2");
+    expect(io.warned.join("\n")).toContain("using taken-2");
+  });
+
+  it("asks nothing unattended: no title, and the branch's directory", async () => {
+    const scratch = join(temp(), ".scratch");
+    const io = pen({});
+    const named = await nameNewPool(io, { scratch, suggested: "feature-x", unattended: true });
+    expect(io.asked).toEqual([]);
+    expect(named).toEqual({ title: null, slug: "feature-x" });
+  });
+
+  it("writes the title into console.json beside the rest", () => {
+    expect(mergeConsoleConfig({ port: 9001 }, { title: "Jev as the grader" })).toEqual({
+      port: 9001,
+      title: "Jev as the grader",
+    });
+    // A pool Boot did not create is never given a title it was not asked for.
+    expect("title" in mergeConsoleConfig({ port: 9001 }, {})).toBe(false);
   });
 });
 

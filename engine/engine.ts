@@ -2336,7 +2336,9 @@ function terminalAdoptable(
 
 /**
  * The per-pool runtime file that remembers the Pool workspace:
- * `runs/pool-workspace.json`, `{ "workspace_id": "wT" }`. A runtime fact of
+ * `runs/pool-workspace.json`, `{ "workspace_id": "wT" }`, plus
+ * `"created": true` and the `"label"` it last gave a workspace the Console
+ * made itself (issue #100). A runtime fact of
  * this engine's own, never pool configuration, so it lives beside the other
  * runs artifacts and never in console.json: the operator neither writes it
  * nor reviews it, and a pool copied elsewhere must not drag another

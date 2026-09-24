@@ -14,6 +14,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readPoolTitle } from "./pool-title.ts";
 
 /**
  * The three markers that make a directory a Pool. `console.json` is the
@@ -220,7 +221,31 @@ export function nearestExisting(dir: string): string {
   }
 }
 
-/** A pool's display name, which is its directory name. */
+/** A pool's directory name, which is its identity. */
 export function poolName(dir: string): string {
   return basename(dir);
+}
+
+/**
+ * One pool in Boot's pick-a-pool list (issue #100): its Pool title with the
+ * directory beside it, since the title is how the operator knows it and the
+ * directory is what it is; a pool with no title is its directory alone.
+ */
+export function poolChoiceLine(dir: string): string {
+  const title = readPoolTitle(dir);
+  return title === null ? poolName(dir) : `${title} (${poolName(dir)})`;
+}
+
+/**
+ * A directory name under `.scratch/` nothing already holds: the slug as it
+ * is when it is free, else the slug with the first free `-2`, `-3`, ... on
+ * the end. A title is not unique, so two pools titled alike must still land
+ * in two directories rather than one pool quietly adopting another's.
+ */
+export function freeSlug(scratch: string, slug: string): string {
+  if (!existsSync(join(scratch, slug))) return slug;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${slug}-${n}`;
+    if (!existsSync(join(scratch, candidate))) return candidate;
+  }
 }

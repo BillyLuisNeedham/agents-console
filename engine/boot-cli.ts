@@ -31,14 +31,16 @@ import { validPort } from "./ports.ts";
 import {
   createPool,
   ensureScratchExcluded,
+  freeSlug,
   gitDirOf,
   gitLine,
   nearestExisting,
-  poolName,
+  poolChoiceLine,
   realRepoProbe,
   resolvePool,
   slugify,
 } from "./boot-pool.ts";
+import { normaliseTitle } from "./pool-title.ts";
 import { KNOWN_HARNESSES, detect, type Detection } from "./boot-detect.ts";
 import {
   fillAgentTemplate,
@@ -208,7 +210,7 @@ export function engineCheckout(configured: string | undefined): string {
 async function choosePool(
   args: BootArgs,
   io: BootIo,
-): Promise<{ dir: string; created: boolean } | { error: string }> {
+): Promise<{ dir: string; created: boolean; title?: string } | { error: string }> {
   const repo = realRepoProbe();
   const resolution = resolvePool({
     explicit: args.poolDir ? resolve(args.poolDir) : undefined,
@@ -242,7 +244,7 @@ async function choosePool(
     }
     io.log(`pools under ${resolution.scratch}:`);
     resolution.candidates.forEach((dir, index) => {
-      io.log(`  ${index + 1}. ${poolName(dir)}`);
+      io.log(`  ${index + 1}. ${poolChoiceLine(dir)}`);
     });
     const picked = await io.ask("which pool", "1");
     const index = Number(picked) - 1;
@@ -251,10 +253,11 @@ async function choosePool(
     io.log(`pool: ${dir} (chosen)`);
     return { dir, created: false };
   }
-  const name = args.yes
-    ? resolution.suggested
-    : await io.ask("name for the new pool", resolution.suggested);
-  const slug = slugify(name) || resolution.suggested;
+  const { title, slug } = await nameNewPool(io, {
+    scratch: resolution.scratch,
+    suggested: resolution.suggested,
+    unattended: args.yes,
+  });
   const top = dirname(resolution.scratch);
   const { dir, excluded } = createPool(resolution.scratch, slug, gitDirOf(top));
   io.log(`pool: ${dir} (created, ${resolution.why})`);
@@ -262,7 +265,37 @@ async function choosePool(
   else if (excluded === "unavailable") {
     io.warn(`could not write ${top}/.git/info/exclude; add .scratch/ to it yourself`);
   }
-  return { dir, created: true };
+  return { dir, created: true, ...(title !== null ? { title } : {}) };
+}
+
+/**
+ * A new Pool's title and directory (issue #100). The title comes first,
+ * because it is how the operator will know the pool, and the directory is
+ * derived from it: its slug, else the branch's, made free under `.scratch/`
+ * and offered for confirmation. A blank title is no title, and the pool is
+ * known by its directory, exactly as before titles. Unattended, nothing is
+ * asked: no title, and the branch's slug.
+ */
+export async function nameNewPool(
+  io: BootIo,
+  input: { scratch: string; suggested: string; unattended: boolean },
+): Promise<{ title: string | null; slug: string }> {
+  const title = input.unattended
+    ? null
+    : normaliseTitle(await io.ask("title for the new pool (blank for none)", ""));
+  const derived = freeSlug(
+    input.scratch,
+    (title !== null ? slugify(title) : "") || input.suggested,
+  );
+  if (input.unattended) return { title, slug: derived };
+  const answer = await io.ask("directory for the new pool", derived);
+  let slug = slugify(answer) || derived;
+  const free = freeSlug(input.scratch, slug);
+  if (free !== slug) {
+    io.warn(`${slug} is already under ${input.scratch}; using ${free}`);
+    slug = free;
+  }
+  return { title, slug };
 }
 
 /**
@@ -541,6 +574,7 @@ export async function runBoot(options: RunOptions): Promise<number> {
     return 1;
   }
   const poolDir = chosen.dir;
+  const newTitle = chosen.title;
 
   let existingConfig: Record<string, unknown>;
   try {
@@ -591,6 +625,7 @@ export async function runBoot(options: RunOptions): Promise<number> {
 
   const unattended = args.yes || args.relaunch;
   const result = await interview({ io, prefill, settled, detection, unattended });
+  if (newTitle !== undefined) result.answers.title = newTitle;
   if (unattended && result.missing.length > 0 && !args.relaunch) {
     io.warn(
       `nothing prefilled the ${result.missing.join(" and ")}; ` +
