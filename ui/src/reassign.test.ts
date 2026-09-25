@@ -47,6 +47,7 @@ const SNAPSHOT = {
   poolName: "repo/pool",
   poolTitle: null,
   poolDir: "/tmp/pool",
+  finishedTerminals: 0,
   state: {
     tickets: [],
     conversations: [],

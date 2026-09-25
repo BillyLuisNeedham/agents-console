@@ -12,6 +12,8 @@ import {
   type TicketEventsResponse,
   type RestartResponse,
   type TicketGradeSummary,
+  type KeepTalkingResponse,
+  type CloseFinishedTerminalsResponse,
 } from "./project";
 
 /** The Reassign view the wire carries per ticket (issue #126), derived so a
@@ -46,6 +48,7 @@ function ticket(
     enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
+    heldPane: null,
     ...overrides,
   };
   return { ...base, reassign: base.reassign ?? reassignOf(base) };
@@ -81,6 +84,7 @@ function snapshot(
     poolName: "repo/pool",
     poolTitle: null,
     poolDir: "/tmp/pool",
+    finishedTerminals: 0,
     ...overrides,
     state: {
       tickets: [],
@@ -138,6 +142,8 @@ function rig() {
   const logCalls: string[] = [];
   const stops: Deferred<void>[] = [];
   const restarts: Deferred<RestartResponse>[] = [];
+  const keepTalks: { ticketId: string; deferred: Deferred<KeepTalkingResponse> }[] = [];
+  const closes: Deferred<CloseFinishedTerminalsResponse>[] = [];
   const probes: number[] = [];
   const relaunched: number[] = [];
   const streamHandlers: {
@@ -185,6 +191,18 @@ function rig() {
       restarts.push(d);
       return d.promise;
     },
+    // Keep talking and the bulk close park the same way (issue #139), so a
+    // test can watch a button sit disabled before the engine answers.
+    keepTalking: (ticketId) => {
+      const d = deferred<KeepTalkingResponse>();
+      keepTalks.push({ ticketId, deferred: d });
+      return d.promise;
+    },
+    closeFinishedTerminals: () => {
+      const d = deferred<CloseFinishedTerminalsResponse>();
+      closes.push(d);
+      return d.promise;
+    },
     probeServer: (port) => {
       probes.push(port);
       return Promise.resolve(probeAnswer);
@@ -215,6 +233,8 @@ function rig() {
     logCalls,
     stops,
     restarts,
+    keepTalks,
+    closes,
     probes,
     relaunched,
     setProbeAnswer: (value: boolean) => {
@@ -703,5 +723,140 @@ describe("restart control (ADR-0026)", () => {
     } finally {
       timers.restore();
     }
+  });
+});
+
+describe("Keep talking (issue #139)", () => {
+  /** A connected session whose ticket A waits at a checkpoint over a live
+   *  Held pane of attempt `attempt`. */
+  function heldSnapshot(attempt = 2): EnrichedSnapshot {
+    return snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "checkpoint", heldPane: { attempt, paneId: "w3:p1" } })],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
+      },
+    });
+  }
+
+  function heldSession() {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.connect();
+    session.setSnapshot(heldSnapshot());
+    return { r, session };
+  }
+
+  const offerOf = (session: ConsoleSession) => {
+    const card = session.model({}).cards.find((c) => c.id === "ticket:A");
+    return card?.kind === "ticket" ? card.interrupt?.keepTalking : undefined;
+  };
+
+  it("asks the engine by ticket id and stays disabled after the accept, until the snapshot moves on", async () => {
+    const { r, session } = heldSession();
+    const settled = session.keepTalking("A");
+    expect(r.keepTalks.map((call) => call.ticketId)).toEqual(["A"]);
+    expect(offerOf(session)).toEqual({ requesting: true, failure: null });
+    // A second click while it is out sends nothing.
+    void session.keepTalking("A");
+    expect(r.keepTalks).toHaveLength(1);
+    r.keepTalks[0]!.deferred.resolve({ ticketId: "A", attempt: 3 });
+    await settled;
+    // Accepted, but the snapshot still shows the checkpoint: the pane is
+    // already claimed, so the button must not invite a second ask.
+    expect(offerOf(session)).toEqual({ requesting: true, failure: null });
+    // The Continued attempt's snapshot: running, no Held pane, no offer.
+    session.setSnapshot(
+      snapshot({
+        state: {
+          tickets: [
+            ticket("A", {
+              status: "in-progress",
+              liveAttempt: { attempt: 3, paneId: "w3:p1", role: "agent", startedAt: "2026-09-25T10:00:00Z" },
+            }),
+          ],
+        },
+      }),
+    );
+    expect(offerOf(session)).toBeUndefined();
+    // A later checkpoint's Held pane starts clean.
+    session.setSnapshot(heldSnapshot(3));
+    expect(offerOf(session)).toEqual({ requesting: false, failure: null });
+  });
+
+  it("puts a refusal's reason beside the button, never on the global banner, and lets it retry", async () => {
+    const { r, session } = heldSession();
+    const settled = session.keepTalking("A");
+    r.keepTalks[0]!.deferred.reject(new Error("the pane is gone"));
+    await settled;
+    expect(offerOf(session)).toEqual({ requesting: false, failure: "the pane is gone" });
+    expect(session.model({}).error).toBeNull();
+    void session.keepTalking("A");
+    expect(r.keepTalks).toHaveLength(2);
+    expect(offerOf(session)).toEqual({ requesting: true, failure: null });
+  });
+
+  it("sends nothing for a ticket with no Held pane", async () => {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.setSnapshot(snapshot({ state: { tickets: [ticket("A", { status: "checkpoint" })] } }));
+    await session.keepTalking("A");
+    expect(r.keepTalks).toHaveLength(0);
+  });
+});
+
+describe("close finished terminals (issue #139)", () => {
+  function sessionWith(finishedTerminals: number) {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.connect();
+    session.setSnapshot(snapshot({ finishedTerminals }));
+    return { r, session };
+  }
+
+  it("offers the control only while the snapshot counts a Finished terminal over a live stream", () => {
+    const { r, session } = sessionWith(0);
+    expect(session.model({}).closeTerminals).toMatchObject({ offered: false, count: 0 });
+    session.setSnapshot(snapshot({ finishedTerminals: 2 }));
+    expect(session.model({}).closeTerminals).toMatchObject({ offered: true, count: 2 });
+    r.streamHandlers[0]!.onError("pool stream disconnected");
+    expect(session.model({}).closeTerminals.offered).toBe(false);
+  });
+
+  it("arms and cancels without sending anything, and disarms when the count drops to zero", () => {
+    const { r, session } = sessionWith(2);
+    session.armCloseTerminals();
+    expect(session.model({}).closeTerminals.state).toBe("armed");
+    session.cancelCloseTerminals();
+    expect(session.model({}).closeTerminals.state).toBe("idle");
+    session.armCloseTerminals();
+    session.setSnapshot(snapshot({ finishedTerminals: 0 }));
+    expect(session.model({}).closeTerminals.state).toBe("idle");
+    expect(r.closes).toHaveLength(0);
+  });
+
+  it("holds 'requesting' while the POST is out, then returns to idle for the snapshot to hide it", async () => {
+    const { r, session } = sessionWith(2);
+    session.armCloseTerminals();
+    const settled = session.confirmCloseTerminals();
+    expect(session.model({}).closeTerminals.state).toBe("requesting");
+    expect(r.closes).toHaveLength(1);
+    r.closes[0]!.resolve({ closed: 2 });
+    await settled;
+    expect(session.model({}).closeTerminals).toMatchObject({ state: "idle", failure: null });
+  });
+
+  it("puts a refusal beside the button, never on the global banner", async () => {
+    const { r, session } = sessionWith(2);
+    session.armCloseTerminals();
+    const settled = session.confirmCloseTerminals();
+    r.closes[0]!.reject(new Error("pool is not terminal-backed"));
+    await settled;
+    const model = session.model({});
+    expect(model.closeTerminals).toMatchObject({
+      state: "idle",
+      failure: "pool is not terminal-backed",
+    });
+    expect(model.error).toBeNull();
   });
 });

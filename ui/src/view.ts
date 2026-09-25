@@ -80,6 +80,19 @@ export interface RestartView {
   waiting: boolean;
 }
 
+/**
+ * The pool header's "Close N finished terminals" control (issue #139).
+ * `offered` gates it on a live stream with at least one Finished terminal
+ * open; `count` is the snapshot's; `state` is the Stop control's inline
+ * confirmation machine; `failure` is a refusal's reason, shown beside it.
+ */
+export interface CloseTerminalsView {
+  offered: boolean;
+  count: number;
+  state: StopState;
+  failure: string | null;
+}
+
 export interface AppModel {
   /** The pool as the Console names it (issue #100): Pool title, else directory. */
   poolName: string | null;
@@ -98,6 +111,8 @@ export interface AppModel {
   stop: StopView;
   /** The Settings pane's Restart control and the restarting notice (ADR-0026). */
   restart: RestartView;
+  /** The pool header's bulk close of Finished terminals (issue #139). */
+  closeTerminals: CloseTerminalsView;
   /** The pool is Terminal-backed: the header offers Enlist only then. */
   terminalBacked: boolean;
   /** The canvas header's Merge queue line (issue #129); null with no hold. */
@@ -134,6 +149,9 @@ export interface Handlers {
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
+  /** Keep talking on a checkpoint with a Held pane (issue #139), from the
+   *  Detail or the Needs input tray; the session holds its state. */
+  onKeepTalking: (ticketId: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
   /** The Stop control's three intents (issue #97): raise the inline
    *  confirmation, drop it (nothing is sent), and send the stop. */
@@ -145,6 +163,11 @@ export interface Handlers {
   onArmRestart: () => void;
   onCancelRestart: () => void;
   onConfirmRestart: () => void;
+  /** The pool header's close-finished-terminals control (issue #139), the
+   *  Stop control's three intents again. Cancel sends nothing. */
+  onArmCloseTerminals: () => void;
+  onCancelCloseTerminals: () => void;
+  onConfirmCloseTerminals: () => void;
 }
 
 export type ConsoleViewOptions = NeedsInputOptions &
@@ -198,12 +221,18 @@ export class ConsoleView {
   // highlight instead of stripping it.
   private selectedNodeId: string | null = null;
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
-  // The canvas header's Stop control is built once with the canvas, but its
-  // intents belong to the render handlers, so they land through the latest
-  // render's set, the way the selection does.
-  private stopHandlers: Pick<
+  // The canvas header's Stop and close-finished-terminals controls are
+  // built once with the canvas, but their intents belong to the render
+  // handlers, so they land through the latest render's set, the way the
+  // selection does.
+  private headerHandlers: Pick<
     Handlers,
-    "onArmStop" | "onCancelStop" | "onConfirmStop"
+    | "onArmStop"
+    | "onCancelStop"
+    | "onConfirmStop"
+    | "onArmCloseTerminals"
+    | "onCancelCloseTerminals"
+    | "onConfirmCloseTerminals"
   > | null = null;
 
   constructor(options: ConsoleViewOptions) {
@@ -238,9 +267,12 @@ export class ConsoleView {
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
-      onArmStop: () => this.stopHandlers?.onArmStop(),
-      onCancelStop: () => this.stopHandlers?.onCancelStop(),
-      onConfirmStop: () => this.stopHandlers?.onConfirmStop(),
+      onArmStop: () => this.headerHandlers?.onArmStop(),
+      onCancelStop: () => this.headerHandlers?.onCancelStop(),
+      onConfirmStop: () => this.headerHandlers?.onConfirmStop(),
+      onArmCloseTerminals: () => this.headerHandlers?.onArmCloseTerminals(),
+      onCancelCloseTerminals: () => this.headerHandlers?.onCancelCloseTerminals(),
+      onConfirmCloseTerminals: () => this.headerHandlers?.onConfirmCloseTerminals(),
     });
     this.needsInput = new NeedsInputTray(options);
   }
@@ -253,7 +285,7 @@ export class ConsoleView {
 
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
     this.onSelectNode = handlers.onSelectNode;
-    this.stopHandlers = handlers;
+    this.headerHandlers = handlers;
     this.canvas.sync(model.cards);
     const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
     this.detail.pruneDrafts(pendingInterrupts);
@@ -296,6 +328,7 @@ export class ConsoleView {
       this.needsInput.render(model.needsInput, model.conversationsNeedsInput, {
         onSelect: (cardId) => this.selectNode(cardId),
         onFocusConversation: (conversationId) => this.onFocusTerminal(conversationId),
+        onKeepTalking: handlers.onKeepTalking,
       }),
       this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),

@@ -31,7 +31,11 @@ import {
   type TimelineView,
 } from "./project";
 import { noteLogScroll } from "./log-pane";
-import { renderTerminalSurface } from "./terminal";
+import {
+  renderKeepTalkingButton,
+  renderKeepTalkingFailure,
+  renderTerminalSurface,
+} from "./terminal";
 import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
 
@@ -57,6 +61,10 @@ export interface DetailHandlers {
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
   onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
+  /** Keep talking on a checkpoint with a Held pane (issue #139): fire and
+   *  forget, like onAnswer; the session holds the in-flight and refusal
+   *  state the interrupt's `keepTalking` view reads back. */
+  onKeepTalking: (ticketId: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
   /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
    *  Conversations store tracks the in-flight/failure state on `endView`. */
@@ -216,7 +224,9 @@ export class Detail {
   // One interrupt form shape, rendered in the Detail: the only place an
   // interrupt is read and answered. The kind-specific body comes from the
   // engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
-  // or attempt.
+  // or attempt. A checkpoint whose Held pane is still alive also offers Keep
+  // talking beside Resume (issue #139); it is not an answer, so the note
+  // stays with Resume and the button sends none.
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -270,8 +280,17 @@ export class Detail {
             label,
           ),
         ),
+        interrupt.keepTalking
+          ? renderKeepTalkingButton(interrupt.keepTalking, () =>
+              handlers.onKeepTalking(interrupt.ticketId),
+            )
+          : null,
       ),
     );
+    const refusal = interrupt.keepTalking
+      ? renderKeepTalkingFailure(interrupt.keepTalking)
+      : null;
+    if (refusal) box.append(refusal);
     return box;
   }
 

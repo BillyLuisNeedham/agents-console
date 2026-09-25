@@ -120,6 +120,7 @@ function ticket(
     enlisted: false,
     assignment: { harness: null, model: null, drivers: "implement" },
     liveAttempt: null,
+    heldPane: null,
     ...overrides,
   };
   return { ...base, reassign: base.reassign ?? reassignOf(base) };
@@ -155,6 +156,7 @@ function snapshot(
     poolName: "repo/pool",
     poolTitle: null,
     poolDir: "/tmp/pool",
+    finishedTerminals: 0,
     ...overrides,
     state: {
       tickets: [],
@@ -1092,6 +1094,7 @@ describe("projectDetailTabs", () => {
       actions: [{ action: "resume", label: "resume", tone: "primary" }],
     },
     queued: false,
+    keepTalking: null,
   });
 
   const active = (status: TicketStatus, override: TabOverride | null = null) =>
@@ -2381,6 +2384,132 @@ describe("projectPool terminal surface", () => {
     const view = projectPool(snap, {}, {}, terminal);
     expect(cardOf(view, "01")?.terminal).toBeNull();
     expect(cardOf(view, "02")?.terminal).toBeNull();
+  });
+});
+
+describe("Held pane and Keep talking (issue #139)", () => {
+  // A ticket waiting at a checkpoint whose Terminal-backed attempt's pane is
+  // still alive: no Live attempt (the attempt is over), a Held pane instead.
+  const heldTicket = (id: string, attempt = 2, paneId = "pane-9") =>
+    ticket(id, { status: "checkpoint", heldPane: { attempt, paneId } });
+  const cardOf = (view: ReturnType<typeof projectPool>, id: string) =>
+    view.cards.find(
+      (c): c is TicketCardView => c.kind === "ticket" && c.ticketId === id,
+    );
+  const checkpointOn = (id: string) => ({ ticketId: id, kind: "checkpoint" as const, body: "brief" });
+
+  it("gives a Held pane the card's terminal surface and pane id, as a running attempt's", () => {
+    const view = projectPool(
+      snapshot({
+        state: { tickets: [heldTicket("A")], interrupts: [checkpointOn("A")] },
+      }),
+    );
+    expect(cardOf(view, "A")?.paneId).toBe("pane-9");
+    expect(cardOf(view, "A")?.terminal).toEqual({
+      paneId: "pane-9",
+      status: "pending",
+      text: "",
+      justFocused: false,
+    });
+  });
+
+  it("gives a Held pane's row the terminal pitch, so the surface fits", () => {
+    const tickets = [heldTicket("A"), ticket("B", { blockedBy: ["A"] })];
+    const view = projectPool(snapshot({ state: { tickets } }));
+    const rowY = (id: string) => view.cards.find((c) => c.id === id)!.y;
+    expect(rowY("ticket:B") - rowY("ticket:A")).toBe(LAYOUT.terminalRowH);
+  });
+
+  it("offers Keep talking on a checkpoint with a Held pane, beside the unchanged resume form", () => {
+    const view = projectPool(
+      snapshot({
+        state: { tickets: [heldTicket("A")], interrupts: [checkpointOn("A")] },
+      }),
+    );
+    const interrupt = cardOf(view, "A")?.interrupt;
+    expect(interrupt?.keepTalking).toEqual({ requesting: false, failure: null });
+    // Not an answer: the form's actions (and so "resume all") stay Resume alone.
+    expect(interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+  });
+
+  it("offers it on no other interrupt kind, even with a Held pane", () => {
+    const kinds = INTERRUPT_KINDS.filter((kind) => kind !== "checkpoint");
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: kinds.map((kind) => heldTicket(`T-${kind}`)),
+          interrupts: kinds.map((kind) => ({ ticketId: `T-${kind}`, kind, body: "" })),
+        },
+      }),
+    );
+    for (const kind of kinds) {
+      expect(cardOf(view, `T-${kind}`)?.interrupt?.keepTalking).toBeNull();
+    }
+  });
+
+  it("does not offer it on a checkpoint whose pane is headless or gone", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [ticket("A", { status: "checkpoint" })],
+          interrupts: [checkpointOn("A")],
+        },
+      }),
+    );
+    expect(cardOf(view, "A")?.interrupt?.keepTalking).toBeNull();
+    expect(cardOf(view, "A")?.terminal).toBeNull();
+  });
+
+  it("withdraws it once the checkpoint's answer is queued", () => {
+    const view = projectPool(
+      snapshot({
+        state: {
+          tickets: [heldTicket("A")],
+          interrupts: [checkpointOn("A")],
+          queuedAnswers: [
+            { seq: 1, ticketId: "A", kind: "checkpoint", at: "2026-09-12T10:00:00Z", processedAt: null },
+          ],
+        },
+      }),
+    );
+    expect(cardOf(view, "A")?.interrupt?.keepTalking).toBeNull();
+  });
+
+  it("carries the same offer into the Detail and the Needs input row", () => {
+    const view = projectPool(
+      snapshot({
+        state: { tickets: [heldTicket("A")], interrupts: [checkpointOn("A")] },
+      }),
+    );
+    const detail = projectDetail(view.cards, "ticket:A");
+    const [row] = projectNeedsInput(view.cards);
+    expect(detail?.kind === "ticket" ? detail.interrupt?.keepTalking : undefined).toEqual({
+      requesting: false,
+      failure: null,
+    });
+    expect(row?.interrupt.keepTalking).toEqual({ requesting: false, failure: null });
+  });
+
+  it("threads the session's mark for this Held pane, and ignores one left from an earlier checkpoint", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [heldTicket("A", 2), heldTicket("B", 3)],
+        interrupts: [checkpointOn("A"), checkpointOn("B")],
+      },
+    });
+    const view = projectPool(snap, {}, {}, {}, VITALS_NOW, {}, {
+      A: { attempt: 2, requesting: false, failure: "the pane is gone" },
+      // Asked of attempt 1's pane; B now holds attempt 3's.
+      B: { attempt: 1, requesting: true, failure: null },
+    });
+    expect(cardOf(view, "A")?.interrupt?.keepTalking).toEqual({
+      requesting: false,
+      failure: "the pane is gone",
+    });
+    expect(cardOf(view, "B")?.interrupt?.keepTalking).toEqual({
+      requesting: false,
+      failure: null,
+    });
   });
 });
 

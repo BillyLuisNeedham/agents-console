@@ -332,15 +332,19 @@ body {
 
 /* The Stop control and the stopped-server notice (issue #97). The control
    keeps its confirmation on one row beside the other header tools; the
-   notice is a bar under the header, carrying the relaunch command. */
+   notice is a bar under the header, carrying the relaunch command. The
+   close-finished-terminals control (issue #139) is the same inline confirm,
+   so it wears the same shape. */
 
-.canvas-stop {
+.canvas-stop,
+.canvas-close-terminals {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.canvas-stop-prompt {
+.canvas-stop-prompt,
+.canvas-close-terminals-prompt {
   font-size: 11px;
   color: var(--interrupt);
   white-space: nowrap;

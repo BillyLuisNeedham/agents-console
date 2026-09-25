@@ -15,6 +15,7 @@ import type {
   EnrichedSnapshot,
   EnrichedTicketState,
   Grade,
+  HeldPaneRecord,
   Interrupt,
   LiveAttemptRecord,
   MergeQueueEntry,
@@ -44,6 +45,7 @@ export type {
   AssignmentSource,
   AssignmentSources,
   AssignmentView,
+  CloseFinishedTerminalsResponse,
   ConversationStatus,
   ConversationView,
   EnlistPane,
@@ -52,7 +54,10 @@ export type {
   EnrichedSnapshot,
   EnrichedTicketState,
   Grade,
+  HeldPaneRecord,
   InterruptKind,
+  KeepTalkingRequest,
+  KeepTalkingResponse,
   MachineDefaults,
   MachineDefaultsView,
   MergeQueueEntry,
@@ -111,6 +116,39 @@ export interface InterruptView extends Interrupt {
   form: InterruptFormView;
   /** True while an accepted answer waits for processing: answered-and-waiting. */
   queued: boolean;
+  /**
+   * Keep talking (issue #139), offered beside Resume only on an open
+   * checkpoint whose ticket still has its Held pane: the operator carries
+   * on the checkpointed Attempt's conversation in the same terminal rather
+   * than resuming into a fresh Attempt. Null wherever it is not offered:
+   * every other kind, a headless or closed pane, and an answer already
+   * queued. It is not one of the form's actions because it is not an
+   * answer: it never queues for the boundary, so the tray's "resume all"
+   * never fires it.
+   */
+  keepTalking: KeepTalkingView | null;
+}
+
+/**
+ * Keep talking's per-ticket request state (issue #139), held by the session
+ * for the one Held pane it was asked of: `attempt` is that pane's Attempt,
+ * so a mark left over from an earlier checkpoint never greys or annotates a
+ * later one's button. `requesting` stays set after the engine accepts,
+ * because the ticket only leaves checkpoint when the next snapshot says so,
+ * and a second click in that gap would ask the engine for a pane it has
+ * already claimed.
+ */
+export interface KeepTalkingState {
+  attempt: number;
+  requesting: boolean;
+  failure: string | null;
+}
+
+/** The Keep talking button as the Detail and the Needs input tray draw it:
+ *  disabled while `requesting`, with a refusal's reason beside it. */
+export interface KeepTalkingView {
+  requesting: boolean;
+  failure: string | null;
 }
 
 const RESUME: InterruptFormAction = { action: "resume", label: "resume", tone: "primary" };
@@ -727,15 +765,16 @@ export interface TicketCardView {
    *  activity payload yet (no empty flash before the first data lands). */
   vitals: VitalsView | null;
   /**
-   * The current attempt's herdr pane id (ADR-0014), for the card's terminal
-   * surface. Null for headless attempts and headless pools.
+   * The ticket's herdr pane id (ADR-0014), for the card's terminal surface:
+   * its Live attempt's, or its Held pane's while it waits at a checkpoint
+   * (issue #139). Null for headless attempts and headless pools.
    */
   paneId: string | null;
   /**
    * The card's terminal surface: the peek viewport, "Open in herdr", and the
-   * attach chip. Present exactly while the attempt is terminal-backed and
-   * running (the snapshot carries its paneId); null for headless and
-   * finished cards, which stay untouched.
+   * attach chip. Present exactly while the ticket has a pane (`paneId`):
+   * a terminal-backed attempt running, or its Held pane waiting at a
+   * checkpoint; null for headless and finished cards, which stay untouched.
    */
   terminal: TerminalSurfaceView | null;
   x: number;
@@ -955,9 +994,9 @@ function layoutPool(
   return positions;
 }
 
-/** A ticket row's vertical pitch: taller while any of its tickets runs a pane-backed attempt. */
+/** A ticket row's vertical pitch: taller while any of its tickets shows a terminal surface. */
 function rowPitch(row: EnrichedTicketState[]): number {
-  return row.some((ticket) => typeof ticket.liveAttempt?.paneId === "string")
+  return row.some((ticket) => ticketPaneId(ticket) !== null)
     ? LAYOUT.terminalRowH
     : LAYOUT.rowH;
 }
@@ -1045,21 +1084,63 @@ function isAnswerQueued(
   );
 }
 
-function toInterruptView(raw: Interrupt | null, state: PoolState): InterruptView | null {
+function toInterruptView(
+  raw: Interrupt | null,
+  state: PoolState,
+  heldPane: HeldPaneRecord | null = null,
+  keepTalking: KeepTalkingState | undefined = undefined,
+): InterruptView | null {
   if (!raw) return null;
+  const queued = isAnswerQueued(state.queuedAnswers, raw);
   return {
     ...raw,
     form: interruptForm(raw),
-    queued: isAnswerQueued(state.queuedAnswers, raw),
+    queued,
+    keepTalking: queued ? null : projectKeepTalking(raw, heldPane, keepTalking),
   };
 }
 
 /**
- * The card's terminal surface (ADR-0014): present exactly when the ticket's
- * current attempt is terminal-backed and running (the enriched snapshot's
- * live attempt carries its pane, and the record goes the moment the attempt
- * ends), so headless
- * and finished cards stay untouched. Before the first peek payload lands the
+ * Keep talking's view for a ticket's interrupt (issue #139): offered only
+ * on a checkpoint whose ticket carries a Held pane, the engine's word that
+ * the checkpointed Attempt's TUI is still alive to talk to. Every other
+ * kind is answered through its form alone: a merge conflict, an approval, a
+ * crash or a config problem is not a conversation to carry on. The
+ * session's mark counts only for the Held pane it was asked of.
+ */
+function projectKeepTalking(
+  raw: Interrupt,
+  heldPane: HeldPaneRecord | null,
+  state: KeepTalkingState | undefined,
+): KeepTalkingView | null {
+  if (raw.kind !== "checkpoint" || heldPane === null) return null;
+  const current = state?.attempt === heldPane.attempt ? state : undefined;
+  return {
+    requesting: current?.requesting ?? false,
+    failure: current?.failure ?? null,
+  };
+}
+
+/**
+ * The one reading of "this ticket has a pane to show": its Live attempt's
+ * pane while a terminal-backed attempt runs, else its Held pane's while it
+ * waits at a checkpoint with the checkpointed Attempt's TUI still alive
+ * (issue #139), else null. The engine never sets both. The card's terminal
+ * surface, the terminal store's peek polling and the row pitch all read it
+ * here, so a Held pane keeps peek, "Open in herdr" and the attach chip the
+ * way a running attempt does, and all three stop together when neither is
+ * there. The server resolves a Held pane for the ticket-keyed peek and
+ * focus routes exactly as it resolves a Live attempt's.
+ */
+export function ticketPaneId(ticket: EnrichedTicketState): string | null {
+  return ticket.liveAttempt?.paneId ?? ticket.heldPane?.paneId ?? null;
+}
+
+/**
+ * The card's terminal surface (ADR-0014): present exactly when the card has
+ * a pane, a ticket's by `ticketPaneId` (its running attempt's, or its Held
+ * pane's at a checkpoint; both go the moment the engine drops them) and a
+ * live Conversation's own, so headless and finished cards stay untouched. Before the first peek payload lands the
  * store holds no entry; the card still gets the surface, in its pending
  * "waiting for output" state, so there is no empty flash.
  */
@@ -1079,8 +1160,10 @@ function projectTicket(
   vitals: VitalsState | null,
   terminal: TerminalSurfaceView | undefined,
   now: number,
+  keepTalking: KeepTalkingState | undefined,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
+  const paneId = ticketPaneId(ticket);
   return {
     kind: "ticket",
     id: ticketCardId(ticket.id),
@@ -1096,7 +1179,7 @@ function projectTicket(
     reassign: ticket.reassign,
     hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
-    interrupt: toInterruptView(raw, state),
+    interrupt: toInterruptView(raw, state, ticket.heldPane, keepTalking),
     grade,
     vitals: projectVitals(
       vitals,
@@ -1104,8 +1187,8 @@ function projectTicket(
       now,
       ticket.liveAttempt?.role === "resolver" ? ticket.liveAttempt.startedAt : null,
     ),
-    paneId: ticket.liveAttempt?.paneId ?? null,
-    terminal: projectTerminalSurface(ticket.liveAttempt?.paneId ?? null, terminal),
+    paneId,
+    terminal: projectTerminalSurface(paneId, terminal),
     x: pos.x,
     y: pos.y,
   };
@@ -1191,6 +1274,7 @@ export function projectPool(
   terminal: Record<string, TerminalSurfaceView> = {},
   now: number = Date.now(),
   conversationEndings: Record<string, ConversationEndView> = {},
+  keepTalking: Record<string, KeepTalkingState> = {},
 ): PoolView {
   const tickets = snapshot.state.tickets;
   const conversations = snapshot.state.conversations;
@@ -1215,6 +1299,7 @@ export function projectPool(
         vitals[ticket.id] ?? null,
         terminal[ticket.id],
         now,
+        keepTalking[ticket.id],
       ),
     ),
     projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),

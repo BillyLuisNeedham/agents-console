@@ -77,6 +77,8 @@ const session = new ConsoleSession({
   answer: (ticketId, action, note) => client.answer(ticketId, action, note),
   stop: () => client.stop(),
   restart: () => client.restart(),
+  keepTalking: (ticketId) => client.keepTalking(ticketId),
+  closeFinishedTerminals: () => client.closeFinishedTerminals(),
   probeServer: (port) => probeServer(port),
   onRelaunched: (port) => handOverTo(port),
   stream: (handlers) => client.stream(handlers),
@@ -187,6 +189,11 @@ function render(): void {
         );
       });
     },
+    // Keep talking (issue #139): the session catches its own refusal into
+    // the reason beside the button, so there is nothing to report here.
+    onKeepTalking: (ticketId) => {
+      void session.keepTalking(ticketId);
+    },
     onSelectTab: (ticketId, tab) => session.selectTab(ticketId, tab),
     // The Stop control (issue #97). `confirmStop` catches its own failures
     // into the inline message beside the button, so there is nothing to
@@ -203,6 +210,13 @@ function render(): void {
     onCancelRestart: () => session.cancelRestart(),
     onConfirmRestart: () => {
       void session.confirmRestart();
+    },
+    // Close finished terminals (issue #139), in the pool header beside Stop,
+    // and the same shape again.
+    onArmCloseTerminals: () => session.armCloseTerminals(),
+    onCancelCloseTerminals: () => session.cancelCloseTerminals(),
+    onConfirmCloseTerminals: () => {
+      void session.confirmCloseTerminals();
     },
   });
 }

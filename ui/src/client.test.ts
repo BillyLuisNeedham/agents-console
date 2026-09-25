@@ -29,6 +29,7 @@ function snap(seq: number): EnrichedSnapshot {
     poolName: "repo/pool",
     poolTitle: null,
     poolDir: "/tmp/pool",
+    finishedTerminals: 0,
     state: {
       tickets: [
         {
@@ -40,6 +41,7 @@ function snap(seq: number): EnrichedSnapshot {
           enlisted: false,
           assignment: { harness: null, model: null, drivers: "implement" },
           liveAttempt: null,
+          heldPane: null,
           reassign: {
             eligible: true,
             reason: null,
@@ -676,6 +678,73 @@ describe("PoolClient settings and restart (ADR-0026)", () => {
     globalThis.fetch = fetch;
     await expect(new PoolClient().restart()).rejects.toThrow(
       "pool restart failed: 500",
+    );
+  });
+});
+
+describe("PoolClient Keep talking and closing finished terminals (issue #139)", () => {
+  function jsonFetch(status: number, body: unknown, bodyFails = false) {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetch = ((url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return Promise.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: () =>
+          bodyFails ? Promise.reject(new Error("not json")) : Promise.resolve(body),
+      } as unknown as Response);
+    }) as unknown as typeof globalThis.fetch;
+    return { fetch, calls };
+  }
+
+  it("POSTs the ticket id as JSON to /api/keep-talking and answers with the Continued attempt", async () => {
+    const { fetch, calls } = jsonFetch(202, { ticketId: "A", attempt: 3 });
+    globalThis.fetch = fetch;
+    const result = await new PoolClient().keepTalking("A");
+    expect(calls[0]!.url).toBe("/api/keep-talking");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({ ticketId: "A" });
+    expect(result).toEqual({ ticketId: "A", attempt: 3 });
+  });
+
+  it("surfaces a 409's reason as the thrown Error's message", async () => {
+    const { fetch } = jsonFetch(409, { reason: "the pane is gone" });
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().keepTalking("A")).rejects.toThrow("the pane is gone");
+  });
+
+  it("surfaces a 400's reason the same way", async () => {
+    const { fetch } = jsonFetch(400, { reason: "ticketId is required" });
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().keepTalking("")).rejects.toThrow("ticketId is required");
+  });
+
+  it("falls back to a generic message when a Keep talking refusal carries no reason", async () => {
+    const { fetch } = jsonFetch(500, null, true);
+    globalThis.fetch = fetch;
+    await expect(new PoolClient().keepTalking("A")).rejects.toThrow(
+      "keep talking failed: 500",
+    );
+  });
+
+  it("POSTs /api/terminals/close-finished with no body and answers with how many closed", async () => {
+    const { fetch, calls } = jsonFetch(200, { closed: 4 });
+    globalThis.fetch = fetch;
+    const result = await new PoolClient().closeFinishedTerminals();
+    expect(calls[0]!.url).toBe("/api/terminals/close-finished");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(calls[0]!.init?.body).toBeUndefined();
+    expect(result).toEqual({ closed: 4 });
+  });
+
+  it("surfaces a refused close's reason, or a generic message without one", async () => {
+    globalThis.fetch = jsonFetch(409, { reason: "pool is not terminal-backed" }).fetch;
+    await expect(new PoolClient().closeFinishedTerminals()).rejects.toThrow(
+      "pool is not terminal-backed",
+    );
+    globalThis.fetch = jsonFetch(500, null, true).fetch;
+    await expect(new PoolClient().closeFinishedTerminals()).rejects.toThrow(
+      "close finished terminals failed: 500",
     );
   });
 });

@@ -26,7 +26,7 @@ import {
   type UtilityCardView,
   type VitalsView,
 } from "./project";
-import type { RestartView, StopView } from "./view";
+import type { CloseTerminalsView, RestartView, StopState, StopView } from "./view";
 import {
   edgePath,
   layoutStorageKey,
@@ -217,6 +217,86 @@ interface CanvasBind {
 }
 
 /** The slice of the app model the canvas renders from. */
+/**
+ * The header's inline confirmation (issue #97's Stop, reused by issue #139's
+ * close-finished-terminals): the control's button, then on a click a prompt
+ * with the confirming action and Cancel beside it, then a disabled
+ * requesting label while the POST is out. The session owns the state
+ * machine; this only draws it. Cancel sends nothing, and a refusal's reason
+ * shows beside the button rather than on the global banner. Every class is
+ * `base`-prefixed, so each control keeps its own hooks and styling; the
+ * wrapper is keyed by `base`, so two such controls side by side never
+ * trade places in a morph.
+ */
+interface InlineConfirmSpec {
+  base: string;
+  /** Extra classes on the idle button, beside `btn`. */
+  openClass: string;
+  label: string;
+  title: string;
+  prompt: string;
+  confirmLabel: string;
+  requestingLabel: string;
+  state: StopState;
+  failure: string | null;
+  onArm: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function renderInlineConfirm(spec: InlineConfirmSpec): HTMLElement {
+  if (spec.state === "requesting") {
+    return h(
+      "div",
+      { class: spec.base, key: spec.base },
+      h(
+        "button",
+        { class: "btn btn-danger", type: "button", disabled: true },
+        spec.requestingLabel,
+      ),
+    );
+  }
+  if (spec.state === "armed") {
+    return h(
+      "div",
+      { class: `${spec.base} ${spec.base}-armed`, key: spec.base },
+      h("span", { class: `${spec.base}-prompt` }, spec.prompt),
+      h(
+        "button",
+        {
+          class: "btn btn-danger",
+          type: "button",
+          title: spec.title,
+          onclick: () => spec.onConfirm(),
+        },
+        spec.confirmLabel,
+      ),
+      h(
+        "button",
+        { class: "btn", type: "button", onclick: () => spec.onCancel() },
+        "Cancel",
+      ),
+    );
+  }
+  return h(
+    "div",
+    { class: spec.base, key: spec.base },
+    h(
+      "button",
+      {
+        class: `btn ${spec.openClass}`,
+        type: "button",
+        title: spec.title,
+        onclick: () => spec.onArm(),
+      },
+      spec.label,
+    ),
+    spec.failure
+      ? h("span", { class: `error-inline ${spec.base}-failure` }, spec.failure)
+      : null,
+  );
+}
+
 export interface CanvasModel {
   cards: PoolCardView[];
   connected: boolean;
@@ -240,6 +320,8 @@ export interface CanvasModel {
   /** The Merge queue line (issue #129): shown under the status while the
    *  Merge hold stands, absent otherwise. */
   mergeQueueLine: string | null;
+  /** The header's "Close N finished terminals" control (issue #139). */
+  closeTerminals: CloseTerminalsView;
 }
 
 /**
@@ -298,6 +380,9 @@ export class Canvas {
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
   private readonly onConfirmStop: () => void;
+  private readonly onArmCloseTerminals: () => void;
+  private readonly onCancelCloseTerminals: () => void;
+  private readonly onConfirmCloseTerminals: () => void;
 
   constructor(options: {
     /** Canvas-held view state changed (a badge toggled): render again. */
@@ -320,6 +405,11 @@ export class Canvas {
     onArmStop: () => void;
     onCancelStop: () => void;
     onConfirmStop: () => void;
+    /** The header's close-finished-terminals control (issue #139), the Stop
+     *  control's three intents again. Cancel sends nothing. */
+    onArmCloseTerminals: () => void;
+    onCancelCloseTerminals: () => void;
+    onConfirmCloseTerminals: () => void;
   }) {
     this.onChange = options.onChange;
     this.onCardTap = options.onCardTap;
@@ -331,6 +421,9 @@ export class Canvas {
     this.onArmStop = options.onArmStop;
     this.onCancelStop = options.onCancelStop;
     this.onConfirmStop = options.onConfirmStop;
+    this.onArmCloseTerminals = options.onArmCloseTerminals;
+    this.onCancelCloseTerminals = options.onCancelCloseTerminals;
+    this.onConfirmCloseTerminals = options.onConfirmCloseTerminals;
     if (typeof window !== "undefined") {
       window.addEventListener("pointerup", (event) => this.endDrag(event));
       window.addEventListener("pointercancel", (event) => this.endDrag(event));
@@ -759,6 +852,7 @@ export class Canvas {
           },
           "New Conversation",
         ),
+        this.renderCloseTerminalsControl(model.closeTerminals),
         this.renderStopControl(model.stop),
         h(
           "button",
@@ -790,56 +884,45 @@ export class Canvas {
    */
   private renderStopControl(stop: StopView): HTMLElement | null {
     if (!stop.offered) return null;
-    if (stop.state === "requesting") {
-      return h(
-        "div",
-        { class: "canvas-stop" },
-        h(
-          "button",
-          { class: "btn btn-danger", type: "button", disabled: true },
-          "stopping...",
-        ),
-      );
-    }
-    if (stop.state === "armed") {
-      return h(
-        "div",
-        { class: "canvas-stop canvas-stop-armed" },
-        h("span", { class: "canvas-stop-prompt" }, "Really stop?"),
-        h(
-          "button",
-          {
-            class: "btn btn-danger",
-            type: "button",
-            title: "stop this pool's server",
-            onclick: () => this.onConfirmStop(),
-          },
-          "Stop",
-        ),
-        h(
-          "button",
-          { class: "btn", type: "button", onclick: () => this.onCancelStop() },
-          "Cancel",
-        ),
-      );
-    }
-    return h(
-      "div",
-      { class: "canvas-stop" },
-      h(
-        "button",
-        {
-          class: "btn btn-danger canvas-stop-server",
-          type: "button",
-          title: "stop this pool's server",
-          onclick: () => this.onArmStop(),
-        },
-        "Stop server",
-      ),
-      stop.failure
-        ? h("span", { class: "error-inline canvas-stop-failure" }, stop.failure)
-        : null,
-    );
+    return renderInlineConfirm({
+      base: "canvas-stop",
+      openClass: "btn-danger canvas-stop-server",
+      label: "Stop server",
+      title: "stop this pool's server",
+      prompt: "Really stop?",
+      confirmLabel: "Stop",
+      requestingLabel: "stopping...",
+      state: stop.state,
+      failure: stop.failure,
+      onArm: () => this.onArmStop(),
+      onCancel: () => this.onCancelStop(),
+      onConfirm: () => this.onConfirmStop(),
+    });
+  }
+
+  /**
+   * "Close N finished terminals" (issue #139): the herdr tabs this pool
+   * opened whose Attempt or Conversation has ended, which the engine never
+   * closes on its own. Hidden at zero, and behind the Stop control's inline
+   * confirmation, since closing a tab takes its scrollback with it.
+   */
+  private renderCloseTerminalsControl(close: CloseTerminalsView): HTMLElement | null {
+    if (!close.offered) return null;
+    const noun = close.count === 1 ? "terminal" : "terminals";
+    return renderInlineConfirm({
+      base: "canvas-close-terminals",
+      openClass: "canvas-close-terminals-open",
+      label: `Close ${close.count} finished ${noun}`,
+      title: "close the herdr tabs of Attempts and Conversations that have ended",
+      prompt: `Really close ${close.count}?`,
+      confirmLabel: "Close",
+      requestingLabel: "closing...",
+      state: close.state,
+      failure: close.failure,
+      onArm: () => this.onArmCloseTerminals(),
+      onCancel: () => this.onCancelCloseTerminals(),
+      onConfirm: () => this.onConfirmCloseTerminals(),
+    });
   }
 
   /**

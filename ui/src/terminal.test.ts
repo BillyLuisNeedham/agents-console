@@ -24,6 +24,7 @@ function snap(
     poolName: "repo/pool",
     poolTitle: null,
     poolDir: "/tmp/pool",
+    finishedTerminals: 0,
     state: {
       tickets: Object.entries(panes).map(([id, paneId]) => ({
         id,
@@ -37,6 +38,7 @@ function snap(
           paneId === undefined
             ? null
             : { attempt: 1, paneId, role: "agent" as const, startedAt: "2026-09-23T10:00:00.000Z" },
+        heldPane: null,
         reassign: {
           eligible: paneId === undefined,
           reason: paneId === undefined ? null : "an Attempt is in flight",
@@ -364,5 +366,56 @@ describe("TerminalSurface store", () => {
     expect(await store.focus("conv-1")).toBe(true);
     store.dispose();
     expect(focused).toEqual(["conv-1"]);
+  });
+});
+
+// A Held pane (issue #139): the ticket's checkpointed Attempt is over, so it
+// carries no Live attempt, but its TUI is still alive and the snapshot says
+// which pane. The store treats it as a pane to show, keyed by ticket id,
+// because the server resolves it for peek and focus the same way.
+function held(snapshot: EnrichedSnapshot, ticketId: string, paneId: string): EnrichedSnapshot {
+  for (const ticket of snapshot.state.tickets) {
+    if (ticket.id !== ticketId) continue;
+    ticket.status = "checkpoint";
+    ticket.liveAttempt = null;
+    ticket.heldPane = { attempt: 1, paneId };
+  }
+  return snapshot;
+}
+
+describe("TerminalSurface store over a Held pane (issue #139)", () => {
+  it("peeks and focuses a checkpointed ticket's Held pane by ticket id", async () => {
+    const h = makeStore({});
+    h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
+    expect(h.peeked).toEqual(["01"]);
+    await ticks();
+    expect(h.store.state()["01"]).toMatchObject({ paneId: "pane-7", status: "live" });
+    expect(await h.store.focus("01")).toBe(true);
+    h.store.dispose();
+    expect(h.focused).toEqual(["01"]);
+  });
+
+  it("keeps the surface when the Held pane continues as a Live attempt in the same pane", async () => {
+    const h = makeStore({});
+    h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
+    await ticks();
+    // Keep talking: the Continued attempt runs in the pane the checkpoint
+    // held, so the surface carries on rather than flashing back to pending.
+    h.store.update(snap({ "01": "pane-7" }));
+    h.store.dispose();
+    expect(h.store.state()["01"]).toMatchObject({ paneId: "pane-7", status: "live" });
+  });
+
+  it("stops polling once the ticket has neither a Live attempt nor a Held pane", async () => {
+    const h = makeStore({});
+    h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
+    await ticks();
+    // Resume answered the checkpoint (or the pane closed): nothing to show.
+    h.store.update(snap({ "01": undefined }));
+    const pollsAtEnd = h.peeked.length;
+    expect(h.store.state()["01"]).toBeUndefined();
+    await ticks();
+    h.store.dispose();
+    expect(h.peeked.length).toBe(pollsAtEnd);
   });
 });

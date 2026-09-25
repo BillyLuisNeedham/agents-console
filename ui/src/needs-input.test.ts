@@ -16,6 +16,9 @@ import {
   type NeedsInputRow,
   type ResumeAction,
 } from "./project";
+import { useDom } from "./test-dom";
+
+useDom();
 
 // The form shapes the resume-all tests need: the single-action resume form
 // for the resume kinds, the two-action approve/reject form for review. The
@@ -49,6 +52,7 @@ function row(ticketId: string, kind: InterruptKind, queued = false): NeedsInputR
       body: "",
       queued,
       form: form(kind),
+      keepTalking: null,
     },
   };
 }
@@ -175,6 +179,7 @@ describe("NeedsInputTray waiting rows", () => {
       poolName: "repo/pool",
       poolTitle: null,
       poolDir: "/tmp/pool",
+      finishedTerminals: 0,
       state: {
         tickets: [
           {
@@ -186,6 +191,7 @@ describe("NeedsInputTray waiting rows", () => {
             enlisted: false,
             assignment: { harness: null, model: null, drivers: "implement" },
             liveAttempt: null,
+            heldPane: null,
             reassign: {
               eligible: true,
               reason: null,
@@ -202,6 +208,7 @@ describe("NeedsInputTray waiting rows", () => {
             enlisted: false,
             assignment: { harness: null, model: null, drivers: "implement" },
             liveAttempt: null,
+            heldPane: null,
             reassign: {
               eligible: true,
               reason: null,
@@ -339,5 +346,73 @@ describe("NeedsInputTray resume all", () => {
     await fired;
     tray.pruneFailures(new Set());
     expect(tray.failure("01")).toBeNull();
+  });
+});
+
+describe("NeedsInputTray Keep talking (issue #139)", () => {
+  // A row as the projection hands it over: `keepTalking` set only on a
+  // checkpoint whose ticket still has its Held pane.
+  function offered(
+    ticketId: string,
+    kind: InterruptKind,
+    keepTalking: InterruptView["keepTalking"],
+  ): NeedsInputRow {
+    const base = row(ticketId, kind);
+    return { ...base, interrupt: { ...base.interrupt, keepTalking } };
+  }
+
+  function paint(rows: NeedsInputRow[]) {
+    const keepTalks: string[] = [];
+    const tray = stateTray();
+    const el = tray.render(rows, [], {
+      onSelect: () => {},
+      onFocusConversation: () => Promise.resolve(true),
+      onKeepTalking: (ticketId) => keepTalks.push(ticketId),
+    })!;
+    return { el, keepTalks };
+  }
+
+  const keepTalkingIn = (el: HTMLElement, cardId: string) =>
+    el.querySelector<HTMLButtonElement>(`[data-key="${cardId}"] .keep-talking`);
+
+  it("offers it on a checkpoint row with a Held pane, beside Resume, and calls the seam", () => {
+    const { el, keepTalks } = paint([
+      offered("01", "checkpoint", { requesting: false, failure: null }),
+    ]);
+    const actions = [...el.querySelectorAll('[data-key="ticket:01"] .needs-input-actions button')];
+    expect(actions.map((b) => b.textContent)).toEqual(["resume", "Keep talking"]);
+    keepTalkingIn(el, "ticket:01")!.click();
+    expect(keepTalks).toEqual(["01"]);
+  });
+
+  it("offers it nowhere the projection withholds it", () => {
+    const { el } = paint([
+      offered("01", "checkpoint", null),
+      offered("02", "merge-conflict", null),
+      offered("03", "merge-approval", null),
+    ]);
+    expect(el.querySelectorAll(".keep-talking")).toHaveLength(0);
+  });
+
+  it("stays out of resume all, which fires Resume alone", () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    const fired = tray.resumeAll([
+      offered("01", "checkpoint", { requesting: false, failure: null }),
+    ]);
+    expect(fake.calls).toEqual([{ ticketId: "01", action: "resume", note: "" }]);
+    fake.deferreds.get("01")!.resolve();
+    return fired;
+  });
+
+  it("disables while the request is out and shows a refusal's reason under the row", () => {
+    const { el } = paint([
+      offered("01", "checkpoint", { requesting: true, failure: null }),
+      offered("02", "checkpoint", { requesting: false, failure: "the pane is gone" }),
+    ]);
+    expect(keepTalkingIn(el, "ticket:01")?.disabled).toBe(true);
+    expect(keepTalkingIn(el, "ticket:02")?.disabled).toBe(false);
+    const failures = [...el.querySelectorAll(".keep-talking-failure")];
+    expect(failures.map((f) => f.textContent)).toEqual(["the pane is gone"]);
   });
 });

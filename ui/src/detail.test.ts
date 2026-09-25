@@ -37,6 +37,7 @@ const SNAPSHOT = {
   poolName: "repo/pool",
   poolTitle: null,
   poolDir: "/tmp/pool",
+  finishedTerminals: 0,
   state: {
     tickets: [],
     conversations: [],
@@ -127,6 +128,7 @@ function rig(detail: TicketDetailView) {
     onSelectStream: () => {},
     onLoadEarlier: () => {},
     onAnswer: () => {},
+    onKeepTalking: () => {},
     onSelectTab: () => {},
     onEndConversation: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
@@ -425,6 +427,105 @@ describe("Detail: the Reassign section (issue #126)", () => {
     r.paint();
     expect(r.root.querySelector(".reassign-readonly")?.textContent).toContain(
       "unassigned",
+    );
+  });
+});
+
+describe("Detail: Keep talking (issue #139)", () => {
+  // The Detail on its Progress tab, where the interrupt form renders, with
+  // Keep talking's clicks and Resume's answers recorded.
+  function paintInterrupt(interrupt: TicketDetailView["interrupt"]) {
+    const keepTalks: string[] = [];
+    const answers: string[] = [];
+    const pane = new Detail({ onClose: () => {} });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: (ticketId, action) => answers.push(`${ticketId}:${action}`),
+      onKeepTalking: (ticketId) => keepTalks.push(ticketId),
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.className = "shell";
+      shell.appendChild(
+        pane.render(
+          {
+            ...model(detailView({ status: "checkpoint", interrupt })),
+            detailTabs: [
+              { id: "spec", label: "Spec", active: false, interruptDot: true },
+              { id: "progress", label: "Progress", active: true, interruptDot: true },
+              { id: "outcome", label: "Outcome", active: false, interruptDot: true },
+            ],
+          },
+          handlers,
+        ),
+      );
+      return shell;
+    });
+    return { root, keepTalks, answers };
+  }
+
+  const checkpoint = (
+    keepTalking: NonNullable<TicketDetailView["interrupt"]>["keepTalking"],
+    kind: "checkpoint" | "merge-conflict" = "checkpoint",
+  ): TicketDetailView["interrupt"] => ({
+    ticketId: "A",
+    kind,
+    body: "the brief",
+    form: {
+      title: kind,
+      actions: [{ action: "resume", label: "resume", tone: "primary" }],
+    },
+    queued: false,
+    keepTalking,
+  });
+
+  const button = (root: HTMLElement) =>
+    root.querySelector<HTMLButtonElement>(".interrupt-actions .keep-talking");
+
+  it("sits beside Resume on a checkpoint with a Held pane, and calls the seam with the ticket", () => {
+    const r = paintInterrupt(checkpoint({ requesting: false, failure: null }));
+    const actions = [...r.root.querySelectorAll(".interrupt-actions button")].map(
+      (b) => b.textContent,
+    );
+    expect(actions).toEqual(["resume", "Keep talking"]);
+    expect(button(r.root)?.title).toContain("same terminal");
+    button(r.root)!.click();
+    expect(r.keepTalks).toEqual(["A"]);
+    // Keep talking is not an answer: Resume's seam never fired.
+    expect(r.answers).toEqual([]);
+  });
+
+  it("is absent when the interrupt does not offer it", () => {
+    const r = paintInterrupt(checkpoint(null, "merge-conflict"));
+    expect(r.root.querySelector(".interrupt-actions")).not.toBeNull();
+    expect(button(r.root)).toBeNull();
+  });
+
+  it("disables while the request is out", () => {
+    const r = paintInterrupt(checkpoint({ requesting: true, failure: null }));
+    expect(button(r.root)?.disabled).toBe(true);
+  });
+
+  it("shows a refusal's reason under the form", () => {
+    const r = paintInterrupt(
+      checkpoint({ requesting: false, failure: "the pane is gone" }),
+    );
+    expect(button(r.root)?.disabled).toBe(false);
+    expect(r.root.querySelector(".interrupt-box .keep-talking-failure")?.textContent).toBe(
+      "the pane is gone",
     );
   });
 });
