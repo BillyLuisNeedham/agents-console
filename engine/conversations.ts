@@ -480,6 +480,8 @@ export interface ConversationHost {
   log(line: string): void;
   /** A tab this module closed: the pane survey lists again, so the snapshot's Finished terminals count drops at once. */
   tabClosed(): void;
+  /** Whether a merge-conflict or merge-approval interrupt waits for this id. */
+  hasMergeInterrupt(id: string): boolean;
   /** The live pool config. */
   config(): PoolConfig;
 }
@@ -857,7 +859,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // Finish, at boot, an End the engine stopped in the middle of (issue #140):
   // replayed from the start when its merge had not been handed on, or held
   // as ending when an interrupt already owns it, so the pending answer
-  // finishes it (answerMerge) and nothing merges twice.
+  // finishes it (answerMerge) and nothing merges twice. A merge handed on
+  // with no interrupt waiting was a resolver cut off mid-run: the engine
+  // raises the manual merge-conflict interrupt itself, so Resume
+  // re-attempts the merge rather than the End standing there forever.
   async function finishEndAtBoot(rec: ConversationRecord, listing?: PaneListing): Promise<void> {
     if (!endAwaitsAnswer(rec.id)) {
       await end(rec.id, undefined, listing).catch(() => {});
@@ -870,6 +875,16 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       .filter((e) => e.kind === "end-requested")
       .pop();
     if (typeof asked?.payload.closing === "string") runtime.closing = asked.payload.closing;
+    if (!host.hasMergeInterrupt(rec.id)) {
+      host.raiseInterrupt({
+        ticketId: rec.id,
+        kind: "merge-conflict",
+        body:
+          `The engine stopped while the resolver ran on conversation ${rec.id}'s End; ` +
+          `the branch is parked at ${runtime.worktree.branch}. Resolve it by hand, or ` +
+          "answer resume to re-attempt the merge.",
+      });
+    }
     publish();
   }
 

@@ -776,6 +776,63 @@ describe("Keep talking review fixes (issue #139)", () => {
     return { run, poolDir, fake, id };
   }
 
+  it("records a merge held at the gate at once, with no drive running, and redoes it after a restart (M1)", async () => {
+    // 02's attempt runs in its worktree, re-adopted at boot; 01 runs alone
+    // in the pool checkout, checkpoints, and is continued there, so the pool
+    // is quiescent when 02 ends done and its merge meets the held gate.
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { file: "01.md", marker: READY, body: "# First\n\nbody" },
+        { file: "02.md", marker: "<!-- state: id=02 blocked-by= status=in-progress -->", body: "# Second\n\nbody" },
+      ],
+      config,
+    });
+    const worktree = worktreePathFor(poolDir, "02");
+    const branch = branchFor(poolDir, "02");
+    Bun.spawnSync(["git", "-C", poolDir, "worktree", "add", "-q", "-b", branch, worktree], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    appendEvent(join(poolDir, "runs"), "02", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { argv: ["tui"], cwd: worktree, branch, pane_id: "p-02", tab_id: "t-02" },
+    });
+    const { harnesses } = tuiHarness(poolDir, {
+      "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    fake.injectPane("p-02", { tabId: "t-02", cwd: worktree, workspaceId: "w1" });
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, enlistPollMs: 50, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("01's Held pane", () => latest(run).heldPanes["01"] !== undefined);
+    await run.keepTalking("01");
+    await run.settled;
+    commitIn(worktree, "held.txt");
+    writeFileSync(
+      join(poolDir, "runs", "02.outcome.json"),
+      JSON.stringify({ status: "done", summary: "done", commitSha: null }),
+    );
+    await until("the merge-deferred record", () =>
+      readEvents(join(poolDir, "runs"), "02").some((e) => e.kind === "merge-deferred"),
+    );
+    expect(existsSync(join(poolDir, "held.txt"))).toBe(false);
+    await run.shutdown(300);
+    runs.splice(runs.indexOf(run), 1);
+
+    const again = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, enlistPollMs: 50, paneSurveyMs: 50 });
+    runs.push(again);
+    await until("01 re-adopted", () => latest(again).liveAttempts["01"]?.attempt === 2);
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await until("the redone merge", () => existsSync(join(poolDir, "held.txt")), 20_000);
+    expect(readEvents(join(poolDir, "runs"), "02").some((e) => e.kind === "merged")).toBe(true);
+  }, 60_000);
+
   it("redoes a merge a Stop dropped at the pool checkout's gate once the Continued attempt ends after the restart (F2)", async () => {
     const { run, poolDir, fake, id } = await heldMerge();
     await run.shutdown(300);

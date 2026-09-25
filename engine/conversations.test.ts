@@ -1130,26 +1130,36 @@ describe("Conversation boot reconciliation", () => {
     }
   });
 
-  it("holds an End whose merge an interrupt already owns at boot, rather than merging again (F4)", async () => {
+  it("holds an End whose merge was handed on at boot, raising the interrupt a cut-off resolver never did (F4, M2)", async () => {
     const { poolDir, fake, id } = await startedThenShutDown();
     try {
-      for (const kind of ["end-requested", "merge-conflict"] as const) {
+      const worktree = worktreePathFor(poolDir, id);
+      writeFileSync(join(worktree, "resolving.txt"), "work\n");
+      gitIn(worktree, ["add", "-A"]);
+      gitIn(worktree, ["commit", "-qm", "resolving"]);
+      // The End handed its merge to a resolver, and the engine stopped while
+      // it ran: no interrupt was raised.
+      for (const kind of ["end-requested", "merge-conflict", "resolver"] as const) {
         appendEvent(join(poolDir, "runs"), id, {
           at: new Date().toISOString(),
           attempt: 1,
           kind,
-          payload: kind === "end-requested" ? { closing: "bye" } : { conflicted: ["x"] },
+          payload: kind === "end-requested" ? { closing: "bye" } : {},
         });
       }
       const run = reboot(poolDir, fake.socketPath);
       await waitFor(() => run.snapshots.at(-1)?.conversations.find((c) => c.id === id)?.ending === true);
-      await Bun.sleep(300);
-      const events = readEvents(join(poolDir, "runs"), id);
-      expect(events.filter((e) => e.kind === "merge-conflict")).toHaveLength(1);
-      expect(events.some((e) => e.kind === "merged" || e.kind === "ended" || e.kind === "crash")).toBe(false);
-      expect(readConversation(join(poolDir, "conversations", `${id}.md`)).status).toBe("live");
-      // Ending: no pane to peek or focus.
+      await waitFor(() => run.interrupts.some((i) => i.ticketId === id && i.kind === "merge-conflict"));
+      const interrupt = run.interrupts.find((i) => i.ticketId === id)!;
+      expect(interrupt.body).toContain("stopped while the resolver ran");
+      expect(interrupt.body).toContain(branchFor(poolDir, id));
+      // Nothing merged again on its own, and no pane to peek while ending.
+      expect(readEvents(join(poolDir, "runs"), id).some((e) => e.kind === "merged")).toBe(false);
       expect(run.snapshots.at(-1)!.conversations.find((c) => c.id === id)?.paneId).toBeNull();
+      // Resume re-attempts the merge, which lands and ends the Conversation.
+      await run.resume(id);
+      await waitFor(() => readConversation(join(poolDir, "conversations", `${id}.md`)).status === "ended");
+      expect(existsSync(join(poolDir, "resolving.txt"))).toBe(true);
       await run.shutdown(0);
     } finally {
       await fake.close();

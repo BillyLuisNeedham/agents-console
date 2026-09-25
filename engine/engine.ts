@@ -877,10 +877,11 @@ interface Session {
   // graded as lone attempts: grading spawns graders and merges, so it runs in
   // the drive loop between super-steps, never beside one (ADR-0004).
   continuedGrades: { ticketId: string; attempt: number; work: HeldPane }[];
-  // Merges into the pool checkout past its gate and not yet settled, and
-  // verify rounds from their gate to their merge decision (ADR-0027): Keep
-  // talking is refused beside one, as beside any agent in the checkout.
-  poolCheckoutMerging: number;
+  // What is writing in the pool checkout on the engine's own account right
+  // now, each as a phrase for Keep talking's refusal (ADR-0027): a merge
+  // past its gate and not settled, a verify round from its gate to its merge
+  // decision, a resolver working a merge that lands there.
+  poolCheckoutWriters: Map<number, string>;
   // Tickets the drive planned into the pool checkout, from the plan to the
   // attempt's ending (issue #139): the pool checkout's occupant before its
   // launch has spawned (ADR-0027's one agent at a time).
@@ -993,6 +994,10 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
       session.state = applyUpdate(session.state, { log: [line] });
     },
     tabClosed: () => void sessionOf().paneSurvey?.refresh(),
+    hasMergeInterrupt: (id) =>
+      sessionOf().state.interrupts.some(
+        (i) => i.ticketId === id && (i.kind === "merge-conflict" || i.kind === "merge-approval"),
+      ),
   };
 }
 
@@ -1174,7 +1179,7 @@ export function startPool(options: RunOptions): PoolRun {
     held: new Map(),
     continued: new Map(),
     continuedGrades: [],
-    poolCheckoutMerging: 0,
+    poolCheckoutWriters: new Map(),
     poolCheckoutPlanned: new Set(),
     paneSurvey: null,
     openedTabs: [],
@@ -1818,9 +1823,8 @@ async function runSuperStep(
           issuesDir: session.issuesDir,
         },
         plan,
-      ).then((result) => {
-        // Its ending ends its hold on the pool checkout too.
-        session.poolCheckoutPlanned.delete(marker.id);
+      // Its ending, however it ends, ends its hold on the pool checkout.
+      ).finally(() => session.poolCheckoutPlanned.delete(marker.id)).then((result) => {
         // The attempt's surviving proposals ride to the boundary's
         // adoption buffer (ADR-0010). A verify candidate carries none:
         // its proposals ride or die with selection.
@@ -2015,7 +2019,10 @@ async function runSuperStep(
     // waits then leaves the round ungraded rather than graded and lost, and
     // the step stops there.
     if (!(await poolCheckoutFree(session))) return "stop";
-    session.poolCheckoutMerging += 1;
+    const release = holdPoolCheckout(
+      session,
+      `the verify round of ${marker.id} is deciding its merge into the pool checkout`,
+    );
     try {
       const grades = await gradeRound(session, marker, attempts, emit);
       // Lone-attempt resolution (ticket 05): with one attempt and one
@@ -2052,7 +2059,7 @@ async function runSuperStep(
         }
       }
     } finally {
-      session.poolCheckoutMerging -= 1;
+      release();
     }
   }
   // The boundary persist: a failed write retries with backoff, and the
@@ -2432,6 +2439,11 @@ function redoDeferredMerges(session: Session): void {
     );
     if (settled) continue;
     const deferred = events[deferredAt];
+    // The ticket ran again since (a later attempt spawned): that attempt's
+    // own ending decides its merge, not this old record.
+    if (events.some((event, i) => i > deferredAt && event.kind === "spawned" && event.attempt > deferred.attempt)) {
+      continue;
+    }
     const path = deferred.payload.path;
     const branch = deferred.payload.branch;
     if (typeof path !== "string" || typeof branch !== "string") continue;
@@ -4193,6 +4205,17 @@ function restoreAssignment(session: Session, marker: TicketMarker): void {
   }
 }
 
+// Mark the engine writing in the pool checkout (ADR-0027) until the returned
+// release is called: Keep talking refuses beside it, in these words.
+let poolCheckoutWriterSeq = 0;
+function holdPoolCheckout(session: Session, what: string): () => void {
+  const key = ++poolCheckoutWriterSeq;
+  session.poolCheckoutWriters.set(key, what);
+  return () => {
+    session.poolCheckoutWriters.delete(key);
+  };
+}
+
 // The pool checkout's one agent (ADR-0027): what, other than `exceptId`'s
 // own agent, is writing in the pool checkout right now, as a phrase for the
 // refusal. That is a merge into it in flight (past its gate, not settled); a
@@ -4205,7 +4228,7 @@ function restoreAssignment(session: Session, marker: TicketMarker): void {
 function otherAgentInPoolCheckout(session: Session, exceptId: string): string | null {
   // A merge landing in the checkout is a writer there too, from its gate
   // until it settles.
-  if (session.poolCheckoutMerging > 0) return "a merge into the pool checkout is in flight";
+  for (const what of session.poolCheckoutWriters.values()) return what;
   for (const id of session.poolCheckoutPlanned) {
     if (id !== exceptId) return `${id} is working now`;
   }
@@ -4275,44 +4298,44 @@ async function poolCheckoutFree(session: Session): Promise<boolean> {
 // waits on the conversation the way it waits on a lone attempt working in
 // the checkout, and no deadlock is possible because the Continued attempt
 // ends outside the drive. A merge counts as in flight from the gate until it
-// settles (session.poolCheckoutMerging), which Keep talking refuses beside.
-// One a shutdown drops while it waits is recorded `merge-deferred` on its
-// ticket (a Conversation's End needs no record: the next boot finishes it),
-// and the next boot chains it again (redoDeferredMerges).
+// settles (holdPoolCheckout), which Keep talking refuses beside. A merge the
+// gate holds is recorded `merge-deferred` on its ticket the moment it is
+// held (a Conversation's End needs no record: the next boot finishes it),
+// so a shutdown at any point after, drive running or not, leaves the next
+// boot what to chain again (redoDeferredMerges); a record the merge then
+// settles is settled by the events that follow it.
 function throughPoolCheckoutGate(
   session: Session,
   deferred: { marker: TicketMarker; worktree: WorktreeInfo; attempt: number } | null,
   merge: () => void | Promise<void>,
 ): void | Promise<void> {
   const run = (): void | Promise<void> => {
-    session.poolCheckoutMerging += 1;
+    const release = holdPoolCheckout(
+      session,
+      deferred !== null
+        ? `a merge of ${deferred.marker.id} into the pool checkout is in flight`
+        : "a Conversation's merge into the pool checkout is in flight",
+    );
     let result: void | Promise<void>;
     try {
       result = merge();
     } catch (err) {
-      session.poolCheckoutMerging -= 1;
+      release();
       throw err;
     }
-    if (result instanceof Promise) {
-      return result.finally(() => {
-        session.poolCheckoutMerging -= 1;
-      });
-    }
-    session.poolCheckoutMerging -= 1;
+    if (result instanceof Promise) return result.finally(release);
+    release();
   };
   if (!poolCheckoutHeld(session)) return run();
-  return poolCheckoutFree(session).then((free) => {
-    if (free) return run();
-    if (deferred !== null) {
-      appendEvent(session.runsDir, deferred.marker.id, {
-        at: new Date().toISOString(),
-        attempt: deferred.attempt,
-        kind: "merge-deferred",
-        payload: { path: deferred.worktree.path, branch: deferred.worktree.branch },
-      });
-    }
-    return undefined;
-  });
+  if (deferred !== null) {
+    appendEvent(session.runsDir, deferred.marker.id, {
+      at: new Date().toISOString(),
+      attempt: deferred.attempt,
+      kind: "merge-deferred",
+      payload: { path: deferred.worktree.path, branch: deferred.worktree.branch },
+    });
+  }
+  return poolCheckoutFree(session).then((free) => (free ? run() : undefined));
 }
 
 function keepTalkingRefusal(ticketId: string, why: string): Error {
@@ -4792,11 +4815,14 @@ async function gradeContinuedAttempts(
       session.continuedGrades.unshift({ ticketId, attempt, work });
       return;
     }
-    session.poolCheckoutMerging += 1;
+    const release = holdPoolCheckout(
+      session,
+      `the lone grade of ${ticketId}'s continued attempt is deciding its merge`,
+    );
     try {
       await gradeContinuedAttempt(session, marker, attempt, work, emit);
     } finally {
-      session.poolCheckoutMerging -= 1;
+      release();
     }
   }
   await persistWithRetry(session);
@@ -5754,6 +5780,23 @@ async function runResolver(
   // below is this run's attempt bump, and it is also what the resolver
   // log's rotation keys on, so the well-known log rotates here, before the
   // event lands, or the previous run's log would take this run's number.
+  // A resolver works a merge that lands in the pool checkout: a writer there
+  // for Keep talking's refusal (ADR-0027) until it is done.
+  const release = holdPoolCheckout(session, `a resolver is resolving ${marker.id}'s merge`);
+  try {
+    return await runResolverAttempt(session, marker, worktree, resolver, result);
+  } finally {
+    release();
+  }
+}
+
+async function runResolverAttempt(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+  resolver: ResolverSpec,
+  result: MergeResult,
+): Promise<ResolverAttempt> {
   const attempt = nextAttempt(session.runsDir, marker.id);
   rotateAttemptLog(
     session.runsDir,
