@@ -575,6 +575,62 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
   await settleAll();
 }
 
+/**
+ * Typing into a Settings text field (issue #142): every keystroke re-renders
+ * the pane through the store's onChange, with no render() of the harness's
+ * own in between, so Save must light up on the first key while the field
+ * keeps its node, its focus and a caret the operator put mid-text.
+ */
+async function settingsTyping(): Promise<void> {
+  const name = "settings typing";
+  stage = name;
+  if (!q(".settings-pane")) q<HTMLButtonElement>(".canvas-settings")?.click();
+  await settleAll();
+  const selector = '[data-key="pool-model-input"]';
+  const input = q<HTMLInputElement>(selector);
+  const save = () => q<HTMLButtonElement>('[data-key="settings-save-pool"] .settings-save');
+  if (!input || !save()) {
+    report.push({ scenario: name, assertion: "save enables on typing", pass: null, detail: "settings pane absent" });
+    return;
+  }
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const wasDisabled = save()!.disabled;
+
+  // Insert keys one at a time at a caret mid-text: "opus" becomes "op-4us".
+  input.focus();
+  input.setSelectionRange(2, 2);
+  const rendersBefore = renders;
+  let failure: string | null = null;
+  for (const key of "-4") {
+    const at = input.selectionStart ?? 0;
+    input.value = input.value.slice(0, at) + key + input.value.slice(at);
+    input.setSelectionRange(at + 1, at + 1);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const now = q<HTMLInputElement>(selector);
+    if (now !== input) failure ??= `after "${key}": the field was replaced`;
+    else if (document.activeElement !== input) failure ??= `after "${key}": activeElement is ${describe(document.activeElement)}`;
+    else if (input.selectionStart !== at + 1 || input.selectionEnd !== at + 1)
+      failure ??= `after "${key}": selection ${input.selectionStart}-${input.selectionEnd}, expected ${at + 1}`;
+  }
+  const typed = renders - rendersBefore;
+  push("keystrokes re-render", typed >= 2 ? null : `${typed} renders for 2 keystrokes`, `${typed} renders for 2 keystrokes`);
+  push("focus and caret survive typing", failure, `caret held at 4 in "${input.value}"`);
+  push(
+    "save enables on typing",
+    wasDisabled && !save()!.disabled ? null : `disabled before ${wasDisabled}, after ${save()!.disabled}`,
+    "disabled before, enabled after the first keystrokes",
+  );
+
+  // Put it back: a revert is clean again, so Save greys out.
+  input.value = "opus";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  push("save disables on revert", save()!.disabled ? null : "still enabled", "disabled");
+  input.blur();
+}
+
 function parsePan(transform: string): { x: number; y: number; zoom: number } {
   const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(transform);
   return m ? { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) } : { x: NaN, y: NaN, zoom: NaN };
@@ -621,6 +677,7 @@ async function main(): Promise<void> {
     q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
+  await settingsTyping();
 
   for (const selector of DEAD_SELECTORS) {
     report.push({ scenario: "-", assertion: `scroll ${selector}`, pass: null, detail: "selector in styles.css but no live module renders it" });
