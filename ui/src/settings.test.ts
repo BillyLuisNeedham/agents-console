@@ -63,8 +63,9 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
 }
 
 /** A store wired to hand-settled deferreds, so a test pins the read's
- *  dispatch before any answer lands (the enlist.test.ts pattern). */
-function harness() {
+ *  dispatch before any answer lands (the enlist.test.ts pattern). The
+ *  optional `onChange` stands in for the composition's re-render. */
+function harness(onChange: () => void = () => {}) {
   const reads: Deferred<SettingsResponse>[] = [];
   const poolSaves: { config: PoolConfigPatch; deferred: Deferred<SettingsResponse> }[] = [];
   const machineSaves: {
@@ -94,6 +95,7 @@ function harness() {
     },
     onChange: () => {
       changes += 1;
+      onChange();
     },
   });
   return {
@@ -107,8 +109,11 @@ function harness() {
 }
 
 /** An opened store already holding an answer. */
-async function opened(response: SettingsResponse = settings()) {
-  const rig = harness();
+async function opened(
+  response: SettingsResponse = settings(),
+  onChange?: () => void,
+) {
+  const rig = harness(onChange);
   const open = rig.store.open();
   rig.reads[0]!.resolve(response);
   await open;
@@ -328,6 +333,32 @@ describe("SettingsStore", () => {
     expect(rig.store.machineDirty).toBe(false);
   });
 
+  it("re-renders on every text edit, so Save sees the draft (issue #142)", async () => {
+    const rig = await opened();
+    const before = rig.changes();
+    rig.store.setPoolField("model", "sonnet");
+    expect(rig.changes()).toBe(before + 1);
+    rig.store.setMachineField("model", "sonnet");
+    expect(rig.changes()).toBe(before + 2);
+    // Setting what is already there changes nothing, so nothing re-renders.
+    rig.store.setPoolField("model", "sonnet");
+    expect(rig.changes()).toBe(before + 2);
+  });
+
+  it("counts a whitespace-only edit as clean, since the save would trim it", async () => {
+    const rig = await opened();
+    rig.store.setPoolField("model", " opus  ");
+    expect(rig.store.poolDirty).toBe(false);
+    rig.store.setPoolField("roster", "two engineers ");
+    expect(rig.store.poolDirty).toBe(false);
+    rig.store.setMachineField("harness", "claude ");
+    expect(rig.store.machineDirty).toBe(false);
+    rig.store.setPoolField("title", "   ");
+    expect(rig.store.poolDirty).toBe(false);
+    rig.store.setPoolField("model", "opus 2");
+    expect(rig.store.poolDirty).toBe(true);
+  });
+
   it("sends the edited draft as a patch and re-seeds from the answer", async () => {
     const rig = await opened();
     rig.store.setPoolField("model", "sonnet");
@@ -489,6 +520,47 @@ describe("SettingsStore.render", () => {
       root.querySelector<HTMLInputElement>('[data-key="pool-model-input"]'),
     ).toBe(model);
     expect(model!.value).toBe("half-typed");
+  });
+
+  /** Types into a keyed input the way the browser does: value, then event. */
+  function type(root: HTMLElement, key: string, value: string): void {
+    const input = root.querySelector<HTMLInputElement>(`[data-key="${key}"]`);
+    expect(input).not.toBeNull();
+    input!.value = value;
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function saveButton(root: HTMLElement, which: "pool" | "machine"): HTMLButtonElement {
+    const button = root.querySelector<HTMLButtonElement>(
+      `[data-key="settings-save-${which}"] .settings-save`,
+    );
+    expect(button).not.toBeNull();
+    return button!;
+  }
+
+  it("enables Save as the operator types, and disables it on a revert (issue #142)", async () => {
+    // The pane re-renders only when the store says so, as in the app: no
+    // hand-painted frame between the keystroke and the assertion.
+    let paint = () => {};
+    const rig = await opened(settings(), () => paint());
+    const mounted = mount(rig.store);
+    paint = mounted.paint;
+    paint();
+    const { root } = mounted;
+
+    for (const [which, key, value, saved] of [
+      ["pool", "pool-model-input", "sonnet", "opus"],
+      ["pool", "pool-title-input", "Release train", ""],
+      ["pool", "pool-port-input", "4301", "4300"],
+      ["machine", "machine-model-input", "sonnet", ""],
+      ["machine", "machine-engine-input", "/other/engine", ""],
+    ] as const) {
+      expect(saveButton(root, which).disabled).toBe(true);
+      type(root, key, value);
+      expect(saveButton(root, which).disabled).toBe(false);
+      type(root, key, saved);
+      expect(saveButton(root, which).disabled).toBe(true);
+    }
   });
 
   it("offers the Pool title first, the directory name as its placeholder (issue #100)", async () => {

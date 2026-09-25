@@ -53,6 +53,10 @@ handler bound to the viewport per render would stack: one pan must move the
 world once, one wheel notch must zoom it once, and a card dragged with a render
 landing mid-drag must land where both moves put it. A fourth scenario toggles
 the Detail to fullscreen and checks the class and the measured top edge hold.
+A last one types into a Settings text field key by key, with a caret
+mid-text, and checks each keystroke re-renders on its own, the field keeps its
+node, focus and caret, and the pool's Save enables and greys out again on a
+revert (issue #142).
 
 ## Baseline on the `replaceChildren` renderer (2026-09-21)
 

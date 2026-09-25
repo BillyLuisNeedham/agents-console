@@ -241,8 +241,15 @@ function poolDirName(configPath: string): string {
   return parts.at(-2) ?? "";
 }
 
+/**
+ * Whether two drafts would write the same file. Text compares trimmed, the
+ * way the patch sends it, so a stray space never enables a Save that would
+ * change nothing on disk.
+ */
 function sameDraft<T extends object>(a: T, b: T): boolean {
-  return (Object.keys(a) as (keyof T)[]).every((key) => a[key] === b[key]);
+  const norm = (value: unknown): unknown =>
+    typeof value === "string" ? value.trim() : value;
+  return (Object.keys(a) as (keyof T)[]).every((key) => norm(a[key]) === norm(b[key]));
 }
 
 export class SettingsStore {
@@ -402,6 +409,7 @@ export class SettingsStore {
     // is on disk, and this draft no longer is.
     if (this.poolState === "saved") this.poolState = "idle";
     this.poolError = null;
+    this.onChange();
   }
 
   setPoolTerminal(value: boolean): void {
@@ -417,6 +425,7 @@ export class SettingsStore {
     this.machineDraft[name] = value;
     if (this.machineState === "saved") this.machineState = "idle";
     this.machineError = null;
+    this.onChange();
   }
 
   setMachineTerminal(value: boolean): void {
@@ -587,10 +596,7 @@ export class SettingsStore {
           this.poolDraft.harness,
           "(none)",
           null,
-          (value) => {
-            this.setPoolField("harness", value);
-            this.onChange();
-          },
+          (value) => this.setPoolField("harness", value),
         ),
         false,
       ),
@@ -608,10 +614,7 @@ export class SettingsStore {
             this.poolDraft.resolverHarness,
             "(unset)",
             RESOLVER_NONE,
-            (value) => {
-              this.setPoolField("resolverHarness", value);
-              this.onChange();
-            },
+            (value) => this.setPoolField("resolverHarness", value),
           ),
           h("input", {
             class: "settings-input settings-pair-model",
@@ -640,10 +643,7 @@ export class SettingsStore {
             { value: "human", label: "human" },
           ],
           this.poolDraft.selection,
-          (value) => {
-            this.setPoolField("selection", value);
-            this.onChange();
-          },
+          (value) => this.setPoolField("selection", value),
         ),
         badges.has("selection"),
       ),
@@ -780,10 +780,7 @@ export class SettingsStore {
           this.machineDraft.harness,
           merged.harness ? `(${merged.harness})` : "(none)",
           null,
-          (value) => {
-            this.setMachineField("harness", value);
-            this.onChange();
-          },
+          (value) => this.setMachineField("harness", value),
         ),
         false,
       ),
