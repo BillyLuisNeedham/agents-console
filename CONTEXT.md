@@ -142,6 +142,18 @@ _Avoid_: running attempt (status is the ticket's), current attempt (a settled At
 An Attempt whose harness runs as an interactive TUI in a herdr pane instead of a headless child — a real terminal the operator can watch and type into mid-run, while the engine stays oblivious to that input. The attempt ends when a valid Outcome appears; the TUI stays alive afterward and pane exit trails whenever the operator closes the tab, so pane loss *without* an Outcome is the crash signal. Its Stream file is a `script` typescript (both directions), not harness stream-json (ADR-0016). Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
 _Avoid_: interactive attempt (interaction is the operator's, not the attempt's), attached attempt, PTY attempt
 
+**Continued attempt**:
+An Attempt launched into the still-live pane of the Terminal-backed attempt whose checkpoint Interrupt it answers, instead of into a new tab, so the agent that holds the context carries on. The operator chooses it with Keep talking on the checkpoint Interrupt; the engine types one teaching Turn saying a fresh Outcome is expected, then leaves the pane to the operator. It is a new Attempt with its own number and Outcome: done ends the ticket as any done does, and checkpoint raises a fresh Interrupt with a new Brief, which may itself be continued. Offered for any checkpoint Interrupt whose Attempt's pane is still alive, never for a headless Attempt. Introduced by ADR-0027 (`docs/adr/0027-keep-talking-continues-a-checkpointed-attempt-in-its-pane.md`), closing issue #139.
+_Avoid_: resumed attempt (Resume launches a fresh Attempt in a new tab), reopened attempt (an ended Attempt never takes a second Outcome), follow-up (that's a Spawn)
+
+**Held pane**:
+The still-live herdr pane of a Terminal-backed attempt that ended in a checkpoint Interrupt, kept the pool's while that Interrupt waits: the card keeps its Peek, focus and attach, and Keep talking can continue it as a Continued attempt. It is no Live attempt (that Attempt is over) and it is let go when the Interrupt is answered or herdr no longer lists the pane; a plain Resume closes it just before the fresh Attempt launches. An enlisted pane is never held; it was the operator's before it was the pool's. Introduced by ADR-0027.
+_Avoid_: checkpoint pane (the checkpoint is the Interrupt, not where it ran), idle pane, parked pane (a branch is parked; a pane is held)
+
+**Finished terminal**:
+A herdr tab the pool opened, for an Attempt or a Conversation, that is still open after its Attempt or Conversation ended, and is no Live attempt's, Held pane's, enlisted or live Conversation's: a crashed attempt's tab, a done ticket's before its merge. The engine never closes one on its own; the operator closes them all at once from the pool header. Introduced by ADR-0027.
+_Avoid_: dead tab (the TUI in it is often still alive), orphan (an Orphan attempt is still running), stale pane
+
 **Pool workspace**:
 The one herdr workspace a Terminal-backed pool opens its attempt and Conversation tabs in, so every tab of one Pool sits together and never in another project's workspace. Resolved once at boot, from the workspace the Console server was launched in or by creating a fresh one, and kept across restarts while it still exists. Settled by the issue #94 amendment to ADR-0015 (`docs/adr/0015-attempts-spawn-as-named-herdr-tabs.md`).
 _Avoid_: workspace (banned as a Pool synonym; a herdr workspace is a container, a Pool is the work), window, project workspace
