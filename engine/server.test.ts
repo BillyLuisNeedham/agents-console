@@ -147,6 +147,7 @@ async function startServer(
     enlistPollMs?: number;
     conversationPollMs?: number;
     enlistTeachingWaitMs?: number;
+    paneSurveyMs?: number;
   } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
@@ -6413,5 +6414,96 @@ describe("enlisted ticket lifecycle", () => {
     };
     expect(body.running).toBe(true);
     expect(body.diff?.added ?? 0).toBeGreaterThan(0);
+  });
+});
+
+describe("Keep talking and Finished terminals routes (issue #139)", () => {
+  const fakes: ExecutingFakeHerdr[] = [];
+
+  afterEach(async () => {
+    while (fakes.length > 0) await fakes.pop()!.close();
+  });
+
+  const READY_01 = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  /** A stand-in TUI that writes a checkpoint Outcome and stays up until released. */
+  function checkpointingTui(poolDir: string, sentinel: string): Record<string, HarnessCommand> {
+    const script = join(poolDir, "tui.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        'outcome_path="$1"; sentinel="$2"',
+        'printf \'{"status":"checkpoint","summary":"paused","commitSha":null,"brief":"talk to me"}\' > "$outcome_path"',
+        'while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+        "",
+      ].join("\n"),
+    );
+    return { stub: (ctx) => ["bash", script, ctx.outcomePath, sentinel] };
+  }
+
+  it("serves a checkpoint's Held pane on the snapshot and the terminal routes, then continues it", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }], { terminal: "herdr" });
+    const sentinel = join(poolDir, "release");
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const server = await startServer(poolDir, checkpointingTui(poolDir, sentinel), {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 50,
+      paneSurveyMs: 50,
+    });
+    await server.start();
+    const ticket = () => server.latest?.state.tickets.find((t) => t.id === "01");
+    await waitFor(() => ticket()?.heldPane != null, "01's Held pane on the snapshot");
+    const held = ticket()!.heldPane!;
+    expect(held.attempt).toBe(1);
+    expect(ticket()!.liveAttempt).toBeNull();
+
+    fake.setPaneContent(held.paneId, "the agent, waiting");
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(await peek.json()).toEqual({ ticket: "01", paneId: held.paneId, text: "the agent, waiting" });
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
+    expect(focus.status).toBe(200);
+
+    const missing = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(missing.status).toBe(400);
+
+    const res = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ticketId: "01", attempt: 2 });
+    await waitFor(() => ticket()?.liveAttempt?.attempt === 2, "the Continued attempt live");
+    expect(ticket()!.liveAttempt!.paneId).toBe(held.paneId);
+    expect(ticket()!.heldPane).toBeNull();
+    expect(server.latest!.state.interrupts).toEqual([]);
+
+    const again = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { reason: string }).reason).toContain("not waiting at a checkpoint");
+    writeFileSync(sentinel, "");
+  });
+
+  it("refuses Keep talking and the bulk close in a headless pool", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    await server.start();
+    await settleOrBeat(server);
+    expect(server.latest!.finishedTerminals).toBe(0);
+    const talk = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(talk.status).toBe(409);
+    const close = await fetch(`${server.url}/api/terminals/close-finished`, { method: "POST" });
+    expect(close.status).toBe(409);
+    expect(((await close.json()) as { reason: string }).reason).toContain("not terminal-backed");
   });
 });

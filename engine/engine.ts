@@ -7,6 +7,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -20,6 +21,7 @@ import {
   attemptExitCodeName,
   attemptLogName,
   attemptOutcomeName,
+  attemptStreamName,
   lastAttempt,
   nextAttempt,
   readEvents,
@@ -40,7 +42,7 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
-import { buildEnlistTeaching, buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
+import { buildContinuedTeaching, buildEnlistTeaching, buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
   engineEnvSet,
@@ -52,6 +54,7 @@ import {
   closePane,
   closeTab,
   listPaneIds,
+  listPanes,
   relabelWorkspace,
   releasePaneAgent,
   resolvePoolWorkspace,
@@ -73,6 +76,7 @@ import {
 import {
   EXIT_CODE_PANE_GONE,
   EXIT_CODE_UNREADABLE,
+  SPAWN_INTERACTIVE_PROMPT_FAILED,
   exitedPhrase,
   readAttemptResult,
   waitForAttemptEnding,
@@ -114,6 +118,15 @@ import {
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from "./live-attempts.ts";
 import { createPaneReadRegister, type PaneRead, type PaneReadRegister } from "./pane-reads.ts";
+import { createPaneSurvey, type PaneSurvey } from "./pane-survey.ts";
+import {
+  heldPaneOf,
+  lastCheckpointAttempt,
+  type HeldPane,
+  type HeldPaneRecord,
+} from "./held-panes.ts";
+import { finishedTerminals, openedTabs, type OpenedTab } from "./finished-terminals.ts";
+import { runContinued, type ContinuedEnding, type ContinuedRun } from "./continued.ts";
 import {
   createMergeHoldWatch,
   createMergeLine,
@@ -380,6 +393,15 @@ export interface PoolSnapshot {
   // from the registry at emit, never persisted; the server and the terminal
   // routes take the pane from here and never from the events files.
   liveAttempts: Record<string, LiveAttemptRecord>;
+  // The Held pane per ticket (issue #139, held-panes.ts): a ticket waiting
+  // at a checkpoint Interrupt whose Terminal-backed attempt's pane the pane
+  // survey still lists. The terminal routes serve it as they serve a Live
+  // attempt's pane, and Keep talking continues it. Never persisted.
+  heldPanes: Record<string, HeldPaneRecord>;
+  // How many Finished terminals the pool has (issue #139,
+  // finished-terminals.ts), from the pane survey's last listing: 0 in a
+  // headless pool and before the first listing lands.
+  finishedTerminals: number;
   // The Merge hold (ADR-0014, merge-hold.ts): the done-but-unmerged ticket
   // ids, derived fresh at every emit from the statuses and branch state and
   // never persisted or checkpointed, so the server's card labels are this
@@ -427,6 +449,9 @@ interface RunOptions {
   // against an agent that is never taught. Production leaves it unset (a
   // Launch's readiness bound); tests shorten it.
   enlistTeachingWaitMs?: number;
+  // How often the pane survey lists herdr's panes (issue #139,
+  // pane-survey.ts). Production leaves it unset (15 s); a test shortens it.
+  paneSurveyMs?: number;
   // The herdr workspace the server was launched in (issue #94), the second
   // candidate for the Pool workspace after the id this pool remembers. It
   // reaches the engine as an option and never as an environment read: the
@@ -495,6 +520,18 @@ export interface PoolRun {
    * tried; never rejects, a refusal being a pool log line.
    */
   retitle: (title: string | null) => Promise<void>;
+  /**
+   * Keep talking (issue #139): continue the ticket's checkpointed Attempt in
+   * its Held pane as a Continued attempt, at once rather than at the next
+   * super-step boundary. Resolves with the new Attempt's number once the
+   * pane is claimed; rejects with the reason the ticket cannot be continued.
+   */
+  keepTalking: (ticketId: string) => Promise<{ attempt: number }>;
+  /**
+   * Close every Finished terminal (issue #139): the operator's bulk close,
+   * the only way one closes. Resolves with how many closed.
+   */
+  closeFinishedTerminals: () => Promise<number>;
 }
 
 const reduceTickets = (
@@ -807,8 +844,42 @@ interface Session {
   // worktree (`planTicket`), so nothing the engine does moves or writes the
   // checkout an enlisted agent works in.
   mergeTarget: string | null;
-  // How often an enlisted attempt's tick re-reads its pane (RunOptions).
+  // How often an enlisted attempt's tick re-reads its pane (RunOptions);
+  // a Continued attempt's Turn wait and ending race read on the same cadence.
   enlistPollMs?: number;
+  // How long a Continued attempt's teaching Turn waits for a working pane
+  // (RunOptions' enlistTeachingWaitMs, the bound an enlist uses).
+  teachingWaitMs?: number;
+  // Held panes (issue #139, held-panes.ts): the pane of every ticket's
+  // checkpointed Terminal-backed attempt, held where the checkpoint is
+  // raised and re-read at boot. Whether each is still alive is the pane
+  // survey's to say; the snapshot shows only the ones it still lists.
+  held: Map<string, HeldPane>;
+  // The Continued attempts in flight (issue #139, continued.ts): the runtime
+  // in each ticket's pane, the attempt number it records, and the facts its
+  // ending needs.
+  continued: Map<string, ContinuedAttempt>;
+  // Continued attempts on a verify ticket that ended done and wait to be
+  // graded as lone attempts: grading spawns graders and merges, so it runs in
+  // the drive loop between super-steps, never beside one (ADR-0004).
+  continuedGrades: { ticketId: string; attempt: number; work: HeldPane }[];
+  // The pane survey (issue #139, pane-survey.ts): the cached herdr listing
+  // behind the Held panes and the Finished terminals. Null in a headless pool.
+  paneSurvey: PaneSurvey | null;
+  // The tabs this pool's `spawned` events name (finished-terminals.ts),
+  // re-read with each survey listing so a snapshot never reads events files.
+  openedTabs: OpenedTab[];
+}
+
+// One Continued attempt in flight (issue #139). `work` is its own Held pane
+// shape: the pane, where it works, under which Assignment and naming, so
+// its ending records and merges the way the attempt it continues would have.
+interface ContinuedAttempt {
+  attempt: number;
+  work: HeldPane;
+  run: ContinuedRun;
+  logPath: string;
+  outcomePath: string;
 }
 
 // One terminal-backed attempt re-adopted at boot (ADR-0014). `abandoned` is
@@ -1061,6 +1132,14 @@ export function startPool(options: RunOptions): PoolRun {
     enlistedWork: new Map(),
     mergeTarget: null,
     ...(options.enlistPollMs !== undefined ? { enlistPollMs: options.enlistPollMs } : {}),
+    ...(options.enlistTeachingWaitMs !== undefined
+      ? { teachingWaitMs: options.enlistTeachingWaitMs }
+      : {}),
+    held: new Map(),
+    continued: new Map(),
+    continuedGrades: [],
+    paneSurvey: null,
+    openedTabs: [],
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
       onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
@@ -1070,6 +1149,21 @@ export function startPool(options: RunOptions): PoolRun {
 
   seedEnlistedWork(session);
   rehydrate(session);
+  // The pane survey (issue #139) only has panes to list in a terminal-backed
+  // pool. It lists on its cadence and whenever the engine holds a pane, so a
+  // Held pane from before a restart is looked for at once (seedHeldPanes
+  // below asks) without a listing ahead of boot's own herdr calls.
+  if (attemptEnvOf(session).terminalBacked) {
+    session.paneSurvey = createPaneSurvey({
+      list: async () => {
+        session.openedTabs = openedTabs(session.runsDir, tabOwners(session));
+        return listPanes(session.herdrSocket);
+      },
+      onListing: () => surveyListed(session),
+      ...(options.paneSurveyMs !== undefined ? { intervalMs: options.paneSurveyMs } : {}),
+    });
+  }
+  seedHeldPanes(session);
   // Jev (ADR-0020): one boot line saying which path is live, then one line
   // per fallback cause as the port's own dedupe announces them, never one
   // per call. The subscription is released with the store at close.
@@ -1191,6 +1285,8 @@ function makeHandle(session: Session): PoolRun {
         : enlistTicket(session, req),
     paneRead: (paneId) => session.paneReads.latest(paneId),
     retitle: (title) => retitlePoolWorkspace(session, title),
+    keepTalking: (ticketId) => keepTalking(session, ticketId),
+    closeFinishedTerminals: () => closeFinishedTerminals(session),
   };
   return handle;
 }
@@ -1228,6 +1324,10 @@ async function shutdownSession(
   }
   session.conversations.dispose();
   session.enlisted.dispose();
+  // A Continued attempt's pane outlives the engine like any terminal-backed
+  // attempt's, and boot re-adopts it; only this process's watch on it stops.
+  for (const continued of session.continued.values()) continued.run.release();
+  session.paneSurvey?.stop();
   closeStore(session);
   try {
     emitSnapshot(session, "stopped");
@@ -1329,6 +1429,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   // watch notes what went out so a merge done by hand can move it.
   const hold = mergeHold(session);
   const liveAttempts = session.liveAttempts.records((id) => session.conversations.isLive(id));
+  const listing = session.paneSurvey?.latest() ?? null;
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
@@ -1340,6 +1441,11 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
     conversations: session.conversations.views(),
     // A Conversation's pane rides its own view above.
     liveAttempts,
+    heldPanes: heldPaneRecords(session),
+    finishedTerminals:
+      listing === null
+        ? 0
+        : finishedTerminals(session.openedTabs, listing, busyPanes(session)).length,
     mergeHold: hold,
     mergeQueue: session.mergeLine.queue(
       hold,
@@ -1371,6 +1477,9 @@ async function driveLoop(session: Session): Promise<void> {
   // can never enter the ready set as a duplicate spawn.
   await session.terminalReconcile;
   for (;;) {
+    // A verify ticket's Continued attempt that ended done is graded here,
+    // between super-steps, where the drive's own grading runs (issue #139).
+    await gradeContinuedAttempts(session, emit);
     const next = await superStepBoundary(session, emit);
     if (next.kind === "close") break;
     const step = planSuperStep(session, emit, next.ready);
@@ -1646,6 +1755,12 @@ async function runSuperStep(
     beforeSha: string;
   }[] = [];
   let mergeQueue: Promise<void> = session.mergeChain;
+  // A ticket resumed from a checkpoint launches fresh: its old pane closes
+  // first (issue #139), so two agents never share its files.
+  await closeCheckpointedTabs(
+    session,
+    planned.map(({ marker }) => marker),
+  );
   const results = await Promise.all(
     planned.map(({ marker, plan }) =>
       runTicket(
@@ -1842,43 +1957,7 @@ async function runSuperStep(
       .filter((r) => r.marker.id === marker.id)
       .map((r) => r.plan.attempt)
       .sort((a, b) => a - b);
-    // The grading path switch (ADR-0023): with a Jev key the round is graded
-    // in code, every Attempt over its own Evidence, and no grader tickets are
-    // written. Without a key, or when any ask falls back, the grader tickets
-    // run exactly as before; never both in one round. The fallback's cause
-    // reaches the pool log once through the port's own notice board; the
-    // line here names the attempt and the switch.
-    let grades: Map<number, Grade>;
-    if (session.jev.configured) {
-      const jevGrading = await runJevGraders(session, marker, attempts);
-      if (jevGrading.ok) {
-        grades = jevGrading.grades;
-        // Named before the per-attempt lines, so the pool log reads in
-        // order; it is written only once the whole round has an answer,
-        // because a fallback means the round was never Jev's.
-        session.state = applyUpdate(session.state, {
-          log: [
-            `ticket ${marker.id}: grading ${attempts.length} ` +
-              `attempt${attempts.length === 1 ? "" : "s"} with Jev`,
-          ],
-        });
-        for (const attempt of attempts) {
-          const grade = grades.get(attempt);
-          if (grade) recordJevGrade(session, marker, attempt, grade, emit);
-        }
-      } else {
-        session.state = applyUpdate(session.state, {
-          log: [
-            `ticket ${marker.id}: Jev could not grade attempt ` +
-              `${jevGrading.attempt} (${jevGrading.cause}: ` +
-              `${jevGrading.detail}); falling back to grader tickets`,
-          ],
-        });
-        grades = await runGraders(session, marker, attempts, emit);
-      }
-    } else {
-      grades = await runGraders(session, marker, attempts, emit);
-    }
+    const grades = await gradeRound(session, marker, attempts, emit);
     // Lone-attempt resolution (ticket 05): with one attempt and one
     // grade there is nothing to select between, so the grade decides
     // at the ticket: flag → checkpoint, pass → done.
@@ -1943,10 +2022,18 @@ async function closeDrive(
     raiseInterrupt(session, reviewInterrupt(session));
     await persistWithRetry(session);
   }
+  // Tickets whose Attempt runs outside the drive (issue #139): a Continued
+  // attempt, or an enlisted one, is in-progress with no interrupt and
+  // nothing the drive can schedule, yet it is not stuck: it ends on its own
+  // and records itself, so the run waits for it as it waits for an answer,
+  // with the store open for that record.
+  const outside = pending.filter((id) => session.liveAttempts.isLive(id));
   let phase: Exclude<RunPhase, "running">;
   if (session.state.interrupts.length > 0) {
     // An interrupt can outlive its ticket's done: a conflicted merge leaves
     // the ticket done and the interrupt pending.
+    phase = "quiescent";
+  } else if (outside.length > 0 || session.continuedGrades.length > 0) {
     phase = "quiescent";
   } else if (pending.length === 0) {
     phase = "done";
@@ -1958,9 +2045,11 @@ async function closeDrive(
       phase === "done"
         ? "pool done: every ticket reached done"
         : phase === "quiescent"
-          ? `pool quiescent: interrupts pending for ${session.state.interrupts
-              .map((i) => i.ticketId)
-              .join(", ")}`
+          ? session.state.interrupts.length > 0
+            ? `pool quiescent: interrupts pending for ${session.state.interrupts
+                .map((i) => i.ticketId)
+                .join(", ")}`
+            : `pool quiescent: waiting on ${outside.join(", ") || "a continued attempt's grading"}`
           : `pool stalled: ${pending.join(", ")} cannot run`,
     ],
   });
@@ -1971,6 +2060,10 @@ async function closeDrive(
   emit(phase);
   if (phase !== "quiescent") closeStore(session);
   settleDrive(session, phase, null);
+  // A Continued attempt that ended done while this drive was closing kicked
+  // a drive that was still in flight, which does nothing: its grading would
+  // wait for an unrelated kick, so the drive that closes starts the next.
+  if (session.continuedGrades.length > 0) kickProcessing(session);
 }
 
 const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
@@ -2324,6 +2417,10 @@ function terminalAdoptable(
   attempt: number,
 ): boolean {
   if (engineTicketBuildId(ticketId)) return false;
+  // A Continued attempt (issue #139) is re-entered by its own runtime, on a
+  // verify ticket too: it runs alone, and its ending grades it as a lone
+  // attempt from wherever it lands.
+  if (continuedWork(session, ticketId, attempt) !== null) return true;
   if (session.assignments.get(ticketId)?.verify != null) return false;
   return !readEvents(session.runsDir, ticketId).some(
     (event) => event.kind === "resolver" && event.attempt === attempt,
@@ -2851,6 +2948,13 @@ function adoptTerminalAttempt(
   log: string[],
 ): void {
   const enlisted = marker.enlistedFrom !== undefined;
+  // A Continued attempt (issue #139) runs under the pane's Assignment, not
+  // the config's, and its ending is its own race; recovered from its
+  // `spawned` event before anything below reports the agent under it.
+  const continued = continuedWork(session, marker.id, orphan.attempt);
+  if (continued) {
+    session.assignments.set(marker.id, paneAssignment(session, marker.id, continued));
+  }
   if (!midAdoption) {
     writeMarkerStatus(marker.file, "in-progress");
     stripEngineResetNote(marker.file);
@@ -2905,6 +3009,14 @@ function adoptTerminalAttempt(
       { id: marker.id, title: marker.title, harness },
       "working",
     );
+  }
+  if (continued) {
+    log.push(
+      `ticket ${marker.id}: continued attempt ${orphan.attempt} re-adopted ` +
+        `from live pane ${orphan.paneId}; waiting on its Outcome`,
+    );
+    readoptContinued(session, marker, orphan.attempt, continued);
+    return;
   }
   log.push(
     `ticket ${marker.id}: attempt ${orphan.attempt} re-adopted from live ` +
@@ -3058,6 +3170,15 @@ function abandonAdoption(session: Session, ticketId: string): void {
   session.adopted.delete(ticketId);
   session.liveAttempts.clear(ticketId, adopted.attempt);
   const marker = session.markers.find((candidate) => candidate.id === ticketId);
+  // A re-adopted Continued attempt (issue #139) has a runtime of its own
+  // watching the pane; it lets go here, and the pane closes below as any
+  // abandoned adoption's does.
+  const continued = session.continued.get(ticketId);
+  if (continued) {
+    continued.run.release();
+    session.continued.delete(ticketId);
+    if (marker) restoreAssignment(session, marker);
+  }
   if (marker?.enlistedFrom !== undefined) {
     session.enlisted.release(ticketId);
     const harness = session.assignments.get(ticketId)?.harness;
@@ -3171,7 +3292,10 @@ async function finalizeAdoptedAttempt(
 }
 
 // Record one adopted attempt's exit (ADR-0014): the mirror of runTicket's
-// exit tail, without the spawn-time parts. Consumes the Attempt-ending
+// exit tail, without the spawn-time parts. A Continued attempt (issue #139)
+// ends through here too: like an adopted one it runs in a pane the drive is
+// not waiting on, and its ending is recorded the same way; `what` names
+// which of the two the pool log is talking about. Consumes the Attempt-ending
 // module's decision (the code, the already-read Outcome and the crash
 // reason) rather than re-reading and re-deriving them its own way; what
 // stays here is genuinely its own: the marker status write, the checkpoint
@@ -3184,6 +3308,7 @@ function recordAdoptedExit(
   decision: AttemptEndingDecision<Extract<OutcomeResult, { ok: true }>>,
   logPath: string,
   outcomePath: string,
+  what = "adopted attempt",
 ): void {
   const ticketId = marker.id;
   const { code, result: outcome, crashReason } = decision;
@@ -3214,7 +3339,7 @@ function recordAdoptedExit(
     }
   }
   const log: string[] = [
-    `ticket ${ticketId}: adopted attempt ${attempt} ${exitedPhrase(code)}, ` +
+    `ticket ${ticketId}: ${what} ${attempt} ${exitedPhrase(code)}, ` +
       `marker ${status}` +
       (crashReason !== null ? `, crash: ${crashReason}` : ""),
   ];
@@ -3271,7 +3396,7 @@ function recordAdoptedExit(
         );
         session.state = applyUpdate(session.state, {
           log: [
-            `ticket ${ticketId}: adopted attempt ${attempt} merged ` +
+            `ticket ${ticketId}: ${what} ${attempt} merged ` +
               `${branchFor(session.cwd, ticketId)} onto the working branch`,
           ],
         });
@@ -3557,6 +3682,680 @@ function recordEnlistedTrailingExit(session: Session, ticketId: string): void {
     ],
   });
   emitSnapshot(session, session.driving ? "running" : "quiescent");
+}
+
+// ---------------------------------------------------------------------------
+// Held panes, Keep talking and Finished terminals (issue #139)
+// ---------------------------------------------------------------------------
+
+// Hold the pane of a checkpointed attempt (CONTEXT.md "Held pane"): called
+// wherever a checkpoint Interrupt is raised, so every checkpoint whose
+// Attempt ran in a pane keeps it reachable while the Interrupt waits. An
+// enlisted ticket's pane is the operator's own terminal and never held
+// (ADR-0021); an adoption's checkpoint is an Attempt still running, which is
+// no hold. Whether the pane is alive is the survey's to say, so it is asked
+// now rather than at its next cadence.
+function holdCheckpointPane(session: Session, marker: TicketMarker, attempt: number): void {
+  if (marker.enlistedFrom !== undefined || session.adopted.has(marker.id)) return;
+  const held = heldPaneOf(readEvents(session.runsDir, marker.id), attempt, (n) =>
+    worktreePathFor(session.cwd, marker.id, n),
+  );
+  if (held === null) {
+    session.held.delete(marker.id);
+    return;
+  }
+  session.held.set(marker.id, held);
+  void session.paneSurvey?.refresh();
+}
+
+// The Held panes a restart finds (issue #139): every ticket still waiting at
+// a checkpoint Interrupt the checkpoint store brought back, held again from
+// the attempt its last `checkpoint` event names. A checkpoint rehydrate
+// re-raised itself was held there already; holding it twice is the same.
+function seedHeldPanes(session: Session): void {
+  for (const marker of session.markers) {
+    if (marker.status !== "checkpoint") continue;
+    const waiting = session.state.interrupts.some(
+      (i) => i.ticketId === marker.id && i.kind === "checkpoint",
+    );
+    if (!waiting) continue;
+    const attempt = lastCheckpointAttempt(readEvents(session.runsDir, marker.id));
+    if (attempt !== null) holdCheckpointPane(session, marker, attempt);
+  }
+}
+
+// The snapshot's Held panes: a hold whose ticket still waits at its
+// checkpoint Interrupt with nothing live, over a pane the survey's last
+// listing still has. Before the first listing nothing is shown: a pane from
+// before a restart is not offered until herdr has said it is there.
+function heldPaneRecords(session: Session): Record<string, HeldPaneRecord> {
+  const listing = session.paneSurvey?.latest() ?? null;
+  if (listing === null) return {};
+  const out: Record<string, HeldPaneRecord> = {};
+  for (const [id, held] of session.held) {
+    if (session.state.tickets[id] !== "checkpoint") continue;
+    if (session.liveAttempts.isLive(id)) continue;
+    const waiting = session.state.interrupts.some(
+      (i) => i.ticketId === id && i.kind === "checkpoint",
+    );
+    if (!waiting || !listing.panes.has(held.paneId)) continue;
+    out[id] = { attempt: held.attempt, paneId: held.paneId };
+  }
+  return out;
+}
+
+// Every pane the pool is still using, so no tab over one is a Finished
+// terminal: a Live attempt's (a Continued attempt's included), a Held
+// pane's, and a live Conversation's.
+function busyPanes(session: Session): Set<string> {
+  const panes = session.liveAttempts.panes();
+  for (const held of session.held.values()) panes.add(held.paneId);
+  for (const view of session.conversations.views()) {
+    if (view.paneId && session.conversations.isLive(view.id)) panes.add(view.paneId);
+  }
+  return panes;
+}
+
+// Whose `spawned` events name tabs the pool opened: every Ticket (graders
+// and the head-to-head judge are Tickets too) and every Conversation, less
+// the enlisted ones, whose tab was the operator's before it was the pool's.
+function tabOwners(session: Session): string[] {
+  return [
+    ...session.markers
+      .filter((marker) => marker.enlistedFrom === undefined)
+      .map((marker) => marker.id),
+    ...session.conversations
+      .views()
+      .filter((view) => !view.enlisted)
+      .map((view) => view.id),
+  ];
+}
+
+// A survey listing landed: a Held pane whose pane has gone is let go (the
+// Interrupt stays; only Keep talking goes with it), and a snapshot goes out
+// when the Held panes or the Finished terminals count moved since the last
+// one. Compared rather than emitted every time, so a quiet pool's cadence
+// sends nothing; derived rather than compared as listings, because a tab
+// becomes finished when its attempt ends, with no change in herdr at all.
+function surveyListed(session: Session): void {
+  const listing = session.paneSurvey?.latest() ?? null;
+  if (listing === null) return;
+  for (const [id, held] of session.held) {
+    if (!listing.panes.has(held.paneId)) session.held.delete(id);
+  }
+  const last = session.snapshots[session.snapshots.length - 1];
+  const held = heldPaneRecords(session);
+  const finished = finishedTerminals(session.openedTabs, listing, busyPanes(session)).length;
+  if (
+    last !== undefined &&
+    last.finishedTerminals === finished &&
+    JSON.stringify(last.heldPanes) === JSON.stringify(held)
+  ) {
+    return;
+  }
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+// The attempt whose worktree and branch an attempt's work lives in: itself,
+// or for a Continued attempt the one its chain began at, as its `spawned`
+// event recorded (issue #139).
+function workAttemptOf(session: Session, ticketId: string, attempt: number): number {
+  const spawned = readEvents(session.runsDir, ticketId)
+    .filter((event) => event.kind === "spawned" && event.attempt === attempt)
+    .pop();
+  const work = spawned?.payload.work_attempt;
+  return typeof work === "number" ? work : attempt;
+}
+
+// A Continued attempt's own facts, read back from its `spawned` event: null
+// when the attempt is not one.
+function continuedWork(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+): (HeldPane & { streamOffset: number }) | null {
+  const events = readEvents(session.runsDir, ticketId);
+  const spawned = events
+    .filter((event) => event.kind === "spawned" && event.attempt === attempt)
+    .pop();
+  if (spawned?.payload.continued !== true) return null;
+  const work = heldPaneOf(events, attempt, (n) => worktreePathFor(session.cwd, ticketId, n));
+  if (work === null) return null;
+  const offset = spawned.payload.stream_offset;
+  return { ...work, streamOffset: typeof offset === "number" ? offset : 0 };
+}
+
+// The Assignment a Held pane runs: the one its attempt launched with, as
+// the `spawned` event recorded it, whatever a Reassign has written since;
+// the ticket's current record fills a field an older event did not record.
+function paneAssignment(session: Session, ticketId: string, held: HeldPane): Assignment {
+  const current = session.assignments.get(ticketId);
+  return {
+    harness: held.harness || current?.harness || "",
+    model: held.model || current?.model || "",
+    drivers: current?.drivers ?? DEFAULT_DRIVERS,
+    ...(current?.verify != null ? { verify: current.verify } : {}),
+  };
+}
+
+// A Continued attempt's ending hands the ticket back to the config's
+// Assignment: the pane's was the attempt's, and the next Attempt launches on
+// whatever the config says now.
+function restoreAssignment(session: Session, marker: TicketMarker): void {
+  const previous = session.assignments.get(marker.id);
+  session.assignments.delete(marker.id);
+  try {
+    resolveUnseenAssignments(
+      session.markers,
+      session.assignments,
+      session.state.config,
+      session.harnesses,
+    );
+  } catch {
+    if (previous) session.assignments.set(marker.id, previous);
+  }
+}
+
+function keepTalkingRefusal(ticketId: string, why: string): Error {
+  return new Error(`keep talking: ticket ${ticketId} ${why}`);
+}
+
+/**
+ * Keep talking (issue #139): continue a ticket's checkpointed Attempt in its
+ * Held pane as a Continued attempt. It starts at once, never queued for the
+ * super-step boundary and never held by the Merge hold, exactly as an enlist
+ * claims its pane (an exception to ADR-0004, like Enlist): the agent that
+ * holds the context is waiting in the pane now, and the operator chose to
+ * talk to it now. What makes that safe is what Keep talking does not do: it
+ * launches nothing, opens no worktree and merges nothing, so nothing the
+ * boundary serialises is touched here; the Continued attempt's ending is
+ * recorded the way an adopted attempt's is, off the drive loop, and a verify
+ * ticket's grading waits for the drive (gradeContinuedAttempts).
+ *
+ * The claim answers the checkpoint Interrupt (the ticket leaves Needs
+ * input), writes the marker in-progress, numbers the next Attempt, records
+ * a `spawned` event naming the same pane and tab and the attempt it
+ * continues, and registers it live on that pane, all before this resolves.
+ * The runtime (continued.ts) then brings the pane forward, types the one
+ * teaching Turn once the agent is waiting, and watches for the ending.
+ */
+async function keepTalking(session: Session, ticketId: string): Promise<{ attempt: number }> {
+  if (session.paneSurvey === null) {
+    throw keepTalkingRefusal(ticketId, "is in a pool that is not terminal-backed");
+  }
+  const check = (): { marker: TicketMarker; held: HeldPane } => {
+    const interrupt = session.state.interrupts.find((i) => i.ticketId === ticketId);
+    const marker = session.markers.find((candidate) => candidate.id === ticketId);
+    if (
+      interrupt?.kind !== "checkpoint" ||
+      !marker ||
+      marker.status !== "checkpoint" ||
+      session.adopted.has(ticketId)
+    ) {
+      throw keepTalkingRefusal(ticketId, "is not waiting at a checkpoint");
+    }
+    if (session.answers.pending().some((answer) => answer.ticketId === ticketId)) {
+      throw keepTalkingRefusal(ticketId, "already has an answer to its checkpoint queued");
+    }
+    const held = session.held.get(ticketId);
+    if (!held) {
+      throw keepTalkingRefusal(ticketId, "has no terminal left to continue in");
+    }
+    return { marker, held };
+  };
+  check();
+  // The pane is asked about now, not at the survey's last cadence: a
+  // Continued attempt claimed over a closed pane would crash at once.
+  await session.paneSurvey.refresh();
+  const { marker, held } = check();
+  if (!session.paneSurvey.latest()?.panes.has(held.paneId)) {
+    session.held.delete(ticketId);
+    emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+    throw keepTalkingRefusal(ticketId, `lost its terminal: pane ${held.paneId} is gone`);
+  }
+
+  // The claim is synchronous from here, so no answer, boundary or second
+  // Keep talking can land between the check above and the ticket moving.
+  const attempt = nextAttempt(session.runsDir, ticketId);
+  const naming = held.numbered ? attempt : null;
+  const logPath = join(session.runsDir, attemptLogName(ticketId, naming, false));
+  const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, naming, false));
+  // A solo ticket's well-known log is the checkpointed attempt's until it
+  // rotates, and so is its Stream file, which `script` keeps writing under
+  // the rotated name (a rename moves no open file); a verify attempt's are
+  // attempt-numbered already.
+  if (!held.numbered) rotateAttemptLog(session.runsDir, ticketId, logPath, "exited");
+  const stream =
+    held.stream ?? join(session.runsDir, attemptStreamName(ticketId, held.attempt, false));
+  const streamPath = existsSync(stream) ? stream : null;
+  const streamOffset = streamPath === null ? 0 : statSync(streamPath).size;
+  // The Outcome the checkpoint was read from is spent: cleared before the
+  // watch is armed, so it can never be read as this attempt's.
+  rmSync(outcomePath, { force: true });
+  const assignment = paneAssignment(session, ticketId, held);
+  const at = new Date().toISOString();
+  appendEvent(session.runsDir, ticketId, {
+    at,
+    attempt: held.attempt,
+    kind: "answered",
+    payload: { kind: "checkpoint", action: "keep-talking" },
+  });
+  appendEvent(session.runsDir, ticketId, {
+    at,
+    attempt,
+    kind: "spawned",
+    payload: {
+      argv: [],
+      cwd: held.cwd,
+      branch: held.branch,
+      commitSha: commitShaAt(held.cwd),
+      env: engineEnvSet(spawnEnv(held.cwd)),
+      harness: assignment.harness,
+      model: assignment.model,
+      pane_id: held.paneId,
+      tab_id: held.tabId,
+      continued: true,
+      continues: held.attempt,
+      work_attempt: held.workAttempt,
+      numbered: held.numbered,
+      stream: streamPath,
+      stream_offset: streamOffset,
+    },
+  });
+  writeMarkerStatus(marker.file, "in-progress");
+  marker.status = "in-progress";
+  session.held.delete(ticketId);
+  session.assignments.set(ticketId, assignment);
+  session.state = applyUpdate(session.state, {
+    tickets: { [ticketId]: "in-progress" },
+    interrupts: session.state.interrupts.filter((i) => i.ticketId !== ticketId),
+    log: [
+      `ticket ${ticketId}: keep talking; attempt ${attempt} continues attempt ` +
+        `${held.attempt} in pane ${held.paneId}`,
+    ],
+  });
+  const work: HeldPane = { ...held, attempt, stream: streamPath };
+  reportAttemptAgent(
+    attemptEnvOf(session),
+    held.paneId,
+    { id: ticketId, title: marker.title, harness: assignment.harness },
+    "working",
+  );
+  startContinued(session, marker, {
+    attempt,
+    work,
+    logPath,
+    outcomePath,
+    streamOffset,
+    teaching: buildContinuedTeaching({
+      id: ticketId,
+      issuePath: marker.file,
+      outcomePath,
+      attempt,
+    }),
+  });
+  // Registered last: the registration emits, and the snapshot it sends must
+  // already show the ticket running with no Interrupt.
+  session.liveAttempts.register(ticketId, attempt, {
+    paneId: held.paneId,
+    tabId: held.tabId,
+    startedAt: at,
+  });
+  try {
+    persist(session);
+  } catch {
+    // The next boundary persist (or the persistence interrupt machinery)
+    // owns store failures; a claim already made stands.
+  }
+  return { attempt };
+}
+
+// Start a Continued attempt's runtime and route its ending to the record.
+// `teaching` is null for a pane re-adopted at boot, taught before the
+// restart, which is also not brought forward: nobody asked for it.
+function startContinued(
+  session: Session,
+  marker: TicketMarker,
+  started: {
+    attempt: number;
+    work: HeldPane;
+    logPath: string;
+    outcomePath: string;
+    streamOffset: number;
+    teaching: string | null;
+  },
+): void {
+  const run = runContinued(
+    {
+      herdrSocket: session.herdrSocket,
+      ...(session.enlistPollMs !== undefined ? { pollMs: session.enlistPollMs } : {}),
+      ...(session.teachingWaitMs !== undefined
+        ? { teachingWaitMs: session.teachingWaitMs }
+        : {}),
+    },
+    {
+      paneId: started.work.paneId,
+      harness: session.assignments.get(marker.id)?.harness ?? started.work.harness,
+      teaching: started.teaching,
+      focus: started.teaching !== null,
+      outcomePath: started.outcomePath,
+      streamPath: started.work.stream,
+      streamOffset: started.streamOffset,
+      logPath: started.logPath,
+    },
+  );
+  session.continued.set(marker.id, {
+    attempt: started.attempt,
+    work: started.work,
+    run,
+    logPath: started.logPath,
+    outcomePath: started.outcomePath,
+  });
+  void run.ending
+    .then((ending) => endContinuedAttempt(session, marker.id, started.attempt, ending))
+    .catch(() => {});
+}
+
+// Re-adopt a Continued attempt found live at boot (issue #139): its own
+// runtime again, with no teaching (the agent was taught before the
+// restart), its log re-derived from where the attempt began in the Stream
+// file. adoptTerminalAttempt has already raised the adoption interrupt and
+// registered it live, as for any terminal-backed orphan.
+function readoptContinued(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  work: HeldPane & { streamOffset: number },
+): void {
+  const naming = work.numbered ? attempt : null;
+  const { streamOffset, ...held } = work;
+  startContinued(session, marker, {
+    attempt,
+    work: held,
+    logPath: join(session.runsDir, attemptLogName(marker.id, naming, false)),
+    outcomePath: join(session.runsDir, attemptOutcomeName(marker.id, naming, false)),
+    streamOffset,
+    teaching: null,
+  });
+}
+
+// The Brief a Continued attempt leaves when its teaching Turn could not be
+// typed: the agent was never told a fresh Outcome is owed, so the attempt is
+// over rather than left running on a promise nobody made.
+function untaughtBrief(attempt: number, paneId: string, reason: string): string {
+  return (
+    `Keep talking could not teach the agent in pane ${paneId}: ${reason}. ` +
+    `Continued attempt ${attempt} is over without an Outcome, and the pane ` +
+    "was left as it was. Keep talking again once the agent is waiting on " +
+    "you, or answer resume to start a fresh attempt."
+  );
+}
+
+/**
+ * Record a Continued attempt's ending (issue #139). A solo ticket's is
+ * exactly an adopted attempt's (recordAdoptedExit): done writes the status
+ * and chains the ordinary merge, checkpoint raises a fresh Interrupt over
+ * the same pane (so it can be continued again), anything else is a crash. A
+ * pane that went with no Outcome is a crash, as it is for any terminal
+ * attempt. A verify ticket's attempt is graded as a lone attempt: a
+ * checkpoint pauses the ticket as the lone path does, and done waits for
+ * the drive to grade it. An untaught attempt pauses at a checkpoint of the
+ * engine's own. A released one records nothing: whoever released it owns
+ * the ticket.
+ */
+function endContinuedAttempt(
+  session: Session,
+  ticketId: string,
+  attempt: number,
+  ending: ContinuedEnding,
+): void {
+  if (ending.kind === "released") return;
+  const entry = session.continued.get(ticketId);
+  if (!entry || entry.attempt !== attempt) return;
+  const marker = session.markers.find((candidate) => candidate.id === ticketId);
+  if (!marker) return;
+  session.continued.delete(ticketId);
+  // A re-adopted Continued attempt's adoption is over with its ending: its
+  // interrupt goes with the record below, as an adopted attempt's does.
+  session.adopted.delete(ticketId);
+  session.liveAttempts.clear(ticketId, attempt);
+  const { work, logPath, outcomePath } = entry;
+  releaseAttemptAgent(
+    session.herdrSocket,
+    work.paneId,
+    session.assignments.get(ticketId)?.harness || work.harness,
+  );
+  restoreAssignment(session, marker);
+  void session.paneSurvey?.refresh();
+  const emit = (phase: RunPhase) => emitSnapshot(session, phase);
+  const clearInterrupts = (): void => {
+    session.state = applyUpdate(session.state, {
+      interrupts: session.state.interrupts.filter((i) => i.ticketId !== ticketId),
+    });
+  };
+
+  if (ending.kind === "untaught") {
+    appendEvent(session.runsDir, ticketId, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "exited",
+      payload: {
+        code: SPAWN_INTERACTIVE_PROMPT_FAILED,
+        status: "checkpoint",
+        logTail: readLogTail(logPath),
+        outcomeExists: existsSync(outcomePath),
+      },
+    });
+    clearInterrupts();
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      untaughtBrief(attempt, work.paneId, ending.reason),
+      `ticket ${ticketId}: continued attempt ${attempt} could not be taught ` +
+        `(${ending.reason}); checkpoint raised`,
+      emit,
+    );
+    finishAdoptedFinalize(session);
+    return;
+  }
+
+  const read = readAttemptResult(outcomePath, validateOutcome);
+  const decision: AttemptEndingDecision<Extract<OutcomeResult, { ok: true }>> =
+    ending.kind === "pane-gone"
+      ? {
+          ending: "pane-gone",
+          code: EXIT_CODE_PANE_GONE,
+          result: read,
+          crashReason:
+            `pane ${work.paneId} went before continued attempt ${attempt} ` +
+            "wrote an Outcome",
+        }
+      : read.ok
+        ? { ending: "outcome", code: 0, result: read, crashReason: null }
+        : { ending: "outcome", code: EXIT_CODE_UNREADABLE, result: read, crashReason: read.reason };
+  if (read.ok && decision.crashReason === null) {
+    for (const rejection of read.spawnRejections ?? []) {
+      appendEvent(session.runsDir, ticketId, {
+        at: new Date().toISOString(),
+        attempt,
+        kind: "spawn-rejected",
+        payload: {
+          reason: rejection.reason,
+          ...(rejection.index !== undefined ? { index: rejection.index } : {}),
+        },
+      });
+    }
+  }
+
+  if (!work.numbered || decision.crashReason !== null || !read.ok) {
+    if (
+      !work.numbered &&
+      read.ok &&
+      decision.crashReason === null &&
+      read.outcome.status === "done" &&
+      read.outcome.spawn?.length
+    ) {
+      session.pendingSpawns.push({
+        parentId: ticketId,
+        proposals: read.outcome.spawn,
+        origin: "ticket",
+      });
+    }
+    recordAdoptedExit(session, marker, attempt, decision, logPath, outcomePath, "continued attempt");
+    return;
+  }
+
+  // A verify ticket's Continued attempt, ended with a valid Outcome: the
+  // exit is recorded as a verify candidate's is, and the lone-attempt rules
+  // decide the rest.
+  const outcome = read.outcome;
+  appendEvent(session.runsDir, ticketId, {
+    at: new Date().toISOString(),
+    attempt,
+    kind: "exited",
+    payload: {
+      code: 0,
+      status: outcome.status,
+      logTail: readLogTail(logPath),
+      outcomeExists: true,
+    },
+  });
+  clearInterrupts();
+  if (outcome.status === "checkpoint") {
+    checkpointLoneAttempt(
+      session,
+      marker,
+      attempt,
+      outcome.brief,
+      `ticket ${ticketId}: continued attempt ${attempt} checkpointed`,
+      emit,
+    );
+    session.state = applyUpdate(session.state, { outcomes: { [ticketId]: outcome } });
+    if (outcome.spawn?.length) {
+      session.pendingSpawns.push({ parentId: ticketId, proposals: outcome.spawn, origin: "ticket" });
+    }
+    finishAdoptedFinalize(session);
+    return;
+  }
+  session.continuedGrades.push({ ticketId, attempt, work });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${ticketId}: continued attempt ${attempt} done; graded as a lone ` +
+        "attempt at the next boundary",
+    ],
+  });
+  finishAdoptedFinalize(session);
+}
+
+// Grade every verify ticket's Continued attempt that ended done (issue
+// #139), each as a lone attempt: one round of one attempt, then the lone
+// rules (a flag checkpoints the ticket over the same pane, a pass merges the
+// branch the chain worked on). Run by the drive loop between super-steps,
+// the one place grading already runs: graders are spawned attempts and a
+// pass merges, neither of which may run beside a super-step (ADR-0004).
+async function gradeContinuedAttempts(
+  session: Session,
+  emit: (phase: RunPhase) => void,
+): Promise<void> {
+  if (session.continuedGrades.length === 0) return;
+  while (session.continuedGrades.length > 0) {
+    const { ticketId, attempt, work } = session.continuedGrades.shift()!;
+    const marker = session.markers.find((candidate) => candidate.id === ticketId);
+    if (!marker || marker.status !== "in-progress") continue;
+    const grades = await gradeRound(session, marker, [attempt], emit);
+    const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, attempt, false));
+    resolveLoneAttempt(
+      session,
+      marker,
+      {
+        marker,
+        status: "done",
+        logPath: join(session.runsDir, attemptLogName(ticketId, attempt, false)),
+        exitCode: 0,
+        plan: {
+          cwd: work.cwd,
+          ...(work.branch !== null ? { worktree: { path: work.cwd, branch: work.branch } } : {}),
+          attempt,
+          verify: true,
+        },
+        update: {},
+        joinedAtExit: true,
+        logTail: [],
+        outcomePath,
+        outcomeExists: existsSync(outcomePath),
+        crashReason: null,
+      },
+      grades.get(attempt) ?? null,
+      emit,
+    );
+  }
+  await persistWithRetry(session);
+  emit("running");
+}
+
+// Plain Resume closes the old pane (issue #139): just before a ticket's
+// fresh Attempt launches, the tab of its checkpointed Attempt closes, so the
+// old TUI, idle on the spent checkpoint, never shares the worktree and the
+// ticket's well-known Outcome and exit-code files with the new attempt. The
+// tab is the one the ticket's latest `spawned` event names, when a
+// checkpoint was raised for that attempt afterwards; a crashed attempt's tab
+// stays, as ADR-0014 has it. Stateless, so a Resume answered before a
+// restart closes its tab after it. Never an enlisted pane (ADR-0021).
+async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]): Promise<void> {
+  const closing: Promise<void>[] = [];
+  for (const marker of new Set(markers)) {
+    if (marker.enlistedFrom !== undefined) continue;
+    session.held.delete(marker.id);
+    const events = readEvents(session.runsDir, marker.id);
+    let at = -1;
+    events.forEach((event, i) => {
+      if (event.kind === "spawned" && typeof event.payload.tab_id === "string") at = i;
+    });
+    if (at === -1) continue;
+    const spawned = events[at];
+    const checkpointed = events.some(
+      (event, i) => i > at && event.kind === "checkpoint" && event.attempt === spawned.attempt,
+    );
+    if (!checkpointed) continue;
+    closing.push(
+      closeTab(session.herdrSocket, spawned.payload.tab_id as string).catch(() => {}),
+    );
+  }
+  await Promise.all(closing);
+}
+
+/**
+ * Close every Finished terminal (issue #139): the operator's bulk close from
+ * the pool header, and the only way one closes. The set is derived afresh,
+ * from a listing made now, so a tab that came back into use since the last
+ * snapshot is never closed from under it. Resolves with how many closed.
+ */
+async function closeFinishedTerminals(session: Session): Promise<number> {
+  if (session.paneSurvey === null) {
+    throw new Error("close finished terminals: the pool is not terminal-backed");
+  }
+  await session.paneSurvey.refresh();
+  const listing = session.paneSurvey.latest();
+  if (listing === null) {
+    throw new Error("close finished terminals: the herdr daemon could not list its panes");
+  }
+  const finished = finishedTerminals(session.openedTabs, listing, busyPanes(session));
+  const closed = await Promise.all(
+    finished.map((tab) =>
+      closeTab(session.herdrSocket, tab.tabId).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+  const count = closed.filter(Boolean).length;
+  session.state = applyUpdate(session.state, {
+    log: [`closed ${count} finished terminal${count === 1 ? "" : "s"}`],
+  });
+  await session.paneSurvey.refresh();
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+  return count;
 }
 
 // Markers dual-write: every checkpoint write is preceded by bringing the
@@ -3851,6 +4650,9 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   if (session.adopted.has(record.ticketId)) {
     abandonAdoption(session, record.ticketId);
   }
+  // A plain Resume passes the Held pane over (issue #139): the next Attempt
+  // launches fresh, and the old tab is closed just before it does.
+  session.held.delete(record.ticketId);
   if (marker.status !== "done") {
     writeMarkerStatus(marker.file, "ready");
     marker.status = "ready";
@@ -4922,7 +5724,11 @@ function reloadConfigAtBoundary(session: Session): void {
   // spawned-by cycle) leaves session.assignments and session.state.config
   // untouched — the candidate map is scratch until this call returns clean.
   const resolved = new Map<string, Assignment>();
-  for (const id of [...session.adopted.keys(), ...session.enlistedWork.keys()]) {
+  for (const id of [
+    ...session.adopted.keys(),
+    ...session.enlistedWork.keys(),
+    ...session.continued.keys(),
+  ]) {
     const frozen = session.assignments.get(id);
     if (frozen) resolved.set(id, frozen);
   }
@@ -5051,15 +5857,17 @@ function trimTail(text: string): string {
 
 // The attempt's work as a diff: the attempt branch against the commit it was
 // cut from, so sibling merges onto the working branch during the fan-out
-// never leak into one attempt's grade.
+// never leak into one attempt's grade. A Continued attempt (issue #139) works
+// on the branch of the attempt its chain began at, so that is the one read.
 function attemptDiff(
   session: Session,
   buildId: string,
   attempt: number,
 ): string {
   if (!session.git) return "(no diff: the pool does not run in git)\n";
-  const branch = branchFor(session.cwd, buildId, attempt);
-  if (!branchExists(session.cwd, buildId, attempt)) {
+  const work = workAttemptOf(session, buildId, attempt);
+  const branch = branchFor(session.cwd, buildId, work);
+  if (!branchExists(session.cwd, buildId, work)) {
     return `(no diff: no attempt branch ${branch})\n`;
   }
   const base = git(session.cwd, ["merge-base", "HEAD", branch]);
@@ -5082,8 +5890,9 @@ function attemptDiffParts(
   noContext: boolean,
 ): { diff: string; reason: string | null } {
   if (!session.git) return { diff: "", reason: "the pool does not run in git" };
-  const branch = branchFor(session.cwd, buildId, attempt);
-  if (!branchExists(session.cwd, buildId, attempt)) {
+  const work = workAttemptOf(session, buildId, attempt);
+  const branch = branchFor(session.cwd, buildId, work);
+  if (!branchExists(session.cwd, buildId, work)) {
     return { diff: "", reason: `no attempt branch ${branch}` };
   }
   const base = git(session.cwd, ["merge-base", "HEAD", branch]);
@@ -5153,6 +5962,49 @@ function gradedPayload(grade: Grade): Record<string, unknown> {
       ? { evidenceBudget: grade.evidenceBudget }
       : {}),
   };
+}
+
+// One verify round's grades, by attempt number, through the grading path
+// switch (ADR-0023): with a Jev key the round is graded in code, every
+// Attempt over its own Evidence, and no grader tickets are written. Without a
+// key, or when any ask falls back, the grader tickets run exactly as before;
+// never both in one round. The fallback's cause reaches the pool log once
+// through the port's own notice board; the line here names the attempt and
+// the switch. Shared by the drive's fan-out and a verify ticket's Continued
+// attempt (issue #139), which is a round of one.
+async function gradeRound(
+  session: Session,
+  marker: TicketMarker,
+  attempts: number[],
+  emit: (phase: RunPhase) => void,
+): Promise<Map<number, Grade>> {
+  if (!session.jev.configured) return runGraders(session, marker, attempts, emit);
+  const jevGrading = await runJevGraders(session, marker, attempts);
+  if (!jevGrading.ok) {
+    session.state = applyUpdate(session.state, {
+      log: [
+        `ticket ${marker.id}: Jev could not grade attempt ` +
+          `${jevGrading.attempt} (${jevGrading.cause}: ` +
+          `${jevGrading.detail}); falling back to grader tickets`,
+      ],
+    });
+    return runGraders(session, marker, attempts, emit);
+  }
+  const grades = jevGrading.grades;
+  // Named before the per-attempt lines, so the pool log reads in order; it
+  // is written only once the whole round has an answer, because a fallback
+  // means the round was never Jev's.
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${marker.id}: grading ${attempts.length} ` +
+        `attempt${attempts.length === 1 ? "" : "s"} with Jev`,
+    ],
+  });
+  for (const attempt of attempts) {
+    const grade = grades.get(attempt);
+    if (grade) recordJevGrade(session, marker, attempt, grade, emit);
+  }
+  return grades;
 }
 
 // The Jev grading path (ADR-0023): grade every Attempt of one verify round in
@@ -5761,12 +6613,12 @@ function completeLoneAttempt(
     closeAttemptTab(session, marker.id, attempt);
     session.conversations.ticketEnded(
       marker,
-      branchFor(session.cwd, marker.id, attempt),
+      worktree.branch,
       beforeSha ? `${beforeSha}..${mergeTargetRef(session)}` : null,
     );
     update.log = [
       `ticket ${marker.id}: attempt ${attempt} passed grading; merged ` +
-        `${branchFor(session.cwd, marker.id, attempt)} onto the working branch`,
+        `${worktree.branch} onto the working branch`,
     ];
   }
   writeMarkerStatus(marker.file, "done");
@@ -5807,7 +6659,7 @@ function mergeConflictComplaint(
   attempt: number,
   result: MergeResult,
 ): string {
-  const branch = branchFor(session.cwd, buildId, attempt);
+  const branch = branchFor(session.cwd, buildId, workAttemptOf(session, buildId, attempt));
   if (result.reason === "blocked") {
     return (
       `The attempt passed grading, but merging ${branch} onto the working ` +
@@ -6730,6 +7582,9 @@ function raiseCheckpoint(
   // call site to remember. interrupt.body is the same extractBrief(marker
   // .file) read the interrupt itself carries; reused rather than re-read.
   session.conversations.ticketCheckpointed(marker, interrupt.body);
+  // The same funnel holds the checkpointed attempt's pane (issue #139), so
+  // every checkpoint Interrupt over a live pane can be continued.
+  holdCheckpointPane(session, marker, attempt);
 }
 
 // "## Brief" and "## Brief, written by the engine" both head a Brief
@@ -7000,11 +7855,15 @@ function planTicket(
   // an enlisted agent works there, its HEAD is not the merge target, and an
   // attempt launched into it would commit onto the operator's branch beside
   // the operator's agent. Every ticket gets a worktree from then on.
+  // The same holds while a Continued attempt (issue #139) works in the pool
+  // checkout: it runs beside the drive, and a lone ticket launched there
+  // would be a second agent in its tree.
   if (
     !verify &&
     readyCount < 2 &&
     !branchExists(session.cwd, marker.id) &&
-    session.mergeTarget === null
+    session.mergeTarget === null &&
+    ![...session.continued.values()].some((c) => c.work.cwd === session.cwd)
   ) {
     return { cwd: session.cwd, attempt, verify };
   }
@@ -7271,6 +8130,9 @@ function registeredPanesOf(session: Session): Set<string> {
   for (const view of session.conversations.views()) {
     if (view.paneId) panes.add(view.paneId);
   }
+  // A Held pane is the pool's while its checkpoint waits (issue #139): Keep
+  // talking may still continue it, so it is no pane to enlist.
+  for (const held of session.held.values()) panes.add(held.paneId);
   return panes;
 }
 

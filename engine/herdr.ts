@@ -476,6 +476,30 @@ export async function listPaneIds(
 }
 
 /**
+ * Every pane the daemon lists, with the tab it sits in (issue #139): the pane
+ * survey's one read, which answers both "is this pane alive" and "is this tab
+ * still open" from a single call. The tab is null when the daemon reports
+ * none. Daemon-wide: a pool's tabs are in its Pool workspace, but a workspace
+ * re-resolved mid-run left the tabs opened before it in the old one.
+ */
+export async function listPanes(
+  socketPath: string,
+): Promise<{ paneId: string; tabId: string | null }[]> {
+  const list = await herdrRpc(socketPath, "pane.list", {});
+  const panes =
+    typeof list === "object" && list !== null
+      ? (list as { panes?: unknown }).panes
+      : undefined;
+  if (!Array.isArray(panes)) return [];
+  return (panes as { pane_id?: unknown; tab_id?: unknown }[])
+    .filter((p) => typeof p?.pane_id === "string")
+    .map((p) => ({
+      paneId: p.pane_id as string,
+      tabId: typeof p.tab_id === "string" ? p.tab_id : null,
+    }));
+}
+
+/**
  * One pane as herdr's `agent.list` reports it (the enlist picker's raw
  * material, issue #101). herdr lists an entry per pane it binds an agent to,
  * whether the engine reported the agent or herdr detected one itself; the

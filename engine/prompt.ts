@@ -213,6 +213,50 @@ export function buildEnlistTeaching(parts: {
 }
 
 /**
+ * The teaching Turn a Continued attempt starts with (issue #139): the agent
+ * already wrote the checkpoint Outcome its prompt asked for and believes its
+ * part is over, so it is told the operator chose to carry on here and that a
+ * fresh Outcome is owed when the two of them decide. It restates the whole
+ * Outcome contract rather than pointing back at the original prompt: the path
+ * may be a new one (an attempt-numbered file on a verify ticket), and a
+ * context the harness compacted may no longer hold the old wording. The
+ * engine types it into the pane, never writes it to a file.
+ */
+export function buildContinuedTeaching(parts: {
+  id: string;
+  issuePath: string;
+  outcomePath: string;
+  attempt: number;
+}): string {
+  return [
+    "---",
+    "",
+    `The operator chose to keep talking with you here about Ticket ${parts.id}, ` +
+      "instead of starting a fresh attempt. You are now its attempt " +
+      `${parts.attempt}: carry on from where you checkpointed, with the ` +
+      "operator, in this same terminal and checkout.",
+    "",
+    `The Ticket file of record is ${parts.issuePath}; its line-1 status ` +
+      "marker is the engine's, never edit it.",
+    "",
+    "The Outcome you wrote before is spent. When you and the operator decide " +
+      "the work is done, or that it has to pause again, record a fresh " +
+      `outcome as JSON at ${parts.outcomePath}: {"status": "done" or ` +
+      '"checkpoint", "summary": "what you did, in a sentence or two", ' +
+      '"commitSha": "the sha of your commit, or null"}. On a checkpoint, add ' +
+      '"brief": "what the human has to do next". Write it only once it is ' +
+      "decided: the engine reads the file the moment it appears.",
+    "",
+    "You may propose follow-up tickets in that same outcome JSON by adding " +
+      'a "spawn" array, one entry per follow-up, each shaped {"title": ' +
+      '"...", "body": "...", "blockedBy": ["id", ...]}, the body carrying ' +
+      `at least ${SPAWN_BODY_MIN_CHARS} characters of intent for a fresh ` +
+      "agent to work from. You never write pool state yourself: no ticket " +
+      "files, no ids, no statuses. You propose; the engine writes.",
+  ].join("\n");
+}
+
+/**
  * The teaching conversations.ts appends to a Conversation's opening Turn (or
  * types alone when there is none, so the mechanism is learned either way):
  * how to propose Spawns mid-conversation (the Conversations ADR). A

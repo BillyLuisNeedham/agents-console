@@ -80,4 +80,14 @@ describe("live attempts registry", () => {
     live.clear("01", 1);
     expect(changes).toBe(2);
   });
+
+  it("lists every live Attempt's pane, a fan-out's earlier candidates included (issue #139)", () => {
+    const live = createLiveAttempts();
+    live.register("01", 4, { paneId: "pane-4", tabId: "tab-4", startedAt: AT });
+    live.register("01", 5, { paneId: "pane-5", tabId: "tab-5", startedAt: AT });
+    live.register("02", 1, { paneId: null, tabId: null, startedAt: AT });
+    expect([...live.panes()].sort()).toEqual(["pane-4", "pane-5"]);
+    live.clear("01", 4);
+    expect([...live.panes()]).toEqual(["pane-5"]);
+  });
 });

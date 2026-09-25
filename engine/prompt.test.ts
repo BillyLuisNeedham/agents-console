@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { SPAWN_BODY_MIN_CHARS } from "./engine.ts";
 import {
+  buildContinuedTeaching,
   buildConversationTeaching as build,
   buildHeadToHeadPrompt,
   buildPrompt,
@@ -209,5 +210,29 @@ describe("buildHeadToHeadPrompt", () => {
     expect(body).toContain("falls back to the higher score, then the earlier");
     expect(body).toContain("Trust terminal output over the agents' self-assessments.");
     expect(body).toContain("The engine owns every status write");
+  });
+});
+
+describe("buildContinuedTeaching", () => {
+  const teaching = buildContinuedTeaching({
+    id: "01",
+    issuePath: "/pool/issues/01.md",
+    outcomePath: "/pool/runs/01.attempt-3.outcome.json",
+    attempt: 3,
+  });
+
+  it("tells the agent the operator carries on here and a fresh Outcome is owed at the exact path", () => {
+    expect(teaching).toContain("keep talking with you here about Ticket 01");
+    expect(teaching).toContain("attempt 3");
+    expect(teaching).toContain("The Outcome you wrote before is spent");
+    expect(teaching).toContain("/pool/runs/01.attempt-3.outcome.json");
+    expect(teaching).toContain("/pool/issues/01.md");
+  });
+
+  it("restates the whole Outcome contract, spawn floor included", () => {
+    expect(teaching).toContain('"status": "done" or "checkpoint"');
+    expect(teaching).toContain('"brief"');
+    expect(teaching).toContain('"spawn" array');
+    expect(teaching).toContain(`at least ${SPAWN_BODY_MIN_CHARS} characters`);
   });
 });

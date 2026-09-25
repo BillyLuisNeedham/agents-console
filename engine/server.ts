@@ -66,7 +66,9 @@ import {
   readEvents,
 } from "./events.ts";
 import type {
+  CloseFinishedTerminalsResponse,
   EnrichedSnapshot,
+  KeepTalkingResponse,
   LogAttemptInfo,
   ReconstructedAttempt,
   ResumeAction,
@@ -159,6 +161,9 @@ export interface PoolServerOptions {
    *  refusing (issue #101); tests shrink it. Production leaves it unset (a
    *  Launch's readiness bound). */
   enlistTeachingWaitMs?: number;
+  /** How often the engine's pane survey lists herdr's panes (issue #139);
+   *  tests shrink it. Production leaves it unset (15 s). */
+  paneSurveyMs?: number;
   /**
    * What a `POST /api/stop` sets in motion once the route has accepted it
    * (issue #97). The CLI passes the same stop-then-exit the signal handler
@@ -233,6 +238,10 @@ export interface PoolServer {
    *  rather call through than round-trip HTTP. Throws "pool not started" or
    *  the engine's own reason, which the POST route maps to a 409. */
   enlist: (req: EnlistRequest) => Promise<EnlistResponse>;
+  /** Keep talking (issue #139), for tests that would rather call through
+   *  than round-trip HTTP. Throws "pool not started" or the engine's own
+   *  reason, which the POST route maps to a 409. */
+  keepTalking: (ticketId: string) => Promise<KeepTalkingResponse>;
 }
 
 // The Reassign row a ticket the module did not answer for falls back to: it
@@ -268,6 +277,7 @@ function enrich(
     poolName,
     poolTitle,
     poolDir,
+    finishedTerminals: snapshot.finishedTerminals,
     state: {
       tickets: meta.map((m) => {
         const row = reassign.get(m.id);
@@ -290,6 +300,7 @@ function enrich(
               ...UNASSIGNED_ASSIGNMENT_VIEW,
             },
           liveAttempt: snapshot.liveAttempts[m.id] ?? null,
+          heldPane: snapshot.heldPanes[m.id] ?? null,
           // An enlisted ticket (issue #101) reads "as found" where a spawned
           // one names its model: the marker field is the durable fact.
           enlisted: m.enlistedFrom !== undefined,
@@ -1210,6 +1221,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       ...(options.enlistTeachingWaitMs !== undefined
         ? { enlistTeachingWaitMs: options.enlistTeachingWaitMs }
         : {}),
+      ...(options.paneSurveyMs !== undefined ? { paneSurveyMs: options.paneSurveyMs } : {}),
       ...(jev !== undefined ? { jev } : {}),
       onSnapshot: (snapshot) => {
         refreshMeta();
@@ -1317,6 +1329,15 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return run.enlist(req);
   }
 
+  // Keep talking (issue #139): the same thin proxy shape as enlist, behind
+  // POST /api/keep-talking below.
+  async function keepTalking(ticketId: string): Promise<KeepTalkingResponse> {
+    const run = currentRun;
+    if (!run) throw new Error("pool not started");
+    const { attempt } = await run.keepTalking(ticketId);
+    return { ticketId, attempt };
+  }
+
   // The shared first half of both terminal endpoints: the id (a ticket's or,
   // since issue #60, a Conversation's) -> pane translation, read from the
   // last snapshot alone: a ticket's Live attempt pane or a Conversation
@@ -1327,12 +1348,16 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // #101 the guarantee is engine registration, not who opened the tab: an
   // enlisted pane is registered by the engine exactly as a spawned one is,
   // so it resolves here and a pane the engine never registered never does.
+  // A Held pane (issue #139) is the engine's record too: the pane of a
+  // checkpointed attempt, served while its Interrupt waits and the pane is
+  // still listed, so a card at a checkpoint keeps its peek and focus.
   function resolveTerminalRequest(ticketId: string):
     | { ok: true; paneId: string }
     | { ok: false; status: number; error: string } {
     const ticket = latest?.state.tickets.find((t) => t.id === ticketId);
     const paneId =
       ticket?.liveAttempt?.paneId ??
+      ticket?.heldPane?.paneId ??
       latest?.state.conversations.find((c) => c.id === ticketId)?.paneId ??
       null;
     if (paneId === null || paneId === "") {
@@ -1870,6 +1895,54 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
         }
 
+        // Keep talking (issue #139): continue a ticket's checkpointed Attempt
+        // in its Held pane. Not a resume action, because it is never queued
+        // (ADR-0004's exception, as Enlist is), so it answers once the pane is
+        // claimed: 202 with the Continued attempt's number, or the enlist
+        // route's 409 `reason` envelope when the engine refuses (no Held pane,
+        // not at a checkpoint, an answer already queued, the pane gone).
+        if (pathname === "/api/keep-talking" && req.method === "POST") {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const ticketId = typeof fields.ticketId === "string" ? fields.ticketId : "";
+          if (!ticketId) {
+            return Response.json({ reason: "ticketId is required" }, { status: 400 });
+          }
+          try {
+            const answer = await keepTalking(ticketId);
+            return Response.json(answer, { status: 202 });
+          } catch (err) {
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
+        // Close every Finished terminal (issue #139): the pool header's bulk
+        // close, behind the Console's inline confirm. The engine works out
+        // the set afresh and closes it; nothing else ever closes one.
+        if (pathname === "/api/terminals/close-finished" && req.method === "POST") {
+          const run = currentRun;
+          if (!run) {
+            return Response.json({ reason: "pool not started" }, { status: 409 });
+          }
+          try {
+            const closed = await run.closeFinishedTerminals();
+            return Response.json({ closed } satisfies CloseFinishedTerminalsResponse);
+          } catch (err) {
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
         if (pathname === "/api/conversations/end" && req.method === "POST") {
           let body: unknown;
           try {
@@ -1993,7 +2066,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           }
           const registeredPanes = new Set<string>();
           for (const ticket of latest?.state.tickets ?? []) {
-            const paneId = ticket.liveAttempt?.paneId;
+            const paneId = ticket.liveAttempt?.paneId ?? ticket.heldPane?.paneId;
             if (paneId) registeredPanes.add(paneId);
           }
           for (const conversation of latest?.state.conversations ?? []) {
@@ -2117,6 +2190,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     startConversation,
     endConversation,
     enlist,
+    keepTalking,
     url: `http://localhost:${server.port}`,
     close: async () => {
       await server.stop(true);

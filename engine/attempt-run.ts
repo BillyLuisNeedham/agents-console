@@ -944,7 +944,8 @@ export function releaseAttemptAgent(
  * carries the prompt body elided; the commit SHA resolves from the spawn cwd
  * at spawn time (null when git is unavailable or the cwd is not a checkout);
  * env is the keys the engine set on the child environment beyond the
- * inherited parent's, with their values. Terminal-backed spawns add pane_id
+ * inherited parent's, with their values; harness and model are the
+ * Assignment it launched with. Terminal-backed spawns add pane_id
  * (and terminal_error on a headless fallback, whenever it happened: the tab
  * refusing to open or the wrapper refusing to send), per ADR-0014 and
  * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
@@ -964,6 +965,11 @@ function spawnedPayload(
     branch,
     commitSha: commitShaAt(ctx.cwd),
     env: engineEnvSet(spawnEnv(ctx.cwd)),
+    // The Assignment the attempt launched with (issue #139): a Continued
+    // attempt carries on in this attempt's pane under exactly this, whatever
+    // a Reassign has written since, and after a restart this is the record.
+    harness: ctx.harness,
+    model: ctx.model,
     ...(pid !== undefined ? { pid } : {}),
     ...(terminal
       ? {
@@ -1181,11 +1187,16 @@ function endWriteStream(
  * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
  * derivation. Polls by positioned reads; `finish` drains the tail, flushes
  * the line buffer, and ends the log stream. Exported for the boot-adopted
- * attempt's finalize (engine.ts), which tails a pane it never launched.
+ * attempt's finalize (engine.ts), which tails a pane it never launched, and
+ * for a Continued attempt (issue #139), whose pane's `script` is still
+ * writing the Stream file of the attempt it continues: `fromOffset` is where
+ * that file stood when the Continued attempt began, so its log holds its own
+ * part of the session and none of the attempt before it.
  */
 export function startPaneStreamTail(
   streamPath: string,
   logPath: string,
+  fromOffset = 0,
 ): PaneTailer {
   const log = createWriteStream(logPath);
   let streamError: unknown = null;
@@ -1216,7 +1227,7 @@ export function startPaneStreamTail(
         } catch {
           return; // script has not created the file yet
         }
-        offset = 0;
+        offset = fromOffset;
         buffer = new TranscriptLineBuffer();
       }
       let size: number;
