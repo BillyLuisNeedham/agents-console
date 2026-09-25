@@ -38,14 +38,16 @@ export interface OpenedTab {
 }
 
 /**
- * Every tab the owners' `spawned` events name, once each. A Continued attempt
- * names the tab of the attempt it continues, so a tab can be named twice; the
- * later spawn's pane is kept.
+ * Every tab the owners' `spawned` events name, once each, less the ones their
+ * events record closed (a `tab-closed`). A Continued attempt names the tab of
+ * the attempt it continues, so a tab can be named twice; the later spawn's
+ * pane is kept.
  */
 export function openedTabs(runsDir: string, owners: Iterable<string>): OpenedTab[] {
   const tabs = new Map<string, OpenedTab>();
   for (const owner of owners) {
-    for (const event of readEvents(runsDir, owner)) {
+    const events = readEvents(runsDir, owner);
+    for (const event of events) {
       if (event.kind !== "spawned" || typeof event.payload.tab_id !== "string") continue;
       tabs.set(event.payload.tab_id, {
         owner,
@@ -55,6 +57,11 @@ export function openedTabs(runsDir: string, owners: Iterable<string>): OpenedTab
         terminalId:
           typeof event.payload.terminal_id === "string" ? event.payload.terminal_id : null,
       });
+    }
+    // A tab the engine recorded closing is not open, whatever a listing
+    // taken before the close still says.
+    for (const [tabId, tab] of tabs) {
+      if (tab.owner === owner && tabRecordedClosed(events, tabId, tab.terminalId)) tabs.delete(tabId);
     }
   }
   return [...tabs.values()];

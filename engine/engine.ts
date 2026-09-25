@@ -982,6 +982,7 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
       const session = sessionOf();
       session.state = applyUpdate(session.state, { log: [line] });
     },
+    tabClosed: () => void sessionOf().paneSurvey?.refresh(),
   };
 }
 
@@ -3416,6 +3417,19 @@ function recordAdoptedExit(
 ): void {
   const ticketId = marker.id;
   const { code, result: outcome, crashReason } = decision;
+  // Where the attempt's work is: the worktree and branch its `spawned` event
+  // recorded (a Continued attempt's names the worktree of the attempt it
+  // continues), or null when it ran in the pool checkout itself, whose done
+  // work is already on the working branch.
+  const recorded = readEvents(session.runsDir, ticketId)
+    .filter((event) => event.kind === "spawned" && event.attempt === attempt)
+    .pop();
+  const worktree: WorktreeInfo | null =
+    recorded &&
+    typeof recorded.payload.cwd === "string" &&
+    typeof recorded.payload.branch === "string"
+      ? { path: recorded.payload.cwd, branch: recorded.payload.branch }
+      : null;
   const outcomeExists = existsSync(outcomePath);
   const logTail = readLogTail(logPath);
   let status: TicketStatus = "in-progress";
@@ -3465,16 +3479,19 @@ function recordAdoptedExit(
   } else if (status === "checkpoint") {
     raiseCheckpoint(session, marker, attempt);
   }
-  if (status === "done" && branchExists(session.cwd, branchFor(session.cwd, ticketId))) {
+  // The branch is checked by name as recorded: branchExists would name it
+  // again from the ticket id (branchFor applied twice read as a branch that
+  // never exists, and a done adopted attempt in a worktree never merged).
+  if (
+    status === "done" &&
+    worktree !== null &&
+    git(session.cwd, ["rev-parse", "--verify", `refs/heads/${worktree.branch}`]).ok
+  ) {
     // The merge chains onto the session merge chain: the drive's merges
     // wait for it and it waits for them, so two git merges never run
     // concurrently on the main checkout. The kick below runs only once the
     // chain settles, so a resumed drive's closing gate can never raise the
     // Review interrupt ahead of this merge landing.
-    const worktree: WorktreeInfo = {
-      path: worktreePathFor(session.cwd, ticketId),
-      branch: branchFor(session.cwd, ticketId),
-    };
     session.mergeLine.taken(ticketId);
     void mergeDoneTicket(session, marker, worktree, attempt, what).finally(() =>
       finishAdoptedFinalize(session),
@@ -8289,6 +8306,9 @@ function closeTabRecorded(
       kind: "tab-closed",
       payload: { tab_id: tabId, ...(terminalId !== null ? { terminal_id: terminalId } : {}), reason },
     });
+    // The snapshot's Finished terminals count should not wait a cadence to
+    // drop the tab just closed.
+    void session.paneSurvey?.refresh();
     return true;
   };
   return closeTab(session.herdrSocket, tabId).then(

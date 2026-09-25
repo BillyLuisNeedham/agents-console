@@ -124,4 +124,13 @@ describe("finished terminals", () => {
     expect(tabRecordedClosed(closed({ tab_id: "t1", terminal_id: "term_a" }), "t1", null)).toBe(true);
     expect(tabRecordedClosed([], "t1", null)).toBe(false);
   });
+
+  it("leaves out a tab its owner's events record closed", () => {
+    const runsDir = makeTempDir("runs-");
+    dirs.push(runsDir);
+    appendEvent(runsDir, "01", { at: AT, attempt: 1, kind: "spawned", payload: { pane_id: "p1", tab_id: "t1", terminal_id: "term_a" } });
+    appendEvent(runsDir, "01", { at: AT, attempt: 2, kind: "spawned", payload: { pane_id: "p2", tab_id: "t2" } });
+    appendEvent(runsDir, "01", { at: AT, attempt: 1, kind: "tab-closed", payload: { tab_id: "t1", terminal_id: "term_a" } });
+    expect(openedTabs(runsDir, ["01"]).map((tab) => tab.tabId)).toEqual(["t2"]);
+  });
 });

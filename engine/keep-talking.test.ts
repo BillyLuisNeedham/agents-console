@@ -18,7 +18,7 @@ import {
   type ExecutingFakeHerdr,
 } from "./herdr-executing-fake.ts";
 import { cleanupPools, makeGitPool, makePool } from "./pool-fixture.ts";
-import { worktreePathFor } from "./worktrees.ts";
+import { branchFor, worktreePathFor } from "./worktrees.ts";
 
 const fakes: ExecutingFakeHerdr[] = [];
 const runs: PoolRun[] = [];
@@ -809,4 +809,107 @@ describe("Keep talking review fixes (issue #139)", () => {
     await until("the held merge", () => existsSync(join(poolDir, "side.txt")));
     expect(run.final.tickets["01"]).toBe("done");
   }, 40_000);
+
+  // A worktree, not the pool checkout: two tickets ready at once each get
+  // their own, and a done attempt there has a branch to merge.
+  async function twoInWorktrees(outcomes: Record<string, Record<string, unknown>[]>) {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { file: "01.md", marker: READY, body: "# First\n\nbody" },
+        { file: "02.md", marker: "<!-- state: id=02 blocked-by= status=ready -->", body: "# Second\n\nbody" },
+      ],
+      config,
+    });
+    const { harnesses, quit } = tuiHarness(poolDir, outcomes);
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    return { poolDir, harnesses, quit, fake };
+  }
+
+  function commitIn(worktree: string, file: string): void {
+    writeFileSync(join(worktree, file), "work\n");
+    const git = (args: string[]) => Bun.spawnSync(["git", "-C", worktree, ...args], { stdout: "ignore", stderr: "ignore" });
+    git(["add", file]);
+    git(["commit", "-qm", `add ${file}`]);
+  }
+
+  it("merges a Continued attempt that ends done in a worktree onto the target", async () => {
+    const { poolDir, harnesses, fake } = await twoInWorktrees({
+      "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
+      "02": [{ status: "done", summary: "done", commitSha: null }],
+    });
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, enlistPollMs: 50, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("01's Held pane", () => latest(run).heldPanes["01"] !== undefined);
+    const worktree = worktreePathFor(poolDir, "01");
+    expect(readEvents(join(poolDir, "runs"), "01").find((e) => e.kind === "spawned")!.payload.cwd).toBe(worktree);
+    await run.keepTalking("01");
+    commitIn(worktree, "continued.txt");
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await until("the merge", () => readEvents(join(poolDir, "runs"), "01").some((e) => e.kind === "merged"), 20_000);
+    expect(existsSync(join(poolDir, "continued.txt"))).toBe(true);
+    expect(run.final.tickets["01"]).toBe("done");
+  }, 40_000);
+
+  it("merges a boot-re-adopted terminal attempt that ends done in a worktree onto the target", async () => {
+    // What a restart finds: 01's attempt was launched into its worktree by
+    // the engine before, and its pane is still running there.
+    const { poolDir } = makeGitPool({
+      tickets: [{ file: "01.md", marker: "<!-- state: id=01 blocked-by= status=in-progress -->", body: "# First\n\nbody" }],
+      config,
+    });
+    const worktree = worktreePathFor(poolDir, "01");
+    const branch = branchFor(poolDir, "01");
+    Bun.spawnSync(["git", "-C", poolDir, "worktree", "add", "-q", "-b", branch, worktree], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { argv: ["tui"], cwd: worktree, branch, pane_id: "p-01", tab_id: "t-01" },
+    });
+    const { harnesses } = tuiHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    // In the Pool workspace the boot will create (the fake's first, w1),
+    // where boot reconciliation looks for this pool's panes.
+    fake.injectPane("p-01", { tabId: "t-01", cwd: worktree, workspaceId: "w1" });
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("the re-adoption", () => latest(run).liveAttempts["01"] !== undefined);
+    expect(run.final.log.some((line) => line.includes("attempt 1 re-adopted"))).toBe(true);
+    commitIn(worktree, "adopted.txt");
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "finished after the restart", commitSha: null }),
+    );
+    await until("the merge", () => readEvents(join(poolDir, "runs"), "01").some((e) => e.kind === "merged"), 20_000);
+    expect(existsSync(join(poolDir, "adopted.txt"))).toBe(true);
+    expect(run.final.tickets["01"]).toBe("done");
+  }, 40_000);
+
+  it("drops a tab from the Finished terminals count the moment the engine closes it (minor 2)", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [{ file: "01.md", marker: "<!-- state: id=01 blocked-by= status=done -->" }],
+      config,
+    });
+    const { harnesses } = tuiHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    // A cadence far longer than the test: every listing here is on demand.
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 600_000 });
+    runs.push(run);
+    const view = await run.startConversation({ title: "Brief" });
+    // A listing while the Conversation is live: its tab is open and in use.
+    expect(await run.closeFinishedTerminals()).toBe(0);
+    await run.endConversation(view.id);
+    await until("ended", () => latest(run).conversations.find((c) => c.id === view.id)?.status === "ended");
+    await Bun.sleep(300);
+    expect(latest(run).finishedTerminals).toBe(0);
+  }, 30_000);
 });

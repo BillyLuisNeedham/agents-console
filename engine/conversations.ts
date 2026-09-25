@@ -473,6 +473,8 @@ export interface ConversationHost {
   markers(): readonly TicketMarker[];
   /** Add one line to the pool log, published with the next snapshot. */
   log(line: string): void;
+  /** A tab this module closed: the pane survey lists again, so the snapshot's Finished terminals count drops at once. */
+  tabClosed(): void;
   /** The live pool config. */
   config(): PoolConfig;
 }
@@ -1497,12 +1499,14 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // does not ask herdr again; a tab herdr no longer has is closed already.
   function closeConversationTab(id: string, tabId: string, reason: string): Promise<void> {
     const terminalId = launchOf(id)?.terminalId ?? null;
-    const closed = (): void =>
+    const closed = (): void => {
       event(id, "tab-closed", {
         tab_id: tabId,
         ...(terminalId !== null ? { terminal_id: terminalId } : {}),
         reason,
       });
+      host.tabClosed();
+    };
     return closeTab(env.herdrSocket, tabId).then(closed, (err: unknown) => {
       if (isTabNotFound(err)) {
         closed();
