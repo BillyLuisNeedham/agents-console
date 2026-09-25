@@ -125,4 +125,10 @@ describe("listedAsRecorded", () => {
     expect(listedAsRecorded(as(null), recorded, null)).toBe(true);
     expect(listedAsRecorded(as("term_ffff"), { ...recorded, terminalId: null }, null)).toBe(true);
   });
+
+  it("takes a terminal id match as ours on its own, a tab moved to another workspace included", () => {
+    const recorded = { paneId: "p1", tabId: "t1", cwd: "/w", terminalId: "term_65b1" };
+    const moved = listing([{ paneId: "p1", tabId: "t9", workspaceId: "w-other", cwd: "/x", terminalId: "term_65b1" }]);
+    expect(listedAsRecorded(moved, recorded, "w1")).toBe(true);
+  });
 });

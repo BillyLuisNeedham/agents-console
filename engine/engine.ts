@@ -54,6 +54,7 @@ import {
   HERDR_SOCKET_DEFAULT,
   closePane,
   closeTab,
+  isTabNotFound,
   listPaneIds,
   listPanes,
   relabelWorkspace,
@@ -134,6 +135,7 @@ import {
 import {
   finishedTerminals,
   openedTabs,
+  tabRecordedClosed,
   type OpenedTab,
   type Untouchable,
 } from "./finished-terminals.ts";
@@ -875,6 +877,10 @@ interface Session {
   // graded as lone attempts: grading spawns graders and merges, so it runs in
   // the drive loop between super-steps, never beside one (ADR-0004).
   continuedGrades: { ticketId: string; attempt: number; work: HeldPane }[];
+  // Tickets the drive planned into the pool checkout, from the plan to the
+  // attempt's ending (issue #139): the pool checkout's occupant before its
+  // launch has spawned (ADR-0027's one agent at a time).
+  poolCheckoutPlanned: Set<string>;
   // The pane survey (issue #139, pane-survey.ts): the cached herdr listing
   // behind the Held panes and the Finished terminals. Null in a headless pool.
   paneSurvey: PaneSurvey | null;
@@ -892,6 +898,9 @@ interface Session {
 interface ContinuedAttempt {
   attempt: number;
   work: HeldPane;
+  // Whether it works inside the pool checkout's tree (inPoolCheckout),
+  // decided once at its start: while it does, merges into the checkout wait.
+  inPoolCheckout: boolean;
   run: ContinuedRun;
   logPath: string;
   outcomePath: string;
@@ -924,17 +933,11 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
     resolveConflict: (marker, result, attempt) =>
       handleMergeConflict(sessionOf(), marker, result, attempt),
     closeAttemptTabs: (id) => closeAttemptTabs(sessionOf(), id),
-    chainMerge: (work) => {
-      const session = sessionOf();
-      const next = session.mergeChain.then(async () => {
-        await poolCheckoutFree(session);
-        return work();
-      });
-      // The chain itself never rejects (a failed merge must not wedge the
-      // next caller's), while the caller sees `work`'s own outcome.
-      session.mergeChain = next.catch(() => {});
-      return next;
-    },
+    chainMerge: (work) =>
+      // Through the pool checkout's gate (ADR-0027): joins the chain once
+      // no Continued attempt holds the checkout; a shutdown while it waits
+      // drops the merge, which the next boot's End finishes.
+      chainMergeWork(sessionOf(), work).then(() => {}),
     mergeTargetBranch: () => mergeTargetBranch(sessionOf()),
     mergeIntoTarget: (branch) => {
       const session = sessionOf();
@@ -1160,6 +1163,7 @@ export function startPool(options: RunOptions): PoolRun {
     held: new Map(),
     continued: new Map(),
     continuedGrades: [],
+    poolCheckoutPlanned: new Set(),
     paneSurvey: null,
     openedTabs: [],
     enlistedTerminals: { panes: new Set(), tabs: new Set() },
@@ -1798,6 +1802,8 @@ async function runSuperStep(
         },
         plan,
       ).then((result) => {
+        // Its ending ends its hold on the pool checkout too.
+        session.poolCheckoutPlanned.delete(marker.id);
         // The attempt's surviving proposals ride to the boundary's
         // adoption buffer (ADR-0010). A verify candidate carries none:
         // its proposals ride or die with selection.
@@ -1823,28 +1829,37 @@ async function runSuperStep(
           // Its place in the Merge queue is the order it joins the chain,
           // which is also the order the conflict loop below resolves in.
           session.mergeLine.taken(marker.id);
-          mergeQueue = mergeQueue.then(async () => {
-            // A Continued attempt in the pool checkout holds its merges
-            // (ADR-0027): this one waits for it in the queue.
-            await poolCheckoutFree(session);
-            // Captured just before the merge, inside the serialized chain:
-            // HEAD may have moved since this ticket's attempt exited (an
-            // earlier sibling's merge in the same super-step), so this is
-            // the range mergeTicket is actually about to add, not
-            // whatever HEAD was when the outer async callback started.
-            const beforeSha = mergeTargetSha(session);
-            merges.push({
-              marker,
-              result: mergeTicket(session, marker, result.plan.worktree!),
-              attempt: result.plan.attempt,
-              beforeSha,
+          if (poolCheckoutHeld(session)) {
+            // A Continued attempt holds the pool checkout (ADR-0027): this
+            // merge waits at the gate, off the super-step, which carries on
+            // without it; the Merge hold then keeps the boundary from
+            // planning past the unmerged done ticket, as for any merge.
+            void mergeDoneTicket(session, marker, result.plan.worktree!, result.plan.attempt, "attempt")
+              .finally(() => finishAdoptedFinalize(session));
+          } else {
+            // Chained from the session's tail, not the step's own queue: a
+            // merge the gate held back joins the chain when it is let through,
+            // and the step's next merge must come after it.
+            mergeQueue = session.mergeChain.then(async () => {
+              // Captured just before the merge, inside the serialized chain:
+              // HEAD may have moved since this ticket's attempt exited (an
+              // earlier sibling's merge in the same super-step), so this is
+              // the range mergeTicket is actually about to add, not
+              // whatever HEAD was when the outer async callback started.
+              const beforeSha = mergeTargetSha(session);
+              merges.push({
+                marker,
+                result: mergeTicket(session, marker, result.plan.worktree!),
+                attempt: result.plan.attempt,
+                beforeSha,
+              });
             });
-          });
-          // Publish the tail at every extension, not once after the await:
-          // an adopted terminal attempt's finalize merge (ADR-0014) chains
-          // onto session.mergeChain from outside the drive loop and must
-          // never see a stale, already-settled tail.
-          session.mergeChain = mergeQueue.catch(() => {});
+            // Publish the tail at every extension, not once after the await:
+            // an adopted terminal attempt's finalize merge (ADR-0014) chains
+            // onto session.mergeChain from outside the drive loop and must
+            // never see a stale, already-settled tail.
+            session.mergeChain = mergeQueue.catch(() => {});
+          }
         }
         if (result.status === "in-progress") {
           // A crashed attempt was recorded at exit (the crash event
@@ -1984,9 +1999,11 @@ async function runSuperStep(
       .filter((r) => r.marker.id === marker.id)
       .map((r) => r.plan.attempt)
       .sort((a, b) => a - b);
+    // Both decisions below can merge into the pool checkout, so the round
+    // waits at its gate before any grade is recorded: a shutdown while it
+    // waits then leaves the round ungraded rather than graded and lost.
+    if (!(await poolCheckoutFree(session))) continue;
     const grades = await gradeRound(session, marker, attempts, emit);
-    // Both decisions below can merge into the pool checkout.
-    await poolCheckoutFree(session);
     // Lone-attempt resolution (ticket 05): with one attempt and one
     // grade there is nothing to select between, so the grade decides
     // at the ticket: flag → checkpoint, pass → done.
@@ -3459,47 +3476,62 @@ function recordAdoptedExit(
       branch: branchFor(session.cwd, ticketId),
     };
     session.mergeLine.taken(ticketId);
-    const next = session.mergeChain.then(async () => {
-      await poolCheckoutFree(session);
-      // Captured inside the serialized chain, right before the merge: HEAD
-      // may have moved since this ticket's attempt was adopted (another
-      // merge landing first), and mergeTicket removes this branch on
-      // success, so the range for a done-Notice's diff summary has to be
-      // taken here or not at all.
-      const beforeSha = mergeTargetSha(session);
-      const merge = mergeTicket(session, marker, worktree);
-      if (merge.ok) {
-        session.mergeLine.settled(ticketId);
-        appendEvent(session.runsDir, ticketId, {
-          at: new Date().toISOString(),
-          attempt,
-          kind: "merged",
-          payload: mergedPayload(merge),
-        });
-        closeAttemptTab(session, ticketId, attempt);
-        session.conversations.ticketEnded(
-          marker,
-          branchFor(session.cwd, ticketId),
-          beforeSha ? `${beforeSha}..${mergeTargetRef(session)}` : null,
-        );
-        session.state = applyUpdate(session.state, {
-          log: [
-            `ticket ${ticketId}: ${what} ${attempt} merged ` +
-              `${branchFor(session.cwd, ticketId)} onto the working branch`,
-          ],
-        });
-      } else {
-        await handleMergeConflict(session, marker, merge, attempt);
-      }
-    });
-    session.mergeChain = next.catch(() => {});
-    void next.then(
-      () => finishAdoptedFinalize(session),
-      () => finishAdoptedFinalize(session),
+    void mergeDoneTicket(session, marker, worktree, attempt, what).finally(() =>
+      finishAdoptedFinalize(session),
     );
   } else {
     finishAdoptedFinalize(session);
   }
+}
+
+// Merge a done ticket's worktree branch off the drive loop: an adopted or a
+// Continued attempt's ending, or a drive merge the pool checkout's gate held
+// back (ADR-0027). It passes the gate, then joins the session merge chain,
+// so two git merges never run at once on the main checkout, and records the
+// merge exactly as the drive's own merges do: the merged event, the tab
+// close, the done-Notice, the pool log; a conflict goes to the resolver
+// machinery. A shutdown while it waits at the gate drops it; the ticket
+// stays done-but-unmerged for the next run's Merge hold.
+async function mergeDoneTicket(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+  attempt: number,
+  what: string,
+): Promise<void> {
+  const ticketId = marker.id;
+  await chainMergeWork(session, async () => {
+    // Captured inside the serialized chain, right before the merge: HEAD
+    // may have moved since this ticket's attempt ended (another merge
+    // landing first), and mergeTicket removes this branch on success, so
+    // the range for a done-Notice's diff summary has to be taken here or
+    // not at all.
+    const beforeSha = mergeTargetSha(session);
+    const merge = mergeTicket(session, marker, worktree);
+    if (merge.ok) {
+      session.mergeLine.settled(ticketId);
+      appendEvent(session.runsDir, ticketId, {
+        at: new Date().toISOString(),
+        attempt,
+        kind: "merged",
+        payload: mergedPayload(merge),
+      });
+      closeAttemptTab(session, ticketId, attempt);
+      session.conversations.ticketEnded(
+        marker,
+        worktree.branch,
+        beforeSha ? `${beforeSha}..${mergeTargetRef(session)}` : null,
+      );
+      session.state = applyUpdate(session.state, {
+        log: [
+          `ticket ${ticketId}: ${what} ${attempt} merged ` +
+            `${worktree.branch} onto the working branch`,
+        ],
+      });
+    } else {
+      await handleMergeConflict(session, marker, merge, attempt);
+    }
+  }).catch(() => {});
 }
 
 // The adopted finalize's last step, after its merge chain has settled: emit
@@ -3729,8 +3761,7 @@ function chainEnlistedMerge(
   branch: string,
 ): void {
   session.mergeLine.taken(marker.id);
-  const next = session.mergeChain.then(async () => {
-    await poolCheckoutFree(session);
+  const next = chainMergeWork(session, async () => {
     const merge = mergeWithIssueAside(session, marker, branch);
     if (merge.ok) {
       session.mergeLine.settled(marker.id);
@@ -3750,7 +3781,6 @@ function chainEnlistedMerge(
     }
     await handleMergeConflict(session, marker, merge, attempt);
   });
-  session.mergeChain = next.catch(() => {});
   void next.then(
     () => finishAdoptedFinalize(session),
     () => finishAdoptedFinalize(session),
@@ -3899,7 +3929,9 @@ function heldPaneRecords(session: Session): Record<string, HeldPaneRecord> {
 
 // Every pane and tab no close may touch (issue #139): a Live attempt's (a
 // Continued attempt's included), a Held pane's, a live Conversation's, every
-// pane the engine counts as registered, and every pane and tab any enlisted
+// pane the engine counts as registered, every pane and tab a Conversation
+// record names while it is live (re-adopted or not yet, issue #140), and
+// every pane and tab any enlisted
 // Ticket or Conversation names on its events (ADR-0021). The last is read
 // with the survey's listing (session.enlistedTerminals), because an
 // operator may enlist the still-live agent in a finished tab of the pool's
@@ -3912,7 +3944,9 @@ function untouchable(session: Session): Untouchable {
   }
   for (const pane of registeredPanesOf(session)) panes.add(pane);
   for (const pane of session.enlistedTerminals.panes) panes.add(pane);
-  return { panes, tabs: session.enlistedTerminals.tabs };
+  const tabs = new Set(session.enlistedTerminals.tabs);
+  for (const tab of session.conversations.liveTerminals().tabs) tabs.add(tab);
+  return { panes, tabs };
 }
 
 // Every pane and tab the enlisted Tickets' and Conversations' `spawned`
@@ -3969,6 +4003,9 @@ function tabOwners(session: Session): string[] {
 function surveyListed(session: Session): void {
   const listing = session.paneSurvey?.latest() ?? null;
   if (listing === null) return;
+  // The daemon answers again: a Conversation a boot could not settle is
+  // tried again now (issue #140).
+  void session.conversations.readoptPending();
   for (const [id, held] of session.held) {
     if (!heldPaneListed(session, id, held) || tuiExited(session, id, held)) session.held.delete(id);
   }
@@ -4048,11 +4085,18 @@ function restoreAssignment(session: Session, marker: TicketMarker): void {
   }
 }
 
-// The pool checkout's one agent (ADR-0027): the id of an Attempt other than
-// `exceptId`'s working in the pool checkout right now, live (a drive's, a
-// Conversation's, a Continued one) or re-adopted, read from where its last
-// spawn ran or, for an enlisted one, its found directory. Null when none is.
+// The pool checkout's one agent (ADR-0027): the id of an agent other than
+// `exceptId`'s working in the pool checkout right now. That is a ticket the
+// drive planned into it, from the plan on (its launch may not have spawned
+// yet); a live or re-adopted Attempt whose last spawn ran there, or, for an
+// enlisted one, whose found directory is there; and a live Conversation,
+// enlisted ones included, working there. "There" is anywhere inside the
+// checkout's own working tree (inPoolCheckout), an enlisted agent in a
+// subdirectory included. Null when none is.
 function otherAgentInPoolCheckout(session: Session, exceptId: string): string | null {
+  for (const id of session.poolCheckoutPlanned) {
+    if (id !== exceptId) return id;
+  }
   const ids = new Set([
     ...Object.keys(session.liveAttempts.records()),
     ...session.adopted.keys(),
@@ -4065,9 +4109,23 @@ function otherAgentInPoolCheckout(session: Session, exceptId: string): string | 
       readEvents(session.runsDir, id)
         .filter((event) => event.kind === "spawned")
         .pop()?.payload.cwd;
-    if (cwd === session.cwd) return id;
+    if (typeof cwd === "string" && inPoolCheckout(session, cwd)) return id;
+  }
+  for (const { id, cwd } of session.conversations.liveDirectories()) {
+    if (id !== exceptId && inPoolCheckout(session, cwd)) return id;
   }
   return null;
+}
+
+// Whether a directory is inside the pool checkout's own working tree: its
+// git toplevel is the checkout's, so a subdirectory counts and a pool
+// worktree (under .git, with a toplevel of its own) does not. A directory
+// git cannot answer for counts by its path alone.
+function inPoolCheckout(session: Session, cwd: string): boolean {
+  const top = git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (top.ok) return canonicalDir(top.out) === session.cwd;
+  const path = canonicalDir(cwd);
+  return path === session.cwd || path.startsWith(`${session.cwd}/`);
 }
 
 // Whether a Continued attempt holds the pool checkout while merges land in
@@ -4077,15 +4135,40 @@ function otherAgentInPoolCheckout(session: Session, exceptId: string): string | 
 // the pool checkout is not where they land.
 function poolCheckoutHeld(session: Session): boolean {
   if (session.mergeTarget !== null) return false;
-  return [...session.continued.values()].some((c) => c.work.cwd === session.cwd);
+  return [...session.continued.values()].some((c) => c.inPoolCheckout);
 }
 
 // Wait until no Continued attempt holds the pool checkout: every merge that
 // lands in it passes through here first, so another ticket keeps running in
 // its own worktree and its merge queues behind the conversation, the way the
 // Merge hold queues scheduling behind a merge.
-async function poolCheckoutFree(session: Session): Promise<void> {
-  while (poolCheckoutHeld(session)) await Bun.sleep(MERGE_HOLD_POLL_MS);
+// Resolves true once no Continued attempt holds the pool checkout, or false
+// when the engine began shutting down while it waited: a merge let through
+// then would land in a checkout an agent still works in, so it is dropped,
+// and the ticket's merge is the next run's.
+async function poolCheckoutFree(session: Session): Promise<boolean> {
+  while (poolCheckoutHeld(session)) {
+    if (session.children.stopping) return false;
+    await Bun.sleep(MERGE_HOLD_POLL_MS);
+  }
+  return true;
+}
+
+// Run merge work on the session merge chain once the pool checkout's gate
+// lets it through (ADR-0027). The work joins the chain only then, so nothing
+// already on the chain, the super-step's own queue included, ever waits on
+// a held merge; the chain itself never rejects, while the caller sees the
+// work's own outcome. Resolves undefined when a shutdown dropped it.
+function chainMergeWork<T>(session: Session, work: () => Promise<T> | T): Promise<T | undefined> {
+  return poolCheckoutFree(session).then((free) => {
+    if (!free) return undefined;
+    const next = session.mergeChain.then(work);
+    session.mergeChain = next.then(
+      () => {},
+      () => {},
+    );
+    return next;
+  });
 }
 
 function keepTalkingRefusal(ticketId: string, why: string): Error {
@@ -4161,7 +4244,9 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
   // The pool checkout holds one agent at a time (ADR-0027): a Continued
   // attempt there beside another agent working there would be two writers
   // in one tree.
-  const beside = held.cwd === session.cwd ? otherAgentInPoolCheckout(session, ticketId) : null;
+  const beside = inPoolCheckout(session, held.cwd)
+    ? otherAgentInPoolCheckout(session, ticketId)
+    : null;
   if (beside !== null) {
     throw keepTalkingRefusal(
       ticketId,
@@ -4309,6 +4394,7 @@ function startContinued(
   session.continued.set(marker.id, {
     attempt: started.attempt,
     work: started.work,
+    inPoolCheckout: inPoolCheckout(session, started.work.cwd),
     run,
     logPath: started.logPath,
     outcomePath: started.outcomePath,
@@ -4556,8 +4642,13 @@ async function gradeContinuedAttempts(
     const { ticketId, attempt, work } = session.continuedGrades.shift()!;
     const marker = session.markers.find((candidate) => candidate.id === ticketId);
     if (!marker || marker.status !== "in-progress") continue;
+    // Before the grade is recorded (as in the drive's grading): a shutdown
+    // while it waits leaves the grade owed, and the next boot grades it.
+    if (!(await poolCheckoutFree(session))) {
+      session.continuedGrades.unshift({ ticketId, attempt, work });
+      return;
+    }
     const grades = await gradeRound(session, marker, [attempt], emit);
-    await poolCheckoutFree(session);
     const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, attempt, false));
     resolveLoneAttempt(
       session,
@@ -4595,11 +4686,14 @@ async function gradeContinuedAttempts(
 // tab is the one the Attempt named by the ticket's latest `checkpoint`
 // event ran in (a verify fan-out's checkpointed candidate, not whichever
 // candidate spawned last), and it closes once: the close is recorded as a
-// `tab-closed` event, and a tab already recorded closed is never asked
-// about again, so a crashed re-run's Resume does not reach back for it. A
-// headless fallback recorded no tab and closes nothing, and a crashed
-// attempt's tab stays, as ADR-0014 has it. Stateless otherwise, so a Resume
-// answered before a restart closes its tab after it.
+// `tab-closed` event (by herdr's terminal id when one was recorded), and a
+// tab already recorded closed is never asked about again, so a crashed
+// re-run's Resume does not reach back for it. A headless fallback recorded
+// no tab and closes nothing, and a crashed attempt's tab stays, as ADR-0014
+// has it: when a later attempt ran in the checkpointed tab after the
+// checkpoint (a Continued attempt that crashed), the tab is that attempt's
+// now and stays open. Stateless otherwise, so a Resume answered before a
+// restart closes its tab after it.
 //
 // It closes only what is certainly the pool's own and idle: never a tab
 // whose pane is untouchable (live, held, registered, or anyone's enlisted,
@@ -4619,20 +4713,29 @@ async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]):
     if (marker.enlistedFrom !== undefined) continue;
     session.held.delete(marker.id);
     const events = readEvents(session.runsDir, marker.id);
-    const attempt = lastCheckpointAttempt(events);
-    if (attempt === null) continue;
+    let checkpointAt = -1;
+    events.forEach((event, i) => {
+      if (event.kind === "checkpoint") checkpointAt = i;
+    });
+    if (checkpointAt === -1) continue;
+    const attempt = events[checkpointAt].attempt;
     const spawned = events
       .filter((event) => event.kind === "spawned" && event.attempt === attempt)
       .pop();
     const tabId = spawned?.payload.tab_id;
     const paneId = spawned?.payload.pane_id;
     if (typeof tabId !== "string" || typeof paneId !== "string") continue;
-    if (events.some((event) => event.kind === "tab-closed" && event.payload.tab_id === tabId)) {
-      continue;
-    }
     const cwd = typeof spawned!.payload.cwd === "string" ? spawned!.payload.cwd : null;
     const terminalId =
       typeof spawned!.payload.terminal_id === "string" ? spawned!.payload.terminal_id : null;
+    if (tabRecordedClosed(events, tabId, terminalId)) continue;
+    const reused = events.some(
+      (event, i) =>
+        i > checkpointAt &&
+        event.kind === "spawned" &&
+        event.payload.tab_id === tabId,
+    );
+    if (reused) continue;
     candidates.push({ marker, attempt, tabId, paneId, cwd, terminalId });
   }
   if (candidates.length === 0) return;
@@ -4645,14 +4748,7 @@ async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]):
       if (!listedAsRecorded(listing, { paneId, tabId, cwd, terminalId }, session.poolWorkspace.id)) {
         return;
       }
-      if (await closeTabRecorded(session, marker.id, attempt, tabId)) {
-        appendEvent(session.runsDir, marker.id, {
-          at: new Date().toISOString(),
-          attempt,
-          kind: "tab-closed",
-          payload: { tab_id: tabId, reason: "resume" },
-        });
-      }
+      await closeTabRecorded(session, marker.id, attempt, tabId, terminalId, "resume");
     }),
   );
 }
@@ -4675,7 +4771,14 @@ async function closeFinishedTerminals(session: Session): Promise<number> {
   const finished = finishedNow(session, session.paneSurvey.latest()!);
   const closed = await Promise.all(
     finished.map((tab) =>
-      closeTabRecorded(session, tab.owner, lastAttempt(session.runsDir, tab.owner), tab.tabId),
+      closeTabRecorded(
+        session,
+        tab.owner,
+        lastAttempt(session.runsDir, tab.owner),
+        tab.tabId,
+        tab.terminalId,
+        "finished terminals closed",
+      ),
     ),
   );
   const count = closed.filter(Boolean).length;
@@ -8112,7 +8215,7 @@ function closeAttemptTab(
       typeof event.payload.tab_id === "string",
   );
   if (!spawned || typeof spawned.payload.tab_id !== "string") return;
-  void closeTabRecorded(session, ticketId, attempt, spawned.payload.tab_id);
+  void closeSpawnedTab(session, ticketId, spawned, "role ended");
 }
 
 /**
@@ -8127,15 +8230,38 @@ function closeAttemptTab(
  */
 function closeAttemptTabs(session: Session, ticketId: string): void {
   if (wasEnlisted(session, ticketId)) return;
+  // One close per tab: a Continued attempt names its pane's tab again.
+  const seen = new Set<string>();
   for (const spawned of readEvents(session.runsDir, ticketId)) {
     if (
       spawned.kind !== "spawned" ||
-      typeof spawned.payload.tab_id !== "string"
+      typeof spawned.payload.tab_id !== "string" ||
+      seen.has(spawned.payload.tab_id)
     ) {
       continue;
     }
-    void closeTabRecorded(session, ticketId, spawned.attempt, spawned.payload.tab_id);
+    seen.add(spawned.payload.tab_id);
+    void closeSpawnedTab(session, ticketId, spawned, "role ended");
   }
+}
+
+// Close the tab a `spawned` event names, unless the events already record
+// it closed (issue #139): a Conversation's End closes its own tab before
+// its ending sweeps every tab under its id, and a Resume or bulk close can
+// come before a merge's close. Nobody asks herdr twice.
+function closeSpawnedTab(
+  session: Session,
+  owner: string,
+  spawned: TicketEvent,
+  reason: string,
+): Promise<boolean> {
+  const tabId = spawned.payload.tab_id as string;
+  const terminalId =
+    typeof spawned.payload.terminal_id === "string" ? spawned.payload.terminal_id : null;
+  if (tabRecordedClosed(readEvents(session.runsDir, owner), tabId, terminalId)) {
+    return Promise.resolve(true);
+  }
+  return closeTabRecorded(session, owner, spawned.attempt, tabId, terminalId, reason);
 }
 
 /**
@@ -8151,10 +8277,24 @@ function closeTabRecorded(
   owner: string,
   attempt: number,
   tabId: string,
+  terminalId: string | null,
+  reason: string,
 ): Promise<boolean> {
+  // A closed tab is recorded, so a later closer skips it; a tab herdr no
+  // longer has (tab_not_found) is closed already, not a failure.
+  const closed = (): boolean => {
+    appendEvent(session.runsDir, owner, {
+      at: new Date().toISOString(),
+      attempt,
+      kind: "tab-closed",
+      payload: { tab_id: tabId, ...(terminalId !== null ? { terminal_id: terminalId } : {}), reason },
+    });
+    return true;
+  };
   return closeTab(session.herdrSocket, tabId).then(
-    () => true,
+    closed,
     (err: unknown) => {
+      if (isTabNotFound(err)) return closed();
       const error = err instanceof Error ? err.message : String(err);
       appendEvent(session.runsDir, owner, {
         at: new Date().toISOString(),
@@ -8220,7 +8360,10 @@ function planTicket(
   attempt: number,
   verify: boolean,
 ): TicketPlan {
-  if (!session.git) return { cwd: session.cwd, attempt, verify };
+  if (!session.git) {
+    session.poolCheckoutPlanned.add(marker.id);
+    return { cwd: session.cwd, attempt, verify };
+  }
   // A lone ready ticket runs in the pool checkout itself, except once an
   // enlist has moved that checkout onto a created pool branch (issue #101):
   // an enlisted agent works there, its HEAD is not the merge target, and an
@@ -8234,8 +8377,11 @@ function planTicket(
     readyCount < 2 &&
     !branchExists(session.cwd, marker.id) &&
     session.mergeTarget === null &&
-    ![...session.continued.values()].some((c) => c.work.cwd === session.cwd)
+    ![...session.continued.values()].some((c) => c.inPoolCheckout)
   ) {
+    // Occupied from the plan on (ADR-0027): Keep talking must see this
+    // agent before its launch has spawned anything to see it by.
+    session.poolCheckoutPlanned.add(marker.id);
     return { cwd: session.cwd, attempt, verify };
   }
   const worktree = prepareWorktree(
@@ -8504,6 +8650,9 @@ function registeredPanesOf(session: Session): Set<string> {
   // A Held pane is the pool's while its checkpoint waits (issue #139): Keep
   // talking may still continue it, so it is no pane to enlist.
   for (const held of session.held.values()) panes.add(held.paneId);
+  // So is every pane a Conversation record names while it is live, adopted
+  // or not yet (issue #140): its End must still find it.
+  for (const pane of session.conversations.liveTerminals().panes) panes.add(pane);
   return panes;
 }
 

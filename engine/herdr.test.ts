@@ -9,6 +9,8 @@ import {
   attemptTabLabel,
   closeTab,
   herdrRpc,
+  isTabNotFound,
+  listAgents,
   listPaneIds,
   listPanes,
   openAttemptTab,
@@ -537,5 +539,26 @@ describe("listPanes (issue #139)", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("throws when agent.list answers without an agents list (R10)", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-agents-malformed-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () => socket.end(`${JSON.stringify({ id: "1", result: {} })}\n`));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      await expect(listAgents(socketPath)).rejects.toThrow("without an agents list");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads herdr's tab_not_found as a tab already gone", () => {
+    expect(isTabNotFound(new Error('tab.close failed: {"code":-32000,"message":"tab_not_found: w7:t1"}'))).toBe(true);
+    expect(isTabNotFound(new Error("tab.close failed: refused"))).toBe(false);
   });
 });

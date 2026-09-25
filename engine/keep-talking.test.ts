@@ -67,7 +67,7 @@ function tuiHarness(
           commitSha: null,
           grade: { score: 8, verdict: "pass", reasons: "fine" },
         }
-      : outcomes[ctx.id]?.[n];
+      : (outcomes[ctx.id]?.[n] ?? outcomes["*"]?.[0]);
     return ["bash", script, ctx.outcomePath, scripted ? JSON.stringify(scripted) : "", quit];
   };
   return { harnesses: { tui }, quit };
@@ -298,6 +298,38 @@ describe("Keep talking (issue #139)", () => {
     const closes = fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id);
     expect(closes.filter((tab) => tab === first.tab)).toHaveLength(1);
     expect(closes).not.toContain(second.tab);
+  }, 30_000);
+
+  it("leaves the tab open at a Resume when a Continued attempt crashed in it after the checkpoint (R6)", async () => {
+    const { run, poolDir, fake, quit } = await checkpointed({ holdPane: true });
+    const [first] = spawnedPanes(poolDir);
+    await run.keepTalking("01");
+    // The Continued attempt's TUI exits with no Outcome: a crash, and its
+    // tab stays open as every crashed attempt's does.
+    writeFileSync(quit, "");
+    await until("the crash", () => run.interrupts.some((i) => i.kind === "crash"));
+    run.accept("01");
+    await until("the fresh attempt's tab", () => spawnedPanes(poolDir).length === 3);
+    expect(fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === first.tab)).toBe(false);
+  }, 30_000);
+
+  it("refuses Keep talking while an enlisted Conversation works in a subdirectory of the pool checkout (R3)", async () => {
+    const { run, poolDir, fake } = await checkpointed({ git: true });
+    expect(readEvents(join(poolDir, "runs"), "01").find((e) => e.kind === "spawned")!.payload.cwd).toBe(poolDir);
+    const sub = join(poolDir, "sub");
+    mkdirSync(sub, { recursive: true });
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: sub,
+      title: "OC",
+      status: "idle",
+      rendered: "opencode\nctrl+p commands",
+      tabId: "tab-op",
+    });
+    const enlisted = await run.enlist({ becomes: "conversation", paneId: "pane-op", title: "Beside" });
+    expect(enlisted).toBeDefined();
+    await expect(run.keepTalking("01")).rejects.toThrow("working now");
   }, 30_000);
 
   it("refuses Keep talking in the pool checkout while another agent works there (review item 3)", async () => {
@@ -567,7 +599,7 @@ describe("Keep talking review fixes (issue #139)", () => {
     }
     const fake = await startExecutingFakeHerdr();
     fakes.push(fake);
-    fake.injectPane(options.paneId);
+    fake.injectPane(options.paneId, { cwd: poolDir });
     const { harnesses } = tuiHarness(poolDir, {});
     const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
     runs.push(run);
@@ -710,6 +742,46 @@ describe("Keep talking review fixes (issue #139)", () => {
     expect(spawnedPanes(poolDir).length).toBe(spawnsBefore);
   }, 40_000);
 
+  it("lets the drive carry on past a merge held for a Continued attempt in the pool checkout (R4)", async () => {
+    // 01 ran alone, so in the pool checkout, and is continued there. A
+    // Conversation then spawns a ticket, which runs in its own worktree and
+    // finishes done while 01's conversation goes on: its merge waits at the
+    // gate, and the super-step it ran in still ends.
+    const { run, poolDir } = await checkpointed({
+      git: true,
+      outcomes: {
+        "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
+        "*": [{ status: "done", summary: "spawned work", commitSha: null }],
+      },
+    });
+    await run.keepTalking("01");
+    const view = await run.startConversation({ title: "Spawner" });
+    writeFileSync(
+      join(poolDir, "runs", `${view.id}.spawn.json`),
+      JSON.stringify({ spawn: [{ title: "Side ticket", body: "do a small side thing please, in its own worktree" }] }),
+    );
+    const spawned = () => Object.keys(run.final.tickets).find((id) => id.startsWith(`${view.id}-spawn`));
+    await until("the spawned ticket done", () => {
+      const id = spawned();
+      return id !== undefined && run.final.tickets[id] === "done";
+    }, 20_000);
+    // The super-step it ran in ended and the drive went on to its close,
+    // rather than waiting inside the step on the held merge.
+    await until("the drive's close after the step", () => {
+      const log = run.final.log;
+      const exited = log.findIndex((line) => line.includes(`${spawned()!}: exited`));
+      return exited !== -1 && log.slice(exited).some((line) => line.startsWith("pool quiescent"));
+    });
+    expect(readEvents(join(poolDir, "runs"), spawned()!).some((e) => e.kind === "merged")).toBe(false);
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await until("the held merge", () =>
+      readEvents(join(poolDir, "runs"), spawned()!).some((e) => e.kind === "merged"),
+    );
+  }, 40_000);
+
   it("holds merges into the pool checkout while a Continued attempt works there (review item 3)", async () => {
     // 01 ran alone, so in the pool checkout; a Conversation works in its own
     // worktree meanwhile, and its End's merge waits for the conversation in
@@ -725,14 +797,15 @@ describe("Keep talking review fixes (issue #139)", () => {
     const git = (args: string[]) => Bun.spawnSync(["git", "-C", worktree, ...args], { stdout: "ignore", stderr: "ignore" });
     git(["add", "side.txt"]);
     git(["commit", "-qm", "side work"]);
-    const ended = run.endConversation(view.id);
-    await Bun.sleep(700);
+    // The End answers at once (R4): its ending is recorded and its tab
+    // closed, and its merge waits at the gate, off the caller.
+    await run.endConversation(view.id);
+    await Bun.sleep(500);
     expect(existsSync(join(poolDir, "side.txt"))).toBe(false);
     writeFileSync(
       join(poolDir, "runs", "01.outcome.json"),
       JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
     );
-    await ended;
     await until("the held merge", () => existsSync(join(poolDir, "side.txt")));
     expect(run.final.tickets["01"]).toBe("done");
   }, 40_000);

@@ -550,8 +550,9 @@ function stringField(value: unknown): string | null {
  * The live agents herdr holds, from `agent.list`: every pane with an agent
  * bound to it, engine-reported or herdr-detected. The enlist route reads it
  * through the engine, never the Console, and judges eligibility itself
- * (engine/enlist.ts). A daemon answer missing the `agents` array reads as
- * none, the way `listPaneIds` reads a missing `panes` array.
+ * (engine/enlist.ts). A daemon answer missing the `agents` array throws, as
+ * `listPanes` does (issue #139): read as none, it would tell boot that every
+ * enlisted Conversation's pane was gone, and the pane is the operator's.
  */
 export async function listAgents(socketPath: string): Promise<HerdrAgent[]> {
   const list = await herdrRpc(socketPath, "agent.list", {});
@@ -559,7 +560,9 @@ export async function listAgents(socketPath: string): Promise<HerdrAgent[]> {
     typeof list === "object" && list !== null
       ? (list as { agents?: unknown }).agents
       : undefined;
-  if (!Array.isArray(agents)) return [];
+  if (!Array.isArray(agents)) {
+    throw new Error(`agent.list answered without an agents list: ${JSON.stringify(list)}`);
+  }
   return (agents as Record<string, unknown>[]).flatMap((agent) => {
     const paneId = stringField(agent.pane_id);
     if (paneId === null) return [];
@@ -796,6 +799,18 @@ export async function closeTab(
   tabId: string,
 ): Promise<void> {
   await herdrRpc(socketPath, "tab.close", { tab_id: tabId });
+}
+
+/**
+ * Whether a failed close says the tab was not there to close (herdr's
+ * `tab_not_found`): a tab that is already gone is the close done, not a
+ * failure worth recording (issue #139). Two closers of one tab (a
+ * Conversation's End and its ending's sweep, a Resume close and a later
+ * merge) are ordinary, and so is an operator who closed it by hand.
+ */
+export function isTabNotFound(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /tab_not_found|tab .*not found|no such tab/i.test(message);
 }
 
 /**

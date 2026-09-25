@@ -21,7 +21,7 @@
  * Ticket, and from then on that tab is theirs (ADR-0021), whoever opened it.
  */
 
-import { readEvents } from "./events.ts";
+import { readEvents, type TicketEvent } from "./events.ts";
 import { listedAsRecorded, type PaneListing } from "./pane-survey.ts";
 
 /** One tab a `spawned` event says the engine opened. */
@@ -91,5 +91,26 @@ export function finishedTerminals(
     }
     if (untouchable.panes.has(tab.paneId)) return false;
     return !heldTabs.has(tab.tabId);
+  });
+}
+
+/**
+ * Whether the events record this tab as closed already (a `tab-closed`
+ * event), so no closer asks herdr again. Matched by herdr's terminal id when
+ * both the spawn and the close carry one, because the short tab id can be
+ * reused by a later tab; by tab id otherwise.
+ */
+export function tabRecordedClosed(
+  events: TicketEvent[],
+  tabId: string,
+  terminalId: string | null,
+): boolean {
+  return events.some((event) => {
+    if (event.kind !== "tab-closed") return false;
+    const closedTerminal = event.payload.terminal_id;
+    if (terminalId !== null && typeof closedTerminal === "string") {
+      return closedTerminal === terminalId;
+    }
+    return event.payload.tab_id === tabId;
   });
 }

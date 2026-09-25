@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { appendEvent } from "./events.ts";
-import { finishedTerminals, openedTabs, type OpenedTab } from "./finished-terminals.ts";
+import { finishedTerminals, openedTabs, tabRecordedClosed, type OpenedTab } from "./finished-terminals.ts";
 import type { ListedPane, PaneListing } from "./pane-survey.ts";
 import { makeTempDir } from "./tmp.ts";
 
@@ -110,5 +110,18 @@ describe("finished terminals", () => {
     expect(
       finishedTerminals([tab("01", 1)], listing([{ paneId: "p1", tabId: "t1", terminalId: "term_ffff" }]), none, null),
     ).toHaveLength(1);
+  });
+
+  it("knows a tab closed by its terminal id when one was recorded, by its tab id otherwise (R7)", () => {
+    const closed = (payload: Record<string, unknown>) => [
+      { at: AT, attempt: 1, kind: "tab-closed" as const, payload },
+    ];
+    // The same short tab id, reused by a later terminal: not the one closed.
+    expect(tabRecordedClosed(closed({ tab_id: "t1", terminal_id: "term_a" }), "t1", "term_b")).toBe(false);
+    expect(tabRecordedClosed(closed({ tab_id: "t1", terminal_id: "term_a" }), "t9", "term_a")).toBe(true);
+    // Records without terminal ids fall back to the tab id.
+    expect(tabRecordedClosed(closed({ tab_id: "t1" }), "t1", "term_b")).toBe(true);
+    expect(tabRecordedClosed(closed({ tab_id: "t1", terminal_id: "term_a" }), "t1", null)).toBe(true);
+    expect(tabRecordedClosed([], "t1", null)).toBe(false);
   });
 });

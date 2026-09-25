@@ -82,6 +82,10 @@ const EVENT_KINDS = [
   // left it exactly as found and handed the Ticket back to ordinary
   // attempts, so a restart must not take the pane back as the Ticket's.
   "let-go",
+  // The operator asked a Conversation to End (issue #140): recorded before
+  // the End moves anything, so an engine that stops mid-End leaves the next
+  // boot the fact that this was an ending, not a crash.
+  "end-requested",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

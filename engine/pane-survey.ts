@@ -20,6 +20,8 @@
  * than read an unanswered question as every pane gone.
  */
 
+import { realpathSync } from "node:fs";
+
 // How often the survey lists while nothing asks for a fresher answer: slow,
 // because the operator closing a tab by hand is the only change it exists to
 // notice on its own; everything the engine does itself refreshes on demand.
@@ -59,9 +61,10 @@ export interface RecordedPane {
  * is the operator's and lives wherever they put it), and in the recorded
  * directory, each checked only where the listing reports it. Where both
  * the record and the listing carry herdr's `terminal_id`, which is unique
- * per terminal and never reused, it must match too: that alone tells a
- * recorded pane from a later one given its id. Anything that disagrees is
- * not ours: never closed, never held.
+ * per terminal and never reused, it alone decides: a match is ours even in
+ * a tab the operator moved to another workspace, and a mismatch is not ours
+ * whatever else agrees. Anything that disagrees is not ours: never closed,
+ * never held.
  */
 export function listedAsRecorded(
   listing: PaneListing,
@@ -70,8 +73,11 @@ export function listedAsRecorded(
 ): boolean {
   const listed = listing.panes.get(recorded.paneId);
   if (!listed) return false;
-  if (recorded.terminalId && listed.terminalId && listed.terminalId !== recorded.terminalId) {
-    return false;
+  if (recorded.terminalId && listed.terminalId) {
+    // herdr's terminal id is never reused, so it settles the question on its
+    // own either way: the same terminal is ours wherever the operator moved
+    // its tab since, and another terminal is not, whatever it shares.
+    return listed.terminalId === recorded.terminalId;
   }
   if (recorded.tabId !== null && listed.tabId !== null && listed.tabId !== recorded.tabId) {
     return false;
@@ -85,8 +91,17 @@ export function listedAsRecorded(
   return true;
 }
 
+// A directory as herdr reports it: the physical path (herdr resolves
+// symlinks, macOS's /tmp among them), so the recorded one is resolved the
+// same way before they are compared.
 function trimSlash(path: string): string {
-  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+  let physical = path;
+  try {
+    physical = realpathSync(path);
+  } catch {
+    // Gone from disk: compared as written.
+  }
+  return physical.length > 1 ? physical.replace(/\/+$/, "") : physical;
 }
 
 export interface PaneSurvey {
