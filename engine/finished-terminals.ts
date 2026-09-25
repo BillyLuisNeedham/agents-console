@@ -33,6 +33,8 @@ export interface OpenedTab {
   paneId: string | null;
   /** Where the attempt ran, as the event recorded it. */
   cwd: string | null;
+  /** herdr's never-reused terminal id, when the spawn recorded one. */
+  terminalId: string | null;
 }
 
 /**
@@ -50,6 +52,8 @@ export function openedTabs(runsDir: string, owners: Iterable<string>): OpenedTab
         tabId: event.payload.tab_id,
         paneId: typeof event.payload.pane_id === "string" ? event.payload.pane_id : null,
         cwd: typeof event.payload.cwd === "string" ? event.payload.cwd : null,
+        terminalId:
+          typeof event.payload.terminal_id === "string" ? event.payload.terminal_id : null,
       });
     }
   }
@@ -81,7 +85,8 @@ export function finishedTerminals(
   }
   return opened.filter((tab) => {
     if (tab.paneId === null) return false;
-    if (!listedAsRecorded(listing, { paneId: tab.paneId, tabId: tab.tabId, cwd: tab.cwd }, workspaceId)) {
+    const recorded = { paneId: tab.paneId, tabId: tab.tabId, cwd: tab.cwd, terminalId: tab.terminalId };
+    if (!listedAsRecorded(listing, recorded, workspaceId)) {
       return false;
     }
     if (untouchable.panes.has(tab.paneId)) return false;

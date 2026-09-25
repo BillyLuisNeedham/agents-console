@@ -3,7 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { createPaneSurvey, listedAsRecorded } from "./pane-survey.ts";
 
-const pane = (paneId: string, tabId: string | null = null) => ({ paneId, tabId, workspaceId: null, cwd: null });
+const pane = (paneId: string, tabId: string | null = null) => ({ paneId, tabId, workspaceId: null, cwd: null, terminalId: null });
 
 describe("pane survey", () => {
   it("serves the last listing and hands every one to the engine", async () => {
@@ -87,14 +87,23 @@ describe("pane survey", () => {
 });
 
 describe("listedAsRecorded", () => {
-  const listing = (listed: { paneId: string; tabId: string | null; workspaceId: string | null; cwd: string | null }[]) => ({
+  const listing = (
+    listed: {
+      paneId: string;
+      tabId: string | null;
+      workspaceId: string | null;
+      cwd: string | null;
+      terminalId: string | null;
+    }[],
+  ) => ({
     panes: new Map(listed.map((p) => [p.paneId, p])),
     tabs: new Set(listed.flatMap((p) => (p.tabId ? [p.tabId] : []))),
   });
   it("holds a pane only as it was recorded", () => {
     const recorded = { paneId: "p1", tabId: "t1", cwd: "/w" };
-    const as = (p: Partial<{ tabId: string | null; workspaceId: string | null; cwd: string | null }>) =>
-      listing([{ paneId: "p1", tabId: null, workspaceId: null, cwd: null, ...p }]);
+    const as = (
+      p: Partial<{ tabId: string | null; workspaceId: string | null; cwd: string | null; terminalId: string | null }>,
+    ) => listing([{ paneId: "p1", tabId: null, workspaceId: null, cwd: null, terminalId: null, ...p }]);
     expect(listedAsRecorded(as({ tabId: "t1", workspaceId: "w1", cwd: "/w" }), recorded, "w1")).toBe(true);
     expect(listedAsRecorded(as({}), recorded, "w1")).toBe(true);
     expect(listedAsRecorded(as({ tabId: "t2" }), recorded, null)).toBe(false);
@@ -102,5 +111,18 @@ describe("listedAsRecorded", () => {
     expect(listedAsRecorded(as({ workspaceId: "w2" }), recorded, null)).toBe(true);
     expect(listedAsRecorded(as({ cwd: "/x" }), recorded, null)).toBe(false);
     expect(listedAsRecorded(listing([]), recorded, null)).toBe(false);
+  });
+
+  it("requires herdr's terminal id to match where both sides carry one", () => {
+    const recorded = { paneId: "p1", tabId: "t1", cwd: null, terminalId: "term_65b1" };
+    const as = (terminalId: string | null) =>
+      listing([{ paneId: "p1", tabId: "t1", workspaceId: null, cwd: null, terminalId }]);
+    expect(listedAsRecorded(as("term_65b1"), recorded, null)).toBe(true);
+    // The short ids were reused by a later terminal: not ours.
+    expect(listedAsRecorded(as("term_ffff"), recorded, null)).toBe(false);
+    // A daemon that reports none, and a record from before one was kept,
+    // fall back to the other checks.
+    expect(listedAsRecorded(as(null), recorded, null)).toBe(true);
+    expect(listedAsRecorded(as("term_ffff"), { ...recorded, terminalId: null }, null)).toBe(true);
   });
 });

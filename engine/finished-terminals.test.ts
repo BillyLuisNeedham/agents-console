@@ -20,6 +20,7 @@ function listing(panes: Partial<ListedPane>[]): PaneListing {
     tabId: pane.tabId ?? null,
     workspaceId: pane.workspaceId ?? null,
     cwd: pane.cwd ?? null,
+    terminalId: pane.terminalId ?? null,
   }));
   return {
     panes: new Map(full.map((pane) => [pane.paneId, pane])),
@@ -29,22 +30,22 @@ function listing(panes: Partial<ListedPane>[]): PaneListing {
 
 const none = { panes: new Set<string>(), tabs: new Set<string>() };
 
-function tab(owner: string, n: number, cwd: string | null = null): OpenedTab {
-  return { owner, tabId: `t${n}`, paneId: `p${n}`, cwd };
+function tab(owner: string, n: number, cwd: string | null = null, terminalId: string | null = null): OpenedTab {
+  return { owner, tabId: `t${n}`, paneId: `p${n}`, cwd, terminalId };
 }
 
 describe("finished terminals", () => {
   it("reads every tab the owners' spawned events name, once each", () => {
     const runsDir = makeTempDir("runs-");
     dirs.push(runsDir);
-    appendEvent(runsDir, "01", { at: AT, attempt: 1, kind: "spawned", payload: { cwd: "/w", pane_id: "p1", tab_id: "t1" } });
+    appendEvent(runsDir, "01", { at: AT, attempt: 1, kind: "spawned", payload: { cwd: "/w", pane_id: "p1", tab_id: "t1", terminal_id: "term_a" } });
     appendEvent(runsDir, "01", { at: AT, attempt: 2, kind: "spawned", payload: { cwd: "/w", pane_id: "p1", tab_id: "t1", continued: true } });
     appendEvent(runsDir, "01", { at: AT, attempt: 3, kind: "spawned", payload: { pid: 7 } });
     appendEvent(runsDir, "conv-1", { at: AT, attempt: 1, kind: "spawned", payload: { pane_id: "pc", tab_id: "tc" } });
     appendEvent(runsDir, "enlist-1", { at: AT, attempt: 1, kind: "spawned", payload: { pane_id: "pe", tab_id: "te" } });
     expect(openedTabs(runsDir, ["01", "conv-1"])).toEqual([
-      { owner: "01", tabId: "t1", paneId: "p1", cwd: "/w" },
-      { owner: "conv-1", tabId: "tc", paneId: "pc", cwd: null },
+      { owner: "01", tabId: "t1", paneId: "p1", cwd: "/w", terminalId: null },
+      { owner: "conv-1", tabId: "tc", paneId: "pc", cwd: null, terminalId: null },
     ]);
   });
 
@@ -94,5 +95,20 @@ describe("finished terminals", () => {
     ).toHaveLength(1);
     expect(finishedTerminals(opened, listing([{ paneId: "p1" }]), none, "w1")).toHaveLength(1);
     expect(finishedTerminals(opened, listing([]), none, null)).toHaveLength(0);
+  });
+
+  it("never counts a tab whose terminal herdr now names differently (terminal_id)", () => {
+    const opened = [tab("01", 1, null, "term_65b1")];
+    // Same pane and tab ids, another terminal behind them: not ours.
+    expect(
+      finishedTerminals(opened, listing([{ paneId: "p1", tabId: "t1", terminalId: "term_ffff" }]), none, null),
+    ).toEqual([]);
+    expect(
+      finishedTerminals(opened, listing([{ paneId: "p1", tabId: "t1", terminalId: "term_65b1" }]), none, null),
+    ).toHaveLength(1);
+    // A record from before herdr gave terminal ids falls back to the other checks.
+    expect(
+      finishedTerminals([tab("01", 1)], listing([{ paneId: "p1", tabId: "t1", terminalId: "term_ffff" }]), none, null),
+    ).toHaveLength(1);
   });
 });

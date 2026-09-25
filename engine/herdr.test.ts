@@ -478,12 +478,17 @@ describe("HERDR_SOCKET_DEFAULT in a test run", () => {
 });
 
 describe("listPanes (issue #139)", () => {
-  it("reads each pane's tab, workspace and directory", async () => {
+  it("reads each pane's tab, workspace, directory and terminal id", async () => {
     const fake = await startFakeHerdr({
-      foreignPanes: [{ tab_id: "t1", pane_id: "p1", workspace_id: "w1" }],
+      foreignPanes: [
+        { tab_id: "t1", pane_id: "p1", workspace_id: "w1" },
+        // herdr 0.8.2's own fields, beyond the fake's usual three.
+        { tab_id: "w7:t1", pane_id: "w7:p1", workspace_id: "w7", cwd: "/w", terminal_id: "term_65b1" } as FakePane,
+      ],
     });
     expect(await listPanes(fake.socketPath)).toEqual([
-      { paneId: "p1", tabId: "t1", workspaceId: "w1", cwd: null },
+      { paneId: "p1", tabId: "t1", workspaceId: "w1", cwd: null, terminalId: null },
+      { paneId: "w7:p1", tabId: "w7:t1", workspaceId: "w7", cwd: "/w", terminalId: "term_65b1" },
     ]);
   });
 
@@ -497,6 +502,37 @@ describe("listPanes (issue #139)", () => {
     await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
     try {
       await expect(listPanes(socketPath)).rejects.toThrow("without a panes list");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes the root pane's terminal id off a tab.create answer that carries one", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-terminal-id-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () =>
+        socket.end(
+          `${JSON.stringify({
+            id: "1",
+            result: {
+              type: "tab_created",
+              tab: { tab_id: "w7:t1" },
+              root_pane: { pane_id: "w7:p1", tab_id: "w7:t1", terminal_id: "term_65b1" },
+            },
+          })}\n`,
+        ),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      expect(await openAttemptTab(socketPath, "01 · x", "/w", "w7")).toEqual({
+        tabId: "w7:t1",
+        paneId: "w7:p1",
+        terminalId: "term_65b1",
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });

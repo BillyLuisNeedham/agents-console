@@ -598,7 +598,7 @@ export async function launchAttempt<R extends { ok: true }>(
       }
       return headless(opened);
     }
-    terminal = { paneId: opened.paneId, tabId: opened.tabId };
+    terminal = { paneId: opened.paneId, tabId: opened.tabId, terminalId: opened.terminalId ?? null };
     await waitForShellSettled(env.herdrSocket, terminal.paneId, cadence);
     const terminalError = await sendWrapperToPane(
       env.herdrSocket,
@@ -848,6 +848,8 @@ export async function runAttempt<R extends { ok: true }>(
 interface AttemptTerminal {
   paneId: string | null;
   tabId: string | null;
+  /** herdr's never-reused id for the terminal (issue #139), when it gave one. */
+  terminalId?: string | null;
   error?: string;
 }
 
@@ -881,7 +883,7 @@ async function openAttemptTerminal(
     }
     try {
       const tab = await openAttemptTab(env.herdrSocket, label, cwd, workspaceId);
-      return { paneId: tab.paneId, tabId: tab.tabId };
+      return { paneId: tab.paneId, tabId: tab.tabId, terminalId: tab.terminalId };
     } catch (refused) {
       // The refused id goes back with the question: the engine answers with
       // the same workspace when it is still there (a transient refusal),
@@ -890,7 +892,7 @@ async function openAttemptTerminal(
       const retryId = await env.poolWorkspace.reresolve(workspaceId);
       if (retryId === null) throw refused;
       const tab = await openAttemptTab(env.herdrSocket, label, cwd, retryId);
-      return { paneId: tab.paneId, tabId: tab.tabId };
+      return { paneId: tab.paneId, tabId: tab.tabId, terminalId: tab.terminalId };
     }
   } catch (err) {
     return {
@@ -979,6 +981,9 @@ function spawnedPayload(
           // must never point at the dead pane the fallback closed.
           pane_id: terminalError !== undefined ? null : terminal.paneId,
           tab_id: terminalError !== undefined ? null : terminal.tabId,
+          ...(terminalError === undefined && terminal.terminalId
+            ? { terminal_id: terminal.terminalId }
+            : {}),
           ...(terminal.error !== undefined || terminalError !== undefined
             ? { terminal_error: terminalError ?? terminal.error }
             : {}),

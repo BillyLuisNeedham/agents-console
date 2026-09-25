@@ -27,6 +27,8 @@ export interface HeldPaneRecord {
 /** Everything a Continued attempt needs to carry on in a Held pane. */
 export interface HeldPane extends HeldPaneRecord {
   tabId: string | null;
+  /** herdr's never-reused terminal id, when the spawn recorded one. */
+  terminalId: string | null;
   /** Where the attempt ran: its worktree, or the pool checkout. */
   cwd: string;
   /** The branch the attempt worked on; null in the pool checkout. */
@@ -98,6 +100,7 @@ export function heldPaneOf(
     attempt,
     paneId: payload.pane_id,
     tabId: typeof payload.tab_id === "string" ? payload.tab_id : null,
+    terminalId: typeof payload.terminal_id === "string" ? payload.terminal_id : null,
     cwd: payload.cwd,
     branch: typeof payload.branch === "string" ? payload.branch : null,
     harness: typeof payload.harness === "string" ? payload.harness : "",

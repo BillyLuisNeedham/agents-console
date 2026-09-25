@@ -717,7 +717,13 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // pane and tab it ran in, where, and when. Null for none.
   function launchOf(
     id: string,
-  ): { paneId: string; tabId: string | null; cwd: string | null; at: string } | null {
+  ): {
+    paneId: string;
+    tabId: string | null;
+    cwd: string | null;
+    terminalId: string | null;
+    at: string;
+  } | null {
     const spawned = readEvents(env.runsDir, id)
       .filter((e) => e.kind === "spawned" && typeof e.payload.pane_id === "string")
       .pop();
@@ -726,6 +732,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       paneId: spawned.payload.pane_id as string,
       tabId: typeof spawned.payload.tab_id === "string" ? spawned.payload.tab_id : null,
       cwd: typeof spawned.payload.cwd === "string" ? spawned.payload.cwd : null,
+      terminalId:
+        typeof spawned.payload.terminal_id === "string" ? spawned.payload.terminal_id : null,
       at: spawned.at,
     };
   }

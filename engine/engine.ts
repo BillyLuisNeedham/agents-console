@@ -3856,7 +3856,7 @@ function heldPaneListed(session: Session, ticketId: string, held: HeldPane): boo
   const enlisted = !held.wrapped;
   return listedAsRecorded(
     listing,
-    { paneId: held.paneId, tabId: held.tabId, cwd: held.cwd },
+    { paneId: held.paneId, tabId: held.tabId, cwd: held.cwd, terminalId: held.terminalId },
     enlisted ? null : session.poolWorkspace.id,
   );
 }
@@ -4213,6 +4213,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
       model: assignment.model,
       pane_id: held.paneId,
       tab_id: held.tabId,
+      ...(held.terminalId !== null ? { terminal_id: held.terminalId } : {}),
       continued: true,
       continues: held.attempt,
       work_attempt: held.workAttempt,
@@ -4606,7 +4607,14 @@ async function gradeContinuedAttempts(
 // recorded; a listing that could not be had closes nothing.
 async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]): Promise<void> {
   if (session.paneSurvey === null) return;
-  const candidates: { marker: TicketMarker; attempt: number; tabId: string; paneId: string; cwd: string | null }[] = [];
+  const candidates: {
+    marker: TicketMarker;
+    attempt: number;
+    tabId: string;
+    paneId: string;
+    cwd: string | null;
+    terminalId: string | null;
+  }[] = [];
   for (const marker of new Set(markers)) {
     if (marker.enlistedFrom !== undefined) continue;
     session.held.delete(marker.id);
@@ -4623,16 +4631,20 @@ async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]):
       continue;
     }
     const cwd = typeof spawned!.payload.cwd === "string" ? spawned!.payload.cwd : null;
-    candidates.push({ marker, attempt, tabId, paneId, cwd });
+    const terminalId =
+      typeof spawned!.payload.terminal_id === "string" ? spawned!.payload.terminal_id : null;
+    candidates.push({ marker, attempt, tabId, paneId, cwd, terminalId });
   }
   if (candidates.length === 0) return;
   if (!(await session.paneSurvey.refresh())) return;
   const listing = session.paneSurvey.latest()!;
   const off = untouchable(session);
   await Promise.all(
-    candidates.map(async ({ marker, attempt, tabId, paneId, cwd }) => {
+    candidates.map(async ({ marker, attempt, tabId, paneId, cwd, terminalId }) => {
       if (off.panes.has(paneId) || off.tabs.has(tabId)) return;
-      if (!listedAsRecorded(listing, { paneId, tabId, cwd }, session.poolWorkspace.id)) return;
+      if (!listedAsRecorded(listing, { paneId, tabId, cwd, terminalId }, session.poolWorkspace.id)) {
+        return;
+      }
       if (await closeTabRecorded(session, marker.id, attempt, tabId)) {
         appendEvent(session.runsDir, marker.id, {
           at: new Date().toISOString(),

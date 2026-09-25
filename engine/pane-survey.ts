@@ -31,6 +31,7 @@ export interface ListedPane {
   tabId: string | null;
   workspaceId: string | null;
   cwd: string | null;
+  terminalId: string | null;
 }
 
 export interface PaneListing {
@@ -45,6 +46,8 @@ export interface RecordedPane {
   paneId: string;
   tabId: string | null;
   cwd: string | null;
+  /** herdr's never-reused terminal id, on records made since herdr gave one. */
+  terminalId?: string | null;
 }
 
 /**
@@ -54,8 +57,11 @@ export interface RecordedPane {
  * under a recorded one. So the listed pane must sit in the recorded tab, in
  * the Pool workspace when one is named (`workspaceId`; null for a pane that
  * is the operator's and lives wherever they put it), and in the recorded
- * directory, each checked only where the listing reports it. Anything that
- * disagrees is not ours: never closed, never held.
+ * directory, each checked only where the listing reports it. Where both
+ * the record and the listing carry herdr's `terminal_id`, which is unique
+ * per terminal and never reused, it must match too: that alone tells a
+ * recorded pane from a later one given its id. Anything that disagrees is
+ * not ours: never closed, never held.
  */
 export function listedAsRecorded(
   listing: PaneListing,
@@ -64,6 +70,9 @@ export function listedAsRecorded(
 ): boolean {
   const listed = listing.panes.get(recorded.paneId);
   if (!listed) return false;
+  if (recorded.terminalId && listed.terminalId && listed.terminalId !== recorded.terminalId) {
+    return false;
+  }
   if (recorded.tabId !== null && listed.tabId !== null && listed.tabId !== recorded.tabId) {
     return false;
   }

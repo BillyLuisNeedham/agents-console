@@ -165,6 +165,10 @@ export function attemptTabLabel(ticketId: string, title: string): string {
 export interface AttemptTab {
   tabId: string;
   paneId: string;
+  /** herdr's `terminal_id` for the root pane, when the answer carries one:
+   *  unique per terminal and never reused, unlike the short pane and tab
+   *  ids, so a record carrying it names this terminal and no later one. */
+  terminalId: string | null;
 }
 
 /**
@@ -195,7 +199,7 @@ export async function openAttemptTab(
     typeof created === "object" && created !== null
       ? (created as {
           tab?: { tab_id?: unknown };
-          root_pane?: { pane_id?: unknown };
+          root_pane?: { pane_id?: unknown; terminal_id?: unknown };
         })
       : {};
   const tabId = answer.tab?.tab_id;
@@ -208,7 +212,8 @@ export async function openAttemptTab(
       `tab.create returned no root pane id: ${JSON.stringify(created)}`,
     );
   }
-  return { tabId, paneId };
+  const terminalId = answer.root_pane?.terminal_id;
+  return { tabId, paneId, terminalId: typeof terminalId === "string" ? terminalId : null };
 }
 
 /** Where the Pool workspace id the engine uses came from (issue #94). */
@@ -487,7 +492,13 @@ export async function listPaneIds(
  * empty one would let go of every Held pane at once.
  */
 export async function listPanes(socketPath: string): Promise<
-  { paneId: string; tabId: string | null; workspaceId: string | null; cwd: string | null }[]
+  {
+    paneId: string;
+    tabId: string | null;
+    workspaceId: string | null;
+    cwd: string | null;
+    terminalId: string | null;
+  }[]
 > {
   const list = await herdrRpc(socketPath, "pane.list", {});
   const panes =
@@ -504,6 +515,7 @@ export async function listPanes(socketPath: string): Promise<
       tabId: typeof p.tab_id === "string" ? p.tab_id : null,
       workspaceId: typeof p.workspace_id === "string" ? p.workspace_id : null,
       cwd: typeof p.cwd === "string" ? p.cwd : null,
+      terminalId: typeof p.terminal_id === "string" ? p.terminal_id : null,
     }));
 }
 
