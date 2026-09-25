@@ -9,7 +9,10 @@ import {
   attemptTabLabel,
   closeTab,
   herdrRpc,
+  isTabNotFound,
+  listAgents,
   listPaneIds,
+  listPanes,
   openAttemptTab,
   relabelWorkspace,
   releasePaneAgent,
@@ -473,5 +476,89 @@ describe("HERDR_SOCKET_DEFAULT in a test run", () => {
     expect(HERDR_SOCKET_DEFAULT).toBe(process.env.HERDR_SOCKET_PATH!);
     expect(existsSync(HERDR_SOCKET_DEFAULT)).toBe(false);
     expect(HERDR_SOCKET_DEFAULT.startsWith(join(homedir(), ".config"))).toBe(false);
+  });
+});
+
+describe("listPanes (issue #139)", () => {
+  it("reads each pane's tab, workspace, directory and terminal id", async () => {
+    const fake = await startFakeHerdr({
+      foreignPanes: [
+        { tab_id: "t1", pane_id: "p1", workspace_id: "w1" },
+        // herdr 0.8.2's own fields, beyond the fake's usual three.
+        { tab_id: "w7:t1", pane_id: "w7:p1", workspace_id: "w7", cwd: "/w", terminal_id: "term_65b1" } as FakePane,
+      ],
+    });
+    expect(await listPanes(fake.socketPath)).toEqual([
+      { paneId: "p1", tabId: "t1", workspaceId: "w1", cwd: null, terminalId: null },
+      { paneId: "w7:p1", tabId: "w7:t1", workspaceId: "w7", cwd: "/w", terminalId: "term_65b1" },
+    ]);
+  });
+
+  it("throws on an answer with no panes list rather than reading it as none (review item 8)", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-malformed-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () => socket.end(`${JSON.stringify({ id: "1", result: { type: "ok" } })}\n`));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      await expect(listPanes(socketPath)).rejects.toThrow("without a panes list");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes the root pane's terminal id off a tab.create answer that carries one", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-terminal-id-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () =>
+        socket.end(
+          `${JSON.stringify({
+            id: "1",
+            result: {
+              type: "tab_created",
+              tab: { tab_id: "w7:t1" },
+              root_pane: { pane_id: "w7:p1", tab_id: "w7:t1", terminal_id: "term_65b1" },
+            },
+          })}\n`,
+        ),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      expect(await openAttemptTab(socketPath, "01 · x", "/w", "w7")).toEqual({
+        tabId: "w7:t1",
+        paneId: "w7:p1",
+        terminalId: "term_65b1",
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when agent.list answers without an agents list (R10)", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-agents-malformed-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () => socket.end(`${JSON.stringify({ id: "1", result: {} })}\n`));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      await expect(listAgents(socketPath)).rejects.toThrow("without an agents list");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads herdr's tab_not_found as a tab already gone", () => {
+    expect(isTabNotFound(new Error('tab.close failed: {"code":-32000,"message":"tab_not_found: w7:t1"}'))).toBe(true);
+    expect(isTabNotFound(new Error("tab.close failed: refused"))).toBe(false);
   });
 });

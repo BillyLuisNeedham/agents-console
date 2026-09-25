@@ -1,11 +1,13 @@
 /**
  * Terminal surface: the client side of the card's terminal-backed attempt
  * surface (ADR-0014). The store polls the peek endpoint for every ticket
- * whose enriched snapshot entry carries a live attempt with a pane (that
- * is, whose current attempt is terminal-backed and running), every 2s and
+ * whose enriched snapshot entry carries a pane (`ticketPaneId`: a live
+ * attempt's while a terminal-backed attempt runs, or a Held pane's while
+ * the ticket waits at a checkpoint, issue #139), every 2s and
  * once per pool snapshot, and holds the peek text and focus confirmations
  * the cards' surfaces project from. A ticket whose pane leaves the snapshot (the
- * attempt ended, or the ticket left the pool) is pruned, so its polling
+ * attempt ended, the checkpoint was answered or its pane closed, or the
+ * ticket left the pool) is pruned, so its polling
  * stops with its surface; a re-spawned attempt's new pane id resets the
  * entry to pending. Module scope in the bootstrap, so no render drops the
  * entries. The renderer shapes the surface: a dim,
@@ -14,7 +16,9 @@
  */
 
 import {
+  ticketPaneId,
   type EnrichedSnapshot,
+  type KeepTalkingView,
   type TerminalPeekResponse,
   type TerminalSurfaceView,
 } from "./project";
@@ -68,9 +72,9 @@ export class TerminalSurface {
   }
 
   /**
-   * The snapshot cadence: prune to the tickets and Conversations whose
-   * current attempt is terminal-backed (a live attempt's pane on the
-   * enriched snapshot),
+   * The snapshot cadence: prune to the tickets and Conversations that have
+   * a pane to show (a live attempt's or a Held pane's on the enriched
+   * snapshot),
    * reset entries whose attempt re-spawned under a new pane id, and peek
    * each once, so a freshly spawned attempt's surface fills as soon as its
    * snapshot lands rather than after up to 2s. A live Conversation carries
@@ -80,7 +84,7 @@ export class TerminalSurface {
   update(snapshot: EnrichedSnapshot | null): void {
     const paneOf = new Map<string, string>();
     for (const ticket of snapshot?.state.tickets ?? []) {
-      const paneId = ticket.liveAttempt?.paneId;
+      const paneId = ticketPaneId(ticket);
       if (typeof paneId === "string" && paneId !== "") {
         paneOf.set(ticket.id, paneId);
       }
@@ -294,4 +298,43 @@ export function renderTerminalSurface(
         : null,
     ),
   );
+}
+
+/**
+ * Keep talking (issue #139): the button beside Resume on a checkpoint whose
+ * ticket still has its Held pane, shared by the Detail's interrupt form and
+ * the Needs input tray so both say the same thing. It lives with the
+ * terminal surface because that is what it continues: the checkpointed
+ * Attempt's own herdr pane, conversation and all, as a Continued attempt,
+ * where Resume would start a fresh Attempt from the Issue. Disabled while
+ * the request is out and after the engine accepts, until the snapshot moves
+ * the ticket off checkpoint. An answer already queued withdraws the offer
+ * (the projection's `keepTalking` goes null), so a waiting row never shows
+ * it. A refusal's reason renders beside the form through
+ * `renderKeepTalkingFailure`, never on the global banner.
+ */
+export function renderKeepTalkingButton(
+  view: KeepTalkingView,
+  onKeepTalking: () => void,
+): HTMLElement {
+  return h(
+    "button",
+    {
+      class: "btn keep-talking",
+      type: "button",
+      key: "keep-talking",
+      disabled: view.requesting,
+      title:
+        "continue this conversation in the same terminal instead of starting a fresh attempt",
+      onclick: () => onKeepTalking(),
+    },
+    "Keep talking",
+  );
+}
+
+/** A refused Keep talking's reason, or null while there is none. */
+export function renderKeepTalkingFailure(view: KeepTalkingView): HTMLElement | null {
+  return view.failure
+    ? h("div", { class: "error-inline keep-talking-failure" }, view.failure)
+    : null;
 }

@@ -19,6 +19,7 @@
  */
 
 import { h } from "./dom";
+import { renderKeepTalkingButton, renderKeepTalkingFailure } from "./terminal";
 import {
   bulkResumeRows,
   type ConversationNeedsInputRow,
@@ -50,6 +51,10 @@ export interface NeedsInputHandlers {
   /** A waiting Conversation row's action: focus its pane in herdr. Resolves
    *  false on any failure, matching the card's terminal surface seam. */
   onFocusConversation: (conversationId: string) => Promise<boolean>;
+  /** A checkpoint row's Keep talking (issue #139): the same session seam the
+   *  Detail's button fires, so both surfaces disable together and show the
+   *  same refusal. */
+  onKeepTalking: (ticketId: string) => void;
 }
 
 /** One row's failed answer: the action a retry refires, and why it failed. */
@@ -275,7 +280,9 @@ export class NeedsInputTray {
   // config. A waiting row greys out in place: the answer is recorded, so its
   // note and actions disable and the waiting line stands in, until the
   // boundary snapshot drops the row. A failed answer adds an inline mark
-  // under the row with its retry. The interrupt body stays in the Detail;
+  // under the row with its retry. A checkpoint row whose Held pane is alive
+  // also offers Keep talking beside Resume (issue #139), with a refusal's
+  // reason under the row. The interrupt body stays in the Detail;
   // the row is the queue entry, not the reading surface.
   private renderRow(row: NeedsInputRow, handlers: NeedsInputHandlers): HTMLElement[] {
     const status = waitingStatus(row);
@@ -289,7 +296,7 @@ export class NeedsInputTray {
       oninput: (event: Event) =>
         this.setNote(row.ticketId, (event.currentTarget as HTMLInputElement).value),
     });
-    const elements = [
+    const elements: HTMLElement[] = [
       h(
         "div",
         {
@@ -324,9 +331,18 @@ export class NeedsInputTray {
               label,
             ),
           ),
+          row.interrupt.keepTalking
+            ? renderKeepTalkingButton(row.interrupt.keepTalking, () =>
+                handlers.onKeepTalking(row.ticketId),
+              )
+            : null,
         ),
       ),
     ];
+    const refusal = row.interrupt.keepTalking
+      ? renderKeepTalkingFailure(row.interrupt.keepTalking)
+      : null;
+    if (refusal) elements.push(refusal);
     const failure = this.failure(row.ticketId);
     if (failure && !waiting) {
       elements.push(

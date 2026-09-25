@@ -69,6 +69,27 @@ const EVENT_KINDS = [
   // a spawn off an enlisted Conversation, or a pool with no defaults), so
   // it waits as a config interrupt instead of a launch that would throw.
   "unassigned",
+  // A tab the engine closed by rule (a merge, a role's end, a Conversation's
+  // end, a Resume's fresh launch, the operator's bulk close) that herdr
+  // refused to close (issue #139): the close stays best-effort, and this is
+  // the record that it failed and why, where a silent catch used to be.
+  "tab-close-failed",
+  // The engine closed the tab of a checkpointed Attempt before a Resume's
+  // fresh launch (issue #139): recorded so the close happens once and a
+  // later Resume never reaches back for a tab it already closed.
+  "tab-closed",
+  // An enlisted pane the pool let go (issue #139): an abandoned adoption
+  // left it exactly as found and handed the Ticket back to ordinary
+  // attempts, so a restart must not take the pane back as the Ticket's.
+  "let-go",
+  // The operator asked a Conversation to End (issue #140): recorded before
+  // the End moves anything, so an engine that stops mid-End leaves the next
+  // boot the fact that this was an ending, not a crash.
+  "end-requested",
+  // A merge a shutdown dropped while it waited at the pool checkout's gate
+  // (issue #139, ADR-0027): the worktree and branch it would have merged,
+  // so the next boot chains it again through the ordinary merge path.
+  "merge-deferred",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

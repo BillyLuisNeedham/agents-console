@@ -147,6 +147,7 @@ async function startServer(
     enlistPollMs?: number;
     conversationPollMs?: number;
     enlistTeachingWaitMs?: number;
+    paneSurveyMs?: number;
   } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
@@ -5600,6 +5601,68 @@ describe("enlisted ticket lifecycle", () => {
     ).toBe(false);
   });
 
+  it("holds an enlisted ticket's checkpointed pane and keeps talking in it, never closing it (issue #139)", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      paneSurveyMs: 50,
+    });
+    await server.start();
+    expect((await enlist(server, { becomes: "ticket", paneId: "pane-op", title: "Talk", spec: "" })).status).toBe(201);
+    const ticket = () => server.latest?.state.tickets.find((t) => t.id === "enlist-1");
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }),
+    );
+    await waitFor(() => ticket()?.heldPane != null, "the enlisted pane held at its checkpoint");
+    expect(ticket()!.heldPane).toEqual({ attempt: 1, paneId: "pane-op" });
+    // Held, and still the operator's: never a Finished terminal.
+    expect(server.latest!.finishedTerminals).toBe(0);
+    const closed = await fetch(`${server.url}/api/terminals/close-finished`, { method: "POST" });
+    expect(await closed.json()).toEqual({ closed: 0 });
+
+    const res = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "enlist-1" }),
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ticketId: "enlist-1", attempt: 2 });
+    await waitFor(
+      () => fake.submitted.some((text) => text.includes(outcomePath(poolDir, "enlist-1"))),
+      "the teaching Turn typed into the enlisted pane",
+    );
+    expect(ticket()!.liveAttempt).toMatchObject({ attempt: 2, paneId: "pane-op" });
+    // As found, still: the harness herdr named, no model.
+    expect(ticket()!.assignment).toMatchObject({ harness: "opencode", model: null });
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(() => ticket()?.status === "done", "enlist-1 done");
+    await waitFor(() => existsSync(join(poolDir, "enlisted.txt")), "the found branch merged");
+    expect(existsSync(worktree)).toBe(true);
+    expect(branchNamesIn(poolDir)).toContain("feature/x");
+    expect(
+      fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-op"),
+    ).toBe(false);
+  });
+
   it("merges a pane enlisted in the pool's own checkout onto the branch the pool was on", async () => {
     const poolDir = gitTerminalPool([
       { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
@@ -6413,5 +6476,96 @@ describe("enlisted ticket lifecycle", () => {
     };
     expect(body.running).toBe(true);
     expect(body.diff?.added ?? 0).toBeGreaterThan(0);
+  });
+});
+
+describe("Keep talking and Finished terminals routes (issue #139)", () => {
+  const fakes: ExecutingFakeHerdr[] = [];
+
+  afterEach(async () => {
+    while (fakes.length > 0) await fakes.pop()!.close();
+  });
+
+  const READY_01 = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  /** A stand-in TUI that writes a checkpoint Outcome and stays up until released. */
+  function checkpointingTui(poolDir: string, sentinel: string): Record<string, HarnessCommand> {
+    const script = join(poolDir, "tui.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        'outcome_path="$1"; sentinel="$2"',
+        'printf \'{"status":"checkpoint","summary":"paused","commitSha":null,"brief":"talk to me"}\' > "$outcome_path"',
+        'while [ ! -f "$sentinel" ]; do sleep 0.02; done',
+        "",
+      ].join("\n"),
+    );
+    return { stub: (ctx) => ["bash", script, ctx.outcomePath, sentinel] };
+  }
+
+  it("serves a checkpoint's Held pane on the snapshot and the terminal routes, then continues it", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }], { terminal: "herdr" });
+    const sentinel = join(poolDir, "release");
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const server = await startServer(poolDir, checkpointingTui(poolDir, sentinel), {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 50,
+      paneSurveyMs: 50,
+    });
+    await server.start();
+    const ticket = () => server.latest?.state.tickets.find((t) => t.id === "01");
+    await waitFor(() => ticket()?.heldPane != null, "01's Held pane on the snapshot");
+    const held = ticket()!.heldPane!;
+    expect(held.attempt).toBe(1);
+    expect(ticket()!.liveAttempt).toBeNull();
+
+    fake.setPaneContent(held.paneId, "the agent, waiting");
+    const peek = await fetch(`${server.url}/api/terminal/peek?ticket=01`);
+    expect(await peek.json()).toEqual({ ticket: "01", paneId: held.paneId, text: "the agent, waiting" });
+    const focus = await fetch(`${server.url}/api/terminal/focus?ticket=01`, { method: "POST" });
+    expect(focus.status).toBe(200);
+
+    const missing = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(missing.status).toBe(400);
+
+    const res = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ticketId: "01", attempt: 2 });
+    await waitFor(() => ticket()?.liveAttempt?.attempt === 2, "the Continued attempt live");
+    expect(ticket()!.liveAttempt!.paneId).toBe(held.paneId);
+    expect(ticket()!.heldPane).toBeNull();
+    expect(server.latest!.state.interrupts).toEqual([]);
+
+    const again = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { reason: string }).reason).toContain("not waiting at a checkpoint");
+    writeFileSync(sentinel, "");
+  });
+
+  it("refuses Keep talking and the bulk close in a headless pool", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: READY_01 }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    await server.start();
+    await settleOrBeat(server);
+    expect(server.latest!.finishedTerminals).toBe(0);
+    const talk = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "01" }),
+    });
+    expect(talk.status).toBe(409);
+    const close = await fetch(`${server.url}/api/terminals/close-finished`, { method: "POST" });
+    expect(close.status).toBe(409);
+    expect(((await close.json()) as { reason: string }).reason).toContain("not terminal-backed");
   });
 });

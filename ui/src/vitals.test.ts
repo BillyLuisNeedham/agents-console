@@ -19,6 +19,7 @@ function snap(
     poolName: "repo/pool",
     poolTitle: null,
     poolDir: "/tmp/pool",
+    finishedTerminals: 0,
     state: {
       tickets: Object.entries(tickets).map(([id, status]) => ({
         id,
@@ -36,6 +37,7 @@ function snap(
               startedAt: new Date().toISOString(),
             }
           : null,
+        heldPane: null,
         reassign: {
           eligible: status !== "done",
           reason: null,

@@ -165,6 +165,10 @@ export function attemptTabLabel(ticketId: string, title: string): string {
 export interface AttemptTab {
   tabId: string;
   paneId: string;
+  /** herdr's `terminal_id` for the root pane, when the answer carries one:
+   *  unique per terminal and never reused, unlike the short pane and tab
+   *  ids, so a record carrying it names this terminal and no later one. */
+  terminalId: string | null;
 }
 
 /**
@@ -195,7 +199,7 @@ export async function openAttemptTab(
     typeof created === "object" && created !== null
       ? (created as {
           tab?: { tab_id?: unknown };
-          root_pane?: { pane_id?: unknown };
+          root_pane?: { pane_id?: unknown; terminal_id?: unknown };
         })
       : {};
   const tabId = answer.tab?.tab_id;
@@ -208,7 +212,8 @@ export async function openAttemptTab(
       `tab.create returned no root pane id: ${JSON.stringify(created)}`,
     );
   }
-  return { tabId, paneId };
+  const terminalId = answer.root_pane?.terminal_id;
+  return { tabId, paneId, terminalId: typeof terminalId === "string" ? terminalId : null };
 }
 
 /** Where the Pool workspace id the engine uses came from (issue #94). */
@@ -476,6 +481,45 @@ export async function listPaneIds(
 }
 
 /**
+ * Every pane the daemon lists, with the tab, workspace and directory it
+ * reports for each (issue #139): the pane survey's one read, which answers
+ * both "is this pane alive" and "is this tab still open", and lets a recorded
+ * pane be checked against what herdr now lists under its id. A field the
+ * daemon does not report is null. Daemon-wide: a pool's tabs are in its Pool
+ * workspace, but a workspace re-resolved mid-run left the tabs opened before
+ * it in the old one. An answer with no `panes` array throws rather than
+ * reading as no panes: the survey keeps its last good listing then, where an
+ * empty one would let go of every Held pane at once.
+ */
+export async function listPanes(socketPath: string): Promise<
+  {
+    paneId: string;
+    tabId: string | null;
+    workspaceId: string | null;
+    cwd: string | null;
+    terminalId: string | null;
+  }[]
+> {
+  const list = await herdrRpc(socketPath, "pane.list", {});
+  const panes =
+    typeof list === "object" && list !== null
+      ? (list as { panes?: unknown }).panes
+      : undefined;
+  if (!Array.isArray(panes)) {
+    throw new Error(`pane.list answered without a panes list: ${JSON.stringify(list)}`);
+  }
+  return (panes as Record<string, unknown>[])
+    .filter((p) => typeof p?.pane_id === "string")
+    .map((p) => ({
+      paneId: p.pane_id as string,
+      tabId: typeof p.tab_id === "string" ? p.tab_id : null,
+      workspaceId: typeof p.workspace_id === "string" ? p.workspace_id : null,
+      cwd: typeof p.cwd === "string" ? p.cwd : null,
+      terminalId: typeof p.terminal_id === "string" ? p.terminal_id : null,
+    }));
+}
+
+/**
  * One pane as herdr's `agent.list` reports it (the enlist picker's raw
  * material, issue #101). herdr lists an entry per pane it binds an agent to,
  * whether the engine reported the agent or herdr detected one itself; the
@@ -506,8 +550,9 @@ function stringField(value: unknown): string | null {
  * The live agents herdr holds, from `agent.list`: every pane with an agent
  * bound to it, engine-reported or herdr-detected. The enlist route reads it
  * through the engine, never the Console, and judges eligibility itself
- * (engine/enlist.ts). A daemon answer missing the `agents` array reads as
- * none, the way `listPaneIds` reads a missing `panes` array.
+ * (engine/enlist.ts). A daemon answer missing the `agents` array throws, as
+ * `listPanes` does (issue #139): read as none, it would tell boot that every
+ * enlisted Conversation's pane was gone, and the pane is the operator's.
  */
 export async function listAgents(socketPath: string): Promise<HerdrAgent[]> {
   const list = await herdrRpc(socketPath, "agent.list", {});
@@ -515,7 +560,9 @@ export async function listAgents(socketPath: string): Promise<HerdrAgent[]> {
     typeof list === "object" && list !== null
       ? (list as { agents?: unknown }).agents
       : undefined;
-  if (!Array.isArray(agents)) return [];
+  if (!Array.isArray(agents)) {
+    throw new Error(`agent.list answered without an agents list: ${JSON.stringify(list)}`);
+  }
   return (agents as Record<string, unknown>[]).flatMap((agent) => {
     const paneId = stringField(agent.pane_id);
     if (paneId === null) return [];
@@ -752,6 +799,18 @@ export async function closeTab(
   tabId: string,
 ): Promise<void> {
   await herdrRpc(socketPath, "tab.close", { tab_id: tabId });
+}
+
+/**
+ * Whether a failed close says the tab was not there to close (herdr's
+ * `tab_not_found`): a tab that is already gone is the close done, not a
+ * failure worth recording (issue #139). Two closers of one tab (a
+ * Conversation's End and its ending's sweep, a Resume close and a later
+ * merge) are ordinary, and so is an operator who closed it by hand.
+ */
+export function isTabNotFound(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /tab_not_found|tab .*not found|no such tab/i.test(message);
 }
 
 /**

@@ -30,9 +30,12 @@ import {
   projectPool,
   projectTimeline,
   selectLogAttempt,
+  type CloseFinishedTerminalsResponse,
   type ConversationEndView,
   type DetailTab,
   type EnrichedSnapshot,
+  type KeepTalkingResponse,
+  type KeepTalkingState,
   type PoolCardView,
   type PoolTabStatus,
   type PoolView,
@@ -79,6 +82,13 @@ export interface ConsoleSessionOptions {
   /** Restart this pool's server (ADR-0026). Resolves with the port the
    *  relaunched server will use; rejects with the refusal's reason. */
   restart: () => Promise<RestartResponse>;
+  /** Keep talking (issue #139): continue a checkpointed ticket's Attempt in
+   *  its Held pane. Resolves once the engine claims the pane; rejects with
+   *  the refusal's reason. */
+  keepTalking: (ticketId: string) => Promise<KeepTalkingResponse>;
+  /** Close the pool's Finished terminals (issue #139). Resolves with how
+   *  many closed; rejects with the refusal's reason. */
+  closeFinishedTerminals: () => Promise<CloseFinishedTerminalsResponse>;
   /** Whether a server is answering on a port. Resolving false (or throwing)
    *  means nothing is there yet; the bootstrap owns the fetch, since the
    *  probe crosses an origin and the session holds no DOM or location. */
@@ -137,6 +147,8 @@ export class ConsoleSession {
   private readonly answerSeam: ConsoleSessionOptions["answer"];
   private readonly stopSeam: ConsoleSessionOptions["stop"];
   private readonly restartSeam: ConsoleSessionOptions["restart"];
+  private readonly keepTalkingSeam: ConsoleSessionOptions["keepTalking"];
+  private readonly closeTerminalsSeam: ConsoleSessionOptions["closeFinishedTerminals"];
   private readonly probeServer: ConsoleSessionOptions["probeServer"];
   private readonly onRelaunched: ConsoleSessionOptions["onRelaunched"];
   private readonly restartPollMs: number;
@@ -178,6 +190,20 @@ export class ConsoleSession {
   // One poll chain at a time: the accept and the farewell both start it, and
   // the second must not lay a second chain over the first.
   private restartPolling = false;
+
+  // Keep talking's marks (issue #139), keyed by ticket id and tied to the
+  // Held pane's Attempt they were asked of. The session holds them rather
+  // than either surface, so the Detail's button and the tray's disable
+  // together and show the same refusal. A snapshot whose ticket no longer
+  // holds that pane drops its mark: the Continued attempt started, the
+  // checkpoint was answered, or the pane closed.
+  private readonly keepTalkingMarks = new Map<string, KeepTalkingState>();
+
+  // The pool header's "Close N finished terminals" control (issue #139): the
+  // same three-state inline confirm as Stop, offered while the snapshot
+  // counts any Finished terminals.
+  private closeTerminalsState: StopState = "idle";
+  private closeTerminalsFailure: string | null = null;
 
   // The selected card's timeline: the events fetch answers on its own
   // cadence, and a slow answer answering after a newer selection (or a newer
@@ -225,6 +251,8 @@ export class ConsoleSession {
     this.answerSeam = options.answer;
     this.stopSeam = options.stop;
     this.restartSeam = options.restart;
+    this.keepTalkingSeam = options.keepTalking;
+    this.closeTerminalsSeam = options.closeFinishedTerminals;
     this.probeServer = options.probeServer;
     this.onRelaunched = options.onRelaunched;
     this.restartPollMs = options.restartPollMs ?? RESTART_POLL_MS;
@@ -278,6 +306,12 @@ export class ConsoleSession {
       this.stopState = "idle";
       this.stopFailure = null;
     }
+    if (this.closeTerminalsState === "armed" && snapshot.finishedTerminals === 0) {
+      // Nothing left to close (another tab closed them, or a pane went on
+      // its own): the offer is withdrawn and the armed prompt goes with it.
+      this.closeTerminalsState = "idle";
+    }
+    this.pruneKeepTalking(snapshot);
     this.error = null;
     this.vitals.update(snapshot);
     this.terminal.update(snapshot);
@@ -525,6 +559,87 @@ export class ConsoleSession {
     }
   }
 
+  /**
+   * Keep talking (issue #139): ask the engine to continue the ticket's
+   * checkpointed Attempt in its Held pane. The mark stays `requesting` after
+   * the engine accepts, since the ticket leaves checkpoint only when the
+   * snapshot says so and the pane is already claimed; that snapshot drops
+   * the mark. A refusal clears the in-flight flag and keeps its reason on
+   * the mark, shown beside the button on both surfaces, never on the global
+   * banner: the pool is fine, the request simply did not apply. A click
+   * with no Held pane, or one already out for it, sends nothing.
+   */
+  async keepTalking(ticketId: string): Promise<void> {
+    const held = this.snapshot?.state.tickets.find((t) => t.id === ticketId)?.heldPane;
+    if (!held) return;
+    const mark = this.keepTalkingMarks.get(ticketId);
+    if (mark?.attempt === held.attempt && mark.requesting) return;
+    this.keepTalkingMarks.set(ticketId, {
+      attempt: held.attempt,
+      requesting: true,
+      failure: null,
+    });
+    this.onChange();
+    try {
+      await this.keepTalkingSeam(ticketId);
+    } catch (err) {
+      // The snapshot may have dropped the mark while the request was out;
+      // a refusal for a pane that is already gone has nothing left to mark.
+      const current = this.keepTalkingMarks.get(ticketId);
+      if (current?.attempt === held.attempt) {
+        this.keepTalkingMarks.set(ticketId, {
+          ...current,
+          requesting: false,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+        this.onChange();
+      }
+    }
+  }
+
+  /** Drop the Keep talking marks whose ticket no longer holds the pane they
+   *  were asked of. */
+  private pruneKeepTalking(snapshot: EnrichedSnapshot): void {
+    for (const [ticketId, mark] of [...this.keepTalkingMarks]) {
+      const held = snapshot.state.tickets.find((t) => t.id === ticketId)?.heldPane;
+      if (held?.attempt !== mark.attempt) this.keepTalkingMarks.delete(ticketId);
+    }
+  }
+
+  /** Arm the close-finished-terminals confirmation (issue #139). Nothing is sent. */
+  armCloseTerminals(): void {
+    this.closeTerminalsState = "armed";
+    this.closeTerminalsFailure = null;
+    this.onChange();
+  }
+
+  /** Disarm it. Nothing is sent, on the way in or out. */
+  cancelCloseTerminals(): void {
+    this.closeTerminalsState = "idle";
+    this.closeTerminalsFailure = null;
+    this.onChange();
+  }
+
+  /**
+   * Close the Finished terminals. The count on the button comes from the
+   * snapshot, and the engine publishes a fresh one once the tabs are gone,
+   * so the 200 only returns the control to idle; the snapshot hides it. A
+   * refusal (a pool that is not Terminal-backed) or a network failure
+   * disarms and shows its reason beside the button, the way Stop does.
+   */
+  async confirmCloseTerminals(): Promise<void> {
+    this.closeTerminalsState = "requesting";
+    this.closeTerminalsFailure = null;
+    this.onChange();
+    try {
+      await this.closeTerminalsSeam();
+    } catch (err) {
+      this.closeTerminalsFailure = err instanceof Error ? err.message : String(err);
+    }
+    this.closeTerminalsState = "idle";
+    this.onChange();
+  }
+
   /** Surface a failure on the global banner (the fire-and-forget paths). */
   reportError(message: string): void {
     this.error = message;
@@ -545,6 +660,7 @@ export class ConsoleSession {
           this.terminal.state(),
           Date.now(),
           endings,
+          Object.fromEntries(this.keepTalkingMarks),
         )
       : null;
     const cards = this.view?.cards ?? [];
@@ -610,6 +726,15 @@ export class ConsoleSession {
         state: this.restartState,
         failure: this.restartFailure,
         waiting: this.restartWaiting,
+      },
+      closeTerminals: {
+        // Offered while any Finished terminal is open, over a live stream
+        // for the same reason Stop is: a POST down a dead stream goes
+        // nowhere, and the count it would show could be stale.
+        offered: (this.snapshot?.finishedTerminals ?? 0) > 0 && this.connected,
+        count: this.snapshot?.finishedTerminals ?? 0,
+        state: this.closeTerminalsState,
+        failure: this.closeTerminalsFailure,
       },
       terminalBacked: this.snapshot
         ? isTerminalBacked(this.snapshot.state.config)

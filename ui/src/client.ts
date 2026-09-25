@@ -7,10 +7,13 @@
  */
 
 import type {
+  CloseFinishedTerminalsResponse,
   ConversationView,
   EnlistRequest,
   EnlistResponse,
   EnrichedSnapshot,
+  KeepTalkingRequest,
+  KeepTalkingResponse,
   PanesResponse,
   ReassignRequest,
   ReassignResponse,
@@ -368,6 +371,47 @@ export class PoolClient {
   }
 
   /**
+   * Keep talking (issue #139): continue a ticket's checkpointed Attempt in
+   * its Held pane as a Continued attempt. Not an answer, so not the resume
+   * route: nothing waits for the boundary. 202 with the Continued attempt's
+   * number once the engine has claimed the pane; the engine's refusal (the
+   * pane is gone, the checkpoint was answered, the ticket is not at one) is
+   * a 409 and a malformed body a 400, both carrying `reason`, which becomes
+   * the thrown Error's message for the button to show beside itself.
+   */
+  async keepTalking(ticketId: string): Promise<KeepTalkingResponse> {
+    const request: KeepTalkingRequest = { ticketId };
+    const res = await fetch(`${this.base}/api/keep-talking`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      throw new Error((await refusalReason(res)) ?? `keep talking failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /**
+   * Close every Finished terminal the pool opened (issue #139): the herdr
+   * tabs still open over an Attempt or a Conversation that has ended. The
+   * engine never closes them on its own; this is the pool header's bulk
+   * close, answering 200 with how many it closed. A pool that is not
+   * Terminal-backed refuses with a 409 `reason`, shown beside the control.
+   */
+  async closeFinishedTerminals(): Promise<CloseFinishedTerminalsResponse> {
+    const res = await fetch(`${this.base}/api/terminals/close-finished`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw new Error(
+        (await refusalReason(res)) ?? `close finished terminals failed: ${res.status}`,
+      );
+    }
+    return res.json();
+  }
+
+  /**
    * The Settings pane's read (ADR-0026): the pool's own config, the machine
    * defaults (merged and as the file holds them), and the harnesses the pane
    * offers. Fetched when the pane opens, never through the snapshot: settings
@@ -580,6 +624,18 @@ export class PoolClient {
       void reader?.cancel().catch(() => {});
     };
   }
+}
+
+/**
+ * A refusal's `reason`, the envelope the enlist and Keep talking routes
+ * answer a 409 or 400 with; null when the body is not JSON or carries none,
+ * so the caller falls back to a generic message with the status.
+ */
+async function refusalReason(res: Response): Promise<string | null> {
+  const body = await res.json().catch(() => null);
+  return body && typeof (body as { reason?: unknown }).reason === "string"
+    ? (body as { reason: string }).reason
+    : null;
 }
 
 /** The slice of a page's visibility lifecycle the refetch-on-visible reads. */

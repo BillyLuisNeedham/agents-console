@@ -598,7 +598,7 @@ export async function launchAttempt<R extends { ok: true }>(
       }
       return headless(opened);
     }
-    terminal = { paneId: opened.paneId, tabId: opened.tabId };
+    terminal = { paneId: opened.paneId, tabId: opened.tabId, terminalId: opened.terminalId ?? null };
     await waitForShellSettled(env.herdrSocket, terminal.paneId, cadence);
     const terminalError = await sendWrapperToPane(
       env.herdrSocket,
@@ -848,6 +848,8 @@ export async function runAttempt<R extends { ok: true }>(
 interface AttemptTerminal {
   paneId: string | null;
   tabId: string | null;
+  /** herdr's never-reused id for the terminal (issue #139), when it gave one. */
+  terminalId?: string | null;
   error?: string;
 }
 
@@ -881,7 +883,7 @@ async function openAttemptTerminal(
     }
     try {
       const tab = await openAttemptTab(env.herdrSocket, label, cwd, workspaceId);
-      return { paneId: tab.paneId, tabId: tab.tabId };
+      return { paneId: tab.paneId, tabId: tab.tabId, terminalId: tab.terminalId };
     } catch (refused) {
       // The refused id goes back with the question: the engine answers with
       // the same workspace when it is still there (a transient refusal),
@@ -890,7 +892,7 @@ async function openAttemptTerminal(
       const retryId = await env.poolWorkspace.reresolve(workspaceId);
       if (retryId === null) throw refused;
       const tab = await openAttemptTab(env.herdrSocket, label, cwd, retryId);
-      return { paneId: tab.paneId, tabId: tab.tabId };
+      return { paneId: tab.paneId, tabId: tab.tabId, terminalId: tab.terminalId };
     }
   } catch (err) {
     return {
@@ -944,7 +946,8 @@ export function releaseAttemptAgent(
  * carries the prompt body elided; the commit SHA resolves from the spawn cwd
  * at spawn time (null when git is unavailable or the cwd is not a checkout);
  * env is the keys the engine set on the child environment beyond the
- * inherited parent's, with their values. Terminal-backed spawns add pane_id
+ * inherited parent's, with their values; harness and model are the
+ * Assignment it launched with. Terminal-backed spawns add pane_id
  * (and terminal_error on a headless fallback, whenever it happened: the tab
  * refusing to open or the wrapper refusing to send), per ADR-0014 and
  * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
@@ -964,6 +967,11 @@ function spawnedPayload(
     branch,
     commitSha: commitShaAt(ctx.cwd),
     env: engineEnvSet(spawnEnv(ctx.cwd)),
+    // The Assignment the attempt launched with (issue #139): a Continued
+    // attempt carries on in this attempt's pane under exactly this, whatever
+    // a Reassign has written since, and after a restart this is the record.
+    harness: ctx.harness,
+    model: ctx.model,
     ...(pid !== undefined ? { pid } : {}),
     ...(terminal
       ? {
@@ -973,6 +981,9 @@ function spawnedPayload(
           // must never point at the dead pane the fallback closed.
           pane_id: terminalError !== undefined ? null : terminal.paneId,
           tab_id: terminalError !== undefined ? null : terminal.tabId,
+          ...(terminalError === undefined && terminal.terminalId
+            ? { terminal_id: terminal.terminalId }
+            : {}),
           ...(terminal.error !== undefined || terminalError !== undefined
             ? { terminal_error: terminalError ?? terminal.error }
             : {}),
@@ -1181,11 +1192,16 @@ function endWriteStream(
  * here; the headless pump in `spawnToLog` keeps the ADR-0012 JSONL
  * derivation. Polls by positioned reads; `finish` drains the tail, flushes
  * the line buffer, and ends the log stream. Exported for the boot-adopted
- * attempt's finalize (engine.ts), which tails a pane it never launched.
+ * attempt's finalize (engine.ts), which tails a pane it never launched, and
+ * for a Continued attempt (issue #139), whose pane's `script` is still
+ * writing the Stream file of the attempt it continues: `fromOffset` is where
+ * that file stood when the Continued attempt began, so its log holds its own
+ * part of the session and none of the attempt before it.
  */
 export function startPaneStreamTail(
   streamPath: string,
   logPath: string,
+  fromOffset = 0,
 ): PaneTailer {
   const log = createWriteStream(logPath);
   let streamError: unknown = null;
@@ -1216,7 +1232,7 @@ export function startPaneStreamTail(
         } catch {
           return; // script has not created the file yet
         }
-        offset = 0;
+        offset = fromOffset;
         buffer = new TranscriptLineBuffer();
       }
       let size: number;

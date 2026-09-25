@@ -32,6 +32,7 @@ export type {
 export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
 export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
+export type { HeldPaneRecord } from "./held-panes.ts";
 export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
@@ -64,6 +65,7 @@ import type { Interrupt, Outcome, RunPhase } from "./engine.ts";
 import type { TicketStatus } from "./pool.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
+import type { HeldPaneRecord } from "./held-panes.ts";
 import type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
@@ -102,6 +104,15 @@ export interface EnrichedTicketState {
    */
   liveAttempt: LiveAttemptRecord | null;
   /**
+   * The ticket's Held pane (issue #139): while it waits at a checkpoint
+   * Interrupt whose Terminal-backed attempt's pane is still alive in herdr,
+   * that attempt's number and pane, so the card and the Detail keep peek,
+   * focus and attach for it and offer Keep talking. Null once the Interrupt
+   * is answered or the pane is gone, for a headless attempt, and for every
+   * ticket not at a checkpoint. Never set together with `liveAttempt`.
+   */
+  heldPane: HeldPaneRecord | null;
+  /**
    * The ticket was enlisted from a live herdr pane (issue #101): its
    * Assignment was recorded as found, so the card reads "as found" where a
    * spawned ticket names a model. Derived by the server from the marker's
@@ -132,6 +143,14 @@ export interface EnrichedSnapshot {
   /** The pool directory the server was launched on, verbatim: what a
    *  relaunch after a Console stop (issue #97) passes to `--pool`. */
   poolDir: string;
+  /**
+   * Finished terminals (issue #139): how many herdr tabs this pool opened
+   * are still open over an Attempt or a Conversation that has ended, none
+   * of them a Live attempt's, a Held pane's, an enlisted pane or a live
+   * Conversation's. The pool header offers to close them when it is not 0;
+   * the engine never closes them on its own.
+   */
+  finishedTerminals: number;
   state: {
     tickets: EnrichedTicketState[];
     /** Every Conversation the pool knows about (issue #60), passed through
@@ -236,6 +255,35 @@ export interface TicketBodyResponse {
   id: string;
   /** The Issue file's markdown with the line-1 state marker stripped. */
   body: string;
+}
+
+// ---------------------------------------------------------------------------
+// Keep talking (POST /api/keep-talking)
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep talking (issue #139): continue a ticket's checkpointed Attempt in its
+ * Held pane. Not a resume action: it is never queued for the super-step
+ * boundary (ADR-0004's exception, as Enlist is), so it has its own route.
+ */
+export interface KeepTalkingRequest {
+  ticketId: string;
+}
+
+/** The Continued attempt's number, once the engine has claimed the pane. A
+ *  refusal is the 409 `reason` envelope the enlist route answers with. */
+export interface KeepTalkingResponse {
+  ticketId: string;
+  attempt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Close finished terminals (POST /api/terminals/close-finished)
+// ---------------------------------------------------------------------------
+
+/** How many Finished terminals the bulk close closed. */
+export interface CloseFinishedTerminalsResponse {
+  closed: number;
 }
 
 // ---------------------------------------------------------------------------

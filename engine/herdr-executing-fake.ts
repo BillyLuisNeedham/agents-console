@@ -148,7 +148,12 @@ export interface ExecutingFakeHerdr {
   /** Refuse the next `times` calls of this method, then answer normally again: a daemon blip, not a daemon that is down. */
   failNextCall: (method: string, times?: number) => void;
   close: () => Promise<void>;
-  injectPane: (paneId: string) => void;
+  /** A pane with no process behind it; `options` sets what the listing
+   *  reports for it (its tab, directory and terminal id). */
+  injectPane: (
+    paneId: string,
+    options?: { tabId?: string; cwd?: string; terminalId?: string; workspaceId?: string | null },
+  ) => void;
   /** Offer an operator-opened agent on the daemon's `agent.list`. */
   seedAgent: (seed: FakeHerdrAgentSeed) => void;
   /** Close a workspace out from under the pool, the way an operator does mid-run (issue #94). */
@@ -227,6 +232,8 @@ export async function startExecutingFakeHerdr(
       hideEcho: boolean;
       swallow: boolean;
       createdAt: number;
+      /** herdr's never-reused terminal id (0.8.2 reports one per pane). */
+      terminalId?: string | null;
       proc?: ReturnType<typeof Bun.spawn>;
     }
   >();
@@ -330,6 +337,7 @@ export async function startExecutingFakeHerdr(
           hideEcho: false,
           swallow: swallowRemaining > 0,
           createdAt: Date.now(),
+          terminalId: `term-${minted}`,
         });
         swallowRemaining -= 1;
         respond({
@@ -339,6 +347,7 @@ export async function startExecutingFakeHerdr(
             pane_id: paneId,
             tab_id: tabId,
             ...(workspaceId !== null ? { workspace_id: workspaceId } : {}),
+            terminal_id: `term-${minted}`,
           },
         });
       } else if (msg.method === "workspace.get") {
@@ -440,6 +449,9 @@ export async function startExecutingFakeHerdr(
               tab_id: pane.tabId,
               pane_id: paneId,
               ...(pane.workspaceId !== null ? { workspace_id: pane.workspaceId } : {}),
+              // herdr 0.8.2 reports these on every pane too (issue #139).
+              cwd: pane.cwd,
+              ...(pane.terminalId ? { terminal_id: pane.terminalId } : {}),
             })),
         });
       } else if (msg.method === "pane.read") {
@@ -621,14 +633,16 @@ export async function startExecutingFakeHerdr(
         sessionId: seed.sessionId ?? null,
       });
     },
-    injectPane: (paneId) => {
+    injectPane: (paneId, options) => {
       panes.set(paneId, {
-        tabId: "tab-ghost",
+        tabId: options?.tabId ?? "tab-ghost",
+        terminalId: options?.terminalId ?? null,
         // An injected orphan belongs to whatever workspace the pool
         // resolved, so a scoped pane.list still finds it: the first
         // workspace the fake holds, or none at all when it holds none.
-        workspaceId: [...workspaces][0] ?? null,
-        cwd: "/tmp",
+        workspaceId:
+          options?.workspaceId !== undefined ? options.workspaceId : ([...workspaces][0] ?? null),
+        cwd: options?.cwd ?? "/tmp",
         alive: true,
         buffer: "",
         rendered: defaultRendered,

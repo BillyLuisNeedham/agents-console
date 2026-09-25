@@ -4,7 +4,8 @@ import { describe, expect, it } from "bun:test";
 import { Canvas, canvasStatusText, type CanvasModel } from "./canvas";
 import { commit as commitTree } from "./morph";
 import { useDom } from "./test-dom";
-import type { RestartView, StopView } from "./view";
+import { projectPool, type EnrichedSnapshot } from "./project";
+import type { CloseTerminalsView, RestartView, StopView } from "./view";
 
 useDom();
 
@@ -47,6 +48,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     restart: restart(),
     terminalBacked: false,
     mergeQueueLine: null,
+    closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
     ...overrides,
   };
 }
@@ -146,7 +148,10 @@ describe("the pool's name in the header (issue #100)", () => {
 
 /** A canvas mounted the way the composition root mounts it: render, morph
  *  the tree already on the page, bind the mechanics to what is now there. */
-function mountCanvas(model: CanvasModel): { canvas: Canvas; root: HTMLElement; commit(): void } {
+function mountCanvas(
+  model: CanvasModel,
+  intents: Partial<ConstructorParameters<typeof Canvas>[0]> = {},
+): { canvas: Canvas; root: HTMLElement; commit(): void } {
   const canvas = new Canvas({
     onChange: () => commit(),
     onCardTap: () => {},
@@ -158,6 +163,10 @@ function mountCanvas(model: CanvasModel): { canvas: Canvas; root: HTMLElement; c
     onArmStop: () => {},
     onCancelStop: () => {},
     onConfirmStop: () => {},
+    onArmCloseTerminals: () => {},
+    onCancelCloseTerminals: () => {},
+    onConfirmCloseTerminals: () => {},
+    ...intents,
   });
   const root = document.createElement("div");
   document.body.appendChild(root);
@@ -253,5 +262,136 @@ describe("Canvas across a morphing render", () => {
     expect(root.querySelector<HTMLElement>('[data-node-id="u-1"]')).toBe(card);
     expect(card.style.left).toBe("140px");
     expect(card.style.top).toBe("135px");
+  });
+});
+
+describe("the header's close-finished-terminals control (issue #139)", () => {
+  function closeTerminals(overrides: Partial<CloseTerminalsView> = {}): CloseTerminalsView {
+    return { offered: true, count: 3, state: "idle", failure: null, ...overrides };
+  }
+
+  // A card on the canvas, so the world the mount binds to is there.
+  const cards: CanvasModel["cards"] = [
+    { kind: "utility", id: "u-1", label: "grader", interrupt: null, x: 100, y: 100 },
+  ];
+
+  function mount(close: CloseTerminalsView, stopView: StopView = stop()) {
+    const intents: string[] = [];
+    const { root, commit } = mountCanvas(model({ cards, closeTerminals: close, stop: stopView }), {
+      onArmCloseTerminals: () => intents.push("arm"),
+      onCancelCloseTerminals: () => intents.push("cancel"),
+      onConfirmCloseTerminals: () => intents.push("confirm"),
+    });
+    commit();
+    return { root, intents };
+  }
+
+  const control = (root: HTMLElement) => root.querySelector(".canvas-close-terminals");
+
+  it("is hidden while no Finished terminal is open", () => {
+    const { root } = mount(closeTerminals({ offered: false, count: 0 }));
+    expect(control(root)).toBeNull();
+  });
+
+  it("reads the count, singular at one", () => {
+    const many = mount(closeTerminals({ count: 3 }));
+    expect(control(many.root)?.textContent).toBe("Close 3 finished terminals");
+    const one = mount(closeTerminals({ count: 1 }));
+    expect(control(one.root)?.textContent).toBe("Close 1 finished terminal");
+  });
+
+  it("arms on a click rather than closing anything", () => {
+    const { root, intents } = mount(closeTerminals());
+    root.querySelector<HTMLButtonElement>(".canvas-close-terminals-open")!.click();
+    expect(intents).toEqual(["arm"]);
+  });
+
+  it("confirms or cancels from the inline prompt, the way Stop does", () => {
+    const { root, intents } = mount(closeTerminals({ state: "armed" }));
+    const armed = control(root)!;
+    expect(armed.classList.contains("canvas-close-terminals-armed")).toBe(true);
+    expect(armed.querySelector(".canvas-close-terminals-prompt")?.textContent).toBe(
+      "Really close 3?",
+    );
+    const [confirm, cancel] = [...armed.querySelectorAll("button")];
+    expect(confirm!.textContent).toBe("Close");
+    confirm!.click();
+    cancel!.click();
+    expect(intents).toEqual(["confirm", "cancel"]);
+  });
+
+  it("disables itself while the POST is out", () => {
+    const { root } = mount(closeTerminals({ state: "requesting" }));
+    const button = control(root)!.querySelector("button")!;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("closing...");
+  });
+
+  it("shows a refusal beside the button", () => {
+    const { root } = mount(closeTerminals({ failure: "this pool is headless" }));
+    expect(root.querySelector(".canvas-close-terminals-failure")?.textContent).toBe(
+      "this pool is headless",
+    );
+  });
+
+  it("sits beside Stop, each keyed as its own control", () => {
+    const { root } = mount(closeTerminals(), stop({ offered: true }));
+    expect(root.querySelector(".canvas-stop-server")?.textContent).toBe("Stop server");
+    expect(control(root)?.getAttribute("data-key")).toBe("canvas-close-terminals");
+    expect(root.querySelector(".canvas-stop")?.getAttribute("data-key")).toBe("canvas-stop");
+  });
+});
+
+describe("a ticket card over a Held pane (issue #139)", () => {
+  it("keeps the peek and the attach chip while the ticket waits at a checkpoint", () => {
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "quiescent",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      state: {
+        tickets: [
+          {
+            id: "A",
+            title: "ticket A",
+            blockedBy: [],
+            status: "checkpoint",
+            mergeState: null,
+            enlisted: false,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            liveAttempt: null,
+            heldPane: { attempt: 2, paneId: "w3:p1" },
+            reassign: {
+              eligible: true,
+              reason: null,
+              verify: null,
+              sources: { harness: "default", model: "default", drivers: "default" },
+            },
+          },
+        ],
+        conversations: [],
+        log: [],
+        outcomes: {},
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: { terminal: "herdr" },
+      },
+    };
+    const focused: string[] = [];
+    const { root, commit } = mountCanvas(model({ cards: projectPool(snapshot).cards }), {
+      onFocusTerminal: async (ticketId) => {
+        focused.push(ticketId);
+        return true;
+      },
+    });
+    commit();
+    const card = root.querySelector('[data-ticket-id="A"]')!;
+    expect(card.querySelector(".terminal-peek")).not.toBeNull();
+    expect(card.querySelector(".terminal-chip-pane")?.textContent).toBe("w3:p1");
+    card.querySelector<HTMLButtonElement>(".terminal-focus")!.click();
+    expect(focused).toEqual(["A"]);
   });
 });

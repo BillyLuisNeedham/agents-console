@@ -54,6 +54,12 @@ export interface LiveAttempts {
   /** Whether any Attempt of this id is live. */
   isLive(id: string): boolean;
   /**
+   * Every live Attempt's pane, not only each id's highest (issue #139): a
+   * verify fan-out's earlier candidates are live too, and a tab over any of
+   * them is in use, never a Finished terminal.
+   */
+  panes(): Set<string>;
+  /**
    * One record per id, the highest-numbered live Attempt: a verify fan-out
    * has several live Attempts on one Ticket id, and when the highest ends
    * first the record falls back to an earlier one still live. Ids the
@@ -94,6 +100,15 @@ export function createLiveAttempts(onChange?: () => void): LiveAttempts {
     },
     isLive(id) {
       return live.has(id);
+    },
+    panes() {
+      const panes = new Set<string>();
+      for (const attempts of live.values()) {
+        for (const entry of attempts.values()) {
+          if (entry.paneId !== null) panes.add(entry.paneId);
+        }
+      }
+      return panes;
     },
     records(exclude) {
       const out: Record<string, LiveAttemptRecord> = {};

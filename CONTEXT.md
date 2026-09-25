@@ -142,6 +142,18 @@ _Avoid_: running attempt (status is the ticket's), current attempt (a settled At
 An Attempt whose harness runs as an interactive TUI in a herdr pane instead of a headless child — a real terminal the operator can watch and type into mid-run, while the engine stays oblivious to that input. The attempt ends when a valid Outcome appears; the TUI stays alive afterward and pane exit trails whenever the operator closes the tab, so pane loss *without* an Outcome is the crash signal. Its Stream file is a `script` typescript (both directions), not harness stream-json (ADR-0016). Opted into per pool with `terminal: herdr`; headless remains the default and fallback. Introduced by ADR-0014 (`docs/adr/0014-attempts-terminal-backed-in-herdr.md`), toward issue #29.
 _Avoid_: interactive attempt (interaction is the operator's, not the attempt's), attached attempt, PTY attempt
 
+**Continued attempt**:
+An Attempt launched into the still-live pane of the Terminal-backed attempt whose checkpoint Interrupt it answers, instead of into a new tab, so the agent that holds the context carries on. The operator chooses it with Keep talking on the checkpoint Interrupt; the engine types one teaching Turn saying a fresh Outcome is expected, then leaves the pane to the operator. It is a new Attempt with its own number and Outcome: done ends the ticket as any done does, and checkpoint raises a fresh Interrupt with a new Brief, which may itself be continued. Offered for any checkpoint Interrupt whose Attempt's pane is still alive, never for a headless Attempt. Introduced by ADR-0027 (`docs/adr/0027-keep-talking-continues-a-checkpointed-attempt-in-its-pane.md`), closing issue #139.
+_Avoid_: resumed attempt (Resume launches a fresh Attempt in a new tab), reopened attempt (an ended Attempt never takes a second Outcome), follow-up (that's a Spawn)
+
+**Held pane**:
+The still-live herdr pane of a Terminal-backed attempt that ended in a checkpoint Interrupt, kept the pool's while that Interrupt waits: the card keeps its Peek, focus and attach, and Keep talking can continue it as a Continued attempt. It is no Live attempt (that Attempt is over). It is held only while the checkpoint is about that Attempt's own work and its agent is still there, and let go when the Interrupt is answered, herdr no longer lists the pane as recorded, or the TUI exits and leaves a bare shell; a plain Resume closes it just before the fresh Attempt launches. An enlisted Ticket's pane is held while the Ticket still works in it, and, being the operator's, is never closed by anything, Resume included. Introduced by ADR-0027.
+_Avoid_: checkpoint pane (the checkpoint is the Interrupt, not where it ran), idle pane, parked pane (a branch is parked; a pane is held)
+
+**Finished terminal**:
+A herdr tab the pool opened, for an Attempt or a Conversation, that is still open after its Attempt or Conversation ended or crashed, and is no Live attempt's, Held pane's, enlisted or live Conversation's: a crashed attempt's tab, a done ticket's before its merge, a started Conversation's left open by a Restart and crashed at the next boot. The engine never closes one on its own; the operator closes them all at once from the pool header. Introduced by ADR-0027.
+_Avoid_: dead tab (the TUI in it is often still alive), orphan (an Orphan attempt is still running), stale pane
+
 **Pool workspace**:
 The one herdr workspace a Terminal-backed pool opens its attempt and Conversation tabs in, so every tab of one Pool sits together and never in another project's workspace. Resolved once at boot, from the workspace the Console server was launched in or by creating a fresh one, and kept across restarts while it still exists. Settled by the issue #94 amendment to ADR-0015 (`docs/adr/0015-attempts-spawn-as-named-herdr-tabs.md`).
 _Avoid_: workspace (banned as a Pool synonym; a herdr workspace is a container, a Pool is the work), window, project workspace
@@ -215,7 +227,7 @@ A follow-up ticket an attempt proposes in its Outcome and the engine writes into
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 **Conversation**:
-An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
+An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
 _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
 
 **Turn**:

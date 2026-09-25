@@ -31,6 +31,7 @@ const CONVERSATION: ConversationView = {
   turn: { state: "waiting", lastLine: "", idleSince: null },
   children: [],
   enlisted: false,
+  ending: false,
 };
 
 /** A tray wired to hand-settled deferreds, so a test pins the dispatch order
