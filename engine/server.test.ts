@@ -5601,6 +5601,68 @@ describe("enlisted ticket lifecycle", () => {
     ).toBe(false);
   });
 
+  it("holds an enlisted ticket's checkpointed pane and keeps talking in it, never closing it (issue #139)", async () => {
+    const poolDir = gitTerminalPool([
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(poolDir);
+    const fake = await fakeHerdr();
+    fake.seedAgent({
+      paneId: "pane-op",
+      agent: "opencode",
+      cwd: worktree,
+      title: "OC",
+      status: "idle",
+      rendered: OPENCODE_WAITING,
+      tabId: "tab-op",
+    });
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 15,
+      paneSurveyMs: 50,
+    });
+    await server.start();
+    expect((await enlist(server, { becomes: "ticket", paneId: "pane-op", title: "Talk", spec: "" })).status).toBe(201);
+    const ticket = () => server.latest?.state.tickets.find((t) => t.id === "enlist-1");
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }),
+    );
+    await waitFor(() => ticket()?.heldPane != null, "the enlisted pane held at its checkpoint");
+    expect(ticket()!.heldPane).toEqual({ attempt: 1, paneId: "pane-op" });
+    // Held, and still the operator's: never a Finished terminal.
+    expect(server.latest!.finishedTerminals).toBe(0);
+    const closed = await fetch(`${server.url}/api/terminals/close-finished`, { method: "POST" });
+    expect(await closed.json()).toEqual({ closed: 0 });
+
+    const res = await fetch(`${server.url}/api/keep-talking`, {
+      method: "POST",
+      body: JSON.stringify({ ticketId: "enlist-1" }),
+    });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ ticketId: "enlist-1", attempt: 2 });
+    await waitFor(
+      () => fake.submitted.some((text) => text.includes(outcomePath(poolDir, "enlist-1"))),
+      "the teaching Turn typed into the enlisted pane",
+    );
+    expect(ticket()!.liveAttempt).toMatchObject({ attempt: 2, paneId: "pane-op" });
+    // As found, still: the harness herdr named, no model.
+    expect(ticket()!.assignment).toMatchObject({ harness: "opencode", model: null });
+
+    writeFileSync(
+      outcomePath(poolDir, "enlist-1"),
+      JSON.stringify({ status: "done", summary: "finished", commitSha: null }),
+    );
+    await waitFor(() => ticket()?.status === "done", "enlist-1 done");
+    await waitFor(() => existsSync(join(poolDir, "enlisted.txt")), "the found branch merged");
+    expect(existsSync(worktree)).toBe(true);
+    expect(branchNamesIn(poolDir)).toContain("feature/x");
+    expect(
+      fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-op"),
+    ).toBe(false);
+  });
+
   it("merges a pane enlisted in the pool's own checkout onto the branch the pool was on", async () => {
     const poolDir = gitTerminalPool([
       { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },

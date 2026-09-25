@@ -2154,6 +2154,10 @@ function enlistSpawnedEvent(session: Session, id: string) {
     .filter(
       (event) =>
         event.kind === "spawned" &&
+        // A Continued attempt (issue #139) records the same directory and
+        // branch in the same pane, but it is not the enlist: the captured
+        // merge target rides the enlist's event alone.
+        event.payload.continued !== true &&
         typeof event.payload.cwd === "string" &&
         typeof event.payload.branch === "string",
     )
@@ -3695,12 +3699,19 @@ function recordEnlistedTrailingExit(session: Session, ticketId: string): void {
 // Hold the pane of a checkpointed attempt (CONTEXT.md "Held pane"): called
 // wherever a checkpoint Interrupt is raised, so every checkpoint whose
 // Attempt ran in a pane keeps it reachable while the Interrupt waits. An
-// enlisted ticket's pane is the operator's own terminal and never held
-// (ADR-0021); an adoption's checkpoint is an Attempt still running, which is
-// no hold. Whether the pane is alive is the survey's to say, so it is asked
-// now rather than at its next cadence.
+// enlisted ticket's pane is held too, while the ticket still works in it:
+// holding is not owning, and nothing the hold leads to (Keep talking) ever
+// closes it (ADR-0021). Once the found work is dropped (the pane went, or an
+// adoption let it go) the pane is no longer the ticket's, and is not held.
+// An adoption's checkpoint is an Attempt still running, which is no hold.
+// Whether the pane is alive is the survey's to say, so it is asked now
+// rather than at its next cadence.
 function holdCheckpointPane(session: Session, marker: TicketMarker, attempt: number): void {
-  if (marker.enlistedFrom !== undefined || session.adopted.has(marker.id)) return;
+  if (session.adopted.has(marker.id)) return;
+  if (marker.enlistedFrom !== undefined && !session.enlistedWork.has(marker.id)) {
+    session.held.delete(marker.id);
+    return;
+  }
   const held = heldPaneOf(readEvents(session.runsDir, marker.id), attempt, (n) =>
     worktreePathFor(session.cwd, marker.id, n),
   );
@@ -3832,11 +3843,14 @@ function continuedWork(
 // The Assignment a Held pane runs: the one its attempt launched with, as
 // the `spawned` event recorded it, whatever a Reassign has written since;
 // the ticket's current record fills a field an older event did not record.
+// An enlisted pane's is as found (issue #101): herdr names its harness and
+// nobody knows its model, which no config fills in.
 function paneAssignment(session: Session, ticketId: string, held: HeldPane): Assignment {
   const current = session.assignments.get(ticketId);
+  const enlisted = session.enlistedWork.has(ticketId);
   return {
     harness: held.harness || current?.harness || "",
-    model: held.model || current?.model || "",
+    model: enlisted ? "" : held.model || current?.model || "",
     drivers: current?.drivers ?? DEFAULT_DRIVERS,
     ...(current?.verify != null ? { verify: current.verify } : {}),
   };
@@ -4119,6 +4133,18 @@ function endContinuedAttempt(
   const marker = session.markers.find((candidate) => candidate.id === ticketId);
   if (!marker) return;
   session.continued.delete(ticketId);
+  // An enlisted ticket's Continued attempt ends the way its enlisted attempt
+  // did (ADR-0021): the same two observations, recorded by the same hands,
+  // so done merges the found branch in place, a pane gone first is a
+  // checkpoint that keeps the branch (never a crash, never a re-run), and the
+  // tab, directory and branch are left exactly as they are. Its Assignment
+  // stays as found. Only an untaught one is this function's own below.
+  const enlisted = marker.enlistedFrom !== undefined && session.enlistedWork.has(ticketId);
+  if (enlisted && ending.kind !== "untaught") {
+    void session.paneSurvey?.refresh();
+    endEnlistedAttempt(session, ticketId, ending.kind, attempt);
+    return;
+  }
   // A re-adopted Continued attempt's adoption is over with its ending: its
   // interrupt goes with the record below, as an adopted attempt's does.
   session.adopted.delete(ticketId);
@@ -4129,7 +4155,7 @@ function endContinuedAttempt(
     work.paneId,
     session.assignments.get(ticketId)?.harness || work.harness,
   );
-  restoreAssignment(session, marker);
+  if (!enlisted) restoreAssignment(session, marker);
   void session.paneSurvey?.refresh();
   const emit = (phase: RunPhase) => emitSnapshot(session, phase);
   const clearInterrupts = (): void => {
