@@ -9,9 +9,9 @@
 // (ADR-0016), until the test lets it go.
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readEvents } from "./events.ts";
+import { appendEvent, readEvents } from "./events.ts";
 import { startPool, type HarnessCommand, type PoolRun, type PoolSnapshot } from "./engine.ts";
 import {
   startExecutingFakeHerdr,
@@ -262,6 +262,82 @@ describe("Finished terminals (issue #139)", () => {
     expect(await run.closeFinishedTerminals()).toBe(1);
     expect(fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === tab)).toBe(true);
     await until("the count to clear", () => latest(run).finishedTerminals === 0);
+  }, 30_000);
+
+  it("counts a Conversation's tab left open by a restart, crashed at boot", async () => {
+    // A Stop or Restart leaves a started Conversation's tab open, and the
+    // next boot crashes the record without a word to herdr: the tab is a
+    // Finished terminal like any other, found from its spawned event.
+    const poolDir = makePool({ tickets: [{ file: "01.md", marker: READY }], config });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=live spawned-by=none harness=tui model=m drivers=tdd -->\n\n# Left open\n\nhi\n",
+    );
+    appendEvent(join(poolDir, "runs"), "conv-1", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { cwd: poolDir, pane_id: "p-conv", tab_id: "tab-ghost" },
+    });
+    const { harnesses, quit } = tuiHarness(poolDir, {
+      "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "later" }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    fake.injectPane("p-conv");
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("the crashed Conversation's tab counted", () =>
+      latest(run).conversations.some((c) => c.id === "conv-1" && c.status === "crashed") &&
+      latest(run).finishedTerminals === 1,
+    );
+    expect(await run.closeFinishedTerminals()).toBe(1);
+    expect(fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-ghost")).toBe(true);
+    writeFileSync(quit, "");
+  }, 30_000);
+
+  it("records a tab herdr refuses to close, and keeps the close best-effort", async () => {
+    const poolDir = makePool({
+      tickets: [{ file: "01.md", marker: READY, body: "# Done and left open\n\nbody" }],
+      config,
+    });
+    const { harnesses } = tuiHarness(poolDir, {
+      "01": [{ status: "done", summary: "done", commitSha: null }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("the finished terminal", () => latest(run).finishedTerminals === 1);
+    fake.fail.add("tab.close");
+    expect(await run.closeFinishedTerminals()).toBe(0);
+    const failed = readEvents(join(poolDir, "runs"), "01").find((e) => e.kind === "tab-close-failed")!;
+    expect(failed.payload.tab_id).toBe(
+      readEvents(join(poolDir, "runs"), "01").find((e) => e.kind === "spawned")!.payload.tab_id,
+    );
+    expect(String(failed.payload.error)).toContain("tab.close");
+    expect(run.final.log.some((line) => line.includes("could not be closed"))).toBe(true);
+    expect(latest(run).finishedTerminals).toBe(1);
+  }, 30_000);
+
+  it("records a Conversation tab herdr refuses to close at its crash", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [{ file: "01.md", marker: "<!-- state: id=01 blocked-by= status=done -->" }],
+      config: { defaults: { harness: "claude", model: "m" }, terminal: "herdr" },
+    });
+    const fake = await startExecutingFakeHerdr({ fail: ["tab.close"] });
+    fakes.push(fake);
+    const run = startPool({ poolDir, harnesses: { claude: () => ["false"] }, herdrSocket: fake.socketPath });
+    runs.push(run);
+    const view = await run.startConversation({ title: "Doomed" });
+    expect(view.status).toBe("crashed");
+    await until("the refused close on the Conversation's log", () =>
+      readEvents(join(poolDir, "runs"), view.id).some((e) => e.kind === "tab-close-failed"),
+    );
+    // A crash closes through the engine's closeAttemptTabs (the host's), an
+    // End through the module's own closeRuntimeTab; both record a refusal.
+    expect(run.final.log.some((line) => line.includes(`${view.id}: herdr tab`))).toBe(true);
   }, 30_000);
 
   it("never counts a Held pane, a Live attempt's pane or a Continued attempt's", async () => {

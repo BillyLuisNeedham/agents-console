@@ -957,6 +957,10 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
     },
     markers: () => sessionOf().markers,
     config: () => sessionOf().state.config,
+    log: (line) => {
+      const session = sessionOf();
+      session.state = applyUpdate(session.state, { log: [line] });
+    },
   };
 }
 
@@ -4319,7 +4323,9 @@ async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]):
     );
     if (!checkpointed) continue;
     closing.push(
-      closeTab(session.herdrSocket, spawned.payload.tab_id as string).catch(() => {}),
+      closeTabRecorded(session, marker.id, spawned.attempt, spawned.payload.tab_id as string).then(
+        () => {},
+      ),
     );
   }
   await Promise.all(closing);
@@ -4342,12 +4348,7 @@ async function closeFinishedTerminals(session: Session): Promise<number> {
   }
   const finished = finishedTerminals(session.openedTabs, listing, busyPanes(session));
   const closed = await Promise.all(
-    finished.map((tab) =>
-      closeTab(session.herdrSocket, tab.tabId).then(
-        () => true,
-        () => false,
-      ),
-    ),
+    finished.map((tab) => closeTabRecorded(session, tab.owner, lastAttempt(session.runsDir, tab.owner), tab.tabId)),
   );
   const count = closed.filter(Boolean).length;
   session.state = applyUpdate(session.state, {
@@ -7772,8 +7773,7 @@ function closeAttemptTab(
       typeof event.payload.tab_id === "string",
   );
   if (!spawned || typeof spawned.payload.tab_id !== "string") return;
-  const tabId = spawned.payload.tab_id;
-  void closeTab(session.herdrSocket, tabId).catch(() => {});
+  void closeTabRecorded(session, ticketId, attempt, spawned.payload.tab_id);
 }
 
 /**
@@ -7795,8 +7795,40 @@ function closeAttemptTabs(session: Session, ticketId: string): void {
     ) {
       continue;
     }
-    void closeTab(session.herdrSocket, spawned.payload.tab_id).catch(() => {});
+    void closeTabRecorded(session, ticketId, spawned.attempt, spawned.payload.tab_id);
   }
+}
+
+/**
+ * Close one tab the engine opened, best-effort and never silently (issue
+ * #139): a close herdr refuses leaves the tab open and the engine carries
+ * on, but the failure lands as a `tab-close-failed` event on the owner's log
+ * and a line on the pool log, naming the error, so a tab that will not
+ * close is something the operator can see and not a mystery. Resolves
+ * whether the tab closed.
+ */
+function closeTabRecorded(
+  session: Session,
+  owner: string,
+  attempt: number,
+  tabId: string,
+): Promise<boolean> {
+  return closeTab(session.herdrSocket, tabId).then(
+    () => true,
+    (err: unknown) => {
+      const error = err instanceof Error ? err.message : String(err);
+      appendEvent(session.runsDir, owner, {
+        at: new Date().toISOString(),
+        attempt,
+        kind: "tab-close-failed",
+        payload: { tab_id: tabId, error },
+      });
+      session.state = applyUpdate(session.state, {
+        log: [`${owner}: herdr tab ${tabId} could not be closed (${error})`],
+      });
+      return false;
+    },
+  );
 }
 
 /** The exit facts a crash interrupt body quotes (ADR-0012), frozen at raise time. */

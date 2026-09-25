@@ -151,7 +151,7 @@ The still-live herdr pane of a Terminal-backed attempt that ended in a checkpoin
 _Avoid_: checkpoint pane (the checkpoint is the Interrupt, not where it ran), idle pane, parked pane (a branch is parked; a pane is held)
 
 **Finished terminal**:
-A herdr tab the pool opened, for an Attempt or a Conversation, that is still open after its Attempt or Conversation ended, and is no Live attempt's, Held pane's, enlisted or live Conversation's: a crashed attempt's tab, a done ticket's before its merge. The engine never closes one on its own; the operator closes them all at once from the pool header. Introduced by ADR-0027.
+A herdr tab the pool opened, for an Attempt or a Conversation, that is still open after its Attempt or Conversation ended or crashed, and is no Live attempt's, Held pane's, enlisted or live Conversation's: a crashed attempt's tab, a done ticket's before its merge, a started Conversation's left open by a Restart and crashed at the next boot. The engine never closes one on its own; the operator closes them all at once from the pool header. Introduced by ADR-0027.
 _Avoid_: dead tab (the TUI in it is often still alive), orphan (an Orphan attempt is still running), stale pane
 
 **Pool workspace**:

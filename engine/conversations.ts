@@ -454,6 +454,8 @@ export interface ConversationHost {
   recordAssignment(id: string, assignment: { harness: string; model: string; drivers: string }): void;
   /** The pool's Tickets as the engine currently knows them. */
   markers(): readonly TicketMarker[];
+  /** Add one line to the pool log, published with the next snapshot. */
+  log(line: string): void;
   /** The live pool config. */
   config(): PoolConfig;
 }
@@ -1188,9 +1190,16 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // the pool's and stay theirs (issue #101): the engine never closes the tab
   // and never removes the directory, at End or at any other ending. A
   // started Conversation keeps the ordinary cleanup.
+  // Best-effort, as every close is, but never silent (issue #139): a tab
+  // herdr refused to close is on the Conversation's log and the pool's.
   function closeRuntimeTab(runtime: ConversationRuntime): Promise<void> {
     if (runtime.enlisted || !runtime.tabId) return Promise.resolve();
-    return closeTab(env.herdrSocket, runtime.tabId).catch(() => {});
+    const tabId = runtime.tabId;
+    return closeTab(env.herdrSocket, tabId).catch((err: unknown) => {
+      const error = err instanceof Error ? err.message : String(err);
+      event(runtime.id, "tab-close-failed", { tab_id: tabId, error });
+      host.log(`conversation ${runtime.id}: herdr tab ${tabId} could not be closed (${error})`);
+    });
   }
 
   function disposeWorktree(runtime: ConversationRuntime): void {

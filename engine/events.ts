@@ -69,6 +69,11 @@ const EVENT_KINDS = [
   // a spawn off an enlisted Conversation, or a pool with no defaults), so
   // it waits as a config interrupt instead of a launch that would throw.
   "unassigned",
+  // A tab the engine closed by rule (a merge, a role's end, a Conversation's
+  // end, a Resume's fresh launch, the operator's bulk close) that herdr
+  // refused to close (issue #139): the close stays best-effort, and this is
+  // the record that it failed and why, where a silent catch used to be.
+  "tab-close-failed",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];
