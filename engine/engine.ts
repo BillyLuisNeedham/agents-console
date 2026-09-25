@@ -1225,6 +1225,9 @@ export function startPool(options: RunOptions): PoolRun {
         // when the pane has gone. Runs beside the attempt reconcile; both
         // are best-effort against the daemon.
         session.conversations.adoptEnlistedAtBoot(),
+        // A started Conversation's pane survives a restart too (issue #140):
+        // re-adopted while its TUI runs, crashed with its tab closed if not.
+        session.conversations.adoptStartedAtBoot(),
       ]),
     )
     .then(() => undefined);

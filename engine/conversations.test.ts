@@ -848,4 +848,121 @@ describe("Conversation boot reconciliation", () => {
 
     await run.shutdown(0);
   });
+
+  // Issue #140: a Restart or Stop leaves a started Conversation's pane and
+  // TUI running, so the next boot decides by the pane. Each case starts a
+  // real Conversation, shuts the engine down (which leaves the tab), does
+  // what happened while the engine was down, then boots again on the same
+  // pool and daemon.
+  async function startedThenShutDown(): Promise<{
+    poolDir: string;
+    fake: Awaited<ReturnType<typeof startFakeHerdr>>;
+    id: string;
+    paneId: string;
+    tabId: string;
+  }> {
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const fake = await startFakeHerdr();
+    const run: PoolRun = startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: fake.socketPath });
+    const view = await run.startConversation({ title: "Across a restart" });
+    expect(view.status).toBe("live");
+    const spawned = readEvents(join(poolDir, "runs"), view.id).find((e) => e.kind === "spawned")!;
+    await run.shutdown(0);
+    // The shutdown left the tab and the TUI as they were.
+    expect(fake.requests.some((r) => r.method === "tab.close")).toBe(false);
+    return {
+      poolDir,
+      fake,
+      id: view.id,
+      paneId: spawned.payload.pane_id as string,
+      tabId: spawned.payload.tab_id as string,
+    };
+  }
+
+  function reboot(poolDir: string, socketPath: string): PoolRun {
+    return startPool({ poolDir, harnesses: convoHarnesses, herdrSocket: socketPath, conversationPollMs: 50 });
+  }
+
+  it("re-adopts a started Conversation whose pane is alive, and End closes its tab after the restart", async () => {
+    const { poolDir, fake, id, paneId, tabId } = await startedThenShutDown();
+    try {
+      const run = reboot(poolDir, fake.socketPath);
+      await waitFor(() => run.snapshots.at(-1)?.conversations.find((c) => c.id === id)?.paneId === paneId);
+      expect(readConversation(join(poolDir, "conversations", `${id}.md`)).status).toBe("live");
+      expect(run.snapshots.at(-1)!.liveAttempts[id]).toBeUndefined(); // a Conversation's pane rides its view
+      expect(readEvents(join(poolDir, "runs"), id).some((e) => e.kind === "crash")).toBe(false);
+
+      await run.endConversation(id);
+      expect(readConversation(join(poolDir, "conversations", `${id}.md`)).status).toBe("ended");
+      await waitFor(() => fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === tabId));
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("crashes a started Conversation whose pane went while the engine was down, and closes its tab", async () => {
+    const { poolDir, fake, id, paneId, tabId } = await startedThenShutDown();
+    try {
+      fake.endPane(paneId);
+      const run = reboot(poolDir, fake.socketPath);
+      await waitFor(() => readConversation(join(poolDir, "conversations", `${id}.md`)).status === "crashed");
+      const crash = readEvents(join(poolDir, "runs"), id).find((e) => e.kind === "crash")!;
+      expect(String(crash.payload.reason)).toContain("pane was gone");
+      await waitFor(() => fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === tabId));
+      // Its branch is kept, as for any crash after going live.
+      expect(branchExists(poolDir, id)).toBe(true);
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("crashes a started Conversation whose TUI exited, and closes the tab left at its shell", async () => {
+    const { poolDir, fake, id, tabId } = await startedThenShutDown();
+    try {
+      writeFileSync(join(poolDir, "runs", `${id}.exitcode`), "0\n");
+      const run = reboot(poolDir, fake.socketPath);
+      await waitFor(() => readConversation(join(poolDir, "conversations", `${id}.md`)).status === "crashed");
+      const crash = readEvents(join(poolDir, "runs"), id).find((e) => e.kind === "crash")!;
+      expect(String(crash.payload.reason)).toContain("TUI had exited");
+      await waitFor(() => fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === tabId));
+      expect(fake.requests.some((r) => r.method === "pane.release_agent")).toBe(true);
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("leaves an enlisted Conversation to its own boot path and never closes its tab", async () => {
+    const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
+    const dir = join(poolDir, "conversations");
+    writeConversation(dir, {
+      id: "conv-1",
+      file: join(dir, "conv-1.md"),
+      title: "Enlisted",
+      opening: "",
+      status: "live",
+      harness: "claude",
+      model: "",
+      drivers: "implement",
+      enlisted: {
+        paneId: "pane-op",
+        tabId: "tab-op",
+        directory: poolDir,
+        branch: "main",
+        sessionId: null,
+      },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const run = reboot(poolDir, fake.socketPath);
+      await waitFor(() => readConversation(join(dir, "conv-1.md")).status === "crashed");
+      await Bun.sleep(200);
+      expect(fake.requests.some((r) => r.method === "tab.close")).toBe(false);
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
 });

@@ -348,10 +348,11 @@ describe("Finished terminals (issue #139)", () => {
     await until("the count to clear", () => latest(run).finishedTerminals === 0);
   }, 30_000);
 
-  it("counts a Conversation's tab left open by a restart, crashed at boot", async () => {
-    // A Stop or Restart leaves a started Conversation's tab open, and the
-    // next boot crashes the record without a word to herdr: the tab is a
-    // Finished terminal like any other, found from its spawned event.
+  it("re-adopts a started Conversation left talking by a restart instead of leaving its tab behind (issue #140)", async () => {
+    // A Stop or Restart leaves a started Conversation's tab open. Its pane is
+    // still its own, so the next boot re-adopts it: live again, and its tab
+    // no Finished terminal. (A dead one is crashed with its tab closed; the
+    // Conversation suite covers that.)
     const poolDir = makePool({ tickets: [{ file: "01.md", marker: READY }], config });
     mkdirSync(join(poolDir, "conversations"), { recursive: true });
     writeFileSync(
@@ -372,12 +373,44 @@ describe("Finished terminals (issue #139)", () => {
     fake.injectPane("p-conv");
     const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
     runs.push(run);
-    await until("the crashed Conversation's tab counted", () =>
-      latest(run).conversations.some((c) => c.id === "conv-1" && c.status === "crashed") &&
-      latest(run).finishedTerminals === 1,
+    await until("the re-adopted Conversation", () =>
+      latest(run).conversations.some((c) => c.id === "conv-1" && c.status === "live" && c.paneId === "p-conv"),
     );
-    expect(await run.closeFinishedTerminals()).toBe(1);
-    expect(fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-ghost")).toBe(true);
+    await Bun.sleep(200);
+    expect(latest(run).finishedTerminals).toBe(0);
+    expect(await run.closeFinishedTerminals()).toBe(0);
+    expect(fake.requests.some((r) => r.method === "tab.close")).toBe(false);
+    writeFileSync(quit, "");
+  }, 30_000);
+
+  it("never counts or closes an ended enlisted Conversation's tab (issue #140)", async () => {
+    const poolDir = makePool({ tickets: [{ file: "01.md", marker: READY }], config });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=claude model= drivers=tdd " +
+        `pane=p-op tab=tab-ghost directory=${encodeURIComponent(poolDir)} branch=main session=none -->\n\n# Theirs\n\nhi\n`,
+    );
+    appendEvent(join(poolDir, "runs"), "conv-1", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { argv: [], cwd: poolDir, pane_id: "p-op", tab_id: "tab-ghost" },
+    });
+    const { harnesses, quit } = tuiHarness(poolDir, {
+      "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "later" }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    fake.injectPane("p-op");
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("the checkpoint", () => run.interrupts.some((i) => i.kind === "checkpoint"));
+    await Bun.sleep(300);
+    expect(latest(run).conversations.find((c) => c.id === "conv-1")?.enlisted).toBe(true);
+    expect(latest(run).finishedTerminals).toBe(0);
+    expect(await run.closeFinishedTerminals()).toBe(0);
+    expect(fake.requests.some((r) => r.method === "tab.close" && r.params.tab_id === "tab-ghost")).toBe(false);
     writeFileSync(quit, "");
   }, 30_000);
 
