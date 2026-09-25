@@ -141,6 +141,7 @@ function conversation(
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
     enlisted: false,
+    ending: false,
     ...overrides,
   };
 }
@@ -3118,5 +3119,16 @@ describe("projectEnlistForm", () => {
     expect(view.showsOpening).toBe(true);
     expect(view.note).toContain("cannot block");
     expect(view.note).toContain("Ticket");
+  });
+});
+
+describe("a Conversation the engine says is ending (issue #140)", () => {
+  it("shows its End disabled even with no End sent from this tab", () => {
+    const view = projectPool(
+      snapshot({ state: { conversations: [conversation("conv-1", { ending: true, paneId: null })] } }),
+    );
+    const card = view.cards.find((c) => c.kind === "conversation");
+    expect(card?.kind === "conversation" && card.endView.ending).toBe(true);
+    expect(card?.kind === "conversation" && card.terminal).toBe(null);
   });
 });

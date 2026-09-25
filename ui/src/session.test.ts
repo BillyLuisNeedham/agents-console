@@ -69,6 +69,7 @@ function conversation(
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
     enlisted: false,
+    ending: false,
     ...overrides,
   };
 }

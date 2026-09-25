@@ -877,6 +877,10 @@ interface Session {
   // graded as lone attempts: grading spawns graders and merges, so it runs in
   // the drive loop between super-steps, never beside one (ADR-0004).
   continuedGrades: { ticketId: string; attempt: number; work: HeldPane }[];
+  // Merges into the pool checkout past its gate and not yet settled, and
+  // verify rounds from their gate to their merge decision (ADR-0027): Keep
+  // talking is refused beside one, as beside any agent in the checkout.
+  poolCheckoutMerging: number;
   // Tickets the drive planned into the pool checkout, from the plan to the
   // attempt's ending (issue #139): the pool checkout's occupant before its
   // launch has spawned (ADR-0027's one agent at a time).
@@ -933,11 +937,17 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
     resolveConflict: (marker, result, attempt) =>
       handleMergeConflict(sessionOf(), marker, result, attempt),
     closeAttemptTabs: (id) => closeAttemptTabs(sessionOf(), id),
-    chainMerge: (work) =>
-      // Through the pool checkout's gate (ADR-0027): joins the chain once
-      // no Continued attempt holds the checkout; a shutdown while it waits
-      // drops the merge, which the next boot's End finishes.
-      chainMergeWork(sessionOf(), work).then(() => {}),
+    chainMerge: (work) => {
+      const session = sessionOf();
+      // The pool checkout's gate is checked inside the link, as the merge is
+      // about to run (ADR-0027): a merge dropped there at a shutdown is an
+      // End the next boot finishes.
+      const next = session.mergeChain.then(() => throughPoolCheckoutGate(session, null, work));
+      // The chain itself never rejects (a failed merge must not wedge the
+      // next caller's), while the caller sees `work`'s own outcome.
+      session.mergeChain = next.catch(() => {});
+      return next.then(() => {});
+    },
     mergeTargetBranch: () => mergeTargetBranch(sessionOf()),
     mergeIntoTarget: (branch) => {
       const session = sessionOf();
@@ -1164,6 +1174,7 @@ export function startPool(options: RunOptions): PoolRun {
     held: new Map(),
     continued: new Map(),
     continuedGrades: [],
+    poolCheckoutMerging: 0,
     poolCheckoutPlanned: new Set(),
     paneSurvey: null,
     openedTabs: [],
@@ -1235,6 +1246,9 @@ export function startPool(options: RunOptions): PoolRun {
         session.conversations.adoptStartedAtBoot(),
       ]),
     )
+    // Merges a shutdown dropped at the pool checkout's gate are chained
+    // again, once the Continued attempt that held them is re-adopted.
+    .then(() => redoDeferredMerges(session))
     .then(() => undefined);
   const handle = makeHandle(session);
   session.handle = handle;
@@ -1509,6 +1523,8 @@ async function driveLoop(session: Session): Promise<void> {
     // A verify ticket's Continued attempt that ended done is graded here,
     // between super-steps, where the drive's own grading runs (issue #139).
     await gradeContinuedAttempts(session, emit);
+    // A shutdown that released the grading gate: nothing more is planned.
+    if (session.children.stopping) break;
     const next = await superStepBoundary(session, emit);
     if (next.kind === "close") break;
     const step = planSuperStep(session, emit, next.ready);
@@ -1830,18 +1846,12 @@ async function runSuperStep(
           // Its place in the Merge queue is the order it joins the chain,
           // which is also the order the conflict loop below resolves in.
           session.mergeLine.taken(marker.id);
-          if (poolCheckoutHeld(session)) {
-            // A Continued attempt holds the pool checkout (ADR-0027): this
-            // merge waits at the gate, off the super-step, which carries on
-            // without it; the Merge hold then keeps the boundary from
-            // planning past the unmerged done ticket, as for any merge.
-            void mergeDoneTicket(session, marker, result.plan.worktree!, result.plan.attempt, "attempt")
-              .finally(() => finishAdoptedFinalize(session));
-          } else {
-            // Chained from the session's tail, not the step's own queue: a
-            // merge the gate held back joins the chain when it is let through,
-            // and the step's next merge must come after it.
-            mergeQueue = session.mergeChain.then(async () => {
+          mergeQueue = mergeQueue.then(() =>
+            // The pool checkout's gate (ADR-0027), checked as the merge is
+            // about to run: with no Continued attempt in the checkout this is
+            // the merge at once, exactly as before; with one, the queue (and
+            // the step) waits behind it until the attempt ends.
+            throughPoolCheckoutGate(session, { marker, worktree: result.plan.worktree!, attempt: result.plan.attempt }, () => {
               // Captured just before the merge, inside the serialized chain:
               // HEAD may have moved since this ticket's attempt exited (an
               // earlier sibling's merge in the same super-step), so this is
@@ -1854,13 +1864,13 @@ async function runSuperStep(
                 attempt: result.plan.attempt,
                 beforeSha,
               });
-            });
-            // Publish the tail at every extension, not once after the await:
-            // an adopted terminal attempt's finalize merge (ADR-0014) chains
-            // onto session.mergeChain from outside the drive loop and must
-            // never see a stale, already-settled tail.
-            session.mergeChain = mergeQueue.catch(() => {});
-          }
+            }),
+          );
+          // Publish the tail at every extension, not once after the await:
+          // an adopted terminal attempt's finalize merge (ADR-0014) chains
+          // onto session.mergeChain from outside the drive loop and must
+          // never see a stale, already-settled tail.
+          session.mergeChain = mergeQueue.catch(() => {});
         }
         if (result.status === "in-progress") {
           // A crashed attempt was recorded at exit (the crash event
@@ -2002,41 +2012,47 @@ async function runSuperStep(
       .sort((a, b) => a - b);
     // Both decisions below can merge into the pool checkout, so the round
     // waits at its gate before any grade is recorded: a shutdown while it
-    // waits then leaves the round ungraded rather than graded and lost.
-    if (!(await poolCheckoutFree(session))) continue;
-    const grades = await gradeRound(session, marker, attempts, emit);
-    // Lone-attempt resolution (ticket 05): with one attempt and one
-    // grade there is nothing to select between, so the grade decides
-    // at the ticket: flag → checkpoint, pass → done.
-    if (assignment.verify === 1 && attempts.length === 1) {
-      resolveLoneAttempt(
-        session,
-        marker,
-        results.find((r) => r.marker.id === marker.id)!,
-        grades.get(attempts[0]) ?? null,
-        emit,
-      );
-      continue;
-    }
-    // Winner selection (ticket 04): with more than one graded candidate
-    // and every attempt done, the engine picks the best and merges only
-    // that attempt's branch. A round with a crashed or paused attempt
-    // grades but decides nothing: the crash or checkpoint interrupt owns
-    // the ticket and the re-round after the human answers selects
-    // afresh. A grader without a usable grade is equally undecided
-    // (ticket 07's re-spawn supplies it). With the pool's selection set
-    // to human (ticket 08), the same completed fan-out raises the
-    // selection interrupt instead and the answer picks the winner.
-    const round = results.filter((r) => r.marker.id === marker.id);
-    if (
-      round.every((r) => r.status === "done") &&
-      attempts.every((attempt) => grades.has(attempt))
-    ) {
-      if (selectionMode(session.state.config) === "human") {
-        raiseSelectionInterrupt(session, marker, attempts, grades, emit);
-      } else {
-        await selectAndMergeWinner(session, marker, attempts, grades, emit);
+    // waits then leaves the round ungraded rather than graded and lost, and
+    // the step stops there.
+    if (!(await poolCheckoutFree(session))) return "stop";
+    session.poolCheckoutMerging += 1;
+    try {
+      const grades = await gradeRound(session, marker, attempts, emit);
+      // Lone-attempt resolution (ticket 05): with one attempt and one
+      // grade there is nothing to select between, so the grade decides
+      // at the ticket: flag → checkpoint, pass → done.
+      if (assignment.verify === 1 && attempts.length === 1) {
+        resolveLoneAttempt(
+          session,
+          marker,
+          results.find((r) => r.marker.id === marker.id)!,
+          grades.get(attempts[0]) ?? null,
+          emit,
+        );
+        continue;
       }
+      // Winner selection (ticket 04): with more than one graded candidate
+      // and every attempt done, the engine picks the best and merges only
+      // that attempt's branch. A round with a crashed or paused attempt
+      // grades but decides nothing: the crash or checkpoint interrupt owns
+      // the ticket and the re-round after the human answers selects
+      // afresh. A grader without a usable grade is equally undecided
+      // (ticket 07's re-spawn supplies it). With the pool's selection set
+      // to human (ticket 08), the same completed fan-out raises the
+      // selection interrupt instead and the answer picks the winner.
+      const round = results.filter((r) => r.marker.id === marker.id);
+      if (
+        round.every((r) => r.status === "done") &&
+        attempts.every((attempt) => grades.has(attempt))
+      ) {
+        if (selectionMode(session.state.config) === "human") {
+          raiseSelectionInterrupt(session, marker, attempts, grades, emit);
+        } else {
+          await selectAndMergeWinner(session, marker, attempts, grades, emit);
+        }
+      }
+    } finally {
+      session.poolCheckoutMerging -= 1;
     }
   }
   // The boundary persist: a failed write retries with backoff, and the
@@ -2379,6 +2395,59 @@ function owedContinuedGrade(
   }
   const work = heldPaneOf(events, attempt, (n) => worktreePathFor(session.cwd, marker.id, n));
   return work === null ? null : { ticketId: marker.id, attempt, work };
+}
+
+// Chain again every merge a shutdown dropped at the pool checkout's gate
+// (ADR-0027): a done ticket whose last `merge-deferred` has no merge record
+// after it (merged, merge-conflict, merge-blocked, resolver) and no merge
+// interrupt waiting. Through the ordinary path, so the merge passes the gate
+// again (a re-adopted Continued attempt may still hold the checkout), lands
+// or goes to the resolver machinery as any merge does, and takes its place
+// in the Merge queue rather than standing there stalled.
+function redoDeferredMerges(session: Session): void {
+  for (const marker of session.markers) {
+    if (session.state.tickets[marker.id] !== "done") continue;
+    if (
+      session.state.interrupts.some(
+        (i) =>
+          i.ticketId === marker.id &&
+          (i.kind === "merge-conflict" || i.kind === "merge-approval"),
+      )
+    ) {
+      continue;
+    }
+    const events = readEvents(session.runsDir, marker.id);
+    let deferredAt = -1;
+    events.forEach((event, i) => {
+      if (event.kind === "merge-deferred") deferredAt = i;
+    });
+    if (deferredAt === -1) continue;
+    const settled = events.some(
+      (event, i) =>
+        i > deferredAt &&
+        (event.kind === "merged" ||
+          event.kind === "merge-conflict" ||
+          event.kind === "merge-blocked" ||
+          event.kind === "resolver"),
+    );
+    if (settled) continue;
+    const deferred = events[deferredAt];
+    const path = deferred.payload.path;
+    const branch = deferred.payload.branch;
+    if (typeof path !== "string" || typeof branch !== "string") continue;
+    session.state = applyUpdate(session.state, {
+      log: [`ticket ${marker.id}: merge dropped at the last shutdown chained again`],
+    });
+    if (marker.enlistedFrom !== undefined && session.enlistedWork.has(marker.id)) {
+      chainEnlistedMerge(session, marker, deferred.attempt, branch);
+      continue;
+    }
+    session.mergeLine.taken(marker.id);
+    void mergeDoneTicket(session, marker, { path, branch }, deferred.attempt, "attempt").then(
+      () => finishAdoptedFinalize(session),
+      () => finishAdoptedFinalize(session),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3493,8 +3562,10 @@ function recordAdoptedExit(
     // chain settles, so a resumed drive's closing gate can never raise the
     // Review interrupt ahead of this merge landing.
     session.mergeLine.taken(ticketId);
-    void mergeDoneTicket(session, marker, worktree, attempt, what).finally(() =>
-      finishAdoptedFinalize(session),
+    const next = mergeDoneTicket(session, marker, worktree, attempt, what);
+    void next.then(
+      () => finishAdoptedFinalize(session),
+      () => finishAdoptedFinalize(session),
     );
   } else {
     finishAdoptedFinalize(session);
@@ -3502,14 +3573,13 @@ function recordAdoptedExit(
 }
 
 // Merge a done ticket's worktree branch off the drive loop: an adopted or a
-// Continued attempt's ending, or a drive merge the pool checkout's gate held
-// back (ADR-0027). It passes the gate, then joins the session merge chain,
-// so two git merges never run at once on the main checkout, and records the
-// merge exactly as the drive's own merges do: the merged event, the tab
-// close, the done-Notice, the pool log; a conflict goes to the resolver
-// machinery. A shutdown while it waits at the gate drops it; the ticket
-// stays done-but-unmerged for the next run's Merge hold.
-async function mergeDoneTicket(
+// Continued attempt's ending, or a merge a shutdown dropped at the pool
+// checkout's gate and the next boot takes up again (ADR-0027). It chains
+// onto the session merge chain, so two git merges never run at once on the
+// main checkout, passes the gate inside its link, and records the merge
+// exactly as the drive's own merges do: the merged event, the tab close, the
+// done-Notice, the pool log; a conflict goes to the resolver machinery.
+function mergeDoneTicket(
   session: Session,
   marker: TicketMarker,
   worktree: WorktreeInfo,
@@ -3517,38 +3587,42 @@ async function mergeDoneTicket(
   what: string,
 ): Promise<void> {
   const ticketId = marker.id;
-  await chainMergeWork(session, async () => {
-    // Captured inside the serialized chain, right before the merge: HEAD
-    // may have moved since this ticket's attempt ended (another merge
-    // landing first), and mergeTicket removes this branch on success, so
-    // the range for a done-Notice's diff summary has to be taken here or
-    // not at all.
-    const beforeSha = mergeTargetSha(session);
-    const merge = mergeTicket(session, marker, worktree);
-    if (merge.ok) {
-      session.mergeLine.settled(ticketId);
-      appendEvent(session.runsDir, ticketId, {
-        at: new Date().toISOString(),
-        attempt,
-        kind: "merged",
-        payload: mergedPayload(merge),
-      });
-      closeAttemptTab(session, ticketId, attempt);
-      session.conversations.ticketEnded(
-        marker,
-        worktree.branch,
-        beforeSha ? `${beforeSha}..${mergeTargetRef(session)}` : null,
-      );
-      session.state = applyUpdate(session.state, {
-        log: [
-          `ticket ${ticketId}: ${what} ${attempt} merged ` +
-            `${worktree.branch} onto the working branch`,
-        ],
-      });
-    } else {
-      await handleMergeConflict(session, marker, merge, attempt);
-    }
-  }).catch(() => {});
+  const next = session.mergeChain.then(() =>
+    throughPoolCheckoutGate(session, { marker, worktree, attempt }, async () => {
+      // Captured inside the serialized chain, right before the merge: HEAD
+      // may have moved since this ticket's attempt ended (another merge
+      // landing first), and mergeTicket removes this branch on success, so
+      // the range for a done-Notice's diff summary has to be taken here or
+      // not at all.
+      const beforeSha = mergeTargetSha(session);
+      const merge = mergeTicket(session, marker, worktree);
+      if (merge.ok) {
+        session.mergeLine.settled(ticketId);
+        appendEvent(session.runsDir, ticketId, {
+          at: new Date().toISOString(),
+          attempt,
+          kind: "merged",
+          payload: mergedPayload(merge),
+        });
+        closeAttemptTab(session, ticketId, attempt);
+        session.conversations.ticketEnded(
+          marker,
+          worktree.branch,
+          beforeSha ? `${beforeSha}..${mergeTargetRef(session)}` : null,
+        );
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${ticketId}: ${what} ${attempt} merged ` +
+              `${worktree.branch} onto the working branch`,
+          ],
+        });
+      } else {
+        await handleMergeConflict(session, marker, merge, attempt);
+      }
+    }),
+  );
+  session.mergeChain = next.catch(() => {});
+  return next.then(() => {});
 }
 
 // The adopted finalize's last step, after its merge chain has settled: emit
@@ -3778,26 +3852,36 @@ function chainEnlistedMerge(
   branch: string,
 ): void {
   session.mergeLine.taken(marker.id);
-  const next = chainMergeWork(session, async () => {
-    const merge = mergeWithIssueAside(session, marker, branch);
-    if (merge.ok) {
-      session.mergeLine.settled(marker.id);
-      appendEvent(session.runsDir, marker.id, {
-        at: new Date().toISOString(),
-        attempt,
-        kind: "merged",
-        payload: mergedPayload(merge),
-      });
-      session.state = applyUpdate(session.state, {
-        log: [
-          `ticket ${marker.id}: enlisted attempt ${attempt} merged ` +
-            `${branch} onto the working branch`,
-        ],
-      });
-      return;
-    }
-    await handleMergeConflict(session, marker, merge, attempt);
-  });
+  // The found branch is merged in place; a merge a shutdown drops at the
+  // pool checkout's gate names the found directory, for the next boot.
+  const deferred = {
+    marker,
+    worktree: { path: session.enlistedWork.get(marker.id)?.directory ?? session.cwd, branch },
+    attempt,
+  };
+  const next = session.mergeChain.then(() =>
+    throughPoolCheckoutGate(session, deferred, async () => {
+      const merge = mergeWithIssueAside(session, marker, branch);
+      if (merge.ok) {
+        session.mergeLine.settled(marker.id);
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt,
+          kind: "merged",
+          payload: mergedPayload(merge),
+        });
+        session.state = applyUpdate(session.state, {
+          log: [
+            `ticket ${marker.id}: enlisted attempt ${attempt} merged ` +
+              `${branch} onto the working branch`,
+          ],
+        });
+        return;
+      }
+      await handleMergeConflict(session, marker, merge, attempt);
+    }),
+  );
+  session.mergeChain = next.catch(() => {});
   void next.then(
     () => finishAdoptedFinalize(session),
     () => finishAdoptedFinalize(session),
@@ -4022,7 +4106,14 @@ function surveyListed(session: Session): void {
   if (listing === null) return;
   // The daemon answers again: a Conversation a boot could not settle is
   // tried again now (issue #140).
-  void session.conversations.readoptPending();
+  void session.conversations.readoptPending().catch((err: unknown) => {
+    session.state = applyUpdate(session.state, {
+      log: [
+        "conversations: re-adoption failed " +
+          `(${err instanceof Error ? err.message : String(err)}); the next listing tries again`,
+      ],
+    });
+  });
   for (const [id, held] of session.held) {
     if (!heldPaneListed(session, id, held) || tuiExited(session, id, held)) session.held.delete(id);
   }
@@ -4102,17 +4193,21 @@ function restoreAssignment(session: Session, marker: TicketMarker): void {
   }
 }
 
-// The pool checkout's one agent (ADR-0027): the id of an agent other than
-// `exceptId`'s working in the pool checkout right now. That is a ticket the
-// drive planned into it, from the plan on (its launch may not have spawned
-// yet); a live or re-adopted Attempt whose last spawn ran there, or, for an
-// enlisted one, whose found directory is there; and a live Conversation,
-// enlisted ones included, working there. "There" is anywhere inside the
-// checkout's own working tree (inPoolCheckout), an enlisted agent in a
-// subdirectory included. Null when none is.
+// The pool checkout's one agent (ADR-0027): what, other than `exceptId`'s
+// own agent, is writing in the pool checkout right now, as a phrase for the
+// refusal. That is a merge into it in flight (past its gate, not settled); a
+// ticket the drive planned into it, from the plan on (its launch may not
+// have spawned yet); a live or re-adopted Attempt whose last spawn ran
+// there, or, for an enlisted one, whose found directory is there; and a live
+// Conversation, enlisted ones included, working there. "There" is anywhere
+// inside the checkout's own working tree (inPoolCheckout), an enlisted agent
+// in a subdirectory included. Null when nothing is.
 function otherAgentInPoolCheckout(session: Session, exceptId: string): string | null {
+  // A merge landing in the checkout is a writer there too, from its gate
+  // until it settles.
+  if (session.poolCheckoutMerging > 0) return "a merge into the pool checkout is in flight";
   for (const id of session.poolCheckoutPlanned) {
-    if (id !== exceptId) return id;
+    if (id !== exceptId) return `${id} is working now`;
   }
   const ids = new Set([
     ...Object.keys(session.liveAttempts.records()),
@@ -4126,10 +4221,10 @@ function otherAgentInPoolCheckout(session: Session, exceptId: string): string | 
       readEvents(session.runsDir, id)
         .filter((event) => event.kind === "spawned")
         .pop()?.payload.cwd;
-    if (typeof cwd === "string" && inPoolCheckout(session, cwd)) return id;
+    if (typeof cwd === "string" && inPoolCheckout(session, cwd)) return `${id} is working now`;
   }
   for (const { id, cwd } of session.conversations.liveDirectories()) {
-    if (id !== exceptId && inPoolCheckout(session, cwd)) return id;
+    if (id !== exceptId && inPoolCheckout(session, cwd)) return `${id} is working now`;
   }
   return null;
 }
@@ -4171,20 +4266,52 @@ async function poolCheckoutFree(session: Session): Promise<boolean> {
   return true;
 }
 
-// Run merge work on the session merge chain once the pool checkout's gate
-// lets it through (ADR-0027). The work joins the chain only then, so nothing
-// already on the chain, the super-step's own queue included, ever waits on
-// a held merge; the chain itself never rejects, while the caller sees the
-// work's own outcome. Resolves undefined when a shutdown dropped it.
-function chainMergeWork<T>(session: Session, work: () => Promise<T> | T): Promise<T | undefined> {
+// A merge into the pool checkout, run through its gate (ADR-0027), inside the
+// merge-chain link at the moment the merge is about to touch the checkout.
+// With no Continued attempt in the checkout the merge runs at once, returning
+// whatever it returns (and throwing whatever it throws) exactly as the chain
+// always has. With one there, the link waits until it ends, and so does
+// everything chained behind it, the drive's own queue included: the pool
+// waits on the conversation the way it waits on a lone attempt working in
+// the checkout, and no deadlock is possible because the Continued attempt
+// ends outside the drive. A merge counts as in flight from the gate until it
+// settles (session.poolCheckoutMerging), which Keep talking refuses beside.
+// One a shutdown drops while it waits is recorded `merge-deferred` on its
+// ticket (a Conversation's End needs no record: the next boot finishes it),
+// and the next boot chains it again (redoDeferredMerges).
+function throughPoolCheckoutGate(
+  session: Session,
+  deferred: { marker: TicketMarker; worktree: WorktreeInfo; attempt: number } | null,
+  merge: () => void | Promise<void>,
+): void | Promise<void> {
+  const run = (): void | Promise<void> => {
+    session.poolCheckoutMerging += 1;
+    let result: void | Promise<void>;
+    try {
+      result = merge();
+    } catch (err) {
+      session.poolCheckoutMerging -= 1;
+      throw err;
+    }
+    if (result instanceof Promise) {
+      return result.finally(() => {
+        session.poolCheckoutMerging -= 1;
+      });
+    }
+    session.poolCheckoutMerging -= 1;
+  };
+  if (!poolCheckoutHeld(session)) return run();
   return poolCheckoutFree(session).then((free) => {
-    if (!free) return undefined;
-    const next = session.mergeChain.then(work);
-    session.mergeChain = next.then(
-      () => {},
-      () => {},
-    );
-    return next;
+    if (free) return run();
+    if (deferred !== null) {
+      appendEvent(session.runsDir, deferred.marker.id, {
+        at: new Date().toISOString(),
+        attempt: deferred.attempt,
+        kind: "merge-deferred",
+        payload: { path: deferred.worktree.path, branch: deferred.worktree.branch },
+      });
+    }
+    return undefined;
   });
 }
 
@@ -4267,7 +4394,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
   if (beside !== null) {
     throw keepTalkingRefusal(
       ticketId,
-      `worked in the pool checkout, where ${beside} is working now; keep talking once it is done`,
+      `worked in the pool checkout, where ${beside}; keep talking once it is done`,
     );
   }
 
@@ -4665,6 +4792,27 @@ async function gradeContinuedAttempts(
       session.continuedGrades.unshift({ ticketId, attempt, work });
       return;
     }
+    session.poolCheckoutMerging += 1;
+    try {
+      await gradeContinuedAttempt(session, marker, attempt, work, emit);
+    } finally {
+      session.poolCheckoutMerging -= 1;
+    }
+  }
+  await persistWithRetry(session);
+  emit("running");
+}
+
+// One owed lone grade and its decision (gradeContinuedAttempts).
+async function gradeContinuedAttempt(
+  session: Session,
+  marker: TicketMarker,
+  attempt: number,
+  work: HeldPane,
+  emit: (phase: RunPhase) => void,
+): Promise<void> {
+  const ticketId = marker.id;
+  {
     const grades = await gradeRound(session, marker, [attempt], emit);
     const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, attempt, false));
     resolveLoneAttempt(
@@ -4692,8 +4840,6 @@ async function gradeContinuedAttempts(
       emit,
     );
   }
-  await persistWithRetry(session);
-  emit("running");
 }
 
 // Plain Resume closes the old pane (issue #139): just before a ticket's
@@ -8247,17 +8393,18 @@ function closeAttemptTab(
  */
 function closeAttemptTabs(session: Session, ticketId: string): void {
   if (wasEnlisted(session, ticketId)) return;
-  // One close per tab: a Continued attempt names its pane's tab again.
+  // One close per terminal: a Continued attempt names its pane's tab again.
+  // Keyed by herdr's terminal id where recorded, since a short tab id can be
+  // reused by a later terminal of the same owner.
   const seen = new Set<string>();
   for (const spawned of readEvents(session.runsDir, ticketId)) {
-    if (
-      spawned.kind !== "spawned" ||
-      typeof spawned.payload.tab_id !== "string" ||
-      seen.has(spawned.payload.tab_id)
-    ) {
-      continue;
-    }
-    seen.add(spawned.payload.tab_id);
+    if (spawned.kind !== "spawned" || typeof spawned.payload.tab_id !== "string") continue;
+    const key =
+      typeof spawned.payload.terminal_id === "string"
+        ? `terminal:${spawned.payload.terminal_id}`
+        : `tab:${spawned.payload.tab_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     void closeSpawnedTab(session, ticketId, spawned, "role ended");
   }
 }

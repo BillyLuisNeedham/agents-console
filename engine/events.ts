@@ -86,6 +86,10 @@ const EVENT_KINDS = [
   // the End moves anything, so an engine that stops mid-End leaves the next
   // boot the fact that this was an ending, not a crash.
   "end-requested",
+  // A merge a shutdown dropped while it waited at the pool checkout's gate
+  // (issue #139, ADR-0027): the worktree and branch it would have merged,
+  // so the next boot chains it again through the ordinary merge path.
+  "merge-deferred",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

@@ -61,6 +61,7 @@ function snap(
         turn: { state: "working" as const, lastLine: "", idleSince: null },
         children: [],
         enlisted: false,
+        ending: false,
       })),
       log: [],
       outcomes: {},

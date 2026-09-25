@@ -469,6 +469,7 @@ describe("PoolClient Conversations routes (issue #60)", () => {
       turn: { state: "working", lastLine: "", idleSince: null },
       children: [],
       enlisted: false,
+      ending: false,
     };
     const { fetch, calls } = jsonFetch(201, { conversation });
     globalThis.fetch = fetch;

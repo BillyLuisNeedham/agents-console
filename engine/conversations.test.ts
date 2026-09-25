@@ -1100,6 +1100,91 @@ describe("Conversation boot reconciliation", () => {
     }
   });
 
+  it("claims a no-runtime live record once when two Ends race (F3)", async () => {
+    const { poolDir, fake, id } = await startedThenShutDown();
+    try {
+      const worktree = worktreePathFor(poolDir, id);
+      writeFileSync(join(worktree, "raced.txt"), "work\n");
+      gitIn(worktree, ["add", "-A"]);
+      gitIn(worktree, ["commit", "-qm", "raced"]);
+      fake.fail.add("pane.read");
+      const run = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+        conversationPollMs: 50,
+        paneSurveyMs: 600_000,
+      });
+      await Bun.sleep(300);
+      expect(readConversation(join(poolDir, "conversations", `${id}.md`)).status).toBe("live");
+      await Promise.all([run.endConversation(id), run.endConversation(id)]);
+      await waitFor(() => readConversation(join(poolDir, "conversations", `${id}.md`)).status === "ended");
+      await Bun.sleep(300);
+      const events = readEvents(join(poolDir, "runs"), id);
+      expect(events.filter((e) => e.kind === "ended")).toHaveLength(1);
+      expect(events.filter((e) => e.kind === "merged")).toHaveLength(1);
+      expect(events.filter((e) => e.kind === "end-requested")).toHaveLength(1);
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("holds an End whose merge an interrupt already owns at boot, rather than merging again (F4)", async () => {
+    const { poolDir, fake, id } = await startedThenShutDown();
+    try {
+      for (const kind of ["end-requested", "merge-conflict"] as const) {
+        appendEvent(join(poolDir, "runs"), id, {
+          at: new Date().toISOString(),
+          attempt: 1,
+          kind,
+          payload: kind === "end-requested" ? { closing: "bye" } : { conflicted: ["x"] },
+        });
+      }
+      const run = reboot(poolDir, fake.socketPath);
+      await waitFor(() => run.snapshots.at(-1)?.conversations.find((c) => c.id === id)?.ending === true);
+      await Bun.sleep(300);
+      const events = readEvents(join(poolDir, "runs"), id);
+      expect(events.filter((e) => e.kind === "merge-conflict")).toHaveLength(1);
+      expect(events.some((e) => e.kind === "merged" || e.kind === "ended" || e.kind === "crash")).toBe(false);
+      expect(readConversation(join(poolDir, "conversations", `${id}.md`)).status).toBe("live");
+      // Ending: no pane to peek or focus.
+      expect(run.snapshots.at(-1)!.conversations.find((c) => c.id === id)?.paneId).toBeNull();
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("releases no agent and closes no tab when an End finds its pane listed as another terminal (F8)", async () => {
+    const { poolDir, fake, id, paneId, tabId } = await startedThenShutDown();
+    try {
+      // The boot cannot ask, so the record stays live; then herdr lists a
+      // different terminal under the recorded ids.
+      fake.fail.add("pane.list");
+      const run = startPool({
+        poolDir,
+        harnesses: convoHarnesses,
+        herdrSocket: fake.socketPath,
+        conversationPollMs: 50,
+        paneSurveyMs: 600_000,
+      });
+      await Bun.sleep(300);
+      fake.panes.get(paneId)!.terminalId = "term-someone-else";
+      fake.fail.delete("pane.list");
+      const before = fake.requests.length;
+      await run.endConversation(id);
+      await waitFor(() => readConversation(join(poolDir, "conversations", `${id}.md`)).status === "ended");
+      await Bun.sleep(200);
+      const after = fake.requests.slice(before);
+      expect(after.some((r) => r.method === "pane.release_agent")).toBe(false);
+      expect(after.some((r) => r.method === "tab.close" && r.params.tab_id === tabId)).toBe(false);
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
   it("leaves an enlisted Conversation to its own boot path and never closes its tab", async () => {
     const { poolDir } = makeGitPool({ tickets: [doneTicket("01")], config: convoConfig });
     const dir = join(poolDir, "conversations");

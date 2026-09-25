@@ -742,12 +742,12 @@ describe("Keep talking review fixes (issue #139)", () => {
     expect(spawnedPanes(poolDir).length).toBe(spawnsBefore);
   }, 40_000);
 
-  it("lets the drive carry on past a merge held for a Continued attempt in the pool checkout (R4)", async () => {
-    // 01 ran alone, so in the pool checkout, and is continued there. A
-    // Conversation then spawns a ticket, which runs in its own worktree and
-    // finishes done while 01's conversation goes on: its merge waits at the
-    // gate, and the super-step it ran in still ends.
-    const { run, poolDir } = await checkpointed({
+  // 01 ran alone, so in the pool checkout, and is continued there. A
+  // Conversation then spawns a ticket, which runs in its own worktree and
+  // finishes done while 01's conversation goes on: its merge waits at the
+  // pool checkout's gate.
+  async function heldMerge() {
+    const { run, poolDir, fake } = await checkpointed({
       git: true,
       outcomes: {
         "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
@@ -760,27 +760,53 @@ describe("Keep talking review fixes (issue #139)", () => {
       join(poolDir, "runs", `${view.id}.spawn.json`),
       JSON.stringify({ spawn: [{ title: "Side ticket", body: "do a small side thing please, in its own worktree" }] }),
     );
-    const spawned = () => Object.keys(run.final.tickets).find((id) => id.startsWith(`${view.id}-spawn`));
-    await until("the spawned ticket done", () => {
-      const id = spawned();
-      return id !== undefined && run.final.tickets[id] === "done";
-    }, 20_000);
-    // The super-step it ran in ended and the drive went on to its close,
-    // rather than waiting inside the step on the held merge.
-    await until("the drive's close after the step", () => {
-      const log = run.final.log;
-      const exited = log.findIndex((line) => line.includes(`${spawned()!}: exited`));
-      return exited !== -1 && log.slice(exited).some((line) => line.startsWith("pool quiescent"));
+    const spawned = (): string | undefined =>
+      Object.keys(run.final.tickets).find((id) => id.startsWith(`${view.id}-spawn`));
+    await until(
+      "the spawned ticket done",
+      () => {
+        const id = spawned();
+        return id !== undefined && run.final.tickets[id] === "done";
+      },
+      20_000,
+    );
+    await Bun.sleep(300);
+    const id = spawned()!;
+    expect(readEvents(join(poolDir, "runs"), id).some((e) => e.kind === "merged")).toBe(false);
+    return { run, poolDir, fake, id };
+  }
+
+  it("redoes a merge a Stop dropped at the pool checkout's gate once the Continued attempt ends after the restart (F2)", async () => {
+    const { run, poolDir, fake, id } = await heldMerge();
+    await run.shutdown(300);
+    runs.splice(runs.indexOf(run), 1);
+    const deferred = readEvents(join(poolDir, "runs"), id).filter((e) => e.kind === "merge-deferred");
+    expect(deferred).toHaveLength(1);
+
+    const { harnesses } = tuiHarness(poolDir, {});
+    const again = startPool({
+      poolDir,
+      harnesses,
+      herdrSocket: fake.socketPath,
+      enlistPollMs: 50,
+      paneSurveyMs: 50,
     });
-    expect(readEvents(join(poolDir, "runs"), spawned()!).some((e) => e.kind === "merged")).toBe(false);
+    runs.push(again);
+    // The Continued attempt is re-adopted and still holds the checkout; the
+    // redone merge waits at the gate again.
+    await until("01 re-adopted", () => latest(again).liveAttempts["01"]?.attempt === 2);
+    await Bun.sleep(300);
+    expect(readEvents(join(poolDir, "runs"), id).some((e) => e.kind === "merged")).toBe(false);
     writeFileSync(
       join(poolDir, "runs", "01.outcome.json"),
       JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
     );
-    await until("the held merge", () =>
-      readEvents(join(poolDir, "runs"), spawned()!).some((e) => e.kind === "merged"),
+    await until(
+      "the redone merge",
+      () => readEvents(join(poolDir, "runs"), id).some((e) => e.kind === "merged"),
+      20_000,
     );
-  }, 40_000);
+  }, 60_000);
 
   it("holds merges into the pool checkout while a Continued attempt works there (review item 3)", async () => {
     // 01 ran alone, so in the pool checkout; a Conversation works in its own

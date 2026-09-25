@@ -1214,11 +1214,15 @@ function conversationIdleAge(
 }
 
 /** The End action's view for a Conversation id; the default before any End
- *  has ever been attempted this session. */
+ *  has ever been attempted this session. The engine's own word that an End
+ *  is under way (issue #140) counts too: after a reload, or an End from
+ *  another tab, the merge may still be landing, and End stays disabled. */
 function projectConversationEnd(
   state: ConversationEndView | undefined,
+  engineEnding: boolean,
 ): ConversationEndView {
-  return state ?? { ending: false, failure: null };
+  const view = state ?? { ending: false, failure: null };
+  return engineEnding ? { ...view, ending: true } : view;
 }
 
 function projectConversation(
@@ -1242,7 +1246,7 @@ function projectConversation(
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
     terminal: projectTerminalSurface(conversation.paneId, terminal),
-    endView: projectConversationEnd(endings[conversation.id]),
+    endView: projectConversationEnd(endings[conversation.id], conversation.ending),
     x: pos.x,
     y: pos.y,
   };

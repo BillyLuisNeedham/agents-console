@@ -366,6 +366,11 @@ export interface ConversationView {
   /** Enlisted from a live herdr pane (issue #101): the card reads "as found"
    *  where a started Conversation names its model. */
   enlisted: boolean;
+  /** Its End is under way (issue #140): the talk is over and its tab closed
+   *  or closing, the merge still to land. The Console shows it ending with
+   *  End disabled, and `paneId` is null so nothing peeks or focuses a pane
+   *  that is going. */
+  ending: boolean;
 }
 
 export interface StartConversationRequest {
@@ -669,6 +674,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
 
   function viewOf(rec: ConversationRecord, conversations: ConversationRecord[]): ConversationView {
     const runtime = runtimes.get(rec.id);
+    const ending = rec.status === "live" && (runtime?.ending ?? endRequested(rec.id));
     // An enlisted Conversation has no pool branch to derive: the branch it
     // was found on is the one its record names.
     const branch = runtime
@@ -684,7 +690,9 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       // A live record the engine has not re-adopted yet (issue #140) still
       // names its pane, so the pane stays the pool's in every surface that
       // reads the view: the enlist picker, the terminal routes.
-      paneId: runtime?.paneId ?? (rec.status === "live" ? recordedPaneOf(rec) : null),
+      paneId: ending
+        ? null
+        : (runtime?.paneId ?? (rec.status === "live" ? recordedPaneOf(rec) : null)),
       // A conversation with no live runtime (ended cleanly, or never tracked
       // across a restart) has no branch worth naming once it merged; a
       // git-less pool has none at all. Neither is an error: the card simply
@@ -695,6 +703,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         : { state: "waiting", lastLine: "", idleSince: null },
       children: childrenOf(rec.id, conversations),
       enlisted: rec.enlisted !== undefined,
+      ending,
     };
   }
 
@@ -812,6 +821,58 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     );
   }
 
+  // One claim on a Conversation at a time (review F3): an End on a record
+  // with no runtime and an adoption pass both build a runtime across awaits,
+  // and two of them racing would each set one. A claim waits for any claim
+  // in flight on the same id, then re-checks what is there.
+  const claiming = new Map<string, Promise<unknown>>();
+  async function claim<T>(id: string, build: () => Promise<T>): Promise<T> {
+    for (let pending = claiming.get(id); pending; pending = claiming.get(id)) {
+      await pending.catch(() => {});
+    }
+    const run = build();
+    claiming.set(id, run);
+    try {
+      return await run;
+    } finally {
+      if (claiming.get(id) === run) claiming.delete(id);
+    }
+  }
+
+  // Whether the End in flight when the engine stopped had already handed its
+  // merge on (review F4): a conflict, a blocked merge or a resolver after the
+  // End's request means an interrupt holds the ending now, and replaying the
+  // merge would run it twice.
+  function endAwaitsAnswer(id: string): boolean {
+    const events = readEvents(env.runsDir, id);
+    const asked = events.map((e) => e.kind).lastIndexOf("end-requested");
+    return (
+      asked !== -1 &&
+      events
+        .slice(asked)
+        .some((e) => e.kind === "merge-conflict" || e.kind === "merge-blocked" || e.kind === "resolver")
+    );
+  }
+
+  // Finish, at boot, an End the engine stopped in the middle of (issue #140):
+  // replayed from the start when its merge had not been handed on, or held
+  // as ending when an interrupt already owns it, so the pending answer
+  // finishes it (answerMerge) and nothing merges twice.
+  async function finishEndAtBoot(rec: ConversationRecord, listing?: PaneListing): Promise<void> {
+    if (!endAwaitsAnswer(rec.id)) {
+      await end(rec.id, undefined, listing).catch(() => {});
+      return;
+    }
+    const runtime = await claimDetached(rec.id, listing).catch(() => null);
+    if (runtime === null || runtime.ending) return;
+    runtime.ending = true;
+    const asked = readEvents(env.runsDir, rec.id)
+      .filter((e) => e.kind === "end-requested")
+      .pop();
+    if (typeof asked?.payload.closing === "string") runtime.closing = asked.payload.closing;
+    publish();
+  }
+
   // Boot adoption, one pass at a time: the boot's own and a later retry off
   // the pane survey never claim the same record twice.
   let adopting: Promise<void> = Promise.resolve();
@@ -880,9 +941,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     if (listing === null) return;
     const workspaceId = await env.poolWorkspace.id();
     for (const rec of live) {
+      if (runtimes.has(rec.id) || claiming.has(rec.id)) continue;
       const launch = launchOf(rec.id)!;
       if (endRequested(rec.id)) {
-        await end(rec.id, undefined, listing).catch(() => {});
+        await finishEndAtBoot(rec, listing);
         continue;
       }
       const exitCodePath = join(env.runsDir, attemptExitCodeName(rec.id, null, false));
@@ -908,33 +970,40 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       }
       const descriptor = defaultHarnessDescriptors[rec.harness.trim().toLowerCase()] ?? null;
       const runtime = startedRuntime(rec, launch.tabId);
-      try {
-        await settleTurn(runtime, descriptor);
-      } catch {
-        // The pane could not be read: leave the record live, as for an
-        // enlisted one; the survey's next listing tries again rather than
-        // ending a talk that may still be there. No tick follows, so nothing
-        // may serve what the reads recorded.
-        env.paneReads.forget(launch.paneId);
-        continue;
-      }
-      runtime.tailer = startPaneStreamTail(runtime.streamPath, runtime.logPath);
-      reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
-      runtimes.set(rec.id, runtime);
-      env.liveAttempts.register(rec.id, 1, {
-        paneId: launch.paneId,
-        tabId: launch.tabId,
-        startedAt: launch.at,
+      await claim(rec.id, async () => {
+        try {
+          await settleTurn(runtime, descriptor);
+        } catch {
+          // The pane could not be read: leave the record live, as for an
+          // enlisted one; the survey's next listing tries again rather than
+          // ending a talk that may still be there. No tick follows, so
+          // nothing may serve what the reads recorded.
+          env.paneReads.forget(launch.paneId);
+          return;
+        }
+        // An End, or another claim, may have landed across the reads.
+        if (runtimes.has(rec.id) || endRequested(rec.id)) {
+          env.paneReads.forget(launch.paneId);
+          return;
+        }
+        runtime.tailer = startPaneStreamTail(runtime.streamPath, runtime.logPath);
+        reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
+        runtimes.set(rec.id, runtime);
+        env.liveAttempts.register(rec.id, 1, {
+          paneId: launch.paneId,
+          tabId: launch.tabId,
+          startedAt: launch.at,
+        });
+        watchForCrash(runtime);
+        host.recordAssignment(rec.id, {
+          harness: rec.harness,
+          model: rec.model,
+          drivers: rec.drivers || DEFAULT_DRIVERS,
+        });
+        runtime.timer = setInterval(() => tick(rec.id), pollMs);
+        host.log(`conversation ${rec.id}: re-adopted at boot from live pane ${launch.paneId}`);
+        publish();
       });
-      watchForCrash(runtime);
-      host.recordAssignment(rec.id, {
-        harness: rec.harness,
-        model: rec.model,
-        drivers: rec.drivers || DEFAULT_DRIVERS,
-      });
-      runtime.timer = setInterval(() => tick(rec.id), pollMs);
-      host.log(`conversation ${rec.id}: re-adopted at boot from live pane ${launch.paneId}`);
-      publish();
     }
   }
 
@@ -1011,9 +1080,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     }
     const listed = new Map(agents.map((agent) => [agent.paneId, agent]));
     for (const rec of live) {
+      if (runtimes.has(rec.id) || claiming.has(rec.id)) continue;
       const found = rec.enlisted!;
       if (endRequested(rec.id)) {
-        await end(rec.id).catch(() => {});
+        await finishEndAtBoot(rec);
         continue;
       }
       if (!listed.has(found.paneId)) {
@@ -1040,25 +1110,33 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         directory: found.directory,
         branch: found.branch,
       });
-      try {
-        await settleTurn(runtime, descriptor);
-      } catch {
-        // The pane could not be read: leave the record live, the next boot
-        // tries again rather than destroying a talk that may still be there.
-        // No tick follows, so nothing may serve what the reads recorded.
-        env.paneReads.forget(found.paneId);
-        continue;
-      }
-      reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
-      runtimes.set(rec.id, runtime);
-      watchForCrash(runtime);
-      host.recordAssignment(rec.id, {
-        harness: rec.harness,
-        model: rec.model,
-        drivers: rec.drivers || DEFAULT_DRIVERS,
+      await claim(rec.id, async () => {
+        try {
+          await settleTurn(runtime, descriptor);
+        } catch {
+          // The pane could not be read: leave the record live, the next
+          // listing tries again rather than destroying a talk that may still
+          // be there. No tick follows, so nothing may serve what the reads
+          // recorded.
+          env.paneReads.forget(found.paneId);
+          return;
+        }
+        // An End, or another claim, may have landed across the reads.
+        if (runtimes.has(rec.id) || endRequested(rec.id)) {
+          env.paneReads.forget(found.paneId);
+          return;
+        }
+        reportAgent(runtime, runtime.turn.state === "waiting" ? "blocked" : "working");
+        runtimes.set(rec.id, runtime);
+        watchForCrash(runtime);
+        host.recordAssignment(rec.id, {
+          harness: rec.harness,
+          model: rec.model,
+          drivers: rec.drivers || DEFAULT_DRIVERS,
+        });
+        runtime.timer = setInterval(() => tick(rec.id), pollMs);
+        publish();
       });
-      runtime.timer = setInterval(() => tick(rec.id), pollMs);
-      publish();
     }
   }
 
@@ -1566,7 +1644,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       throw new Error(`end conversation: no live conversation ${id}`);
     }
     if (rec.enlisted) {
-      const runtime = enlistedRuntime({
+      return enlistedRuntime({
         id: rec.id,
         file: rec.file,
         paneId: rec.enlisted.paneId,
@@ -1576,17 +1654,39 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         directory: rec.enlisted.directory,
         branch: rec.enlisted.branch,
       });
-      runtimes.set(id, runtime);
-      return runtime;
     }
     const launch = launchOf(id);
     const listing = known ?? (await paneListing());
-    const ours =
-      launch !== null && launch.tabId !== null && listing !== null && !tabIsForeign(listing, launch);
-    const runtime = startedRuntime(rec, ours ? launch!.tabId : null);
-    if (!ours) runtime.closeTabs = false;
-    runtimes.set(id, runtime);
+    const workspaceId = await env.poolWorkspace.id();
+    // The pane is this Conversation's to let go only when herdr lists it as
+    // recorded or no longer lists it; listed as another terminal, or with no
+    // listing to go by, its agent binding is not released (review F8, as the
+    // boot's own rule has it), and its tab is not closed.
+    const listed = launch !== null && listing !== null && listing.panes.has(launch.paneId);
+    const paneOurs =
+      launch !== null &&
+      listing !== null &&
+      (!listed || listedAsRecorded(listing, launch, workspaceId));
+    const tabOurs =
+      paneOurs && launch!.tabId !== null && !tabIsForeign(listing!, launch!);
+    const runtime = startedRuntime(rec, tabOurs ? launch!.tabId : null);
+    if (!paneOurs) runtime.paneId = null;
+    if (!tabOurs) runtime.closeTabs = false;
     return runtime;
+  }
+
+  // Claim a runtime for an End on a record with no runtime, once: a second
+  // End, or an adoption pass, racing it waits and gets the same runtime.
+  function claimDetached(id: string, known?: PaneListing): Promise<ConversationRuntime> {
+    return claim(id, async () => {
+      const existing = runtimes.get(id);
+      if (existing) return existing;
+      const runtime = await detachedRuntime(id, known);
+      const raced = runtimes.get(id);
+      if (raced) return raced;
+      runtimes.set(id, runtime);
+      return runtime;
+    });
   }
 
   /**
@@ -1599,7 +1699,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
    * closed.
    */
   async function end(id: string, closing?: string, listing?: PaneListing): Promise<void> {
-    const runtime = runtimes.get(id) ?? (await detachedRuntime(id, listing));
+    const runtime = runtimes.get(id) ?? (await claimDetached(id, listing));
     if (runtime.ending) return;
     runtime.ending = true;
     runtime.closing = closing;
@@ -2069,8 +2169,20 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     adoptStartedAtBoot,
     readoptPending,
     liveTerminals,
-    liveDirectories: () =>
-      [...runtimes.values()].map((runtime) => ({ id: runtime.id, cwd: runtime.worktree.path })),
+    // Every live record, adopted or not: a record the engine could not
+    // re-adopt still has an agent working where it was recorded (review F9).
+    liveDirectories: () => {
+      const out = [...runtimes.values()].map((runtime) => ({
+        id: runtime.id,
+        cwd: runtime.worktree.path,
+      }));
+      for (const rec of loadConversations(dir)) {
+        if (rec.status !== "live" || runtimes.has(rec.id)) continue;
+        const cwd = rec.enlisted?.directory ?? launchOf(rec.id)?.cwd ?? null;
+        if (cwd !== null) out.push({ id: rec.id, cwd });
+      }
+      return out;
+    },
     adoptEnlistedAtBoot,
     ticketEnded,
     ticketCheckpointed,
