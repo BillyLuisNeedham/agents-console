@@ -20,18 +20,22 @@
  *   is, bounded the same way; a pane that will not take it ends the attempt
  *   untaught, since an agent that does not know it owes an Outcome would
  *   leave the ticket running forever.
- * - The ending: an enlisted attempt's two-form race (enlisted.ts), a valid
- *   Outcome on disk against the pane leaving herdr's listing, because the
- *   wrapper's exit-code file belongs to the attempt before and only lands
- *   when the TUI is closed, which the pane leaving already says.
+ * - The ending: a valid Outcome on disk, raced against two ways the agent
+ *   can be gone without one. The TUI can exit while its pane stays open
+ *   (the wrapper is typed into the pane's own shell, which outlives it), so
+ *   the wrapper's exit-code file landing is one; the pane leaving herdr's
+ *   listing is the other. The exit-code file is the checkpointed attempt's,
+ *   known absent when the claim was made, so its appearance can only be
+ *   this TUI exiting. An enlisted pane has no wrapper and no such file, so
+ *   its race is the enlisted two-form one (enlisted.ts).
  *
  * The engine records whatever ending this reports; nothing here writes pool
  * state.
  */
 
-import { focusPane, peekPane } from "./herdr.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { focusPane, listPaneIds, peekPane } from "./herdr.ts";
 import { startPaneStreamTail } from "./attempt-run.ts";
-import { waitForEnlistedEnding } from "./enlisted.ts";
 import { READINESS_TIMEOUT_MS, typeVerified } from "./pane-session.ts";
 import { defaultHarnessDescriptors, idlePatternFor } from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState } from "./turn-state.ts";
@@ -46,6 +50,7 @@ const CONTINUED_POLL_MS = 2_000;
  */
 export type ContinuedEnding =
   | { kind: "outcome" }
+  | { kind: "exited" }
   | { kind: "pane-gone" }
   | { kind: "untaught"; reason: string }
   | { kind: "released" };
@@ -68,6 +73,9 @@ export interface ContinuedInput {
   focus: boolean;
   /** Where the agent writes this attempt's Outcome; the ending race reads it. */
   outcomePath: string;
+  /** The wrapper's exit-code file, whose landing says the TUI exited; null
+   *  for an enlisted pane, which has no wrapper. */
+  exitCodePath: string | null;
   /** The Stream file the pane's `script` writes, and where it stood at the start. */
   streamPath: string | null;
   streamOffset: number;
@@ -103,14 +111,7 @@ export function runContinued(env: ContinuedEnv, input: ContinuedInput): Continue
       const taught = await teach(env.herdrSocket, input, pollMs, teachingWaitMs, released.signal);
       if (taught !== null) return { kind: "untaught", reason: taught };
     }
-    const ending = await waitForEnlistedEnding(
-      env.herdrSocket,
-      input.paneId,
-      input.outcomePath,
-      released.signal,
-      pollMs,
-    );
-    return { kind: ending };
+    return { kind: await waitForContinuedEnding(env.herdrSocket, input, released.signal, pollMs) };
   };
   const ending = Promise.race([
     watch().catch((err): ContinuedEnding => ({
@@ -123,6 +124,52 @@ export function runContinued(env: ContinuedEnv, input: ContinuedInput): Continue
     return released.signal.aborted ? { kind: "released" as const } : result;
   });
   return { ending, release: () => released.abort() };
+}
+
+/**
+ * The ending race: the Outcome first each sweep, so an Outcome that landed
+ * just before the TUI exited or the pane went still reads as the Outcome;
+ * then the exit-code file; then the pane's presence in herdr's listing, a
+ * listing the daemon cannot answer saying nothing about the pane. Released,
+ * it never resolves (the caller's release wins the race above it).
+ */
+async function waitForContinuedEnding(
+  socketPath: string,
+  input: ContinuedInput,
+  signal: AbortSignal,
+  pollMs: number,
+): Promise<"outcome" | "exited" | "pane-gone"> {
+  for (;;) {
+    if (outcomeIsOnDisk(input.outcomePath)) return "outcome";
+    if (input.exitCodePath !== null && existsSync(input.exitCodePath)) return "exited";
+    if (signal.aborted) return new Promise(() => {});
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    if (signal.aborted) return new Promise(() => {});
+    let live: string[] | null;
+    try {
+      live = await listPaneIds(socketPath);
+    } catch {
+      live = null;
+    }
+    if (live !== null && !live.includes(input.paneId)) {
+      // One more look before calling it gone: the Outcome or the exit code
+      // may have landed between the sweep and the listing.
+      if (outcomeIsOnDisk(input.outcomePath)) return "outcome";
+      if (input.exitCodePath !== null && existsSync(input.exitCodePath)) return "exited";
+      return "pane-gone";
+    }
+  }
+}
+
+/** A complete Outcome on disk: a file that does not parse yet is a write in flight. */
+function outcomeIsOnDisk(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    JSON.parse(readFileSync(path, "utf8"));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

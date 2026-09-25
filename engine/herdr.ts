@@ -476,26 +476,34 @@ export async function listPaneIds(
 }
 
 /**
- * Every pane the daemon lists, with the tab it sits in (issue #139): the pane
- * survey's one read, which answers both "is this pane alive" and "is this tab
- * still open" from a single call. The tab is null when the daemon reports
- * none. Daemon-wide: a pool's tabs are in its Pool workspace, but a workspace
- * re-resolved mid-run left the tabs opened before it in the old one.
+ * Every pane the daemon lists, with the tab, workspace and directory it
+ * reports for each (issue #139): the pane survey's one read, which answers
+ * both "is this pane alive" and "is this tab still open", and lets a recorded
+ * pane be checked against what herdr now lists under its id. A field the
+ * daemon does not report is null. Daemon-wide: a pool's tabs are in its Pool
+ * workspace, but a workspace re-resolved mid-run left the tabs opened before
+ * it in the old one. An answer with no `panes` array throws rather than
+ * reading as no panes: the survey keeps its last good listing then, where an
+ * empty one would let go of every Held pane at once.
  */
-export async function listPanes(
-  socketPath: string,
-): Promise<{ paneId: string; tabId: string | null }[]> {
+export async function listPanes(socketPath: string): Promise<
+  { paneId: string; tabId: string | null; workspaceId: string | null; cwd: string | null }[]
+> {
   const list = await herdrRpc(socketPath, "pane.list", {});
   const panes =
     typeof list === "object" && list !== null
       ? (list as { panes?: unknown }).panes
       : undefined;
-  if (!Array.isArray(panes)) return [];
-  return (panes as { pane_id?: unknown; tab_id?: unknown }[])
+  if (!Array.isArray(panes)) {
+    throw new Error(`pane.list answered without a panes list: ${JSON.stringify(list)}`);
+  }
+  return (panes as Record<string, unknown>[])
     .filter((p) => typeof p?.pane_id === "string")
     .map((p) => ({
       paneId: p.pane_id as string,
       tabId: typeof p.tab_id === "string" ? p.tab_id : null,
+      workspaceId: typeof p.workspace_id === "string" ? p.workspace_id : null,
+      cwd: typeof p.cwd === "string" ? p.cwd : null,
     }));
 }
 

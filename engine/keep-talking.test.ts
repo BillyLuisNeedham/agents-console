@@ -9,7 +9,7 @@
 // (ADR-0016), until the test lets it go.
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendEvent, readEvents } from "./events.ts";
 import { startPool, type HarnessCommand, type PoolRun, type PoolSnapshot } from "./engine.ts";
@@ -18,6 +18,7 @@ import {
   type ExecutingFakeHerdr,
 } from "./herdr-executing-fake.ts";
 import { cleanupPools, makeGitPool, makePool } from "./pool-fixture.ts";
+import { worktreePathFor } from "./worktrees.ts";
 
 const fakes: ExecutingFakeHerdr[] = [];
 const runs: PoolRun[] = [];
@@ -88,6 +89,7 @@ function latest(run: PoolRun): PoolSnapshot {
 
 async function checkpointed(options: {
   git?: boolean;
+  holdPane?: boolean;
   verify?: number;
   outcomes?: Record<string, Record<string, unknown>[]>;
 }): Promise<{ run: PoolRun; poolDir: string; fake: ExecutingFakeHerdr; quit: string }> {
@@ -105,7 +107,7 @@ async function checkpointed(options: {
       "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
     },
   );
-  const fake = await startExecutingFakeHerdr();
+  const fake = await startExecutingFakeHerdr(options.holdPane ? { holdPane: true } : undefined);
   fakes.push(fake);
   const run = startPool({
     poolDir,
@@ -194,12 +196,56 @@ describe("Keep talking (issue #139)", () => {
   }, 30_000);
 
   it("crashes a Continued attempt whose pane goes before an Outcome", async () => {
-    const { run, quit } = await checkpointed({});
+    const { run, fake } = await checkpointed({});
+    const paneId = latest(run).heldPanes["01"].paneId;
     await run.keepTalking("01");
-    writeFileSync(quit, "");
+    fake.endPane(paneId);
     await until("the crash interrupt", () => run.interrupts.some((i) => i.kind === "crash"));
     expect(run.final.tickets["01"]).toBe("in-progress");
     expect(run.interrupts[0].body).toContain("went before continued attempt 2 wrote an Outcome");
+  }, 30_000);
+
+  it("crashes a Continued attempt whose TUI exits while its pane stays open (review item 1)", async () => {
+    // The wrapper runs in the pane's own shell, so a TUI that quits leaves
+    // the pane at its prompt; only the exit-code file says the agent is gone.
+    const { run, quit } = await checkpointed({ holdPane: true });
+    await run.keepTalking("01");
+    writeFileSync(quit, "");
+    await until("the crash interrupt", () => run.interrupts.some((i) => i.kind === "crash"));
+    expect(run.interrupts[0].body).toContain("exited before continued attempt 2 wrote an Outcome");
+  }, 30_000);
+
+  it("lets a Held pane go when its TUI exits and offers no Keep talking over the bare shell (review item 1)", async () => {
+    const { run, quit } = await checkpointed({ holdPane: true });
+    writeFileSync(quit, "");
+    await until("the Held pane to go", () => latest(run).heldPanes["01"] === undefined);
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    await expect(run.keepTalking("01")).rejects.toThrow("no terminal left to continue in");
+  }, 30_000);
+
+  it("clears a stale exit-code file from before the attempt, then races a fresh one (review item 1)", async () => {
+    const { run, poolDir, quit } = await checkpointed({ holdPane: true });
+    const exitCode = join(poolDir, "runs", "01.exitcode");
+    writeFileSync(exitCode, "0\n");
+    const past = new Date(Date.now() - 3_600_000);
+    utimesSync(exitCode, past, past);
+    await run.keepTalking("01");
+    expect(existsSync(exitCode)).toBe(false);
+    writeFileSync(quit, "");
+    await until("the crash interrupt", () => run.interrupts.some((i) => i.kind === "crash"));
+  }, 30_000);
+
+  it("ends on a valid Outcome even when the pane goes with it (review item 5)", async () => {
+    const { run, poolDir, fake } = await checkpointed({});
+    const paneId = latest(run).heldPanes["01"].paneId;
+    await run.keepTalking("01");
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "said and gone", commitSha: null }),
+    );
+    fake.endPane(paneId);
+    await until("done", () => run.final.tickets["01"] === "done");
+    expect(run.interrupts.filter((i) => i.kind === "crash")).toEqual([]);
   }, 30_000);
 
   it("lets the Held pane go when the pane leaves herdr, and then refuses to continue", async () => {
@@ -217,26 +263,64 @@ describe("Keep talking (issue #139)", () => {
     await expect(run.keepTalking("01")).rejects.toThrow(/checkpoint/);
   }, 30_000);
 
-  it("closes the checkpointed attempt's tab before a plain Resume launches afresh", async () => {
-    const { run, poolDir, fake } = await checkpointed({
+  it("closes the checkpointed attempt's tab before a plain Resume launches afresh, once (review item 10)", async () => {
+    const { run, poolDir, fake, quit } = await checkpointed({
       outcomes: {
         "01": [
           { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" },
-          { status: "done", summary: "fresh", commitSha: null },
+          // attempt 2 writes nothing: it crashes when its TUI quits
         ],
       },
     });
     const [first] = spawnedPanes(poolDir);
-    await run.resume("01");
-    await until("the fresh attempt's done", () => run.final.tickets["01"] === "done");
+    // Accepted, not awaited: the fresh attempt runs until the test quits it.
+    run.accept("01");
+    await until("the fresh attempt's tab", () => spawnedPanes(poolDir).length === 2);
     const methods = fake.requests.map((r) =>
       r.method === "tab.close" ? `tab.close ${String(r.params.tab_id)}` : r.method,
     );
     const closed = methods.indexOf(`tab.close ${String(first.tab)}`);
     const creates = methods.flatMap((method, i) => (method === "tab.create" ? [i] : []));
     expect(closed).toBeGreaterThan(-1);
-    expect(creates).toHaveLength(2);
     expect(closed).toBeLessThan(creates[1]);
+    expect(
+      readEvents(join(poolDir, "runs"), "01").filter((e) => e.kind === "tab-closed").map((e) => e.payload.tab_id),
+    ).toEqual([first.tab]);
+
+    // Attempt 2 crashes; resuming it launches attempt 3, and the Resume
+    // close reaches back for nothing: the checkpointed tab is closed
+    // already, and a crashed attempt's tab stays.
+    writeFileSync(quit, "");
+    await until("the crash", () => run.interrupts.some((i) => i.kind === "crash"));
+    const second = spawnedPanes(poolDir)[1];
+    run.accept("01");
+    await until("attempt 3's tab", () => spawnedPanes(poolDir).length === 3);
+    const closes = fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id);
+    expect(closes.filter((tab) => tab === first.tab)).toHaveLength(1);
+    expect(closes).not.toContain(second.tab);
+  }, 30_000);
+
+  it("refuses Keep talking in the pool checkout while another agent works there (review item 3)", async () => {
+    // A pool with no git runs every attempt in its own checkout: 02 is still
+    // working there when 01 checkpoints.
+    const poolDir = makePool({
+      tickets: [
+        { file: "01.md", marker: READY, body: "# Talk\n\nbody" },
+        { file: "02.md", marker: "<!-- state: id=02 blocked-by= status=ready -->", body: "# Busy\n\nbody" },
+      ],
+      config,
+    });
+    const { harnesses } = tuiHarness(poolDir, {
+      "01": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("01's Held pane", () => latest(run).heldPanes["01"] !== undefined);
+    expect(latest(run).liveAttempts["02"]).toBeDefined();
+    await expect(run.keepTalking("01")).rejects.toThrow("where 02 is working now");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
   }, 30_000);
 });
 
@@ -423,5 +507,200 @@ describe("Continued attempts across a restart and on verify tickets (issue #139)
     // The branch merged is the one attempt 1's worktree was cut on, the
     // Continued attempt having worked there.
     expect(run.final.log.some((line) => line.includes("attempt 2 passed grading; merged") && line.includes("01.attempt-1"))).toBe(true);
+  }, 40_000);
+});
+
+describe("Keep talking review fixes (issue #139)", () => {
+  // A pool booted over events written by hand, the way a restart finds
+  // them: the checkpoint's Held pane is decided at boot from the events
+  // alone, against a pane the fake daemon lists.
+  async function bootOver(options: {
+    id: string;
+    marker: string;
+    events: { attempt: number; kind: Parameters<typeof appendEvent>[2]["kind"]; payload?: Record<string, unknown> }[];
+    paneId: string;
+  }): Promise<PoolRun> {
+    const poolDir = makePool({
+      tickets: [{ file: `${options.id}.md`, marker: options.marker, body: "# Held?\n\nbody\n\n## Brief\n\nask me" }],
+      config,
+    });
+    for (const event of options.events) {
+      appendEvent(join(poolDir, "runs"), options.id, {
+        at: new Date(Date.now() - 60_000).toISOString(),
+        attempt: event.attempt,
+        kind: event.kind,
+        payload: { cwd: poolDir, ...(event.payload ?? {}) },
+      });
+    }
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    fake.injectPane(options.paneId);
+    const { harnesses } = tuiHarness(poolDir, {});
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("the checkpoint Interrupt", () => run.interrupts.some((i) => i.kind === "checkpoint"));
+    await Bun.sleep(300);
+    return run;
+  }
+
+  const CHECKPOINTED = "<!-- state: id=01 blocked-by= status=checkpoint -->";
+  const spawnedInPane = { argv: ["tui"], pane_id: "p-x", tab_id: "tab-ghost", branch: null };
+
+  it("holds the checkpointed attempt's own pane at boot", async () => {
+    const run = await bootOver({
+      id: "01",
+      marker: CHECKPOINTED,
+      paneId: "p-x",
+      events: [
+        { attempt: 1, kind: "spawned", payload: spawnedInPane },
+        { attempt: 1, kind: "exited", payload: { status: "checkpoint" } },
+        { attempt: 1, kind: "checkpoint" },
+      ],
+    });
+    expect(latest(run).heldPanes["01"]).toEqual({ attempt: 1, paneId: "p-x" });
+  }, 30_000);
+
+  it("holds nothing for an engine-raised checkpoint about a held branch (review item 11)", async () => {
+    const run = await bootOver({
+      id: "01",
+      marker: CHECKPOINTED,
+      paneId: "p-x",
+      events: [
+        { attempt: 1, kind: "spawned", payload: spawnedInPane },
+        { attempt: 1, kind: "exited", payload: { status: "checkpoint" } },
+        { attempt: 1, kind: "branch-held", payload: { branch: "b", directory: "/elsewhere" } },
+        { attempt: 1, kind: "checkpoint" },
+      ],
+    });
+    expect(latest(run).heldPanes["01"]).toBeUndefined();
+  }, 30_000);
+
+  const ENLISTED = "<!-- state: id=enlist-1 blocked-by= status=checkpoint enlisted-from=p-op -->";
+  const enlistSpawn = {
+    argv: [],
+    pane_id: "p-op",
+    tab_id: "tab-ghost",
+    branch: "main",
+    harness: "opencode",
+  };
+
+  it("holds an enlisted Ticket's checkpointed pane at boot", async () => {
+    const run = await bootOver({
+      id: "enlist-1",
+      marker: ENLISTED,
+      paneId: "p-op",
+      events: [
+        { attempt: 1, kind: "spawned", payload: enlistSpawn },
+        { attempt: 1, kind: "exited", payload: { status: "checkpoint" } },
+        { attempt: 1, kind: "checkpoint" },
+      ],
+    });
+    expect(latest(run).heldPanes["enlist-1"]).toEqual({ attempt: 1, paneId: "p-op" });
+  }, 30_000);
+
+  it("never holds an enlisted pane the pool let go, across a restart (review item 9)", async () => {
+    const run = await bootOver({
+      id: "enlist-1",
+      marker: ENLISTED,
+      paneId: "p-op",
+      events: [
+        { attempt: 1, kind: "spawned", payload: enlistSpawn },
+        { attempt: 1, kind: "exited", payload: { status: "checkpoint" } },
+        { attempt: 1, kind: "let-go", payload: { pane_id: "p-op" } },
+        { attempt: 1, kind: "checkpoint" },
+      ],
+    });
+    expect(latest(run).heldPanes["enlist-1"]).toBeUndefined();
+  }, 30_000);
+
+  it("never counts or closes a finished tab whose agent was enlisted afterwards (review item 2)", async () => {
+    // 01 finishes and leaves its tab open (w1:t1 over w1:p1, the fake's
+    // first); the operator then enlisted that live agent as enlist-1.
+    const poolDir = makePool({
+      tickets: [
+        { file: "01.md", marker: READY, body: "# Done and left open\n\nbody" },
+        {
+          file: "enlist-1.md",
+          marker: "<!-- state: id=enlist-1 blocked-by= status=done enlisted-from=w1:p1 -->",
+          body: "# Enlisted from a finished tab\n\nbody",
+        },
+      ],
+      config,
+    });
+    appendEvent(join(poolDir, "runs"), "enlist-1", {
+      at: new Date().toISOString(),
+      attempt: 1,
+      kind: "spawned",
+      payload: { argv: [], cwd: poolDir, branch: "main", pane_id: "w1:p1", tab_id: "w1:t1", harness: "tui" },
+    });
+    const { harnesses } = tuiHarness(poolDir, {
+      "01": [{ status: "done", summary: "done", commitSha: null }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(run);
+    await until("01 done", () => run.final.tickets["01"] === "done");
+    await Bun.sleep(300);
+    expect(latest(run).finishedTerminals).toBe(0);
+    expect(await run.closeFinishedTerminals()).toBe(0);
+    expect(fake.requests.some((r) => r.method === "tab.close")).toBe(false);
+  }, 30_000);
+
+  it("grades a verify ticket's Continued attempt owed its grade across a restart (review item 6)", async () => {
+    const { run, poolDir, fake, quit } = await checkpointed({ git: true, verify: 1 });
+    await run.keepTalking("01");
+    await until("the teaching Turn", () => fake.submitted.length > 0);
+    await run.shutdown(200);
+    runs.splice(runs.indexOf(run), 1);
+    // While the engine was down the attempt ended done and its exit was
+    // recorded, but no grade was: the state a Stop between the two leaves.
+    writeFileSync(
+      join(poolDir, "runs", "01.attempt-2.outcome.json"),
+      JSON.stringify({ status: "done", summary: "done before the stop", commitSha: null }),
+    );
+    appendEvent(join(poolDir, "runs"), "01", {
+      at: new Date().toISOString(),
+      attempt: 2,
+      kind: "exited",
+      payload: { code: 0, status: "done", logTail: [], outcomeExists: true },
+    });
+    writeFileSync(quit, "");
+    const spawnsBefore = spawnedPanes(poolDir).length;
+    const { harnesses } = tuiHarness(poolDir, {});
+    const again = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, paneSurveyMs: 50 });
+    runs.push(again);
+    await until("the owed grade's done", () => again.final.tickets["01"] === "done", 20_000);
+    const events = readEvents(join(poolDir, "runs"), "01");
+    expect(events.filter((e) => e.kind === "graded").map((e) => e.attempt)).toEqual([1, 2]);
+    // No fresh fan-out: the ticket never re-ran.
+    expect(spawnedPanes(poolDir).length).toBe(spawnsBefore);
+  }, 40_000);
+
+  it("holds merges into the pool checkout while a Continued attempt works there (review item 3)", async () => {
+    // 01 ran alone, so in the pool checkout; a Conversation works in its own
+    // worktree meanwhile, and its End's merge waits for the conversation in
+    // the checkout to end.
+    const { run, poolDir } = await checkpointed({ git: true });
+    const [first] = spawnedPanes(poolDir);
+    expect(readEvents(join(poolDir, "runs"), "01").find((e) => e.kind === "spawned")!.payload.cwd).toBe(poolDir);
+    void first;
+    await run.keepTalking("01");
+    const view = await run.startConversation({ title: "Side work" });
+    const worktree = worktreePathFor(poolDir, view.id);
+    writeFileSync(join(worktree, "side.txt"), "side\n");
+    const git = (args: string[]) => Bun.spawnSync(["git", "-C", worktree, ...args], { stdout: "ignore", stderr: "ignore" });
+    git(["add", "side.txt"]);
+    git(["commit", "-qm", "side work"]);
+    const ended = run.endConversation(view.id);
+    await Bun.sleep(700);
+    expect(existsSync(join(poolDir, "side.txt"))).toBe(false);
+    writeFileSync(
+      join(poolDir, "runs", "01.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await ended;
+    await until("the held merge", () => existsSync(join(poolDir, "side.txt")));
+    expect(run.final.tickets["01"]).toBe("done");
   }, 40_000);
 });

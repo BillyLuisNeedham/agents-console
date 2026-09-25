@@ -26,6 +26,7 @@ import {
   nextAttempt,
   readEvents,
   ticketSeedName,
+  type TicketEvent,
 } from "./events.ts";
 import {
   type CheckpointStore,
@@ -118,17 +119,28 @@ import {
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
 import { createLiveAttempts, type LiveAttemptRecord, type LiveAttempts } from "./live-attempts.ts";
 import { createPaneReadRegister, type PaneRead, type PaneReadRegister } from "./pane-reads.ts";
-import { createPaneSurvey, type PaneSurvey } from "./pane-survey.ts";
+import {
+  createPaneSurvey,
+  listedAsRecorded,
+  type PaneListing,
+  type PaneSurvey,
+} from "./pane-survey.ts";
 import {
   heldPaneOf,
   lastCheckpointAttempt,
   type HeldPane,
   type HeldPaneRecord,
 } from "./held-panes.ts";
-import { finishedTerminals, openedTabs, type OpenedTab } from "./finished-terminals.ts";
+import {
+  finishedTerminals,
+  openedTabs,
+  type OpenedTab,
+  type Untouchable,
+} from "./finished-terminals.ts";
 import { runContinued, type ContinuedEnding, type ContinuedRun } from "./continued.ts";
 import {
   createMergeHoldWatch,
+  MERGE_HOLD_POLL_MS,
   createMergeLine,
   deriveMergeHold,
   gitMergeHoldProbe,
@@ -869,6 +881,9 @@ interface Session {
   // The tabs this pool's `spawned` events name (finished-terminals.ts),
   // re-read with each survey listing so a snapshot never reads events files.
   openedTabs: OpenedTab[];
+  // Every pane and tab an enlisted owner's events name (untouchable, issue
+  // #139), re-read with each survey listing like openedTabs.
+  enlistedTerminals: { panes: Set<string>; tabs: Set<string> };
 }
 
 // One Continued attempt in flight (issue #139). `work` is its own Held pane
@@ -911,7 +926,10 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
     closeAttemptTabs: (id) => closeAttemptTabs(sessionOf(), id),
     chainMerge: (work) => {
       const session = sessionOf();
-      const next = session.mergeChain.then(() => work());
+      const next = session.mergeChain.then(async () => {
+        await poolCheckoutFree(session);
+        return work();
+      });
       // The chain itself never rejects (a failed merge must not wedge the
       // next caller's), while the caller sees `work`'s own outcome.
       session.mergeChain = next.catch(() => {});
@@ -1144,6 +1162,7 @@ export function startPool(options: RunOptions): PoolRun {
     continuedGrades: [],
     paneSurvey: null,
     openedTabs: [],
+    enlistedTerminals: { panes: new Set(), tabs: new Set() },
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
       onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
@@ -1161,6 +1180,7 @@ export function startPool(options: RunOptions): PoolRun {
     session.paneSurvey = createPaneSurvey({
       list: async () => {
         session.openedTabs = openedTabs(session.runsDir, tabOwners(session));
+        session.enlistedTerminals = enlistedTerminalsOf(session);
         return listPanes(session.herdrSocket);
       },
       onListing: () => surveyListed(session),
@@ -1446,10 +1466,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
     // A Conversation's pane rides its own view above.
     liveAttempts,
     heldPanes: heldPaneRecords(session),
-    finishedTerminals:
-      listing === null
-        ? 0
-        : finishedTerminals(session.openedTabs, listing, busyPanes(session)).length,
+    finishedTerminals: listing === null ? 0 : finishedNow(session, listing).length,
     mergeHold: hold,
     mergeQueue: session.mergeLine.queue(
       hold,
@@ -1803,7 +1820,10 @@ async function runSuperStep(
           // Its place in the Merge queue is the order it joins the chain,
           // which is also the order the conflict loop below resolves in.
           session.mergeLine.taken(marker.id);
-          mergeQueue = mergeQueue.then(() => {
+          mergeQueue = mergeQueue.then(async () => {
+            // A Continued attempt in the pool checkout holds its merges
+            // (ADR-0027): this one waits for it in the queue.
+            await poolCheckoutFree(session);
             // Captured just before the merge, inside the serialized chain:
             // HEAD may have moved since this ticket's attempt exited (an
             // earlier sibling's merge in the same super-step), so this is
@@ -1962,6 +1982,8 @@ async function runSuperStep(
       .map((r) => r.plan.attempt)
       .sort((a, b) => a - b);
     const grades = await gradeRound(session, marker, attempts, emit);
+    // Both decisions below can merge into the pool checkout.
+    await poolCheckoutFree(session);
     // Lone-attempt resolution (ticket 05): with one attempt and one
     // grade there is nothing to select between, so the grade decides
     // at the ticket: flag → checkpoint, pass → done.
@@ -2119,6 +2141,20 @@ function seedEnlistedWork(session: Session): void {
     if (marker.enlistedFrom === undefined) continue;
     const spawned = enlistSpawnedEvent(session, marker.id);
     if (!spawned) continue;
+    // The merge target an enlist captured when it moved the pool's own
+    // checkout (ticket 04-spawn-1): recovered from every enlisted marker,
+    // done and let-go ones included, because the checkout stays on the
+    // created pool branch for the rest of the pool's life and every later
+    // merge in this pool runs against the captured target
+    // (`withMergeCheckout`). The found work is not recovered once the pool
+    // let the pane go (issue #139): the Ticket re-runs as an ordinary
+    // attempt, and the pane is nobody's to hold.
+    if (typeof spawned.payload.merge_target === "string") {
+      session.mergeTarget = spawned.payload.merge_target;
+    }
+    if (readEvents(session.runsDir, marker.id).some((event) => event.kind === "let-go")) {
+      continue;
+    }
     session.enlistedWork.set(marker.id, {
       branch: spawned.payload.branch as string,
       directory: spawned.payload.cwd as string,
@@ -2135,14 +2171,6 @@ function seedEnlistedWork(session: Session): void {
         model: "",
         drivers: DEFAULT_DRIVERS,
       });
-    }
-    // The merge target an enlist captured when it moved the pool's own
-    // checkout (ticket 04-spawn-1): recovered from every enlisted marker,
-    // done ones included, because the checkout stays on the created pool
-    // branch for the rest of the pool's life and every later merge in this
-    // pool runs against the captured target (`withMergeCheckout`).
-    if (typeof spawned.payload.merge_target === "string") {
-      session.mergeTarget = spawned.payload.merge_target;
     }
   }
 }
@@ -2195,6 +2223,22 @@ function rehydrate(session: Session): void {
   }
   const interrupted = new Set(session.state.interrupts.map((i) => i.ticketId));
   for (const marker of session.markers) {
+    // A verify ticket's Continued attempt that ended done and was not yet
+    // graded when the engine stopped (issue #139): its grade is still owed,
+    // so the ticket stays in-progress and the drive grades it first, rather
+    // than a reset re-running a whole fan-out over work that is finished.
+    const owed =
+      marker.status === "in-progress" && !interrupted.has(marker.id)
+        ? owedContinuedGrade(session, marker)
+        : null;
+    if (owed !== null) {
+      session.continuedGrades.push(owed);
+      log.push(
+        `ticket ${marker.id}: continued attempt ${owed.attempt} ended done ` +
+          "before a restart; graded as a lone attempt before anything runs",
+      );
+      continue;
+    }
     if (marker.status === "in-progress" && !interrupted.has(marker.id)) {
       // A headless attempt of the previous engine process may still be
       // running (ADR-0017): its spawned event's pid proves it. The note says
@@ -2291,6 +2335,29 @@ function rehydrate(session: Session): void {
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
+}
+
+// The lone grade a verify ticket's Continued attempt is still owed at boot
+// (issue #139): its latest spawn is a Continued attempt on attempt-numbered
+// files, that attempt exited done, and no grade was recorded for it since.
+function owedContinuedGrade(
+  session: Session,
+  marker: TicketMarker,
+): { ticketId: string; attempt: number; work: HeldPane } | null {
+  const events = readEvents(session.runsDir, marker.id);
+  const spawned = events.filter((event) => event.kind === "spawned").pop();
+  if (spawned?.payload.continued !== true || spawned.payload.numbered !== true) return null;
+  const attempt = spawned.attempt;
+  const exited = events.findIndex(
+    (event) =>
+      event.kind === "exited" && event.attempt === attempt && event.payload.status === "done",
+  );
+  if (exited === -1) return null;
+  if (events.some((event, i) => i > exited && event.attempt === attempt && event.kind === "graded")) {
+    return null;
+  }
+  const work = heldPaneOf(events, attempt, (n) => worktreePathFor(session.cwd, marker.id, n));
+  return work === null ? null : { ticketId: marker.id, attempt, work };
 }
 
 // ---------------------------------------------------------------------------
@@ -3196,6 +3263,15 @@ function abandonAdoption(session: Session, ticketId: string): void {
       );
     }
     session.enlistedWork.delete(ticketId);
+    session.held.delete(ticketId);
+    // Recorded, so a restart does not restore the found work from the
+    // enlist's event and take the let-go pane back as the Ticket's.
+    appendEvent(session.runsDir, ticketId, {
+      at: new Date().toISOString(),
+      attempt: adopted.attempt,
+      kind: "let-go",
+      payload: { pane_id: adopted.paneId },
+    });
     session.assignments.set(ticketId, reRunAssignment(session, marker));
     session.state = applyUpdate(session.state, {
       log: [
@@ -3381,6 +3457,7 @@ function recordAdoptedExit(
     };
     session.mergeLine.taken(ticketId);
     const next = session.mergeChain.then(async () => {
+      await poolCheckoutFree(session);
       // Captured inside the serialized chain, right before the merge: HEAD
       // may have moved since this ticket's attempt was adopted (another
       // merge landing first), and mergeTicket removes this branch on
@@ -3650,6 +3727,7 @@ function chainEnlistedMerge(
 ): void {
   session.mergeLine.taken(marker.id);
   const next = session.mergeChain.then(async () => {
+    await poolCheckoutFree(session);
     const merge = mergeWithIssueAside(session, marker, branch);
     if (merge.ok) {
       session.mergeLine.settled(marker.id);
@@ -3697,30 +3775,87 @@ function recordEnlistedTrailingExit(session: Session, ticketId: string): void {
 // ---------------------------------------------------------------------------
 
 // Hold the pane of a checkpointed attempt (CONTEXT.md "Held pane"): called
-// wherever a checkpoint Interrupt is raised, so every checkpoint whose
-// Attempt ran in a pane keeps it reachable while the Interrupt waits. An
-// enlisted ticket's pane is held too, while the ticket still works in it:
-// holding is not owning, and nothing the hold leads to (Keep talking) ever
-// closes it (ADR-0021). Once the found work is dropped (the pane went, or an
-// adoption let it go) the pane is no longer the ticket's, and is not held.
-// An adoption's checkpoint is an Attempt still running, which is no hold.
-// Whether the pane is alive is the survey's to say, so it is asked now
-// rather than at its next cadence.
+// wherever a checkpoint Interrupt is raised, so a checkpoint over a pane
+// keeps it reachable while the Interrupt waits. Whether this pane is the one
+// to hold is ownHeldPane's rule; whether it is still alive, and still the
+// pane recorded, is the survey's to say, so it is asked now rather than at
+// its next cadence. An adoption's checkpoint is an Attempt still running,
+// which is no hold.
 function holdCheckpointPane(session: Session, marker: TicketMarker, attempt: number): void {
   if (session.adopted.has(marker.id)) return;
-  if (marker.enlistedFrom !== undefined && !session.enlistedWork.has(marker.id)) {
-    session.held.delete(marker.id);
-    return;
-  }
-  const held = heldPaneOf(readEvents(session.runsDir, marker.id), attempt, (n) =>
-    worktreePathFor(session.cwd, marker.id, n),
-  );
+  const held = ownHeldPane(session, marker, readEvents(session.runsDir, marker.id), attempt);
   if (held === null) {
     session.held.delete(marker.id);
     return;
   }
   session.held.set(marker.id, held);
   void session.paneSurvey?.refresh();
+}
+
+/**
+ * The rule for which pane a checkpoint holds (ADR-0027): the pane of the
+ * Attempt the checkpoint is about, and only while it is still that
+ * Attempt's agent to talk to. The checkpoint must follow the Attempt's own
+ * ending (its `exited`: its Outcome, its grade or its merge raised it, or a
+ * Continued attempt could not be taught), and no engine-raised checkpoint
+ * about the ticket's circumstances may have come after that ending (a
+ * branch held in another checkout says nothing about the agent in the
+ * pane, whose attempt was over long before). The agent must still be there:
+ * a wrapped TUI that exited leaves a bare shell in its pane, which is
+ * nothing to talk to. An enlisted pane is held only while the Ticket still
+ * works in it; once the found work is dropped (the pane went, or an
+ * adoption let it go), it is the operator's alone.
+ */
+function ownHeldPane(
+  session: Session,
+  marker: TicketMarker,
+  events: TicketEvent[],
+  attempt: number,
+): HeldPane | null {
+  if (marker.enlistedFrom !== undefined && !session.enlistedWork.has(marker.id)) return null;
+  let ended = -1;
+  events.forEach((event, i) => {
+    if (event.kind === "exited" && event.attempt === attempt) ended = i;
+  });
+  if (ended === -1) return null;
+  if (events.some((event, i) => i > ended && event.kind === "branch-held")) return null;
+  const held = heldPaneOf(events, attempt, (n) => worktreePathFor(session.cwd, marker.id, n));
+  if (held === null || tuiExited(session, marker.id, held)) return null;
+  return held;
+}
+
+// The exit-code file the Held pane's wrapper writes when its TUI exits: the
+// file of the attempt that launched the wrapper (the chain's first), named
+// as that attempt's files are. Null for an enlisted pane, which has none.
+function heldExitCodePath(session: Session, ticketId: string, held: HeldPane): string | null {
+  if (!held.wrapped) return null;
+  return join(
+    session.runsDir,
+    attemptExitCodeName(ticketId, held.numbered ? held.workAttempt : null, false),
+  );
+}
+
+// Whether the Held pane's TUI has exited, leaving its shell: its wrapper's
+// exit-code file is there and was written after the attempt began. One
+// older than that is stale, a solo ticket's well-known file from before.
+function tuiExited(session: Session, ticketId: string, held: HeldPane): boolean {
+  const path = heldExitCodePath(session, ticketId, held);
+  if (path === null || !existsSync(path)) return false;
+  return statSync(path).mtimeMs >= Date.parse(held.spawnedAt);
+}
+
+// Whether the survey's listing still has the Held pane as it was recorded:
+// the same tab, the Pool workspace (an enlisted pane lives in the
+// operator's), and the recorded directory (pane-survey.ts).
+function heldPaneListed(session: Session, ticketId: string, held: HeldPane): boolean {
+  const listing = session.paneSurvey?.latest() ?? null;
+  if (listing === null) return false;
+  const enlisted = !held.wrapped;
+  return listedAsRecorded(
+    listing,
+    { paneId: held.paneId, tabId: held.tabId, cwd: held.cwd },
+    enlisted ? null : session.poolWorkspace.id,
+  );
 }
 
 // The Held panes a restart finds (issue #139): every ticket still waiting at
@@ -3753,22 +3888,57 @@ function heldPaneRecords(session: Session): Record<string, HeldPaneRecord> {
     const waiting = session.state.interrupts.some(
       (i) => i.ticketId === id && i.kind === "checkpoint",
     );
-    if (!waiting || !listing.panes.has(held.paneId)) continue;
+    if (!waiting || !heldPaneListed(session, id, held) || tuiExited(session, id, held)) continue;
     out[id] = { attempt: held.attempt, paneId: held.paneId };
   }
   return out;
 }
 
-// Every pane the pool is still using, so no tab over one is a Finished
-// terminal: a Live attempt's (a Continued attempt's included), a Held
-// pane's, and a live Conversation's.
-function busyPanes(session: Session): Set<string> {
+// Every pane and tab no close may touch (issue #139): a Live attempt's (a
+// Continued attempt's included), a Held pane's, a live Conversation's, every
+// pane the engine counts as registered, and every pane and tab any enlisted
+// Ticket or Conversation names on its events (ADR-0021). The last is read
+// with the survey's listing (session.enlistedTerminals), because an
+// operator may enlist the still-live agent in a finished tab of the pool's
+// own, and from then on that tab is theirs whoever opened it.
+function untouchable(session: Session): Untouchable {
   const panes = session.liveAttempts.panes();
   for (const held of session.held.values()) panes.add(held.paneId);
   for (const view of session.conversations.views()) {
     if (view.paneId && session.conversations.isLive(view.id)) panes.add(view.paneId);
   }
-  return panes;
+  for (const pane of registeredPanesOf(session)) panes.add(pane);
+  for (const pane of session.enlistedTerminals.panes) panes.add(pane);
+  return { panes, tabs: session.enlistedTerminals.tabs };
+}
+
+// Every pane and tab the enlisted Tickets' and Conversations' `spawned`
+// events name, their Continued attempts' included.
+function enlistedTerminalsOf(session: Session): { panes: Set<string>; tabs: Set<string> } {
+  const owners = [
+    ...session.markers.filter((marker) => marker.enlistedFrom !== undefined).map((m) => m.id),
+    ...session.conversations.views().filter((view) => view.enlisted).map((view) => view.id),
+  ];
+  const panes = new Set<string>();
+  const tabs = new Set<string>();
+  for (const owner of owners) {
+    for (const event of readEvents(session.runsDir, owner)) {
+      if (event.kind !== "spawned") continue;
+      if (typeof event.payload.pane_id === "string") panes.add(event.payload.pane_id);
+      if (typeof event.payload.tab_id === "string") tabs.add(event.payload.tab_id);
+    }
+  }
+  return { panes, tabs };
+}
+
+// The Finished terminals as the last listing has them.
+function finishedNow(session: Session, listing: PaneListing): OpenedTab[] {
+  return finishedTerminals(
+    session.openedTabs,
+    listing,
+    untouchable(session),
+    session.poolWorkspace.id,
+  );
 }
 
 // Whose `spawned` events name tabs the pool opened: every Ticket (graders
@@ -3786,8 +3956,9 @@ function tabOwners(session: Session): string[] {
   ];
 }
 
-// A survey listing landed: a Held pane whose pane has gone is let go (the
-// Interrupt stays; only Keep talking goes with it), and a snapshot goes out
+// A survey listing landed: a Held pane whose pane has gone, is listed as
+// something other than what was recorded, or whose TUI exited is let go
+// (the Interrupt stays; only Keep talking goes with it), and a snapshot goes out
 // when the Held panes or the Finished terminals count moved since the last
 // one. Compared rather than emitted every time, so a quiet pool's cadence
 // sends nothing; derived rather than compared as listings, because a tab
@@ -3796,11 +3967,11 @@ function surveyListed(session: Session): void {
   const listing = session.paneSurvey?.latest() ?? null;
   if (listing === null) return;
   for (const [id, held] of session.held) {
-    if (!listing.panes.has(held.paneId)) session.held.delete(id);
+    if (!heldPaneListed(session, id, held) || tuiExited(session, id, held)) session.held.delete(id);
   }
   const last = session.snapshots[session.snapshots.length - 1];
   const held = heldPaneRecords(session);
-  const finished = finishedTerminals(session.openedTabs, listing, busyPanes(session)).length;
+  const finished = finishedNow(session, listing).length;
   if (
     last !== undefined &&
     last.finishedTerminals === finished &&
@@ -3874,6 +4045,46 @@ function restoreAssignment(session: Session, marker: TicketMarker): void {
   }
 }
 
+// The pool checkout's one agent (ADR-0027): the id of an Attempt other than
+// `exceptId`'s working in the pool checkout right now, live (a drive's, a
+// Conversation's, a Continued one) or re-adopted, read from where its last
+// spawn ran or, for an enlisted one, its found directory. Null when none is.
+function otherAgentInPoolCheckout(session: Session, exceptId: string): string | null {
+  const ids = new Set([
+    ...Object.keys(session.liveAttempts.records()),
+    ...session.adopted.keys(),
+  ]);
+  for (const id of ids) {
+    if (id === exceptId) continue;
+    const found = session.enlistedWork.get(id)?.directory;
+    const cwd =
+      found ??
+      readEvents(session.runsDir, id)
+        .filter((event) => event.kind === "spawned")
+        .pop()?.payload.cwd;
+    if (cwd === session.cwd) return id;
+  }
+  return null;
+}
+
+// Whether a Continued attempt holds the pool checkout while merges land in
+// it (ADR-0027): the merge target is the checkout's own branch, the one the
+// agent is committing on, so nothing merges until it ends. Once an enlist
+// captured the target, merges run in the engine's own merge checkout and
+// the pool checkout is not where they land.
+function poolCheckoutHeld(session: Session): boolean {
+  if (session.mergeTarget !== null) return false;
+  return [...session.continued.values()].some((c) => c.work.cwd === session.cwd);
+}
+
+// Wait until no Continued attempt holds the pool checkout: every merge that
+// lands in it passes through here first, so another ticket keeps running in
+// its own worktree and its merge queues behind the conversation, the way the
+// Merge hold queues scheduling behind a merge.
+async function poolCheckoutFree(session: Session): Promise<void> {
+  while (poolCheckoutHeld(session)) await Bun.sleep(MERGE_HOLD_POLL_MS);
+}
+
 function keepTalkingRefusal(ticketId: string, why: string): Error {
   return new Error(`keep talking: ticket ${ticketId} ${why}`);
 }
@@ -3907,7 +4118,10 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
     if (
       interrupt?.kind !== "checkpoint" ||
       !marker ||
-      marker.status !== "checkpoint" ||
+      // The state, not the marker object: a checkpoint joined at its
+      // attempt's exit reaches the markers only at the boundary persist,
+      // and a sibling may still be running.
+      session.state.tickets[ticketId] !== "checkpoint" ||
       session.adopted.has(ticketId)
     ) {
       throw keepTalkingRefusal(ticketId, "is not waiting at a checkpoint");
@@ -3922,14 +4136,34 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
     return { marker, held };
   };
   check();
-  // The pane is asked about now, not at the survey's last cadence: a
-  // Continued attempt claimed over a closed pane would crash at once.
-  await session.paneSurvey.refresh();
+  // The pane is asked about now, with a listing begun after this call, not
+  // the survey's last cadence: a Continued attempt claimed over a closed
+  // pane would crash at once.
+  const listed = await session.paneSurvey.refresh();
   const { marker, held } = check();
-  if (!session.paneSurvey.latest()?.panes.has(held.paneId)) {
+  if (!listed) {
+    throw keepTalkingRefusal(ticketId, "cannot be checked: the herdr daemon did not list its panes");
+  }
+  const letGo = (why: string): never => {
     session.held.delete(ticketId);
     emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
-    throw keepTalkingRefusal(ticketId, `lost its terminal: pane ${held.paneId} is gone`);
+    throw keepTalkingRefusal(ticketId, why);
+  };
+  if (!heldPaneListed(session, ticketId, held)) {
+    letGo(`lost its terminal: pane ${held.paneId} is gone`);
+  }
+  if (tuiExited(session, ticketId, held)) {
+    letGo(`lost its agent: the TUI in pane ${held.paneId} has exited`);
+  }
+  // The pool checkout holds one agent at a time (ADR-0027): a Continued
+  // attempt there beside another agent working there would be two writers
+  // in one tree.
+  const beside = held.cwd === session.cwd ? otherAgentInPoolCheckout(session, ticketId) : null;
+  if (beside !== null) {
+    throw keepTalkingRefusal(
+      ticketId,
+      `worked in the pool checkout, where ${beside} is working now; keep talking once it is done`,
+    );
   }
 
   // The claim is synchronous from here, so no answer, boundary or second
@@ -3948,8 +4182,12 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
   const streamPath = existsSync(stream) ? stream : null;
   const streamOffset = streamPath === null ? 0 : statSync(streamPath).size;
   // The Outcome the checkpoint was read from is spent: cleared before the
-  // watch is armed, so it can never be read as this attempt's.
+  // watch is armed, so it can never be read as this attempt's. So is a
+  // stale exit-code file (tuiExited has said it predates the attempt): from
+  // here its landing can only be this TUI exiting.
   rmSync(outcomePath, { force: true });
+  const exitCodePath = heldExitCodePath(session, ticketId, held);
+  if (exitCodePath !== null) rmSync(exitCodePath, { force: true });
   const assignment = paneAssignment(session, ticketId, held);
   const at = new Date().toISOString();
   appendEvent(session.runsDir, ticketId, {
@@ -3978,6 +4216,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
       numbered: held.numbered,
       stream: streamPath,
       stream_offset: streamOffset,
+      wrapped: held.wrapped,
     },
   });
   writeMarkerStatus(marker.file, "in-progress");
@@ -3992,7 +4231,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
         `${held.attempt} in pane ${held.paneId}`,
     ],
   });
-  const work: HeldPane = { ...held, attempt, stream: streamPath };
+  const work: HeldPane = { ...held, attempt, stream: streamPath, spawnedAt: at };
   reportAttemptAgent(
     attemptEnvOf(session),
     held.paneId,
@@ -4057,6 +4296,7 @@ function startContinued(
       teaching: started.teaching,
       focus: started.teaching !== null,
       outcomePath: started.outcomePath,
+      exitCodePath: heldExitCodePath(session, marker.id, started.work),
       streamPath: started.work.stream,
       streamOffset: started.streamOffset,
       logPath: started.logPath,
@@ -4133,23 +4373,29 @@ function endContinuedAttempt(
   const marker = session.markers.find((candidate) => candidate.id === ticketId);
   if (!marker) return;
   session.continued.delete(ticketId);
+  const { work, logPath, outcomePath } = entry;
+  // A valid Outcome is the ending whichever observation came first: the
+  // agent may write it and the operator close the tab (or quit the TUI)
+  // before the next sweep, and that is a finished attempt, not a crash.
+  const read = readAttemptResult(outcomePath, validateOutcome);
+  const observed = ending.kind === "untaught" ? "untaught" : read.ok ? "outcome" : ending.kind;
   // An enlisted ticket's Continued attempt ends the way its enlisted attempt
   // did (ADR-0021): the same two observations, recorded by the same hands,
   // so done merges the found branch in place, a pane gone first is a
   // checkpoint that keeps the branch (never a crash, never a re-run), and the
   // tab, directory and branch are left exactly as they are. Its Assignment
-  // stays as found. Only an untaught one is this function's own below.
+  // stays as found. Only an untaught one is this function's own below. It
+  // has no wrapper, so it never sees an exit-code ending.
   const enlisted = marker.enlistedFrom !== undefined && session.enlistedWork.has(ticketId);
-  if (enlisted && ending.kind !== "untaught") {
+  if (enlisted && observed !== "untaught") {
     void session.paneSurvey?.refresh();
-    endEnlistedAttempt(session, ticketId, ending.kind, attempt);
+    endEnlistedAttempt(session, ticketId, observed === "outcome" ? "outcome" : "pane-gone", attempt);
     return;
   }
   // A re-adopted Continued attempt's adoption is over with its ending: its
   // interrupt goes with the record below, as an adopted attempt's does.
   session.adopted.delete(ticketId);
   session.liveAttempts.clear(ticketId, attempt);
-  const { work, logPath, outcomePath } = entry;
   releaseAttemptAgent(
     session.herdrSocket,
     work.paneId,
@@ -4190,9 +4436,13 @@ function endContinuedAttempt(
     return;
   }
 
-  const read = readAttemptResult(outcomePath, validateOutcome);
+  const exitCode = (): number => {
+    const path = heldExitCodePath(session, ticketId, work);
+    const code = path === null ? NaN : Number.parseInt(readOptional(path)?.trim() ?? "", 10);
+    return Number.isInteger(code) ? code : EXIT_CODE_UNREADABLE;
+  };
   const decision: AttemptEndingDecision<Extract<OutcomeResult, { ok: true }>> =
-    ending.kind === "pane-gone"
+    observed === "pane-gone"
       ? {
           ending: "pane-gone",
           code: EXIT_CODE_PANE_GONE,
@@ -4201,6 +4451,15 @@ function endContinuedAttempt(
             `pane ${work.paneId} went before continued attempt ${attempt} ` +
             "wrote an Outcome",
         }
+      : observed === "exited"
+        ? {
+            ending: "exit-code",
+            code: exitCode(),
+            result: read,
+            crashReason:
+              `the TUI in pane ${work.paneId} exited before continued attempt ` +
+              `${attempt} wrote an Outcome`,
+          }
       : read.ok
         ? { ending: "outcome", code: 0, result: read, crashReason: null }
         : { ending: "outcome", code: EXIT_CODE_UNREADABLE, result: read, crashReason: read.reason };
@@ -4294,6 +4553,7 @@ async function gradeContinuedAttempts(
     const marker = session.markers.find((candidate) => candidate.id === ticketId);
     if (!marker || marker.status !== "in-progress") continue;
     const grades = await gradeRound(session, marker, [attempt], emit);
+    await poolCheckoutFree(session);
     const outcomePath = join(session.runsDir, attemptOutcomeName(ticketId, attempt, false));
     resolveLoneAttempt(
       session,
@@ -4328,53 +4588,80 @@ async function gradeContinuedAttempts(
 // fresh Attempt launches, the tab of its checkpointed Attempt closes, so the
 // old TUI, idle on the spent checkpoint, never shares the worktree and the
 // ticket's well-known Outcome and exit-code files with the new attempt. The
-// tab is the one the ticket's latest `spawned` event names, when a
-// checkpoint was raised for that attempt afterwards; a crashed attempt's tab
-// stays, as ADR-0014 has it. Stateless, so a Resume answered before a
-// restart closes its tab after it. Never an enlisted pane (ADR-0021).
+// tab is the one the Attempt named by the ticket's latest `checkpoint`
+// event ran in (a verify fan-out's checkpointed candidate, not whichever
+// candidate spawned last), and it closes once: the close is recorded as a
+// `tab-closed` event, and a tab already recorded closed is never asked
+// about again, so a crashed re-run's Resume does not reach back for it. A
+// headless fallback recorded no tab and closes nothing, and a crashed
+// attempt's tab stays, as ADR-0014 has it. Stateless otherwise, so a Resume
+// answered before a restart closes its tab after it.
+//
+// It closes only what is certainly the pool's own and idle: never a tab
+// whose pane is untouchable (live, held, registered, or anyone's enlisted,
+// ADR-0021), and never one herdr now lists differently from how it was
+// recorded; a listing that could not be had closes nothing.
 async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]): Promise<void> {
-  const closing: Promise<void>[] = [];
+  if (session.paneSurvey === null) return;
+  const candidates: { marker: TicketMarker; attempt: number; tabId: string; paneId: string; cwd: string | null }[] = [];
   for (const marker of new Set(markers)) {
     if (marker.enlistedFrom !== undefined) continue;
     session.held.delete(marker.id);
     const events = readEvents(session.runsDir, marker.id);
-    let at = -1;
-    events.forEach((event, i) => {
-      if (event.kind === "spawned" && typeof event.payload.tab_id === "string") at = i;
-    });
-    if (at === -1) continue;
-    const spawned = events[at];
-    const checkpointed = events.some(
-      (event, i) => i > at && event.kind === "checkpoint" && event.attempt === spawned.attempt,
-    );
-    if (!checkpointed) continue;
-    closing.push(
-      closeTabRecorded(session, marker.id, spawned.attempt, spawned.payload.tab_id as string).then(
-        () => {},
-      ),
-    );
+    const attempt = lastCheckpointAttempt(events);
+    if (attempt === null) continue;
+    const spawned = events
+      .filter((event) => event.kind === "spawned" && event.attempt === attempt)
+      .pop();
+    const tabId = spawned?.payload.tab_id;
+    const paneId = spawned?.payload.pane_id;
+    if (typeof tabId !== "string" || typeof paneId !== "string") continue;
+    if (events.some((event) => event.kind === "tab-closed" && event.payload.tab_id === tabId)) {
+      continue;
+    }
+    const cwd = typeof spawned!.payload.cwd === "string" ? spawned!.payload.cwd : null;
+    candidates.push({ marker, attempt, tabId, paneId, cwd });
   }
-  await Promise.all(closing);
+  if (candidates.length === 0) return;
+  if (!(await session.paneSurvey.refresh())) return;
+  const listing = session.paneSurvey.latest()!;
+  const off = untouchable(session);
+  await Promise.all(
+    candidates.map(async ({ marker, attempt, tabId, paneId, cwd }) => {
+      if (off.panes.has(paneId) || off.tabs.has(tabId)) return;
+      if (!listedAsRecorded(listing, { paneId, tabId, cwd }, session.poolWorkspace.id)) return;
+      if (await closeTabRecorded(session, marker.id, attempt, tabId)) {
+        appendEvent(session.runsDir, marker.id, {
+          at: new Date().toISOString(),
+          attempt,
+          kind: "tab-closed",
+          payload: { tab_id: tabId, reason: "resume" },
+        });
+      }
+    }),
+  );
 }
 
 /**
  * Close every Finished terminal (issue #139): the operator's bulk close from
  * the pool header, and the only way one closes. The set is derived afresh,
- * from a listing made now, so a tab that came back into use since the last
- * snapshot is never closed from under it. Resolves with how many closed.
+ * from a listing begun after the request, so a tab that came back into use
+ * since the last snapshot, or was enlisted, is never closed from under it;
+ * a listing that could not be had closes nothing. Resolves with how many
+ * closed.
  */
 async function closeFinishedTerminals(session: Session): Promise<number> {
   if (session.paneSurvey === null) {
     throw new Error("close finished terminals: the pool is not terminal-backed");
   }
-  await session.paneSurvey.refresh();
-  const listing = session.paneSurvey.latest();
-  if (listing === null) {
+  if (!(await session.paneSurvey.refresh())) {
     throw new Error("close finished terminals: the herdr daemon could not list its panes");
   }
-  const finished = finishedTerminals(session.openedTabs, listing, busyPanes(session));
+  const finished = finishedNow(session, session.paneSurvey.latest()!);
   const closed = await Promise.all(
-    finished.map((tab) => closeTabRecorded(session, tab.owner, lastAttempt(session.runsDir, tab.owner), tab.tabId)),
+    finished.map((tab) =>
+      closeTabRecorded(session, tab.owner, lastAttempt(session.runsDir, tab.owner), tab.tabId),
+    ),
   );
   const count = closed.filter(Boolean).length;
   session.state = applyUpdate(session.state, {
@@ -4567,6 +4854,17 @@ function kickProcessing(session: Session): void {
 // super-step.
 function drainAnswers(session: Session): void {
   for (const record of session.answers.pending()) {
+    // An answer that merges into the pool checkout waits, still queued,
+    // while a Continued attempt works there (ADR-0027); its ending kicks the
+    // drain again.
+    if (
+      poolCheckoutHeld(session) &&
+      (record.kind === "merge-conflict" ||
+        record.kind === "merge-approval" ||
+        record.kind === "selection")
+    ) {
+      continue;
+    }
     const waiters = session.answerWaiters.get(record.seq) ?? [];
     session.answerWaiters.delete(record.seq);
     try {

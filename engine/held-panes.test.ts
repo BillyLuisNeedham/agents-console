@@ -16,6 +16,7 @@ describe("held panes", () => {
   it("reads a checkpointed attempt's pane, place and Assignment off its spawned event", () => {
     const events = [
       event(1, "spawned", {
+        argv: ["bash", "-c", "claude"],
         cwd: "/pool/.git/pool-worktrees/01",
         branch: "pool/p/01",
         pane_id: "w1:p1",
@@ -37,6 +38,8 @@ describe("held panes", () => {
       workAttempt: 1,
       numbered: false,
       stream: null,
+      spawnedAt: AT,
+      wrapped: true,
     });
   });
 

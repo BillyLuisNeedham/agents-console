@@ -147,7 +147,7 @@ An Attempt launched into the still-live pane of the Terminal-backed attempt whos
 _Avoid_: resumed attempt (Resume launches a fresh Attempt in a new tab), reopened attempt (an ended Attempt never takes a second Outcome), follow-up (that's a Spawn)
 
 **Held pane**:
-The still-live herdr pane of a Terminal-backed attempt that ended in a checkpoint Interrupt, kept the pool's while that Interrupt waits: the card keeps its Peek, focus and attach, and Keep talking can continue it as a Continued attempt. It is no Live attempt (that Attempt is over) and it is let go when the Interrupt is answered or herdr no longer lists the pane; a plain Resume closes it just before the fresh Attempt launches. An enlisted Ticket's pane is held while the Ticket still works in it, and, being the operator's, is never closed by anything, Resume included. Introduced by ADR-0027.
+The still-live herdr pane of a Terminal-backed attempt that ended in a checkpoint Interrupt, kept the pool's while that Interrupt waits: the card keeps its Peek, focus and attach, and Keep talking can continue it as a Continued attempt. It is no Live attempt (that Attempt is over). It is held only while the checkpoint is about that Attempt's own work and its agent is still there, and let go when the Interrupt is answered, herdr no longer lists the pane as recorded, or the TUI exits and leaves a bare shell; a plain Resume closes it just before the fresh Attempt launches. An enlisted Ticket's pane is held while the Ticket still works in it, and, being the operator's, is never closed by anything, Resume included. Introduced by ADR-0027.
 _Avoid_: checkpoint pane (the checkpoint is the Interrupt, not where it ran), idle pane, parked pane (a branch is parked; a pane is held)
 
 **Finished terminal**:

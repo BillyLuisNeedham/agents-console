@@ -10,6 +10,7 @@ import {
   closeTab,
   herdrRpc,
   listPaneIds,
+  listPanes,
   openAttemptTab,
   relabelWorkspace,
   releasePaneAgent,
@@ -473,5 +474,32 @@ describe("HERDR_SOCKET_DEFAULT in a test run", () => {
     expect(HERDR_SOCKET_DEFAULT).toBe(process.env.HERDR_SOCKET_PATH!);
     expect(existsSync(HERDR_SOCKET_DEFAULT)).toBe(false);
     expect(HERDR_SOCKET_DEFAULT.startsWith(join(homedir(), ".config"))).toBe(false);
+  });
+});
+
+describe("listPanes (issue #139)", () => {
+  it("reads each pane's tab, workspace and directory", async () => {
+    const fake = await startFakeHerdr({
+      foreignPanes: [{ tab_id: "t1", pane_id: "p1", workspace_id: "w1" }],
+    });
+    expect(await listPanes(fake.socketPath)).toEqual([
+      { paneId: "p1", tabId: "t1", workspaceId: "w1", cwd: null },
+    ]);
+  });
+
+  it("throws on an answer with no panes list rather than reading it as none (review item 8)", async () => {
+    const { createServer } = await import("node:net");
+    const dir = mkdtempSync(join(tmpdir(), "herdr-malformed-"));
+    const socketPath = join(dir, "herdr.sock");
+    const server = createServer((socket) => {
+      socket.on("data", () => socket.end(`${JSON.stringify({ id: "1", result: { type: "ok" } })}\n`));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()));
+    try {
+      await expect(listPanes(socketPath)).rejects.toThrow("without a panes list");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

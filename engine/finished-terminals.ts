@@ -12,14 +12,17 @@
  * The set is derived, never recorded: the tabs every `spawned` event names
  * (a ticket's attempts, its resolvers, graders, the head-to-head judge, a
  * Conversation's launch), less the ones herdr no longer lists, less every tab
- * whose pane is still in use. What counts as in use is the engine's own
- * registries, handed in: a Live attempt's pane, a Held pane, a live
- * Conversation's pane. An enlisted pane is never the pool's to close
- * (ADR-0021), so its owner is left out before its events are read.
+ * whose pane is still in use or is anyone's enlisted pane, less every tab
+ * herdr now lists differently from how the engine recorded it. What is
+ * untouchable is the engine's to say and handed in: a Live attempt's pane, a
+ * Held pane, any Conversation's pane, and every pane and tab any enlisted
+ * Ticket or Conversation names. That last is not only the enlisted owners'
+ * own tabs: an operator can enlist a finished tab's still-live agent as a new
+ * Ticket, and from then on that tab is theirs (ADR-0021), whoever opened it.
  */
 
 import { readEvents } from "./events.ts";
-import type { PaneListing } from "./pane-survey.ts";
+import { listedAsRecorded, type PaneListing } from "./pane-survey.ts";
 
 /** One tab a `spawned` event says the engine opened. */
 export interface OpenedTab {
@@ -28,6 +31,8 @@ export interface OpenedTab {
   tabId: string;
   /** The pane the attempt ran in: the tab's root pane. */
   paneId: string | null;
+  /** Where the attempt ran, as the event recorded it. */
+  cwd: string | null;
 }
 
 /**
@@ -44,32 +49,42 @@ export function openedTabs(runsDir: string, owners: Iterable<string>): OpenedTab
         owner,
         tabId: event.payload.tab_id,
         paneId: typeof event.payload.pane_id === "string" ? event.payload.pane_id : null,
+        cwd: typeof event.payload.cwd === "string" ? event.payload.cwd : null,
       });
     }
   }
   return [...tabs.values()];
 }
 
+/** Panes and tabs a close must never touch: in use, or someone's enlisted. */
+export interface Untouchable {
+  panes: ReadonlySet<string>;
+  tabs: ReadonlySet<string>;
+}
+
 /**
- * The opened tabs that are Finished terminals: still listed by herdr (by tab,
- * or by the root pane when the daemon reports no tab ids), with neither the
- * root pane nor any other listed pane of the tab in use.
+ * The opened tabs that are Finished terminals: herdr still lists the tab's
+ * root pane as the engine recorded it (listedAsRecorded: the same tab, the
+ * Pool workspace, the recorded directory), and neither that pane, the tab,
+ * nor any other listed pane in the tab is untouchable. A tab whose root pane
+ * was never recorded cannot be checked, so it is never one.
  */
 export function finishedTerminals(
   opened: OpenedTab[],
   listing: PaneListing,
-  busyPanes: ReadonlySet<string>,
+  untouchable: Untouchable,
+  workspaceId: string | null,
 ): OpenedTab[] {
-  const busyTabs = new Set<string>();
-  for (const [paneId, tabId] of listing.panes) {
-    if (tabId !== null && busyPanes.has(paneId)) busyTabs.add(tabId);
+  const heldTabs = new Set(untouchable.tabs);
+  for (const pane of listing.panes.values()) {
+    if (pane.tabId !== null && untouchable.panes.has(pane.paneId)) heldTabs.add(pane.tabId);
   }
   return opened.filter((tab) => {
-    const open =
-      listing.tabs.has(tab.tabId) ||
-      (tab.paneId !== null && listing.panes.has(tab.paneId));
-    if (!open) return false;
-    if (tab.paneId !== null && busyPanes.has(tab.paneId)) return false;
-    return !busyTabs.has(tab.tabId);
+    if (tab.paneId === null) return false;
+    if (!listedAsRecorded(listing, { paneId: tab.paneId, tabId: tab.tabId, cwd: tab.cwd }, workspaceId)) {
+      return false;
+    }
+    if (untouchable.panes.has(tab.paneId)) return false;
+    return !heldTabs.has(tab.tabId);
   });
 }

@@ -74,6 +74,14 @@ const EVENT_KINDS = [
   // refused to close (issue #139): the close stays best-effort, and this is
   // the record that it failed and why, where a silent catch used to be.
   "tab-close-failed",
+  // The engine closed the tab of a checkpointed Attempt before a Resume's
+  // fresh launch (issue #139): recorded so the close happens once and a
+  // later Resume never reaches back for a tab it already closed.
+  "tab-closed",
+  // An enlisted pane the pool let go (issue #139): an abandoned adoption
+  // left it exactly as found and handed the Ticket back to ordinary
+  // attempts, so a restart must not take the pane back as the Ticket's.
+  "let-go",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

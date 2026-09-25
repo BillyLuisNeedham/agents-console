@@ -56,6 +56,15 @@ export interface HeldPane extends HeldPaneRecord {
    * whose own Stream file it is.
    */
   stream: string | null;
+  /** When the attempt's `spawned` event was recorded (ISO). */
+  spawnedAt: string;
+  /**
+   * Whether the pane's TUI runs under the engine's wrapper, which writes an
+   * exit-code file when the TUI exits: true for an attempt the engine
+   * launched, false for an enlisted pane (the operator started its agent),
+   * and a Continued attempt keeps the answer of the attempt it continues.
+   */
+  wrapped: boolean;
 }
 
 /**
@@ -99,6 +108,11 @@ export function heldPaneOf(
         ? payload.numbered
         : payload.cwd === numberedCwd(attempt),
     stream: typeof payload.stream === "string" ? payload.stream : null,
+    spawnedAt: spawned.at,
+    wrapped:
+      typeof payload.wrapped === "boolean"
+        ? payload.wrapped
+        : Array.isArray(payload.argv) && payload.argv.length > 0,
   };
 }
 
