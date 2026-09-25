@@ -220,6 +220,9 @@ interface CanvasBind {
 export interface CanvasModel {
   cards: PoolCardView[];
   connected: boolean;
+  /** The pool as the Console names it (issue #100): its Pool title, else
+   *  its directory. Null until the first snapshot says which pool this is. */
+  poolName: string | null;
   /** The raw phase, for the two things the label alone cannot tell apart: a
    *  stopped server's status line and its body notice (issue #97). */
   phase: RunPhase | null;
@@ -247,17 +250,22 @@ export interface CanvasModel {
  * says so; every other tab just reports the stop.
  */
 export function canvasStatusText(model: CanvasModel): string {
+  // The pool leads (issue #100), so with several Consoles open the header
+  // says which pool before it says how it is doing.
+  const name = model.poolName ?? "pool";
   if (model.phase === "stopped") {
     // A Restart is a stop with a relaunch behind it, so the tab that asked
     // for one reads the same farewell as "restarting", not "stopped": the
     // server is coming back, and saying otherwise would be wrong for the
     // few seconds Boot takes.
-    if (model.restart.waiting) return "pool · restarting...";
-    return model.stop.stoppedFromHere ? "pool · stopped · from this page" : "pool · stopped";
+    if (model.restart.waiting) return `${name} · restarting...`;
+    return model.stop.stoppedFromHere
+      ? `${name} · stopped · from this page`
+      : `${name} · stopped`;
   }
   return model.connected
-    ? `pool · ${model.phaseLabel} · snapshot ${model.seq}`
-    : "pool · connecting";
+    ? `${name} · ${model.phaseLabel} · snapshot ${model.seq}`
+    : `${name} · connecting`;
 }
 
 /** The selection's one-hop flow neighbourhood, computed by the composition. */
@@ -863,7 +871,7 @@ export class Canvas {
       h(
         "span",
         { class: "canvas-stopped-text" },
-        "This pool's server has stopped. Relaunch it from a terminal and this page will reconnect on its own:",
+        `${model.poolName ? `The server for ${model.poolName}` : "This pool's server"} has stopped. Relaunch it from a terminal and this page will reconnect on its own:`,
       ),
       model.stop.relaunch
         ? h("code", { class: "canvas-stopped-command" }, model.stop.relaunch)

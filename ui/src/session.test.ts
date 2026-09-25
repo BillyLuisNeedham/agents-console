@@ -79,6 +79,7 @@ function snapshot(
     seq: 0,
     phase: "running",
     poolName: "repo/pool",
+    poolTitle: null,
     poolDir: "/tmp/pool",
     ...overrides,
     state: {
@@ -238,6 +239,18 @@ describe("one derivation per cycle", () => {
     const model = session.model({});
     expect(model.detail?.kind).toBe("ticket");
     expect(r.projectCalls()).toBe(2);
+  });
+});
+
+describe("the pool's name (issue #100)", () => {
+  it("names the pool by its title, follows a retitle, and falls back to the directory", () => {
+    const session = new ConsoleSession(rig().options);
+    expect(session.model({}).poolName).toBeNull();
+    session.setSnapshot(snapshot({ poolTitle: "Jev as the grader" }));
+    expect(session.poolName).toBe("Jev as the grader");
+    expect(session.model({}).poolName).toBe("Jev as the grader");
+    session.setSnapshot(snapshot({ poolTitle: null }));
+    expect(session.model({}).poolName).toBe("repo/pool");
   });
 });
 

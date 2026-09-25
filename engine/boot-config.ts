@@ -55,6 +55,8 @@ export interface BootAnswers {
   port?: number | "auto";
   /** "herdr" backs attempts with tabs; "none" removes the key. */
   terminal?: "herdr" | "none";
+  /** The Pool title (issue #100), asked only when Boot creates the Pool. */
+  title?: string;
 }
 
 /** The seven behavioural keys a Setup carries, and nothing pool-specific. */
@@ -166,6 +168,7 @@ export function mergeConsoleConfig(
   else if (typeof answers.port === "number") out.port = answers.port;
   if (answers.terminal === "none") delete out.terminal;
   else if (answers.terminal === "herdr") out.terminal = "herdr";
+  if (answers.title !== undefined && answers.title !== "") out.title = answers.title;
   return out;
 }
 

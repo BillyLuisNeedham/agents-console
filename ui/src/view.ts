@@ -81,6 +81,8 @@ export interface RestartView {
 }
 
 export interface AppModel {
+  /** The pool as the Console names it (issue #100): Pool title, else directory. */
+  poolName: string | null;
   phase: RunPhase | null;
   phaseLabel: string;
   cards: PoolCardView[];

@@ -280,6 +280,23 @@ export async function resolvePoolWorkspace(
 }
 
 /**
+ * Relabel a workspace (`workspace.rename`, herdr protocol 20; the method and
+ * its `{ workspace_id, label }` params are in the schema herdr 0.8.2 bundles,
+ * `herdr api schema --json`). The engine calls it only on a Pool workspace it
+ * created itself, when the Pool title changes (issue #100): a launch
+ * workspace, or one a pool merely remembers without having made it, is the
+ * operator's, and its label is theirs. Throws on a refusal; the caller
+ * decides how loud that is.
+ */
+export async function relabelWorkspace(
+  socketPath: string,
+  workspaceId: string,
+  label: string,
+): Promise<void> {
+  await herdrRpc(socketPath, "workspace.rename", { workspace_id: workspaceId, label });
+}
+
+/**
  * Whether the daemon still holds this workspace: `workspace.get` answering
  * with one. Any error (an unknown id, a daemon that is not there) is a "no",
  * because both mean the same thing to the caller — this id cannot be used.

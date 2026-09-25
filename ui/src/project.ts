@@ -1412,6 +1412,8 @@ export interface PoolConfigPatch {
   agents?: string | null;
   reviewer?: string | null;
   checkpoint?: string | null;
+  /** The Pool title (issue #100); null clears it back to the directory name. */
+  title?: string | null;
 }
 
 /**
@@ -1642,6 +1644,24 @@ export function phaseLabel(phase: RunPhase): string {
 export interface PoolTabStatus {
   word: string;
   color: string;
+}
+
+/**
+ * What the Console calls this pool (issue #100): its Pool title when it has
+ * one, else the directory name the server derives. Display-only; the
+ * directory stays the identity.
+ */
+export function poolDisplayName(snapshot: EnrichedSnapshot): string {
+  return snapshot.poolTitle ?? snapshot.poolName;
+}
+
+/**
+ * The browser tab's title, the pool first (issue #100): with several
+ * Consoles open, the start of the tab is what shows, and it has to say which
+ * pool before it says how that pool is doing.
+ */
+export function poolTabTitle(name: string, status: PoolTabStatus): string {
+  return `${name} — ${status.word}`;
 }
 
 /** The tab status colors, from the Console palette. The favicon's boot dot

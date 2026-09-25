@@ -5379,7 +5379,11 @@ describe("the Pool workspace (issue #94)", () => {
       focus: false,
     });
     // Remembered on disk, in the runs directory and never in console.json.
-    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: basename(poolDir),
+    });
     const spawned = readEventLines(poolDir, "01").find((e) => e.kind === "spawned")!;
     expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
     // No path matching: the daemon is never asked to list its workspaces.
@@ -5501,7 +5505,11 @@ describe("the Pool workspace (issue #94)", () => {
     // being gone too) and one retry, and the attempt kept its pane rather
     // than falling back to headless.
     expect(fake.requests.filter((r) => r.method === "workspace.create")).toHaveLength(1);
-    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: basename(poolDir),
+    });
     const spawned = readEventLines(poolDir, "02").find((e) => e.kind === "spawned")!;
     expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
     expect(spawned.payload.terminal_error).toBeUndefined();
@@ -5579,7 +5587,11 @@ describe("the Pool workspace (issue #94)", () => {
     expect(run.final.tickets["01"]).toBe("done");
     expect(run.final.tickets["02"]).toBe("done");
     expect(fake.requests.filter((r) => r.method === "workspace.create")).toHaveLength(1);
-    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w1" });
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: basename(poolDir),
+    });
     for (const id of ["01", "02"]) {
       const spawned = readEventLines(poolDir, id).find((e) => e.kind === "spawned")!;
       expect(String(spawned.payload.pane_id).startsWith("w1:")).toBe(true);
@@ -5726,6 +5738,164 @@ describe("the Pool workspace (issue #94)", () => {
     expect(spawned.payload.pane_id).toBeNull();
     expect(String(spawned.payload.terminal_error)).toContain("no Pool workspace");
     expect(typeof spawned.payload.pid).toBe("number");
+  }, 15000);
+
+  // The Pool title (issue #100) labels a workspace the Console created, and
+  // follows the title when it changes, live or while the Console was down.
+  // A workspace the Console did not make is the operator's and keeps its
+  // label: the launch workspace, and one a pool remembers without the
+  // record saying the Console made it.
+
+  function titledPool(title: string): string {
+    return makePool({
+      tickets: [{ ...readyTicket("01"), body: "# Workspaces\n\nticket body" }],
+      config: { ...stubConfig, terminal: "herdr", title },
+    });
+  }
+
+  it("labels a workspace it creates with the Pool title", async () => {
+    const poolDir = titledPool("Jev as the grader");
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+
+    await runPool({ poolDir, harnesses: rig.harnesses, herdrSocket: fake.socketPath });
+    await fake.close();
+
+    const created = fake.requests.find((r) => r.method === "workspace.create")!;
+    expect(created.params.label).toBe("Jev as the grader");
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: "Jev as the grader",
+    });
+    // Created with the label it wants, so there is nothing to rename.
+    expect(fake.requests.some((r) => r.method === "workspace.rename")).toBe(false);
+  }, 15000);
+
+  it("relabels its own workspace live when the title changes, and back to the directory when cleared", async () => {
+    const poolDir = titledPool("First title");
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr();
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await run.retitle("Second title");
+    expect(fake.workspaceLabel("w1")).toBe("Second title");
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: "Second title",
+    });
+    // The same title again is not a change, and asks herdr nothing.
+    await run.retitle("Second title");
+    await run.retitle(null);
+    await fake.close();
+
+    expect(
+      fake.requests
+        .filter((r) => r.method === "workspace.rename")
+        .map((r) => r.params),
+    ).toEqual([
+      { workspace_id: "w1", label: "Second title" },
+      { workspace_id: "w1", label: basename(poolDir) },
+    ]);
+    // The operator is told on the pool's own log.
+    expect(
+      run.final.log.some((line) => line.includes('Pool workspace w1 relabelled "Second title"')),
+    ).toBe(true);
+  }, 15000);
+
+  it("relabels at boot a workspace it created earlier when the title changed while it was down", async () => {
+    const poolDir = titledPool("Renamed while down");
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(
+      poolWorkspaceFile(poolDir),
+      JSON.stringify({ workspace_id: "w-kept", created: true, label: "Old title" }),
+    );
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-kept"] });
+
+    await runPool({ poolDir, harnesses: rig.harnesses, herdrSocket: fake.socketPath });
+    await fake.close();
+
+    expect(
+      fake.requests.filter((r) => r.method === "workspace.rename").map((r) => r.params),
+    ).toEqual([{ workspace_id: "w-kept", label: "Renamed while down" }]);
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w-kept",
+      created: true,
+      label: "Renamed while down",
+    });
+  }, 15000);
+
+  it("never relabels the launch workspace", async () => {
+    const poolDir = titledPool("Titled pool");
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-launch"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+      herdrWorkspace: "w-launch",
+    });
+    await run.retitle("Another title");
+    await fake.close();
+
+    expect(fake.requests.some((r) => r.method === "workspace.rename")).toBe(false);
+    expect(fake.workspaceLabel("w-launch")).toBe("");
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-launch" });
+  }, 15000);
+
+  it("never relabels a remembered workspace whose record does not say the Console made it", async () => {
+    // A file from before titles holds the bare id: whether the Console made
+    // that workspace or was launched in it is not recorded, so it is left
+    // alone rather than guessed at.
+    const poolDir = titledPool("Titled pool");
+    mkdirSync(join(poolDir, "runs"), { recursive: true });
+    writeFileSync(poolWorkspaceFile(poolDir), JSON.stringify({ workspace_id: "w-kept" }));
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ workspaces: ["w-kept"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await run.retitle("Another title");
+    await fake.close();
+
+    expect(fake.requests.some((r) => r.method === "workspace.rename")).toBe(false);
+    expect(rememberedWorkspace(poolDir)).toEqual({ workspace_id: "w-kept" });
+  }, 15000);
+
+  it("logs a refused relabel and keeps the workspace's recorded label", async () => {
+    const poolDir = titledPool("First title");
+    const rig = stubHarness(poolDir, {});
+    const fake = await startExecutingFakeHerdr({ fail: ["workspace.rename"] });
+
+    const run = await runPool({
+      poolDir,
+      harnesses: rig.harnesses,
+      herdrSocket: fake.socketPath,
+    });
+    await run.retitle("Second title");
+    await fake.close();
+
+    expect(fake.workspaceLabel("w1")).toBe("First title");
+    expect(rememberedWorkspace(poolDir)).toEqual({
+      workspace_id: "w1",
+      created: true,
+      label: "First title",
+    });
+    expect(
+      run.final.log.some((line) =>
+        line.includes('Pool workspace w1 could not be relabelled "Second title"'),
+      ),
+    ).toBe(true);
   }, 15000);
 
   it("reports the attempt's agent while it runs and releases it at the ending", async () => {

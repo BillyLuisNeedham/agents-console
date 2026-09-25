@@ -71,6 +71,10 @@ _Avoid_: per-ticket lint, typecheck (those are not Review)
 The set of Tickets and Conversations one Console run works, identified by its directory on disk. Hermetic: no ticket edges cross pool boundaries. One Console server binds one pool at a time. A Pool that holds no Tickets at all is still a Pool: see Seeded Pool.
 _Avoid_: project, workspace, queue
 
+**Pool title**:
+One line of free text the operator gives a Pool so that several running at once can be told apart. The Console's browser tab and header lead with it, Boot's choice between Pools shows it beside each directory, and a Pool workspace the Console created carries it. Display-only: the Pool's directory stays its identity and never changes when the title does, and two Pools may share a title. Boot asks for it first when it creates a Pool and derives the directory from it; it can be changed at any time from the Pool settings and shows at once. A Pool without one is known by its directory name. Always the operator's words, never made up from the Pool's Tickets or specs.
+_Avoid_: pool name, label
+
 **Seeded Pool**:
 A Pool that starts with no Tickets and grows from live work: the operator Enlists herdr panes into it as Conversations, and those Conversations Spawn the Tickets. It opts in by holding a `conversations/` directory, which may be empty; without that directory an empty ticket directory is the "no Tickets written yet" mistake and the Console refuses to start. Ordinary in every other respect, and seeded only at the beginning: the same config, the same server, the same super-steps and merges, and from its first Spawn it holds Tickets like any other Pool. Introduced by ADR-0024 (`docs/adr/0024-a-pool-may-start-with-no-tickets.md`).
 _Avoid_: empty pool (it is empty only at the start), conversation-only pool (it stops being that at the first Spawn), scratch pool, sandbox
@@ -99,7 +103,7 @@ The Interrupt the engine raises on a Ticket about to schedule with no harness or
 _Avoid_: dead drive (that was the old outcome), pool config error (the log line, not the pause)
 
 **Pool settings**:
-The operator's editable view of one Pool's config in the Console: pool defaults, resolver, terminal, port, selection, roster and agents. Editing the assignment slice takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
+The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, terminal, port, selection, roster and agents. The Pool title shows as soon as it is saved; editing the assignment slice takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
 _Avoid_: config (that's the raw file), preferences, options
 
 **Machine defaults**:

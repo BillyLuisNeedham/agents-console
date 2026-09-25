@@ -10,8 +10,9 @@
  * a key this module has never heard of belongs to whoever put it there, so
  * both survive a save untouched. Second, only some of what the pane edits
  * takes effect without a Restart: `defaults`, `assign` and `resolver` reload
- * at the next super-step boundary (ADR-0018), and BOOT_ONLY_KEYS is the rest,
- * which the running process froze at boot and the Console badges as such.
+ * at the next super-step boundary (ADR-0018), the Pool title (issue #100)
+ * shows the moment it is saved, and BOOT_ONLY_KEYS is the rest, which the
+ * running process froze at boot and the Console badges as such.
  *
  * `reviewer` and `checkpoint` are prose the setup skill already writes here
  * and the engine has never read: agents meet them through AGENT.md. They are
@@ -22,6 +23,7 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readConfig, type PoolConfig } from "./engine.ts";
+import { normaliseTitle } from "./pool-title.ts";
 import type { MachineDefaults } from "./machine-defaults.ts";
 
 /**
@@ -39,6 +41,7 @@ export const POOL_SETTINGS_KEYS = [
   "agents",
   "reviewer",
   "checkpoint",
+  "title",
 ] as const satisfies readonly (keyof PoolConfig)[];
 
 export type PoolSettingsKey = (typeof POOL_SETTINGS_KEYS)[number];
@@ -164,7 +167,18 @@ function normaliseKey(
     case "reviewer":
     case "checkpoint":
       return normaliseProse(key, value);
+    case "title":
+      return normalisePoolTitle(value);
   }
+}
+
+// The Pool title (issue #100) is one line: whatever was typed is folded onto
+// it rather than refused, so a pasted newline cannot break the tab title.
+function normalisePoolTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    throw new Error("pool settings: title must be a string");
+  }
+  return normaliseTitle(value) ?? undefined;
 }
 
 function normaliseProse(key: string, value: unknown): string | undefined {

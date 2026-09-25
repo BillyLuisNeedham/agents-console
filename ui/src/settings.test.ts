@@ -140,6 +140,11 @@ describe("poolDraftFrom", () => {
   it("reads a terminal-backed pool's checkbox as ticked", () => {
     expect(poolDraftFrom({ terminal: "herdr" }).terminal).toBe(true);
   });
+
+  it("seeds the Pool title, and an untitled pool as an empty field (issue #100)", () => {
+    expect(poolDraftFrom({ title: "Jev as the grader" }).title).toBe("Jev as the grader");
+    expect(EMPTY.title).toBe("");
+  });
 });
 
 describe("poolPatchFrom", () => {
@@ -174,6 +179,13 @@ describe("poolPatchFrom", () => {
 
   it("passes `none` through as the opt-out string", () => {
     expect(poolPatchFrom({ ...EMPTY, resolverHarness: "none" }).resolver).toBe("none");
+  });
+
+  it("sends the Pool title trimmed, and an emptied one as null (issue #100)", () => {
+    expect(poolPatchFrom({ ...EMPTY, title: "  Jev as the grader " }).title).toBe(
+      "Jev as the grader",
+    );
+    expect(poolPatchFrom(EMPTY).title).toBeNull();
   });
 
   it("drops a selection that is neither auto nor human", () => {
@@ -477,6 +489,18 @@ describe("SettingsStore.render", () => {
       root.querySelector<HTMLInputElement>('[data-key="pool-model-input"]'),
     ).toBe(model);
     expect(model!.value).toBe("half-typed");
+  });
+
+  it("offers the Pool title first, the directory name as its placeholder (issue #100)", async () => {
+    const rig = await opened();
+    const { root, paint } = mount(rig.store);
+    paint();
+    const inputs = [...root.querySelectorAll<HTMLInputElement>(".settings-input")];
+    expect(inputs[0]?.getAttribute("data-key")).toBe("pool-title-input");
+    expect(inputs[0]?.getAttribute("placeholder")).toBe("pool");
+    // Display-only and live: never badged for a Restart.
+    const field = root.querySelector('[data-key="pool-title"]');
+    expect(field?.querySelector(".settings-badge")).toBeNull();
   });
 
   it("gives the body its own scroll region, keyed so the scroll survives", async () => {
