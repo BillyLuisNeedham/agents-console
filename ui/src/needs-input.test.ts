@@ -196,7 +196,7 @@ describe("NeedsInputTray waiting rows", () => {
               eligible: true,
               reason: null,
               verify: null,
-              sources: { harness: "default", model: "default", drivers: "default" },
+              sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
             },
           },
           {
@@ -213,7 +213,7 @@ describe("NeedsInputTray waiting rows", () => {
               eligible: true,
               reason: null,
               verify: null,
-              sources: { harness: "default", model: "default", drivers: "default" },
+              sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
             },
           },
         ],

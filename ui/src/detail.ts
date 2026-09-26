@@ -38,6 +38,7 @@ import {
 } from "./terminal";
 import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
+import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
 // across reloads.
@@ -681,9 +682,9 @@ export class Detail {
   ): HTMLElement {
     const view = detail.reassign;
     // An enlisted ticket runs as it was found, so the engine fixes its model,
-    // drivers and verify and refuses a write to any of them: the editor
-    // offers its harness and shows the other three the way an ineligible
-    // ticket shows all four.
+    // effort, drivers and verify and refuses a write to any of them: the
+    // editor offers its harness and shows the rest the way an ineligible
+    // ticket shows every field.
     const seed: ReassignSeed = {
       assignment: detail.assignment,
       verify: view.verify,
@@ -704,6 +705,7 @@ export class Detail {
           { class: "reassign-readonly" },
           this.renderReadonlyField("harness", detail.assignment.harness, view.sources.harness),
           this.renderReadonlyField("model", detail.assignment.model, view.sources.model),
+          this.renderReadonlyEffort(detail),
           this.renderReadonlyField("drivers", detail.assignment.drivers, view.sources.drivers),
           this.renderReadonlyField(
             "verify",
@@ -743,6 +745,7 @@ export class Detail {
             "div",
             { class: "reassign-readonly", key: "reassign-fixed" },
             this.renderReadonlyField("model", detail.assignment.model, view.sources.model),
+            this.renderReadonlyEffort(detail),
             this.renderReadonlyField(
               "drivers",
               detail.assignment.drivers,
@@ -777,6 +780,31 @@ export class Detail {
                 ),
             }),
           ),
+      detail.enlisted
+        ? null
+        : this.renderReassignField(
+            detail,
+            store,
+            seed,
+            "effort",
+            effortInput({
+              key: "reassign-detail-effort",
+              class: "settings-input reassign-input",
+              harness: store.field(ticketId, "harness", seed),
+              value: store.field(ticketId, "effort", seed),
+              placeholder: "(harness default)",
+              onInput: (value) => store.setField(ticketId, "effort", value, seed),
+            }),
+          ),
+      // The effort in force, when the harness cannot take it in the mode
+      // this pool launches in: kept, but said plainly (CONTEXT.md: Effort).
+      !detail.enlisted && detail.assignment.effortApplied === false
+        ? h(
+            "div",
+            { class: "dim reassign-note effort-unapplied-note", key: "reassign-effort-note" },
+            `effort ${detail.assignment.effort} is not applied: ${EFFORT_NOT_APPLIED_TITLE}`,
+          )
+        : null,
       detail.enlisted
         ? null
         : this.renderReassignField(
@@ -860,13 +888,25 @@ export class Detail {
     label: string,
     value: string | null,
     source: AssignmentSource,
+    empty: string = UNASSIGNED_LABEL,
   ): HTMLElement {
     return h(
       "div",
       { class: "reassign-readonly-field", key: `reassign-readonly-${label}` },
       h("span", { class: "reassign-field-label" }, label),
-      h("span", { class: "reassign-readonly-value" }, value ?? UNASSIGNED_LABEL),
+      h("span", { class: "reassign-readonly-value" }, value ?? empty),
       renderSource(source),
+    );
+  }
+
+  // Effort is optional by nature: none set reads as the harness's own
+  // default rather than as unassigned.
+  private renderReadonlyEffort(detail: Extract<DetailView, { kind: "ticket" }>): HTMLElement {
+    return this.renderReadonlyField(
+      "effort",
+      effortValue(detail.assignment),
+      detail.reassign.sources.effort,
+      "(harness default)",
     );
   }
 
@@ -876,7 +916,7 @@ export class Detail {
     detail: Extract<DetailView, { kind: "ticket" }>,
     store: ReassignStore,
     seed: ReassignSeed,
-    name: "harness" | "model" | "drivers" | "verify",
+    name: "harness" | "model" | "effort" | "drivers" | "verify",
     control: HTMLElement,
   ): HTMLElement {
     const source: AssignmentSource =
@@ -950,7 +990,12 @@ export class Detail {
       h(
         "div",
         { class: "card-text" },
-        [detail.assignment.harness, detail.assignment.model, detail.assignment.drivers]
+        [
+          detail.assignment.harness,
+          detail.assignment.model,
+          effortText(detail.assignment),
+          detail.assignment.drivers,
+        ]
           .filter((field): field is string => Boolean(field))
           .join(" · ") || UNASSIGNED_LABEL,
       ),

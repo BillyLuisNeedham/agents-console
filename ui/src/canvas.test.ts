@@ -209,7 +209,7 @@ describe("Canvas across a morphing render", () => {
           eligible: false,
           reason: "an Attempt is in flight",
           verify: null,
-          sources: { harness: "pinned", model: "default", drivers: "default" },
+          sources: { harness: "pinned", model: "default", effort: "unset", drivers: "default" },
         },
         hasLiveAttempt: true,
         outcome: null,
@@ -235,6 +235,23 @@ describe("Canvas across a morphing render", () => {
     badge.click();
     commit();
     expect(badge.classList.contains("assignment-badge-expanded")).toBe(false);
+  });
+
+  it("shows the effort on the badge, marked when the harness cannot take it", () => {
+    const card = withTicket.cards[0] as Extract<(typeof withTicket.cards)[number], { kind: "ticket" }>;
+    const effortOf = (assignment: typeof card.assignment) => {
+      const { root, commit } = mountCanvas(model({ cards: [{ ...card, assignment }] }));
+      commit();
+      return root.querySelector<HTMLElement>(".assignment-badge-effort");
+    };
+    const applied = effortOf({ ...card.assignment, effort: "high", effortApplied: true })!;
+    expect(applied.textContent).toBe("· effort high");
+    expect(applied.classList.contains("assignment-badge-effort-unapplied")).toBe(false);
+    const unapplied = effortOf({ ...card.assignment, effort: "high", effortApplied: false })!;
+    expect(unapplied.textContent).toBe("· effort high (not applied)");
+    expect(unapplied.classList.contains("assignment-badge-effort-unapplied")).toBe(true);
+    // None set: the harness runs on its own default, and the badge says nothing.
+    expect(effortOf(card.assignment)).toBeNull();
   });
 
   it("zooms once per wheel notch however many renders the viewport has seen", () => {
@@ -367,7 +384,7 @@ describe("a ticket card over a Held pane (issue #139)", () => {
               eligible: true,
               reason: null,
               verify: null,
-              sources: { harness: "default", model: "default", drivers: "default" },
+              sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
             },
           },
         ],

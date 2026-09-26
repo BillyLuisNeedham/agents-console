@@ -21,6 +21,7 @@
  */
 
 import { h } from "./dom";
+import { effortInput, effortValue } from "./effort";
 import type { GetSettingsHandler, SaveState } from "./settings";
 import type {
   AssignmentSource,
@@ -43,17 +44,18 @@ export interface ReassignOptions {
   onChange: () => void;
 }
 
-/** The four `assign` keys a Reassign writes. */
-export type ReassignField = "harness" | "model" | "drivers" | "verify";
+/** The five `assign` keys a Reassign writes. */
+export type ReassignField = "harness" | "model" | "effort" | "drivers" | "verify";
 
 export const REASSIGN_FIELDS: readonly ReassignField[] = [
   "harness",
   "model",
+  "effort",
   "drivers",
   "verify",
 ];
 
-/** One ticket's Detail draft: the text in each of the four fields. */
+/** One ticket's Detail draft: the text in each of the five fields. */
 export type ReassignDraft = Record<ReassignField, string>;
 
 /** What a ticket's draft is seeded from and compared against: the Assignment
@@ -63,8 +65,8 @@ export interface ReassignSeed {
   verify: number | null;
   /**
    * An enlisted ticket runs whatever the pane it was taken from is already
-   * running, so the engine fixes its model, drivers and verify by the
-   * as-found rule and refuses a write to any of them. Only its harness can
+   * running, so the engine fixes its model, effort, drivers and verify by
+   * the as-found rule and refuses a write to any of them. Only its harness can
    * be reassigned, and the editor offers only that.
    */
   harnessOnly?: boolean;
@@ -90,6 +92,7 @@ export interface ReassignResult {
 const EMPTY_BULK_DRAFT: BulkDraft = {
   harness: { mode: "leave", value: "" },
   model: { mode: "leave", value: "" },
+  effort: { mode: "leave", value: "" },
   drivers: { mode: "leave", value: "" },
   verify: { mode: "leave", value: "" },
 };
@@ -100,6 +103,7 @@ export function draftFrom(seed: ReassignSeed): ReassignDraft {
   return {
     harness: seed.assignment.harness ?? "",
     model: seed.assignment.model ?? "",
+    effort: seed.assignment.effort ?? "",
     drivers: seed.assignment.drivers ?? "",
     verify: seed.verify === null ? "" : String(seed.verify),
   };
@@ -135,11 +139,11 @@ export function ticketFieldsFrom(
   const fields: ReassignRequest["fields"] = {};
   const harness = draft.harness.trim();
   if (harness !== baseline.harness.trim()) fields.harness = harness || null;
-  // An enlisted ticket's other three fields are the engine's to fix, so a
-  // draft that still holds an edit to one (the ticket was enlisted after the
+  // An enlisted ticket's other fields are the engine's to fix, so a draft
+  // that still holds an edit to one (the ticket was enlisted after the
   // editor opened) never travels.
   if (seed.harnessOnly) return fields;
-  for (const name of ["model", "drivers"] as const) {
+  for (const name of ["model", "effort", "drivers"] as const) {
     const value = draft[name].trim();
     if (value === baseline[name].trim()) continue;
     fields[name] = value || null;
@@ -494,7 +498,7 @@ export class ReassignStore {
       return;
     }
     const fields = bulkFieldsFrom(this.bulk);
-    // An enlisted ticket's model, drivers and verify are the engine's to fix,
+    // An enlisted ticket's model, effort, drivers and verify are the engine's to fix,
     // and it refuses the whole write rather than part of it. So a form that
     // touches any of them leaves the enlisted tickets out here and says so on
     // the result line, which keeps one Apply one request.
@@ -640,6 +644,12 @@ export class ReassignStore {
           { class: "reassign-row-fields" },
           fieldPill("harness", row.assignment.harness, row.sources.harness),
           fieldPill("model", row.assignment.model, row.sources.model),
+          fieldPill(
+            "effort",
+            effortValue(row.assignment),
+            row.sources.effort,
+            "(harness default)",
+          ),
           fieldPill("drivers", row.assignment.drivers, row.sources.drivers),
           fieldPill(
             "verify",
@@ -664,6 +674,7 @@ export class ReassignStore {
       ),
       this.renderBulkField("harness", "harness"),
       this.renderBulkField("model", "model"),
+      this.renderBulkField("effort", "effort"),
       this.renderBulkField("drivers", "drivers"),
       this.renderBulkField("verify", "verify"),
       h(
@@ -723,7 +734,17 @@ export class ReassignStore {
               field.value,
               (value) => this.setBulkValue("harness", value),
             )
-          : h("input", {
+          : name === "effort"
+            ? effortInput({
+                key: "reassign-bulk-effort",
+                class: "settings-input reassign-input",
+                // Every ticked ticket may run a different harness, so the
+                // words are suggested only when the form sets one for all.
+                harness: this.bulk.harness.mode === "set" ? this.bulk.harness.value : null,
+                value: field.value,
+                onInput: (value) => this.setBulkValue("effort", value),
+              })
+            : h("input", {
               class: "settings-input reassign-input",
               key: `reassign-bulk-${name}`,
               type: name === "verify" ? "number" : "text",
@@ -745,6 +766,7 @@ function cloneBulk(draft: BulkDraft): BulkDraft {
   return {
     harness: { ...draft.harness },
     model: { ...draft.model },
+    effort: { ...draft.effort },
     drivers: { ...draft.drivers },
     verify: { ...draft.verify },
   };
@@ -755,12 +777,13 @@ function fieldPill(
   label: string,
   value: string | null,
   source: AssignmentSource,
+  empty = "(none)",
 ): HTMLElement {
   return h(
     "span",
     { class: "reassign-pill" },
     h("span", { class: "reassign-pill-label dim" }, label),
-    h("span", { class: "reassign-pill-value" }, value ?? "(none)"),
+    h("span", { class: "reassign-pill-value" }, value ?? empty),
     renderSource(source),
   );
 }

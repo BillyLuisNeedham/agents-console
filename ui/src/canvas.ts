@@ -26,6 +26,7 @@ import {
   type UtilityCardView,
   type VitalsView,
 } from "./project";
+import { EFFORT_NOT_APPLIED_TITLE, effortText } from "./effort";
 import type { CloseTerminalsView, RestartView, StopState, StopView } from "./view";
 import {
   edgePath,
@@ -148,7 +149,7 @@ function renderAssignmentBadge(
   if (unassigned) {
     badge.append(UNASSIGNED_LABEL);
   } else {
-    const fields: { class: string; value: string }[] = [];
+    const fields: { class: string; value: string; title?: string }[] = [];
     if (assignment.harness) {
       fields.push({ class: "assignment-badge-harness", value: assignment.harness });
     }
@@ -157,6 +158,18 @@ function renderAssignmentBadge(
     } else if (asFound) {
       fields.push({ class: "assignment-badge-model", value: "as found" });
     }
+    const effort = effortText(assignment);
+    if (effort) {
+      fields.push(
+        assignment.effortApplied === false
+          ? {
+              class: "assignment-badge-effort assignment-badge-effort-unapplied",
+              value: effort,
+              title: EFFORT_NOT_APPLIED_TITLE,
+            }
+          : { class: "assignment-badge-effort", value: effort },
+      );
+    }
     if (assignment.drivers) {
       fields.push({ class: "assignment-badge-drivers", value: assignment.drivers });
     }
@@ -164,7 +177,11 @@ function renderAssignmentBadge(
       // Each separator leads the value it belongs to, so the expanded wrap
       // never strands a bare dot at a line break.
       badge.append(
-        h("span", { class: field.class }, i === 0 ? field.value : `· ${field.value}`),
+        h(
+          "span",
+          { class: field.class, title: field.title ?? null },
+          i === 0 ? field.value : `· ${field.value}`,
+        ),
       );
     }
   }

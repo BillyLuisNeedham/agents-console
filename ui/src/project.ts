@@ -254,17 +254,19 @@ function gradeFromPayload(payload: Record<string, unknown>): TimelineGradeView |
 
 // A config reload's `reassigned` event (ADR-0018), as one readable line: "harness
 // / model → harness / model". A field the config leaves unassigned reads as
-// "unassigned", matching how the card badge reads a null Assignment field.
+// "unassigned", matching how the card badge reads a null Assignment field; an
+// effort, optional by nature, is named only on a side that has one.
 // Anything not shaped like a from/to Assignment record (a foreign or torn
 // line) decodes to null — never throws, so an event kind this build does not
 // fully understand still shows its timestamp instead of breaking the timeline.
 function reassignmentFromPayload(payload: Record<string, unknown>): string | null {
   const describe = (side: unknown): string | null => {
     if (typeof side !== "object" || side === null) return null;
-    const { harness, model } = side as Record<string, unknown>;
+    const { harness, model, effort } = side as Record<string, unknown>;
     if (harness !== null && typeof harness !== "string") return null;
     if (model !== null && typeof model !== "string") return null;
-    return `${harness ?? UNASSIGNED_LABEL} / ${model ?? UNASSIGNED_LABEL}`;
+    const named = typeof effort === "string" && effort ? ` / effort ${effort}` : "";
+    return `${harness ?? UNASSIGNED_LABEL} / ${model ?? UNASSIGNED_LABEL}${named}`;
   };
   const from = describe(payload.from);
   const to = describe(payload.to);
@@ -1454,6 +1456,7 @@ export function poolAssignmentDefaults(
   const defaults: NonNullable<StartConversationRequest["assign"]> = {};
   if (typeof source.harness === "string") defaults.harness = source.harness;
   if (typeof source.model === "string") defaults.model = source.model;
+  if (typeof source.effort === "string") defaults.effort = source.effort;
   if (typeof source.drivers === "string") defaults.drivers = source.drivers;
   return defaults;
 }
@@ -1492,7 +1495,7 @@ export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port
  * its own fields blanked the same way.
  */
 export interface PoolConfigPatch {
-  defaults?: { harness: string; model: string; drivers: string };
+  defaults?: { harness: string; model: string; effort: string; drivers: string };
   resolver?: PoolConfig["resolver"] | null;
   terminal?: "herdr" | null;
   port?: number | null;

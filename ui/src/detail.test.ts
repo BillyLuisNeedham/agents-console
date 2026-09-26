@@ -83,7 +83,7 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
       eligible: true,
       reason: null,
       verify: null,
-      sources: { harness: "default", model: "pinned", drivers: "default" },
+      sources: { harness: "default", model: "pinned", effort: "unset", drivers: "default" },
     },
     ...overrides,
   };
@@ -211,6 +211,43 @@ describe("Detail: the Reassign section (issue #126)", () => {
     await Promise.resolve();
   });
 
+  it("edits effort with the harness's words offered, and sends it", () => {
+    const r = rig(detailView());
+    r.paint();
+    const input = r.root.querySelector<HTMLInputElement>('[data-key="reassign-detail-effort"]')!;
+    expect(input.placeholder).toBe("(harness default)");
+    const list = r.root.querySelector(`#${input.getAttribute("list")}`)!;
+    expect([...list.querySelectorAll("option")].map((o) => o.getAttribute("value"))).toContain(
+      "xhigh",
+    );
+    input.value = "max";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    r.paint();
+    save(r.root)!.click();
+    expect(r.writes[0]!.request.fields).toEqual({ effort: "max" });
+  });
+
+  it("says plainly when the effort in force is not applied", () => {
+    const r = rig(
+      detailView({
+        assignment: {
+          harness: "cursor",
+          model: "m",
+          effort: "high",
+          effortApplied: false,
+          drivers: "implement",
+        },
+      }),
+    );
+    r.paint();
+    expect(r.root.querySelector(".effort-unapplied-note")?.textContent).toContain(
+      "effort high is not applied",
+    );
+    // cursor takes no effort at all, so nothing is suggested.
+    const input = r.root.querySelector<HTMLInputElement>('[data-key="reassign-detail-effort"]')!;
+    expect(input.getAttribute("list")).toBeNull();
+  });
+
   it("clearing a pinned field empties it, so the write clears the entry", () => {
     const r = rig(detailView());
     r.paint();
@@ -281,7 +318,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
           eligible: true,
           reason: null,
           verify: 3,
-          sources: { harness: "default", model: "default", drivers: "default" },
+          sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
         },
       }),
     );
@@ -303,7 +340,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
           eligible: true,
           reason: "enlisted: the write waits until the engine releases the pane",
           verify: null,
-          sources: { harness: "default", model: "default", drivers: "default" },
+          sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
         },
       }),
     );
@@ -322,7 +359,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
           eligible: true,
           reason: null,
           verify: null,
-          sources: { harness: "default", model: "inherited", drivers: "inherited" },
+          sources: { harness: "default", model: "inherited", effort: "unset", drivers: "inherited" },
         },
       }),
     );
@@ -348,7 +385,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
         eligible: true,
         reason: null,
         verify: null,
-        sources: { harness: "default", model: "inherited", drivers: "inherited" },
+        sources: { harness: "default", model: "inherited", effort: "unset", drivers: "inherited" },
       },
     });
     const r = rig(view);
@@ -395,7 +432,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
           eligible: false,
           reason: "an Attempt is in flight; it keeps the Assignment it started on",
           verify: null,
-          sources: { harness: "pinned", model: "inherited", drivers: "default" },
+          sources: { harness: "pinned", model: "inherited", effort: "unset", drivers: "default" },
         },
       }),
     );
@@ -420,7 +457,7 @@ describe("Detail: the Reassign section (issue #126)", () => {
           eligible: false,
           reason: "a done ticket keeps the Assignment it ran on",
           verify: null,
-          sources: { harness: "unset", model: "unset", drivers: "default" },
+          sources: { harness: "unset", model: "unset", effort: "unset", drivers: "default" },
         },
       }),
     );
@@ -428,6 +465,10 @@ describe("Detail: the Reassign section (issue #126)", () => {
     expect(r.root.querySelector(".reassign-readonly")?.textContent).toContain(
       "unassigned",
     );
+    // Effort is optional by nature: none reads as the harness's own default.
+    expect(
+      r.root.querySelector('[data-key="reassign-readonly-effort"]')?.textContent,
+    ).toContain("(harness default)");
   });
 });
 

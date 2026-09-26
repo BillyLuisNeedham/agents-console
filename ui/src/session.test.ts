@@ -31,7 +31,7 @@ function reassignOf(ticket: {
         ? "a done ticket keeps the Assignment it ran on"
         : "an Attempt is in flight",
     verify: null,
-    sources: { harness: "default", model: "default", drivers: "default" },
+    sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
   };
 }
 

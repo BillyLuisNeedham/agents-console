@@ -136,10 +136,16 @@ describe("poolDraftFrom", () => {
     expect(draft.agents).toBe("");
   });
 
-  it("splits the resolver's object form across its two fields", () => {
-    const draft = poolDraftFrom({ resolver: { harness: "opencode", model: "sonnet" } });
+  it("splits the resolver's object form across its fields", () => {
+    const draft = poolDraftFrom({ resolver: { harness: "opencode", model: "sonnet", effort: "max" } });
     expect(draft.resolverHarness).toBe("opencode");
     expect(draft.resolverModel).toBe("sonnet");
+    expect(draft.resolverEffort).toBe("max");
+  });
+
+  it("seeds the defaults' effort, and none as an empty field", () => {
+    expect(poolDraftFrom({ defaults: { effort: "high" } }).effort).toBe("high");
+    expect(EMPTY.effort).toBe("");
   });
 
   it("reads a terminal-backed pool's checkbox as ticked", () => {
@@ -160,7 +166,7 @@ describe("poolPatchFrom", () => {
     expect(patch.selection).toBeNull();
     expect(patch.roster).toBeNull();
     expect(patch.resolver).toBeNull();
-    expect(patch.defaults).toEqual({ harness: "", model: "", drivers: "" });
+    expect(patch.defaults).toEqual({ harness: "", model: "", effort: "", drivers: "" });
   });
 
   it("sends the port as a number and the terminal as herdr", () => {
@@ -180,6 +186,14 @@ describe("poolPatchFrom", () => {
       resolverModel: "opus",
     });
     expect(patch.resolver).toEqual({ harness: "claude", model: "opus" });
+  });
+
+  it("sends the defaults' effort trimmed, and keeps the object for a resolver effort", () => {
+    expect(poolPatchFrom({ ...EMPTY, effort: " xhigh " }).defaults?.effort).toBe("xhigh");
+    expect(
+      poolPatchFrom({ ...EMPTY, resolverHarness: "claude", resolverEffort: " max " }).resolver,
+    ).toEqual({ harness: "claude", effort: "max" });
+    expect(poolPatchFrom({ ...EMPTY, resolverEffort: "low" }).resolver).toEqual({ effort: "low" });
   });
 
   it("passes `none` through as the opt-out string", () => {
@@ -223,6 +237,7 @@ describe("machineDefaultsFrom", () => {
       machineDefaultsFrom({
         harness: "",
         model: "",
+        effort: "",
         drivers: "",
         terminal: false,
         engine: "",
@@ -235,12 +250,14 @@ describe("machineDefaultsFrom", () => {
       machineDefaultsFrom({
         harness: "claude",
         model: "",
+        effort: " high ",
         drivers: " implement ",
         terminal: true,
         engine: "/repo/engine",
       }),
     ).toEqual({
       harness: "claude",
+      effort: "high",
       drivers: "implement",
       engine: "/repo/engine",
       terminal: "herdr",
@@ -367,6 +384,7 @@ describe("SettingsStore", () => {
     expect(rig.poolSaves[0]!.config.defaults).toEqual({
       harness: "claude",
       model: "sonnet",
+      effort: "",
       drivers: "implement",
     });
     const saved = settings();

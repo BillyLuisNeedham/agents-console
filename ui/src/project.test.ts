@@ -98,7 +98,7 @@ function reassignOf(ticket: {
         ? "a done ticket keeps the Assignment it ran on"
         : "an Attempt is in flight",
     verify: null,
-    sources: { harness: "default", model: "default", drivers: "default" },
+    sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
   };
 }
 
@@ -1012,7 +1012,7 @@ describe("projectDetail", () => {
               eligible: true,
               reason: null,
               verify: 2,
-              sources: { harness: "pinned", model: "default", drivers: "inherited" },
+              sources: { harness: "pinned", model: "default", effort: "unset", drivers: "inherited" },
             },
           }),
         ],
@@ -1080,7 +1080,7 @@ describe("projectDetailTabs", () => {
         eligible: status !== "done",
         reason: null,
         verify: null,
-        sources: { harness: "default", model: "default", drivers: "default" },
+        sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
       },
       hasLiveAttempt: false,
     };
@@ -1483,10 +1483,18 @@ describe("projectTimeline", () => {
           to: { harness: "kimi", model: "k3" },
         }),
         event(1, "spawned"),
+        event(1, "reassigned", {
+          from: { harness: "claude", model: "opus" },
+          to: { harness: "claude", model: "opus", effort: "max" },
+        }),
       ]),
       "done",
     );
-    const [graded, reassigned, spawned] = view.attempts[0].events;
+    const [graded, reassigned, spawned, effortMoved] = view.attempts[0].events;
+    // An effort is named only on a side that has one.
+    expect(effortMoved.reassignment).toBe(
+      "reassigned: claude / opus → claude / opus / effort max",
+    );
     expect(graded.grade).toEqual({ score: 8, verdict: "pass", reasons: "clean diff" });
     expect(graded.timeLabel.length).toBeGreaterThan(0);
     expect(reassigned.reassignment).toBe(
@@ -2877,10 +2885,10 @@ describe("poolAssignmentDefaults", () => {
   it("reads the pool's Assignment defaults from config.defaults", () => {
     expect(
       poolAssignmentDefaults({
-        defaults: { harness: "claude", model: "opus", drivers: "implement" },
+        defaults: { harness: "claude", model: "opus", effort: "high", drivers: "implement" },
         terminal: "herdr",
       }),
-    ).toEqual({ harness: "claude", model: "opus", drivers: "implement" });
+    ).toEqual({ harness: "claude", model: "opus", effort: "high", drivers: "implement" });
   });
 
   it("returns nothing when the pool sets no defaults", () => {
@@ -2978,6 +2986,7 @@ describe("projectReassignTickets", () => {
   const sources = {
     harness: "pinned" as const,
     model: "default" as const,
+    effort: "unset" as const,
     drivers: "default" as const,
   };
 
