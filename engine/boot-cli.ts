@@ -377,8 +377,9 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
   // A field a prefill settled is not asked, but it is still written: the
   // Pool carries its own config as data, so a default that came from the
   // machine or from a Setup has to land in this pool's file rather than
-  // being looked up again at every boot.
-  for (const key of ["harness", "model", "drivers", "reviewer", "checkpoint", "roster", "agents"] as const) {
+  // being looked up again at every boot. Effort is only ever carried this
+  // way: the interview never asks it, the Settings pane edits it.
+  for (const key of ["harness", "model", "effort", "drivers", "reviewer", "checkpoint", "roster", "agents"] as const) {
     const value = settled[key];
     if (value !== undefined) answers[key] = value;
   }
@@ -656,6 +657,7 @@ export async function runBoot(options: RunOptions): Promise<number> {
     writeMachineDefaultsOnce(io, home, {
       harness: (merged.defaults as Record<string, string> | undefined)?.harness,
       model: (merged.defaults as Record<string, string> | undefined)?.model,
+      effort: (merged.defaults as Record<string, string> | undefined)?.effort,
       drivers: (merged.defaults as Record<string, string> | undefined)?.drivers,
       terminal: merged.terminal === "herdr" ? "herdr" : undefined,
       engine: engineDir,
@@ -729,6 +731,7 @@ function writeMachineDefaultsOnce(
   values: {
     harness?: string | undefined;
     model?: string | undefined;
+    effort?: string | undefined;
     drivers?: string | undefined;
     terminal?: "herdr" | undefined;
     engine: string;
@@ -741,6 +744,7 @@ function writeMachineDefaultsOnce(
       {
         ...(values.harness ? { harness: values.harness } : {}),
         ...(values.model ? { model: values.model } : {}),
+        ...(values.effort ? { effort: values.effort } : {}),
         ...(values.drivers ? { drivers: values.drivers } : {}),
         ...(values.terminal ? { terminal: values.terminal } : {}),
         engine: values.engine,

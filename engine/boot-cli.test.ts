@@ -289,6 +289,23 @@ describe("prefill", () => {
     expect(merged.seeded).toBe(true);
   });
 
+  it("carries effort field-wise from the pool, the Setup and the machine", () => {
+    const fromSetup = mergePrefill([
+      prefillFromConfig({ defaults: { harness: "claude", model: "m" } }),
+      prefillFromSetup({ defaults: { effort: "high" } }),
+      prefillFromMachineDefaults({ effort: "low" }),
+    ]);
+    expect(fromSetup.effort).toBe("high");
+    expect(fromSetup.model).toBe("m");
+    expect(
+      mergePrefill([prefillFromConfig({ defaults: { effort: "max" } }), prefillFromMachineDefaults({ effort: "low" })])
+        .effort,
+    ).toBe("max");
+    expect(mergePrefill([prefillFromConfig({}), prefillFromMachineDefaults({ effort: "low" })]).effort).toBe(
+      "low",
+    );
+  });
+
   it("never lets a Setup carry a port into the next pool", () => {
     expect(prefillFromSetup({ port: 9000 }).port).toBeUndefined();
     expect(prefillFromConfig({ port: 9000 }).port).toBe(9000);
@@ -313,6 +330,10 @@ describe("console.json", () => {
     });
     expect(merged.assign).toEqual({ "04": { harness: "claude", verify: 2 } });
     expect(merged.selection).toBe("human");
+    // An effort the file already had survives answers that never name one.
+    expect(
+      mergeConsoleConfig({ defaults: { harness: "claude", effort: "high" } }, { model: "m" }).defaults,
+    ).toEqual({ harness: "claude", effort: "high", model: "m" });
     expect(merged.port).toBe(9001);
     expect(merged.terminal).toBe("herdr");
   });
@@ -530,7 +551,7 @@ describe("interview", () => {
 
   it("asks nothing for a field a prefill already settled", async () => {
     const pen = io({});
-    const settled = { harness: "opencode", model: "m", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 9001, terminal: "herdr" as const };
+    const settled = { harness: "opencode", model: "m", effort: "high", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 9001, terminal: "herdr" as const };
     const result = await interview({
       io: pen,
       prefill: { ...settled },
@@ -546,6 +567,7 @@ describe("interview", () => {
     expect(mergeConsoleConfig({}, result.answers).defaults).toEqual({
       harness: "opencode",
       model: "m",
+      effort: "high",
       drivers: "implement",
     });
   });

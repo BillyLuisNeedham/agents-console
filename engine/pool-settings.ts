@@ -197,8 +197,8 @@ function normaliseDefaults(
     throw new Error("pool settings: defaults must be an object");
   }
   const raw = value as Record<string, unknown>;
-  const out: { harness?: string; model?: string; drivers?: string } = {};
-  for (const field of ["harness", "model", "drivers"] as const) {
+  const out: NonNullable<PoolConfig["defaults"]> = {};
+  for (const field of ["harness", "model", "effort", "drivers"] as const) {
     const entry = raw[field];
     if (entry === undefined || entry === null) continue;
     if (typeof entry !== "string") {
@@ -211,8 +211,9 @@ function normaliseDefaults(
 }
 
 // The resolver takes three shapes (engine.ts's resolveResolver): a harness
-// name, the opt-out "none", or { harness, model } when the resolver runs on a
-// harness whose model names the defaults' harness would not recognise. An
+// name, the opt-out "none", or { harness, model, effort } when the resolver
+// runs on a harness whose model names the defaults' harness would not
+// recognise, or at an effort of its own (CONTEXT.md: Effort). An
 // empty string is the pane clearing the key, not the opt-out; "none" is the
 // opt-out and is kept verbatim.
 function normaliseResolver(
@@ -227,12 +228,12 @@ function normaliseResolver(
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(
-      'pool settings: resolver must be a harness name, "none", or { harness, model }',
+      'pool settings: resolver must be a harness name, "none", or { harness, model, effort }',
     );
   }
   const raw = value as Record<string, unknown>;
-  const out: { harness?: string; model?: string } = {};
-  for (const field of ["harness", "model"] as const) {
+  const out: { harness?: string; model?: string; effort?: string } = {};
+  for (const field of ["harness", "model", "effort"] as const) {
     const entry = raw[field];
     if (entry === undefined || entry === null) continue;
     if (typeof entry !== "string") {
