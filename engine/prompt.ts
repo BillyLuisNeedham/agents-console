@@ -271,6 +271,7 @@ export function buildContinuedTeaching(parts: {
 export interface TeachingAssignment {
   harness: string;
   model: string;
+  effort?: string;
   drivers: string;
 }
 
@@ -279,7 +280,10 @@ export interface TeachingAssignment {
 // rather than left as a blank the agent would read past.
 function describeAssignment(a: Partial<TeachingAssignment> | undefined): string {
   const field = (value: string | undefined) => (value ? value : "(none)");
-  return `harness ${field(a?.harness)}, model ${field(a?.model)}, drivers ${field(a?.drivers)}`;
+  // Effort is optional (the harness's own default when unset), so it is
+  // named only when set rather than as a gap the agent might try to fill.
+  const effort = a?.effort ? `, effort ${a.effort}` : "";
+  return `harness ${field(a?.harness)}, model ${field(a?.model)}${effort}, drivers ${field(a?.drivers)}`;
 }
 
 export function buildConversationTeaching(
@@ -296,7 +300,7 @@ export function buildConversationTeaching(
       `JSON to ${spawnPath}: {"spawn": [...]}, one entry per follow-up, each ` +
       'shaped {"title": "...", "body": "...", "blockedBy": ["id", ...], ' +
       '"kind": "ticket" or "conversation", "assign": {"harness": "...", ' +
-      '"model": "...", "drivers": "..."}}.',
+      '"model": "...", "effort": "...", "drivers": "..."}}.',
     "",
     `The body needs at least ${SPAWN_BODY_MIN_CHARS} characters of intent for a fresh agent to ` +
       'work from. "blockedBy" is optional and may only name Tickets, never ' +

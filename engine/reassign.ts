@@ -30,6 +30,7 @@ import {
   writeConfigAtomically,
 } from "./pool-settings.ts";
 import type { TicketMarker, TicketStatus } from "./pool.ts";
+import { effortApplies, poolHarnessMode } from "./spawn.ts";
 
 /** Where a resolved Assignment field came from, field by field: the
  *  ticket's own assign entry (pinned), its parent or build ticket
@@ -66,6 +67,7 @@ export interface ReassignRequest {
   fields: {
     harness?: string | null;
     model?: string | null;
+    effort?: string | null;
     drivers?: string | null;
     verify?: number | null;
   };
@@ -115,17 +117,19 @@ export class ReassignRefusal extends Error {}
 interface AssignEntry {
   harness?: string;
   model?: string;
+  effort?: string;
   drivers?: string;
   verify?: number;
 }
 
-const ASSIGNMENT_FIELDS = ["harness", "model", "drivers"] as const;
+const ASSIGNMENT_FIELDS = ["harness", "model", "effort", "drivers"] as const;
 
 // The view a ticket the resolver never reached gets: no layer answered for
 // it, so nothing about its Assignment is this module's to explain.
 const NO_SOURCES: AssignmentSources = {
   harness: "unset",
   model: "unset",
+  effort: "unset",
   drivers: "unset",
 };
 
@@ -185,6 +189,7 @@ function frozenSeed(
     seed.set(marker.id, {
       harness: view.harness ?? "",
       model: view.model ?? "",
+      ...(view.effort ? { effort: view.effort } : {}),
       drivers: view.drivers,
     });
   }
@@ -234,9 +239,16 @@ export function reassignViews(
     const verify =
       marker.enlistedFrom !== undefined ? null : verifyOf(config?.assign?.[marker.id]);
     const assignment = resolved?.assignments.get(marker.id);
+    const mode = poolHarnessMode(config?.terminal);
     views.set(marker.id, {
       reassign: { ...judgement, verify, sources },
-      assignment: judgement.eligible && assignment ? assignmentViewOf(assignment) : null,
+      assignment:
+        judgement.eligible && assignment
+          ? assignmentViewOf(
+              assignment,
+              effortApplies(input.harnesses, assignment.harness, mode),
+            )
+          : null,
     });
   }
   return views;
@@ -254,8 +266,8 @@ export function reassignViews(
  *
  * Enlisted is a note rather than a refusal, but a narrow one: the engine
  * records an enlisted ticket's Assignment as found (issue #101), keeping only
- * the harness from the config and forcing model, drivers and verify itself,
- * so the harness is the one field a Reassign can move. The ticket also stays
+ * the harness from the config and forcing model, effort, drivers and verify
+ * itself, so the harness is the one field a Reassign can move. The ticket also stays
  * frozen while the engine holds the pane it was enlisted from, which can
  * outlive the attempt, so even that save lands in the file and waits.
  */
@@ -370,16 +382,17 @@ export function writeReassign(
 }
 
 // The harness is the only field an enlisted ticket can take (issue #101):
-// the engine records its Assignment as found, forcing model, drivers and
-// verify itself whatever the file says. A write of any of the three would sit
-// in console.json looking applied and change nothing, so it is refused here
+// the engine records its Assignment as found, forcing model, effort, drivers
+// and verify itself whatever the file says (an enlisted pane runs as found,
+// so effort never applies to it). A write of any of those would sit in
+// console.json looking applied and change nothing, so it is refused here
 // rather than accepted and quietly ignored.
 function refuseEnlistedFields(
   ids: string[],
   fields: ReassignRequest["fields"],
   markers: TicketMarker[],
 ): void {
-  const forced = (["model", "drivers", "verify"] as const).filter((f) => f in fields);
+  const forced = (["model", "effort", "drivers", "verify"] as const).filter((f) => f in fields);
   if (forced.length === 0) return;
   const enlisted = new Set(
     markers.filter((m) => m.enlistedFrom !== undefined).map((m) => m.id),

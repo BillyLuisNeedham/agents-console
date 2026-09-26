@@ -89,12 +89,18 @@ import {
 import type { PaneReadRegister } from "./pane-reads.ts";
 import { listedAsRecorded, type PaneListing } from "./pane-survey.ts";
 import { READINESS_TIMEOUT_MS, stillWorkingReason, typeVerified } from "./pane-session.ts";
-import { defaultHarnessDescriptors, idlePatternFor, type HarnessDescriptor } from "./spawn.ts";
+import {
+  defaultHarnessDescriptors,
+  effortApplies,
+  idlePatternFor,
+  type HarnessDescriptor,
+} from "./spawn.ts";
 import { FRESH_TURN, IDLE_STABLE_READS, nextTurnState, type TurnSide, type TurnState } from "./turn-state.ts";
 import {
   assignmentViewOf,
   DEFAULT_DRIVERS,
   resolveAssignment,
+  type Assignment,
   type AssignmentView,
 } from "./assignment.ts";
 import type { Interrupt, PoolConfig } from "./engine.ts";
@@ -131,6 +137,8 @@ export interface ConversationRecord {
   spawnedBy?: string;
   harness: string;
   model: string;
+  // The Assignment's effort (CONTEXT.md: Effort), when one resolved.
+  effort?: string;
   drivers: string;
   enlisted?: EnlistedConversation;
 }
@@ -184,6 +192,7 @@ function parseConversationMarkerLine(
     ...(spawnedBy ? { spawnedBy } : {}),
     harness: decodeURIComponent(fields.get("harness") ?? ""),
     model: decodeURIComponent(fields.get("model") ?? ""),
+    ...(fields.get("effort") ? { effort: decodeURIComponent(fields.get("effort")!) } : {}),
     drivers: decodeURIComponent(fields.get("drivers") ?? ""),
     ...(enlisted ? { enlisted } : {}),
   };
@@ -196,6 +205,8 @@ function markerLine(rec: Omit<ConversationRecord, "file" | "title" | "opening">)
     `spawned-by=${rec.spawnedBy ? encodeURIComponent(rec.spawnedBy) : "none"}`,
     `harness=${encodeURIComponent(rec.harness)}`,
     `model=${encodeURIComponent(rec.model)}`,
+    // Written only when set, so a record with none reads exactly as before.
+    ...(rec.effort ? [`effort=${encodeURIComponent(rec.effort)}`] : []),
     `drivers=${encodeURIComponent(rec.drivers)}`,
     ...(rec.enlisted
       ? [
@@ -376,7 +387,7 @@ export interface ConversationView {
 export interface StartConversationRequest {
   title: string;
   opening?: string;
-  assign?: { harness?: string; model?: string; drivers?: string };
+  assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
   spawnedBy?: string;
   // Spawn adoption (engine.ts's adoptSpawnProposals) precomputes a
   // collision-free id shared across a parent's ticket-spawn and
@@ -473,7 +484,7 @@ export interface ConversationHost {
   /** Validate and adopt a Conversation's raw spawn proposals (the `spawn` field of its spawn.json): `onRejected` is handed the malformed entries for the module to log before the survivors are queued, adopted at once when the engine is idle. */
   adoptSpawns(parentId: string, raw: unknown, onRejected: (rejections: { index?: number; reason: string }[]) => void): void;
   /** Record a Conversation's resolved Assignment under its id (if not already known) so work it spawns inherits it. */
-  recordAssignment(id: string, assignment: { harness: string; model: string; drivers: string }): void;
+  recordAssignment(id: string, assignment: Assignment): void;
   /** The pool's Tickets as the engine currently knows them. */
   markers(): readonly TicketMarker[];
   /** Add one line to the pool log, published with the next snapshot. */
@@ -688,7 +699,12 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       status: rec.status,
       spawnedBy: rec.spawnedBy ?? null,
       // A record written before drivers were stored reads as the default.
-      assignment: assignmentViewOf({ ...rec, drivers: rec.drivers || DEFAULT_DRIVERS }),
+      // A Conversation is always the TUI (ADR-0018), so that is the mode
+      // its effort must reach.
+      assignment: assignmentViewOf(
+        { ...rec, drivers: rec.drivers || DEFAULT_DRIVERS },
+        effortApplies(env.harnesses, rec.harness, "interactive"),
+      ),
       // A live record the engine has not re-adopted yet (issue #140) still
       // names its pane, so the pane stays the pool's in every surface that
       // reads the view: the enlist picker, the terminal routes.
@@ -1013,6 +1029,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         host.recordAssignment(rec.id, {
           harness: rec.harness,
           model: rec.model,
+          ...(rec.effort ? { effort: rec.effort } : {}),
           drivers: rec.drivers || DEFAULT_DRIVERS,
         });
         runtime.timer = setInterval(() => tick(rec.id), pollMs);
@@ -1147,6 +1164,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         host.recordAssignment(rec.id, {
           harness: rec.harness,
           model: rec.model,
+          ...(rec.effort ? { effort: rec.effort } : {}),
           drivers: rec.drivers || DEFAULT_DRIVERS,
         });
         runtime.timer = setInterval(() => tick(rec.id), pollMs);
@@ -1162,13 +1180,18 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   function resolveStartAssignment(
     req: StartConversationRequest,
     existing: ConversationRecord[],
-  ): { harness: string; model: string; drivers: string } {
+  ): Assignment {
     const parent = req.spawnedBy ? existing.find((r) => r.id === req.spawnedBy) : undefined;
     return resolveAssignment({
       subject: "conversation start:",
       request: req.assign,
       inherited: parent
-        ? { harness: parent.harness, model: parent.model, drivers: parent.drivers }
+        ? {
+            harness: parent.harness,
+            model: parent.model,
+            ...(parent.effort ? { effort: parent.effort } : {}),
+            drivers: parent.drivers,
+          }
         : undefined,
       defaults: host.config().defaults,
       strict: true,
@@ -1229,7 +1252,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     req: StartConversationRequest,
     existing: ConversationRecord[],
   ): Promise<ConversationView> {
-    const { harness, model, drivers } = resolveStartAssignment(req, existing);
+    const { harness, model, effort, drivers } = resolveStartAssignment(req, existing);
     // Forked from the merge target, not the pool checkout's HEAD: once an
     // enlist has moved that checkout onto a created pool branch (issue
     // #101), HEAD there is the enlisted agent's branch, and a Conversation
@@ -1247,7 +1270,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     const spawnPath = spawnProposalPath(id);
     const teaching = buildConversationTeaching(
       spawnPath,
-      { harness, model, drivers },
+      { harness, model, ...(effort ? { effort } : {}), drivers },
       host.config().defaults,
     );
     const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
@@ -1270,6 +1293,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         driver: "converse",
         harness,
         model,
+        ...(effort ? { effort } : {}),
         cwd: worktree.path,
         branch: worktree.branch,
         attempt: 1,
@@ -1296,6 +1320,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       ...(req.spawnedBy ? { spawnedBy: req.spawnedBy } : {}),
       harness,
       model,
+      ...(effort ? { effort } : {}),
       drivers,
     };
     writeConversation(dir, record);
@@ -1363,7 +1388,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // The Assignment under this Conversation's id, so a Ticket it spawns
     // whose spawned-by names it resolves the same way a grader or spawned
     // ticket inherits from its own parent.
-    host.recordAssignment(id, { harness, model, drivers });
+    host.recordAssignment(id, { harness, model, ...(effort ? { effort } : {}), drivers });
     runtime.timer = setInterval(() => tick(id), pollMs);
     // start is called directly off the PoolRun handle (the server route, or
     // a fire-and-forget spawn adoption), never through the drive loop, so

@@ -253,7 +253,7 @@ const UNKNOWN_REASSIGN: TicketReassignView = {
   verify: null,
   // Drivers always resolve to something, so "unset" is a value the resolver
   // never reports for them and the badge would never otherwise show.
-  sources: { harness: "unset", model: "unset", drivers: "default" },
+  sources: { harness: "unset", model: "unset", effort: "unset", drivers: "default" },
 };
 
 /** Enrich an engine snapshot with the pool's ticket metadata for the UI. */
@@ -1814,6 +1814,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             ? {
                 harness: stringField(rawAssign.harness),
                 model: stringField(rawAssign.model),
+                effort: stringField(rawAssign.effort),
                 drivers: stringField(rawAssign.drivers),
               }
             : undefined;

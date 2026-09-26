@@ -100,6 +100,13 @@ describe("buildConversationTeaching", () => {
     expect(body).toContain("ask the operator here before you write the file");
   });
 
+  it("names an effort only where one is set, and offers it in the assign shape", () => {
+    const body = build(spawnPath, { ...own, effort: "high" }, defaults);
+    expect(body).toContain("This Conversation's Assignment: harness claude, model opus, effort high, drivers implement.");
+    expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
+    expect(body).toContain('"effort": "..."');
+  });
+
   it("spells out an empty field rather than leaving a blank: an enlisted pane names no model, a pool may name no defaults", () => {
     const body = build(spawnPath, { ...own, model: "" }, undefined);
     expect(body).toContain("This Conversation's Assignment: harness claude, model (none), drivers implement.");

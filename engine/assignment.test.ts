@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { assignmentViewOf, resolveAssignment, UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
+import {
+  assignmentViewOf,
+  resolveAssignment,
+  resolveAssignmentSources,
+  UNASSIGNED_ASSIGNMENT_VIEW,
+} from "./assignment.ts";
 import type { HarnessCommand } from "./spawn.ts";
 
 const harnesses: Record<string, HarnessCommand> = {
@@ -74,6 +79,70 @@ describe("resolveAssignment: field-wise overrides", () => {
   });
 });
 
+describe("resolveAssignment: effort layers like model", () => {
+  it("takes the request, then the parent, then the defaults, field by field", () => {
+    const withEffort = { ...defaults, effort: "high" };
+    expect(resolveAssignment({ ...ordinary, defaults: withEffort, request: undefined })).toEqual(
+      withEffort,
+    );
+    expect(
+      resolveAssignment({ ...ordinary, defaults: withEffort, request: { effort: "max" } }),
+    ).toEqual({ ...defaults, effort: "max" });
+    // The parent's effort over the defaults'; a parent with none hands the
+    // field to the defaults rather than blocking them.
+    expect(
+      resolveAssignment({
+        ...spawned,
+        request: undefined,
+        inherited: { ...parent, effort: "low" },
+        defaults: withEffort,
+      }),
+    ).toEqual({ ...parent, effort: "low" });
+    expect(
+      resolveAssignment({ ...spawned, request: undefined, defaults: withEffort }),
+    ).toEqual({ ...parent, effort: "high" });
+    // A judge may override effort wherever it may override the model.
+    expect(
+      resolveAssignment({ ...grader, request: { effort: "xhigh" }, inherited: { ...parent, effort: "low" } }),
+    ).toEqual({ ...parent, effort: "xhigh" });
+  });
+
+  it("leaves effort off when nothing sets it, and never refuses for it", () => {
+    const resolved = resolveAssignment({ ...conversation, request: undefined });
+    expect(resolved).not.toHaveProperty("effort");
+    // Strict resolution refuses a missing harness or model, never a missing effort.
+    expect(() => resolveAssignment({ ...conversation, request: { effort: "" } })).not.toThrow();
+  });
+
+  it("passes a harness's own word through verbatim, trimmed", () => {
+    expect(
+      resolveAssignment({ ...ordinary, request: { effort: "  minimal " } }).effort,
+    ).toBe("minimal");
+  });
+
+  it("names the layer effort came from, like every other field", () => {
+    expect(
+      resolveAssignmentSources({
+        request: { effort: "max" },
+        inherited: { ...parent, effort: "low" },
+        defaults: { effort: "high" },
+      }).effort,
+    ).toBe("pinned");
+    expect(
+      resolveAssignmentSources({
+        request: {},
+        inherited: { ...parent, effort: "low" },
+        defaults: { effort: "high" },
+      }).effort,
+    ).toBe("inherited");
+    expect(
+      resolveAssignmentSources({ request: {}, inherited: parent, defaults: { effort: "high" } })
+        .effort,
+    ).toBe("default");
+    expect(resolveAssignmentSources({ request: {}, defaults }).effort).toBe("unset");
+  });
+});
+
 describe("resolveAssignment: errors, verbatim", () => {
   it("a named harness must be known, in every mode", () => {
     expect(() => resolveAssignment({ ...ordinary, request: { harness: "gemini" } })).toThrow(
@@ -136,5 +205,14 @@ describe("assignmentViewOf", () => {
       model: "opus",
       drivers: "fix",
     });
+  });
+
+  it("carries an effort with whether it applies, and nothing when there is none", () => {
+    const assignment = { harness: "cursor", model: "gpt-5", effort: "high", drivers: "implement" };
+    expect(assignmentViewOf(assignment, false)).toEqual({ ...assignment, effortApplied: false });
+    expect(assignmentViewOf(assignment)).toEqual({ ...assignment, effortApplied: true });
+    const none = assignmentViewOf({ harness: "cursor", model: "gpt-5", drivers: "implement" }, false);
+    expect(none).not.toHaveProperty("effort");
+    expect(none).not.toHaveProperty("effortApplied");
   });
 });
