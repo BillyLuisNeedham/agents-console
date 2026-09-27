@@ -9,7 +9,7 @@ You work inside a Console pool. The engine owns pool state; you propose, the eng
 
 The teaching Turn that enlisted you (or the pool's `AGENT.md`) states three things. Find them before you propose anything:
 
-- your own **Assignment**: the harness, model and drivers you run on. An enlisted pane names a harness and often no model, because herdr found you as you are.
+- your own **Assignment**: the harness, model, effort and drivers you run on. An enlisted pane names a harness and often no model, because herdr found you as you are.
 - the pool **defaults**: the Assignment a follow-up runs on when nobody says otherwise.
 - the **spawn path**: the file you write proposals to, and its JSON shape.
 
@@ -18,7 +18,8 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states three thin
 1. Write the body for a fresh agent with none of your context: the goal, the files, the acceptance criteria. A thin body is dropped at the boundary with the reason in the ticket log.
 2. Decide the follow-up's Assignment:
    - The pool defaults fit: omit `assign`. Whatever your own Assignment leaves empty falls through to the defaults.
-   - The follow-up needs something the defaults do not give (a stronger model for a review, a different harness): set only the fields that differ in `assign`.
+   - The follow-up needs something the defaults do not give (a stronger model or a higher effort for a review, a different harness): set only the fields that differ in `assign`.
+   - `effort` is the harness's own word (claude: low, medium, high, xhigh, max), passed through as written; leave it out for the harness's default.
    - You cannot tell, or the defaults name no model: ask the operator in this pane before you write the file. The operator is in the room; a guess costs a wasted Attempt.
 3. `blockedBy` names Tickets only, never a Conversation.
 4. Write the file. The engine adopts the proposal at the next super-step boundary, assigns the id, and writes the ticket. You never write under `issues/`, never set a status, never pick an id.
