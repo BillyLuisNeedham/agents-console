@@ -830,8 +830,7 @@ body {
 
 /* An effort the harness cannot take in its launch mode (CONTEXT.md: Effort):
    shown, but dimmed, so it never reads as in force. */
-.assignment-badge-effort-unapplied,
-.effort-unapplied {
+.assignment-badge-effort-unapplied {
   color: var(--text-dim);
   text-decoration: line-through dotted;
 }
