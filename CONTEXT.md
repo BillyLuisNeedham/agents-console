@@ -107,7 +107,7 @@ The Interrupt the engine raises on a Ticket about to schedule with no harness or
 _Avoid_: dead drive (that was the old outcome), pool config error (the log line, not the pause)
 
 **Pool settings**:
-The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, terminal, port, selection, roster and agents. The Pool title shows as soon as it is saved; editing the assignment slice takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
+The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, Spawn caps, terminal, port, selection, roster and agents. The Pool title shows as soon as it is saved; editing the assignment slice or the Spawn caps takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
 _Avoid_: config (that's the raw file), preferences, options
 
 **Machine defaults**:
@@ -127,7 +127,7 @@ The operator changing a Ticket's Assignment from the Console, one Ticket from it
 _Avoid_: change setup, switch runner, override (the file's word is assign)
 
 **Config reload**:
-The engine's re-read of the Pool config file at a super-step boundary. Only the assignment slice reloads (defaults, assign, resolver); roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
+The engine's re-read of the Pool config file at a super-step boundary, or at once when a Pool settings save finds no drive in flight. Only the assignment slice (defaults, assign, resolver) and the Spawn caps reload; roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
 _Avoid_: hot reload (implies a watcher; there is none), restart
 
 **Detail**:
@@ -231,8 +231,12 @@ The operator's note for a ticket's pending Interrupt, typed but not yet sent. On
 _Avoid_: note (the form field, not the thing), Queued answer (that one has been sent)
 
 **Spawn**:
-A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32.
+A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn. A proposal may say which tickets it blocks: named ones, or all that have not started, never one already running. Bounded by two Spawn caps that are Pool settings: per attempt, and per run, where a run is one Console boot and only Ticket-origin Spawns count. A proposal beyond a cap becomes a Held spawn. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32; caps, holding and blocks by ADR-0029, closing issue #149.
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
+
+**Held spawn**:
+A Spawn proposal a cap had no room for, kept for the operator instead of dropped. It waits, across restarts, until the operator Adopts it (it lands past both caps) or Discards it (gone for good). Not a Spawn yet: it has no ticket and no id in the pool until it is adopted. Introduced by ADR-0029 (`docs/adr/0029-spawn-caps-are-pool-settings-and-hold-what-they-cannot-take.md`).
+_Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the boundary)
 
 **Conversation**:
 An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
