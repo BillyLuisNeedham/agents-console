@@ -223,8 +223,12 @@ The terminal phase a pool server sends as its farewell on an orderly shutdown, w
 _Avoid_: killed, crashed, disconnected (those are the cases it exists to be told apart from)
 
 **Needs input**:
-The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers.
+The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers. Each row carries the ticket's Draft answer and can open that ticket's Detail full size to write it; Resume all resumes every resumable row, each with its own Draft answer. The tray is widened by dragging its edge, and reset layout restores it.
 _Avoid_: action items, task list, notification center
+
+**Draft answer**:
+The operator's note for a ticket's pending Interrupt, typed but not yet sent. One per Interrupt, whichever surface it was typed in: the Needs input tray and the Detail show and edit the same draft. Kept in the browser only; gone once the Interrupt is answered or no longer pending.
+_Avoid_: note (the form field, not the thing), Queued answer (that one has been sent)
 
 **Spawn**:
 A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands — it schedules, assigns, verifies, and may itself Spawn — bounded by engine-enforced caps per attempt and per run. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32.

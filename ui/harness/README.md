@@ -12,7 +12,7 @@ spec), then does what an operator does:
 
 - scrolls every `overflow: auto` region styles.css declares and a live module
   renders (`.detail-open`, `.log-pane-content`, `.log-lines`,
-  `.needs-input-tray`, `.conversations-tray`, `.enlist-picker`, and the three
+  `.needs-input-rows`, `.conversations-tray`, `.enlist-picker`, and the three
   `<pre>` blocks that only scroll when their content is taller than the panel)
 - focuses the Needs input tray's note field with a caret mid-text
 - pans the canvas with a pointer drag

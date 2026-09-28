@@ -4,6 +4,7 @@ import { describe, expect, it } from "bun:test";
 import { Detail, type DetailHandlers, type DetailModel } from "./detail";
 import { ReassignStore } from "./reassign";
 import { commit } from "./morph";
+import { DraftAnswers } from "./drafts";
 import { useDom } from "./test-dom";
 import type {
   EnrichedSnapshot,
@@ -122,7 +123,7 @@ function rig(detail: TicketDetailView) {
     },
     onChange: () => {},
   });
-  const pane = new Detail({ onClose: () => {} });
+  const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
   const handlers: DetailHandlers = {
     onSelectAttempt: () => {},
     onSelectStream: () => {},
@@ -478,7 +479,7 @@ describe("Detail: Keep talking (issue #139)", () => {
   function paintInterrupt(interrupt: TicketDetailView["interrupt"]) {
     const keepTalks: string[] = [];
     const answers: string[] = [];
-    const pane = new Detail({ onClose: () => {} });
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const handlers: DetailHandlers = {
       onSelectAttempt: () => {},
       onSelectStream: () => {},
@@ -568,5 +569,112 @@ describe("Detail: Keep talking (issue #139)", () => {
     expect(r.root.querySelector(".interrupt-box .keep-talking-failure")?.textContent).toBe(
       "the pane is gone",
     );
+  });
+});
+
+describe("Detail: the shared Draft answer and writing it full size (issue #147)", () => {
+  const checkpoint: TicketDetailView["interrupt"] = {
+    ticketId: "A",
+    kind: "checkpoint",
+    body: "the brief",
+    form: {
+      title: "checkpoint",
+      actions: [{ action: "resume", label: "resume", tone: "primary" }],
+    },
+    queued: false,
+    keepTalking: null,
+  };
+
+  // The Detail on its Progress tab over a given Draft answers store, painted
+  // the composition root's way, with Resume's answers recorded.
+  function rigNote(drafts: DraftAnswers) {
+    const answers: { ticketId: string; action: string; note?: string }[] = [];
+    const pane = new Detail({ onClose: () => {}, drafts });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: (ticketId, action, note) => answers.push({ ticketId, action, note }),
+      onKeepTalking: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.className = "shell";
+        shell.appendChild(
+          pane.render(
+            {
+              ...model(detailView({ status: "checkpoint", interrupt: checkpoint })),
+              detailTabs: [
+                { id: "spec", label: "Spec", active: false, interruptDot: true },
+                { id: "progress", label: "Progress", active: true, interruptDot: true },
+                { id: "outcome", label: "Outcome", active: false, interruptDot: true },
+              ],
+            },
+            handlers,
+          ),
+        );
+        return shell;
+      });
+    paint();
+    const note = () => root.querySelector<HTMLTextAreaElement>(".detail-open textarea.interrupt-note")!;
+    return { root, pane, paint, note, answers };
+  }
+
+  it("shows the draft typed in the tray, and Resume sends it", () => {
+    const drafts = new DraftAnswers();
+    drafts.set("A", "typed in the tray");
+    const r = rigNote(drafts);
+    expect(r.note().value).toBe("typed in the tray");
+    r.root.querySelector<HTMLButtonElement>(".interrupt-actions .btn-primary")!.click();
+    expect(r.answers).toEqual([{ ticketId: "A", action: "resume", note: "typed in the tray" }]);
+  });
+
+  it("writes what is typed to the shared store the tray reads", () => {
+    const drafts = new DraftAnswers();
+    const r = rigNote(drafts);
+    r.note().value = "written full size";
+    r.note().dispatchEvent(new Event("input", { bubbles: true }));
+    expect(drafts.get("A")).toBe("written full size");
+  });
+
+  it("opens full size and focuses the note with the caret at the end", () => {
+    const drafts = new DraftAnswers();
+    drafts.set("A", "started in the tray");
+    const r = rigNote(drafts);
+    r.pane.writeFullSize("A");
+    r.paint();
+    expect(r.root.querySelector(".detail-open")?.classList.contains("detail-fullscreen")).toBe(true);
+    r.pane.settleNoteFocus(r.root);
+    expect(document.activeElement).toBe(r.note());
+    const end = "started in the tray".length;
+    expect([r.note().selectionStart, r.note().selectionEnd]).toEqual([end, end]);
+    // The focus is asked for once: a later render leaves focus where the
+    // operator has since put it.
+    r.note().blur();
+    r.paint();
+    r.pane.settleNoteFocus(r.root);
+    expect(document.activeElement).not.toBe(r.note());
+  });
+
+  it("drops a pending focus when fullscreen is left before the note renders", () => {
+    const r = rigNote(new DraftAnswers());
+    r.pane.writeFullSize("A");
+    r.pane.exitFullscreen();
+    r.paint();
+    r.pane.settleNoteFocus(r.root);
+    expect(document.activeElement).not.toBe(r.note());
+    expect(r.root.querySelector(".detail-fullscreen")).toBeNull();
   });
 });

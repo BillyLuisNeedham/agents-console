@@ -2142,3 +2142,38 @@ export function parseStoredDetailWidth(
     maxPx,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Needs input tray width clamp
+// ---------------------------------------------------------------------------
+
+export const NEEDS_INPUT_MIN_PX = 300;
+/** The tray's maximum width, as a fraction of the canvas column's width. */
+export const NEEDS_INPUT_MAX_FRACTION = 0.6;
+
+/**
+ * Clamp a Needs input tray width in px (issue #147): never narrower than the
+ * tray's original 300px, never wider than most of the canvas column it
+ * overlays. `maxPx` is the caller-computed column fraction. On a column too
+ * narrow to hold the minimum, the column bound wins, as the Detail's does.
+ */
+export function clampNeedsInputWidth(px: number, maxPx: number): number {
+  return Math.min(maxPx, Math.max(NEEDS_INPUT_MIN_PX, px));
+}
+
+/**
+ * The tray width persistence round trip, the Detail's shape: a plain number
+ * string under one global key, parsed back and clamped to the current
+ * column. A missing, unparseable, or non-finite value falls back to the
+ * minimum, which is the default width.
+ */
+export function parseStoredNeedsInputWidth(
+  raw: string | null,
+  maxPx: number,
+): number {
+  const parsed = raw == null ? Number.NaN : Number(raw);
+  return clampNeedsInputWidth(
+    Number.isFinite(parsed) ? parsed : NEEDS_INPUT_MIN_PX,
+    maxPx,
+  );
+}

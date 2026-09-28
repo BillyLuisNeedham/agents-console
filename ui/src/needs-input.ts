@@ -12,20 +12,36 @@
  * failed answer marks its own row inline ("answer failed · retry") without
  * disturbing the others. The header's bulk action fires every open
  * resume-kind row at once, each with its own note. Clicking a row's ticket
- * id selects the card and opens its Detail. State outlives any one render:
- * drafts, the collapsed flag, and the failure
- * marks live on the instance, and a note being typed keeps focus and cursor
- * across the swap.
+ * id selects the card and opens its Detail; its expand opens that Detail
+ * full size with the note focused, for an answer too long to write in a row
+ * (issue #147). State outlives any one render: the collapsed flag, the
+ * failure marks and the dragged width live on the instance, the note drafts
+ * in the Draft answers store the Detail shares, and a note being typed keeps
+ * focus and cursor across the morph.
  */
 
 import { h } from "./dom";
+import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderKeepTalkingButton, renderKeepTalkingFailure } from "./terminal";
 import {
   bulkResumeRows,
+  clampNeedsInputWidth,
+  NEEDS_INPUT_MAX_FRACTION,
+  NEEDS_INPUT_MIN_PX,
+  parseStoredNeedsInputWidth,
   type ConversationNeedsInputRow,
   type ResumeAction,
   type NeedsInputRow,
 } from "./project";
+
+// One global localStorage key (not per pool) remembers the dragged tray
+// width across reloads, the Detail's way.
+export const NEEDS_INPUT_WIDTH_KEY = "console-needs-input-width";
+
+// The row note's height in lines: never below two, so it reads as a text
+// box, and never above eight, past which it scrolls.
+const NOTE_MIN_ROWS = 2;
+const NOTE_MAX_ROWS = 8;
 
 /**
  * The tray's answer seam: resolves when the engine accepts the answer,
@@ -55,6 +71,9 @@ export interface NeedsInputHandlers {
    *  Detail's button fires, so both surfaces disable together and show the
    *  same refusal. */
   onKeepTalking: (ticketId: string) => void;
+  /** A row's expand (issue #147): open that ticket's Detail full size on
+   *  Progress, its note focused, to write an answer too long for the row. */
+  onExpand: (cardId: string, ticketId: string) => void;
 }
 
 /** One row's failed answer: the action a retry refires, and why it failed. */
@@ -71,10 +90,23 @@ export function waitingStatus(row: NeedsInputRow): string | null {
   return row.interrupt.queued ? "answered · waiting" : null;
 }
 
+/**
+ * The row note's rows for a draft: one per line, floored and capped. The
+ * stylesheet's `field-sizing: content` grows the note with wrapped lines
+ * too where the browser has it; this is the floor that holds without it,
+ * and it is a function of the draft alone, so a render never fights the
+ * height the note grew to while typing.
+ */
+export function noteRows(draft: string): number {
+  const lines = draft.split("\n").length;
+  return Math.min(NOTE_MAX_ROWS, Math.max(NOTE_MIN_ROWS, lines));
+}
+
 export class NeedsInputTray {
   // Note drafts, keyed by ticket id, so a snapshot re-render never wipes a
-  // note being typed. Drafts are pruned when their interrupt resolves.
-  private readonly drafts = new Map<string, string>();
+  // note being typed. The store is the Detail's too (issue #147), and the
+  // composition prunes it when an interrupt resolves.
+  private readonly drafts: DraftAnswers;
   // Per-row answer errors, keyed by ticket id: a failed answer marks its own
   // row "answer failed · retry" until a retry (or another accepted answer)
   // clears it. A failure never touches the row's note draft.
@@ -82,17 +114,25 @@ export class NeedsInputTray {
   // Collapsed, the tray leaves only its "needs input · N" badge. Session
   // state, like the drafts: a snapshot re-render never expands it.
   private collapsed = false;
+  // The tray's dragged width (issue #147), clamped to the canvas column on
+  // every read; the drag writes the page directly, as the Detail's does.
+  private width = NEEDS_INPUT_MIN_PX;
+  private drag: { startX: number; startWidth: number } | null = null;
   private readonly onAnswer: AnswerHandler;
   private readonly onChange: () => void;
 
-  constructor(options: NeedsInputOptions) {
+  constructor(options: NeedsInputOptions & { drafts: DraftAnswers }) {
     this.onAnswer = options.onAnswer;
     this.onChange = options.onChange;
+    this.drafts = options.drafts;
+    if (typeof window !== "undefined") {
+      this.width = clampNeedsInputWidth(this.readStoredWidth(), currentMaxPx());
+    }
   }
 
   /** The note draft held for a ticket, or "" when none is held. */
   note(ticketId: string): string {
-    return this.drafts.get(ticketId) ?? "";
+    return this.drafts.get(ticketId);
   }
 
   setNote(ticketId: string, value: string): void {
@@ -112,20 +152,26 @@ export class NeedsInputTray {
     this.collapsed = collapsed;
   }
 
-  /** Drop drafts whose interrupt resolved (or whose ticket left the pool). */
-  pruneDrafts(pendingTicketIds: ReadonlySet<string>): void {
-    this.prune(this.drafts, pendingTicketIds);
-  }
-
   /** Drop failure marks whose row resolved (or whose ticket left the pool). */
   pruneFailures(pendingTicketIds: ReadonlySet<string>): void {
-    this.prune(this.failures, pendingTicketIds);
+    for (const id of [...this.failures.keys()]) {
+      if (!pendingTicketIds.has(id)) this.failures.delete(id);
+    }
   }
 
-  private prune<V>(map: Map<string, V>, pendingTicketIds: ReadonlySet<string>): void {
-    for (const id of [...map.keys()]) {
-      if (!pendingTicketIds.has(id)) map.delete(id);
+  /**
+   * The canvas's reset layout (issue #147): back to the default width, the
+   * stored one forgotten. Applied to the page at once, since the reset
+   * repaints the canvas directly rather than through a render.
+   */
+  resetWidth(): void {
+    this.width = NEEDS_INPUT_MIN_PX;
+    try {
+      localStorage.removeItem(NEEDS_INPUT_WIDTH_KEY);
+    } catch {
+      // private mode: nothing was stored
     }
+    this.applyWidth();
   }
 
   /**
@@ -173,7 +219,8 @@ export class NeedsInputTray {
    * count, waiting rows included; the bulk action's count is the open
    * resume-kind rows alone, and it stands disabled when that count is zero.
    * Every unresolved interrupt lists, one row per card, in the projection's
-   * card order.
+   * card order. The rows scroll under a fixed head, and the right edge is a
+   * drag handle that widens the tray (issue #147).
    */
   render(
     rows: NeedsInputRow[],
@@ -199,7 +246,10 @@ export class NeedsInputTray {
     const bulk = bulkResumeRows(rows);
     return h(
       "div",
-      { class: "needs-input-tray" },
+      {
+        class: "needs-input-tray",
+        style: `width: ${clampNeedsInputWidth(this.width, currentMaxPx())}px`,
+      },
       h(
         "div",
         { class: "needs-input-head" },
@@ -233,14 +283,87 @@ export class NeedsInputTray {
           ),
         ),
       ),
-      ...conversationRows.map((row) => this.renderConversationRow(row, handlers)),
-      ...rows.flatMap((row) => this.renderRow(row, handlers)),
+      h(
+        "div",
+        { class: "needs-input-rows" },
+        ...conversationRows.map((row) => this.renderConversationRow(row, handlers)),
+        ...rows.flatMap((row) => this.renderRow(row, handlers)),
+      ),
+      this.renderHandle(),
     );
   }
 
-  // A Conversation waiting on the operator: no interrupt, so no form. The
-  // row's action opens the pane in herdr; a click on its id still selects
-  // the card and opens the Detail, the same navigation every row offers.
+  // The tray's right edge as a drag handle, the Detail's left-edge handle
+  // mirrored: pointer capture keeps the drag while the pointer leaves the
+  // strip, and the width persists on release.
+  private renderHandle(): HTMLElement {
+    return h("div", {
+      class: "needs-input-handle",
+      title: "drag to resize the needs input tray",
+      onpointerdown: (event: PointerEvent) => {
+        if (this.drag) return;
+        this.drag = {
+          startX: event.clientX,
+          startWidth: clampNeedsInputWidth(this.width, currentMaxPx()),
+        };
+        try {
+          (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+        } catch {
+          // pointer already gone
+        }
+      },
+      onpointermove: (event: PointerEvent) => {
+        if (!this.drag) return;
+        const dx = event.clientX - this.drag.startX;
+        this.width = clampNeedsInputWidth(this.drag.startWidth + dx, currentMaxPx());
+        this.applyWidth();
+      },
+      onpointerup: () => {
+        this.drag = null;
+        this.writeStoredWidth();
+      },
+      onpointercancel: () => {
+        this.drag = null;
+      },
+      // A snapshot can unmount the tray mid-drag, releasing the capture with
+      // no pointerup; without this the drag would stick until a reload.
+      onlostpointercapture: () => {
+        this.drag = null;
+      },
+    });
+  }
+
+  private readStoredWidth(): number {
+    try {
+      return parseStoredNeedsInputWidth(
+        localStorage.getItem(NEEDS_INPUT_WIDTH_KEY),
+        currentMaxPx(),
+      );
+    } catch {
+      // quota or private mode: the default width applies
+      return NEEDS_INPUT_MIN_PX;
+    }
+  }
+
+  private writeStoredWidth(): void {
+    try {
+      localStorage.setItem(NEEDS_INPUT_WIDTH_KEY, String(this.width));
+    } catch {
+      // quota or private mode: the width just will not persist
+    }
+  }
+
+  private applyWidth(): void {
+    const width = `${clampNeedsInputWidth(this.width, currentMaxPx())}px`;
+    for (const el of document.querySelectorAll<HTMLElement>(".needs-input-tray")) {
+      el.style.width = width;
+    }
+  }
+
+  // A Conversation waiting on the operator: no interrupt, so no form and
+  // no note, just the one line. The row's action opens the pane in herdr; a
+  // click on its id still selects the card and opens the Detail, the same
+  // navigation every row offers.
   private renderConversationRow(
     row: ConversationNeedsInputRow,
     handlers: NeedsInputHandlers,
@@ -249,52 +372,65 @@ export class NeedsInputTray {
       "div",
       { class: "needs-input-row needs-input-row-conversation", key: row.cardId },
       h(
-        "button",
-        {
-          class: "needs-input-id",
-          title: row.title,
-          onclick: () => handlers.onSelect(row.cardId),
-        },
-        row.label,
-      ),
-      h("span", { class: "needs-input-waiting" }, "waiting on you"),
-      h(
         "div",
-        { class: "needs-input-actions" },
+        { class: "needs-input-row-line" },
         h(
           "button",
           {
-            class: "btn btn-primary",
-            onclick: () => {
-              void handlers.onFocusConversation(row.conversationId);
-            },
+            class: "needs-input-id",
+            title: row.title,
+            onclick: () => handlers.onSelect(row.cardId),
           },
-          "open in herdr",
+          row.label,
+        ),
+        h("span", { class: "needs-input-waiting" }, "waiting on you"),
+        h(
+          "div",
+          { class: "needs-input-actions" },
+          h(
+            "button",
+            {
+              class: "btn btn-primary",
+              onclick: () => {
+                void handlers.onFocusConversation(row.conversationId);
+              },
+            },
+            "open in herdr",
+          ),
         ),
       ),
     );
   }
 
-  // One row: the ticket id (a click selects the card), the interrupt kind,
-  // a note field, and the interrupt's own action set from the shared form
-  // config. A waiting row greys out in place: the answer is recorded, so its
-  // note and actions disable and the waiting line stands in, until the
-  // boundary snapshot drops the row. A failed answer adds an inline mark
-  // under the row with its retry. A checkpoint row whose Held pane is alive
-  // also offers Keep talking beside Resume (issue #139), with a refusal's
-  // reason under the row. The interrupt body stays in the Detail;
-  // the row is the queue entry, not the reading surface.
+  // One row: a line with the ticket id (a click selects the card), the
+  // interrupt kind, expand, and the interrupt's own action set from the
+  // shared form config, then the note on its own full-width line beneath, so
+  // a long ticket id never squeezes it (issue #147). The note is a textarea
+  // that grows with the answer and scrolls past its cap; plain Enter is a
+  // newline, and nothing in the row submits on a key. A waiting row greys
+  // out in place: the answer is recorded, so its note, expand and actions
+  // disable and the waiting line stands in, until the boundary snapshot
+  // drops the row. A failed answer adds an inline mark under the row with
+  // its retry. A checkpoint row whose Held pane is alive also offers Keep
+  // talking beside Resume (issue #139), with a refusal's reason under the
+  // row. The interrupt body stays in the Detail; the row is the queue entry,
+  // not the reading surface.
   private renderRow(row: NeedsInputRow, handlers: NeedsInputHandlers): HTMLElement[] {
     const status = waitingStatus(row);
     const waiting = status !== null;
-    const note = h("input", {
+    const draft = this.note(row.ticketId);
+    const note = h("textarea", {
       class: "interrupt-note needs-input-note",
-      type: "text",
       placeholder: row.interrupt.form.notePlaceholder ?? "note",
+      rows: noteRows(draft),
       disabled: waiting,
-      value: this.note(row.ticketId),
-      oninput: (event: Event) =>
-        this.setNote(row.ticketId, (event.currentTarget as HTMLInputElement).value),
+      value: draft,
+      [DRAFT_TICKET_ATTR]: row.ticketId,
+      oninput: (event: Event) => {
+        const field = event.currentTarget as HTMLTextAreaElement;
+        this.drafts.input(row.ticketId, field);
+        field.rows = noteRows(field.value);
+      },
     });
     const elements: HTMLElement[] = [
       h(
@@ -304,39 +440,54 @@ export class NeedsInputTray {
           key: row.cardId,
         },
         h(
-          "button",
-          {
-            class: "needs-input-id",
-            title: row.title ?? "open the Detail",
-            onclick: () => handlers.onSelect(row.cardId),
-          },
-          row.label,
-        ),
-        h("span", { class: "needs-input-kind" }, row.interrupt.form.title),
-        status !== null ? h("span", { class: "needs-input-waiting" }, status) : null,
-        note,
-        h(
           "div",
-          { class: "needs-input-actions" },
-          ...row.interrupt.form.actions.map(({ action, label, tone }) =>
-            h(
-              "button",
-              {
-                class: "btn" + (tone === "primary" ? " btn-primary" : " btn-danger"),
-                disabled: waiting,
-                onclick: () => {
-                  void this.fire(row.ticketId, action);
-                },
-              },
-              label,
-            ),
+          { class: "needs-input-row-line" },
+          h(
+            "button",
+            {
+              class: "needs-input-id",
+              // A long id is ellipsized, so the tooltip always carries it whole.
+              title: row.title ? `${row.label}: ${row.title}` : row.label,
+              onclick: () => handlers.onSelect(row.cardId),
+            },
+            row.label,
           ),
-          row.interrupt.keepTalking
-            ? renderKeepTalkingButton(row.interrupt.keepTalking, () =>
-                handlers.onKeepTalking(row.ticketId),
-              )
-            : null,
+          h("span", { class: "needs-input-kind" }, row.interrupt.form.title),
+          status !== null ? h("span", { class: "needs-input-waiting" }, status) : null,
+          h(
+            "button",
+            {
+              class: "btn needs-input-expand",
+              title: "write this answer full size",
+              disabled: waiting,
+              onclick: () => handlers.onExpand(row.cardId, row.ticketId),
+            },
+            "expand",
+          ),
+          h(
+            "div",
+            { class: "needs-input-actions" },
+            ...row.interrupt.form.actions.map(({ action, label, tone }) =>
+              h(
+                "button",
+                {
+                  class: "btn" + (tone === "primary" ? " btn-primary" : " btn-danger"),
+                  disabled: waiting,
+                  onclick: () => {
+                    void this.fire(row.ticketId, action);
+                  },
+                },
+                label,
+              ),
+            ),
+            row.interrupt.keepTalking
+              ? renderKeepTalkingButton(row.interrupt.keepTalking, () =>
+                  handlers.onKeepTalking(row.ticketId),
+                )
+              : null,
+          ),
         ),
+        note,
       ),
     ];
     const refusal = row.interrupt.keepTalking
@@ -366,4 +517,12 @@ export class NeedsInputTray {
     }
     return elements;
   }
+}
+
+// The tray's widest: a fraction of the canvas column it overlays, measured
+// from the column on the page, or the window before the first mount.
+function currentMaxPx(): number {
+  const column = document.querySelector<HTMLElement>(".canvas-column");
+  const width = column?.getBoundingClientRect().width || window.innerWidth;
+  return Math.round(width * NEEDS_INPUT_MAX_FRACTION);
 }

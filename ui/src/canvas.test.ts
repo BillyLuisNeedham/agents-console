@@ -159,6 +159,7 @@ function mountCanvas(
     onNewConversation: () => {},
     onEnlist: () => {},
     onOpenSettings: () => {},
+    onResetLayout: () => {},
     onEndConversation: () => {},
     onArmStop: () => {},
     onCancelStop: () => {},
