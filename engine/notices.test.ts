@@ -385,20 +385,16 @@ const BODY = "Do the follow-up work described here in full.";
 
 describe("Conversation spawn.json adoption", () => {
   it("consumes the proposal file, adopts a ticket, and skips the run cap for a Conversation's own batch", async () => {
-    // Seed spawnedThisRun at the run cap (20) via pre-existing spawn tickets
-    // of an ordinary ticket "01", so a further Ticket-origin spawn would be
-    // fully truncated — proving the Conversation's own batch below is not
-    // sharing that budget.
-    const spawnFiles = Array.from({ length: 20 }, (_, i) => {
-      const n = i + 1;
-      return {
-        file: `01-spawn-${n}.md`,
-        marker: `<!-- state: id=01-spawn-${n} blocked-by=none status=done spawned-by=01 -->`,
-      };
-    });
+    // A run cap of 1 that a Ticket-origin batch of 7 would overflow six
+    // times over, proving the Conversation's own batch below is not sharing
+    // that budget: only the per-file cap holds any of it.
     const { poolDir } = makeGitPool({
-      tickets: [doneTicket("01"), ...spawnFiles],
-      config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
+      tickets: [doneTicket("01")],
+      config: {
+        defaults: { harness: "convo", model: "stub-model" },
+        terminal: "herdr",
+        spawnCaps: { perRun: 1 },
+      },
     });
     const fake = await startFakeHerdr();
     try {
@@ -409,9 +405,8 @@ describe("Conversation spawn.json adoption", () => {
       });
       const view = await run.startConversation({ title: "Plan" });
 
-      // 7 proposals: the per-proposal cap of 5 still trims 2, despite the
-      // run already sitting at the 20-per-run cap that only applies to
-      // Ticket-origin spawns.
+      // 7 proposals: the per-proposal cap of 5 still holds 2, despite a run
+      // cap of 1 that only applies to Ticket-origin spawns.
       writeSpawnJson(
         poolDir,
         view.id,
@@ -428,10 +423,15 @@ describe("Conversation spawn.json adoption", () => {
       // The file is consumed (read once, then removed) rather than re-polled.
       expect(existsSync(spawnJsonPath(poolDir, view.id))).toBe(false);
 
-      const adopted = readEvents(join(poolDir, "runs"), view.id).find(
-        (e) => e.kind === "spawn-adopted",
+      const held = readEvents(join(poolDir, "runs"), view.id).find(
+        (e) => e.kind === "spawn-held",
       );
-      expect(adopted?.payload).toMatchObject({ truncated: 2 });
+      expect(held?.payload).toEqual({
+        held: [
+          { id: "held-1", title: "Follow-up 6", reason: "per-attempt" },
+          { id: "held-2", title: "Follow-up 7", reason: "per-attempt" },
+        ],
+      });
 
       // Ends the Conversation cleanly (closeTab, not a killed pane) so its
       // poller's interval clears deterministically before the pool

@@ -77,6 +77,12 @@ describe("buildPrompt spawn teaching", () => {
     expect(body).toContain("1 proposal honored per attempt and 12 per run");
   });
 
+  it("teaches that an over-cap proposal is held for the operator, not lost", () => {
+    const body = prompt();
+    expect(body).toContain("overflow held for the operator to adopt or discard");
+    expect(body).not.toContain("truncated");
+  });
+
   it("states the standing rule: agents propose, the engine writes pool state", () => {
     const body = prompt();
     expect(body).toContain("proposed, never written");
@@ -156,6 +162,12 @@ describe("buildConversationTeaching", () => {
     const body = buildConversationTeaching(spawnPath);
     expect(body).toContain("5 entries honored per file");
     expect(body).toContain("no run-wide cap");
+  });
+
+  it("teaches that entries beyond the per-file cap are held for the operator", () => {
+    expect(buildConversationTeaching(spawnPath)).toContain(
+      "entries beyond it are held for the operator to adopt or discard",
+    );
   });
 
   it("names the pool's own per-file cap (issue #149)", () => {

@@ -34,6 +34,7 @@ export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
 export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
 export type { HeldPaneRecord } from "./held-panes.ts";
+export type { HeldSpawnReason, HeldSpawnView } from "./held-spawns.ts";
 export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
@@ -67,6 +68,7 @@ import type { TicketStatus } from "./pool.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
 import type { HeldPaneRecord } from "./held-panes.ts";
+import type { HeldSpawnView } from "./held-spawns.ts";
 import type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
@@ -158,6 +160,12 @@ export interface EnrichedSnapshot {
    * and "`perAttempt` per attempt". A run is this Console boot.
    */
   spawnUsage: SpawnUsage;
+  /**
+   * The Held spawns (issue #149, ADR-0029), oldest first, from the engine's
+   * snapshot verbatim: the proposals a Spawn cap had no room for, each
+   * waiting for the operator to Adopt it (past the caps) or Discard it.
+   */
+  heldSpawns: HeldSpawnView[];
   state: {
     tickets: EnrichedTicketState[];
     /** Every Conversation the pool knows about (issue #60), passed through
@@ -291,6 +299,24 @@ export interface KeepTalkingResponse {
 /** How many Finished terminals the bulk close closed. */
 export interface CloseFinishedTerminalsResponse {
   closed: number;
+}
+
+// ---------------------------------------------------------------------------
+// Held spawns (POST /api/spawns/held/adopt, /api/spawns/held/discard)
+// ---------------------------------------------------------------------------
+
+/**
+ * Adopt or Discard one Held spawn (issue #149, ADR-0029), by its id. Adopt
+ * answers 202 once the adoption is queued (written at once on an idle pool,
+ * at the next boundary otherwise); Discard answers 200 once it is gone. A
+ * refusal is the 409 `reason` envelope the keep-talking route answers with.
+ */
+export interface HeldSpawnRequest {
+  id: string;
+}
+
+export interface HeldSpawnResponse {
+  id: string;
 }
 
 // ---------------------------------------------------------------------------

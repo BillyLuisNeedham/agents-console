@@ -68,6 +68,7 @@ import {
 import type {
   CloseFinishedTerminalsResponse,
   EnrichedSnapshot,
+  HeldSpawnResponse,
   KeepTalkingResponse,
   LogAttemptInfo,
   ReconstructedAttempt,
@@ -279,6 +280,7 @@ function enrich(
     poolDir,
     finishedTerminals: snapshot.finishedTerminals,
     spawnUsage: snapshot.spawnUsage,
+    heldSpawns: snapshot.heldSpawns,
     state: {
       tickets: meta.map((m) => {
         const row = reassign.get(m.id);
@@ -1942,6 +1944,46 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           try {
             const closed = await run.closeFinishedTerminals();
             return Response.json({ closed } satisfies CloseFinishedTerminalsResponse);
+          } catch (err) {
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
+        // Adopt or Discard a Held spawn (issue #149, ADR-0029): the
+        // proposals a Spawn cap had no room for wait on the snapshot for the
+        // operator. Adopt answers 202 once queued, past both caps (the
+        // snapshot shows the ticket once the boundary, or at once an idle
+        // engine, writes it); Discard answers once the spawn is gone. A
+        // refusal is the keep-talking route's 409 `reason` envelope.
+        if (
+          (pathname === "/api/spawns/held/adopt" || pathname === "/api/spawns/held/discard") &&
+          req.method === "POST"
+        ) {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const id = typeof fields.id === "string" ? fields.id : "";
+          if (!id) {
+            return Response.json({ reason: "id is required" }, { status: 400 });
+          }
+          const run = currentRun;
+          if (!run) {
+            return Response.json({ reason: "pool not started" }, { status: 409 });
+          }
+          const adopt = pathname === "/api/spawns/held/adopt";
+          try {
+            if (adopt) run.adoptHeldSpawn(id);
+            else run.discardHeldSpawn(id);
+            return Response.json({ id } satisfies HeldSpawnResponse, {
+              status: adopt ? 202 : 200,
+            });
           } catch (err) {
             return Response.json(
               { reason: err instanceof Error ? err.message : String(err) },

@@ -44,6 +44,12 @@ import {
   type TicketStatus,
 } from "./pool.ts";
 import {
+  loadHeldSpawns,
+  type HeldSpawnReason,
+  type HeldSpawnView,
+  type HeldSpawns,
+} from "./held-spawns.ts";
+import {
   checkSpawnCaps,
   spawnCapsOf,
   type SpawnCaps,
@@ -237,6 +243,9 @@ export interface SpawnProposal {
   // (adoptSpawnProposals), the same disposition an unknown blockedBy id
   // gets, since neither can be checked here where no Session exists yet.
   assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
+  // The tickets the Spawn blocks once adopted (ADR-0029): named ids, or
+  // "all" for every ticket not yet started at that moment.
+  blocks?: string[] | "all";
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -254,11 +263,14 @@ export interface SpawnRejection {
 // Conversations ADR's addition: "conversation" is a Conversation's own
 // spawn.json batch (engine/notices.ts's poller), which bypasses the per-run
 // cap (spec: "no run-wide cap for Conversation Spawns") but keeps the
-// per-proposal cap; every ticket-outcome push stays "ticket".
+// per-proposal cap; every ticket-outcome push stays "ticket". `heldId` marks
+// the operator's Adopt of a Held spawn (ADR-0029): one proposal, past both
+// caps, leaving the Held spawns once the boundary settles it.
 export interface PendingSpawn {
   parentId: string;
   proposals: SpawnProposal[];
   origin: "ticket" | "conversation";
+  heldId?: string;
 }
 
 export interface Outcome {
@@ -437,6 +449,8 @@ export interface PoolSnapshot {
   // The Spawn caps in force and this run's count against the per-run one
   // (ADR-0029), so the Console shows how close the pool is to a cap.
   spawnUsage: SpawnUsage;
+  // The Held spawns (ADR-0029), oldest first, as the Console shows them.
+  heldSpawns: HeldSpawnView[];
 }
 
 // What the Console shows of the Spawn caps: `spawnedThisRun` of `perRun`
@@ -570,6 +584,15 @@ export interface PoolRun {
    * boundary to do it; in flight, nothing, the next boundary reloads.
    */
   reloadConfig: () => void;
+  /**
+   * Adopt a Held spawn (ADR-0029): past both caps, at the next boundary, or
+   * at once when no drive is in flight. Throws the reason it cannot be: no
+   * such held spawn, a finished pool, or a proposal the pool as it stands
+   * would reject.
+   */
+  adoptHeldSpawn: (id: string) => void;
+  /** Discard a Held spawn for good; throws when there is no such one. */
+  discardHeldSpawn: (id: string) => void;
 }
 
 const reduceTickets = (
@@ -803,6 +826,9 @@ interface Session {
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
+  // The Held spawns (ADR-0029, held-spawns.ts): proposals the caps had no
+  // room for, waiting on disk for the operator's Adopt or Discard.
+  heldSpawns: HeldSpawns;
   // Ticket-origin Spawns adopted so far this run, bounding the per-run cap.
   // A run is this Console boot (ADR-0029): the count starts at zero at every
   // start, whatever the pool spawned before.
@@ -1187,6 +1213,7 @@ export function startPool(options: RunOptions): PoolRun {
       relabelling: Promise.resolve(),
     },
     pendingSpawns: [],
+    heldSpawns: loadHeldSpawns(runsDir),
     spawnedThisRun: 0,
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
@@ -1223,6 +1250,7 @@ export function startPool(options: RunOptions): PoolRun {
 
   seedEnlistedWork(session);
   rehydrate(session);
+  recoverTruncatedSpawns(session);
   // The pane survey (issue #139) only has panes to list in a terminal-backed
   // pool. It lists on its cadence and whenever the engine holds a pane, so a
   // Held pane from before a restart is looked for at once (seedHeldPanes
@@ -1369,6 +1397,8 @@ function makeHandle(session: Session): PoolRun {
     keepTalking: (ticketId) => keepTalking(session, ticketId),
     closeFinishedTerminals: () => closeFinishedTerminals(session),
     reloadConfig: () => reloadConfigWhenIdle(session),
+    adoptHeldSpawn: (id) => adoptHeldSpawn(session, id),
+    discardHeldSpawn: (id) => discardHeldSpawn(session, id),
   };
   return handle;
 }
@@ -1539,6 +1569,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
       spawnedThisRun: session.spawnedThisRun,
       ...spawnCapsOf(session.state.config),
     },
+    heldSpawns: session.heldSpawns.views(),
   };
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
@@ -9521,29 +9552,71 @@ export function loadPoolTickets(poolDir: string, allowEmptyIssues = false): Tick
   });
 }
 
+// Why a proposal cannot be adopted into the pool as it stands, or null when
+// it can: a blockedBy naming a Conversation or an id outside the pool, or an
+// assign.harness the pool does not know. The boundary's adoption drops a
+// proposal on this reason, and an operator's Adopt of a Held spawn is
+// refused on it before anything is queued.
+function spawnProposalProblem(
+  session: Session,
+  proposal: SpawnProposal,
+  known: { ids: Set<string>; conversations: Set<string> },
+): string | null {
+  const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
+    known.conversations.has(id),
+  );
+  const unknownTickets = (proposal.blockedBy ?? []).filter(
+    (id) => !known.ids.has(id) && !known.conversations.has(id),
+  );
+  if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
+    const reasons: string[] = [];
+    if (conversationBlockers.length > 0) {
+      reasons.push(
+        `blockedBy names Conversations, which cannot block a ticket: ` +
+          conversationBlockers.join(", "),
+      );
+    }
+    if (unknownTickets.length > 0) {
+      reasons.push(
+        `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
+      );
+    }
+    return reasons.join("; ");
+  }
+  if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
+    return `assign.harness names unknown harness '${proposal.assign.harness}'`;
+  }
+  return null;
+}
+
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
-// ADR): every buffered proposal is validated against the pool as the
-// boundary found it, the accepted ones are written as ordinary ticket files
-// or started as Conversations, and the pool's markers and assignments
+// ADR and ADR-0029): every buffered proposal is validated against the pool
+// as the boundary found it, the accepted ones are written as ordinary ticket
+// files or started as Conversations, and the pool's markers and assignments
 // reload so the drive loop schedules the ticket ones like any other. Every
 // aspect of that stays per proposal, never per batch: a dropped proposal
 // logs its reason on the proposing parent's log (a spawn-rejected event) and
-// the parent's own result stands. The per-proposal cap (5) always applies;
-// the per-run cap (20) is skipped for a Conversation's own spawn.json batch
-// (spec: "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn
-// still counts against it, `origin: "ticket"`, whatever kind its entries
-// request). Writing the files is the commit point; a crash after them but
-// before the reload leaves the adopted tickets in the pool for the next
-// start, ids stable. The Conversation host calls this directly when the
-// engine is idle (nothing else would reach this boundary for it otherwise).
+// the parent's own result stands. The per-attempt cap always applies; the
+// per-run cap is skipped for a Conversation's own spawn.json batch (spec:
+// "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn still
+// counts against it, `origin: "ticket"`, whatever kind its entries request).
+// A proposal beyond either cap is held for the operator (ADR-0029), never
+// dropped: it waits in the Held spawns until an Adopt, which comes back
+// through here carrying its held id and passes both caps. Writing the files
+// is the commit point; a crash after them but before the reload leaves the
+// adopted tickets in the pool for the next start, ids stable. The
+// Conversation host and an idle Adopt call this directly (nothing else would
+// reach this boundary for them otherwise).
 function adoptSpawnProposals(session: Session): void {
   if (session.pendingSpawns.length === 0) return;
   const pending = session.pendingSpawns.splice(0);
   // Membership validates against the markers as the boundary found them, so
   // a proposal naming another proposal's future id drops as unknown: the
   // agent never proposes ids and cannot know one.
-  const knownIds = new Set(session.markers.map((m) => m.id));
-  const knownConvIds = knownConversationIds(session.poolDir);
+  const known = {
+    ids: new Set(session.markers.map((m) => m.id)),
+    conversations: knownConversationIds(session.poolDir),
+  };
   const counters = combinedSpawnCounters(session);
   // The caps as this boundary's Config reload left them (ADR-0029).
   const caps = spawnCapsOf(session.state.config);
@@ -9551,68 +9624,45 @@ function adoptSpawnProposals(session: Session): void {
   const log: string[] = [];
   let wrote = false;
 
-  for (const { parentId, proposals, origin } of pending) {
+  for (const { parentId, proposals, origin, heldId } of pending) {
     const accepted: SpawnProposal[] = [];
     for (const proposal of proposals) {
-      const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
-        knownConvIds.has(id),
-      );
-      const unknownTickets = (proposal.blockedBy ?? []).filter(
-        (id) => !knownIds.has(id) && !knownConvIds.has(id),
-      );
-      if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
-        const reasons: string[] = [];
-        if (conversationBlockers.length > 0) {
-          reasons.push(
-            `blockedBy names Conversations, which cannot block a ticket: ` +
-              conversationBlockers.join(", "),
-          );
-        }
-        if (unknownTickets.length > 0) {
-          reasons.push(
-            `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
-          );
-        }
-        const reason = reasons.join("; ");
-        appendEvent(session.runsDir, parentId, {
-          at: new Date().toISOString(),
-          attempt: lastAttempt(session.runsDir, parentId),
-          kind: "spawn-rejected",
-          payload: { title: proposal.title, reason },
-        });
-        log.push(
-          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
-            `rejected: ${reason}`,
-        );
+      const reason = spawnProposalProblem(session, proposal, known);
+      if (reason === null) {
+        accepted.push(proposal);
         continue;
       }
-      if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
-        const reason = `assign.harness names unknown harness '${proposal.assign.harness}'`;
-        appendEvent(session.runsDir, parentId, {
-          at: new Date().toISOString(),
-          attempt: lastAttempt(session.runsDir, parentId),
-          kind: "spawn-rejected",
-          payload: { title: proposal.title, reason },
-        });
-        log.push(
-          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
-            `rejected: ${reason}`,
-        );
-        continue;
-      }
-      accepted.push(proposal);
+      appendEvent(session.runsDir, parentId, {
+        at: new Date().toISOString(),
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-rejected",
+        payload: { title: proposal.title, reason },
+      });
+      log.push(
+        `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
+          `rejected: ${reason}`,
+      );
     }
-    // The per-proposal cap honors the first survivors, always. The per-run
-    // cap truncates whatever the run has no room left for, but only for a
-    // Ticket's own outcome.spawn: a Conversation's spawn.json has none.
-    let truncated = 0;
-    let honored = accepted.slice(0, caps.perAttempt);
-    truncated += accepted.length - honored.length;
-    if (origin !== "conversation") {
-      const room = Math.max(0, caps.perRun - session.spawnedThisRun);
-      if (honored.length > room) {
-        truncated += honored.length - room;
+    // The per-attempt cap honors the first survivors, always. The per-run
+    // cap holds whatever the run has no room left for, but only for a
+    // Ticket's own outcome.spawn: a Conversation's spawn.json has none. What
+    // either cap holds keeps its place in the proposal's order. A held
+    // spawn the operator adopted passes both: the Adopt is the decision the
+    // caps exist to ask for.
+    let honored = accepted;
+    const held: { proposal: SpawnProposal; reason: HeldSpawnReason }[] = [];
+    if (heldId === undefined) {
+      honored = accepted.slice(0, caps.perAttempt);
+      const overAttempt = accepted.slice(caps.perAttempt);
+      if (origin !== "conversation") {
+        const room = Math.max(0, caps.perRun - session.spawnedThisRun);
+        for (const proposal of honored.slice(room)) {
+          held.push({ proposal, reason: "per-run" });
+        }
         honored = honored.slice(0, room);
+      }
+      for (const proposal of overAttempt) {
+        held.push({ proposal, reason: "per-attempt" });
       }
     }
     const adopted: string[] = [];
@@ -9658,27 +9708,46 @@ function adoptSpawnProposals(session: Session): void {
       adopted.push(id);
       if (origin !== "conversation") session.spawnedThisRun += 1;
     }
-    if (adopted.length > 0 || truncated > 0) {
+    // The held spawn leaves the Held spawns once the boundary has settled
+    // it, adopted or rejected: until then a restart finds it still held.
+    if (heldId !== undefined) session.heldSpawns.remove(heldId);
+    const at = new Date().toISOString();
+    const heldNow =
+      held.length > 0
+        ? session.heldSpawns.hold(
+            held.map(({ proposal, reason }) => ({ parentId, origin, proposal, reason, at })),
+          )
+        : [];
+    if (adopted.length > 0) {
       appendEvent(session.runsDir, parentId, {
-        at: new Date().toISOString(),
+        at,
         attempt: lastAttempt(session.runsDir, parentId),
         kind: "spawn-adopted",
-        payload: { adopted, truncated },
+        payload: { adopted, ...(heldId !== undefined ? { fromHeld: heldId } : {}) },
       });
     }
+    if (heldNow.length > 0) {
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-held",
+        payload: {
+          held: heldNow.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
+        },
+      });
+    }
+    const heldPhrase =
+      `${heldNow.length} proposal${heldNow.length === 1 ? "" : "s"} held at ` +
+      `the caps (${capsPhrase}): ${heldNow.map((h) => h.id).join(", ")}`;
     if (adopted.length > 0) {
       log.push(
-        `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
-          (truncated > 0
-            ? `; ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-              `truncated at the caps (${capsPhrase})`
-            : ""),
+        heldId !== undefined
+          ? `ticket ${parentId}: adopted held spawn ${heldId} as ${adopted.join(", ")}`
+          : `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
+              (heldNow.length > 0 ? `; ${heldPhrase}` : ""),
       );
-    } else if (truncated > 0) {
-      log.push(
-        `ticket ${parentId}: ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-          `truncated at the caps (${capsPhrase})`,
-      );
+    } else if (heldNow.length > 0) {
+      log.push(`ticket ${parentId}: ${heldPhrase}`);
     }
   }
 
@@ -9700,6 +9769,157 @@ function adoptSpawnProposals(session: Session): void {
   session.state = applyUpdate(session.state, {
     tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
   });
+}
+
+// The operator's Adopt of a Held spawn (ADR-0029). It is refused up front,
+// the spawn staying held, when the pool as it stands would reject the
+// proposal (a blocker gone from the pool, a harness no longer known) or when
+// the pool has finished and its store is closed, since the drive that would
+// schedule the new ticket could not record it; a Restart reopens the pool
+// with the spawn still held. Otherwise it queues for the boundary like any
+// proposal, carrying its held id past the caps: at once when the engine is
+// idle, the way a Conversation's spawn.json is adopted, and at the next
+// boundary when a drive is in flight.
+function adoptHeldSpawn(session: Session, id: string): void {
+  const held = session.heldSpawns.get(id);
+  if (!held) throw new Error(`no held spawn ${id}`);
+  if (session.heldSpawns.adopting.has(id)) return;
+  if (!session.storeOpen) {
+    throw new Error(
+      `held spawn ${id} cannot be adopted: the pool has finished; Restart the ` +
+        "Console to adopt it",
+    );
+  }
+  const problem = spawnProposalProblem(session, held.proposal, {
+    ids: new Set(session.markers.map((m) => m.id)),
+    conversations: knownConversationIds(session.poolDir),
+  });
+  if (problem !== null) throw new Error(`held spawn ${id} cannot be adopted: ${problem}`);
+  session.heldSpawns.adopting.add(id);
+  session.pendingSpawns.push({
+    parentId: held.parentId,
+    proposals: [held.proposal],
+    origin: held.origin,
+    heldId: id,
+  });
+  if (!session.driving) {
+    adoptSpawnProposals(session);
+    kickProcessing(session);
+  } else {
+    emitSnapshot(session, "running");
+  }
+}
+
+// The operator's Discard of a Held spawn (ADR-0029): gone for good, the
+// discard on the parent's log. One an Adopt has already queued is past
+// discarding: the boundary is about to write it.
+function discardHeldSpawn(session: Session, id: string): void {
+  const held = session.heldSpawns.get(id);
+  if (!held) throw new Error(`no held spawn ${id}`);
+  if (session.heldSpawns.adopting.has(id)) {
+    throw new Error(`held spawn ${id} is already being adopted`);
+  }
+  session.heldSpawns.remove(id);
+  appendEvent(session.runsDir, held.parentId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, held.parentId),
+    kind: "spawn-discarded",
+    payload: { id, title: held.proposal.title },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${held.parentId}: held spawn ${id} ('${held.proposal.title}') ` +
+        "discarded by the operator",
+    ],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+// The per-attempt cap every pool ran under before ADR-0029 made it a
+// setting: what a pre-ADR truncation was measured against.
+const PRE_ADR_0029_PER_ATTEMPT = 5;
+
+// Recovery of the proposals the caps truncated before ADR-0029 (issue
+// #149's og-review loss): at boot, each is held as if the cap had held it.
+// What survives of one is the parent's checkpointed Outcome, whose spawn
+// array is every schema-valid proposal in order, and the parent's last
+// `spawn-adopted` event, which a pre-ADR adoption wrote with the ids it
+// adopted and a `truncated` count (a post-ADR one has no such count, so it
+// is never mistaken for one). The adoption dropped the proposals it
+// rejected, logging each as a `spawn-rejected` event carrying its title just
+// before the `spawn-adopted`, then honored the survivors in order and
+// truncated the tail; so the truncated proposals are the last `truncated`
+// survivors once those rejected titles are taken out. The rule holds only
+// when the parent's Outcome is the one that adoption read, which the count
+// checks: survivors must number exactly adopted plus truncated, or the
+// parent is left alone with a log line. Only the last adoption of a parent
+// can match its Outcome, and only a Ticket has an Outcome, so a truncated
+// Conversation batch is past recovering. Each recovery is keyed by parent
+// and event time and recorded with its holds in one write, so it runs once
+// however the operator later adopts or discards what it held.
+function recoverTruncatedSpawns(session: Session): void {
+  const log: string[] = [];
+  for (const [parentId, outcome] of Object.entries(session.state.outcomes)) {
+    if (!outcome?.spawn?.length) continue;
+    const events = readEvents(session.runsDir, parentId);
+    const adoptions = events.flatMap((event, index) =>
+      event.kind === "spawn-adopted" ? [index] : [],
+    );
+    const last = adoptions.at(-1);
+    if (last === undefined) continue;
+    const event = events[last]!;
+    const truncated = event.payload.truncated;
+    if (typeof truncated !== "number" || truncated <= 0) continue;
+    const key = `${parentId}@${event.at}`;
+    if (session.heldSpawns.wasRecovered(key)) continue;
+
+    const rejected = events
+      .slice((adoptions.at(-2) ?? -1) + 1, last)
+      .filter((e) => e.kind === "spawn-rejected" && typeof e.payload.title === "string")
+      .map((e) => e.payload.title as string);
+    const survivors = outcome.spawn.filter((proposal) => {
+      const at = rejected.indexOf(proposal.title);
+      if (at === -1) return true;
+      rejected.splice(at, 1);
+      return false;
+    });
+    const adopted = Array.isArray(event.payload.adopted) ? event.payload.adopted.length : 0;
+    if (survivors.length !== adopted + truncated) {
+      session.heldSpawns.recover(key, []);
+      log.push(
+        `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
+          "truncated before held spawns existed could not be matched to its " +
+          "Outcome; not recovered",
+      );
+      continue;
+    }
+    const first = survivors.length - truncated;
+    const held = session.heldSpawns.recover(
+      key,
+      survivors.slice(first).map((proposal, i) => ({
+        parentId,
+        origin: "ticket" as const,
+        proposal,
+        reason: (first + i >= PRE_ADR_0029_PER_ATTEMPT ? "per-attempt" : "per-run") as HeldSpawnReason,
+        at: event.at,
+      })),
+    );
+    appendEvent(session.runsDir, parentId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, parentId),
+      kind: "spawn-held",
+      payload: {
+        held: held.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
+        recovered: true,
+      },
+    });
+    log.push(
+      `ticket ${parentId}: recovered ${held.length} spawn proposal` +
+        `${held.length === 1 ? "" : "s"} a cap truncated before held spawns ` +
+        `existed: ${held.map((h) => h.id).join(", ")}`,
+    );
+  }
+  if (log.length > 0) session.state = applyUpdate(session.state, { log });
 }
 
 // Merging one finished ticket's branch onto the pool's working branch.

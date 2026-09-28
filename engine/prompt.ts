@@ -319,7 +319,8 @@ export function buildConversationTeaching(
     "",
     "The engine polls for this file, reads it, and deletes it once read: " +
       "write it whenever you like, mid-conversation, not only once. Caps: " +
-      `${perFile} ${perFile === 1 ? "entry" : "entries"} honored per file written; ` +
+      `${perFile} ${perFile === 1 ? "entry" : "entries"} honored per file written, ` +
+      "and entries beyond it are held for the operator to adopt or discard; " +
       "unlike a Ticket's own spawns there is no run-wide cap on what a " +
       "Conversation spawns.",
     "",
@@ -417,7 +418,8 @@ export function buildPrompt(parts: PromptParts): string {
       `${parts.spawnCaps.perAttempt} ` +
       `${parts.spawnCaps.perAttempt === 1 ? "proposal" : "proposals"} honored ` +
       `per attempt and ${parts.spawnCaps.perRun} per run, ` +
-      "overflow truncated to the log. You never write pool state: no ticket " +
+      "overflow held for the operator to adopt or discard, so order your " +
+      "proposals most important first. You never write pool state: no ticket " +
       "files, no ids, no statuses. You propose; the engine writes.",
   );
   return sections.join("\n");

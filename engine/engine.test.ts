@@ -7914,7 +7914,9 @@ describe("spawn adoption", () => {
     });
   });
 
-  it("honors the per-attempt cap of five and logs the truncation", async () => {
+  // Issue #149 (ADR-0029): a proposal beyond a cap is held for the
+  // operator, never dropped, and the hold is on the parent's log.
+  it("holds the proposals beyond the per-attempt cap of five for the operator", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01")],
       config: stubConfig,
@@ -7937,10 +7939,8 @@ describe("spawn adoption", () => {
     }
     expect(existsSync(join(poolDir, "issues", "01-spawn-6.md"))).toBe(false);
     expect(existsSync(join(poolDir, "issues", "01-spawn-7.md"))).toBe(false);
-    const adopted = readEventLines(poolDir, "01").find(
-      (e) => e.kind === "spawn-adopted",
-    );
-    expect(adopted?.payload).toEqual({
+    const events = readEventLines(poolDir, "01");
+    expect(events.find((e) => e.kind === "spawn-adopted")?.payload).toEqual({
       adopted: [
         "01-spawn-1",
         "01-spawn-2",
@@ -7948,18 +7948,27 @@ describe("spawn adoption", () => {
         "01-spawn-4",
         "01-spawn-5",
       ],
-      truncated: 2,
+    });
+    expect(events.find((e) => e.kind === "spawn-held")?.payload).toEqual({
+      held: [
+        { id: "held-1", title: "Number 6", reason: "per-attempt" },
+        { id: "held-2", title: "Number 7", reason: "per-attempt" },
+      ],
     });
     expect(
-      run.final.log.some(
-        (line) =>
-          line.startsWith("ticket 01: adopted spawn tickets") &&
-          line.includes("2 proposals truncated at the caps"),
-      ),
-    ).toBe(true);
+      run.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.parentId, h.title, h.reason]),
+    ).toEqual([
+      ["held-1", "01", "Number 6", "per-attempt"],
+      ["held-2", "01", "Number 7", "per-attempt"],
+    ]);
+    expect(run.final.log).toContain(
+      "ticket 01: adopted spawn tickets 01-spawn-1, 01-spawn-2, 01-spawn-3, " +
+        "01-spawn-4, 01-spawn-5; 2 proposals held at the caps " +
+        "(5 per attempt, 20 per run): held-1, held-2",
+    );
   }, 15000);
 
-  it("honors the per-run cap of twenty across attempts and logs the truncation", async () => {
+  it("holds what the per-run cap of twenty has no room for across attempts", async () => {
     const poolDir = makePool({
       tickets: [
         readyTicket("01"),
@@ -7991,22 +8000,162 @@ describe("spawn adoption", () => {
       return `issues/${parent}-spawn-${n}.md`;
     }).filter((file) => existsSync(join(poolDir, file)));
     expect(spawnFiles).toHaveLength(20);
-    // The attempts run in parallel, so which parent truncated is racy; that
-    // exactly one did, with all seven proposals dropped, is not.
-    const adoptEvents = ["01", "02", "03", "04", "05"].flatMap((id) =>
+    // The attempts run in parallel, so which parent found the run full is
+    // racy; that exactly one did, with all seven held, is not.
+    const heldReasons = ["01", "02", "03", "04", "05"].map((id) =>
       readEventLines(poolDir, id)
-        .filter((e) => e.kind === "spawn-adopted")
-        .map((e) => e.payload as { adopted: string[]; truncated: number }),
+        .filter((e) => e.kind === "spawn-held")
+        .flatMap((e) => (e.payload.held as { reason: string }[]).map((h) => h.reason)),
     );
-    expect(adoptEvents).toHaveLength(5);
-    expect(adoptEvents.filter((p) => p.adopted.length === 5)).toHaveLength(4);
-    expect(adoptEvents.filter((p) => p.adopted.length === 0)).toEqual([
-      { adopted: [], truncated: 7 },
+    expect(heldReasons.filter((r) => r.length === 2)).toHaveLength(4);
+    expect(heldReasons.filter((r) => r.length === 7)).toEqual([
+      [
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-attempt",
+        "per-attempt",
+      ],
     ]);
-    expect(
-      run.final.log.some((line) => line.includes("truncated at the caps")),
-    ).toBe(true);
+    const last = run.snapshots.at(-1)!;
+    expect(last.heldSpawns).toHaveLength(15);
+    expect(last.spawnUsage.spawnedThisRun).toBe(20);
   }, 15000);
+
+  // The operator's Adopt bypasses both caps (ADR-0029) and still counts
+  // toward the run, and a restart in between loses nothing.
+  it("keeps held spawns across a restart and adopts one past the caps on the operator's word", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perRun: 1 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("First"), proposal("Second", ["01"])] },
+    });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(first.phase).toBe("quiescent");
+    expect(first.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.reason])).toEqual([
+      ["held-1", "per-run"],
+    ]);
+    await first.shutdown(0);
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+    expect(run.snapshots.at(-1)!.heldSpawns.map((h) => h.title)).toEqual(["Second"]);
+    expect(run.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(0);
+
+    expect(() => run.adoptHeldSpawn("held-9")).toThrow("no held spawn held-9");
+    run.adoptHeldSpawn("held-1");
+    const settled = await run.settled;
+
+    expect(markerLine(poolDir, "01-spawn-2.md")).toContain("id=01-spawn-2 blocked-by=01");
+    expect(settled.final.tickets["01-spawn-2"]).toBe("done");
+    expect(settled.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(settled.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(1);
+    const adopted = readEventLines(poolDir, "01").filter((e) => e.kind === "spawn-adopted");
+    expect(adopted.at(-1)!.payload).toEqual({ adopted: ["01-spawn-2"], fromHeld: "held-1" });
+    // Adopting again is refused: the held spawn is gone.
+    expect(() => run.adoptHeldSpawn("held-1")).toThrow("no held spawn held-1");
+    await approveReview(settled);
+  }, 20000);
+
+  it("discards a held spawn for good, recorded on the parent's log", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 1 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("Kept"), proposal("Unwanted")] },
+    });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    first.discardHeldSpawn("held-1");
+
+    expect(first.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(readEventLines(poolDir, "01").find((e) => e.kind === "spawn-discarded")?.payload)
+      .toEqual({ id: "held-1", title: "Unwanted" });
+    expect(first.final.log).toContain(
+      "ticket 01: held spawn held-1 ('Unwanted') discarded by the operator",
+    );
+    expect(() => first.discardHeldSpawn("held-1")).toThrow("no held spawn held-1");
+    await first.shutdown(0);
+
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    await again.shutdown(0);
+  }, 20000);
+
+  // The og-review loss (issue #149): before holding, the caps truncated, and
+  // the truncated proposals survive only in the parent's checkpointed
+  // Outcome. Boot brings them back as held spawns, once.
+  it("recovers proposals a cap truncated before holding existed, once", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-t.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+        {
+          file: "01-spawn-1.md",
+          marker: "<!-- state: id=01-spawn-1 blocked-by=none status=done spawned-by=01 -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const store = new SqliteCheckpointStore(poolDir);
+    store.write({
+      tickets: { "01": "done", "01-spawn-1": "done" },
+      log: [],
+      outcomes: {
+        "01": {
+          status: "done",
+          summary: "s",
+          commitSha: null,
+          spawn: [proposal("Adopted"), proposal("Rejected", ["99"]), proposal("Truncated")],
+        },
+      },
+      interrupts: [],
+      reviewApproved: false,
+    });
+    store.close();
+    const runsDir = join(poolDir, "runs");
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.000Z",
+      attempt: 1,
+      kind: "spawn-rejected",
+      payload: { title: "Rejected", reason: "blockedBy names tickets outside the pool: 99" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.001Z",
+      attempt: 1,
+      kind: "spawn-adopted",
+      payload: { adopted: ["01-spawn-1"], truncated: 1 },
+    });
+    const rig = stubHarness(poolDir, {});
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+    const held = run.snapshots.at(-1)!.heldSpawns;
+    expect(held.map((h) => [h.id, h.parentId, h.title, h.reason, h.at])).toEqual([
+      ["held-1", "01", "Truncated", "per-run", "2026-09-27T10:00:00.001Z"],
+    ]);
+    expect(readEventLines(poolDir, "01").at(-1)).toMatchObject({
+      kind: "spawn-held",
+      payload: { held: [{ id: "held-1", title: "Truncated", reason: "per-run" }], recovered: true },
+    });
+    run.discardHeldSpawn("held-1");
+    await run.shutdown(0);
+
+    // Neither the discard nor a second boot brings it back.
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    await again.shutdown(0);
+  }, 20000);
 
   // Issue #149: both caps live in the pool config, each field falling back
   // to its default on its own, and the snapshot carries them with the count.
