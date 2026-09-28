@@ -5,6 +5,7 @@ import {
   poolAssignmentDefaults,
   checkpointNotice,
   clampDetailWidth,
+  clampNeedsInputWidth,
   clampDrawersHeight,
   bulkResumeRows,
   projectConversationsNeedsInput,
@@ -19,6 +20,9 @@ import {
   logTailOffset,
   nextNodeSelection,
   parseStoredDetailWidth,
+  parseStoredNeedsInputWidth,
+  NEEDS_INPUT_MAX_FRACTION,
+  NEEDS_INPUT_MIN_PX,
   phaseLabel,
   poolDisplayName,
   poolStatus,
@@ -1967,6 +1971,50 @@ describe("parseStoredDetailWidth", () => {
 
   it("tracks the window bound on a narrow window", () => {
     expect(parseStoredDetailWidth("600", 200)).toBe(200);
+  });
+});
+
+describe("clampNeedsInputWidth (issue #147)", () => {
+  it("never narrows below the tray's original 300px", () => {
+    expect(NEEDS_INPUT_MIN_PX).toBe(300);
+    expect(clampNeedsInputWidth(120, 900)).toBe(300);
+  });
+
+  it("clamps above the canvas column fraction", () => {
+    expect(clampNeedsInputWidth(2000, 900)).toBe(900);
+  });
+
+  it("passes values inside the range through unchanged", () => {
+    expect(clampNeedsInputWidth(480, 900)).toBe(480);
+  });
+
+  it("tracks the column bound when the column is too narrow to hold the minimum", () => {
+    expect(clampNeedsInputWidth(480, 200)).toBe(200);
+  });
+
+  it("keeps the maximum at a fraction of the canvas column", () => {
+    expect(NEEDS_INPUT_MAX_FRACTION).toBeCloseTo(0.6);
+    expect(clampNeedsInputWidth(100000, Math.round(1200 * NEEDS_INPUT_MAX_FRACTION))).toBe(720);
+  });
+});
+
+describe("parseStoredNeedsInputWidth (issue #147)", () => {
+  it("round-trips a stored width string through a reload", () => {
+    expect(parseStoredNeedsInputWidth("480", 900)).toBe(480);
+  });
+
+  it("falls back to the default minimum when nothing is stored", () => {
+    expect(parseStoredNeedsInputWidth(null, 900)).toBe(NEEDS_INPUT_MIN_PX);
+  });
+
+  it("falls back to the minimum for a non-numeric or non-finite stored value", () => {
+    expect(parseStoredNeedsInputWidth("wide", 900)).toBe(NEEDS_INPUT_MIN_PX);
+    expect(parseStoredNeedsInputWidth("Infinity", 900)).toBe(NEEDS_INPUT_MIN_PX);
+  });
+
+  it("clamps a stored width that is out of range on reload", () => {
+    expect(parseStoredNeedsInputWidth("10", 900)).toBe(NEEDS_INPUT_MIN_PX);
+    expect(parseStoredNeedsInputWidth("5000", 900)).toBe(900);
   });
 });
 

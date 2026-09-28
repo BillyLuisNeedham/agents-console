@@ -393,6 +393,7 @@ export class Canvas {
   private readonly onNewConversation: () => void;
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
+  private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
@@ -414,6 +415,10 @@ export class Canvas {
     /** The header's "Settings" button (ADR-0026): opens the Settings pane.
      *  Always offered; a headless pool has settings too. */
     onOpenSettings: () => void;
+    /** The header's "reset layout" button, after the canvas has restored its
+     *  own card positions: resets what other modules lay out (the Needs
+     *  input tray's dragged width, issue #147). */
+    onResetLayout: () => void;
     /** A Conversation card's End button. Fire-and-forget: the Conversations
      *  store tracks the in-flight/failure state the card reads back. */
     onEndConversation: (conversationId: string) => void;
@@ -434,6 +439,7 @@ export class Canvas {
     this.onNewConversation = options.onNewConversation;
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
+    this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
     this.onArmStop = options.onArmStop;
     this.onCancelStop = options.onCancelStop;
@@ -875,7 +881,7 @@ export class Canvas {
           "button",
           {
             class: "btn",
-            title: "restore default card positions",
+            title: "restore default card positions and the needs input tray's width",
             onclick: () => {
               this.resetLayout(model.cards);
               this.applyPositions();
@@ -883,6 +889,7 @@ export class Canvas {
                 this.fitWorld(this.canvas.world);
                 this.updateEdges();
               }
+              this.onResetLayout();
             },
           },
           "reset layout",

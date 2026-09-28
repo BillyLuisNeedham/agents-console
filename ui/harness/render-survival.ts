@@ -31,7 +31,7 @@ import type { LogChunk } from "../src/log-pane";
 const SELECTED_TICKET = "t-3";
 const DONE_TICKET = "t-2";
 const CHANGED_TICKET = "t-1";
-const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] input.needs-input-note`;
+const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textarea.needs-input-note`;
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -302,7 +302,8 @@ const SCROLL_SELECTORS = [
   ".detail-md pre",
   ".detail-pre",
   ".log-lines",
-  ".needs-input-tray",
+  // The Needs input tray's rows, which scroll under its fixed head (issue #147).
+  ".needs-input-rows",
   ".conversations-tray",
   ".enlist-picker",
   // The Reassign bulk dialog's row list (issue #126): its own scroll region
@@ -389,12 +390,15 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
   await settle();
 
   // (b) focus the tray note with a caret mid-text
-  const note = q<HTMLInputElement>(TRAY_NOTE);
+  const note = q<HTMLTextAreaElement>(TRAY_NOTE);
   let caret: { start: number; end: number } | null = null;
   if (note) {
     note.value = "hello morph world";
     note.dispatchEvent(new Event("input", { bubbles: true }));
-    note.focus();
+    // Without scrolling: the rows were just scrolled on purpose, and the
+    // two-line rows (issue #147) can put this note out of view, where a
+    // plain focus() would scroll the rows to it before any render ran.
+    note.focus({ preventScroll: true });
     note.setSelectionRange(5, 5);
     caret = { start: 5, end: 5 };
   }
@@ -460,8 +464,8 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     }
     if (caret) {
       const active = document.activeElement;
-      const start = (active as HTMLInputElement | null)?.selectionStart;
-      const end = (active as HTMLInputElement | null)?.selectionEnd;
+      const start = (active as HTMLTextAreaElement | null)?.selectionStart;
+      const end = (active as HTMLTextAreaElement | null)?.selectionEnd;
       if (active !== q(TRAY_NOTE)) note_("focus stays on tray note", `${tag}: activeElement is ${describe(active)}`);
       else if (start !== caret.start || end !== caret.end)
         note_("caret survives", `${tag}: selection ${start}-${end}, expected ${caret.start}-${caret.end}`);

@@ -3,9 +3,10 @@
  * project.ts. All data flows in through `ConsoleView.render`; all user
  * intent flows out through `Handlers`. The canvas (pan, zoom, drag, edge
  * routing, persisted positions), the Detail (render, width drag, fullscreen,
- * interrupt forms, note drafts), and the drawers (strip render and resize)
- * each live in their own module owning their own state; this module owns
- * only the selection and wires the three together.
+ * interrupt forms), and the drawers (strip render and resize) each live in
+ * their own module owning their own state; this module owns the selection
+ * and the Draft answers the Detail and the Needs input tray share, and wires
+ * them together.
  */
 
 import {
@@ -41,6 +42,7 @@ import {
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
 import { Detail, type DetailHandlers } from "./detail";
+import { DraftAnswers } from "./drafts";
 import { Drawers } from "./drawers";
 import { NeedsInputTray, type NeedsInputOptions } from "./needs-input";
 import { h } from "./dom";
@@ -205,8 +207,13 @@ export type ConsoleViewOptions = NeedsInputOptions &
  */
 export class ConsoleView {
   private readonly canvas: Canvas;
+  // One Draft answer per ticket, whichever surface it is typed in (issue
+  // #147): the Detail and the Needs input tray both read and write this
+  // store, and the render prunes it once.
+  private readonly drafts = new DraftAnswers();
   private readonly detail = new Detail({
     onClose: () => this.closeDetail(),
+    drafts: this.drafts,
   });
   private readonly drawers = new Drawers();
   private readonly needsInput: NeedsInputTray;
@@ -264,6 +271,7 @@ export class ConsoleView {
         void this.enlist.openPicker();
       },
       onOpenSettings: () => this.settings.toggle(),
+      onResetLayout: () => this.needsInput.resetWidth(),
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
@@ -274,7 +282,7 @@ export class ConsoleView {
       onCancelCloseTerminals: () => this.headerHandlers?.onCancelCloseTerminals(),
       onConfirmCloseTerminals: () => this.headerHandlers?.onConfirmCloseTerminals(),
     });
-    this.needsInput = new NeedsInputTray(options);
+    this.needsInput = new NeedsInputTray({ ...options, drafts: this.drafts });
   }
 
   /** The Conversations store's per-conversation End state, for the pool
@@ -288,8 +296,7 @@ export class ConsoleView {
     this.headerHandlers = handlers;
     this.canvas.sync(model.cards);
     const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
-    this.detail.pruneDrafts(pendingInterrupts);
-    this.needsInput.pruneDrafts(pendingInterrupts);
+    this.drafts.prune(pendingInterrupts);
     this.needsInput.pruneFailures(pendingInterrupts);
     this.conversationsTray.pruneEndFailures(
       new Set(model.conversationsTray.map((row) => row.id)),
@@ -329,6 +336,7 @@ export class ConsoleView {
         onSelect: (cardId) => this.selectNode(cardId),
         onFocusConversation: (conversationId) => this.onFocusTerminal(conversationId),
         onKeepTalking: handlers.onKeepTalking,
+        onExpand: (cardId, ticketId) => this.writeFullSize(cardId, ticketId, handlers),
       }),
       this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
         onSelect: (cardId) => this.selectNode(cardId),
@@ -356,6 +364,7 @@ export class ConsoleView {
           (model.logPane.stream ? ":stream" : "")
         : null;
     settleLogScroll(logPaneKey);
+    this.detail.settleNoteFocus(root);
     const world = root.querySelector(".canvas-world");
     const viewport = root.querySelector(".canvas-viewport");
     if (world instanceof HTMLElement && viewport instanceof HTMLElement) {
@@ -369,6 +378,17 @@ export class ConsoleView {
     this.detail.exitFullscreen();
     this.selectedNodeId = nextNodeSelection(this.selectedNodeId, nodeId);
     this.onSelectNode?.(this.selectedNodeId);
+  }
+
+  // A Needs input row's expand (issue #147): the ticket's Detail, full size
+  // on Progress with its note focused. Selecting a card leaves fullscreen,
+  // so the selection comes first; a card already selected is not selected
+  // again, which would close it. The tab change renders, and that render's
+  // commit focuses the note.
+  private writeFullSize(cardId: string, ticketId: string, handlers: Handlers): void {
+    if (this.selectedNodeId !== cardId) this.selectNode(cardId);
+    this.detail.writeFullSize(ticketId);
+    handlers.onSelectTab(ticketId, "progress");
   }
 
   private closeDetail(): void {

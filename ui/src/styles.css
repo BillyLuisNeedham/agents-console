@@ -1717,14 +1717,43 @@ body {
   box-shadow: 4px 4px 24px rgba(0, 0, 0, 0.5);
 }
 
+/* The tray's width is rendered inline from the dragged width (issue #147),
+   300px by default; the head stays put and the rows below it scroll. */
 .needs-input-tray {
   width: 300px;
   max-height: calc(100% - 100px);
-  overflow-y: auto;
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.needs-input-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The tray's right edge: drag to widen or narrow it, the Detail handle's
+   look on the opposite side. It straddles the border so the strip is easy
+   to grab without covering the rows' scrollbar. */
+.needs-input-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 8px;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+  border-radius: 0 8px 8px 0;
+}
+
+.needs-input-handle:hover {
+  background: var(--accent);
 }
 
 .needs-input-head,
@@ -1770,12 +1799,22 @@ body {
   color: var(--text);
 }
 
+/* A row is two lines (issue #147): the id, kind and actions on the first,
+   the note full width beneath, so a long ticket id never squeezes it. */
 .needs-input-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 4px;
   border-top: 1px solid var(--border);
+}
+
+.needs-input-row-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
 }
 
 /* The answered-and-waiting row: the same moment as the Detail's queued
@@ -1807,7 +1846,11 @@ body {
   font-weight: 600;
   padding: 0;
   text-align: left;
-  flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .needs-input-id:hover {
@@ -1820,9 +1863,15 @@ body {
   white-space: nowrap;
 }
 
+/* The row's note grows with the answer (field-sizing where the browser has
+   it, the rendered rows otherwise) up to about eight lines, then scrolls. */
 .needs-input-note {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
+  field-sizing: content;
+  min-height: calc(2lh + 12px);
+  max-height: calc(8lh + 12px);
+  overflow-y: auto;
+  resize: none;
 }
 
 .needs-input-actions {

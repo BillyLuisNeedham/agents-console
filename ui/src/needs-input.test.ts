@@ -1,11 +1,14 @@
 /// <reference types="bun" />
 
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import {
+  NEEDS_INPUT_WIDTH_KEY,
   NeedsInputTray,
+  noteRows,
   waitingStatus,
   type AnswerHandler,
   type NeedsInputFailure,
+  type NeedsInputHandlers,
 } from "./needs-input";
 import {
   projectNeedsInput,
@@ -16,6 +19,8 @@ import {
   type NeedsInputRow,
   type ResumeAction,
 } from "./project";
+import { DraftAnswers } from "./drafts";
+import { commit } from "./morph";
 import { useDom } from "./test-dom";
 
 useDom();
@@ -92,14 +97,29 @@ function fakeAnswer(): {
   return { answer, calls, deferreds };
 }
 
-function trayWith(fake: ReturnType<typeof fakeAnswer>): NeedsInputTray {
-  return new NeedsInputTray({ onAnswer: fake.answer, onChange: () => {} });
+function trayWith(
+  fake: ReturnType<typeof fakeAnswer>,
+  drafts = new DraftAnswers(),
+): NeedsInputTray {
+  return new NeedsInputTray({ onAnswer: fake.answer, onChange: () => {}, drafts });
 }
 
 // A tray for the state-only tests: the answer seam is never fired, so a
 // neutral one stands in for the composition's wiring.
-function stateTray(): NeedsInputTray {
-  return new NeedsInputTray({ onAnswer: () => Promise.resolve(), onChange: () => {} });
+function stateTray(drafts = new DraftAnswers()): NeedsInputTray {
+  return new NeedsInputTray({ onAnswer: () => Promise.resolve(), onChange: () => {}, drafts });
+}
+
+// The handlers a painted tray reports through, each a no-op unless the test
+// overrides it.
+function trayHandlers(overrides: Partial<NeedsInputHandlers> = {}): NeedsInputHandlers {
+  return {
+    onSelect: () => {},
+    onFocusConversation: () => Promise.resolve(true),
+    onKeepTalking: () => {},
+    onExpand: () => {},
+    ...overrides,
+  };
 }
 
 describe("NeedsInputTray note drafts", () => {
@@ -117,22 +137,13 @@ describe("NeedsInputTray note drafts", () => {
     expect(tray.note("01")).toBe("");
   });
 
-  it("prunes drafts whose interrupt resolved, keeping the still-pending ones", () => {
-    const tray = stateTray();
-    tray.setNote("01", "clean the worktree first");
-    tray.setNote("02", "skip the flaky test");
-    tray.pruneDrafts(new Set(["02"]));
-    expect(tray.note("01")).toBe("");
-    expect(tray.note("02")).toBe("skip the flaky test");
-  });
-
-  it("prunes nothing when every draft's interrupt is still pending", () => {
-    const tray = stateTray();
-    tray.setNote("01", "clean the worktree first");
-    tray.setNote("02", "skip the flaky test");
-    tray.pruneDrafts(new Set(["01", "02", "03"]));
-    expect(tray.note("01")).toBe("clean the worktree first");
-    expect(tray.note("02")).toBe("skip the flaky test");
+  it("reads and writes the shared Draft answers store (issue #147)", () => {
+    const drafts = new DraftAnswers();
+    const tray = stateTray(drafts);
+    drafts.set("01", "typed in the Detail");
+    expect(tray.note("01")).toBe("typed in the Detail");
+    tray.setNote("02", "typed in the tray");
+    expect(drafts.get("02")).toBe("typed in the tray");
   });
 });
 
@@ -157,12 +168,13 @@ describe("NeedsInputTray collapse", () => {
   });
 
   it("holds the collapsed flag while snapshots re-render and prune", () => {
-    const tray = stateTray();
+    const drafts = new DraftAnswers();
+    const tray = stateTray(drafts);
     tray.setCollapsed(true);
     tray.setNote("01", "clean the worktree first");
     // A snapshot render prunes against the pending interrupts; neither the
     // prune nor the rebuild touches the collapsed flag or the drafts.
-    tray.pruneDrafts(new Set(["01"]));
+    drafts.prune(new Set(["01"]));
     expect(tray.isCollapsed).toBe(true);
     expect(tray.note("01")).toBe("clean the worktree first");
   });
@@ -253,18 +265,19 @@ describe("NeedsInputTray waiting rows", () => {
   });
 
   it("keeps a waiting row's draft pending until the boundary drains it", () => {
-    const tray = stateTray();
+    const drafts = new DraftAnswers();
+    const tray = stateTray(drafts);
     tray.setNote("A", "clean the worktree first");
     tray.setNote("B", "skip the flaky test");
     // While A waits, its row still lists, so its draft stays pending.
     const waiting = projectNeedsInput(projectPool(queuedAnswerSnapshot()).cards);
-    tray.pruneDrafts(new Set(waiting.map((row) => row.ticketId)));
+    drafts.prune(new Set(waiting.map((row) => row.ticketId)));
     expect(tray.note("A")).toBe("clean the worktree first");
     expect(tray.note("B")).toBe("skip the flaky test");
     // The boundary applies the queued answer and the row disappears; the
     // draft goes with it, and the still-open row's draft stands.
     const drained = projectNeedsInput(projectPool(drainedSnapshot()).cards);
-    tray.pruneDrafts(new Set(drained.map((row) => row.ticketId)));
+    drafts.prune(new Set(drained.map((row) => row.ticketId)));
     expect(tray.note("A")).toBe("");
     expect(tray.note("B")).toBe("skip the flaky test");
   });
@@ -364,11 +377,11 @@ describe("NeedsInputTray Keep talking (issue #139)", () => {
   function paint(rows: NeedsInputRow[]) {
     const keepTalks: string[] = [];
     const tray = stateTray();
-    const el = tray.render(rows, [], {
-      onSelect: () => {},
-      onFocusConversation: () => Promise.resolve(true),
-      onKeepTalking: (ticketId) => keepTalks.push(ticketId),
-    })!;
+    const el = tray.render(
+      rows,
+      [],
+      trayHandlers({ onKeepTalking: (ticketId) => keepTalks.push(ticketId) }),
+    )!;
     return { el, keepTalks };
   }
 
@@ -414,5 +427,170 @@ describe("NeedsInputTray Keep talking (issue #139)", () => {
     expect(keepTalkingIn(el, "ticket:02")?.disabled).toBe(false);
     const failures = [...el.querySelectorAll(".keep-talking-failure")];
     expect(failures.map((f) => f.textContent)).toEqual(["the pane is gone"]);
+  });
+});
+
+describe("NeedsInputTray row layout (issue #147)", () => {
+  const longId = "conv-1-spawn-2-spawn-1-a-ticket-id-long-enough-to-squeeze-the-row";
+
+  it("puts the note on its own full-width line under the id, kind and actions", () => {
+    const tray = stateTray();
+    const el = tray.render([row(longId, "checkpoint")], [], trayHandlers())!;
+    const rowEl = el.querySelector(`[data-key="ticket:${longId}"]`)!;
+    const line = rowEl.querySelector(":scope > .needs-input-row-line")!;
+    expect(line).not.toBeNull();
+    expect(line.querySelector(".needs-input-id")?.textContent).toBe(longId);
+    expect(line.querySelector(".needs-input-kind")).not.toBeNull();
+    expect(line.querySelector(".needs-input-actions")).not.toBeNull();
+    // The note is the row's own child after the line, never squeezed beside
+    // the id: a textarea, keeping the classes the Detail's note shares.
+    const note = rowEl.querySelector(":scope > .needs-input-note")!;
+    expect(note.tagName).toBe("TEXTAREA");
+    expect(note.classList.contains("interrupt-note")).toBe(true);
+    expect(line.querySelector(".needs-input-note")).toBeNull();
+    expect(rowEl.lastElementChild).toBe(note);
+  });
+
+  it("grows the note's rows with its lines, floored at two and capped at eight", () => {
+    expect(noteRows("")).toBe(2);
+    expect(noteRows("one line")).toBe(2);
+    expect(noteRows("a\nb\nc")).toBe(3);
+    expect(noteRows(Array.from({ length: 20 }, () => "x").join("\n"))).toBe(8);
+    const tray = stateTray();
+    tray.setNote("01", "a\nb\nc\nd");
+    const el = tray.render([row("01", "checkpoint")], [], trayHandlers())!;
+    expect(el.querySelector("textarea.needs-input-note")!.getAttribute("rows")).toBe("4");
+  });
+
+  it("writes what is typed in the note to the shared Draft answers", () => {
+    const drafts = new DraftAnswers();
+    const tray = stateTray(drafts);
+    const el = tray.render([row("01", "checkpoint")], [], trayHandlers())!;
+    const note = el.querySelector<HTMLTextAreaElement>("textarea.needs-input-note")!;
+    note.value = "line one\nline two";
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(drafts.get("01")).toBe("line one\nline two");
+  });
+
+  it("shows a draft typed elsewhere, and resume all sends it", () => {
+    const drafts = new DraftAnswers();
+    const fake = fakeAnswer();
+    const tray = trayWith(fake, drafts);
+    drafts.set("01", "written full size in the Detail");
+    const el = tray.render([row("01", "checkpoint")], [], trayHandlers())!;
+    expect(el.querySelector<HTMLTextAreaElement>("textarea.needs-input-note")!.value).toBe(
+      "written full size in the Detail",
+    );
+    const fired = tray.resumeAll([row("01", "checkpoint")]);
+    expect(fake.calls).toEqual([
+      { ticketId: "01", action: "resume", note: "written full size in the Detail" },
+    ]);
+    fake.deferreds.get("01")!.resolve();
+    return fired;
+  });
+});
+
+describe("NeedsInputTray expand (issue #147)", () => {
+  it("offers expand on every interrupt row and reports the card and ticket", () => {
+    const expanded: [string, string][] = [];
+    const tray = stateTray();
+    const el = tray.render(
+      [row("01", "checkpoint"), row("02", "review")],
+      [],
+      trayHandlers({ onExpand: (cardId, ticketId) => expanded.push([cardId, ticketId]) }),
+    )!;
+    const expand = el.querySelector<HTMLButtonElement>('[data-key="ticket:02"] .needs-input-expand')!;
+    expect(expand.title).toBe("write this answer full size");
+    expand.click();
+    expect(expanded).toEqual([["ticket:02", "02"]]);
+    // Expand is not an answer: the actions keep exactly the form's set.
+    const actions = [...el.querySelectorAll('[data-key="ticket:02"] .needs-input-actions button')];
+    expect(actions.map((b) => b.textContent)).toEqual(["approve", "reject"]);
+  });
+
+  it("disables expand on a waiting row, whose Detail has no note to write", () => {
+    const tray = stateTray();
+    const el = tray.render([row("01", "checkpoint", true)], [], trayHandlers())!;
+    expect(el.querySelector<HTMLButtonElement>(".needs-input-expand")!.disabled).toBe(true);
+  });
+});
+
+describe("NeedsInputTray width (issue #147)", () => {
+  beforeEach(() => localStorage.clear());
+
+  function mount(tray: NeedsInputTray) {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.className = "shell";
+        shell.appendChild(tray.render([row("01", "checkpoint")], [], trayHandlers())!);
+        return shell;
+      });
+    paint();
+    const trayEl = () => root.querySelector<HTMLElement>(".needs-input-tray")!;
+    return { root, paint, trayEl };
+  }
+
+  function pointer(type: string, target: Element, x: number): void {
+    target.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, pointerId: 1, clientX: x, clientY: 10 }),
+    );
+  }
+
+  it("starts at the original 300px", () => {
+    const { trayEl } = mount(stateTray());
+    expect(trayEl().style.width).toBe("300px");
+  });
+
+  it("widens by dragging its right edge, and remembers the width", () => {
+    const { root, paint, trayEl } = mount(stateTray());
+    const handle = root.querySelector(".needs-input-handle")!;
+    pointer("pointerdown", handle, 300);
+    pointer("pointermove", handle, 360);
+    pointer("pointermove", handle, 420);
+    expect(trayEl().style.width).toBe("420px");
+    pointer("pointerup", handle, 420);
+    expect(localStorage.getItem(NEEDS_INPUT_WIDTH_KEY)).toBe("420");
+    // A re-render draws the dragged width, and a new session reads it back.
+    paint();
+    expect(trayEl().style.width).toBe("420px");
+    expect(mount(stateTray()).trayEl().style.width).toBe("420px");
+  });
+
+  it("lets go of a drag whose pointer capture is lost, so the next drag starts", () => {
+    const { root, trayEl } = mount(stateTray());
+    const handle = root.querySelector(".needs-input-handle")!;
+    pointer("pointerdown", handle, 300);
+    pointer("pointermove", handle, 360);
+    // The tray unmounted mid-drag: the capture goes and no pointerup comes.
+    pointer("lostpointercapture", handle, 360);
+    pointer("pointermove", handle, 500);
+    expect(trayEl().style.width).toBe("360px");
+    pointer("pointerdown", handle, 360);
+    pointer("pointermove", handle, 400);
+    expect(trayEl().style.width).toBe("400px");
+  });
+
+  it("never narrows below 300px", () => {
+    const { root, trayEl } = mount(stateTray());
+    const handle = root.querySelector(".needs-input-handle")!;
+    pointer("pointerdown", handle, 300);
+    pointer("pointermove", handle, 100);
+    pointer("pointerup", handle, 100);
+    expect(trayEl().style.width).toBe("300px");
+  });
+
+  it("resets to the default width and forgets the stored one", () => {
+    localStorage.setItem(NEEDS_INPUT_WIDTH_KEY, "480");
+    const tray = stateTray();
+    const { trayEl, paint } = mount(tray);
+    expect(trayEl().style.width).toBe("480px");
+    tray.resetWidth();
+    expect(trayEl().style.width).toBe("300px");
+    expect(localStorage.getItem(NEEDS_INPUT_WIDTH_KEY)).toBeNull();
+    paint();
+    expect(trayEl().style.width).toBe("300px");
   });
 });

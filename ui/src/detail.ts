@@ -1,11 +1,12 @@
 /**
  * Detail: the right-hand panel for the selected card. One module owns the
- * panel render, the width drag on its left edge, fullscreen, the interrupt
- * forms, and the note drafts, as instance state on the class the composition
- * root creates once per session, so every render says the same thing: the
+ * panel render, the width drag on its left edge, fullscreen, and the
+ * interrupt forms, as instance state on the class the composition root
+ * creates once per session, so every render says the same thing: the
  * dragged width, the fullscreen flag, and a note being typed all render from
- * here. Selection changes arrive through the `onClose` callback and
- * `exitFullscreen`; the composition owns the selection itself.
+ * here. The note drafts are the Draft answers store the Needs input tray
+ * shares (issue #147). Selection changes arrive through the `onClose`
+ * callback and `exitFullscreen`; the composition owns the selection itself.
  */
 
 import {
@@ -38,6 +39,7 @@ import {
 } from "./terminal";
 import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
+import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -93,10 +95,15 @@ export class Detail {
   // keep working. Esc, the toggle, or selecting another card exits; exiting
   // restores the dragged width.
   private fullscreen = false;
+  // The ticket whose note the next commit focuses, set by writeFullSize and
+  // cleared once the note has focus or fullscreen is left, so the focus is
+  // asked for once and never pulled back on a later render.
+  private noteFocus: string | null = null;
   // Interrupt note drafts, keyed by ticket id, so a snapshot re-render
   // (siblings keep running while an interrupt waits) never wipes a note
-  // being typed. Drafts are pruned when their interrupt resolves.
-  private readonly drafts = new Map<string, string>();
+  // being typed. The store is shared with the Needs input tray (issue #147)
+  // and pruned by the composition when an interrupt resolves.
+  private readonly drafts: DraftAnswers;
   // A Conversation's closing-line draft, keyed by conversation id: separate
   // from the interrupt drafts above, which are pruned against pending
   // ticket ids on every render and would otherwise wipe this on the next
@@ -104,8 +111,9 @@ export class Detail {
   private readonly conversationEndDrafts = new Map<string, string>();
   private readonly onClose: () => void;
 
-  constructor(options: { onClose: () => void }) {
+  constructor(options: { onClose: () => void; drafts: DraftAnswers }) {
     this.onClose = options.onClose;
+    this.drafts = options.drafts;
     if (typeof window !== "undefined") {
       this.width = clampDetailWidth(this.readStoredWidth(), currentMaxPx());
       // Esc leaves fullscreen; the toggle and card selection handle their own
@@ -113,6 +121,7 @@ export class Detail {
       window.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && this.fullscreen) {
           this.fullscreen = false;
+          this.noteFocus = null;
           this.applyFullscreen();
         }
       });
@@ -127,13 +136,36 @@ export class Detail {
   /** Selection changed or the panel closed: leave fullscreen. */
   exitFullscreen(): void {
     this.fullscreen = false;
+    this.noteFocus = null;
   }
 
-  /** Drop drafts whose interrupt resolved (or whose ticket left the pool). */
-  pruneDrafts(pendingTicketIds: ReadonlySet<string>): void {
-    for (const id of [...this.drafts.keys()]) {
-      if (!pendingTicketIds.has(id)) this.drafts.delete(id);
-    }
+  /**
+   * Write a ticket's answer full size (issue #147): the next render draws
+   * the Detail fullscreen, and the commit after it focuses the ticket's note
+   * (`settleNoteFocus`). The caller selects the card and its Progress tab;
+   * selecting leaves fullscreen, so it comes first.
+   */
+  writeFullSize(ticketId: string): void {
+    this.fullscreen = true;
+    this.noteFocus = ticketId;
+  }
+
+  /**
+   * After a commit: focus the note writeFullSize asked for, caret at the
+   * end of the draft, once it is on the page. The morph may have kept the
+   * old node or mounted the new one, so the note is found on the page, not
+   * held from the render.
+   */
+  settleNoteFocus(root: ParentNode): void {
+    if (this.noteFocus === null) return;
+    const key = noteKey(this.noteFocus);
+    const note = [
+      ...root.querySelectorAll<HTMLTextAreaElement>(".detail-open textarea.interrupt-note"),
+    ].find((el) => el.getAttribute("data-key") === key);
+    if (!note) return;
+    this.noteFocus = null;
+    note.focus();
+    note.setSelectionRange(note.value.length, note.value.length);
   }
 
   render(model: DetailModel, handlers: DetailHandlers): HTMLElement {
@@ -253,12 +285,14 @@ export class Detail {
     }
     const note = h("textarea", {
       class: "interrupt-note",
+      key: noteKey(interrupt.ticketId),
       placeholder:
         interrupt.form.notePlaceholder ?? "note (optional, appended to the Issue)",
       rows: 3,
-      value: this.drafts.get(interrupt.ticketId) ?? "",
+      value: this.drafts.get(interrupt.ticketId),
+      [DRAFT_TICKET_ATTR]: interrupt.ticketId,
       oninput: (event: Event) => {
-        this.drafts.set(interrupt.ticketId, (event.currentTarget as HTMLTextAreaElement).value);
+        this.drafts.input(interrupt.ticketId, event.currentTarget as HTMLTextAreaElement);
       },
     });
     box.append(note);
@@ -275,7 +309,7 @@ export class Detail {
                 handlers.onAnswer(
                   interrupt.ticketId,
                   action,
-                  this.drafts.get(interrupt.ticketId),
+                  this.drafts.get(interrupt.ticketId) || undefined,
                 ),
             },
             label,
@@ -1180,6 +1214,12 @@ export class Detail {
 
 function currentMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+}
+
+// The interrupt note's morph key, which is also how settleNoteFocus finds
+// the ticket's note on the page.
+function noteKey(ticketId: string): string {
+  return `interrupt-note:${ticketId}`;
 }
 
 // The canvas-header's bottom edge in the window, the Detail's top while
