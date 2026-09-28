@@ -95,6 +95,7 @@ describe("the snapshot's Reassign rows", () => {
     expect(ticket(state, "02").reassign.sources).toEqual({
       harness: "default",
       model: "pinned",
+      effort: "unset",
       drivers: "default",
     });
     expect(ticket(state, "02").assignment).toEqual({
@@ -222,6 +223,7 @@ describe("PUT /api/reassign", () => {
     expect(row.reassign.sources).toEqual({
       harness: "pinned",
       model: "pinned",
+      effort: "unset",
       drivers: "default",
     });
   });

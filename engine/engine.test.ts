@@ -472,6 +472,73 @@ describe("pool loading", () => {
       drivers: "implement",
     });
   });
+
+  it("layers effort like model: the defaults, a ticket's own, a spawn's parent (issue #144)", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        {
+          file: "conv-1-spawn-1.md",
+          marker:
+            "<!-- state: id=conv-1-spawn-1 blocked-by=none status=ready spawned-by=conv-1 -->",
+          body: "# conv-1-spawn-1: Proposed from a Conversation\n\nAlready on disk.\n",
+        },
+      ],
+      config: {
+        defaults: { harness: "stub", model: "m", effort: "high" },
+        assign: { "02": { effort: "max" } },
+      },
+    });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub model=m effort=low drivers=implement -->\n\n# conv-1\n",
+    );
+    const rig = stubHarness(poolDir, {});
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: rig.harnesses }));
+
+    expect(run.phase).toBe("done");
+    const effortOf = (id: string) => rig.spawnList.find((ctx) => ctx.id === id)?.effort;
+    expect(effortOf("01")).toBe("high");
+    expect(effortOf("02")).toBe("max");
+    expect(effortOf("conv-1-spawn-1")).toBe("low");
+    // A pool-registered stub owns its command, so the Console cannot vouch
+    // that the effort reached it: the card and the spawned event both say
+    // not applied.
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["02"]).toEqual({
+      harness: "stub",
+      model: "m",
+      effort: "max",
+      effortApplied: false,
+      drivers: "implement",
+    });
+    const spawned = readFileSync(join(poolDir, "runs", "02.events.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string; payload: Record<string, unknown> })
+      .find((event) => event.kind === "spawned")!;
+    expect(spawned.payload.effort).toBe("max");
+    expect(spawned.payload.effort_applied).toBe(false);
+  });
+
+  it("launches with no effort, and never interrupts for one, when nothing sets it", async () => {
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" }],
+      config: { defaults: { harness: "stub", model: "m" } },
+    });
+    const rig = stubHarness(poolDir, {});
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: rig.harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(run.interrupts.filter((i) => i.kind === "config")).toEqual([]);
+    expect(rig.spawnList[0]!).not.toHaveProperty("effort");
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["01"]).not.toHaveProperty("effort");
+  });
 });
 
 describe("verify assignment", () => {
@@ -10313,6 +10380,10 @@ describe("worktrees", () => {
     );
     const runnerFile = join(poolDir, "issue-runner");
     writeFileSync(runnerFile, "harness=resolver-stub\nmodel=resolver-model\n");
+    // The Machine defaults file names only an effort: the legacy file still
+    // fills harness and model behind it, field by field.
+    const machineFile = join(dirname(runnerFile), "machine-defaults.json");
+    writeFileSync(machineFile, JSON.stringify({ effort: "low" }));
     const rig = gitStubHarness(poolDir, {
       "01": {
         workFile: "shared.txt",
@@ -10341,23 +10412,24 @@ describe("worktrees", () => {
       poolDir,
       harnesses: { ...rig.harnesses, ...resolver.harnesses },
       issueRunnerPath: runnerFile,
-      machineDefaultsPath: join(dirname(runnerFile), "no-such-defaults.json"),
+      machineDefaultsPath: machineFile,
     });
 
     expect(run.interrupts[0]?.kind).toBe("merge-approval");
     expect(run.interrupts[0].body).toContain("via default");
     expect(resolver.spawnOrder).toEqual(["02"]);
+    expect(resolver.spawned["02"].effort).toBe("low");
     const finished = await approveReview(await run.approve("02"));
     expect(finished.phase).toBe("done");
   }, 15000);
 
-  it("pins the resolver's own model when resolver= is the { harness, model } form", async () => {
+  it("pins the resolver's own model and effort when resolver= is the object form", async () => {
     const { poolDir } = makeGitPool(
       {
         tickets: [readyTicket("01"), readyTicket("02")],
         config: {
-          ...stubConfig,
-          resolver: { harness: "resolver-stub", model: "resolver-model" },
+          defaults: { ...stubConfig.defaults, effort: "high" },
+          resolver: { harness: "resolver-stub", model: "resolver-model", effort: "max" },
         },
       },
       { "shared.txt": "base\n" },
@@ -10396,6 +10468,8 @@ describe("worktrees", () => {
     // The defaults' model ("stub-model") belongs to the stub harness; the
     // resolver runs on resolver-stub and must spawn with its own model.
     expect(resolver.spawned["02"].model).toBe("resolver-model");
+    // Its own effort beside its own model, over the pool defaults' effort.
+    expect(resolver.spawned["02"].effort).toBe("max");
     const finished = await approveReview(await run.approve("02"));
     expect(finished.phase).toBe("done");
   }, 15000);

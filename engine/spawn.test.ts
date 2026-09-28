@@ -2,10 +2,12 @@ import { describe, expect, it } from "bun:test";
 import {
   defaultHarnessDescriptors,
   defaultHarnesses,
+  effortApplies,
   elidePromptArgv,
   engineEnvSet,
   harnessStreamMode,
   interactiveHarnessCommand,
+  poolHarnessMode,
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
@@ -288,6 +290,84 @@ describe("interactiveHarnessCommand", () => {
   it("falls back to the registered command for a custom harness name", () => {
     const custom: HarnessCommand = () => ["bash", "/tmp/pool/custom.sh"];
     expect(interactiveHarnessCommand({ custom }, "custom")).toBe(custom);
+  });
+});
+
+describe("effort (CONTEXT.md: Effort)", () => {
+  const withEffort = context({ effort: "high" });
+
+  it("passes claude's --effort in both modes, verbatim", () => {
+    const { claude } = defaultHarnessDescriptors;
+    const batch = claude.batchArgv(withEffort);
+    expect(batch.slice(batch.indexOf("--effort"), batch.indexOf("--effort") + 2)).toEqual([
+      "--effort",
+      "high",
+    ]);
+    const tui = claude.interactiveArgv(withEffort);
+    expect(tui.slice(tui.indexOf("--effort"), tui.indexOf("--effort") + 2)).toEqual([
+      "--effort",
+      "high",
+    ]);
+  });
+
+  it("passes opencode's run --variant, and nothing to its TUI", () => {
+    const { opencode } = defaultHarnessDescriptors;
+    const batch = opencode.batchArgv(context({ harness: "opencode", effort: "minimal" }));
+    expect(batch.slice(batch.indexOf("--variant"), batch.indexOf("--variant") + 2)).toEqual([
+      "--variant",
+      "minimal",
+    ]);
+    expect(opencode.interactiveArgv(context({ harness: "opencode", effort: "minimal" }))).toEqual([
+      "opencode",
+      "--model",
+      "claude-test",
+      "--auto",
+    ]);
+  });
+
+  it("gives cursor nothing in either mode, and never folds it into the model", () => {
+    const { cursor } = defaultHarnessDescriptors;
+    const ctx = context({ harness: "cursor", effort: "high" });
+    expect(cursor.batchArgv(ctx)).toEqual(cursor.batchArgv(context({ harness: "cursor" })));
+    expect(cursor.interactiveArgv(ctx)).toEqual(cursor.interactiveArgv(context({ harness: "cursor" })));
+  });
+
+  it("adds no flag at all when the Assignment names no effort", () => {
+    for (const name of ["claude", "opencode", "cursor"] as const) {
+      const descriptor = defaultHarnessDescriptors[name];
+      for (const argv of [descriptor.batchArgv(context()), descriptor.interactiveArgv(context())]) {
+        expect(argv).not.toContain("--effort");
+        expect(argv).not.toContain("--variant");
+      }
+    }
+  });
+
+  it("declares exactly the modes whose argv carries the effort", () => {
+    for (const [name, descriptor] of Object.entries(defaultHarnessDescriptors)) {
+      const carries = (argv: string[]) => argv.includes("sentinel-effort");
+      const ctx = context({ harness: name, effort: "sentinel-effort" });
+      expect(carries(descriptor.batchArgv(ctx))).toBe(descriptor.takesEffort.batch);
+      expect(carries(descriptor.interactiveArgv(ctx))).toBe(descriptor.takesEffort.interactive);
+    }
+  });
+
+  it("applies only on the engine's own command, in a mode that takes it", () => {
+    expect(effortApplies(defaultHarnesses, "claude", "batch")).toBe(true);
+    expect(effortApplies(defaultHarnesses, "claude", "interactive")).toBe(true);
+    expect(effortApplies(defaultHarnesses, "opencode", "batch")).toBe(true);
+    expect(effortApplies(defaultHarnesses, "opencode", "interactive")).toBe(false);
+    expect(effortApplies(defaultHarnesses, "cursor", "batch")).toBe(false);
+    expect(effortApplies(defaultHarnesses, "cursor", "interactive")).toBe(false);
+    // A pool-registered command owns what runs, so the Console cannot vouch
+    // that it reads the effort: an override by name and a custom name alike.
+    const custom: HarnessCommand = () => ["bash", "/tmp/pool/stub.sh"];
+    expect(effortApplies({ ...defaultHarnesses, claude: custom }, "claude", "batch")).toBe(false);
+    expect(effortApplies({ custom }, "custom", "batch")).toBe(false);
+  });
+
+  it("reads a terminal-backed pool as the TUI and any other as batch", () => {
+    expect(poolHarnessMode("herdr")).toBe("interactive");
+    expect(poolHarnessMode(undefined)).toBe("batch");
   });
 });
 

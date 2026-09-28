@@ -46,7 +46,9 @@ import {
 import { buildContinuedTeaching, buildEnlistTeaching, buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
+  effortApplies,
   engineEnvSet,
+  poolHarnessMode,
   spawnEnv,
   type HarnessCommand,
 } from "./spawn.ts";
@@ -100,6 +102,8 @@ import {
   resolveAssignment,
   resolveAssignmentSources,
   type Assignment,
+  type AssignmentDefaults,
+  type AssignmentRequest,
   type AssignmentSources,
   type AssignmentView,
 } from "./assignment.ts";
@@ -225,7 +229,7 @@ export interface SpawnProposal {
   // An unknown assign.harness drops the whole proposal at adoption time
   // (adoptSpawnProposals), the same disposition an unknown blockedBy id
   // gets, since neither can be checked here where no Session exists yet.
-  assign?: { harness?: string; model?: string; drivers?: string };
+  assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -272,20 +276,21 @@ export interface Outcome {
 interface TicketAssignment {
   harness?: string;
   model?: string;
+  effort?: string;
   drivers?: string;
   verify?: number;
 }
 
 export interface PoolConfig {
-  defaults?: { harness?: string; model?: string; drivers?: string };
+  defaults?: AssignmentDefaults;
   assign?: Record<string, TicketAssignment>;
   roster?: string;
   agents?: string;
   // The merge resolver: a harness name (the model is inherited from
-  // defaults), "none" to opt out, or { harness, model } when the resolver
-  // runs on a harness other than the defaults', whose model names would not
-  // be recognised there.
-  resolver?: string | { harness?: string; model?: string };
+  // defaults), "none" to opt out, or { harness, model, effort } when the
+  // resolver runs on a harness other than the defaults', whose model names
+  // (and effort words) would not be recognised there.
+  resolver?: string | { harness?: string; model?: string; effort?: string };
   port?: number;
   // Who picks the winner of a verify fan-out: the engine's arithmetic rule
   // (default) or the human, via a selection interrupt carrying the grades.
@@ -1050,7 +1055,12 @@ export function startPool(options: RunOptions): PoolRun {
   const assignments = new Map<string, Assignment>();
   for (const rec of loadConversations(join(poolDir, "conversations"))) {
     if (!rec.harness) continue;
-    assignments.set(rec.id, { harness: rec.harness, model: rec.model, drivers: rec.drivers });
+    assignments.set(rec.id, {
+      harness: rec.harness,
+      model: rec.model,
+      ...(rec.effort ? { effort: rec.effort } : {}),
+      drivers: rec.drivers,
+    });
   }
   resolveUnseenAssignments(markers, assignments, config, harnesses);
 
@@ -1487,7 +1497,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
     state: session.state,
     queuedAnswers: session.answers.pending(),
     assignments: Object.fromEntries(
-      [...session.assignments].map(([id, a]) => [id, assignmentViewOf(a)]),
+      [...session.assignments].map(([id, a]) => [id, assignmentWireView(session, a)]),
     ),
     conversations: session.conversations.views(),
     // A Conversation's pane rides its own view above.
@@ -4179,9 +4189,13 @@ function continuedWork(
 function paneAssignment(session: Session, ticketId: string, held: HeldPane): Assignment {
   const current = session.assignments.get(ticketId);
   const enlisted = session.enlistedWork.has(ticketId);
+  // An effort is only ever read off an event that recorded a model too, so a
+  // pane launched with none stays at none rather than taking the config's.
+  const effort = enlisted ? undefined : held.model ? held.effort : current?.effort;
   return {
     harness: held.harness || current?.harness || "",
     model: enlisted ? "" : held.model || current?.model || "",
+    ...(effort ? { effort } : {}),
     drivers: current?.drivers ?? DEFAULT_DRIVERS,
     ...(current?.verify != null ? { verify: current.verify } : {}),
   };
@@ -4463,6 +4477,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
       env: engineEnvSet(spawnEnv(held.cwd)),
       harness: assignment.harness,
       model: assignment.model,
+      ...(assignment.effort ? { effort: assignment.effort } : {}),
       pane_id: held.paneId,
       tab_id: held.tabId,
       ...(held.terminalId !== null ? { terminal_id: held.terminalId } : {}),
@@ -5619,6 +5634,7 @@ const RESOLVER_DRIVER = "resolving-merge-conflicts";
 interface ResolverSpec {
   harness: string;
   model: string;
+  effort?: string;
 }
 
 interface ResolverAttempt {
@@ -5632,26 +5648,30 @@ interface ResolverAttempt {
 // opts out of the resolver, so the conflict takes the manual path; an explicit
 // resolver that names an unknown harness fails fast, matching how a ticket's
 // unknown harness is rejected. No configured resolver at all also means the
-// manual path. The object form { harness, model } pins the resolver's own
-// model: a model name belongs to one harness, so a resolver on a different
-// harness than the defaults' must not inherit the defaults' model.
+// manual path. The object form { harness, model, effort } pins the
+// resolver's own model: a model name belongs to one harness, so a resolver on
+// a different harness than the defaults' must not inherit the defaults'
+// model. Its effort (CONTEXT.md: Effort) falls back the same way, resolver
+// then pool defaults then Machine defaults, and unset is simply none.
 function resolveResolver(session: Session): ResolverSpec | null {
   const config = session.state.config;
   const spec =
     typeof config.resolver === "string" || config.resolver == null
-      ? { harness: config.resolver, model: undefined }
+      ? { harness: config.resolver, model: undefined, effort: undefined }
       : config.resolver;
   const explicit = spec.harness?.trim();
   if (explicit === "" || explicit === "none") return null;
   let harness = explicit;
   let model = spec.model?.trim() || config.defaults?.model;
-  if (!harness || !model) {
+  let effort = spec.effort?.trim() || config.defaults?.effort?.trim();
+  if (!harness || !model || !effort) {
     // The Machine defaults (issue #121), with the legacy `~/.issue-runner`
     // file filled in behind them field by field: a machine that never wrote
     // the new file resolves exactly as it always did.
     const machine = readMachineDefaults(session.machineDefaults);
     if (!harness) harness = machine.harness;
     if (!model) model = machine.model;
+    if (!effort) effort = machine.effort;
   }
   if (!harness || !model) return null;
   if (!session.harnesses[harness]) {
@@ -5663,7 +5683,7 @@ function resolveResolver(session: Session): ResolverSpec | null {
     }
     return null;
   }
-  return { harness, model };
+  return { harness, model, ...(effort ? { effort } : {}) };
 }
 
 // The resolver's result: a `resolved` boolean and an optional note. Not an
@@ -5836,6 +5856,7 @@ async function runResolverAttempt(
       driver: RESOLVER_DRIVER,
       harness: resolver.harness,
       model: resolver.model,
+      ...(resolver.effort ? { effort: resolver.effort } : {}),
       cwd: worktree.path,
       branch: worktree.branch,
       attempt,
@@ -6052,6 +6073,7 @@ export function engineTicketBuildId(id: string): string | null {
 // prompt is engine-built) and an engine-run judge is never itself a verify
 // ticket, so neither carries over. An unknown harness fails fast with the
 // same error a ticket's would, instead of an opaque crash mid-judgment.
+// Effort (CONTEXT.md: Effort) may be overridden wherever the model may.
 function resolveEngineTicketAssignment(
   config: PoolConfig,
   ticketMarker: TicketMarker,
@@ -6061,14 +6083,31 @@ function resolveEngineTicketAssignment(
   const assign = config.assign?.[ticketMarker.id];
   return resolveAssignment({
     subject: `pool config: ticket ${ticketMarker.id}`,
-    // Only harness and model may be overridden: the drivers stay the build's.
-    request: assign ? { harness: assign.harness, model: assign.model } : undefined,
+    // Only harness, model and effort may be overridden: the drivers stay
+    // the build's.
+    request: assign ? engineTicketRequest(assign) : undefined,
     inherited: build,
     defaults: config.defaults,
     strict: false,
     verify: false,
     harnesses,
   });
+}
+
+// The request an engine-run judge's own assign entry may make.
+function engineTicketRequest(assign: TicketAssignment): AssignmentRequest {
+  return { harness: assign.harness, model: assign.model, effort: assign.effort };
+}
+
+/**
+ * A ticket's Assignment on the wire, with the effort marked not applied when
+ * the harness cannot take it in the mode this pool launches in (CONTEXT.md:
+ * Effort). Every ticket Attempt runs through the Attempt-run module, so a
+ * terminal-backed pool launches the TUI and a headless one the batch argv.
+ */
+function assignmentWireView(session: Session, assignment: Assignment): AssignmentView {
+  const mode = poolHarnessMode(session.state.config.terminal);
+  return assignmentViewOf(assignment, effortApplies(session.harnesses, assignment.harness, mode));
 }
 
 // A spawned ticket's assignment (ADR-0010): the ordinary assign machinery
@@ -6151,12 +6190,9 @@ function resolveAssignmentsInto(
           marker.id,
           resolveAssignmentSources({
             // The same narrowed request the engine resolver takes: a judge
-            // may override harness and model, never the build's drivers.
-            request: build
-              ? assign
-                ? { harness: assign.harness, model: assign.model }
-                : undefined
-              : assign,
+            // may override harness, model and effort, never the build's
+            // drivers.
+            request: build ? (assign ? engineTicketRequest(assign) : undefined) : assign,
             ...(build ? { inherited: build } : {}),
             ...(config.defaults ? { defaults: config.defaults } : {}),
           }),
@@ -6202,6 +6238,7 @@ function resolveAssignmentsInto(
             ...(config.defaults ? { defaults: config.defaults } : {}),
           }).harness,
           model: "unset",
+          effort: "unset",
           drivers: "default",
         });
         progressed = true;
@@ -6313,9 +6350,10 @@ function changedSliceKeys(previous: PoolConfig, next: PoolConfig): string[] {
 // it even though verify sits outside the Assignment concept proper.
 function assignmentEventPayload(
   assignment: Assignment,
-): { harness: string | null; model: string | null; drivers: string; verify?: number } {
+): { harness: string | null; model: string | null; effort?: string; drivers: string; verify?: number } {
+  const { effortApplied: _, ...view } = assignmentViewOf(assignment);
   return {
-    ...assignmentViewOf(assignment),
+    ...view,
     ...(assignment.verify != null ? { verify: assignment.verify } : {}),
   };
 }
@@ -6407,6 +6445,7 @@ function reloadConfigAtBoundary(session: Session): void {
     if (
       before.harness === after.harness &&
       before.model === after.model &&
+      before.effort === after.effort &&
       before.drivers === after.drivers
     ) {
       continue;
@@ -7032,6 +7071,7 @@ async function runGrader(
       driver: GRADER_DRIVER,
       harness: assignment.harness,
       model: assignment.model,
+      ...(assignment.effort ? { effort: assignment.effort } : {}),
       cwd: session.cwd,
       branch: null,
       attempt: graderAttempt,
@@ -7897,6 +7937,7 @@ async function runHeadToHead(
       driver: HEAD_TO_HEAD_DRIVER,
       harness: assignment.harness,
       model: assignment.model,
+      ...(assignment.effort ? { effort: assignment.effort } : {}),
       cwd: session.cwd,
       branch: null,
       attempt: h2hAttempt,
@@ -8695,7 +8736,7 @@ function validateSpawnProposals(
         return;
       }
       const a = assignRaw as Record<string, unknown>;
-      const badField = (["harness", "model", "drivers"] as const).find(
+      const badField = (["harness", "model", "effort", "drivers"] as const).find(
         (field) => a[field] !== undefined && typeof a[field] !== "string",
       );
       if (badField) {
@@ -8705,6 +8746,7 @@ function validateSpawnProposals(
       assign = {
         ...(typeof a.harness === "string" ? { harness: a.harness } : {}),
         ...(typeof a.model === "string" ? { model: a.model } : {}),
+        ...(typeof a.effort === "string" ? { effort: a.effort } : {}),
         ...(typeof a.drivers === "string" ? { drivers: a.drivers } : {}),
       };
     }
@@ -9781,6 +9823,7 @@ async function runTicket(
       driver,
       harness: assignment.harness,
       model: assignment.model,
+      ...(assignment.effort ? { effort: assignment.effort } : {}),
       cwd: plan.cwd,
       branch: plan.worktree?.branch ?? null,
       attempt: plan.attempt,

@@ -51,6 +51,7 @@ import {
 import type { TicketStatus } from "./pool.ts";
 import {
   defaultHarnessDescriptors,
+  effortApplies,
   elidePromptArgv,
   engineEnvSet,
   harnessCommandFor,
@@ -198,6 +199,8 @@ export interface AttemptSpec<R extends { ok: true } = { ok: true }> {
   driver: string;
   harness: string;
   model: string;
+  /** The Assignment's effort (CONTEXT.md: Effort); absent is the harness's default. */
+  effort?: string;
   /** Where the harness runs. */
   cwd: string;
   /** The branch fact the `spawned` event records; null in the main checkout. */
@@ -477,6 +480,7 @@ export async function launchAttempt<R extends { ok: true }>(
     driver: spec.driver,
     harness: spec.harness,
     model: spec.model,
+    ...(spec.effort ? { effort: spec.effort } : {}),
     agents: env.agents,
     logPath,
     streamPath: attemptStreamPath(
@@ -509,19 +513,31 @@ export async function launchAttempt<R extends { ok: true }>(
     pid?: number,
   ): void => {
     const at = new Date().toISOString();
+    const headlessRun = terminal === undefined || terminalError !== undefined;
     appendEvent(env.runsDir, id, {
       at,
       attempt: spec.attempt,
       kind: "spawned",
       payload: {
         ...spawnedPayload(argv, ctx, spec.branch, terminal, terminalError, pid),
+        // Whether the effort reached the harness in the mode that actually
+        // ran: a terminal-backed launch that fell back to headless takes the
+        // batch argv, which may carry it where the TUI's does not.
+        ...(ctx.effort !== undefined
+          ? {
+              effort_applied: effortApplies(
+                env.harnesses,
+                spec.harness,
+                headlessRun ? "batch" : "interactive",
+              ),
+            }
+          : {}),
         ...(folderTrust !== undefined ? { folder_trust: folderTrustNote(folderTrust) } : {}),
       },
     });
     // Live from the moment the spawn is on the log, with the pane the event
     // records: a fallback that nulled the event's pane_id is headless here
     // too, so the registry can never point at the pane the fallback closed.
-    const headlessRun = terminal === undefined || terminalError !== undefined;
     env.liveAttempts.register(id, spec.attempt, {
       paneId: headlessRun ? null : terminal.paneId,
       tabId: headlessRun ? null : terminal.tabId,
@@ -946,8 +962,9 @@ export function releaseAttemptAgent(
  * carries the prompt body elided; the commit SHA resolves from the spawn cwd
  * at spawn time (null when git is unavailable or the cwd is not a checkout);
  * env is the keys the engine set on the child environment beyond the
- * inherited parent's, with their values; harness and model are the
- * Assignment it launched with. Terminal-backed spawns add pane_id
+ * inherited parent's, with their values; harness, model and effort are the
+ * Assignment it launched with (effort only when set, with effort_applied
+ * beside it). Terminal-backed spawns add pane_id
  * (and terminal_error on a headless fallback, whenever it happened: the tab
  * refusing to open or the wrapper refusing to send), per ADR-0014 and
  * ADR-0015. A headless spawn adds the child's pid (ADR-0017): the record
@@ -972,6 +989,7 @@ function spawnedPayload(
     // a Reassign has written since, and after a restart this is the record.
     harness: ctx.harness,
     model: ctx.model,
+    ...(ctx.effort !== undefined ? { effort: ctx.effort } : {}),
     ...(pid !== undefined ? { pid } : {}),
     ...(terminal
       ? {

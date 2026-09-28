@@ -16,6 +16,7 @@
  */
 
 import { h } from "./dom";
+import { effortInput } from "./effort";
 import {
   projectRestartBadges,
   type BootOnlyKey,
@@ -59,10 +60,12 @@ export interface PoolDraft {
   title: string;
   harness: string;
   model: string;
+  effort: string;
   drivers: string;
   /** The resolver's harness, or "none" to opt out of resolution entirely. */
   resolverHarness: string;
   resolverModel: string;
+  resolverEffort: string;
   selection: string;
   terminal: boolean;
   /** Empty means auto: the server picks a free port at boot. */
@@ -76,6 +79,7 @@ export interface PoolDraft {
 export interface MachineDraft {
   harness: string;
   model: string;
+  effort: string;
   drivers: string;
   terminal: boolean;
   engine: string;
@@ -91,9 +95,11 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   title: "",
   harness: "",
   model: "",
+  effort: "",
   drivers: "",
   resolverHarness: "",
   resolverModel: "",
+  resolverEffort: "",
   selection: "",
   terminal: false,
   port: "",
@@ -106,6 +112,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
 const EMPTY_MACHINE_DRAFT: MachineDraft = {
   harness: "",
   model: "",
+  effort: "",
   drivers: "",
   terminal: false,
   engine: "",
@@ -117,19 +124,23 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
   const resolver = config.resolver;
   let resolverHarness = "";
   let resolverModel = "";
+  let resolverEffort = "";
   if (typeof resolver === "string") {
     resolverHarness = resolver;
   } else if (resolver && typeof resolver === "object") {
     resolverHarness = resolver.harness ?? "";
     resolverModel = resolver.model ?? "";
+    resolverEffort = resolver.effort ?? "";
   }
   return {
     title: config.title ?? "",
     harness: defaults.harness ?? "",
     model: defaults.model ?? "",
+    effort: defaults.effort ?? "",
     drivers: defaults.drivers ?? "",
     resolverHarness,
     resolverModel,
+    resolverEffort,
     selection: config.selection ?? "",
     terminal: config.terminal === "herdr",
     port: typeof config.port === "number" ? String(config.port) : "",
@@ -145,6 +156,7 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
   return {
     harness: own.harness ?? "",
     model: own.model ?? "",
+    effort: own.effort ?? "",
     drivers: own.drivers ?? "",
     terminal: own.terminal === "herdr",
     engine: own.engine ?? "",
@@ -181,24 +193,27 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
  * `defaults`, as an empty string) so the engine removes the key rather than
  * writing a blank one: an absent port means auto, an absent terminal means
  * headless. The resolver collapses to the shape it was given, a bare harness
- * name when there is no resolver model and the pair when there is.
+ * name when there is no resolver model or effort and the object when there is.
  */
 export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
   const trim = (value: string): string => value.trim();
   const orNull = (value: string): string | null => trim(value) || null;
   const resolverHarness = trim(draft.resolverHarness);
   const resolverModel = trim(draft.resolverModel);
+  const resolverEffort = trim(draft.resolverEffort);
   let resolver: PoolConfigPatch["resolver"];
   if (resolverHarness === RESOLVER_NONE) {
     resolver = RESOLVER_NONE;
-  } else if (!resolverHarness && !resolverModel) {
+  } else if (!resolverHarness && !resolverModel && !resolverEffort) {
     resolver = null;
-  } else if (!resolverModel) {
+  } else if (!resolverModel && !resolverEffort) {
     resolver = resolverHarness;
   } else {
-    resolver = resolverHarness
-      ? { harness: resolverHarness, model: resolverModel }
-      : { model: resolverModel };
+    resolver = {
+      ...(resolverHarness ? { harness: resolverHarness } : {}),
+      ...(resolverModel ? { model: resolverModel } : {}),
+      ...(resolverEffort ? { effort: resolverEffort } : {}),
+    };
   }
   const port = trim(draft.port);
   const selection = trim(draft.selection);
@@ -206,6 +221,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     defaults: {
       harness: trim(draft.harness),
       model: trim(draft.model),
+      effort: trim(draft.effort),
       drivers: trim(draft.drivers),
     },
     resolver,
@@ -225,10 +241,12 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   const defaults: MachineDefaults = {};
   const harness = draft.harness.trim();
   const model = draft.model.trim();
+  const effort = draft.effort.trim();
   const drivers = draft.drivers.trim();
   const engine = draft.engine.trim();
   if (harness) defaults.harness = harness;
   if (model) defaults.model = model;
+  if (effort) defaults.effort = effort;
   if (drivers) defaults.drivers = drivers;
   if (engine) defaults.engine = engine;
   if (draft.terminal) defaults.terminal = "herdr";
@@ -601,6 +619,18 @@ export class SettingsStore {
         false,
       ),
       text("model", "model"),
+      this.renderField(
+        "pool-effort",
+        "effort",
+        effortInput({
+          key: "pool-effort-input",
+          harness: this.poolDraft.harness,
+          value: this.poolDraft.effort,
+          placeholder: "(harness default)",
+          onInput: (value) => this.setPoolField("effort", value),
+        }),
+        false,
+      ),
       text("drivers", "drivers"),
       this.renderField(
         "pool-resolver",
@@ -627,6 +657,16 @@ export class SettingsStore {
                 "resolverModel",
                 (event.currentTarget as HTMLInputElement).value,
               ),
+          }),
+          effortInput({
+            key: "pool-resolver-effort",
+            class: "settings-input settings-pair-effort",
+            // The resolver's own harness names the words, else the one it
+            // falls back to.
+            harness: this.poolDraft.resolverHarness || this.poolDraft.harness,
+            value: this.poolDraft.resolverEffort,
+            placeholder: "effort (optional)",
+            onInput: (value) => this.setPoolField("resolverEffort", value),
           }),
         ),
         false,
@@ -785,6 +825,18 @@ export class SettingsStore {
         false,
       ),
       text("model", "model", merged.model),
+      this.renderField(
+        "machine-effort",
+        "effort",
+        effortInput({
+          key: "machine-effort-input",
+          harness: this.machineDraft.harness || merged.harness,
+          value: this.machineDraft.effort,
+          placeholder: merged.effort ?? "(harness default)",
+          onInput: (value) => this.setMachineField("effort", value),
+        }),
+        false,
+      ),
       text("drivers", "drivers", merged.drivers),
       this.renderField(
         "machine-terminal",

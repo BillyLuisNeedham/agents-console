@@ -15,6 +15,7 @@ import {
   type StartConversationRequest,
 } from "./project";
 import { h } from "./dom";
+import { effortInput } from "./effort";
 
 export type StartConversationHandler = (
   request: StartConversationRequest,
@@ -41,6 +42,7 @@ export interface ConversationsHandlers {
 export interface ConversationAssignmentDefaults {
   harness?: string;
   model?: string;
+  effort?: string;
   drivers?: string;
 }
 
@@ -49,6 +51,7 @@ interface ConversationDraft {
   opening: string;
   harness: string;
   model: string;
+  effort: string;
   drivers: string;
 }
 
@@ -59,6 +62,7 @@ const EMPTY_DRAFT: ConversationDraft = {
   opening: "",
   harness: "",
   model: "",
+  effort: "",
   drivers: "",
 };
 
@@ -143,6 +147,7 @@ export class ConversationsTray {
     const assign: StartConversationRequest["assign"] = {};
     if (this.draft.harness.trim()) assign.harness = this.draft.harness.trim();
     if (this.draft.model.trim()) assign.model = this.draft.model.trim();
+    if (this.draft.effort.trim()) assign.effort = this.draft.effort.trim();
     if (this.draft.drivers.trim()) assign.drivers = this.draft.drivers.trim();
     try {
       await this.onStart({
@@ -275,6 +280,15 @@ export class ConversationsTray {
         { class: "conversations-assign-row" },
         this.assignField("harness", defaults.harness),
         this.assignField("model", defaults.model),
+        effortInput({
+          key: "conversation-effort",
+          class: "field conversations-field",
+          harness: this.draft.harness.trim() || defaults.harness,
+          value: this.draft.effort,
+          placeholder: defaults.effort ?? "effort",
+          disabled: this.submitting,
+          onInput: (value) => this.setField("effort", value),
+        }),
         this.assignField("drivers", defaults.drivers),
       ),
       this.startFailure

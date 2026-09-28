@@ -811,6 +811,7 @@ body {
    The click toggle shows everything, so no value stays unreadable. */
 .assignment-badge-harness,
 .assignment-badge-model,
+.assignment-badge-effort,
 .assignment-badge-drivers {
   min-width: 0;
   overflow: hidden;
@@ -822,8 +823,21 @@ body {
 }
 
 .assignment-badge-harness,
+.assignment-badge-effort,
 .assignment-badge-drivers {
   flex: 0 1 auto;
+}
+
+/* An effort the harness cannot take in its launch mode (CONTEXT.md: Effort):
+   shown, but dimmed, so it never reads as in force. */
+.assignment-badge-effort-unapplied {
+  color: var(--text-dim);
+  text-decoration: line-through dotted;
+}
+
+/* An effort input and its datalist lay out as the bare input would. */
+.effort-control {
+  display: contents;
 }
 
 .assignment-badge-unassigned {
@@ -839,6 +853,7 @@ body {
 
 .assignment-badge-expanded .assignment-badge-harness,
 .assignment-badge-expanded .assignment-badge-model,
+.assignment-badge-expanded .assignment-badge-effort,
 .assignment-badge-expanded .assignment-badge-drivers {
   overflow: visible;
   text-overflow: clip;
@@ -2355,6 +2370,11 @@ textarea.conversations-field {
 
 .settings-pair-model {
   flex: 1;
+}
+
+.settings-pair-effort {
+  flex: 0 1 9em;
+  min-width: 0;
 }
 
 .settings-check {

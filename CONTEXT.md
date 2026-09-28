@@ -91,12 +91,16 @@ _Avoid_: session (ambiguous with the harness's), view model (too generic)
 The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
 
 **Setup**:
-A named, machine-local bundle of a pool's behavioural config — harness, model, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
+A named, machine-local bundle of a pool's behavioural config — harness, model, effort, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
 _Avoid_: profile, template
 
 **Assignment**:
-The harness, model, and drivers an Attempt runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket ahead of the pool defaults, and any field the parent leaves empty (an enlisted Conversation names no model) falls through to the defaults. A ticket with nothing to fill a field from is unassigned; it renders that way and, when it would schedule, waits as a Config interrupt rather than launching. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
+The harness, model, effort, and drivers an Attempt runs on. Resolved by the engine field-wise: a ticket's assign entry overrides the pool defaults field by field; grader, head-to-head, and spawned tickets inherit from their build or parent ticket ahead of the pool defaults, and any field the parent leaves empty (an enlisted Conversation names no model) falls through to the defaults. A ticket with nothing to fill a field from is unassigned; it renders that way and, when it would schedule, waits as a Config interrupt rather than launching. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
 _Avoid_: config (that's the raw file the Assignment is resolved from), profile
+
+**Effort**:
+How hard the harness thinks on an Attempt, as that harness names it (claude's low to max; another harness's own words), passed through verbatim like a model name rather than translated from a Console-wide scale. An optional field of the Assignment, layered like model; unset means the harness's own default and never raises a Config interrupt. The resolver may pin its own, beside its own model. A harness that cannot take an effort launches without it, and the Attempt shows the effort as not applied. Enlisted panes run as found, so effort never applies to them.
+_Avoid_: thinking, reasoning level, variant (opencode's word for it), ultrathink
 
 **Config interrupt**:
 The Interrupt the engine raises on a Ticket about to schedule with no harness or model, in the engine's own voice like a persistence interrupt, naming the missing field and the console.json fix. The Ticket waits as a checkpoint; resume returns it to ready, and the next super-step boundary's Config reload re-resolves its Assignment. Resuming with the file unchanged raises the same interrupt again. A pool-config gap pauses one Ticket and never ends the run. Introduced by ADR-0022 (`docs/adr/0022-a-config-gap-pauses-the-ticket-not-the-run.md`), closing issue #118.
@@ -107,7 +111,7 @@ The operator's editable view of one Pool's config in the Console: Pool title, po
 _Avoid_: config (that's the raw file), preferences, options
 
 **Machine defaults**:
-The per-machine harness, model, drivers, terminal and engine path that a new Pool inherits when nothing more specific says otherwise, kept in one file under `~/.agent-graphs/`. Editable from the Console beside the Pool settings. Not a Setup (a Setup is a named bundle you choose; Machine defaults apply without choosing).
+The per-machine harness, model, effort, drivers, terminal and engine path that a new Pool inherits when nothing more specific says otherwise, kept in one file under `~/.agent-graphs/`. Editable from the Console beside the Pool settings. Not a Setup (a Setup is a named bundle you choose; Machine defaults apply without choosing).
 _Avoid_: runner (there is no runner; the engine's term is harness), global config
 
 **Boot**:

@@ -18,12 +18,14 @@ import type { Detection } from "./boot-detect.ts";
 import { slugify } from "./boot-pool.ts";
 
 /** The resolver as console.json holds it: a harness name, or a pair. */
-export type ResolverValue = string | { harness?: string; model?: string };
+export type ResolverValue = string | { harness?: string; model?: string; effort?: string };
 
 /** Every field Boot can prefill, all optional because any source may be silent. */
 export interface Prefill {
   harness?: string;
   model?: string;
+  /** Carried through, never asked: Boot's interview has no effort question. */
+  effort?: string;
   drivers?: string;
   resolver?: ResolverValue;
   reviewer?: string;
@@ -45,6 +47,7 @@ export interface Prefill {
 export interface BootAnswers {
   harness?: string;
   model?: string;
+  effort?: string;
   drivers?: string;
   resolver?: ResolverValue;
   reviewer?: string;
@@ -94,6 +97,7 @@ export function prefillFromConfig(config: Record<string, unknown>): Prefill {
   const out: Prefill = {};
   if (typeof defaults.harness === "string") out.harness = defaults.harness;
   if (typeof defaults.model === "string") out.model = defaults.model;
+  if (typeof defaults.effort === "string") out.effort = defaults.effort;
   if (typeof defaults.drivers === "string") out.drivers = defaults.drivers;
   if (typeof config.resolver === "string" || isResolverObject(config.resolver)) {
     out.resolver = config.resolver as ResolverValue;
@@ -119,6 +123,7 @@ export function prefillFromMachineDefaults(defaults: MachineDefaults): Prefill {
   const out: Prefill = {};
   if (defaults.harness) out.harness = defaults.harness;
   if (defaults.model) out.model = defaults.model;
+  if (defaults.effort) out.effort = defaults.effort;
   if (defaults.drivers) out.drivers = defaults.drivers;
   if (defaults.terminal) out.terminal = defaults.terminal;
   return out;
@@ -152,7 +157,7 @@ export function mergeConsoleConfig(
   const defaults: Record<string, unknown> = {
     ...((existing.defaults ?? {}) as Record<string, unknown>),
   };
-  for (const key of ["harness", "model", "drivers"] as const) {
+  for (const key of ["harness", "model", "effort", "drivers"] as const) {
     const value = answers[key];
     if (value !== undefined && value !== "") defaults[key] = value;
   }

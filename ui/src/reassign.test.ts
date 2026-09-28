@@ -82,7 +82,7 @@ function row(
     title: `ticket ${id}`,
     status: "ready",
     assignment: { harness: "claude", model: "opus", drivers: "implement" },
-    sources: { harness: "default", model: "pinned", drivers: "default" },
+    sources: { harness: "default", model: "pinned", effort: "unset", drivers: "default" },
     verify: null,
     enlisted: false,
     reason: null,
@@ -126,6 +126,7 @@ const SEED: ReassignSeed = {
 const LEAVE: BulkDraft = {
   harness: { mode: "leave", value: "" },
   model: { mode: "leave", value: "" },
+  effort: { mode: "leave", value: "" },
   drivers: { mode: "leave", value: "" },
   verify: { mode: "leave", value: "" },
 };
@@ -135,9 +136,14 @@ describe("draftFrom", () => {
     expect(draftFrom({ ...SEED, verify: 3 })).toEqual({
       harness: "claude",
       model: "opus",
+      effort: "",
       drivers: "implement",
       verify: "3",
     });
+    expect(
+      draftFrom({ ...SEED, assignment: { ...SEED.assignment, effort: "high", effortApplied: false } })
+        .effort,
+    ).toBe("high");
   });
 
   it("shows an unassigned field and an absent verify as empty", () => {
@@ -146,7 +152,7 @@ describe("draftFrom", () => {
         assignment: { harness: null, model: null, drivers: "implement" },
         verify: null,
       }),
-    ).toEqual({ harness: "", model: "", drivers: "implement", verify: "" });
+    ).toEqual({ harness: "", model: "", effort: "", drivers: "implement", verify: "" });
   });
 });
 
@@ -175,6 +181,17 @@ describe("ticketFieldsFrom", () => {
     });
   });
 
+  it("sets, leaves and clears effort like model", () => {
+    expect(ticketFieldsFrom({ ...draftFrom(SEED), effort: " max " }, SEED)).toEqual({
+      effort: "max",
+    });
+    const pinned = { ...SEED, assignment: { ...SEED.assignment, effort: "high" } };
+    expect(ticketFieldsFrom(draftFrom(pinned), pinned)).toEqual({});
+    expect(ticketFieldsFrom({ ...draftFrom(pinned), effort: "" }, pinned)).toEqual({
+      effort: null,
+    });
+  });
+
   it("sends only the fields that moved", () => {
     const draft = { ...draftFrom(SEED), harness: "opencode", verify: "2" };
     expect(ticketFieldsFrom(draft, SEED)).toEqual({ harness: "opencode", verify: 2 });
@@ -189,10 +206,11 @@ describe("ticketFieldsFrom on an enlisted ticket", () => {
     expect(ticketFieldsFrom(draft, ENLISTED)).toEqual({ harness: "opencode" });
   });
 
-  it("never sends the three fields the engine fixes, however the draft moved", () => {
+  it("never sends the fields the engine fixes, however the draft moved", () => {
     const draft = {
       harness: "claude",
       model: "sonnet",
+      effort: "max",
       drivers: "tdd",
       verify: "3",
     };
@@ -225,6 +243,15 @@ describe("bulkFieldsFrom", () => {
       model: { mode: "clear", value: "" },
     };
     expect(bulkFieldsFrom(draft)).toEqual({ harness: "opencode", model: null });
+  });
+
+  it("sends a set effort as its value and a cleared one as null", () => {
+    expect(bulkFieldsFrom({ ...LEAVE, effort: { mode: "set", value: " xhigh " } })).toEqual({
+      effort: "xhigh",
+    });
+    expect(bulkFieldsFrom({ ...LEAVE, effort: { mode: "clear", value: "" } })).toEqual({
+      effort: null,
+    });
   });
 
   it("sends a set verify as a number and a cleared one as null", () => {
@@ -625,6 +652,40 @@ describe("ReassignStore.render", () => {
     expect(root.querySelector<HTMLInputElement>('[data-key="A-tick"]')!.checked).toBe(
       false,
     );
+  });
+
+  it("shows each row's effort with its pill, not applied where the harness cannot take it", () => {
+    const rig = harness();
+    rig.store.openDialog();
+    const { root, paint } = mount(rig.store, [
+      row("A"),
+      row("B", {
+        assignment: { harness: "cursor", model: "m", effort: "high", effortApplied: false, drivers: "implement" },
+        sources: { harness: "pinned", model: "pinned", effort: "default", drivers: "default" },
+      }),
+    ]);
+    paint();
+    expect(root.querySelector('[data-key="A"]')?.textContent).toContain("effort(harness default)");
+    expect(root.querySelector('[data-key="B"]')?.textContent).toContain("efforthigh (not applied)default");
+  });
+
+  it("offers the set harness's effort words in the bulk form", () => {
+    const rig = harness();
+    rig.store.openDialog();
+    rig.store.setBulkMode("harness", "set");
+    rig.store.setBulkValue("harness", "claude");
+    rig.store.setBulkMode("effort", "set");
+    const { root, paint } = mount(rig.store, [row("A")]);
+    paint();
+    const input = root.querySelector<HTMLInputElement>('[data-key="reassign-bulk-effort"]')!;
+    const list = root.querySelector(`#${input.getAttribute("list")}`)!;
+    expect([...list.querySelectorAll("option")].map((o) => o.getAttribute("value"))).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
   });
 
   it("tags an enlisted row as harness only", () => {

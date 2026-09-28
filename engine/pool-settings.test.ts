@@ -114,6 +114,17 @@ describe("pool settings", () => {
     ).toEqual({ harness: "claude", drivers: "implement" });
 
     expect(
+      writePoolSettings(
+        dir,
+        { defaults: { harness: "claude", effort: " xhigh " } },
+        { harnesses: HARNESSES },
+      ).defaults,
+    ).toEqual({ harness: "claude", effort: "xhigh" });
+    expect(() =>
+      writePoolSettings(dir, { defaults: { effort: 3 } }, { harnesses: HARNESSES }),
+    ).toThrow("pool settings: defaults.effort must be a string");
+
+    expect(
       writePoolSettings(dir, { defaults: { harness: "", model: "" } }, { harnesses: HARNESSES }),
     ).toEqual({});
   });
@@ -132,6 +143,17 @@ describe("pool settings", () => {
         { harnesses: HARNESSES },
       ).resolver,
     ).toEqual({ harness: "opencode", model: "oc/flash" });
+    // The resolver's own effort sits beside its own model.
+    expect(
+      writePoolSettings(
+        dir,
+        { resolver: { harness: "opencode", model: "oc/flash", effort: " max ", } },
+        { harnesses: HARNESSES },
+      ).resolver,
+    ).toEqual({ harness: "opencode", model: "oc/flash", effort: "max" });
+    expect(() =>
+      writePoolSettings(dir, { resolver: { effort: 1 } }, { harnesses: HARNESSES }),
+    ).toThrow("pool settings: resolver.effort must be a string");
     expect(writePoolSettings(dir, { resolver: "" }, { harnesses: HARNESSES })).toEqual({});
   });
 

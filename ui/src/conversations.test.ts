@@ -121,6 +121,7 @@ describe("ConversationsTray submit", () => {
     tray.setField("title", "plan the migration");
     tray.setField("opening", "let's start");
     tray.setField("harness", "claude");
+    tray.setField("effort", " high ");
     const submitted = tray.submit();
     startDeferreds[0]!.resolve(CONVERSATION);
     await submitted;
@@ -128,7 +129,7 @@ describe("ConversationsTray submit", () => {
       {
         title: "plan the migration",
         opening: "let's start",
-        assign: { harness: "claude" },
+        assign: { harness: "claude", effort: "high" },
       },
     ]);
   });

@@ -40,6 +40,8 @@ export interface HeldPane extends HeldPaneRecord {
    */
   harness: string;
   model: string;
+  /** The effort it launched with, when it named one (CONTEXT.md: Effort). */
+  effort?: string;
   /**
    * The Attempt whose worktree and branch the work lives in: the attempt
    * itself, or for a Continued attempt the one its chain began at, since a
@@ -105,6 +107,7 @@ export function heldPaneOf(
     branch: typeof payload.branch === "string" ? payload.branch : null,
     harness: typeof payload.harness === "string" ? payload.harness : "",
     model: typeof payload.model === "string" ? payload.model : "",
+    ...(typeof payload.effort === "string" ? { effort: payload.effort } : {}),
     workAttempt,
     numbered:
       typeof payload.numbered === "boolean"

@@ -10,6 +10,10 @@ export interface SpawnContext {
   driver: string;
   harness: string;
   model: string;
+  // The Assignment's effort (CONTEXT.md: Effort), verbatim; absent leaves the
+  // harness on its own default. Each argv builder whose mode takes an effort
+  // (HarnessDescriptor.takesEffort) passes it; the rest ignore it.
+  effort?: string;
   agents?: string;
   logPath: string;
   outcomePath: string;
@@ -106,7 +110,15 @@ export interface HarnessDescriptor {
   // The log mode (ADR-0012): "stream" harnesses tee a structured Stream file
   // and derive the log from it; "raw" harnesses pass stdout/stderr through.
   streamMode: HarnessStreamMode;
+  // Which modes' argv carry the Assignment's effort (CONTEXT.md: Effort). A
+  // mode that cannot take one launches without it and the Attempt shows the
+  // effort as not applied; the argv builders above pass ctx.effort exactly
+  // where this says true.
+  takesEffort: Record<HarnessMode, boolean>;
 }
+
+/** The two spawn modes: headless batch, or the terminal-backed TUI. */
+export type HarnessMode = "batch" | "interactive";
 
 // The prompt text each mode hands the agent, per harness. claude expands a
 // leading "/<driver> ..." as a slash command in both modes; opencode's batch
@@ -150,6 +162,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       claudeShaping.batch(ctx),
       "--model",
       ctx.model,
+      ...effortArgs("--effort", ctx),
       "--permission-mode",
       "auto",
       // The roster JSON the glued prompt promises claude. opencode and cursor
@@ -166,6 +179,7 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       "claude",
       "--model",
       ctx.model,
+      ...effortArgs("--effort", ctx),
       "--permission-mode",
       "auto",
       ...(ctx.agents ? ["--agents", ctx.agents] : []),
@@ -192,6 +206,8 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     echoPattern: "Pasted text",
     promptShaping: claudeShaping,
     streamMode: "stream",
+    // `--effort <level>` in both modes (low, medium, high, xhigh, max).
+    takesEffort: { batch: true, interactive: true },
     // Unverified on this machine (login expired). The operator confirms a
     // clear sequence on another machine before this slot is populated.
     clearKeys: [],
@@ -208,6 +224,8 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       opencodeShaping.batch(ctx),
       "--model",
       ctx.model,
+      // opencode calls it a variant (minimal, low, high, max, ...).
+      ...effortArgs("--variant", ctx),
       "--auto",
     ],
     interactiveArgv: (ctx) => ["opencode", "--model", ctx.model, "--auto"],
@@ -224,6 +242,8 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     idlePattern: "ctrl+p commands",
     promptShaping: opencodeShaping,
     streamMode: "raw",
+    // Only `opencode run` has --variant; the TUI has no such flag.
+    takesEffort: { batch: true, interactive: false },
     clearKeys: ["ctrl+c"],
   },
   // Run against the real Cursor Agent CLI (2026.09.02-c22c1a3). --verbose was
@@ -266,9 +286,16 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
     echoPattern: "Pasted text",
     promptShaping: cursorShaping,
     streamMode: "stream",
+    // The Cursor Agent CLI has no effort flag in either mode.
+    takesEffort: { batch: false, interactive: false },
     clearKeys: ["ctrl+c"],
   },
 };
+
+// The flag pair carrying ctx.effort, or nothing when the Assignment names none.
+function effortArgs(flag: string, ctx: SpawnContext): string[] {
+  return ctx.effort ? [flag, ctx.effort] : [];
+}
 
 // The batch-argv projection of the descriptors: what the spawn paths resolve
 // a known harness to today (headless runs it directly; the terminal-backed
@@ -309,6 +336,33 @@ export function interactiveHarnessCommand(
     return descriptor.interactiveArgv;
   }
   return command;
+}
+
+/**
+ * Whether an Attempt on `harness` launched in `mode` carries its effort
+ * (CONTEXT.md: Effort): the descriptor must say the mode takes one, and the
+ * registered command must be the descriptor's own. A pool or test that
+ * overrides a harness by name owns what runs (interactiveHarnessCommand), so
+ * the Console cannot vouch that its command reads the effort and counts it
+ * as not applied; a harness with no descriptor at all is the same.
+ */
+export function effortApplies(
+  harnesses: Record<string, HarnessCommand>,
+  harness: string,
+  mode: HarnessMode,
+): boolean {
+  const descriptor = defaultHarnessDescriptors[harness];
+  if (!descriptor || harnesses[harness] !== descriptor.batchArgv) return false;
+  return descriptor.takesEffort[mode];
+}
+
+/**
+ * The mode a pool's Attempts launch in (ADR-0014): the TUI when the pool is
+ * terminal-backed, the batch argv otherwise. A launch that falls back to
+ * headless takes the batch argv anyway, which only its `spawned` event knows.
+ */
+export function poolHarnessMode(terminal: string | undefined): HarnessMode {
+  return terminal === "herdr" ? "interactive" : "batch";
 }
 
 /**

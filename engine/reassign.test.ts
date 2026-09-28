@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolConfig } from "./engine.ts";
-import type { HarnessCommand } from "./spawn.ts";
+import { defaultHarnesses, type HarnessCommand } from "./spawn.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { TicketMarker, TicketStatus } from "./pool.ts";
 import {
@@ -120,6 +120,7 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("01")!.reassign.sources).toEqual({
       harness: "default",
       model: "pinned",
+      effort: "unset",
       drivers: "default",
     });
   });
@@ -138,6 +139,7 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("01-spawn-1")!.reassign.sources).toEqual({
       harness: "inherited",
       model: "inherited",
+      effort: "unset",
       drivers: "inherited",
     });
     expect(rows.get("01-spawn-1")!.assignment).toEqual({
@@ -152,8 +154,34 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("01")!.reassign.sources).toEqual({
       harness: "unset",
       model: "unset",
+      effort: "unset",
       drivers: "default",
     });
+  });
+
+  it("marks an effort not applied where the pool's launch mode cannot take it", () => {
+    const rowsIn = (terminal: "herdr" | undefined) =>
+      reassignViews({
+        markers: [marker("01"), marker("02")],
+        config: {
+          ...(terminal ? { terminal } : {}),
+          defaults: { harness: "claude", model: "m", effort: "high" },
+          assign: { "02": { harness: "opencode" } },
+        },
+        configError: null,
+        harnesses: defaultHarnesses,
+        liveAttempts: new Set(),
+        statuses: {},
+        engineAssignments: {},
+      });
+    const headless = rowsIn(undefined);
+    expect(headless.get("01")!.assignment).toMatchObject({ effort: "high", effortApplied: true });
+    expect(headless.get("02")!.assignment).toMatchObject({ effort: "high", effortApplied: true });
+    expect(headless.get("02")!.reassign.sources.effort).toBe("default");
+    // opencode's TUI has no effort flag; claude's does.
+    const backed = rowsIn("herdr");
+    expect(backed.get("01")!.assignment).toMatchObject({ effort: "high", effortApplied: true });
+    expect(backed.get("02")!.assignment).toMatchObject({ effort: "high", effortApplied: false });
   });
 
   it("carries the ticket's own verify, and nothing when the file has none", () => {
@@ -207,6 +235,7 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("e1")!.reassign.sources).toEqual({
       harness: "default",
       model: "unset",
+      effort: "unset",
       drivers: "default",
     });
   });
@@ -244,6 +273,7 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("01-spawn-1")!.reassign.sources).toEqual({
       harness: "inherited",
       model: "inherited",
+      effort: "unset",
       drivers: "inherited",
     });
   });
@@ -326,6 +356,27 @@ describe("writeReassign: what lands in console.json", () => {
     );
 
     expect(onDisk(dir).assign).toEqual({ "01": { harness: "claude", drivers: "fix" } });
+  });
+
+  it("sets, leaves and clears effort tri-state, like model", () => {
+    const dir = pool({ defaults: DEFAULTS, assign: { "01": { model: "opus" } } });
+    const markers = [marker("01"), marker("02")];
+
+    writeReassign(dir, { tickets: ["01", "02"], fields: { effort: " high " } }, context(markers));
+    expect(onDisk(dir).assign).toEqual({
+      "01": { model: "opus", effort: "high" },
+      "02": { effort: "high" },
+    });
+    // Absent leaves it alone.
+    writeReassign(dir, { tickets: ["01"], fields: { model: "sonnet" } }, context(markers));
+    expect(onDisk(dir).assign).toEqual({
+      "01": { model: "sonnet", effort: "high" },
+      "02": { effort: "high" },
+    });
+    // Null clears it, so the ticket follows the defaults again; a cleared
+    // effort is never a refusal, since unset is the harness's own default.
+    writeReassign(dir, { tickets: ["01", "02"], fields: { effort: null } }, context(markers));
+    expect(onDisk(dir).assign).toEqual({ "01": { model: "sonnet" } });
   });
 
   it("treats an empty string as a clear, the way an empty Pool setting is", () => {
@@ -448,11 +499,11 @@ describe("writeReassign: refusals and skips", () => {
   // The engine forces an enlisted ticket's model, drivers and verify itself,
   // so a write of any of them would look applied in the file and change
   // nothing at all.
-  it("refuses a model, drivers or verify on an enlisted ticket, naming it", () => {
+  it("refuses a model, effort, drivers or verify on an enlisted ticket, naming it", () => {
     const dir = pool({ defaults: DEFAULTS });
     const markers = [marker("e1", { enlistedFrom: "%3" }), marker("01")];
 
-    for (const fields of [{ model: "opus" }, { drivers: "fix" }, { verify: 2 }]) {
+    for (const fields of [{ model: "opus" }, { effort: "high" }, { drivers: "fix" }, { verify: 2 }]) {
       expect(() => writeReassign(dir, { tickets: ["e1"], fields }, context(markers))).toThrow(
         "reassign: ticket 'e1' is enlisted: only harness can be reassigned",
       );

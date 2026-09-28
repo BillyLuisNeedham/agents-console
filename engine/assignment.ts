@@ -1,6 +1,6 @@
 /**
- * Assignment (CONTEXT.md: Assignment; ADR-0013): the harness, model and
- * drivers a unit of work runs on, plus the verify count a Ticket may carry.
+ * Assignment (CONTEXT.md: Assignment; ADR-0013): the harness, model, effort
+ * and drivers a unit of work runs on, plus the verify count a Ticket may carry.
  * One resolver serves every caller: an ordinary Ticket, a spawned Ticket, an
  * engine-run judge (grader, head-to-head) and a Conversation each supply
  * their own overrides and the resolver applies them field-wise in one order,
@@ -8,6 +8,8 @@
  * ticket, then the pool defaults. A named harness must be in the harness
  * table; whether an empty harness or model is an error is the caller's
  * call (a Ticket renders as unassigned, a Conversation refuses to start).
+ * Effort (CONTEXT.md: Effort) layers exactly like model but is never an
+ * error: unset means the harness's own default.
  * Kept free of engine.ts so the rules are trivial to table-test.
  */
 
@@ -16,6 +18,8 @@ import type { HarnessCommand } from "./spawn.ts";
 export interface Assignment {
   harness: string;
   model: string;
+  // The harness's own effort word, verbatim; absent when no layer sets one.
+  effort?: string;
   drivers: string;
   verify?: number;
 }
@@ -29,6 +33,13 @@ export interface Assignment {
 export interface AssignmentView {
   harness: string | null;
   model: string | null;
+  // Present only when some layer sets one; absent, the harness runs on its
+  // own default.
+  effort?: string;
+  // Present beside an effort only: whether the harness, in the mode it
+  // launches in, can take it (spawn.ts effortApplies). False renders the
+  // effort as not applied.
+  effortApplied?: boolean;
   drivers: string;
 }
 
@@ -44,16 +55,31 @@ export const UNASSIGNED_ASSIGNMENT_VIEW: AssignmentView = {
 
 export const DEFAULT_DRIVERS = "implement";
 
+/** The pool defaults' Assignment fields: console.json `defaults`. */
+export interface AssignmentDefaults {
+  harness?: string;
+  model?: string;
+  effort?: string;
+  drivers?: string;
+}
+
 // The wire view of a resolved Assignment: the empty string the engine uses
 // for an unassigned field reads as null, and verify stays off the wire.
-export function assignmentViewOf(assignment: {
-  harness: string;
-  model: string;
-  drivers: string;
-}): AssignmentView {
+// `effortApplied` is the caller's: whether the effort reaches the harness
+// depends on the mode the unit launches in, which only the caller knows.
+export function assignmentViewOf(
+  assignment: {
+    harness: string;
+    model: string;
+    effort?: string;
+    drivers: string;
+  },
+  effortApplied = true,
+): AssignmentView {
   return {
     harness: assignment.harness || null,
     model: assignment.model || null,
+    ...(assignment.effort ? { effort: assignment.effort, effortApplied } : {}),
     drivers: assignment.drivers,
   };
 }
@@ -62,6 +88,7 @@ export function assignmentViewOf(assignment: {
 export interface AssignmentRequest {
   harness?: string;
   model?: string;
+  effort?: string;
   drivers?: string;
   // Read as written in console.json, so a malformed value is reported
   // rather than silently coerced.
@@ -75,11 +102,11 @@ export interface ResolveAssignmentParams {
   request: AssignmentRequest | undefined;
   // What the unit inherits when the request is silent: the parent Ticket
   // or Conversation of a spawned unit, the build ticket of a judge.
-  inherited?: Pick<Assignment, "harness" | "model" | "drivers">;
+  inherited?: Pick<Assignment, "harness" | "model" | "effort" | "drivers">;
   // The pool defaults, applied last, field by field: a parent or build
   // ticket that leaves a field empty (an enlisted Conversation names no
   // model) hands that one field to the defaults rather than blocking them.
-  defaults?: { harness?: string; model?: string; drivers?: string };
+  defaults?: AssignmentDefaults;
   // Strict resolution refuses an empty harness or model; lenient resolution
   // returns them empty so the misconfiguration renders instead of failing
   // pool load (the spawn site reports it when the unit actually runs).
@@ -103,6 +130,7 @@ export type AssignmentSource = "pinned" | "inherited" | "default" | "unset";
 export interface AssignmentSources {
   harness: AssignmentSource;
   model: AssignmentSource;
+  effort: AssignmentSource;
   drivers: AssignmentSource;
 }
 
@@ -139,8 +167,8 @@ function sourceOf(...values: (string | undefined)[]): AssignmentSource {
  */
 export function resolveAssignmentSources(params: {
   request: AssignmentRequest | undefined;
-  inherited?: Pick<Assignment, "harness" | "model" | "drivers">;
-  defaults?: { harness?: string; model?: string; drivers?: string };
+  inherited?: Pick<Assignment, "harness" | "model" | "effort" | "drivers">;
+  defaults?: AssignmentDefaults;
 }): AssignmentSources {
   const request = params.request ?? {};
   const { inherited, defaults } = params;
@@ -148,6 +176,7 @@ export function resolveAssignmentSources(params: {
   return {
     harness: sourceOf(request.harness, inherited?.harness, defaults?.harness),
     model: sourceOf(request.model, inherited?.model, defaults?.model),
+    effort: sourceOf(request.effort, inherited?.effort, defaults?.effort),
     drivers: drivers === "unset" ? "default" : drivers,
   };
 }
@@ -159,6 +188,7 @@ export function resolveAssignment(params: ResolveAssignmentParams): Assignment {
   // (as found), and that field must fall through, not stop the chain.
   const harness = firstSet(request.harness, inherited?.harness, defaults?.harness) ?? "";
   const model = firstSet(request.model, inherited?.model, defaults?.model) ?? "";
+  const effort = firstSet(request.effort, inherited?.effort, defaults?.effort)?.trim();
   const drivers =
     firstSet(request.drivers, inherited?.drivers, defaults?.drivers) ?? DEFAULT_DRIVERS;
   if (params.strict && !harness) {
@@ -189,5 +219,11 @@ export function resolveAssignment(params: ResolveAssignmentParams): Assignment {
     }
     verify = request.verify as number;
   }
-  return { harness, model, drivers, ...(verify !== undefined ? { verify } : {}) };
+  return {
+    harness,
+    model,
+    ...(effort ? { effort } : {}),
+    drivers,
+    ...(verify !== undefined ? { verify } : {}),
+  };
 }

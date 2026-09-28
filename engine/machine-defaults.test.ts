@@ -48,10 +48,11 @@ describe("machine defaults", () => {
     const h = home();
     const paths = defaultMachineDefaultsPaths(h);
     const written = writeMachineDefaults(
-      { harness: " claude ", model: "", drivers: "implement", engine: "/e" },
+      { harness: " claude ", model: "", effort: " high ", drivers: "implement", engine: "/e" },
       paths.file,
     );
-    expect(written).toEqual({ harness: "claude", drivers: "implement", engine: "/e" });
+    expect(written).toEqual({ harness: "claude", effort: "high", drivers: "implement", engine: "/e" });
+    expect(readMachineDefaults(paths).effort).toBe("high");
     expect(JSON.parse(readFileSync(paths.file, "utf8"))).toEqual(written);
   });
 
@@ -66,6 +67,7 @@ describe("machine defaults", () => {
   it("rejects an illegal terminal and a non-string field", () => {
     expect(() => validateMachineDefaults({ terminal: "tmux" })).toThrow(/terminal/);
     expect(() => validateMachineDefaults({ harness: 3 })).toThrow(/harness/);
+    expect(() => validateMachineDefaults({ effort: 3 })).toThrow(/effort/);
     expect(validateMachineDefaults({ terminal: "", harness: "claude" })).toEqual({ harness: "claude" });
   });
 });

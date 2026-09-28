@@ -45,6 +45,7 @@ function snap(
           sources: {
             harness: "default" as const,
             model: "default" as const,
+            effort: "unset" as const,
             drivers: "default" as const,
           },
         },

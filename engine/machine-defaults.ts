@@ -1,6 +1,6 @@
 /**
- * Machine defaults (issue #121): the per-machine harness, model, drivers,
- * terminal and engine path a new Pool inherits when nothing more specific
+ * Machine defaults (issue #121): the per-machine harness, model, effort,
+ * drivers, terminal and engine path a new Pool inherits when nothing more specific
  * says otherwise. One JSON file under `~/.agent-graphs/`, edited from the
  * Console's Settings pane and read by Boot and by the engine's resolver
  * fallback.
@@ -19,6 +19,8 @@ import { dirname, join } from "node:path";
 export interface MachineDefaults {
   harness?: string;
   model?: string;
+  /** The harness's own effort word (CONTEXT.md: Effort), passed through verbatim. */
+  effort?: string;
   drivers?: string;
   /** Terminal backing every new pool starts with; the only legal value is "herdr". */
   terminal?: "herdr";
@@ -29,6 +31,7 @@ export interface MachineDefaults {
 export const MACHINE_DEFAULTS_KEYS = [
   "harness",
   "model",
+  "effort",
   "drivers",
   "terminal",
   "engine",
@@ -111,7 +114,7 @@ export function writeMachineDefaults(
 export function validateMachineDefaults(input: unknown): MachineDefaults {
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const out: MachineDefaults = {};
-  for (const key of ["harness", "model", "drivers", "engine"] as const) {
+  for (const key of ["harness", "model", "effort", "drivers", "engine"] as const) {
     const value = raw[key];
     if (value === undefined || value === null) continue;
     if (typeof value !== "string") {
@@ -133,7 +136,7 @@ export function validateMachineDefaults(input: unknown): MachineDefaults {
 function sanitizeMachineDefaults(parsed: unknown): MachineDefaults {
   const raw = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>;
   const out: MachineDefaults = {};
-  for (const key of ["harness", "model", "drivers", "engine"] as const) {
+  for (const key of ["harness", "model", "effort", "drivers", "engine"] as const) {
     const value = raw[key];
     if (typeof value === "string" && value.trim()) out[key] = value.trim();
   }

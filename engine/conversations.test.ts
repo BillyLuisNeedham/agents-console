@@ -348,6 +348,31 @@ describe("Conversation storage", () => {
     expect(nextConversationId(all)).toBe("conv-2");
   });
 
+  it("round-trips an effort, and writes no effort field for a record with none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "conv-storage-effort-"));
+    registerTempDir(dir);
+    const rec: ConversationRecord = {
+      id: "conv-1",
+      file: join(dir, "conv-1.md"),
+      title: "Think hard",
+      opening: "",
+      status: "live",
+      harness: "claude",
+      model: "opus",
+      effort: "xhigh",
+      drivers: "implement",
+    };
+    writeConversation(dir, rec);
+    expect(readConversation(rec.file)).toEqual(rec);
+    writeConversationStatus(rec.file, "ended");
+    expect(readConversation(rec.file).effort).toBe("xhigh");
+
+    const { effort: _, ...plain } = { ...rec, id: "conv-2", file: join(dir, "conv-2.md") };
+    writeConversation(dir, plain);
+    expect(readFileSync(plain.file, "utf8")).not.toContain("effort=");
+    expect(readConversation(plain.file)).not.toHaveProperty("effort");
+  });
+
   it("loadConversations reads none from a pool with no conversations/ directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "conv-storage-empty-"));
     registerTempDir(dir);
@@ -380,8 +405,12 @@ describe("Conversation launch", () => {
       const view = await run.startConversation({
         title: "Plan the rollout",
         opening: "hello agent, let's plan the rollout",
+        assign: { effort: "high" },
       });
       expect(view.status).toBe("live");
+      // A pool-registered harness owns its command, so the Console cannot
+      // vouch that the effort reached it.
+      expect(view.assignment).toMatchObject({ effort: "high", effortApplied: false });
       expect(view.paneId).toBeTruthy();
       expect(view.branch).toBe(branchFor(poolDir, view.id));
       expect(existsSync(worktreePathFor(poolDir, view.id))).toBe(true);
@@ -390,9 +419,11 @@ describe("Conversation launch", () => {
       expect(rec.status).toBe("live");
       expect(rec.title).toBe("Plan the rollout");
       expect(rec.opening).toBe("hello agent, let's plan the rollout");
+      expect(rec.effort).toBe("high");
 
       const spawned = readEvents(join(poolDir, "runs"), view.id).find((e) => e.kind === "spawned");
       expect(spawned).toBeTruthy();
+      expect(spawned!.payload.effort).toBe("high");
       expect(typeof spawned!.payload.pane_id).toBe("string");
       expect(typeof spawned!.payload.tab_id).toBe("string");
 
