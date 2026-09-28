@@ -278,6 +278,7 @@ function enrich(
     poolTitle,
     poolDir,
     finishedTerminals: snapshot.finishedTerminals,
+    spawnUsage: snapshot.spawnUsage,
     state: {
       tickets: meta.map((m) => {
         const row = reassign.get(m.id);
@@ -1615,6 +1616,11 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             writePoolSettings(poolDir, patch as Record<string, unknown>, {
               harnesses: Object.keys(harnesses),
             });
+            // A pool with nothing in flight reaches no boundary to reload
+            // at, so the save asks for the reload itself (issue #149): a
+            // changed Spawn cap is on the snapshot before this answers. In
+            // flight, the next boundary reads the file as it would anyway.
+            currentRun?.reloadConfig();
             // The Pool title (issue #100) is the one setting with no seam to
             // wait for: every open tab shows it from this push, and the
             // push is what hands a changed title to the run.

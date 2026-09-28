@@ -28,6 +28,7 @@ export type {
   Outcome,
   OutcomeStatus,
   RunPhase,
+  SpawnUsage,
 } from "./engine.ts";
 export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
@@ -61,7 +62,7 @@ export type {
 export type { PoolConfig } from "./engine.ts";
 
 import type { ConversationView } from "./conversations.ts";
-import type { Interrupt, Outcome, RunPhase } from "./engine.ts";
+import type { Interrupt, Outcome, RunPhase, SpawnUsage } from "./engine.ts";
 import type { TicketStatus } from "./pool.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
@@ -151,6 +152,12 @@ export interface EnrichedSnapshot {
    * the engine never closes them on its own.
    */
   finishedTerminals: number;
+  /**
+   * The Spawn caps in force and this run's count (issue #149), from the
+   * engine's snapshot verbatim: "Spawns `spawnedThisRun`/`perRun` this run"
+   * and "`perAttempt` per attempt". A run is this Console boot.
+   */
+  spawnUsage: SpawnUsage;
   state: {
     tickets: EnrichedTicketState[];
     /** Every Conversation the pool knows about (issue #60), passed through

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { SPAWN_BODY_MIN_CHARS } from "./engine.ts";
+import { DEFAULT_SPAWN_CAPS, SPAWN_BODY_MIN_CHARS } from "./engine.ts";
 import {
   buildContinuedTeaching,
   buildConversationTeaching as build,
@@ -14,6 +14,7 @@ function prompt(): string {
     roster: "",
     upstream: [],
     outcomePath: "/tmp/pool/runs/01.outcome.json",
+    spawnCaps: DEFAULT_SPAWN_CAPS,
   });
 }
 
@@ -63,6 +64,19 @@ describe("buildPrompt spawn teaching", () => {
     expect(body).toContain("20 per run");
   });
 
+  // Issue #149: the caps are the pool's live ones, not a hardcoded pair.
+  it("names the pool's own caps, in the singular when a cap is one", () => {
+    const body = buildPrompt({
+      chain: [],
+      agentMd: "",
+      roster: "",
+      upstream: [],
+      outcomePath: "/tmp/pool/runs/01.outcome.json",
+      spawnCaps: { perAttempt: 1, perRun: 12 },
+    });
+    expect(body).toContain("1 proposal honored per attempt and 12 per run");
+  });
+
   it("states the standing rule: agents propose, the engine writes pool state", () => {
     const body = prompt();
     expect(body).toContain("proposed, never written");
@@ -77,6 +91,7 @@ describe("buildPrompt spawn teaching", () => {
       roster: "",
       upstream: [],
       outcomePath: "/tmp/pool/runs/01-spawn-1.outcome.json",
+      spawnCaps: DEFAULT_SPAWN_CAPS,
     });
     expect(spawned).toContain("/tmp/pool/runs/01-spawn-1.outcome.json");
     expect(spawned).toBe(
@@ -89,10 +104,10 @@ describe("buildConversationTeaching", () => {
   const spawnPath = "/tmp/pool/runs/conv-1.spawn.json";
   const own = { harness: "claude", model: "opus", drivers: "implement" };
   const defaults = { harness: "opencode", model: "deepseek", drivers: "implement" };
-  const buildConversationTeaching = (path: string) => build(path, own, defaults);
+  const buildConversationTeaching = (path: string) => build(path, own, defaults, 5);
 
   it("states the Conversation's own Assignment, the pool defaults, the fall-through, and the citizen skill", () => {
-    const body = build(spawnPath, own, defaults);
+    const body = build(spawnPath, own, defaults, 5);
     expect(body).toContain("Load the my-console-citizen skill");
     expect(body).toContain("This Conversation's Assignment: harness claude, model opus, drivers implement.");
     expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
@@ -101,14 +116,14 @@ describe("buildConversationTeaching", () => {
   });
 
   it("names an effort only where one is set, and offers it in the assign shape", () => {
-    const body = build(spawnPath, { ...own, effort: "high" }, defaults);
+    const body = build(spawnPath, { ...own, effort: "high" }, defaults, 5);
     expect(body).toContain("This Conversation's Assignment: harness claude, model opus, effort high, drivers implement.");
     expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
     expect(body).toContain('"effort": "..."');
   });
 
   it("spells out an empty field rather than leaving a blank: an enlisted pane names no model, a pool may name no defaults", () => {
-    const body = build(spawnPath, { ...own, model: "" }, undefined);
+    const body = build(spawnPath, { ...own, model: "" }, undefined, 5);
     expect(body).toContain("This Conversation's Assignment: harness claude, model (none), drivers implement.");
     expect(body).toContain("The pool defaults: harness (none), model (none), drivers (none).");
   });
@@ -141,6 +156,11 @@ describe("buildConversationTeaching", () => {
     const body = buildConversationTeaching(spawnPath);
     expect(body).toContain("5 entries honored per file");
     expect(body).toContain("no run-wide cap");
+  });
+
+  it("names the pool's own per-file cap (issue #149)", () => {
+    expect(build(spawnPath, own, defaults, 8)).toContain("8 entries honored per file");
+    expect(build(spawnPath, own, defaults, 1)).toContain("1 entry honored per file");
   });
 
   it("documents that a spawned Ticket and a spawned Conversation both report back as a Turn", () => {

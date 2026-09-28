@@ -9,8 +9,9 @@
  * replacement: `assign` belongs to the Tickets rather than to the pane, and
  * a key this module has never heard of belongs to whoever put it there, so
  * both survive a save untouched. Second, only some of what the pane edits
- * takes effect without a Restart: `defaults`, `assign` and `resolver` reload
- * at the next super-step boundary (ADR-0018), the Pool title (issue #100)
+ * takes effect without a Restart: `defaults`, `assign`, `resolver` and the
+ * Spawn caps reload at the next super-step boundary (ADR-0018, ADR-0029),
+ * or at once on a pool with nothing in flight, the Pool title (issue #100)
  * shows the moment it is saved, and BOOT_ONLY_KEYS is the rest, which the
  * running process froze at boot and the Console badges as such.
  *
@@ -24,6 +25,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readConfig, type PoolConfig } from "./engine.ts";
 import { normaliseTitle } from "./pool-title.ts";
+import { isPositiveInteger, type SpawnCapsConfig } from "./spawn-caps.ts";
 import type { MachineDefaults } from "./machine-defaults.ts";
 
 /**
@@ -42,6 +44,7 @@ export const POOL_SETTINGS_KEYS = [
   "reviewer",
   "checkpoint",
   "title",
+  "spawnCaps",
 ] as const satisfies readonly (keyof PoolConfig)[];
 
 export type PoolSettingsKey = (typeof POOL_SETTINGS_KEYS)[number];
@@ -169,7 +172,35 @@ function normaliseKey(
       return normaliseProse(key, value);
     case "title":
       return normalisePoolTitle(value);
+    case "spawnCaps":
+      return normaliseSpawnCaps(value);
   }
+}
+
+// The Spawn caps (issue #149) are replaced whole, like `defaults`: the pane
+// shows both fields at once, so one the operator emptied goes back to the
+// engine's default. Each field is a text input, so a numeric string is a
+// cap; anything but a positive integer is refused by name, because a cap of
+// zero would hold every proposal and the engine refuses it at reload too.
+function normaliseSpawnCaps(value: unknown): SpawnCapsConfig | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("pool settings: spawnCaps must be an object");
+  }
+  const raw = value as Record<string, unknown>;
+  const out: SpawnCapsConfig = {};
+  for (const field of ["perAttempt", "perRun"] as const) {
+    let entry = raw[field];
+    if (entry === undefined || entry === null) continue;
+    if (typeof entry === "string") {
+      if (entry.trim() === "") continue;
+      entry = /^\d+$/.test(entry.trim()) ? Number(entry.trim()) : entry;
+    }
+    if (!isPositiveInteger(entry)) {
+      throw new Error(`pool settings: spawnCaps.${field} must be a positive integer`);
+    }
+    out[field] = entry;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 // The Pool title (issue #100) is one line: whatever was typed is folded onto

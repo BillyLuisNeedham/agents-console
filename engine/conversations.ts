@@ -104,6 +104,7 @@ import {
   type AssignmentView,
 } from "./assignment.ts";
 import type { Interrupt, PoolConfig } from "./engine.ts";
+import { spawnCapsOf } from "./spawn-caps.ts";
 
 // ---------------------------------------------------------------------------
 // Storage: the marker format and its parser, in the style of pool.ts.
@@ -1272,6 +1273,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       spawnPath,
       { harness, model, ...(effort ? { effort } : {}), drivers },
       host.config().defaults,
+      spawnCapsOf(host.config()).perAttempt,
     );
     const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
 
@@ -1506,6 +1508,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           join(env.runsDir, `${req.id}.spawn.json`),
           { harness, model: "", drivers: DEFAULT_DRIVERS },
           host.config().defaults,
+          spawnCapsOf(host.config()).perAttempt,
         ),
       });
       if (opening.trim()) {

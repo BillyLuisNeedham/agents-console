@@ -169,6 +169,42 @@ describe("pool settings", () => {
     expect(writePoolSettings(dir, { port: "8790" }, { harnesses: [] }).port).toBe(8790);
   });
 
+  // The Spawn caps (issue #149) are shown whole like `defaults`, so a field
+  // the operator emptied goes back to the engine's default rather than
+  // keeping its old value; the pane's fields are text inputs, so a numeric
+  // string is a cap.
+  it("replaces spawnCaps whole, taking numeric strings and removing an all-empty one", () => {
+    const dir = pool({ spawnCaps: { perAttempt: 5, perRun: 20 } });
+
+    expect(
+      writePoolSettings(dir, { spawnCaps: { perAttempt: 8, perRun: " 30 " } }, { harnesses: [] })
+        .spawnCaps,
+    ).toEqual({ perAttempt: 8, perRun: 30 });
+    expect(
+      writePoolSettings(dir, { spawnCaps: { perAttempt: "", perRun: 40 } }, { harnesses: [] })
+        .spawnCaps,
+    ).toEqual({ perRun: 40 });
+    expect(
+      writePoolSettings(dir, { spawnCaps: { perAttempt: null, perRun: "" } }, { harnesses: [] }),
+    ).toEqual({});
+  });
+
+  it("rejects a spawn cap that is not a positive integer, naming the field", () => {
+    const dir = pool({ spawnCaps: { perRun: 20 } });
+    for (const bad of [0, -1, 2.5, "many", true]) {
+      expect(() =>
+        writePoolSettings(dir, { spawnCaps: { perRun: bad } }, { harnesses: [] }),
+      ).toThrow("pool settings: spawnCaps.perRun must be a positive integer");
+    }
+    expect(() =>
+      writePoolSettings(dir, { spawnCaps: { perAttempt: 0 } }, { harnesses: [] }),
+    ).toThrow("pool settings: spawnCaps.perAttempt must be a positive integer");
+    expect(() => writePoolSettings(dir, { spawnCaps: 5 }, { harnesses: [] })).toThrow(
+      "pool settings: spawnCaps must be an object",
+    );
+    expect(onDisk(dir)).toEqual({ spawnCaps: { perRun: 20 } });
+  });
+
   it("rejects a terminal and a selection the engine would not accept", () => {
     const dir = pool({});
     expect(() => writePoolSettings(dir, { terminal: "tmux" }, { harnesses: [] })).toThrow(
@@ -240,6 +276,8 @@ describe("pool settings", () => {
     for (const key of BOOT_ONLY_KEYS) {
       expect(POOL_SETTINGS_KEYS).toContain(key);
     }
+    // The Spawn caps reload at the boundary (issue #149), so no Restart badge.
+    expect(POOL_SETTINGS_KEYS).toContain("spawnCaps");
     expect([...BOOT_ONLY_KEYS]).toEqual([
       "roster",
       "agents",

@@ -3896,6 +3896,90 @@ describe("config reload (ADR-0018)", () => {
       readEventLines(poolDir, "02").some((e) => e.kind === "reassigned"),
     ).toBe(false);
   });
+
+  // Issue #149: the Spawn caps reload at the boundary with the assignment
+  // slice, so a cap raised from Settings reaches the very next adoption and
+  // the next attempt's teaching.
+  it("reloads the spawn caps at the boundary, into the adoption and the next prompt", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [1, 2, 3].map((n) => ({ title: `N${n}`, body: "A body long enough to stand." })) },
+    });
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ ...stubConfig, spawnCaps: { perAttempt: 1, perRun: 7 } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(run.final.log).toContain("config reloaded: spawnCaps");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(false);
+    expect(rig.spawned["01"].body).toContain("5 proposals honored per attempt and 20 per run");
+    expect(rig.spawned["02"].body).toContain("1 proposal honored per attempt and 7 per run");
+  });
+
+  it("rejects a reload whose spawn cap is not a positive integer, keeping the caps it had", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { ...stubConfig, spawnCaps: { perRun: 9 } },
+    });
+    const rig = stubHarness(poolDir, {});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ ...stubConfig, spawnCaps: { perRun: 0 } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.final.log).toContain(
+      "config reload rejected: pool config: spawnCaps.perRun must be a positive integer",
+    );
+    expect(run.snapshots.at(-1)!.spawnUsage.perRun).toBe(9);
+  });
+
+  // An idle pool reaches no boundary, so a Settings save asks for the reload
+  // itself (issue #149): the caps it changed show on the snapshot at once.
+  it("reloads at once when asked while no drive is in flight", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {});
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ ...stubConfig, spawnCaps: { perRun: 30 } }),
+    );
+    run.reloadConfig();
+
+    expect(run.final.log).toContain("config reloaded: spawnCaps");
+    expect(run.snapshots.at(-1)!.spawnUsage).toEqual({
+      spawnedThisRun: 0,
+      perAttempt: 5,
+      perRun: 30,
+    });
+  });
 });
 
 describe("glued prompt", () => {
@@ -7923,6 +8007,64 @@ describe("spawn adoption", () => {
       run.final.log.some((line) => line.includes("truncated at the caps")),
     ).toBe(true);
   }, 15000);
+
+  // Issue #149: both caps live in the pool config, each field falling back
+  // to its default on its own, and the snapshot carries them with the count.
+  it("reads the caps from the pool config field by field and carries the usage on the snapshot", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 2 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [1, 2, 3].map((n) => proposal(`N${n}`)) },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-3.md"))).toBe(false);
+    expect(run.snapshots.at(-1)!.spawnUsage).toEqual({
+      spawnedThisRun: 2,
+      perAttempt: 2,
+      perRun: 20,
+    });
+  });
+
+  // Issue #149: "per run" is since this Console boot. A pool that spawned
+  // before a restart starts the count again at zero, whatever is on disk.
+  it("counts the run cap from this boot, not from the spawned tickets already on disk", async () => {
+    const earlier = [1, 2, 3].map((n) => ({
+      file: `00-spawn-${n}.md`,
+      marker: `<!-- state: id=00-spawn-${n} blocked-by=none status=done spawned-by=00 -->`,
+    }));
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        ...earlier,
+        readyTicket("01"),
+      ],
+      config: { ...stubConfig, spawnCaps: { perRun: 3 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("After the restart")] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(run.snapshots[0]!.spawnUsage.spawnedThisRun).toBe(0);
+    expect(run.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(1);
+  });
 
   it("lets a spawned ticket's own attempt spawn further tickets", async () => {
     const poolDir = makePool({

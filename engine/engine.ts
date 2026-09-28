@@ -43,6 +43,12 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
+import {
+  checkSpawnCaps,
+  spawnCapsOf,
+  type SpawnCaps,
+  type SpawnCapsConfig,
+} from "./spawn-caps.ts";
 import { buildContinuedTeaching, buildEnlistTeaching, buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
@@ -181,6 +187,7 @@ import {
 } from "./worktrees.ts";
 
 export type { HarnessCommand } from "./spawn.ts";
+export { DEFAULT_SPAWN_CAPS, spawnCapsOf, type SpawnCaps } from "./spawn-caps.ts";
 // Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper, RESIZE_RELAY } from "./pane-session.ts";
@@ -241,12 +248,6 @@ export interface SpawnRejection {
   reason: string;
 }
 
-// Caps (ADR-0010): at most 5 proposals honored per attempt and 20 per run.
-// Overflow truncates and logs (the adoption event carries the count), never
-// an error. Engine constants by spec; no config surface.
-const SPAWN_MAX_PER_ATTEMPT = 5;
-const SPAWN_MAX_PER_RUN = 20;
-
 // One attempt's surviving proposals, buffered between the moment an outcome
 // becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
 // selection's winner) and the boundary that adopts them. `origin` is the
@@ -292,6 +293,9 @@ export interface PoolConfig {
   // (and effort words) would not be recognised there.
   resolver?: string | { harness?: string; model?: string; effort?: string };
   port?: number;
+  // The Spawn caps (ADR-0029, spawn-caps.ts): absent fields take the
+  // defaults, 5 per attempt and 20 per run.
+  spawnCaps?: SpawnCapsConfig;
   // Who picks the winner of a verify fan-out: the engine's arithmetic rule
   // (default) or the human, via a selection interrupt carrying the grades.
   selection?: "auto" | "human";
@@ -430,6 +434,15 @@ export interface PoolSnapshot {
   // the engine works through them, head first, each named by where its
   // merge stands. Derived beside the hold at every emit, never persisted.
   mergeQueue: MergeQueueEntry[];
+  // The Spawn caps in force and this run's count against the per-run one
+  // (ADR-0029), so the Console shows how close the pool is to a cap.
+  spawnUsage: SpawnUsage;
+}
+
+// What the Console shows of the Spawn caps: `spawnedThisRun` of `perRun`
+// this run, and `perAttempt` per attempt.
+export interface SpawnUsage extends SpawnCaps {
+  spawnedThisRun: number;
 }
 
 interface RunOptions {
@@ -551,6 +564,12 @@ export interface PoolRun {
    * the only way one closes. Resolves with how many closed.
    */
   closeFinishedTerminals: () => Promise<number>;
+  /**
+   * Pool settings were saved (issue #149): with no drive in flight, run the
+   * boundary's Config reload now and emit, since an idle pool reaches no
+   * boundary to do it; in flight, nothing, the next boundary reloads.
+   */
+  reloadConfig: () => void;
 }
 
 const reduceTickets = (
@@ -784,8 +803,9 @@ interface Session {
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
-  // Spawn tickets adopted so far this run, bounding the per-run cap. Seeded
-  // from the markers at start, so a resumed run continues the same count.
+  // Ticket-origin Spawns adopted so far this run, bounding the per-run cap.
+  // A run is this Console boot (ADR-0029): the count starts at zero at every
+  // start, whatever the pool spawned before.
   spawnedThisRun: number;
   // Terminal-backed boot reconciliation (ADR-0014): set at startPool to the
   // reconciliation running against herdr, awaited by the drive loop before
@@ -1167,7 +1187,7 @@ export function startPool(options: RunOptions): PoolRun {
       relabelling: Promise.resolve(),
     },
     pendingSpawns: [],
-    spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
+    spawnedThisRun: 0,
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
     mergeChain: Promise.resolve(),
@@ -1348,6 +1368,7 @@ function makeHandle(session: Session): PoolRun {
     retitle: (title) => retitlePoolWorkspace(session, title),
     keepTalking: (ticketId) => keepTalking(session, ticketId),
     closeFinishedTerminals: () => closeFinishedTerminals(session),
+    reloadConfig: () => reloadConfigWhenIdle(session),
   };
   return handle;
 }
@@ -1514,6 +1535,10 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
       ),
       session.state.interrupts,
     ),
+    spawnUsage: {
+      spawnedThisRun: session.spawnedThisRun,
+      ...spawnCapsOf(session.state.config),
+    },
   };
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
@@ -6310,19 +6335,20 @@ function resolveUnseenAssignments(
 // Config reload (ADR-0018)
 // ---------------------------------------------------------------------------
 
-// The three keys the reload touches. Everything else on PoolConfig
-// (roster, agents, selection, terminal, port) stays exactly as it was at
-// boot, whatever the file says, for the life of the run.
-const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver"] as const;
+// The keys the reload touches: the assignment slice, and the Spawn caps
+// beside it (ADR-0029). Everything else on PoolConfig (roster, agents,
+// selection, terminal, port) stays exactly as it was at boot, whatever the
+// file says, for the life of the run.
+const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver", "spawnCaps"] as const;
 
-// Parses only the assignment slice out of a console.json body: defaults,
-// assign, resolver. Deliberately does not validate selection or terminal
-// (readConfig's job, boot-only) — an edit to a field the reload never
-// touches must never block an otherwise-good defaults/assign/resolver edit.
-function parseConfigSlice(
-  raw: string,
-  poolDir: string,
-): Pick<PoolConfig, "defaults" | "assign" | "resolver"> {
+type ConfigSlice = Pick<PoolConfig, (typeof CONFIG_SLICE_KEYS)[number]>;
+
+// Parses only the reloadable slice out of a console.json body: defaults,
+// assign, resolver, spawnCaps. Deliberately does not validate selection or
+// terminal (readConfig's job, boot-only) — an edit to a field the reload
+// never touches must never block an otherwise-good edit of the slice. The
+// caps are checked here, since nothing downstream resolves them.
+function parseConfigSlice(raw: string, poolDir: string): ConfigSlice {
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(
@@ -6333,12 +6359,13 @@ function parseConfigSlice(
     defaults: parsed.defaults,
     assign: parsed.assign,
     resolver: parsed.resolver,
+    spawnCaps: checkSpawnCaps(parsed.spawnCaps),
   };
 }
 
-// Which of the three slice keys actually changed, by value: a file rewritten
-// byte-for-byte differently but with the same defaults/assign/resolver (say,
-// only its port changed) reloads nothing and logs nothing.
+// Which of the slice keys actually changed, by value: a file rewritten
+// byte-for-byte differently but with the same slice (say, only its port
+// changed) reloads nothing and logs nothing.
 function changedSliceKeys(previous: PoolConfig, next: PoolConfig): string[] {
   return CONFIG_SLICE_KEYS.filter(
     (key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]),
@@ -6366,7 +6393,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
 }
 
 // The super-step boundary's config reload (ADR-0018): re-reads console.json,
-// and when its assignment slice (defaults, assign, resolver) changed, dry-run
+// and when its slice (defaults, assign, resolver, spawnCaps) changed, dry-run
 // resolves every reassignable ticket before committing anything. "Reassignable"
 // is every marker except a ticket with an Attempt in flight across the
 // boundary — today that is only a terminal-backed attempt re-adopted at boot
@@ -6388,7 +6415,7 @@ function reloadConfigAtBoundary(session: Session): void {
   if (raw === session.lastConfigText) return;
   session.lastConfigText = raw;
 
-  let slice: Pick<PoolConfig, "defaults" | "assign" | "resolver">;
+  let slice: ConfigSlice;
   try {
     slice = raw === null ? {} : parseConfigSlice(raw, session.poolDir);
   } catch (error) {
@@ -6401,6 +6428,7 @@ function reloadConfigAtBoundary(session: Session): void {
     defaults: slice.defaults,
     assign: slice.assign,
     resolver: slice.resolver,
+    spawnCaps: slice.spawnCaps,
   };
   const changed = changedSliceKeys(session.state.config, candidate);
   if (changed.length === 0) return;
@@ -6465,6 +6493,18 @@ function reloadConfigAtBoundary(session: Session): void {
       },
     });
   }
+}
+
+// A Pool settings save's reload (issue #149). Idle, no super-step is in
+// flight, so this is a boundary as far as the reload is concerned: nothing
+// holds an Assignment it could move but the in-flight tickets the reload
+// already freezes. Its result reaches the Console in the emit, where a
+// changed Spawn cap shows at once. In flight, the drive's next boundary
+// reads the same file.
+function reloadConfigWhenIdle(session: Session): void {
+  if (session.driving) return;
+  reloadConfigAtBoundary(session);
+  emitSnapshot(session, session.settledPhase ?? "running");
 }
 
 // The grader's outcome: the standard contract plus a validated grade.
@@ -9505,6 +9545,9 @@ function adoptSpawnProposals(session: Session): void {
   const knownIds = new Set(session.markers.map((m) => m.id));
   const knownConvIds = knownConversationIds(session.poolDir);
   const counters = combinedSpawnCounters(session);
+  // The caps as this boundary's Config reload left them (ADR-0029).
+  const caps = spawnCapsOf(session.state.config);
+  const capsPhrase = `${caps.perAttempt} per attempt, ${caps.perRun} per run`;
   const log: string[] = [];
   let wrote = false;
 
@@ -9559,14 +9602,14 @@ function adoptSpawnProposals(session: Session): void {
       }
       accepted.push(proposal);
     }
-    // The per-proposal cap honors the first five survivors, always. The
-    // per-run cap truncates whatever the run has no room left for, but only
-    // for a Ticket's own outcome.spawn: a Conversation's spawn.json has none.
+    // The per-proposal cap honors the first survivors, always. The per-run
+    // cap truncates whatever the run has no room left for, but only for a
+    // Ticket's own outcome.spawn: a Conversation's spawn.json has none.
     let truncated = 0;
-    let honored = accepted.slice(0, SPAWN_MAX_PER_ATTEMPT);
+    let honored = accepted.slice(0, caps.perAttempt);
     truncated += accepted.length - honored.length;
     if (origin !== "conversation") {
-      const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
+      const room = Math.max(0, caps.perRun - session.spawnedThisRun);
       if (honored.length > room) {
         truncated += honored.length - room;
         honored = honored.slice(0, room);
@@ -9628,13 +9671,13 @@ function adoptSpawnProposals(session: Session): void {
         `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
           (truncated > 0
             ? `; ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-              "truncated at the caps (5 per attempt, 20 per run)"
+              `truncated at the caps (${capsPhrase})`
             : ""),
       );
     } else if (truncated > 0) {
       log.push(
         `ticket ${parentId}: ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-          "truncated at the caps (5 per attempt, 20 per run)",
+          `truncated at the caps (${capsPhrase})`,
       );
     }
   }
@@ -9808,6 +9851,7 @@ async function runTicket(
     roster: snapshot.config.roster ?? "",
     upstream,
     outcomePath,
+    spawnCaps: spawnCapsOf(snapshot.config),
   });
 
   // The attempt itself is the Attempt-run module's (ADR-0014): spawn,
@@ -9959,6 +10003,7 @@ export function parseConfig(raw: string | null, poolDir: string): PoolConfig {
   if (parsed.terminal !== undefined && parsed.terminal !== "herdr") {
     throw new Error(`pool config: terminal must be "herdr"`);
   }
+  checkSpawnCaps(parsed.spawnCaps);
   return parsed as PoolConfig;
 }
 
