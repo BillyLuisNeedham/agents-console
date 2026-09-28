@@ -77,6 +77,13 @@ describe("buildPrompt spawn teaching", () => {
     expect(body).toContain("1 proposal honored per attempt and 12 per run");
   });
 
+  it("teaches blocks: named tickets or all, never interrupting one running", () => {
+    const body = prompt();
+    expect(body).toContain('"blocks": ["id", ...]');
+    expect(body).toContain('"blocks": "all"');
+    expect(body).toContain("never interrupted");
+  });
+
   it("teaches that an over-cap proposal is held for the operator, not lost", () => {
     const body = prompt();
     expect(body).toContain("overflow held for the operator to adopt or discard");
@@ -162,6 +169,12 @@ describe("buildConversationTeaching", () => {
     const body = buildConversationTeaching(spawnPath);
     expect(body).toContain("5 entries honored per file");
     expect(body).toContain("no run-wide cap");
+  });
+
+  it("teaches blocks for a ticket follow-up", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain('"blocks": ["id", ...]');
+    expect(body).toContain('"blocks": "all"');
   });
 
   it("teaches that entries beyond the per-file cap are held for the operator", () => {

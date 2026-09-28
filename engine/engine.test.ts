@@ -7673,6 +7673,37 @@ describe("outcome spawn schema", () => {
     }
   });
 
+  // ADR-0029: a proposal may name the tickets it blocks, or "all".
+  it("keeps a proposal's blocks, named or all, and rejects any other shape", () => {
+    const spawn = [
+      { title: "Named", body: goodBody, blocks: ["02", "03"] },
+      { title: "Everything", body: goodBody, blocks: "all" as const },
+    ];
+    expect(
+      okOutcome(validateOutcome({ status: "done", summary: "s", commitSha: null, spawn }))
+        .outcome.spawn,
+    ).toEqual(spawn);
+
+    const bad = "proposal's blocks is not a list of ticket ids or \"all\"";
+    const cases: { entry: unknown; reason: string }[] = [
+      { entry: { title: "T", body: goodBody, blocks: "02" }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: [""] }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: [2] }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: null }, reason: bad },
+      {
+        entry: { title: "T", body: goodBody, kind: "conversation", blocks: "all" },
+        reason: "proposal's blocks is only for a ticket: a Conversation blocks nothing",
+      },
+    ];
+    for (const { entry, reason } of cases) {
+      const result = okOutcome(
+        validateOutcome({ status: "done", summary: "s", commitSha: null, spawn: [entry] }),
+      );
+      expect(result.outcome.spawn).toEqual([]);
+      expect(result.spawnRejections).toEqual([{ index: 0, reason }]);
+    }
+  });
+
   it("keeps the well-formed entries around a malformed one, naming the bad index", () => {
     const good = { title: "Follow up", body: goodBody };
 
@@ -8213,6 +8244,116 @@ describe("spawn adoption", () => {
     expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
     expect(run.snapshots[0]!.spawnUsage.spawnedThisRun).toBe(0);
     expect(run.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(1);
+  });
+
+  // ADR-0029: a Spawn that blocks named tickets goes onto each one's
+  // blocked-by, so the fix the agent found runs before them.
+  it("adds a spawn that blocks named tickets to their blocked-by, so it runs first", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01"), readyTicket("03", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [{ ...proposal("Fix first"), blocks: ["02"] }] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "02-t.md")).toContain("blocked-by=01,01-spawn-1");
+    expect(markerLine(poolDir, "03-t.md")).toContain("blocked-by=01 ");
+    expect(run.final.log).toContain("super-step 2: 01-spawn-1, 03");
+    expect(run.final.log).toContain("super-step 3: 02");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "spawn-adopted")?.payload,
+    ).toEqual({ adopted: ["01-spawn-1"], blocks: { "01-spawn-1": ["02"] } });
+    expect(run.final.log).toContain("ticket 01: spawn 01-spawn-1 blocks 02");
+  });
+
+  // "all" is every ticket not yet started at adoption, sibling Spawns
+  // included, but never the Spawn's own blockers (that would deadlock) nor a
+  // done ticket.
+  it("blocks every ticket not yet started when a spawn blocks all, except its own blockers", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        readyTicket("03", "01"),
+        readyTicket("04", "03"),
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [
+          { ...proposal("After four's blockers"), blockedBy: ["04"], blocks: "all" },
+          proposal("A sibling"),
+        ],
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // 04 and 03 are the spawn's own blockers: blocking them would deadlock.
+    expect(markerLine(poolDir, "02-t.md")).toContain("blocked-by=01,01-spawn-1");
+    expect(markerLine(poolDir, "03-t.md")).toContain("blocked-by=01 ");
+    expect(markerLine(poolDir, "04-t.md")).toContain("blocked-by=03 ");
+    expect(markerLine(poolDir, "01-spawn-2.md")).toContain("blocked-by=01-spawn-1");
+    expect(markerLine(poolDir, "00-t.md")).toContain("blocked-by=none");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "spawn-adopted")?.payload,
+    ).toEqual({
+      adopted: ["01-spawn-1", "01-spawn-2"],
+      blocks: { "01-spawn-1": ["01-spawn-2", "02"] },
+    });
+  });
+
+  it("rejects a spawn whose named blocks are unknown, done, or would make a cycle", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        readyTicket("03", "02"),
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [
+          { ...proposal("Ghost"), blocks: ["99"] },
+          { ...proposal("Too late"), blocks: ["00"] },
+          { ...proposal("Circular"), blockedBy: ["03"], blocks: ["02"] },
+        ],
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    const reasons = readEventLines(poolDir, "01")
+      .filter((e) => e.kind === "spawn-rejected")
+      .map((e) => [e.payload.title, e.payload.reason]);
+    expect(reasons).toEqual([
+      ["Ghost", "blocks names tickets outside the pool: 99"],
+      ["Too late", "blocks names done tickets, which have no next attempt to hold: 00"],
+      ["Circular", "blocks names tickets this proposal already waits on, a cycle: 02"],
+    ]);
   });
 
   it("lets a spawned ticket's own attempt spawn further tickets", async () => {

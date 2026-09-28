@@ -8799,6 +8799,26 @@ function validateSpawnProposals(
       });
       return;
     }
+    const blocks = proposal.blocks;
+    if (
+      blocks !== undefined &&
+      blocks !== "all" &&
+      (!Array.isArray(blocks) ||
+        blocks.some((id) => typeof id !== "string" || id.trim() === ""))
+    ) {
+      rejections.push({
+        index,
+        reason: 'proposal\'s blocks is not a list of ticket ids or "all"',
+      });
+      return;
+    }
+    if (blocks !== undefined && kindRaw === "conversation") {
+      rejections.push({
+        index,
+        reason: "proposal's blocks is only for a ticket: a Conversation blocks nothing",
+      });
+      return;
+    }
     const assignRaw = proposal.assign;
     let assign: SpawnProposal["assign"];
     if (assignRaw !== undefined) {
@@ -8827,6 +8847,7 @@ function validateSpawnProposals(
       ...(blockedBy !== undefined ? { blockedBy } : {}),
       ...(kindRaw !== undefined ? { kind: kindRaw as "ticket" | "conversation" } : {}),
       ...(assign !== undefined ? { assign } : {}),
+      ...(blocks !== undefined ? { blocks: blocks as string[] | "all" } : {}),
     });
   });
   return { proposals, rejections };
@@ -9586,7 +9607,107 @@ function spawnProposalProblem(
   if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
     return `assign.harness names unknown harness '${proposal.assign.harness}'`;
   }
+  // Named blocks (ADR-0029) go onto each ticket's blocked-by at adoption, so
+  // each must be a ticket with a next Attempt to hold, and none may be one
+  // the proposal itself waits on, which would deadlock the two. "all" picks
+  // its tickets at adoption and has nothing to check here.
+  if (Array.isArray(proposal.blocks)) {
+    const named = proposal.blocks;
+    const waitsOn = blockedByClosure(session.markers, proposal.blockedBy ?? []);
+    const problems: [string, string[]][] = [
+      [
+        "blocks names Conversations, which cannot be blocked",
+        named.filter((id) => known.conversations.has(id)),
+      ],
+      [
+        "blocks names tickets outside the pool",
+        named.filter((id) => !known.ids.has(id) && !known.conversations.has(id)),
+      ],
+      [
+        "blocks names done tickets, which have no next attempt to hold",
+        named.filter((id) => known.ids.has(id) && session.state.tickets[id] === "done"),
+      ],
+      [
+        "blocks names engine-run tickets, which the engine schedules itself",
+        named.filter((id) => known.ids.has(id) && engineTicketBuildId(id) !== null),
+      ],
+      [
+        "blocks names tickets this proposal already waits on, a cycle",
+        named.filter((id) => waitsOn.has(id)),
+      ],
+    ];
+    const reasons = problems
+      .filter(([, ids]) => ids.length > 0)
+      .map(([reason, ids]) => `${reason}: ${ids.join(", ")}`);
+    if (reasons.length > 0) return reasons.join("; ");
+  }
   return null;
+}
+
+// Every ticket a ticket waits on, directly or through its blockers' own
+// blocked-by: what a Spawn must never block, or the two would wait on each
+// other for good (ADR-0029).
+function blockedByClosure(markers: TicketMarker[], start: string[]): Set<string> {
+  const byId = new Map(markers.map((m) => [m.id, m]));
+  const seen = new Set<string>();
+  const stack = [...start];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    stack.push(...(byId.get(id)?.blockedBy ?? []));
+  }
+  return seen;
+}
+
+// A just-adopted Spawn's blocks (ADR-0029), onto the pool: the Spawn joins
+// each target's blocked-by, through the same marker write the Enlist form's
+// Blocks uses, with the in-memory marker kept in step for the ready set this
+// boundary computes next. "all" is every ticket not yet started (ready) as
+// the adoption lands, sibling Spawns included, excluding the Spawn itself,
+// everything it waits on, and engine-run tickets. A ticket already running
+// is never a target and never interrupted. Named targets were checked at
+// validation; one an earlier Spawn of the same boundary made a cycle of, or
+// that the file refuses, is skipped with a log line rather than written.
+// Returns the tickets actually blocked.
+function applySpawnBlocks(
+  session: Session,
+  spawnId: string,
+  blocks: string[] | "all",
+  log: string[],
+): string[] {
+  const spawn = session.markers.find((m) => m.id === spawnId);
+  if (!spawn) return [];
+  const waitsOn = blockedByClosure(session.markers, spawn.blockedBy);
+  const targets =
+    blocks === "all"
+      ? session.markers
+          .filter(
+            (m) =>
+              m.id !== spawnId &&
+              session.state.tickets[m.id] === "ready" &&
+              !waitsOn.has(m.id) &&
+              engineTicketBuildId(m.id) === null,
+          )
+          .map((m) => m.id)
+      : blocks;
+  const blocked: string[] = [];
+  for (const targetId of targets) {
+    const target = session.markers.find((m) => m.id === targetId);
+    if (!target || target.blockedBy.includes(spawnId)) continue;
+    if (waitsOn.has(targetId)) {
+      log.push(`ticket ${spawnId}: not blocking ${targetId}, which it already waits on`);
+      continue;
+    }
+    const result = addBlockerToTicket(session.poolDir, targetId, spawnId);
+    if (!result.ok) {
+      log.push(`ticket ${spawnId}: not blocking ${targetId}: ${result.reason}`);
+      continue;
+    }
+    target.blockedBy.push(spawnId);
+    blocked.push(targetId);
+  }
+  return blocked;
 }
 
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
@@ -9623,6 +9744,16 @@ function adoptSpawnProposals(session: Session): void {
   const capsPhrase = `${caps.perAttempt} per attempt, ${caps.perRun} per run`;
   const log: string[] = [];
   let wrote = false;
+  // What each parent's adoption settled, recorded on its log once the
+  // blocks below have landed, so its spawn-adopted event names them.
+  const settled: {
+    parentId: string;
+    adopted: string[];
+    heldId?: string;
+    heldNow: { id: string; proposal: SpawnProposal; reason: HeldSpawnReason }[];
+    at: string;
+  }[] = [];
+  const blocking: { parentId: string; spawnId: string; blocks: string[] | "all" }[] = [];
 
   for (const { parentId, proposals, origin, heldId } of pending) {
     const accepted: SpawnProposal[] = [];
@@ -9704,6 +9835,9 @@ function adoptSpawnProposals(session: Session): void {
       } else {
         writeSpawnTicket(session, parentId, id, proposal);
         wrote = true;
+        if (proposal.blocks !== undefined) {
+          blocking.push({ parentId, spawnId: id, blocks: proposal.blocks });
+        }
       }
       adopted.push(id);
       if (origin !== "conversation") session.spawnedThisRun += 1;
@@ -9718,24 +9852,7 @@ function adoptSpawnProposals(session: Session): void {
             held.map(({ proposal, reason }) => ({ parentId, origin, proposal, reason, at })),
           )
         : [];
-    if (adopted.length > 0) {
-      appendEvent(session.runsDir, parentId, {
-        at,
-        attempt: lastAttempt(session.runsDir, parentId),
-        kind: "spawn-adopted",
-        payload: { adopted, ...(heldId !== undefined ? { fromHeld: heldId } : {}) },
-      });
-    }
-    if (heldNow.length > 0) {
-      appendEvent(session.runsDir, parentId, {
-        at,
-        attempt: lastAttempt(session.runsDir, parentId),
-        kind: "spawn-held",
-        payload: {
-          held: heldNow.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
-        },
-      });
-    }
+    settled.push({ parentId, adopted, ...(heldId !== undefined ? { heldId } : {}), heldNow, at });
     const heldPhrase =
       `${heldNow.length} proposal${heldNow.length === 1 ? "" : "s"} held at ` +
       `the caps (${capsPhrase}): ${heldNow.map((h) => h.id).join(", ")}`;
@@ -9751,24 +9868,59 @@ function adoptSpawnProposals(session: Session): void {
     }
   }
 
+  if (wrote) {
+    // The adopted files join the pool the way answer processing brings a
+    // hand-written ticket in: markers reload, unseen ids resolve their
+    // assignments (parent inheritance), and the tickets channel folds them
+    // in at their on-disk statuses.
+    session.markers = loadPoolTickets(session.poolDir);
+    resolveUnseenAssignments(
+      session.markers,
+      session.assignments,
+      session.state.config,
+      session.harnesses,
+    );
+    session.state = applyUpdate(session.state, {
+      tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
+    });
+  }
+  // Blocks land once every Spawn of this boundary is in the pool, so "all"
+  // reaches a sibling adopted alongside, whichever order they came in.
+  const blocked = new Map<string, Record<string, string[]>>();
+  for (const { parentId, spawnId, blocks } of blocking) {
+    const targets = applySpawnBlocks(session, spawnId, blocks, log);
+    if (targets.length === 0) continue;
+    blocked.set(parentId, { ...blocked.get(parentId), [spawnId]: targets });
+    log.push(`ticket ${parentId}: spawn ${spawnId} blocks ${targets.join(", ")}`);
+  }
+  for (const { parentId, adopted, heldId, heldNow, at } of settled) {
+    if (adopted.length > 0) {
+      const blocks = blocked.get(parentId);
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-adopted",
+        payload: {
+          adopted,
+          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
+          ...(blocks ? { blocks } : {}),
+        },
+      });
+    }
+    if (heldNow.length > 0) {
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-held",
+        payload: {
+          held: heldNow.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
+        },
+      });
+    }
+  }
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
-  if (!wrote) return;
-  // The adopted files join the pool the way answer processing brings a
-  // hand-written ticket in: markers reload, unseen ids resolve their
-  // assignments (parent inheritance), and the tickets channel folds them in
-  // at their on-disk statuses.
-  session.markers = loadPoolTickets(session.poolDir);
-  resolveUnseenAssignments(
-    session.markers,
-    session.assignments,
-    session.state.config,
-    session.harnesses,
-  );
-  session.state = applyUpdate(session.state, {
-    tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
-  });
 }
 
 // The operator's Adopt of a Held spawn (ADR-0029). It is refused up front,
