@@ -664,7 +664,12 @@ export class ConsoleSession {
         )
       : null;
     const cards = this.view?.cards ?? [];
-    const detail = this.selectedId ? projectDetail(cards, this.selectedId) : null;
+    const detail = this.selectedId
+      ? projectDetail(cards, this.selectedId, {
+          pending: this.view?.pendingSpawns ?? [],
+          held: this.view?.heldSpawns ?? [],
+        })
+      : null;
     const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
     // The events fetch (and so the timeline) covers a selected Conversation
     // too, reusing /api/events?ticket=<id>; the raw log pane below it stays
@@ -741,6 +746,7 @@ export class ConsoleSession {
         : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
+      pendingSpawns: this.view?.pendingSpawns ?? [],
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,
       detailTabs:

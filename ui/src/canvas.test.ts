@@ -454,3 +454,53 @@ describe("the Spawn caps header line (issue #149)", () => {
     expect(root.querySelector(".canvas-spawn-line")).toBeNull();
   });
 });
+
+describe("faded cards for Pending and Held spawns (issue #150)", () => {
+  const spawnCard = (
+    overrides: Partial<Extract<CanvasModel["cards"][number], { kind: "spawn" }>> = {},
+  ): CanvasModel["cards"][number] => ({
+    kind: "spawn",
+    id: "spawn:proposal-1",
+    proposalId: "proposal-1",
+    state: "pending",
+    label: "lands next boundary",
+    title: "Write the migration guide",
+    parentCardId: "ticket:01",
+    parentId: "01",
+    spawnKind: "ticket",
+    body: "Document every renamed flag.",
+    blockedBy: [],
+    blocks: null,
+    overlaps: [],
+    x: 100,
+    y: 300,
+    ...overrides,
+  });
+
+  it("draws each proposal as a faded card under its own key, selectable like any card", () => {
+    const { root, commit } = mountCanvas(
+      model({
+        cards: [
+          spawnCard(),
+          spawnCard({
+            id: "spawn:proposal-2",
+            proposalId: "proposal-2",
+            state: "held",
+            label: "held · overlaps 02",
+            spawnKind: "conversation",
+          }),
+        ],
+      }),
+    );
+    commit();
+    const pending = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
+    expect(pending.classList.contains("spawn-card-pending")).toBe(true);
+    expect(pending.dataset.nodeId).toBe("spawn:proposal-1");
+    expect(pending.querySelector(".spawn-card-label")?.textContent).toBe("lands next boundary");
+    expect(pending.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
+    const held = root.querySelector<HTMLElement>('[data-key="spawn:proposal-2"]')!;
+    expect(held.classList.contains("spawn-card-held")).toBe(true);
+    expect(held.querySelector(".spawn-card-label")?.textContent).toBe("held · overlaps 02");
+    expect(held.querySelector(".spawn-card-parent")?.textContent).toBe("Conversation from 01");
+  });
+});

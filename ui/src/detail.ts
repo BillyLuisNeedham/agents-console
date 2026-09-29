@@ -25,7 +25,10 @@ import {
   type DetailTab,
   type DetailTabView,
   type DetailView,
+  type HeldSpawnRow,
+  type PendingSpawnRow,
   type ResumeAction,
+  type SpawnDetailView,
   type InterruptView,
   type LogPaneView,
   type TimelineGradeView,
@@ -84,6 +87,15 @@ export interface DetailHandlers {
    * harness list and the save state; this pane only draws them.
    */
   reassign: ReassignStore;
+  /**
+   * A Pending or Held spawn's decisions (issue #150): Hold and Discard, or
+   * Adopt and Discard, drawn by the Spawns list's store so the Detail and
+   * the list share one in-flight and refusal state.
+   */
+  renderSpawnDecision: (
+    row: PendingSpawnRow | HeldSpawnRow,
+    state: "pending" | "held",
+  ) => HTMLElement;
 }
 
 export class Detail {
@@ -184,7 +196,9 @@ export class Detail {
         ? view.ticketId
         : view.kind === "conversation"
           ? view.conversationId
-          : view.label;
+          : view.kind === "spawn"
+            ? view.proposalId
+            : view.label;
     const fullscreenToggle = h("button", {
       class: "btn detail-fullscreen-toggle",
       onclick: () => this.toggleFullscreen(),
@@ -210,7 +224,9 @@ export class Detail {
         ? this.renderTicketDetail(view, model, handlers)
         : view.kind === "conversation"
           ? this.renderConversationDetail(view, model, handlers)
-          : this.renderUtilityDetail(view, handlers),
+          : view.kind === "spawn"
+            ? this.renderSpawnDetail(view, handlers)
+            : this.renderUtilityDetail(view, handlers),
     );
     return detail;
   }
@@ -1131,6 +1147,40 @@ export class Detail {
       box.append(h("div", { class: "error-inline" }, detail.endView.failure));
     }
     return box;
+  }
+
+  // A Pending or Held spawn's Detail (issue #150): the proposal whole, and
+  // the Spawns list's own decisions, so the two never disagree about one in
+  // flight. No Peek, logs or Assignment: it is not in the pool yet.
+  private renderSpawnDetail(detail: SpawnDetailView, handlers: DetailHandlers): HTMLElement {
+    const field = (label: string, value: string) => [
+      h("div", { class: "dim" }, label),
+      h("div", { class: "card-text" }, value),
+    ];
+    const blocks =
+      detail.blocks === "all"
+        ? "every ticket not yet started"
+        : detail.blocks && detail.blocks.length > 0
+          ? detail.blocks.join(", ")
+          : null;
+    return h(
+      "div",
+      { class: "detail-body spawn-detail" },
+      h(
+        "div",
+        { class: `spawn-detail-state spawn-detail-${detail.state}` },
+        `${detail.state === "pending" ? "Pending" : "Held"} spawn · ${detail.label}`,
+      ),
+      ...field("title", detail.title),
+      ...field("from", detail.parentId),
+      ...field("becomes", detail.spawnKind === "conversation" ? "a Conversation" : "a Ticket"),
+      ...(detail.blockedBy.length > 0 ? field("blocked by", detail.blockedBy.join(", ")) : []),
+      ...(blocks !== null ? field("blocks", blocks) : []),
+      ...(detail.overlaps.length > 0 ? field("overlaps", detail.overlaps.join(", ")) : []),
+      h("div", { class: "dim" }, "body"),
+      h("div", { class: "card-text spawn-detail-body" }, detail.body),
+      handlers.renderSpawnDecision(detail.row, detail.state),
+    );
   }
 
   private renderUtilityDetail(

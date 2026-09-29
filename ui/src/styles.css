@@ -456,6 +456,12 @@ body {
   stroke: var(--border);
 }
 
+/* An edge to or from a faded spawn card (issue #150): proposed, not yet in
+   the pool. The dash itself is set per zoom by the canvas. */
+.canvas-edge-proposed {
+  opacity: 0.6;
+}
+
 .canvas-edge-label {
   fill: var(--text-dim);
   font-family: var(--mono);
@@ -1112,6 +1118,39 @@ body {
   background: var(--bg-panel-2);
   border-style: dashed;
   opacity: 0.8;
+}
+
+/* A Pending or Held spawn's faded card (issue #150): work on its way, not in
+   the pool, so it reads as a ghost of the ticket it will be. A held one
+   carries the warning colour on its label, as the header's line does. */
+.spawn-card {
+  background: var(--bg-panel-2);
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+.spawn-card:hover,
+.spawn-card.node-card-selected {
+  opacity: 0.9;
+}
+
+.spawn-card .node-card-id {
+  color: var(--text-dim);
+}
+
+.spawn-card-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+}
+
+.spawn-card-held .spawn-card-label {
+  color: var(--status-running);
+}
+
+.spawn-card-parent {
+  font-size: 11px;
 }
 
 .node-card-utility .node-card-id {
@@ -2816,9 +2855,10 @@ textarea.conversations-field {
 
 /* ------------------------------------------------------------ held spawns */
 
-/* The Held spawns list (issue #149): the Enlist picker's card, opened from
-   the header's Spawn caps line. Its rows scroll on their own so the head
-   stays put however many proposals wait. */
+/* The Spawns list (issues #149, #150): the Enlist picker's card, opened
+   from the header's Spawn caps line, with a Pending section over a Held one.
+   Both scroll together under the head, so it stays put however many
+   proposals wait. */
 .held-spawns-pane {
   position: absolute;
   top: 60px;
@@ -2876,12 +2916,56 @@ textarea.conversations-field {
   padding: 8px 0;
 }
 
-.held-spawns-list {
+.held-spawns-scroll {
   display: flex;
   flex-direction: column;
   gap: 6px;
   overflow: auto;
   min-height: 0;
+}
+
+.held-spawns-section-head {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding-top: 4px;
+  flex-shrink: 0;
+}
+
+.held-spawns-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.held-spawn-pending {
+  border-style: dashed;
+}
+
+/* A faded spawn card's Detail (issue #150): the proposal and its decisions. */
+.spawn-detail-state {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.spawn-detail-held {
+  color: var(--status-running);
+}
+
+.spawn-detail-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.held-spawn-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
 }
 
 .held-spawn {

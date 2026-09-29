@@ -20,6 +20,9 @@ export interface TopologyEdge {
   source: string;
   target: string;
   conditional?: boolean;
+  /** An edge to or from a Pending or Held spawn's faded card (issue #150):
+   *  work proposed, not yet in the pool, drawn dashed. */
+  proposed?: boolean;
   data?: string;
 }
 

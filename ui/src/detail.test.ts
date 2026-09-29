@@ -137,6 +137,7 @@ function rig(detail: TicketDetailView) {
     onEndConversation: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
     onFocusResolver: () => Promise.resolve(true),
+    renderSpawnDecision: () => document.createElement("div"),
     reassign: store,
   };
   const root = document.createElement("div");
@@ -493,6 +494,7 @@ describe("Detail: Keep talking (issue #139)", () => {
       onEndConversation: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
       reassign: new ReassignStore({
         onGetSettings: () => new Promise(() => {}),
         onReassign: () => new Promise(() => {}),
@@ -603,6 +605,7 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
       onEndConversation: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
       reassign: new ReassignStore({
         onGetSettings: () => new Promise(() => {}),
         onReassign: () => new Promise(() => {}),
@@ -730,6 +733,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
             onEndConversation: () => {},
             onFocusConversationTerminal: () => Promise.resolve(true),
             onFocusResolver: () => Promise.resolve(true),
+            renderSpawnDecision: () => document.createElement("div"),
             reassign: new ReassignStore({
               onGetSettings: () => new Promise(() => {}),
               onReassign: () => new Promise(() => {}),

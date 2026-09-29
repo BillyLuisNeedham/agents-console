@@ -21,6 +21,7 @@ import {
   type ConversationCardView,
   type InterruptView,
   type PoolCardView,
+  type SpawnCardView,
   type RunPhase,
   type SpawnLineView,
   type TicketCardView,
@@ -223,7 +224,9 @@ interface DrawnEdge {
   label: SVGTextElement | null;
   source: string;
   target: string;
-  conditional: boolean;
+  /** Drawn dashed: a conditional edge, or one to or from a Pending or Held
+   *  spawn's faded card (issue #150). */
+  dashed: boolean;
 }
 
 interface CanvasBind {
@@ -796,9 +799,46 @@ export class Canvas {
     );
   }
 
+  // A Pending or Held spawn's faded card (issue #150): work on its way, not
+  // in the pool. It says when it lands, or why it is held, and where it came
+  // from; a click selects it and the Detail offers its decisions. Its key is
+  // the `spawn:` card id, so the morph never mistakes it for a ticket's card,
+  // and the ticket it lands as arrives as a card of its own.
+  private renderSpawnCard(card: SpawnCardView, selection: CanvasSelection): HTMLElement {
+    const pos = this.posOf(card);
+    return h(
+      "div",
+      {
+        class:
+          `node-card spawn-card spawn-card-${card.state}` + this.flowClass(card.id, selection),
+        key: card.id,
+        "data-node-id": card.id,
+        "data-proposal-id": card.proposalId,
+        style: `left:${pos.x}px;top:${pos.y}px;width:${CARD_WIDTH}px`,
+      },
+      h(
+        "div",
+        { class: "node-card-head" },
+        h("span", { class: "node-card-id" }, card.proposalId),
+        h("span", { class: `node-card-state spawn-card-label` }, card.label),
+      ),
+      h(
+        "div",
+        { class: "node-card-body" },
+        h("div", { class: "card-text spawn-card-title" }, card.title),
+        h(
+          "div",
+          { class: "dim spawn-card-parent" },
+          `${card.spawnKind === "conversation" ? "Conversation " : ""}from ${card.parentId}`,
+        ),
+      ),
+    );
+  }
+
   private renderCard(card: PoolCardView, selection: CanvasSelection): HTMLElement {
     if (card.kind === "ticket") return this.renderTicketCard(card, selection);
     if (card.kind === "conversation") return this.renderConversationCard(card, selection);
+    if (card.kind === "spawn") return this.renderSpawnCard(card, selection);
     return this.renderUtilityCard(card, selection);
   }
 
@@ -836,7 +876,7 @@ export class Canvas {
               class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
               type: "button",
               // The line ellipsises in a narrow header, so the hover says it whole.
-              title: `${model.spawnLine.text} (open the held spawns)`,
+              title: `${model.spawnLine.text} (open the pending and held spawns)`,
               onclick: () => this.onOpenHeldSpawns(),
             },
             model.spawnLine.text,
@@ -1169,7 +1209,7 @@ export class Canvas {
     const dash = `${4 / this.view.zoom} ${3 / this.view.zoom}`;
     for (const edge of this.canvas.edgeEls) {
       edge.el.setAttribute("stroke-width", String(width));
-      if (edge.conditional) edge.el.setAttribute("stroke-dasharray", dash);
+      if (edge.dashed) edge.el.setAttribute("stroke-dasharray", dash);
       edge.label?.setAttribute("font-size", String(10 / this.view.zoom));
     }
   }
@@ -1295,6 +1335,7 @@ export class Canvas {
         "class",
         "canvas-edge" +
           (edge.conditional ? " canvas-edge-conditional" : "") +
+          (edge.proposed ? " canvas-edge-proposed" : "") +
           (edge.target === selectedId ? " canvas-edge-inflow" : "") +
           (edge.source === selectedId ? " canvas-edge-outflow" : ""),
       );
@@ -1314,7 +1355,7 @@ export class Canvas {
         label,
         source: edge.source,
         target: edge.target,
-        conditional: edge.conditional === true,
+        dashed: edge.conditional === true || edge.proposed === true,
       });
     }
     this.paintStrokeScale();
