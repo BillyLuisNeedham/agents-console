@@ -1124,52 +1124,71 @@ function layoutPool(
   const positions: Record<string, Point> = {};
   positions[startId] = { x: LAYOUT.centerX, y: LAYOUT.startY };
 
+  // The faded cards of Pending and Held spawns (issue #150) never move a
+  // real card: every row is centred on its own cards alone, and a faded card
+  // is placed after them, where the card it lands as will appear. One that
+  // lands as a Conversation joins the Conversations lane; with no lane yet
+  // it sits beside START instead, so it never pushes the ticket rows down.
+  const conversationSpawns = spawns.filter((spawn) => spawn.kind === "conversation");
+  const ticketSpawns = spawns.filter((spawn) => spawn.kind !== "conversation");
+  const rowStart = (count: number) => LAYOUT.centerX - (Math.max(0, count - 1) * LAYOUT.colGap) / 2;
+
   const hasConversations = conversations.length > 0;
   if (hasConversations) {
-    const offset = ((conversations.length - 1) * LAYOUT.colGap) / 2;
+    const left = rowStart(conversations.length);
+    const y = LAYOUT.startY + LAYOUT.rowH;
     conversations.forEach((conversation, index) => {
-      positions[conversationCardId(conversation.id)] = {
-        x: LAYOUT.centerX - offset + index * LAYOUT.colGap,
-        y: LAYOUT.startY + LAYOUT.rowH,
+      positions[conversationCardId(conversation.id)] = { x: left + index * LAYOUT.colGap, y };
+    });
+    conversationSpawns.forEach((spawn, index) => {
+      positions[spawnCardId(spawn.id)] = {
+        x: left + (conversations.length + index) * LAYOUT.colGap,
+        y,
+      };
+    });
+  } else {
+    conversationSpawns.forEach((spawn, index) => {
+      positions[spawnCardId(spawn.id)] = {
+        x: LAYOUT.centerX + (index + 1) * LAYOUT.colGap,
+        y: LAYOUT.startY,
       };
     });
   }
   const ticketBaseY =
     LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.conversationLaneH : 0);
 
-  // A Pending or Held spawn (issue #150) takes the slot its ticket will
-  // take once it lands: the depth its blockedBy gives it, after the row's
-  // tickets, so the landed card appears about where the faded one was.
-  const byDepth = new Map<number, { cardId: string; ticket: EnrichedTicketState | null }[]>();
+  const byDepth = new Map<number, EnrichedTicketState[]>();
+  const spawnsByDepth = new Map<number, SpawnProposalView[]>();
   let maxDepth = -1;
-  const place = (depth: number, cardId: string, ticket: EnrichedTicketState | null) => {
-    const row = byDepth.get(depth) ?? [];
-    row.push({ cardId, ticket });
-    byDepth.set(depth, row);
-    maxDepth = Math.max(maxDepth, depth);
-  };
   for (const ticket of tickets) {
-    place(ticketDepth(ticket.id, tickets), ticketCardId(ticket.id), ticket);
+    const depth = ticketDepth(ticket.id, tickets);
+    byDepth.set(depth, [...(byDepth.get(depth) ?? []), ticket]);
+    maxDepth = Math.max(maxDepth, depth);
   }
-  for (const spawn of spawns) {
+  // A Spawn's depth is the one its blockedBy will give its ticket.
+  for (const spawn of ticketSpawns) {
     const depth =
       spawn.blockedBy.length === 0
         ? 0
         : 1 + Math.max(...spawn.blockedBy.map((id) => ticketDepth(id, tickets)));
-    place(depth, spawnCardId(spawn.id), null);
+    spawnsByDepth.set(depth, [...(spawnsByDepth.get(depth) ?? []), spawn]);
+    maxDepth = Math.max(maxDepth, depth);
   }
   // Rows stack top-down, each starting where the previous one's pitch ends.
   let rowY = ticketBaseY;
   for (let depth = 0; depth <= maxDepth; depth++) {
     const row = byDepth.get(depth) ?? [];
-    const offset = ((row.length - 1) * LAYOUT.colGap) / 2;
-    row.forEach(({ cardId }, index) => {
-      positions[cardId] = {
-        x: LAYOUT.centerX - offset + index * LAYOUT.colGap,
+    const left = rowStart(row.length);
+    row.forEach((ticket, index) => {
+      positions[ticketCardId(ticket.id)] = { x: left + index * LAYOUT.colGap, y: rowY };
+    });
+    (spawnsByDepth.get(depth) ?? []).forEach((spawn, index) => {
+      positions[spawnCardId(spawn.id)] = {
+        x: left + (row.length + index) * LAYOUT.colGap,
         y: rowY,
       };
     });
-    rowY += rowPitch(row.flatMap(({ ticket }) => (ticket ? [ticket] : [])));
+    rowY += rowPitch(row);
   }
   positions[reviewId] = { x: LAYOUT.centerX, y: Math.max(LAYOUT.reviewY, rowY) };
   return positions;

@@ -3503,6 +3503,62 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     expect(landed.find((c) => c.id === "ticket:01-spawn-1")!.y).toBe(at("spawn:proposal-1").y);
   });
 
+  // Review of issue #150: a faded card must never move a real one.
+  it("leaves every real card where it was when faded cards appear", () => {
+    const base = snapshot({
+      state: {
+        tickets: [ticket("01"), ticket("02"), ticket("03", { blockedBy: ["01"] })],
+        conversations: [conversation("conv-1")],
+      },
+    });
+    const withSpawns = snapshot({
+      ...base,
+      state: base.state,
+      pendingSpawns: [
+        pendingSpawn({ parentId: "01" }),
+        pendingSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
+        pendingSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+      ],
+      heldSpawns: [heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] })],
+    });
+    const where = (snap: EnrichedSnapshot) =>
+      Object.fromEntries(
+        projectPool(snap)
+          .cards.filter((c) => c.kind !== "spawn")
+          .map((c) => [c.id, [c.x, c.y]]),
+      );
+    const before = where(base);
+    const after = where(withSpawns);
+    for (const id of Object.keys(before).filter((id) => id !== "REVIEW")) {
+      expect(after[id]).toEqual(before[id]);
+    }
+    const cards = projectPool(withSpawns).cards;
+    const at = (id: string) => cards.find((c) => c.id === id)!;
+    // Each faded card sits after the real cards of its row.
+    expect(at("spawn:proposal-1").y).toBe(at("ticket:01").y);
+    expect(at("spawn:proposal-1").x).toBeGreaterThan(at("ticket:02").x);
+    expect(at("spawn:proposal-4").y).toBe(at("ticket:03").y);
+    expect(at("spawn:proposal-4").x).toBeGreaterThan(at("ticket:03").x);
+    expect(at("spawn:proposal-2").y).toBeGreaterThan(at("ticket:03").y);
+    // One that lands as a Conversation joins the lane, after its cards.
+    expect(at("spawn:proposal-3").y).toBe(at("conversation:conv-1").y);
+    expect(at("spawn:proposal-3").x).toBeGreaterThan(at("conversation:conv-1").x);
+  });
+
+  it("puts a Conversation's faded card beside START when there is no lane, moving no ticket", () => {
+    const base = snapshot({ state: { tickets: [ticket("01")] } });
+    const withSpawn = snapshot({
+      state: base.state,
+      pendingSpawns: [pendingSpawn({ parentId: "01", kind: "conversation" })],
+    });
+    const cards = projectPool(withSpawn).cards;
+    const at = (id: string) => cards.find((c) => c.id === id)!;
+    const ticketBefore = projectPool(base).cards.find((c) => c.id === "ticket:01")!;
+    expect([at("ticket:01").x, at("ticket:01").y]).toEqual([ticketBefore.x, ticketBefore.y]);
+    expect(at("spawn:proposal-1").y).toBe(at("START").y);
+    expect(at("spawn:proposal-1").x).toBeGreaterThan(at("START").x);
+  });
+
   it("opens a Detail with the whole proposal and the row its decisions act on", () => {
     const view = projectPool(snap());
     const detail = projectDetail(view.cards, "spawn:proposal-1", {

@@ -126,11 +126,12 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // Pending spawns (issue #150) above the held ones in the list, each a
     // faded card on the canvas with dashed edges from its parent and to what
     // it would block.
-    pendingSpawns: Array.from({ length: 4 }, (_, i) => ({
+    // The last lands as a Conversation, so it joins the Conversations lane.
+    pendingSpawns: Array.from({ length: 5 }, (_, i) => ({
       id: `proposal-${i + 1}`,
       parentId: i % 2 ? "t-3" : "t-1",
       origin: "ticket" as const,
-      kind: "ticket" as const,
+      kind: i === 4 ? ("conversation" as const) : ("ticket" as const),
       title: `Pending proposal ${i + 1}`,
       body: TICKET_BODY,
       blockedBy: i === 0 ? ["t-1"] : [],
@@ -699,6 +700,43 @@ function describe(el: Element | null): string {
   return `<${el.tagName.toLowerCase()}${el.className ? ` class="${el.className}"` : ""}>`;
 }
 
+/**
+ * The faded cards (issue #150) sit beside the real ones and never on top of
+ * them: every spawn card's box, as laid out, against every other card's.
+ */
+function fadedCardsClear(): void {
+  const box = (el: HTMLElement) => ({
+    x: el.offsetLeft,
+    y: el.offsetTop,
+    w: el.offsetWidth,
+    h: el.offsetHeight,
+  });
+  const cards = [...root.querySelectorAll<HTMLElement>(".node-card")];
+  const faded = cards.filter((el) => el.classList.contains("spawn-card"));
+  const hits: string[] = [];
+  for (const ghost of faded) {
+    const g = box(ghost);
+    for (const other of cards) {
+      if (other === ghost) continue;
+      const o = box(other);
+      if (g.x < o.x + o.w && o.x < g.x + g.w && g.y < o.y + o.h && o.y < g.y + g.h) {
+        hits.push(`${ghost.dataset.nodeId} over ${other.dataset.nodeId}`);
+      }
+    }
+  }
+  report.push({
+    scenario: "layout",
+    assertion: "faded spawn cards overlap no card",
+    pass: faded.length > 0 && hits.length === 0,
+    detail:
+      faded.length === 0
+        ? "no faded cards rendered"
+        : hits.length === 0
+          ? `${faded.length} faded cards clear of ${cards.length - faded.length} cards`
+          : hits.slice(0, 5).join("; "),
+  });
+}
+
 async function main(): Promise<void> {
   stage = "mount";
   session.setSnapshot(current);
@@ -721,6 +759,8 @@ async function main(): Promise<void> {
   await settleAll();
   q<HTMLButtonElement>(".held-spawn-toggle")?.click();
   await settleAll();
+
+  fadedCardsClear();
 
   await runScenario("progress tab", async () => {
     session.select(card(SELECTED_TICKET));
