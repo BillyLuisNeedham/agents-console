@@ -35,6 +35,7 @@ function row(overrides: Partial<HeldSpawnRow> = {}): HeldSpawnRow {
     at: "2026-09-29T10:00:00Z",
     blockedBy: null,
     blocks: "blocks every ticket not yet started",
+    overlaps: null,
     body: "The login test fails one run in five.",
     adopting: false,
     adoptError: null,

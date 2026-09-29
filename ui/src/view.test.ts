@@ -38,6 +38,7 @@ const SNAPSHOT: EnrichedSnapshot = {
   poolDir: "/tmp/pool",
   finishedTerminals: 0,
   spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+  pendingSpawns: [],
   heldSpawns: [],
   state: {
     tickets: [ticket("A"), ticket("B")],
@@ -244,6 +245,7 @@ describe("ConsoleView: the Held spawns list (issue #149)", () => {
         body: "fails one run in five",
         blockedBy: [],
         blocks: "all",
+        overlaps: [],
         reason: "per-run",
         at: "2026-09-29T10:00:00Z",
         adopting: false,

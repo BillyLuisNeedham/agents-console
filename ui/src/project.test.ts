@@ -165,6 +165,7 @@ function snapshot(
     poolDir: "/tmp/pool",
     finishedTerminals: 0,
     spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+    pendingSpawns: [],
     heldSpawns: [],
     ...overrides,
     state: {
@@ -3267,6 +3268,7 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     body: "The login test fails one run in five.",
     blockedBy: [],
     blocks: null,
+    overlaps: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,

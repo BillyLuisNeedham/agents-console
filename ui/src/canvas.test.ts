@@ -372,6 +372,7 @@ describe("a ticket card over a Held pane (issue #139)", () => {
       poolDir: "/tmp/pool",
       finishedTerminals: 0,
       spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
       heldSpawns: [],
       state: {
         tickets: [
