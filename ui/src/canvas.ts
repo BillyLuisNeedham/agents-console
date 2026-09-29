@@ -835,7 +835,8 @@ export class Canvas {
             {
               class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
               type: "button",
-              title: "the Spawn caps; open the held spawns",
+              // The line ellipsises in a narrow header, so the hover says it whole.
+              title: `${model.spawnLine.text} (open the held spawns)`,
               onclick: () => this.onOpenHeldSpawns(),
             },
             model.spawnLine.text,

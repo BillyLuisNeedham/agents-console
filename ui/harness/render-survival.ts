@@ -121,6 +121,23 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     poolName: "harness/render-survival",
     poolTitle: null,
     poolDir: "/tmp/harness-pool",
+    finishedTerminals: 0,
+    spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
+    // Enough Held spawns (issue #149) that the list scrolls under its head,
+    // the first with a long body that scrolls once expanded.
+    heldSpawns: Array.from({ length: 10 }, (_, i) => ({
+      id: `held-${i + 1}`,
+      parentId: "t-1",
+      origin: "ticket" as const,
+      kind: "ticket" as const,
+      title: `Held proposal ${i + 1}`,
+      body: TICKET_BODY,
+      blockedBy: [],
+      blocks: i === 0 ? ("all" as const) : null,
+      reason: i % 2 ? ("per-attempt" as const) : ("per-run" as const),
+      at: "2026-09-29T10:00:00Z",
+      adopting: false,
+    })),
     state: {
       tickets,
       conversations: Array.from({ length: 30 }, (_, i) =>
@@ -260,6 +277,8 @@ const view = new ConsoleView({
   onEnlist: () => Promise.resolve({ ok: true } as never),
   onGetSettings: () => Promise.resolve(SETTINGS),
   onSavePoolSettings: () => Promise.resolve(SETTINGS),
+  onAdoptHeldSpawn: (id) => Promise.resolve({ id }),
+  onDiscardHeldSpawn: (id) => Promise.resolve({ id }),
   onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
   onReassign: () =>
     Promise.resolve({ applied: [], skipped: [], snapshot: current }),
@@ -309,6 +328,9 @@ const SCROLL_SELECTORS = [
   // The Reassign bulk dialog's row list (issue #126): its own scroll region
   // so the head and the form below it stay put however many tickets list.
   ".reassign-rows",
+  // The Held spawns list and an expanded proposal's body (issue #149).
+  ".held-spawns-list",
+  ".held-spawn-body",
 ];
 
 /** Selectors in styles.css that no live module renders; listed so the
@@ -660,6 +682,12 @@ async function main(): Promise<void> {
   q<HTMLButtonElement>(".canvas-settings")?.click();
   await settleAll();
   q<HTMLButtonElement>(".settings-reassign-open")?.click();
+  await settleAll();
+  // And the Held spawns list from the header's Spawn caps line (issue #149),
+  // its first proposal's body expanded.
+  q<HTMLButtonElement>(".canvas-spawn-line")?.click();
+  await settleAll();
+  q<HTMLButtonElement>(".held-spawn-toggle")?.click();
   await settleAll();
 
   await runScenario("progress tab", async () => {
