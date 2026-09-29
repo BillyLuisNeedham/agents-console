@@ -415,7 +415,7 @@ describe("the Spawn caps (issue #149)", () => {
     });
   });
 
-  it("refuses a cap that is not a positive integer with a 400 naming the field", async () => {
+  it("refuses a cap that is not a whole number of 0 or more with a 400 naming the field", async () => {
     const { server } = await startRig();
     const res = await putJson(server, "/api/settings/pool", {
       config: { spawnCaps: { perRun: -3 } },

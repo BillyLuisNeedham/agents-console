@@ -7,6 +7,8 @@ import {
   buildPrompt,
 } from "./prompt.ts";
 
+const LEDGER = "/tmp/pool/runs/spawn-ledger.md";
+
 function prompt(): string {
   return buildPrompt({
     chain: [],
@@ -15,6 +17,7 @@ function prompt(): string {
     upstream: [],
     outcomePath: "/tmp/pool/runs/01.outcome.json",
     spawnCaps: DEFAULT_SPAWN_CAPS,
+    ledgerPath: LEDGER,
   });
 }
 
@@ -73,6 +76,7 @@ describe("buildPrompt spawn teaching", () => {
       upstream: [],
       outcomePath: "/tmp/pool/runs/01.outcome.json",
       spawnCaps: { perAttempt: 1, perRun: 12 },
+      ledgerPath: LEDGER,
     });
     expect(body).toContain("1 proposal honored per attempt and 12 per run");
   });
@@ -90,6 +94,31 @@ describe("buildPrompt spawn teaching", () => {
     expect(body).not.toContain("truncated");
   });
 
+  // Issue #150: a cap of 0 holds every proposal, and the agent is told so.
+  it("teaches that a cap of 0 holds every proposal for the operator", () => {
+    const body = buildPrompt({
+      chain: [],
+      agentMd: "",
+      roster: "",
+      upstream: [],
+      outcomePath: "/tmp/pool/runs/01.outcome.json",
+      spawnCaps: { perAttempt: 0, perRun: 20 },
+      ledgerPath: LEDGER,
+    });
+    expect(body).toContain("0 per attempt and 20 per run");
+    expect(body).toContain("every proposal you make is held for the operator");
+    expect(body).not.toContain("proposals honored per attempt");
+  });
+
+  // Issue #150: the ledger's path, never its contents (issue #84).
+  it("points at the Spawn ledger and teaches overlaps", () => {
+    const body = prompt();
+    expect(body).toContain(`read the Spawn ledger at ${LEDGER}`);
+    expect(body).toContain("Do not propose work it already lists");
+    expect(body).toContain('"overlaps": ["id", ...]');
+    expect(body).toContain("held for the operator to decide");
+  });
+
   it("states the standing rule: agents propose, the engine writes pool state", () => {
     const body = prompt();
     expect(body).toContain("proposed, never written");
@@ -105,6 +134,7 @@ describe("buildPrompt spawn teaching", () => {
       upstream: [],
       outcomePath: "/tmp/pool/runs/01-spawn-1.outcome.json",
       spawnCaps: DEFAULT_SPAWN_CAPS,
+      ledgerPath: LEDGER,
     });
     expect(spawned).toContain("/tmp/pool/runs/01-spawn-1.outcome.json");
     expect(spawned).toBe(
@@ -117,10 +147,10 @@ describe("buildConversationTeaching", () => {
   const spawnPath = "/tmp/pool/runs/conv-1.spawn.json";
   const own = { harness: "claude", model: "opus", drivers: "implement" };
   const defaults = { harness: "opencode", model: "deepseek", drivers: "implement" };
-  const buildConversationTeaching = (path: string) => build(path, own, defaults, 5);
+  const buildConversationTeaching = (path: string) => build(path, own, defaults, 5, LEDGER);
 
   it("states the Conversation's own Assignment, the pool defaults, the fall-through, and the citizen skill", () => {
-    const body = build(spawnPath, own, defaults, 5);
+    const body = build(spawnPath, own, defaults, 5, LEDGER);
     expect(body).toContain("Load the my-console-citizen skill");
     expect(body).toContain("This Conversation's Assignment: harness claude, model opus, drivers implement.");
     expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
@@ -129,14 +159,14 @@ describe("buildConversationTeaching", () => {
   });
 
   it("names an effort only where one is set, and offers it in the assign shape", () => {
-    const body = build(spawnPath, { ...own, effort: "high" }, defaults, 5);
+    const body = build(spawnPath, { ...own, effort: "high" }, defaults, 5, LEDGER);
     expect(body).toContain("This Conversation's Assignment: harness claude, model opus, effort high, drivers implement.");
     expect(body).toContain("The pool defaults: harness opencode, model deepseek, drivers implement.");
     expect(body).toContain('"effort": "..."');
   });
 
   it("spells out an empty field rather than leaving a blank: an enlisted pane names no model, a pool may name no defaults", () => {
-    const body = build(spawnPath, { ...own, model: "" }, undefined, 5);
+    const body = build(spawnPath, { ...own, model: "" }, undefined, 5, LEDGER);
     expect(body).toContain("This Conversation's Assignment: harness claude, model (none), drivers implement.");
     expect(body).toContain("The pool defaults: harness (none), model (none), drivers (none).");
   });
@@ -183,9 +213,21 @@ describe("buildConversationTeaching", () => {
     );
   });
 
+  it("teaches that a per-file cap of 0 holds every entry (issue #150)", () => {
+    const body = build(spawnPath, own, defaults, 0, LEDGER);
+    expect(body).toContain("every entry is held for the operator to adopt or discard");
+    expect(body).not.toContain("entries beyond it");
+  });
+
+  it("points at the Spawn ledger and teaches overlaps (issue #150)", () => {
+    const body = buildConversationTeaching(spawnPath);
+    expect(body).toContain(`read the Spawn ledger at ${LEDGER}`);
+    expect(body).toContain('"overlaps": ["id", ...]');
+  });
+
   it("names the pool's own per-file cap (issue #149)", () => {
-    expect(build(spawnPath, own, defaults, 8)).toContain("8 entries honored per file");
-    expect(build(spawnPath, own, defaults, 1)).toContain("1 entry honored per file");
+    expect(build(spawnPath, own, defaults, 8, LEDGER)).toContain("8 entries honored per file");
+    expect(build(spawnPath, own, defaults, 1, LEDGER)).toContain("1 entry honored per file");
   });
 
   it("documents that a spawned Ticket and a spawned Conversation both report back as a Turn", () => {
@@ -271,6 +313,7 @@ describe("buildContinuedTeaching", () => {
     issuePath: "/pool/issues/01.md",
     outcomePath: "/pool/runs/01.attempt-3.outcome.json",
     attempt: 3,
+    ledgerPath: LEDGER,
   });
 
   it("tells the agent the operator carries on here and a fresh Outcome is owed at the exact path", () => {
@@ -279,6 +322,10 @@ describe("buildContinuedTeaching", () => {
     expect(teaching).toContain("The Outcome you wrote before is spent");
     expect(teaching).toContain("/pool/runs/01.attempt-3.outcome.json");
     expect(teaching).toContain("/pool/issues/01.md");
+  });
+
+  it("points at the Spawn ledger (issue #150)", () => {
+    expect(teaching).toContain(`read the Spawn ledger at ${LEDGER}`);
   });
 
   it("restates the whole Outcome contract, spawn floor included", () => {

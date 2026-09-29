@@ -1,6 +1,20 @@
 import { SPAWN_BODY_MIN_CHARS, type Outcome } from "./engine.ts";
 import type { SpawnCaps } from "./spawn-caps.ts";
 
+// The Spawn ledger (issue #150, spawn-ledger.ts): the path, never the
+// contents, so the prompt stays short (issue #84) and the agent reads the
+// pool as it is when it proposes, not as it was at launch.
+function spawnLedgerTeaching(ledgerPath: string): string {
+  return (
+    `Before you propose anything, read the Spawn ledger at ${ledgerPath}: ` +
+    "every Ticket and Conversation in the pool, and every proposal still " +
+    "waiting to land or held for the operator. Do not propose work it " +
+    "already lists. If a proposal still overlaps something there, add " +
+    '"overlaps": ["id", ...] naming what it overlaps: it is then held for ' +
+    "the operator to decide instead of landing."
+  );
+}
+
 // The `blocks` teaching (ADR-0029), one sentence shared by the attempt
 // prompt and the Conversation teaching so the two cannot drift: what a
 // follow-up that must run first adds to its entry.
@@ -190,6 +204,7 @@ export function buildEnlistTeaching(parts: {
   issuePath: string;
   outcomePath: string;
   branch: string;
+  ledgerPath: string;
 }): string {
   return [
     "---",
@@ -221,6 +236,8 @@ export function buildEnlistTeaching(parts: {
       " The engine assigns the ids, writes the ticket " +
       "files and schedules them. You never write pool state yourself: no " +
       "ticket files, no ids, no statuses. You propose; the engine writes.",
+    "",
+    spawnLedgerTeaching(parts.ledgerPath),
   ].join("\n");
 }
 
@@ -239,6 +256,7 @@ export function buildContinuedTeaching(parts: {
   issuePath: string;
   outcomePath: string;
   attempt: number;
+  ledgerPath: string;
 }): string {
   return [
     "---",
@@ -267,6 +285,8 @@ export function buildContinuedTeaching(parts: {
       SPAWN_BLOCKS_TEACHING +
       " You never write pool state yourself: no ticket " +
       "files, no ids, no statuses. You propose; the engine writes.",
+    "",
+    spawnLedgerTeaching(parts.ledgerPath),
   ].join("\n");
 }
 
@@ -305,6 +325,7 @@ export function buildConversationTeaching(
   own: TeachingAssignment,
   defaults: Partial<TeachingAssignment> | undefined,
   perFile: number,
+  ledgerPath: string,
 ): string {
   return [
     "---",
@@ -333,10 +354,16 @@ export function buildConversationTeaching(
     "",
     "The engine polls for this file, reads it, and deletes it once read: " +
       "write it whenever you like, mid-conversation, not only once. Caps: " +
-      `${perFile} ${perFile === 1 ? "entry" : "entries"} honored per file written, ` +
-      "and entries beyond it are held for the operator to adopt or discard; " +
+      (perFile === 0
+        ? "0 entries honored per file written: the pool's cap is 0, so every " +
+          "entry is held for the operator to adopt or discard and none " +
+          "starts on its own; "
+        : `${perFile} ${perFile === 1 ? "entry" : "entries"} honored per file written, ` +
+          "and entries beyond it are held for the operator to adopt or discard; ") +
       "unlike a Ticket's own spawns there is no run-wide cap on what a " +
       "Conversation spawns.",
+    "",
+    spawnLedgerTeaching(ledgerPath),
     "",
     "A spawned Ticket reports back here as a Turn typed into this " +
       "conversation once it ends (done, or checkpoint with its Brief) and " +
@@ -358,6 +385,28 @@ interface PromptParts {
   outcomePath: string;
   // The pool's Spawn caps as this attempt's boundary left them (ADR-0029).
   spawnCaps: SpawnCaps;
+  // The pool's Spawn ledger (issue #150): read before proposing.
+  ledgerPath: string;
+}
+
+// What the caps mean for this attempt's proposals: how many are taken, or,
+// with a cap of 0 (issue #150), that every one is held for the operator.
+function spawnCapsTeaching({ perAttempt, perRun }: SpawnCaps): string {
+  if (perAttempt === 0 || perRun === 0) {
+    return (
+      `Caps apply: this pool's are ${perAttempt} per attempt and ${perRun} per ` +
+      "run, and a cap of 0 means every proposal you make is held for the " +
+      "operator to adopt or discard, none lands on its own, so propose only " +
+      "what the operator should weigh, most important first."
+    );
+  }
+  return (
+    `Caps apply: ${perAttempt} ` +
+    `${perAttempt === 1 ? "proposal" : "proposals"} honored ` +
+    `per attempt and ${perRun} per run, ` +
+    "overflow held for the operator to adopt or discard, so order your " +
+    "proposals most important first."
+  );
 }
 
 // The prompt body: the standing instructions, chain, roster, upstream
@@ -430,13 +479,12 @@ export function buildPrompt(parts: PromptParts): string {
       "writes the ticket files at the super-step boundary, and schedules " +
       "them like any other ticket. Thin or out-of-pool proposals are " +
       "dropped with the reason recorded in the ticket log, and a dropped " +
-      "proposal never costs your attempt its result. Caps apply: " +
-      `${parts.spawnCaps.perAttempt} ` +
-      `${parts.spawnCaps.perAttempt === 1 ? "proposal" : "proposals"} honored ` +
-      `per attempt and ${parts.spawnCaps.perRun} per run, ` +
-      "overflow held for the operator to adopt or discard, so order your " +
-      "proposals most important first. You never write pool state: no ticket " +
+      "proposal never costs your attempt its result. " +
+      spawnCapsTeaching(parts.spawnCaps) +
+      " You never write pool state: no ticket " +
       "files, no ids, no statuses. You propose; the engine writes.",
+    "",
+    spawnLedgerTeaching(parts.ledgerPath),
   );
   return sections.join("\n");
 }

@@ -113,6 +113,8 @@ const consoleView = new ConsoleView({
     }),
   onAdoptHeldSpawn: (id) => client.adoptHeldSpawn(id),
   onDiscardHeldSpawn: (id) => client.discardHeldSpawn(id),
+  onHoldPendingSpawn: (id) => client.holdPendingSpawn(id),
+  onDiscardPendingSpawn: (id) => client.discardPendingSpawn(id),
   onStart: (request) => client.startConversation(request),
   onEnd: (conversationId, closing) =>
     client

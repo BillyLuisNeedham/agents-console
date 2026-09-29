@@ -44,11 +44,17 @@ const EVENT_KINDS = [
   "review-reject",
   "spawn-adopted",
   "spawn-rejected",
-  // Proposals the Spawn caps had no room for, held for the operator rather
-  // than dropped (ADR-0029): each one's held id, title and which cap held
-  // it; `recovered` when boot held proposals a pre-ADR cap had truncated.
+  // Proposals within the caps, taken from the attempt and waiting for the
+  // next boundary to land (issue #150): each one's proposal id and title.
+  "spawn-pending",
+  // Proposals held for the operator rather than landed (ADR-0029, issue
+  // #150): each one's proposal id, title and reason, a cap that had no room
+  // (`per-attempt`, `per-run`), the agent's own `overlaps` mark (with the
+  // ids it named) or the operator's Hold (`operator`); `recovered` when
+  // boot held proposals a pre-ADR cap had truncated.
   "spawn-held",
-  // A Held spawn the operator discarded (ADR-0029), by id and title.
+  // A Held or Pending spawn the operator discarded (ADR-0029, issue #150),
+  // by id and title, `pending` when it had not yet been held.
   "spawn-discarded",
   "reassigned",
   // The ticket file's two copies (the pool's file of record and the

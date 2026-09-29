@@ -189,20 +189,29 @@ describe("pool settings", () => {
     ).toEqual({});
   });
 
-  it("rejects a spawn cap that is not a positive integer, naming the field", () => {
+  it("rejects a spawn cap that is not a whole number of 0 or more, naming the field", () => {
     const dir = pool({ spawnCaps: { perRun: 20 } });
-    for (const bad of [0, -1, 2.5, "many", true]) {
+    for (const bad of [-1, 2.5, "many", "-2", true]) {
       expect(() =>
         writePoolSettings(dir, { spawnCaps: { perRun: bad } }, { harnesses: [] }),
-      ).toThrow("pool settings: spawnCaps.perRun must be a positive integer");
+      ).toThrow("pool settings: spawnCaps.perRun must be a whole number, 0 or more");
     }
     expect(() =>
-      writePoolSettings(dir, { spawnCaps: { perAttempt: 0 } }, { harnesses: [] }),
-    ).toThrow("pool settings: spawnCaps.perAttempt must be a positive integer");
+      writePoolSettings(dir, { spawnCaps: { perAttempt: -1 } }, { harnesses: [] }),
+    ).toThrow("pool settings: spawnCaps.perAttempt must be a whole number, 0 or more");
     expect(() => writePoolSettings(dir, { spawnCaps: 5 }, { harnesses: [] })).toThrow(
       "pool settings: spawnCaps must be an object",
     );
     expect(onDisk(dir)).toEqual({ spawnCaps: { perRun: 20 } });
+  });
+
+  // Issue #150: a cap of 0 holds every proposal for the operator.
+  it("takes a cap of 0, as a number or as the pane's text", () => {
+    const dir = pool({});
+    expect(
+      writePoolSettings(dir, { spawnCaps: { perAttempt: 0, perRun: "0" } }, { harnesses: [] })
+        .spawnCaps,
+    ).toEqual({ perAttempt: 0, perRun: 0 });
   });
 
   it("rejects a terminal and a selection the engine would not accept", () => {

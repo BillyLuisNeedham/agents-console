@@ -29,8 +29,10 @@ export function spawnCapsOf(config: { spawnCaps?: SpawnCapsConfig }): SpawnCaps 
 
 /**
  * A console.json `spawnCaps` value, checked: absent, or an object whose
- * fields, where present, are positive integers. Boot's parse and the
- * boundary's reload share it, so a cap the reload would refuse never boots.
+ * fields, where present, are whole numbers of zero or more. A cap of 0 is a
+ * pool that holds every proposal for the operator (issue #150). Boot's
+ * parse and the boundary's reload share it, so a cap the reload would
+ * refuse never boots.
  */
 export function checkSpawnCaps(raw: unknown): SpawnCapsConfig | undefined {
   if (raw === undefined) return undefined;
@@ -39,13 +41,14 @@ export function checkSpawnCaps(raw: unknown): SpawnCapsConfig | undefined {
   }
   const caps = raw as Record<string, unknown>;
   for (const field of ["perAttempt", "perRun"] as const) {
-    if (caps[field] !== undefined && !isPositiveInteger(caps[field])) {
-      throw new Error(`pool config: spawnCaps.${field} must be a positive integer`);
+    if (caps[field] !== undefined && !isSpawnCap(caps[field])) {
+      throw new Error(`pool config: spawnCaps.${field} must be a whole number, 0 or more`);
     }
   }
   return caps as SpawnCapsConfig;
 }
 
-export function isPositiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
+/** A Spawn cap: a whole number, 0 (hold everything) or more. */
+export function isSpawnCap(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }

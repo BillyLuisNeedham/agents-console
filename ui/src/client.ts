@@ -14,6 +14,8 @@ import type {
   EnrichedSnapshot,
   HeldSpawnRequest,
   HeldSpawnResponse,
+  PendingSpawnRequest,
+  PendingSpawnResponse,
   KeepTalkingRequest,
   KeepTalkingResponse,
   PanesResponse,
@@ -442,6 +444,38 @@ export class PoolClient {
     if (!res.ok) {
       throw new Error(
         (await refusalReason(res)) ?? `${decision} held spawn failed: ${res.status}`,
+      );
+    }
+    return res.json();
+  }
+
+  /**
+   * Hold a Pending spawn back from the boundary (issue #150): it becomes a
+   * Held spawn, held by the operator, under the same id. 200 once it is
+   * held; one that has already landed is a 409 `reason`.
+   */
+  async holdPendingSpawn(id: string): Promise<PendingSpawnResponse> {
+    return this.decidePendingSpawn("hold", id);
+  }
+
+  /** Discard a Pending spawn before it lands (issue #150): 200 once gone. */
+  async discardPendingSpawn(id: string): Promise<PendingSpawnResponse> {
+    return this.decidePendingSpawn("discard", id);
+  }
+
+  private async decidePendingSpawn(
+    decision: "hold" | "discard",
+    id: string,
+  ): Promise<PendingSpawnResponse> {
+    const request: PendingSpawnRequest = { id };
+    const res = await fetch(`${this.base}/api/spawns/pending/${decision}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      throw new Error(
+        (await refusalReason(res)) ?? `${decision} pending spawn failed: ${res.status}`,
       );
     }
     return res.json();

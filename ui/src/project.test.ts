@@ -38,6 +38,7 @@ import {
   projectLogPane,
   projectNeedsInput,
   projectHeldSpawns,
+  projectPendingSpawns,
   projectPool,
   projectTimeline,
   selectLogAttempt,
@@ -57,6 +58,7 @@ import {
   type TerminalSurfaceView,
   type TicketActivityResponse,
   type HeldSpawnView,
+  type PendingSpawnView,
   type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
@@ -165,6 +167,7 @@ function snapshot(
     poolDir: "/tmp/pool",
     finishedTerminals: 0,
     spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+    pendingSpawns: [],
     heldSpawns: [],
     ...overrides,
     state: {
@@ -1553,6 +1556,62 @@ describe("projectTimeline", () => {
       "adopting held spawn 'Fix the login test' refused: blocker 09 is gone; still held",
       null,
       null,
+    ]);
+  });
+
+  it("words the Pending spawn events and the new hold reasons (issue #150)", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "spawn-pending", {
+          pending: [
+            { id: "proposal-1", title: "Fix the login test" },
+            { id: "proposal-2", title: "Write the docs" },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-3", title: "Again", reason: "overlaps", overlaps: ["02", "proposal-1"] }],
+        }),
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-2", title: "Write the docs", reason: "operator" }],
+        }),
+        event(1, "spawn-held", {
+          held: [
+            {
+              id: "proposal-6",
+              title: "Late",
+              reason: "refused",
+              refusal: "blocks names done tickets: 04",
+            },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [
+            { id: "proposal-7", title: "Maybe", reason: "overlaps", overlaps: ["99"], unknownOverlaps: ["99"] },
+          ],
+        }),
+        event(1, "spawn-adopted", {
+          adopted: ["03-spawn-1"],
+          fromPending: ["proposal-1"],
+          blocks: { "03-spawn-1": ["04"] },
+        }),
+        event(1, "spawn-discarded", { id: "proposal-4", title: "Stale", pending: true }),
+        event(1, "spawn-rejected", {
+          title: "Late",
+          reason: "blockedBy names tickets outside the pool: 09",
+          fromPending: "proposal-5",
+        }),
+      ]),
+      "done",
+    );
+    expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
+      "2 spawns pending for the next boundary: 'Fix the login test', 'Write the docs'",
+      "1 spawn held (overlaps 02, proposal-1): 'Again'",
+      "1 spawn held (held by operator): 'Write the docs'",
+      "1 spawn held (refused at landing: blocks names done tickets: 04): 'Late'",
+      "1 spawn held (overlaps 99 (99 not in the pool)): 'Maybe'",
+      "landed 03-spawn-1 from proposal-1 · 03-spawn-1 blocks 04",
+      "pending spawn 'Stale' discarded",
+      "pending spawn 'Late' rejected at the boundary: blockedBy names tickets outside the pool: 09",
     ]);
   });
 
@@ -3256,6 +3315,23 @@ describe("a Conversation the engine says is ending (issue #140)", () => {
   });
 });
 
+/** A Pending spawn as the wire carries it (issue #150). */
+function pendingSpawn(overrides: Partial<PendingSpawnView> = {}): PendingSpawnView {
+  return {
+    id: "proposal-1",
+    parentId: "04",
+    origin: "ticket",
+    kind: "ticket",
+    title: "Write the migration guide",
+    body: "Document every renamed flag.",
+    blockedBy: [],
+    blocks: null,
+    overlaps: [],
+    at: "2026-09-29T10:10:00Z",
+    ...overrides,
+  };
+}
+
 /** A Held spawn as the wire carries it (issue #149). */
 function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
   return {
@@ -3267,6 +3343,8 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     body: "The login test fails one run in five.",
     blockedBy: [],
     blocks: null,
+    overlaps: [],
+    unknownOverlaps: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,
@@ -3303,6 +3381,209 @@ describe("the Spawn caps header line (issue #149)", () => {
         heldSpawns: [heldSpawn(), heldSpawn({ id: "held-2" })],
       }),
     ).toEqual({ text: "Spawns 1/20 this run · 2 per attempt · 2 held", warn: true });
+  });
+});
+
+describe("the Spawn caps header line with Pending spawns (issue #150)", () => {
+  it("counts the Pending spawns before the held ones, without a warning of their own", () => {
+    const view = projectPool(
+      snapshot({
+        spawnUsage: { spawnedThisRun: 1, perAttempt: 5, perRun: 20 },
+        pendingSpawns: [pendingSpawn(), pendingSpawn({ id: "proposal-2" })],
+      }),
+    );
+    expect(view.spawnLine).toEqual({
+      text: "Spawns 1/20 this run · 5 per attempt · 2 pending",
+      warn: false,
+    });
+    expect(
+      projectPool(
+        snapshot({ pendingSpawns: [pendingSpawn()], heldSpawns: [heldSpawn()] }),
+      ).spawnLine.text,
+    ).toBe("Spawns 0/20 this run · 5 per attempt · 1 pending · 1 held");
+  });
+});
+
+describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
+  const NOW = Date.parse("2026-09-29T10:12:00Z");
+
+  it("words a Pending spawn as the list shows it", () => {
+    const [row] = projectPendingSpawns([pendingSpawn({ overlaps: ["02"] })], NOW);
+    expect(row).toEqual({
+      id: "proposal-1",
+      title: "Write the migration guide",
+      kind: "ticket",
+      parent: "from 04",
+      waited: "2m ago",
+      at: "2026-09-29T10:10:00Z",
+      blockedBy: null,
+      blocks: null,
+      overlaps: "overlaps 02",
+      body: "Document every renamed flag.",
+    });
+  });
+
+  it("says a spawn was held for overlapping named work, or by the operator", () => {
+    const [overlapping, operator] = projectHeldSpawns(
+      [
+        heldSpawn({ reason: "overlaps", overlaps: ["02", "proposal-1"] }),
+        heldSpawn({ id: "proposal-4", reason: "operator" }),
+      ],
+      NOW,
+    );
+    expect(overlapping?.reason).toBe("overlaps 02, proposal-1");
+    expect(operator?.reason).toBe("held by operator");
+  });
+
+  it("notes the overlaps ids the pool never knew, and a spawn refused at landing", () => {
+    const [unknown, refused] = projectHeldSpawns(
+      [
+        heldSpawn({ reason: "overlaps", overlaps: ["02", "99"], unknownOverlaps: ["99"] }),
+        heldSpawn({
+          id: "proposal-5",
+          reason: "refused",
+          adoptError: "blocks names done tickets, which have no next attempt to hold: 02",
+        }),
+      ],
+      NOW,
+    );
+    expect(unknown?.reason).toBe("overlaps 02, 99 (99 not in the pool)");
+    expect(refused?.reason).toBe("refused at landing");
+    expect(refused?.adoptError).toBe(
+      "blocks names done tickets, which have no next attempt to hold: 02",
+    );
+  });
+});
+
+describe("faded cards for Pending and Held spawns (issue #150)", () => {
+  const snap = () =>
+    snapshot({
+      state: { tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] },
+      pendingSpawns: [pendingSpawn({ parentId: "01", blockedBy: ["01"], blocks: ["02"] })],
+      heldSpawns: [heldSpawn({ id: "proposal-2", parentId: "02", reason: "operator" })],
+    });
+
+  it("draws one faded card per proposal under its own key, saying when it lands or why it is held", () => {
+    const spawns = projectPool(snap()).cards.filter((c) => c.kind === "spawn");
+    expect(
+      spawns.map((c) => c.kind === "spawn" && [c.id, c.state, c.label, c.title, c.parentCardId]),
+    ).toEqual([
+      ["spawn:proposal-1", "pending", "lands next boundary", "Write the migration guide", "ticket:01"],
+      ["spawn:proposal-2", "held", "held · held by operator", "Fix the flaky login test", "ticket:02"],
+    ]);
+  });
+
+  it("draws dashed edges from the parent and to what a spawn would block", () => {
+    const edges = projectPool(snap()).edges.filter((e) => e.proposed);
+    expect(edges).toEqual([
+      { source: "ticket:01", target: "spawn:proposal-1", proposed: true },
+      { source: "spawn:proposal-1", target: "ticket:02", proposed: true },
+      { source: "ticket:02", target: "spawn:proposal-2", proposed: true },
+    ]);
+  });
+
+  // The ticket it lands as sits about where the faded card was: the same
+  // row, from the same blockedBy.
+  it("places a faded card in the row its ticket will take", () => {
+    const cards = projectPool(snap()).cards;
+    const at = (id: string) => cards.find((c) => c.id === id)!;
+    expect(at("spawn:proposal-1").y).toBe(at("ticket:02").y);
+    expect(at("spawn:proposal-2").y).toBe(at("ticket:01").y);
+    const landed = projectPool(
+      snapshot({
+        state: {
+          tickets: [
+            ticket("01"),
+            ticket("02", { blockedBy: ["01"] }),
+            ticket("01-spawn-1", { blockedBy: ["01"] }),
+          ],
+        },
+      }),
+    ).cards;
+    expect(landed.find((c) => c.id === "ticket:01-spawn-1")!.y).toBe(at("spawn:proposal-1").y);
+  });
+
+  // Review of issue #150: a faded card must never move a real one.
+  it("leaves every real card where it was when faded cards appear", () => {
+    const base = snapshot({
+      state: {
+        tickets: [ticket("01"), ticket("02"), ticket("03", { blockedBy: ["01"] })],
+        conversations: [conversation("conv-1")],
+      },
+    });
+    const withSpawns = snapshot({
+      ...base,
+      state: base.state,
+      pendingSpawns: [
+        pendingSpawn({ parentId: "01" }),
+        pendingSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
+        pendingSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+      ],
+      heldSpawns: [heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] })],
+    });
+    const where = (snap: EnrichedSnapshot) =>
+      Object.fromEntries(
+        projectPool(snap)
+          .cards.filter((c) => c.kind !== "spawn")
+          .map((c) => [c.id, [c.x, c.y]]),
+      );
+    const before = where(base);
+    const after = where(withSpawns);
+    for (const id of Object.keys(before).filter((id) => id !== "REVIEW")) {
+      expect(after[id]).toEqual(before[id]);
+    }
+    const cards = projectPool(withSpawns).cards;
+    const at = (id: string) => cards.find((c) => c.id === id)!;
+    // Each faded card sits after the real cards of its row.
+    expect(at("spawn:proposal-1").y).toBe(at("ticket:01").y);
+    expect(at("spawn:proposal-1").x).toBeGreaterThan(at("ticket:02").x);
+    expect(at("spawn:proposal-4").y).toBe(at("ticket:03").y);
+    expect(at("spawn:proposal-4").x).toBeGreaterThan(at("ticket:03").x);
+    expect(at("spawn:proposal-2").y).toBeGreaterThan(at("ticket:03").y);
+    // One that lands as a Conversation joins the lane, after its cards.
+    expect(at("spawn:proposal-3").y).toBe(at("conversation:conv-1").y);
+    expect(at("spawn:proposal-3").x).toBeGreaterThan(at("conversation:conv-1").x);
+  });
+
+  it("puts a Conversation's faded card beside START when there is no lane, moving no ticket", () => {
+    const base = snapshot({ state: { tickets: [ticket("01")] } });
+    const withSpawn = snapshot({
+      state: base.state,
+      pendingSpawns: [pendingSpawn({ parentId: "01", kind: "conversation" })],
+    });
+    const cards = projectPool(withSpawn).cards;
+    const at = (id: string) => cards.find((c) => c.id === id)!;
+    const ticketBefore = projectPool(base).cards.find((c) => c.id === "ticket:01")!;
+    expect([at("ticket:01").x, at("ticket:01").y]).toEqual([ticketBefore.x, ticketBefore.y]);
+    expect(at("spawn:proposal-1").y).toBe(at("START").y);
+    expect(at("spawn:proposal-1").x).toBeGreaterThan(at("START").x);
+  });
+
+  it("opens a Detail with the whole proposal and the row its decisions act on", () => {
+    const view = projectPool(snap());
+    const detail = projectDetail(view.cards, "spawn:proposal-1", {
+      pending: view.pendingSpawns,
+      held: view.heldSpawns,
+    });
+    expect(detail).toMatchObject({
+      kind: "spawn",
+      proposalId: "proposal-1",
+      state: "pending",
+      label: "lands next boundary",
+      title: "Write the migration guide",
+      parentId: "01",
+      body: "Document every renamed flag.",
+      blockedBy: ["01"],
+      blocks: ["02"],
+      overlaps: [],
+      row: { id: "proposal-1" },
+    });
+    // A spawn that has since landed or gone has no Detail to show.
+    expect(projectDetail(view.cards, "spawn:proposal-1")).toBeNull();
+  });
+
+  it("never offers a faded card to the Needs input tray", () => {
+    expect(projectNeedsInput(projectPool(snap()).cards)).toEqual([]);
   });
 });
 
