@@ -1512,6 +1512,60 @@ describe("projectTimeline", () => {
     expect(spawned.reassignment).toBeNull();
   });
 
+  it("words the Held spawn events as one line each (issue #149)", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "spawn-held", {
+          held: [
+            { id: "held-1", title: "Fix the login test", reason: "per-run" },
+            { id: "held-2", title: "Write the docs", reason: "per-run" },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [{ id: "held-3", title: "Old one", reason: "per-attempt" }],
+          recovered: true,
+        }),
+        event(1, "spawn-adopted", {
+          adopted: ["03-spawn-1"],
+          fromHeld: "held-1",
+          blocks: { "03-spawn-1": ["04", "05"] },
+        }),
+        event(1, "spawn-adopted", { adopted: ["03-spawn-2", "03-spawn-3"] }),
+        event(1, "spawn-adopted", { adopted: [], truncated: 1 }),
+        event(1, "spawn-discarded", { id: "held-2", title: "Write the docs" }),
+        event(1, "spawned"),
+      ]),
+      "done",
+    );
+    expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
+      "2 spawns held (per-run cap): 'Fix the login test', 'Write the docs'",
+      "1 spawn held (per-attempt cap, recovered at boot): 'Old one'",
+      "adopted 03-spawn-1 from held-1 · 03-spawn-1 blocks 04, 05",
+      "adopted 03-spawn-2, 03-spawn-3",
+      "adopted none · 1 truncated by the cap",
+      "held spawn 'Write the docs' discarded",
+      null,
+    ]);
+  });
+
+  it("names both caps when one boundary held spawns under each", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "spawn-held", {
+          held: [
+            { id: "held-1", title: "A", reason: "per-attempt" },
+            { id: "held-2", title: "B", reason: "per-run" },
+          ],
+        }),
+        event(1, "spawn-held", { held: "nonsense" }),
+      ]),
+      "done",
+    );
+    const [both, torn] = view.attempts[0].events;
+    expect(both.spawn).toBe("2 spawns held (per-attempt cap, per-run cap): 'A', 'B'");
+    expect(torn.spawn).toBeNull();
+  });
+
   it("carries a Jev Grade's provenance through to the Detail's grade", () => {
     const view = projectTimeline(
       response([

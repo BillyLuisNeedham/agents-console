@@ -1545,7 +1545,8 @@ body {
   opacity: 0.65;
 }
 
-.timeline-reassigned {
+.timeline-reassigned,
+.timeline-spawn {
   margin: 2px 0 4px 8px;
   padding: 4px 8px;
   border-left: 2px solid var(--border);

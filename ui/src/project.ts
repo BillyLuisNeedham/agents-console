@@ -210,10 +210,10 @@ export const UNASSIGNED_LABEL = "unassigned";
 export type TimelineGradeView = Grade;
 
 /**
- * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`
- * and `reassignment` straight off the row and never parses a payload. The
- * grade and reassignment are null unless the event's kind carries one and
- * its payload decoded cleanly.
+ * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`,
+ * `reassignment` and `spawn` straight off the row and never parses a
+ * payload. Each is null unless the event's kind carries one and its payload
+ * decoded cleanly.
  */
 interface TimelineEventView {
   kind: string;
@@ -221,6 +221,9 @@ interface TimelineEventView {
   timeLabel: string;
   grade: TimelineGradeView | null;
   reassignment: string | null;
+  /** A spawn-held, spawn-adopted or spawn-discarded event as one line
+   *  (issue #149); null on every other kind. */
+  spawn: string | null;
   /** The files a merge-conflict, merge-blocked or resolver event names;
    *  null on every other kind, and on a payload without a string list. */
   files: string[] | null;
@@ -279,6 +282,60 @@ function reassignmentFromPayload(payload: Record<string, unknown>): string | nul
   return `reassigned: ${from} → ${to}`;
 }
 
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+// The Held spawn events (issue #149, ADR-0029), each as one readable line:
+// "2 spawns held (per-run cap): 'A', 'B'", "adopted 03-spawn-1 from held-1
+// · 03-spawn-1 blocks 04, 05", "held spawn 'A' discarded". A pre-ADR
+// adoption carries a `truncated` count instead of holding, and says so. Like
+// the reassignment line, a payload of the wrong shape decodes to null.
+function spawnFromPayload(kind: string, payload: Record<string, unknown>): string | null {
+  if (kind === "spawn-held") {
+    const held = payload.held;
+    if (!Array.isArray(held) || held.length === 0) return null;
+    const titles: string[] = [];
+    const reasons = new Set<string>();
+    for (const entry of held) {
+      if (typeof entry !== "object" || entry === null) return null;
+      const { title, reason } = entry as Record<string, unknown>;
+      if (typeof title !== "string") return null;
+      if (reason !== "per-attempt" && reason !== "per-run") return null;
+      titles.push(`'${title}'`);
+      reasons.add(HELD_SPAWN_REASON[reason]);
+    }
+    const why = [...reasons].sort();
+    if (payload.recovered === true) why.push("recovered at boot");
+    const count = held.length === 1 ? "1 spawn" : `${held.length} spawns`;
+    return `${count} held (${why.join(", ")}): ${titles.join(", ")}`;
+  }
+  if (kind === "spawn-adopted") {
+    const { adopted, fromHeld, blocks, truncated } = payload;
+    if (!isStringList(adopted)) return null;
+    const parts = [
+      `adopted ${adopted.length > 0 ? adopted.join(", ") : "none"}` +
+        (typeof fromHeld === "string" ? ` from ${fromHeld}` : ""),
+    ];
+    if (typeof blocks === "object" && blocks !== null) {
+      for (const [spawnId, targets] of Object.entries(blocks)) {
+        if (isStringList(targets) && targets.length > 0) {
+          parts.push(`${spawnId} blocks ${targets.join(", ")}`);
+        }
+      }
+    }
+    if (typeof truncated === "number" && truncated > 0) {
+      parts.push(`${truncated} truncated by the cap`);
+    }
+    return parts.join(" · ");
+  }
+  if (kind === "spawn-discarded") {
+    return typeof payload.title === "string"
+      ? `held spawn '${payload.title}' discarded`
+      : null;
+  }
+  return null;
+}
+
 /** One raw event decoded into its timeline row. */
 function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
   return {
@@ -288,6 +345,7 @@ function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
     grade: event.kind === "graded" ? gradeFromPayload(event.payload) : null,
     reassignment:
       event.kind === "reassigned" ? reassignmentFromPayload(event.payload) : null,
+    spawn: spawnFromPayload(event.kind, event.payload),
     files: FILE_EVENT_KINDS.has(event.kind) ? filesFromPayload(event.payload) : null,
   };
 }
