@@ -48,6 +48,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     restart: restart(),
     terminalBacked: false,
     mergeQueueLine: null,
+    spawnLine: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
     ...overrides,
   };
@@ -159,6 +160,7 @@ function mountCanvas(
     onNewConversation: () => {},
     onEnlist: () => {},
     onOpenSettings: () => {},
+    onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
     onArmStop: () => {},
@@ -369,6 +371,8 @@ describe("a ticket card over a Held pane (issue #139)", () => {
       poolTitle: null,
       poolDir: "/tmp/pool",
       finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      heldSpawns: [],
       state: {
         tickets: [
           {
@@ -411,5 +415,41 @@ describe("a ticket card over a Held pane (issue #139)", () => {
     expect(card.querySelector(".terminal-chip-pane")?.textContent).toBe("w3:p1");
     card.querySelector<HTMLButtonElement>(".terminal-focus")!.click();
     expect(focused).toEqual(["A"]);
+  });
+});
+
+describe("the Spawn caps header line (issue #149)", () => {
+  const cards: CanvasModel["cards"] = [
+    { kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 },
+  ];
+
+  it("shows the line and opens the Held spawns list when clicked", () => {
+    let opens = 0;
+    const { root, commit } = mountCanvas(
+      model({ cards, spawnLine: { text: "Spawns 3/20 this run · 5 per attempt", warn: false } }),
+      { onOpenHeldSpawns: () => (opens += 1) },
+    );
+    commit();
+    const line = root.querySelector<HTMLButtonElement>(".canvas-spawn-line")!;
+    expect(line.textContent).toBe("Spawns 3/20 this run · 5 per attempt");
+    expect(line.classList.contains("spawn-line-warn")).toBe(false);
+    line.click();
+    expect(opens).toBe(1);
+  });
+
+  it("wears the warning colour at the cap or with anything held", () => {
+    const { root, commit } = mountCanvas(
+      model({ cards, spawnLine: { text: "Spawns 20/20 this run · 5 per attempt · 1 held", warn: true } }),
+    );
+    commit();
+    expect(
+      root.querySelector(".canvas-spawn-line")?.classList.contains("spawn-line-warn"),
+    ).toBe(true);
+  });
+
+  it("shows no line before a snapshot says what the caps are", () => {
+    const { root, commit } = mountCanvas(model({ cards }));
+    commit();
+    expect(root.querySelector(".canvas-spawn-line")).toBeNull();
   });
 });

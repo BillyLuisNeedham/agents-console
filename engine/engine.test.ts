@@ -3896,6 +3896,90 @@ describe("config reload (ADR-0018)", () => {
       readEventLines(poolDir, "02").some((e) => e.kind === "reassigned"),
     ).toBe(false);
   });
+
+  // Issue #149: the Spawn caps reload at the boundary with the assignment
+  // slice, so a cap raised from Settings reaches the very next adoption and
+  // the next attempt's teaching.
+  it("reloads the spawn caps at the boundary, into the adoption and the next prompt", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [1, 2, 3].map((n) => ({ title: `N${n}`, body: "A body long enough to stand." })) },
+    });
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ ...stubConfig, spawnCaps: { perAttempt: 1, perRun: 7 } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(run.final.log).toContain("config reloaded: spawnCaps");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(false);
+    expect(rig.spawned["01"].body).toContain("5 proposals honored per attempt and 20 per run");
+    expect(rig.spawned["02"].body).toContain("1 proposal honored per attempt and 7 per run");
+  });
+
+  it("rejects a reload whose spawn cap is not a positive integer, keeping the caps it had", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { ...stubConfig, spawnCaps: { perRun: 9 } },
+    });
+    const rig = stubHarness(poolDir, {});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ ...stubConfig, spawnCaps: { perRun: 0 } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.final.log).toContain(
+      "config reload rejected: pool config: spawnCaps.perRun must be a positive integer",
+    );
+    expect(run.snapshots.at(-1)!.spawnUsage.perRun).toBe(9);
+  });
+
+  // An idle pool reaches no boundary, so a Settings save asks for the reload
+  // itself (issue #149): the caps it changed show on the snapshot at once.
+  it("reloads at once when asked while no drive is in flight", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {});
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.phase).toBe("quiescent");
+
+    writeFileSync(
+      join(poolDir, "console.json"),
+      JSON.stringify({ ...stubConfig, spawnCaps: { perRun: 30 } }),
+    );
+    run.reloadConfig();
+
+    expect(run.final.log).toContain("config reloaded: spawnCaps");
+    expect(run.snapshots.at(-1)!.spawnUsage).toEqual({
+      spawnedThisRun: 0,
+      perAttempt: 5,
+      perRun: 30,
+    });
+  });
 });
 
 describe("glued prompt", () => {
@@ -7589,6 +7673,37 @@ describe("outcome spawn schema", () => {
     }
   });
 
+  // ADR-0029: a proposal may name the tickets it blocks, or "all".
+  it("keeps a proposal's blocks, named or all, and rejects any other shape", () => {
+    const spawn = [
+      { title: "Named", body: goodBody, blocks: ["02", "03"] },
+      { title: "Everything", body: goodBody, blocks: "all" as const },
+    ];
+    expect(
+      okOutcome(validateOutcome({ status: "done", summary: "s", commitSha: null, spawn }))
+        .outcome.spawn,
+    ).toEqual(spawn);
+
+    const bad = "proposal's blocks is not a list of ticket ids or \"all\"";
+    const cases: { entry: unknown; reason: string }[] = [
+      { entry: { title: "T", body: goodBody, blocks: "02" }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: [""] }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: [2] }, reason: bad },
+      { entry: { title: "T", body: goodBody, blocks: null }, reason: bad },
+      {
+        entry: { title: "T", body: goodBody, kind: "conversation", blocks: "all" },
+        reason: "proposal's blocks is only for a ticket: a Conversation blocks nothing",
+      },
+    ];
+    for (const { entry, reason } of cases) {
+      const result = okOutcome(
+        validateOutcome({ status: "done", summary: "s", commitSha: null, spawn: [entry] }),
+      );
+      expect(result.outcome.spawn).toEqual([]);
+      expect(result.spawnRejections).toEqual([{ index: 0, reason }]);
+    }
+  });
+
   it("keeps the well-formed entries around a malformed one, naming the bad index", () => {
     const good = { title: "Follow up", body: goodBody };
 
@@ -7830,7 +7945,9 @@ describe("spawn adoption", () => {
     });
   });
 
-  it("honors the per-attempt cap of five and logs the truncation", async () => {
+  // Issue #149 (ADR-0029): a proposal beyond a cap is held for the
+  // operator, never dropped, and the hold is on the parent's log.
+  it("holds the proposals beyond the per-attempt cap of five for the operator", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01")],
       config: stubConfig,
@@ -7853,10 +7970,8 @@ describe("spawn adoption", () => {
     }
     expect(existsSync(join(poolDir, "issues", "01-spawn-6.md"))).toBe(false);
     expect(existsSync(join(poolDir, "issues", "01-spawn-7.md"))).toBe(false);
-    const adopted = readEventLines(poolDir, "01").find(
-      (e) => e.kind === "spawn-adopted",
-    );
-    expect(adopted?.payload).toEqual({
+    const events = readEventLines(poolDir, "01");
+    expect(events.find((e) => e.kind === "spawn-adopted")?.payload).toEqual({
       adopted: [
         "01-spawn-1",
         "01-spawn-2",
@@ -7864,18 +7979,27 @@ describe("spawn adoption", () => {
         "01-spawn-4",
         "01-spawn-5",
       ],
-      truncated: 2,
+    });
+    expect(events.find((e) => e.kind === "spawn-held")?.payload).toEqual({
+      held: [
+        { id: "held-1", title: "Number 6", reason: "per-attempt" },
+        { id: "held-2", title: "Number 7", reason: "per-attempt" },
+      ],
     });
     expect(
-      run.final.log.some(
-        (line) =>
-          line.startsWith("ticket 01: adopted spawn tickets") &&
-          line.includes("2 proposals truncated at the caps"),
-      ),
-    ).toBe(true);
+      run.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.parentId, h.title, h.reason]),
+    ).toEqual([
+      ["held-1", "01", "Number 6", "per-attempt"],
+      ["held-2", "01", "Number 7", "per-attempt"],
+    ]);
+    expect(run.final.log).toContain(
+      "ticket 01: adopted spawn tickets 01-spawn-1, 01-spawn-2, 01-spawn-3, " +
+        "01-spawn-4, 01-spawn-5; 2 proposals held at the caps " +
+        "(5 per attempt, 20 per run): held-1, held-2",
+    );
   }, 15000);
 
-  it("honors the per-run cap of twenty across attempts and logs the truncation", async () => {
+  it("holds what the per-run cap of twenty has no room for across attempts", async () => {
     const poolDir = makePool({
       tickets: [
         readyTicket("01"),
@@ -7907,22 +8031,438 @@ describe("spawn adoption", () => {
       return `issues/${parent}-spawn-${n}.md`;
     }).filter((file) => existsSync(join(poolDir, file)));
     expect(spawnFiles).toHaveLength(20);
-    // The attempts run in parallel, so which parent truncated is racy; that
-    // exactly one did, with all seven proposals dropped, is not.
-    const adoptEvents = ["01", "02", "03", "04", "05"].flatMap((id) =>
+    // The attempts run in parallel, so which parent found the run full is
+    // racy; that exactly one did, with all seven held, is not.
+    const heldReasons = ["01", "02", "03", "04", "05"].map((id) =>
       readEventLines(poolDir, id)
-        .filter((e) => e.kind === "spawn-adopted")
-        .map((e) => e.payload as { adopted: string[]; truncated: number }),
+        .filter((e) => e.kind === "spawn-held")
+        .flatMap((e) => (e.payload.held as { reason: string }[]).map((h) => h.reason)),
     );
-    expect(adoptEvents).toHaveLength(5);
-    expect(adoptEvents.filter((p) => p.adopted.length === 5)).toHaveLength(4);
-    expect(adoptEvents.filter((p) => p.adopted.length === 0)).toEqual([
-      { adopted: [], truncated: 7 },
+    expect(heldReasons.filter((r) => r.length === 2)).toHaveLength(4);
+    expect(heldReasons.filter((r) => r.length === 7)).toEqual([
+      [
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-run",
+        "per-attempt",
+        "per-attempt",
+      ],
     ]);
-    expect(
-      run.final.log.some((line) => line.includes("truncated at the caps")),
-    ).toBe(true);
+    const last = run.snapshots.at(-1)!;
+    expect(last.heldSpawns).toHaveLength(15);
+    expect(last.spawnUsage.spawnedThisRun).toBe(20);
   }, 15000);
+
+  // The operator's Adopt bypasses both caps (ADR-0029) and still counts
+  // toward the run, and a restart in between loses nothing.
+  it("keeps held spawns across a restart and adopts one past the caps on the operator's word", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perRun: 1 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("First"), proposal("Second", ["01"])] },
+    });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(first.phase).toBe("quiescent");
+    expect(first.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.reason])).toEqual([
+      ["held-1", "per-run"],
+    ]);
+    await first.shutdown(0);
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+    expect(run.snapshots.at(-1)!.heldSpawns.map((h) => h.title)).toEqual(["Second"]);
+    expect(run.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(0);
+
+    expect(() => run.adoptHeldSpawn("held-9")).toThrow("no held spawn held-9");
+    run.adoptHeldSpawn("held-1");
+    const settled = await run.settled;
+
+    expect(markerLine(poolDir, "01-spawn-2.md")).toContain("id=01-spawn-2 blocked-by=01");
+    expect(settled.final.tickets["01-spawn-2"]).toBe("done");
+    expect(settled.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(settled.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(1);
+    const adopted = readEventLines(poolDir, "01").filter((e) => e.kind === "spawn-adopted");
+    expect(adopted.at(-1)!.payload).toEqual({ adopted: ["01-spawn-2"], fromHeld: "held-1" });
+    // Adopting again is refused: the held spawn is gone.
+    expect(() => run.adoptHeldSpawn("held-1")).toThrow("no held spawn held-1");
+    await approveReview(settled);
+  }, 20000);
+
+  it("discards a held spawn for good, recorded on the parent's log", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 1 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("Kept"), proposal("Unwanted")] },
+    });
+
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    first.discardHeldSpawn("held-1");
+
+    expect(first.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(readEventLines(poolDir, "01").find((e) => e.kind === "spawn-discarded")?.payload)
+      .toEqual({ id: "held-1", title: "Unwanted" });
+    expect(first.final.log).toContain(
+      "ticket 01: held spawn held-1 ('Unwanted') discarded by the operator",
+    );
+    expect(() => first.discardHeldSpawn("held-1")).toThrow("no held spawn held-1");
+    await first.shutdown(0);
+
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    await again.shutdown(0);
+  }, 20000);
+
+  // The og-review loss (issue #149): before holding, the caps truncated, and
+  // the truncated proposals survive only in the parent's checkpointed
+  // Outcome. Boot brings them back as held spawns, once.
+  it("recovers proposals a cap truncated before holding existed, once", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-t.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+        {
+          file: "01-spawn-1.md",
+          marker: "<!-- state: id=01-spawn-1 blocked-by=none status=done spawned-by=01 -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const store = new SqliteCheckpointStore(poolDir);
+    store.write({
+      tickets: { "01": "done", "01-spawn-1": "done" },
+      log: [],
+      outcomes: {
+        "01": {
+          status: "done",
+          summary: "s",
+          commitSha: null,
+          spawn: [proposal("Adopted"), proposal("Rejected", ["99"]), proposal("Truncated")],
+        },
+      },
+      interrupts: [],
+      reviewApproved: false,
+    });
+    store.close();
+    const runsDir = join(poolDir, "runs");
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.000Z",
+      attempt: 1,
+      kind: "spawn-rejected",
+      payload: { title: "Rejected", reason: "blockedBy names tickets outside the pool: 99" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.001Z",
+      attempt: 1,
+      kind: "spawn-adopted",
+      payload: { adopted: ["01-spawn-1"], truncated: 1 },
+    });
+    const rig = stubHarness(poolDir, {});
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+    const held = run.snapshots.at(-1)!.heldSpawns;
+    expect(held.map((h) => [h.id, h.parentId, h.title, h.reason, h.at])).toEqual([
+      ["held-1", "01", "Truncated", "per-run", "2026-09-27T10:00:00.001Z"],
+    ]);
+    expect(readEventLines(poolDir, "01").at(-1)).toMatchObject({
+      kind: "spawn-held",
+      payload: { held: [{ id: "held-1", title: "Truncated", reason: "per-run" }], recovered: true },
+    });
+    run.discardHeldSpawn("held-1");
+    await run.shutdown(0);
+
+    // Neither the discard nor a second boot brings it back.
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    await again.shutdown(0);
+  }, 20000);
+
+  // Titles are all recovery has to tell rejected proposals apart by, so an
+  // Outcome where a rejected title is shared cannot say which one went:
+  // recovering could hold one already adopted, and its Adopt would write a
+  // duplicate ticket. Such a parent is left alone, as a count mismatch is.
+  it("refuses to recover a parent whose rejected proposal shares its title with another", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-t.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+        {
+          file: "01-spawn-1.md",
+          marker: "<!-- state: id=01-spawn-1 blocked-by=none status=done spawned-by=01 -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const store = new SqliteCheckpointStore(poolDir);
+    store.write({
+      tickets: { "01": "done", "01-spawn-1": "done" },
+      log: [],
+      outcomes: {
+        "01": {
+          status: "done",
+          summary: "s",
+          commitSha: null,
+          spawn: [proposal("Twin"), proposal("Truncated"), proposal("Twin", ["99"])],
+        },
+      },
+      interrupts: [],
+      reviewApproved: false,
+    });
+    store.close();
+    const runsDir = join(poolDir, "runs");
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.000Z",
+      attempt: 1,
+      kind: "spawn-rejected",
+      payload: { title: "Twin", reason: "blockedBy names tickets outside the pool: 99" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.001Z",
+      attempt: 1,
+      kind: "spawn-adopted",
+      payload: { adopted: ["01-spawn-1"], truncated: 1 },
+    });
+    const rig = stubHarness(poolDir, {});
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+
+    expect(run.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(run.final.log).toContain(
+      "ticket 01: 1 spawn proposal truncated before held spawns existed could " +
+        "not be recovered: its rejected proposal 'Twin' shares a title with " +
+        "another, so which one was rejected is unknown",
+    );
+    await run.shutdown(0);
+  }, 20000);
+
+  // ADR-0029: an Adopt the boundary refuses (here a blocks target finished
+  // while the Adopt waited) leaves the spawn held, with the reason on it,
+  // rather than losing the proposal the operator meant to rescue.
+  it("keeps a held spawn whose Adopt the boundary refuses, with the reason on it", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 1 } },
+    });
+    const release = join(poolDir, "release-02");
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("Adopted"), { ...proposal("Fix before two"), blocks: ["02"] }] },
+      "02": { waitFor: release },
+    });
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() =>
+      run.snapshots.some((s) => s.state.tickets["02"] === "in-progress"),
+    );
+    // 02 is still running, so the Adopt passes its check and waits for the
+    // boundary; by then 02 is done and has no next attempt to hold.
+    run.adoptHeldSpawn("held-1");
+    expect(run.snapshots.at(-1)!.heldSpawns[0]!.adopting).toBe(true);
+    writeFileSync(release, "");
+    const settled = await run.settled;
+
+    const reason = "blocks names done tickets, which have no next attempt to hold: 02";
+    expect(settled.snapshots.at(-1)!.heldSpawns).toEqual([
+      expect.objectContaining({ id: "held-1", adopting: false, adoptError: reason }),
+    ]);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(false);
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "spawn-rejected").at(-1)!.payload,
+    ).toEqual({ title: "Fix before two", reason, fromHeld: "held-1" });
+    expect(settled.final.log).toContain(
+      `ticket 01: adopting held spawn held-1 ('Fix before two') refused: ${reason}; it stays held`,
+    );
+    await settled.shutdown(0);
+
+    // The refusal survives a restart, and the spawn is still there to decide.
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.adoptError])).toEqual([
+      ["held-1", reason],
+    ]);
+    await again.shutdown(0);
+  }, 20000);
+
+  // Issue #149: both caps live in the pool config, each field falling back
+  // to its default on its own, and the snapshot carries them with the count.
+  it("reads the caps from the pool config field by field and carries the usage on the snapshot", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 2 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [1, 2, 3].map((n) => proposal(`N${n}`)) },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-3.md"))).toBe(false);
+    expect(run.snapshots.at(-1)!.spawnUsage).toEqual({
+      spawnedThisRun: 2,
+      perAttempt: 2,
+      perRun: 20,
+    });
+  });
+
+  // Issue #149: "per run" is since this Console boot. A pool that spawned
+  // before a restart starts the count again at zero, whatever is on disk.
+  it("counts the run cap from this boot, not from the spawned tickets already on disk", async () => {
+    const earlier = [1, 2, 3].map((n) => ({
+      file: `00-spawn-${n}.md`,
+      marker: `<!-- state: id=00-spawn-${n} blocked-by=none status=done spawned-by=00 -->`,
+    }));
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        ...earlier,
+        readyTicket("01"),
+      ],
+      config: { ...stubConfig, spawnCaps: { perRun: 3 } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("After the restart")] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
+    expect(run.snapshots[0]!.spawnUsage.spawnedThisRun).toBe(0);
+    expect(run.snapshots.at(-1)!.spawnUsage.spawnedThisRun).toBe(1);
+  });
+
+  // ADR-0029: a Spawn that blocks named tickets goes onto each one's
+  // blocked-by, so the fix the agent found runs before them.
+  it("adds a spawn that blocks named tickets to their blocked-by, so it runs first", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01"), readyTicket("03", "01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [{ ...proposal("Fix first"), blocks: ["02"] }] },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(markerLine(poolDir, "02-t.md")).toContain("blocked-by=01,01-spawn-1");
+    expect(markerLine(poolDir, "03-t.md")).toContain("blocked-by=01 ");
+    expect(run.final.log).toContain("super-step 2: 01-spawn-1, 03");
+    expect(run.final.log).toContain("super-step 3: 02");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "spawn-adopted")?.payload,
+    ).toEqual({ adopted: ["01-spawn-1"], blocks: { "01-spawn-1": ["02"] } });
+    expect(run.final.log).toContain("ticket 01: spawn 01-spawn-1 blocks 02");
+  });
+
+  // "all" is every ticket not yet started at adoption, sibling Spawns
+  // included, but never the Spawn's own blockers (that would deadlock) nor a
+  // done ticket.
+  it("blocks every ticket not yet started when a spawn blocks all, except its own blockers", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        readyTicket("03", "01"),
+        readyTicket("04", "03"),
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [
+          { ...proposal("After four's blockers"), blockedBy: ["04"], blocks: "all" },
+          proposal("A sibling"),
+        ],
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    // 04 and 03 are the spawn's own blockers: blocking them would deadlock.
+    expect(markerLine(poolDir, "02-t.md")).toContain("blocked-by=01,01-spawn-1");
+    expect(markerLine(poolDir, "03-t.md")).toContain("blocked-by=01 ");
+    expect(markerLine(poolDir, "04-t.md")).toContain("blocked-by=03 ");
+    expect(markerLine(poolDir, "01-spawn-2.md")).toContain("blocked-by=01-spawn-1");
+    expect(markerLine(poolDir, "00-t.md")).toContain("blocked-by=none");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "spawn-adopted")?.payload,
+    ).toEqual({
+      adopted: ["01-spawn-1", "01-spawn-2"],
+      blocks: { "01-spawn-1": ["01-spawn-2", "02"] },
+    });
+  });
+
+  it("rejects a spawn whose named blocks are unknown, done, or would make a cycle", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "00-t.md",
+          marker: "<!-- state: id=00 blocked-by=none status=done -->",
+        },
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        readyTicket("03", "02"),
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [
+          { ...proposal("Ghost"), blocks: ["99"] },
+          { ...proposal("Too late"), blocks: ["00"] },
+          { ...proposal("Circular"), blockedBy: ["03"], blocks: ["02"] },
+        ],
+      },
+    });
+
+    const run = await approveReview(
+      await runPool({ poolDir, harnesses: rig.harnesses }),
+    );
+
+    expect(run.phase).toBe("done");
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    const reasons = readEventLines(poolDir, "01")
+      .filter((e) => e.kind === "spawn-rejected")
+      .map((e) => [e.payload.title, e.payload.reason]);
+    expect(reasons).toEqual([
+      ["Ghost", "blocks names tickets outside the pool: 99"],
+      ["Too late", "blocks names done tickets, which have no next attempt to hold: 00"],
+      ["Circular", "blocks names tickets this proposal already waits on, a cycle: 02"],
+    ]);
+  });
 
   it("lets a spawned ticket's own attempt spawn further tickets", async () => {
     const poolDir = makePool({

@@ -386,6 +386,45 @@ describe("the Pool title (issue #100)", () => {
   });
 });
 
+describe("the Spawn caps (issue #149)", () => {
+  it("carries the caps and this run's count on every snapshot, the defaults when unset", async () => {
+    const { server } = await startRig();
+    expect(server.latest?.spawnUsage).toEqual({
+      spawnedThisRun: 0,
+      perAttempt: 5,
+      perRun: 20,
+    });
+  });
+
+  // A settled pool reaches no super-step boundary, so the save itself asks
+  // the run to reload: the new caps are on the snapshot before the answer.
+  it("applies a saved cap to a settled pool at once, with no Restart badge", async () => {
+    const { poolDir, server } = await startRig();
+
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { spawnCaps: { perAttempt: "8", perRun: 30 } },
+    });
+
+    expect(res.status).toBe(200);
+    expect(onDisk(poolDir).spawnCaps).toEqual({ perAttempt: 8, perRun: 30 });
+    expect(((await res.json()) as SettingsResponse).pool.effective.stale).toEqual([]);
+    expect(server.latest?.spawnUsage).toEqual({
+      spawnedThisRun: 0,
+      perAttempt: 8,
+      perRun: 30,
+    });
+  });
+
+  it("refuses a cap that is not a positive integer with a 400 naming the field", async () => {
+    const { server } = await startRig();
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { spawnCaps: { perRun: -3 } },
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("spawnCaps.perRun");
+  });
+});
+
 describe("PUT /api/settings/machine", () => {
   it("writes the injected file and answers with the whole payload", async () => {
     const { server, machine } = await startRig();

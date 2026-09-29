@@ -1,4 +1,14 @@
 import { SPAWN_BODY_MIN_CHARS, type Outcome } from "./engine.ts";
+import type { SpawnCaps } from "./spawn-caps.ts";
+
+// The `blocks` teaching (ADR-0029), one sentence shared by the attempt
+// prompt and the Conversation teaching so the two cannot drift: what a
+// follow-up that must run first adds to its entry.
+const SPAWN_BLOCKS_TEACHING =
+  'A follow-up that must run before other work may add "blocks": ["id", ' +
+  '...] to make those tickets wait for it, or "blocks": "all" to make ' +
+  "every ticket that has not started yet wait for it; a ticket already " +
+  "running is never interrupted, and blocks is only for a ticket.";
 
 interface ResolverPromptParts {
   id: string;
@@ -206,7 +216,9 @@ export function buildEnlistTeaching(parts: {
       'a "spawn" array, one entry per follow-up, each shaped {"title": ' +
       '"...", "body": "...", "blockedBy": ["id", ...]}, the body carrying ' +
       `at least ${SPAWN_BODY_MIN_CHARS} characters of intent for a fresh ` +
-      "agent to work from. The engine assigns the ids, writes the ticket " +
+      "agent to work from. " +
+      SPAWN_BLOCKS_TEACHING +
+      " The engine assigns the ids, writes the ticket " +
       "files and schedules them. You never write pool state yourself: no " +
       "ticket files, no ids, no statuses. You propose; the engine writes.",
   ].join("\n");
@@ -251,7 +263,9 @@ export function buildContinuedTeaching(parts: {
       'a "spawn" array, one entry per follow-up, each shaped {"title": ' +
       '"...", "body": "...", "blockedBy": ["id", ...]}, the body carrying ' +
       `at least ${SPAWN_BODY_MIN_CHARS} characters of intent for a fresh ` +
-      "agent to work from. You never write pool state yourself: no ticket " +
+      "agent to work from. " +
+      SPAWN_BLOCKS_TEACHING +
+      " You never write pool state yourself: no ticket " +
       "files, no ids, no statuses. You propose; the engine writes.",
   ].join("\n");
 }
@@ -263,10 +277,10 @@ export function buildContinuedTeaching(parts: {
  * Conversation has no driver, no chain, no roster and no Outcome file the
  * ordinary buildPrompt assembles around, so this is deliberately
  * self-contained rather than a section spliced into that prompt. The floor
- * on a proposal's body (SPAWN_BODY_MIN_CHARS, engine.ts) and the per-file cap
- * (5, engine/notices.ts's poller reusing SPAWN_MAX_PER_ATTEMPT) are named
- * literally here so the two surfaces cannot drift; prompt.test.ts pins both
- * against their exported constants the way it already does for buildPrompt.
+ * on a proposal's body (SPAWN_BODY_MIN_CHARS, engine.ts) is named literally
+ * here so the two surfaces cannot drift, and the per-file cap is the pool's
+ * own per-attempt Spawn cap (ADR-0029) as the caller read it at start;
+ * prompt.test.ts pins both the way it already does for buildPrompt.
  */
 export interface TeachingAssignment {
   harness: string;
@@ -290,6 +304,7 @@ export function buildConversationTeaching(
   spawnPath: string,
   own: TeachingAssignment,
   defaults: Partial<TeachingAssignment> | undefined,
+  perFile: number,
 ): string {
   return [
     "---",
@@ -308,7 +323,8 @@ export function buildConversationTeaching(
       '"kind" defaults to "ticket"; "conversation" starts a new open-ended ' +
       'talk instead of a Ticket. "assign" is optional; when absent the ' +
       "follow-up inherits this Conversation's own Assignment, and any field " +
-      "that leaves empty falls through to the pool defaults.",
+      "that leaves empty falls through to the pool defaults. " +
+      SPAWN_BLOCKS_TEACHING,
     "",
     `This Conversation's Assignment: ${describeAssignment(own)}. ` +
       `The pool defaults: ${describeAssignment(defaults)}. Set "assign" only ` +
@@ -317,8 +333,10 @@ export function buildConversationTeaching(
     "",
     "The engine polls for this file, reads it, and deletes it once read: " +
       "write it whenever you like, mid-conversation, not only once. Caps: " +
-      "5 entries honored per file written; unlike a Ticket's own spawns " +
-      "there is no run-wide cap on what a Conversation spawns.",
+      `${perFile} ${perFile === 1 ? "entry" : "entries"} honored per file written, ` +
+      "and entries beyond it are held for the operator to adopt or discard; " +
+      "unlike a Ticket's own spawns there is no run-wide cap on what a " +
+      "Conversation spawns.",
     "",
     "A spawned Ticket reports back here as a Turn typed into this " +
       "conversation once it ends (done, or checkpoint with its Brief) and " +
@@ -338,6 +356,8 @@ interface PromptParts {
   roster: string;
   upstream: { id: string; outcome: Outcome }[];
   outcomePath: string;
+  // The pool's Spawn caps as this attempt's boundary left them (ADR-0029).
+  spawnCaps: SpawnCaps;
 }
 
 // The prompt body: the standing instructions, chain, roster, upstream
@@ -403,14 +423,19 @@ export function buildPrompt(parts: PromptParts): string {
       'follow-up, each shaped {"title": "...", "body": "...", "blockedBy": ' +
       '["id", ...]}, the body carrying at least 20 characters of intent ' +
       "for a fresh agent to work from, blockedBy optional and naming the " +
-      "ids the follow-up must wait for. The engine assigns the ids " +
+      "ids the follow-up must wait for. " +
+      SPAWN_BLOCKS_TEACHING +
+      " The engine assigns the ids " +
       "(<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), " +
       "writes the ticket files at the super-step boundary, and schedules " +
       "them like any other ticket. Thin or out-of-pool proposals are " +
       "dropped with the reason recorded in the ticket log, and a dropped " +
-      "proposal never costs your attempt its result. Caps apply: 5 " +
-      "proposals honored per attempt and 20 per run, " +
-      "overflow truncated to the log. You never write pool state: no ticket " +
+      "proposal never costs your attempt its result. Caps apply: " +
+      `${parts.spawnCaps.perAttempt} ` +
+      `${parts.spawnCaps.perAttempt === 1 ? "proposal" : "proposals"} honored ` +
+      `per attempt and ${parts.spawnCaps.perRun} per run, ` +
+      "overflow held for the operator to adopt or discard, so order your " +
+      "proposals most important first. You never write pool state: no ticket " +
       "files, no ids, no statuses. You propose; the engine writes.",
   );
   return sections.join("\n");

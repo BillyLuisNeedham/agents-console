@@ -30,6 +30,8 @@ function snap(seq: number): EnrichedSnapshot {
     poolTitle: null,
     poolDir: "/tmp/pool",
     finishedTerminals: 0,
+    spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+    heldSpawns: [],
     state: {
       tickets: [
         {
@@ -746,6 +748,32 @@ describe("PoolClient Keep talking and closing finished terminals (issue #139)", 
     globalThis.fetch = jsonFetch(500, null, true).fetch;
     await expect(new PoolClient().closeFinishedTerminals()).rejects.toThrow(
       "close finished terminals failed: 500",
+    );
+  });
+
+  it("POSTs a Held spawn's id to adopt and discard, answering with the id (issue #149)", async () => {
+    for (const [method, path, status] of [
+      ["adoptHeldSpawn", "/api/spawns/held/adopt", 202],
+      ["discardHeldSpawn", "/api/spawns/held/discard", 200],
+    ] as const) {
+      const { fetch, calls } = jsonFetch(status, { id: "held-2" });
+      globalThis.fetch = fetch;
+      const result = await new PoolClient()[method]("held-2");
+      expect(calls[0]!.url).toBe(path);
+      expect(calls[0]!.init?.method).toBe("POST");
+      expect(JSON.parse(calls[0]!.init?.body as string)).toEqual({ id: "held-2" });
+      expect(result).toEqual({ id: "held-2" });
+    }
+  });
+
+  it("surfaces a refused Held spawn decision's reason, or a generic message without one", async () => {
+    globalThis.fetch = jsonFetch(409, { reason: "no held spawn held-9" }).fetch;
+    await expect(new PoolClient().adoptHeldSpawn("held-9")).rejects.toThrow(
+      "no held spawn held-9",
+    );
+    globalThis.fetch = jsonFetch(500, null, true).fetch;
+    await expect(new PoolClient().discardHeldSpawn("held-9")).rejects.toThrow(
+      "discard held spawn failed: 500",
     );
   });
 });

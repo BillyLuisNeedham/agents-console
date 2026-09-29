@@ -434,6 +434,7 @@ export class Detail {
           if (event.reassignment) {
             row.append(h("div", { class: "timeline-reassigned" }, event.reassignment));
           }
+          if (event.spawn) row.append(h("div", { class: "timeline-spawn" }, event.spawn));
         }
       }
       body.append(row);

@@ -22,6 +22,7 @@ import {
   type InterruptView,
   type PoolCardView,
   type RunPhase,
+  type SpawnLineView,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -337,6 +338,9 @@ export interface CanvasModel {
   /** The Merge queue line (issue #129): shown under the status while the
    *  Merge hold stands, absent otherwise. */
   mergeQueueLine: string | null;
+  /** The Spawn caps line (issue #149), beside the Merge queue line; a
+   *  button that opens the Held spawns list. Null before the first snapshot. */
+  spawnLine: SpawnLineView | null;
   /** The header's "Close N finished terminals" control (issue #139). */
   closeTerminals: CloseTerminalsView;
 }
@@ -393,6 +397,7 @@ export class Canvas {
   private readonly onNewConversation: () => void;
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
+  private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
   private readonly onArmStop: () => void;
@@ -415,6 +420,8 @@ export class Canvas {
     /** The header's "Settings" button (ADR-0026): opens the Settings pane.
      *  Always offered; a headless pool has settings too. */
     onOpenSettings: () => void;
+    /** The header's Spawn caps line (issue #149): opens the Held spawns list. */
+    onOpenHeldSpawns: () => void;
     /** The header's "reset layout" button, after the canvas has restored its
      *  own card positions: resets what other modules lay out (the Needs
      *  input tray's dragged width, issue #147). */
@@ -439,6 +446,7 @@ export class Canvas {
     this.onNewConversation = options.onNewConversation;
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
+    this.onOpenHeldSpawns = options.onOpenHeldSpawns;
     this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
     this.onArmStop = options.onArmStop;
@@ -820,6 +828,19 @@ export class Canvas {
       h("span", { class: "dim" }, canvasStatusText(model)),
       model.mergeQueueLine
         ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
+        : null,
+      model.spawnLine
+        ? h(
+            "button",
+            {
+              class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
+              type: "button",
+              // The line ellipsises in a narrow header, so the hover says it whole.
+              title: `${model.spawnLine.text} (open the held spawns)`,
+              onclick: () => this.onOpenHeldSpawns(),
+            },
+            model.spawnLine.text,
+          )
         : null,
       model.error ? h("span", { class: "error-inline" }, model.error) : null,
       h(

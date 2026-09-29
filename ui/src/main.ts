@@ -111,6 +111,8 @@ const consoleView = new ConsoleView({
       session.setSnapshot(response.snapshot);
       return response;
     }),
+  onAdoptHeldSpawn: (id) => client.adoptHeldSpawn(id),
+  onDiscardHeldSpawn: (id) => client.discardHeldSpawn(id),
   onStart: (request) => client.startConversation(request),
   onEnd: (conversationId, closing) =>
     client

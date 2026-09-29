@@ -37,6 +37,8 @@ const SNAPSHOT: EnrichedSnapshot = {
   poolTitle: null,
   poolDir: "/tmp/pool",
   finishedTerminals: 0,
+  spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+  heldSpawns: [],
   state: {
     tickets: [ticket("A"), ticket("B")],
     conversations: [],
@@ -54,15 +56,16 @@ const SNAPSHOT: EnrichedSnapshot = {
 
 /** The composition root over the real session, the bootstrap's wiring minus
  *  the network: every seam that would fetch parks or answers at once. */
-function mountConsole() {
+function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
   const answers: { ticketId: string; action: ResumeAction; note?: string }[] = [];
+  const adopted: string[] = [];
   // One Console on the page at a time: the Detail's fullscreen writes find
   // the page's panel by class, as they do in the app.
   document.body.replaceChildren();
   const root = document.createElement("div");
   document.body.appendChild(root);
   const session = new ConsoleSession({
-    getState: () => Promise.resolve(SNAPSHOT),
+    getState: () => Promise.resolve(snapshot),
     getEvents: () => new Promise(() => {}),
     getTicket: () => new Promise(() => {}),
     getGrades: () => Promise.resolve({}),
@@ -92,6 +95,11 @@ function mountConsole() {
     onSavePoolSettings: () => new Promise(() => {}),
     onSaveMachineDefaults: () => new Promise(() => {}),
     onReassign: () => new Promise(() => {}),
+    onAdoptHeldSpawn: (id) => {
+      adopted.push(id);
+      return new Promise(() => {});
+    },
+    onDiscardHeldSpawn: () => new Promise(() => {}),
   });
   const handlers: Handlers = {
     onToggleLog: () => session.toggleLog(),
@@ -116,7 +124,7 @@ function mountConsole() {
   function render(): void {
     view.render(root, session.model(view.conversationEndState()), handlers);
   }
-  session.setSnapshot(SNAPSHOT);
+  session.setSnapshot(snapshot);
   const q = <T extends Element>(selector: string) => root.querySelector<T>(selector);
   const trayNote = (ticketId: string) =>
     q<HTMLTextAreaElement>(`.needs-input-row[data-key="ticket:${ticketId}"] textarea.needs-input-note`)!;
@@ -125,7 +133,7 @@ function mountConsole() {
     el.value = value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  return { root, session, render, answers, q, trayNote, detailNote, type };
+  return { root, session, render, answers, adopted, q, trayNote, detailNote, type };
 }
 
 describe("ConsoleView: one Draft answer per ticket (issue #147)", () => {
@@ -219,5 +227,42 @@ describe("ConsoleView: reset layout resets the tray width (issue #147)", () => {
     reset.click();
     expect(c.q<HTMLElement>(".needs-input-tray")!.style.width).toBe("300px");
     expect(localStorage.getItem(NEEDS_INPUT_WIDTH_KEY)).toBeNull();
+  });
+});
+
+describe("ConsoleView: the Held spawns list (issue #149)", () => {
+  const HELD: EnrichedSnapshot = {
+    ...SNAPSHOT,
+    spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
+    heldSpawns: [
+      {
+        id: "held-1",
+        parentId: "A",
+        origin: "ticket",
+        kind: "ticket",
+        title: "Fix the flaky login test",
+        body: "fails one run in five",
+        blockedBy: [],
+        blocks: "all",
+        reason: "per-run",
+        at: "2026-09-29T10:00:00Z",
+        adopting: false,
+      },
+    ],
+  };
+
+  it("opens from the header line and adopts from the list, never from Needs input", () => {
+    const c = mountConsole(HELD);
+    const line = c.q<HTMLButtonElement>(".canvas-spawn-line")!;
+    expect(line.textContent).toBe("Spawns 20/20 this run · 5 per attempt · 1 held");
+    expect(c.q(".needs-input-tray")?.textContent).not.toContain("Fix the flaky login test");
+    expect(c.q(".held-spawns-pane")).toBeNull();
+    line.click();
+    c.q<HTMLButtonElement>('[data-key="held-spawn-held-1"] .held-spawn-adopt')!.click();
+    expect(c.adopted).toEqual(["held-1"]);
+    // Once the boundary writes it, the row goes with the snapshot.
+    c.session.setSnapshot({ ...HELD, seq: 2, heldSpawns: [] });
+    expect(c.q('[data-key="held-spawn-held-1"]')).toBeNull();
+    expect(c.q(".held-spawns-empty")).not.toBeNull();
   });
 });

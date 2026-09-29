@@ -44,6 +44,12 @@ const EVENT_KINDS = [
   "review-reject",
   "spawn-adopted",
   "spawn-rejected",
+  // Proposals the Spawn caps had no room for, held for the operator rather
+  // than dropped (ADR-0029): each one's held id, title and which cap held
+  // it; `recovered` when boot held proposals a pre-ADR cap had truncated.
+  "spawn-held",
+  // A Held spawn the operator discarded (ADR-0029), by id and title.
+  "spawn-discarded",
   "reassigned",
   // The ticket file's two copies (the pool's file of record and the
   // worktree seed the agent committed) changed the same lines differently,

@@ -17,12 +17,14 @@ import {
   type DetailTabView,
   type DetailView,
   type EnlistBlockRow,
+  type HeldSpawnRow,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
   type ReassignTicketRow,
   type ResumeAction,
   type RunPhase,
+  type SpawnLineView,
   type TimelineView,
 } from "./project";
 import { flowNeighbourhood, type TopologyEdge } from "./geometry";
@@ -41,6 +43,7 @@ import {
   type SavePoolHandler,
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
+import { HeldSpawnsStore, type HeldSpawnHandler } from "./held-spawns";
 import { Detail, type DetailHandlers } from "./detail";
 import { DraftAnswers } from "./drafts";
 import { Drawers } from "./drawers";
@@ -119,6 +122,10 @@ export interface AppModel {
   terminalBacked: boolean;
   /** The canvas header's Merge queue line (issue #129); null with no hold. */
   mergeQueueLine: string | null;
+  /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
+  spawnLine: SpawnLineView | null;
+  /** The Held spawns list the Spawn caps line opens (issue #149). */
+  heldSpawns: HeldSpawnRow[];
   detail: DetailView | null;
   /** The ticket Detail's tab bar; null for a utility Detail or no selection. */
   detailTabs: DetailTabView[] | null;
@@ -190,6 +197,10 @@ export type ConsoleViewOptions = NeedsInputOptions &
     /** The Reassign write (issue #126). It answers with a fresh snapshot,
      *  which the bootstrap pushes through setSnapshot. */
     onReassign: ReassignHandler;
+    /** A Held spawn's Adopt and Discard (issue #149, ADR-0029). The engine
+     *  pushes the snapshot that shows either, so neither answers with one. */
+    onAdoptHeldSpawn: HeldSpawnHandler;
+    onDiscardHeldSpawn: HeldSpawnHandler;
   };
 
 /**
@@ -221,6 +232,7 @@ export class ConsoleView {
   private readonly enlist: EnlistStore;
   private readonly settings: SettingsStore;
   private readonly reassign: ReassignStore;
+  private readonly heldSpawns: HeldSpawnsStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   // The selection outlives any one render (snapshots never close the panel
   // or lose the selection); its one-hop flow neighbourhood is recomputed from
@@ -255,6 +267,11 @@ export class ConsoleView {
       onReassign: options.onReassign,
       onChange: options.onChange,
     });
+    this.heldSpawns = new HeldSpawnsStore({
+      onAdopt: options.onAdoptHeldSpawn,
+      onDiscard: options.onDiscardHeldSpawn,
+      onChange: options.onChange,
+    });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,
       onSavePool: options.onSavePoolSettings,
@@ -271,6 +288,7 @@ export class ConsoleView {
         void this.enlist.openPicker();
       },
       onOpenSettings: () => this.settings.toggle(),
+      onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
@@ -305,6 +323,7 @@ export class ConsoleView {
     // that started an Attempt or finished loses its draft rather than
     // holding an edit that can no longer land.
     this.reassign.pruneDrafts(new Set(model.reassignTickets.map((row) => row.id)));
+    this.heldSpawns.prune(new Set(model.heldSpawns.map((row) => row.id)));
     // The harness list is read once, when a Reassign surface first needs it.
     if (model.detail?.kind === "ticket" && model.detail.reassign.eligible) {
       this.reassign.ensureHarnesses();
@@ -344,6 +363,7 @@ export class ConsoleView {
       this.enlist.render(model.enlistBlocks),
       this.settings.render(model.restart, handlers),
       this.reassign.render(model.reassignTickets),
+      model.spawnLine ? this.heldSpawns.render(model.heldSpawns, model.spawnLine) : null,
     );
     const content = h(
       "div",

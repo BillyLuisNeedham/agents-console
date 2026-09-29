@@ -16,6 +16,8 @@ import type {
   EnrichedTicketState,
   Grade,
   HeldPaneRecord,
+  HeldSpawnReason,
+  HeldSpawnView,
   Interrupt,
   LiveAttemptRecord,
   MergeQueueEntry,
@@ -55,6 +57,9 @@ export type {
   EnrichedTicketState,
   Grade,
   HeldPaneRecord,
+  HeldSpawnReason,
+  HeldSpawnResponse,
+  HeldSpawnView,
   InterruptKind,
   KeepTalkingRequest,
   KeepTalkingResponse,
@@ -205,10 +210,10 @@ export const UNASSIGNED_LABEL = "unassigned";
 export type TimelineGradeView = Grade;
 
 /**
- * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`
- * and `reassignment` straight off the row and never parses a payload. The
- * grade and reassignment are null unless the event's kind carries one and
- * its payload decoded cleanly.
+ * One timeline row, fully decoded: the renderer reads `timeLabel`, `grade`,
+ * `reassignment` and `spawn` straight off the row and never parses a
+ * payload. Each is null unless the event's kind carries one and its payload
+ * decoded cleanly.
  */
 interface TimelineEventView {
   kind: string;
@@ -216,6 +221,9 @@ interface TimelineEventView {
   timeLabel: string;
   grade: TimelineGradeView | null;
   reassignment: string | null;
+  /** A spawn-held, spawn-adopted or spawn-discarded event as one line
+   *  (issue #149); null on every other kind. */
+  spawn: string | null;
   /** The files a merge-conflict, merge-blocked or resolver event names;
    *  null on every other kind, and on a payload without a string list. */
   files: string[] | null;
@@ -274,6 +282,68 @@ function reassignmentFromPayload(payload: Record<string, unknown>): string | nul
   return `reassigned: ${from} → ${to}`;
 }
 
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+// The Held spawn events (issue #149, ADR-0029), each as one readable line:
+// "2 spawns held (per-run cap): 'A', 'B'", "adopted 03-spawn-1 from held-1
+// · 03-spawn-1 blocks 04, 05", "held spawn 'A' discarded". A pre-ADR
+// adoption carries a `truncated` count instead of holding, and says so. Like
+// the reassignment line, a payload of the wrong shape decodes to null. Of
+// the spawn-rejected events, only a held spawn's refused Adopt is worded:
+// the rest are an Outcome's own proposals, which the plain row covers.
+function spawnFromPayload(kind: string, payload: Record<string, unknown>): string | null {
+  if (kind === "spawn-held") {
+    const held = payload.held;
+    if (!Array.isArray(held) || held.length === 0) return null;
+    const titles: string[] = [];
+    const reasons = new Set<string>();
+    for (const entry of held) {
+      if (typeof entry !== "object" || entry === null) return null;
+      const { title, reason } = entry as Record<string, unknown>;
+      if (typeof title !== "string") return null;
+      if (reason !== "per-attempt" && reason !== "per-run") return null;
+      titles.push(`'${title}'`);
+      reasons.add(HELD_SPAWN_REASON[reason]);
+    }
+    const why = [...reasons].sort();
+    if (payload.recovered === true) why.push("recovered at boot");
+    const count = held.length === 1 ? "1 spawn" : `${held.length} spawns`;
+    return `${count} held (${why.join(", ")}): ${titles.join(", ")}`;
+  }
+  if (kind === "spawn-adopted") {
+    const { adopted, fromHeld, blocks, truncated } = payload;
+    if (!isStringList(adopted)) return null;
+    const parts = [
+      `adopted ${adopted.length > 0 ? adopted.join(", ") : "none"}` +
+        (typeof fromHeld === "string" ? ` from ${fromHeld}` : ""),
+    ];
+    if (typeof blocks === "object" && blocks !== null) {
+      for (const [spawnId, targets] of Object.entries(blocks)) {
+        if (isStringList(targets) && targets.length > 0) {
+          parts.push(`${spawnId} blocks ${targets.join(", ")}`);
+        }
+      }
+    }
+    if (typeof truncated === "number" && truncated > 0) {
+      parts.push(`${truncated} truncated by the cap`);
+    }
+    return parts.join(" · ");
+  }
+  if (kind === "spawn-rejected") {
+    const { title, reason, fromHeld } = payload;
+    if (typeof fromHeld !== "string" || typeof title !== "string") return null;
+    if (typeof reason !== "string") return null;
+    return `adopting held spawn '${title}' refused: ${reason}; still held`;
+  }
+  if (kind === "spawn-discarded") {
+    return typeof payload.title === "string"
+      ? `held spawn '${payload.title}' discarded`
+      : null;
+  }
+  return null;
+}
+
 /** One raw event decoded into its timeline row. */
 function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
   return {
@@ -283,6 +353,7 @@ function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
     grade: event.kind === "graded" ? gradeFromPayload(event.payload) : null,
     reassignment:
       event.kind === "reassigned" ? reassignmentFromPayload(event.payload) : null,
+    spawn: spawnFromPayload(event.kind, event.payload),
     files: FILE_EVENT_KINDS.has(event.kind) ? filesFromPayload(event.payload) : null,
   };
 }
@@ -875,6 +946,21 @@ export interface PoolView {
   log: string[];
   /** The canvas header's Merge queue line (issue #129); null with no hold. */
   mergeQueueLine: string | null;
+  /** The canvas header's Spawn caps line (issue #149). */
+  spawnLine: SpawnLineView;
+  /** The Held spawns list the line opens (issue #149), oldest first. */
+  heldSpawns: HeldSpawnRow[];
+}
+
+/**
+ * The Spawn caps line (issue #149): "Spawns 3/20 this run · 5 per attempt",
+ * with "· N held" while Held spawns wait. `warn` while the run is at or over
+ * its cap, or anything is held: either way the next proposal, or one
+ * already made, needs the operator.
+ */
+export interface SpawnLineView {
+  text: string;
+  warn: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,7 +1406,81 @@ export function projectPool(
     ],
     log: snapshot.state.log,
     mergeQueueLine: mergeQueueLine(snapshot, now),
+    spawnLine: spawnLine(snapshot),
+    heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
   };
+}
+
+function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
+  const { spawnedThisRun, perAttempt, perRun } = snapshot.spawnUsage;
+  const held = snapshot.heldSpawns.length;
+  const parts = [`Spawns ${spawnedThisRun}/${perRun} this run`, `${perAttempt} per attempt`];
+  if (held > 0) parts.push(`${held} held`);
+  return { text: parts.join(" · "), warn: spawnedThisRun >= perRun || held > 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Held spawns (issue #149, ADR-0029)
+// ---------------------------------------------------------------------------
+
+/** How the list names the cap that held a spawn. */
+const HELD_SPAWN_REASON: Record<HeldSpawnReason, string> = {
+  "per-attempt": "per-attempt cap",
+  "per-run": "per-run cap",
+};
+
+/** One Held spawn as the list shows it, in the engine's order, oldest first. */
+export interface HeldSpawnRow {
+  id: string;
+  title: string;
+  /** What adopting it starts. */
+  kind: "ticket" | "conversation";
+  /** "from 03", or "from Conversation c-1". */
+  parent: string;
+  /** "per-attempt cap" or "per-run cap". */
+  reason: string;
+  /** How long it has waited: "12m ago". */
+  waited: string;
+  /** When it was held, as the wire carries it, for the hover. */
+  at: string;
+  /** "waits on 01, 02"; null when it waits on nothing. */
+  blockedBy: string | null;
+  /** "blocks 04, 05", or every ticket not yet started; null for none. */
+  blocks: string | null;
+  body: string;
+  /** An Adopt is on its way to the boundary: nothing more to decide. */
+  adopting: boolean;
+  /** Why the boundary refused the last Adopt (the pool moved while it
+   *  waited); null until a refusal, and cleared by the next Adopt. */
+  adoptError: string | null;
+}
+
+export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawnRow[] {
+  return held.map((spawn) => {
+    const at = Date.parse(spawn.at);
+    return {
+      id: spawn.id,
+      title: spawn.title,
+      kind: spawn.kind,
+      parent:
+        spawn.origin === "conversation"
+          ? `from Conversation ${spawn.parentId}`
+          : `from ${spawn.parentId}`,
+      reason: HELD_SPAWN_REASON[spawn.reason],
+      waited: Number.isNaN(at) ? "" : `${shortDurationCopy(now - at)} ago`,
+      at: spawn.at,
+      blockedBy: spawn.blockedBy.length > 0 ? `waits on ${spawn.blockedBy.join(", ")}` : null,
+      blocks:
+        spawn.blocks === "all"
+          ? "blocks every ticket not yet started"
+          : spawn.blocks && spawn.blocks.length > 0
+            ? `blocks ${spawn.blocks.join(", ")}`
+            : null,
+      body: spawn.body,
+      adopting: spawn.adopting,
+      adoptError: spawn.adoptError ?? null,
+    };
+  });
 }
 
 /** How the header words a Merge queue state after the ticket ids. */
@@ -1506,6 +1666,9 @@ export interface PoolConfigPatch {
   checkpoint?: string | null;
   /** The Pool title (issue #100); null clears it back to the directory name. */
   title?: string | null;
+  /** The Spawn caps (issue #149), replaced whole: a null field goes back to
+   *  the engine's default, and both null removes the key. */
+  spawnCaps?: { perAttempt: number | null; perRun: number | null };
 }
 
 /**

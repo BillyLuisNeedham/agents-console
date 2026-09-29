@@ -39,6 +39,8 @@ const SNAPSHOT = {
   poolTitle: null,
   poolDir: "/tmp/pool",
   finishedTerminals: 0,
+  spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+  heldSpawns: [],
   state: {
     tickets: [],
     conversations: [],
@@ -676,5 +678,68 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
     r.pane.settleNoteFocus(r.root);
     expect(document.activeElement).not.toBe(r.note());
     expect(r.root.querySelector(".detail-fullscreen")).toBeNull();
+  });
+});
+
+describe("Detail: Held spawn events on the timeline (issue #149)", () => {
+  it("shows a spawn event's line under its row, as a reassignment's is", () => {
+    const event = (kind: string, spawn: string | null) => ({
+      kind,
+      at: "2026-09-29T10:00:00Z",
+      timeLabel: "10:00:00",
+      grade: null,
+      reassignment: null,
+      spawn,
+      files: null,
+    });
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
+    const base = model(detailView());
+    const root = document.createElement("div");
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        pane.render(
+          {
+            ...base,
+            detailTabs: base.detailTabs!.map((tab) => ({ ...tab, active: tab.id === "progress" })),
+            timeline: {
+              reconstructed: false,
+              attempts: [
+                {
+                  number: 1,
+                  reconstructed: false,
+                  running: false,
+                  logFile: null,
+                  streamFile: null,
+                  events: [
+                    event("spawn-held", "1 spawn held (per-run cap): 'Fix the login test'"),
+                    event("exited", null),
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            onSelectAttempt: () => {},
+            onSelectStream: () => {},
+            onLoadEarlier: () => {},
+            onAnswer: () => {},
+            onKeepTalking: () => {},
+            onSelectTab: () => {},
+            onEndConversation: () => {},
+            onFocusConversationTerminal: () => Promise.resolve(true),
+            onFocusResolver: () => Promise.resolve(true),
+            reassign: new ReassignStore({
+              onGetSettings: () => new Promise(() => {}),
+              onReassign: () => new Promise(() => {}),
+              onChange: () => {},
+            }),
+          },
+        ),
+      );
+      return shell;
+    });
+    const lines = [...root.querySelectorAll(".timeline-spawn")].map((el) => el.textContent);
+    expect(lines).toEqual(["1 spawn held (per-run cap): 'Fix the login test'"]);
   });
 });

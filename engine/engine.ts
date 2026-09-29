@@ -43,6 +43,18 @@ import {
   type TicketMarker,
   type TicketStatus,
 } from "./pool.ts";
+import {
+  loadHeldSpawns,
+  type HeldSpawnReason,
+  type HeldSpawnView,
+  type HeldSpawns,
+} from "./held-spawns.ts";
+import {
+  checkSpawnCaps,
+  spawnCapsOf,
+  type SpawnCaps,
+  type SpawnCapsConfig,
+} from "./spawn-caps.ts";
 import { buildContinuedTeaching, buildEnlistTeaching, buildGraderPrompt, buildHeadToHeadPrompt, buildPrompt, buildResolverPrompt } from "./prompt.ts";
 import {
   defaultHarnesses,
@@ -181,6 +193,7 @@ import {
 } from "./worktrees.ts";
 
 export type { HarnessCommand } from "./spawn.ts";
+export { DEFAULT_SPAWN_CAPS, spawnCapsOf, type SpawnCaps } from "./spawn-caps.ts";
 // Re-exported so engine.test.ts's existing import (`from "./engine.ts"`)
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper, RESIZE_RELAY } from "./pane-session.ts";
@@ -230,6 +243,9 @@ export interface SpawnProposal {
   // (adoptSpawnProposals), the same disposition an unknown blockedBy id
   // gets, since neither can be checked here where no Session exists yet.
   assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
+  // The tickets the Spawn blocks once adopted (ADR-0029): named ids, or
+  // "all" for every ticket not yet started at that moment.
+  blocks?: string[] | "all";
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -241,23 +257,20 @@ export interface SpawnRejection {
   reason: string;
 }
 
-// Caps (ADR-0010): at most 5 proposals honored per attempt and 20 per run.
-// Overflow truncates and logs (the adoption event carries the count), never
-// an error. Engine constants by spec; no config surface.
-const SPAWN_MAX_PER_ATTEMPT = 5;
-const SPAWN_MAX_PER_RUN = 20;
-
 // One attempt's surviving proposals, buffered between the moment an outcome
 // becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
 // selection's winner) and the boundary that adopts them. `origin` is the
 // Conversations ADR's addition: "conversation" is a Conversation's own
 // spawn.json batch (engine/notices.ts's poller), which bypasses the per-run
 // cap (spec: "no run-wide cap for Conversation Spawns") but keeps the
-// per-proposal cap; every ticket-outcome push stays "ticket".
+// per-proposal cap; every ticket-outcome push stays "ticket". `heldId` marks
+// the operator's Adopt of a Held spawn (ADR-0029): one proposal, past both
+// caps, leaving the Held spawns once the boundary settles it.
 export interface PendingSpawn {
   parentId: string;
   proposals: SpawnProposal[];
   origin: "ticket" | "conversation";
+  heldId?: string;
 }
 
 export interface Outcome {
@@ -292,6 +305,9 @@ export interface PoolConfig {
   // (and effort words) would not be recognised there.
   resolver?: string | { harness?: string; model?: string; effort?: string };
   port?: number;
+  // The Spawn caps (ADR-0029, spawn-caps.ts): absent fields take the
+  // defaults, 5 per attempt and 20 per run.
+  spawnCaps?: SpawnCapsConfig;
   // Who picks the winner of a verify fan-out: the engine's arithmetic rule
   // (default) or the human, via a selection interrupt carrying the grades.
   selection?: "auto" | "human";
@@ -430,6 +446,17 @@ export interface PoolSnapshot {
   // the engine works through them, head first, each named by where its
   // merge stands. Derived beside the hold at every emit, never persisted.
   mergeQueue: MergeQueueEntry[];
+  // The Spawn caps in force and this run's count against the per-run one
+  // (ADR-0029), so the Console shows how close the pool is to a cap.
+  spawnUsage: SpawnUsage;
+  // The Held spawns (ADR-0029), oldest first, as the Console shows them.
+  heldSpawns: HeldSpawnView[];
+}
+
+// What the Console shows of the Spawn caps: `spawnedThisRun` of `perRun`
+// this run, and `perAttempt` per attempt.
+export interface SpawnUsage extends SpawnCaps {
+  spawnedThisRun: number;
 }
 
 interface RunOptions {
@@ -551,6 +578,21 @@ export interface PoolRun {
    * the only way one closes. Resolves with how many closed.
    */
   closeFinishedTerminals: () => Promise<number>;
+  /**
+   * Pool settings were saved (issue #149): with no drive in flight, run the
+   * boundary's Config reload now and emit, since an idle pool reaches no
+   * boundary to do it; in flight, nothing, the next boundary reloads.
+   */
+  reloadConfig: () => void;
+  /**
+   * Adopt a Held spawn (ADR-0029): past both caps, at the next boundary, or
+   * at once when no drive is in flight. Throws the reason it cannot be: no
+   * such held spawn, a finished pool, or a proposal the pool as it stands
+   * would reject.
+   */
+  adoptHeldSpawn: (id: string) => void;
+  /** Discard a Held spawn for good; throws when there is no such one. */
+  discardHeldSpawn: (id: string) => void;
 }
 
 const reduceTickets = (
@@ -784,8 +826,12 @@ interface Session {
   // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
   // becomes the ticket's and drained by adoptSpawnProposals.
   pendingSpawns: PendingSpawn[];
-  // Spawn tickets adopted so far this run, bounding the per-run cap. Seeded
-  // from the markers at start, so a resumed run continues the same count.
+  // The Held spawns (ADR-0029, held-spawns.ts): proposals the caps had no
+  // room for, waiting on disk for the operator's Adopt or Discard.
+  heldSpawns: HeldSpawns;
+  // Ticket-origin Spawns adopted so far this run, bounding the per-run cap.
+  // A run is this Console boot (ADR-0029): the count starts at zero at every
+  // start, whatever the pool spawned before.
   spawnedThisRun: number;
   // Terminal-backed boot reconciliation (ADR-0014): set at startPool to the
   // reconciliation running against herdr, awaited by the drive loop before
@@ -1167,7 +1213,8 @@ export function startPool(options: RunOptions): PoolRun {
       relabelling: Promise.resolve(),
     },
     pendingSpawns: [],
-    spawnedThisRun: markers.filter((m) => m.spawnedBy !== undefined).length,
+    heldSpawns: loadHeldSpawns(runsDir),
+    spawnedThisRun: 0,
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
     mergeChain: Promise.resolve(),
@@ -1203,6 +1250,7 @@ export function startPool(options: RunOptions): PoolRun {
 
   seedEnlistedWork(session);
   rehydrate(session);
+  recoverTruncatedSpawns(session);
   // The pane survey (issue #139) only has panes to list in a terminal-backed
   // pool. It lists on its cadence and whenever the engine holds a pane, so a
   // Held pane from before a restart is looked for at once (seedHeldPanes
@@ -1348,6 +1396,9 @@ function makeHandle(session: Session): PoolRun {
     retitle: (title) => retitlePoolWorkspace(session, title),
     keepTalking: (ticketId) => keepTalking(session, ticketId),
     closeFinishedTerminals: () => closeFinishedTerminals(session),
+    reloadConfig: () => reloadConfigWhenIdle(session),
+    adoptHeldSpawn: (id) => adoptHeldSpawn(session, id),
+    discardHeldSpawn: (id) => discardHeldSpawn(session, id),
   };
   return handle;
 }
@@ -1514,6 +1565,11 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
       ),
       session.state.interrupts,
     ),
+    spawnUsage: {
+      spawnedThisRun: session.spawnedThisRun,
+      ...spawnCapsOf(session.state.config),
+    },
+    heldSpawns: session.heldSpawns.views(),
   };
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
@@ -6310,19 +6366,20 @@ function resolveUnseenAssignments(
 // Config reload (ADR-0018)
 // ---------------------------------------------------------------------------
 
-// The three keys the reload touches. Everything else on PoolConfig
-// (roster, agents, selection, terminal, port) stays exactly as it was at
-// boot, whatever the file says, for the life of the run.
-const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver"] as const;
+// The keys the reload touches: the assignment slice, and the Spawn caps
+// beside it (ADR-0029). Everything else on PoolConfig (roster, agents,
+// selection, terminal, port) stays exactly as it was at boot, whatever the
+// file says, for the life of the run.
+const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver", "spawnCaps"] as const;
 
-// Parses only the assignment slice out of a console.json body: defaults,
-// assign, resolver. Deliberately does not validate selection or terminal
-// (readConfig's job, boot-only) — an edit to a field the reload never
-// touches must never block an otherwise-good defaults/assign/resolver edit.
-function parseConfigSlice(
-  raw: string,
-  poolDir: string,
-): Pick<PoolConfig, "defaults" | "assign" | "resolver"> {
+type ConfigSlice = Pick<PoolConfig, (typeof CONFIG_SLICE_KEYS)[number]>;
+
+// Parses only the reloadable slice out of a console.json body: defaults,
+// assign, resolver, spawnCaps. Deliberately does not validate selection or
+// terminal (readConfig's job, boot-only) — an edit to a field the reload
+// never touches must never block an otherwise-good edit of the slice. The
+// caps are checked here, since nothing downstream resolves them.
+function parseConfigSlice(raw: string, poolDir: string): ConfigSlice {
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(
@@ -6333,12 +6390,13 @@ function parseConfigSlice(
     defaults: parsed.defaults,
     assign: parsed.assign,
     resolver: parsed.resolver,
+    spawnCaps: checkSpawnCaps(parsed.spawnCaps),
   };
 }
 
-// Which of the three slice keys actually changed, by value: a file rewritten
-// byte-for-byte differently but with the same defaults/assign/resolver (say,
-// only its port changed) reloads nothing and logs nothing.
+// Which of the slice keys actually changed, by value: a file rewritten
+// byte-for-byte differently but with the same slice (say, only its port
+// changed) reloads nothing and logs nothing.
 function changedSliceKeys(previous: PoolConfig, next: PoolConfig): string[] {
   return CONFIG_SLICE_KEYS.filter(
     (key) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]),
@@ -6366,7 +6424,7 @@ function logConfigReloadRejected(session: Session, error: unknown): void {
 }
 
 // The super-step boundary's config reload (ADR-0018): re-reads console.json,
-// and when its assignment slice (defaults, assign, resolver) changed, dry-run
+// and when its slice (defaults, assign, resolver, spawnCaps) changed, dry-run
 // resolves every reassignable ticket before committing anything. "Reassignable"
 // is every marker except a ticket with an Attempt in flight across the
 // boundary — today that is only a terminal-backed attempt re-adopted at boot
@@ -6388,7 +6446,7 @@ function reloadConfigAtBoundary(session: Session): void {
   if (raw === session.lastConfigText) return;
   session.lastConfigText = raw;
 
-  let slice: Pick<PoolConfig, "defaults" | "assign" | "resolver">;
+  let slice: ConfigSlice;
   try {
     slice = raw === null ? {} : parseConfigSlice(raw, session.poolDir);
   } catch (error) {
@@ -6401,6 +6459,7 @@ function reloadConfigAtBoundary(session: Session): void {
     defaults: slice.defaults,
     assign: slice.assign,
     resolver: slice.resolver,
+    spawnCaps: slice.spawnCaps,
   };
   const changed = changedSliceKeys(session.state.config, candidate);
   if (changed.length === 0) return;
@@ -6465,6 +6524,18 @@ function reloadConfigAtBoundary(session: Session): void {
       },
     });
   }
+}
+
+// A Pool settings save's reload (issue #149). Idle, no super-step is in
+// flight, so this is a boundary as far as the reload is concerned: nothing
+// holds an Assignment it could move but the in-flight tickets the reload
+// already freezes. Its result reaches the Console in the emit, where a
+// changed Spawn cap shows at once. In flight, the drive's next boundary
+// reads the same file.
+function reloadConfigWhenIdle(session: Session): void {
+  if (session.driving) return;
+  reloadConfigAtBoundary(session);
+  emitSnapshot(session, session.settledPhase ?? "running");
 }
 
 // The grader's outcome: the standard contract plus a validated grade.
@@ -8728,6 +8799,26 @@ function validateSpawnProposals(
       });
       return;
     }
+    const blocks = proposal.blocks;
+    if (
+      blocks !== undefined &&
+      blocks !== "all" &&
+      (!Array.isArray(blocks) ||
+        blocks.some((id) => typeof id !== "string" || id.trim() === ""))
+    ) {
+      rejections.push({
+        index,
+        reason: 'proposal\'s blocks is not a list of ticket ids or "all"',
+      });
+      return;
+    }
+    if (blocks !== undefined && kindRaw === "conversation") {
+      rejections.push({
+        index,
+        reason: "proposal's blocks is only for a ticket: a Conversation blocks nothing",
+      });
+      return;
+    }
     const assignRaw = proposal.assign;
     let assign: SpawnProposal["assign"];
     if (assignRaw !== undefined) {
@@ -8756,6 +8847,7 @@ function validateSpawnProposals(
       ...(blockedBy !== undefined ? { blockedBy } : {}),
       ...(kindRaw !== undefined ? { kind: kindRaw as "ticket" | "conversation" } : {}),
       ...(assign !== undefined ? { assign } : {}),
+      ...(blocks !== undefined ? { blocks: blocks as string[] | "all" } : {}),
     });
   });
   return { proposals, rejections };
@@ -9481,95 +9573,242 @@ export function loadPoolTickets(poolDir: string, allowEmptyIssues = false): Tick
   });
 }
 
+// Why a proposal cannot be adopted into the pool as it stands, or null when
+// it can: a blockedBy naming a Conversation or an id outside the pool, or an
+// assign.harness the pool does not know. The boundary's adoption drops a
+// proposal on this reason, and an operator's Adopt of a Held spawn is
+// refused on it before anything is queued.
+function spawnProposalProblem(
+  session: Session,
+  proposal: SpawnProposal,
+  known: { ids: Set<string>; conversations: Set<string> },
+): string | null {
+  const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
+    known.conversations.has(id),
+  );
+  const unknownTickets = (proposal.blockedBy ?? []).filter(
+    (id) => !known.ids.has(id) && !known.conversations.has(id),
+  );
+  if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
+    const reasons: string[] = [];
+    if (conversationBlockers.length > 0) {
+      reasons.push(
+        `blockedBy names Conversations, which cannot block a ticket: ` +
+          conversationBlockers.join(", "),
+      );
+    }
+    if (unknownTickets.length > 0) {
+      reasons.push(
+        `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
+      );
+    }
+    return reasons.join("; ");
+  }
+  if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
+    return `assign.harness names unknown harness '${proposal.assign.harness}'`;
+  }
+  // Named blocks (ADR-0029) go onto each ticket's blocked-by at adoption, so
+  // each must be a ticket with a next Attempt to hold, and none may be one
+  // the proposal itself waits on, which would deadlock the two. "all" picks
+  // its tickets at adoption and has nothing to check here.
+  if (Array.isArray(proposal.blocks)) {
+    const named = proposal.blocks;
+    const waitsOn = blockedByClosure(session.markers, proposal.blockedBy ?? []);
+    const problems: [string, string[]][] = [
+      [
+        "blocks names Conversations, which cannot be blocked",
+        named.filter((id) => known.conversations.has(id)),
+      ],
+      [
+        "blocks names tickets outside the pool",
+        named.filter((id) => !known.ids.has(id) && !known.conversations.has(id)),
+      ],
+      [
+        "blocks names done tickets, which have no next attempt to hold",
+        named.filter((id) => known.ids.has(id) && session.state.tickets[id] === "done"),
+      ],
+      [
+        "blocks names engine-run tickets, which the engine schedules itself",
+        named.filter((id) => known.ids.has(id) && engineTicketBuildId(id) !== null),
+      ],
+      [
+        "blocks names tickets this proposal already waits on, a cycle",
+        named.filter((id) => waitsOn.has(id)),
+      ],
+    ];
+    const reasons = problems
+      .filter(([, ids]) => ids.length > 0)
+      .map(([reason, ids]) => `${reason}: ${ids.join(", ")}`);
+    if (reasons.length > 0) return reasons.join("; ");
+  }
+  return null;
+}
+
+// Every ticket a ticket waits on, directly or through its blockers' own
+// blocked-by: what a Spawn must never block, or the two would wait on each
+// other for good (ADR-0029).
+function blockedByClosure(markers: TicketMarker[], start: string[]): Set<string> {
+  const byId = new Map(markers.map((m) => [m.id, m]));
+  const seen = new Set<string>();
+  const stack = [...start];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    stack.push(...(byId.get(id)?.blockedBy ?? []));
+  }
+  return seen;
+}
+
+// A just-adopted Spawn's blocks (ADR-0029), onto the pool: the Spawn joins
+// each target's blocked-by, through the same marker write the Enlist form's
+// Blocks uses, with the in-memory marker kept in step for the ready set this
+// boundary computes next. "all" is every ticket not yet started (ready) as
+// the adoption lands, sibling Spawns included, excluding the Spawn itself,
+// everything it waits on, and engine-run tickets. A ticket already running
+// is never a target and never interrupted. Named targets were checked at
+// validation; one an earlier Spawn of the same boundary made a cycle of, or
+// that the file refuses, is skipped with a log line rather than written.
+// Returns the tickets actually blocked.
+function applySpawnBlocks(
+  session: Session,
+  spawnId: string,
+  blocks: string[] | "all",
+  log: string[],
+): string[] {
+  const spawn = session.markers.find((m) => m.id === spawnId);
+  if (!spawn) return [];
+  const waitsOn = blockedByClosure(session.markers, spawn.blockedBy);
+  const targets =
+    blocks === "all"
+      ? session.markers
+          .filter(
+            (m) =>
+              m.id !== spawnId &&
+              session.state.tickets[m.id] === "ready" &&
+              !waitsOn.has(m.id) &&
+              engineTicketBuildId(m.id) === null,
+          )
+          .map((m) => m.id)
+      : blocks;
+  const blocked: string[] = [];
+  for (const targetId of targets) {
+    const target = session.markers.find((m) => m.id === targetId);
+    if (!target || target.blockedBy.includes(spawnId)) continue;
+    if (waitsOn.has(targetId)) {
+      log.push(`ticket ${spawnId}: not blocking ${targetId}, which it already waits on`);
+      continue;
+    }
+    const result = addBlockerToTicket(session.poolDir, targetId, spawnId);
+    if (!result.ok) {
+      log.push(`ticket ${spawnId}: not blocking ${targetId}: ${result.reason}`);
+      continue;
+    }
+    target.blockedBy.push(spawnId);
+    blocked.push(targetId);
+  }
+  return blocked;
+}
+
 // The boundary's spawn adoption (ADR-0010, extended by the Conversations
-// ADR): every buffered proposal is validated against the pool as the
-// boundary found it, the accepted ones are written as ordinary ticket files
-// or started as Conversations, and the pool's markers and assignments
+// ADR and ADR-0029): every buffered proposal is validated against the pool
+// as the boundary found it, the accepted ones are written as ordinary ticket
+// files or started as Conversations, and the pool's markers and assignments
 // reload so the drive loop schedules the ticket ones like any other. Every
 // aspect of that stays per proposal, never per batch: a dropped proposal
 // logs its reason on the proposing parent's log (a spawn-rejected event) and
-// the parent's own result stands. The per-proposal cap (5) always applies;
-// the per-run cap (20) is skipped for a Conversation's own spawn.json batch
-// (spec: "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn
-// still counts against it, `origin: "ticket"`, whatever kind its entries
-// request). Writing the files is the commit point; a crash after them but
-// before the reload leaves the adopted tickets in the pool for the next
-// start, ids stable. The Conversation host calls this directly when the
-// engine is idle (nothing else would reach this boundary for it otherwise).
+// the parent's own result stands. The per-attempt cap always applies; the
+// per-run cap is skipped for a Conversation's own spawn.json batch (spec:
+// "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn still
+// counts against it, `origin: "ticket"`, whatever kind its entries request).
+// A proposal beyond either cap is held for the operator (ADR-0029), never
+// dropped: it waits in the Held spawns until an Adopt, which comes back
+// through here carrying its held id and passes both caps. Writing the files
+// is the commit point; a crash after them but before the reload leaves the
+// adopted tickets in the pool for the next start, ids stable. The
+// Conversation host and an idle Adopt call this directly (nothing else would
+// reach this boundary for them otherwise).
 function adoptSpawnProposals(session: Session): void {
   if (session.pendingSpawns.length === 0) return;
   const pending = session.pendingSpawns.splice(0);
   // Membership validates against the markers as the boundary found them, so
   // a proposal naming another proposal's future id drops as unknown: the
   // agent never proposes ids and cannot know one.
-  const knownIds = new Set(session.markers.map((m) => m.id));
-  const knownConvIds = knownConversationIds(session.poolDir);
+  const known = {
+    ids: new Set(session.markers.map((m) => m.id)),
+    conversations: knownConversationIds(session.poolDir),
+  };
   const counters = combinedSpawnCounters(session);
+  // The caps as this boundary's Config reload left them (ADR-0029).
+  const caps = spawnCapsOf(session.state.config);
+  const capsPhrase = `${caps.perAttempt} per attempt, ${caps.perRun} per run`;
   const log: string[] = [];
   let wrote = false;
+  // What each parent's adoption settled, recorded on its log once the
+  // blocks below have landed, so its spawn-adopted event names them.
+  const settled: {
+    parentId: string;
+    adopted: string[];
+    heldId?: string;
+    heldNow: { id: string; proposal: SpawnProposal; reason: HeldSpawnReason }[];
+    at: string;
+  }[] = [];
+  const blocking: { parentId: string; spawnId: string; blocks: string[] | "all" }[] = [];
 
-  for (const { parentId, proposals, origin } of pending) {
+  for (const { parentId, proposals, origin, heldId } of pending) {
     const accepted: SpawnProposal[] = [];
     for (const proposal of proposals) {
-      const conversationBlockers = (proposal.blockedBy ?? []).filter((id) =>
-        knownConvIds.has(id),
-      );
-      const unknownTickets = (proposal.blockedBy ?? []).filter(
-        (id) => !knownIds.has(id) && !knownConvIds.has(id),
-      );
-      if (conversationBlockers.length > 0 || unknownTickets.length > 0) {
-        const reasons: string[] = [];
-        if (conversationBlockers.length > 0) {
-          reasons.push(
-            `blockedBy names Conversations, which cannot block a ticket: ` +
-              conversationBlockers.join(", "),
-          );
-        }
-        if (unknownTickets.length > 0) {
-          reasons.push(
-            `blockedBy names tickets outside the pool: ${unknownTickets.join(", ")}`,
-          );
-        }
-        const reason = reasons.join("; ");
-        appendEvent(session.runsDir, parentId, {
-          at: new Date().toISOString(),
-          attempt: lastAttempt(session.runsDir, parentId),
-          kind: "spawn-rejected",
-          payload: { title: proposal.title, reason },
-        });
+      const reason = spawnProposalProblem(session, proposal, known);
+      if (reason === null) {
+        accepted.push(proposal);
+        continue;
+      }
+      appendEvent(session.runsDir, parentId, {
+        at: new Date().toISOString(),
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-rejected",
+        payload: {
+          title: proposal.title,
+          reason,
+          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
+        },
+      });
+      // A held spawn's Adopt the pool can no longer take (it passed its
+      // check when queued, and the pool moved since) is refused, not lost:
+      // the proposal stays held with the reason on it (ADR-0029).
+      if (heldId !== undefined) {
+        session.heldSpawns.refuseAdopt(heldId, reason);
         log.push(
-          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
-            `rejected: ${reason}`,
+          `ticket ${parentId}: adopting held spawn ${heldId} ('${proposal.title}') ` +
+            `refused: ${reason}; it stays held`,
         );
         continue;
       }
-      if (proposal.assign?.harness && !session.harnesses[proposal.assign.harness]) {
-        const reason = `assign.harness names unknown harness '${proposal.assign.harness}'`;
-        appendEvent(session.runsDir, parentId, {
-          at: new Date().toISOString(),
-          attempt: lastAttempt(session.runsDir, parentId),
-          kind: "spawn-rejected",
-          payload: { title: proposal.title, reason },
-        });
-        log.push(
-          `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
-            `rejected: ${reason}`,
-        );
-        continue;
-      }
-      accepted.push(proposal);
+      log.push(
+        `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
+          `rejected: ${reason}`,
+      );
     }
-    // The per-proposal cap honors the first five survivors, always. The
-    // per-run cap truncates whatever the run has no room left for, but only
-    // for a Ticket's own outcome.spawn: a Conversation's spawn.json has none.
-    let truncated = 0;
-    let honored = accepted.slice(0, SPAWN_MAX_PER_ATTEMPT);
-    truncated += accepted.length - honored.length;
-    if (origin !== "conversation") {
-      const room = Math.max(0, SPAWN_MAX_PER_RUN - session.spawnedThisRun);
-      if (honored.length > room) {
-        truncated += honored.length - room;
+    // The per-attempt cap honors the first survivors, always. The per-run
+    // cap holds whatever the run has no room left for, but only for a
+    // Ticket's own outcome.spawn: a Conversation's spawn.json has none. What
+    // either cap holds keeps its place in the proposal's order. A held
+    // spawn the operator adopted passes both: the Adopt is the decision the
+    // caps exist to ask for.
+    let honored = accepted;
+    const held: { proposal: SpawnProposal; reason: HeldSpawnReason }[] = [];
+    if (heldId === undefined) {
+      honored = accepted.slice(0, caps.perAttempt);
+      const overAttempt = accepted.slice(caps.perAttempt);
+      if (origin !== "conversation") {
+        const room = Math.max(0, caps.perRun - session.spawnedThisRun);
+        for (const proposal of honored.slice(room)) {
+          held.push({ proposal, reason: "per-run" });
+        }
         honored = honored.slice(0, room);
+      }
+      for (const proposal of overAttempt) {
+        held.push({ proposal, reason: "per-attempt" });
       }
     }
     const adopted: string[] = [];
@@ -9611,52 +9850,262 @@ function adoptSpawnProposals(session: Session): void {
       } else {
         writeSpawnTicket(session, parentId, id, proposal);
         wrote = true;
+        if (proposal.blocks !== undefined) {
+          blocking.push({ parentId, spawnId: id, blocks: proposal.blocks });
+        }
       }
       adopted.push(id);
       if (origin !== "conversation") session.spawnedThisRun += 1;
     }
-    if (adopted.length > 0 || truncated > 0) {
-      appendEvent(session.runsDir, parentId, {
-        at: new Date().toISOString(),
-        attempt: lastAttempt(session.runsDir, parentId),
-        kind: "spawn-adopted",
-        payload: { adopted, truncated },
-      });
-    }
+    // The held spawn leaves the Held spawns once the boundary has adopted
+    // it: until then a restart finds it still held, and a refused one stays.
+    if (heldId !== undefined && adopted.length > 0) session.heldSpawns.remove(heldId);
+    const at = new Date().toISOString();
+    const heldNow =
+      held.length > 0
+        ? session.heldSpawns.hold(
+            held.map(({ proposal, reason }) => ({ parentId, origin, proposal, reason, at })),
+          )
+        : [];
+    settled.push({ parentId, adopted, ...(heldId !== undefined ? { heldId } : {}), heldNow, at });
+    const heldPhrase =
+      `${heldNow.length} proposal${heldNow.length === 1 ? "" : "s"} held at ` +
+      `the caps (${capsPhrase}): ${heldNow.map((h) => h.id).join(", ")}`;
     if (adopted.length > 0) {
       log.push(
-        `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
-          (truncated > 0
-            ? `; ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-              "truncated at the caps (5 per attempt, 20 per run)"
-            : ""),
+        heldId !== undefined
+          ? `ticket ${parentId}: adopted held spawn ${heldId} as ${adopted.join(", ")}`
+          : `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
+              (heldNow.length > 0 ? `; ${heldPhrase}` : ""),
       );
-    } else if (truncated > 0) {
-      log.push(
-        `ticket ${parentId}: ${truncated} proposal${truncated === 1 ? "" : "s"} ` +
-          "truncated at the caps (5 per attempt, 20 per run)",
-      );
+    } else if (heldNow.length > 0) {
+      log.push(`ticket ${parentId}: ${heldPhrase}`);
     }
   }
 
+  if (wrote) {
+    // The adopted files join the pool the way answer processing brings a
+    // hand-written ticket in: markers reload, unseen ids resolve their
+    // assignments (parent inheritance), and the tickets channel folds them
+    // in at their on-disk statuses.
+    session.markers = loadPoolTickets(session.poolDir);
+    resolveUnseenAssignments(
+      session.markers,
+      session.assignments,
+      session.state.config,
+      session.harnesses,
+    );
+    session.state = applyUpdate(session.state, {
+      tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
+    });
+  }
+  // Blocks land once every Spawn of this boundary is in the pool, so "all"
+  // reaches a sibling adopted alongside, whichever order they came in.
+  const blocked = new Map<string, Record<string, string[]>>();
+  for (const { parentId, spawnId, blocks } of blocking) {
+    const targets = applySpawnBlocks(session, spawnId, blocks, log);
+    if (targets.length === 0) continue;
+    blocked.set(parentId, { ...blocked.get(parentId), [spawnId]: targets });
+    log.push(`ticket ${parentId}: spawn ${spawnId} blocks ${targets.join(", ")}`);
+  }
+  for (const { parentId, adopted, heldId, heldNow, at } of settled) {
+    if (adopted.length > 0) {
+      const blocks = blocked.get(parentId);
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-adopted",
+        payload: {
+          adopted,
+          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
+          ...(blocks ? { blocks } : {}),
+        },
+      });
+    }
+    if (heldNow.length > 0) {
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt: lastAttempt(session.runsDir, parentId),
+        kind: "spawn-held",
+        payload: {
+          held: heldNow.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
+        },
+      });
+    }
+  }
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
   }
-  if (!wrote) return;
-  // The adopted files join the pool the way answer processing brings a
-  // hand-written ticket in: markers reload, unseen ids resolve their
-  // assignments (parent inheritance), and the tickets channel folds them in
-  // at their on-disk statuses.
-  session.markers = loadPoolTickets(session.poolDir);
-  resolveUnseenAssignments(
-    session.markers,
-    session.assignments,
-    session.state.config,
-    session.harnesses,
-  );
-  session.state = applyUpdate(session.state, {
-    tickets: Object.fromEntries(session.markers.map((m) => [m.id, m.status])),
+}
+
+// The operator's Adopt of a Held spawn (ADR-0029). It is refused up front,
+// the spawn staying held, when the pool as it stands would reject the
+// proposal (a blocker gone from the pool, a harness no longer known) or when
+// the pool has finished and its store is closed, since the drive that would
+// schedule the new ticket could not record it; a Restart reopens the pool
+// with the spawn still held. Otherwise it queues for the boundary like any
+// proposal, carrying its held id past the caps: at once when the engine is
+// idle, the way a Conversation's spawn.json is adopted, and at the next
+// boundary when a drive is in flight. A boundary that finds the pool has
+// moved since and refuses it leaves it held with the reason (adoptError),
+// which the next Adopt clears.
+function adoptHeldSpawn(session: Session, id: string): void {
+  const held = session.heldSpawns.get(id);
+  if (!held) throw new Error(`no held spawn ${id}`);
+  if (session.heldSpawns.adopting.has(id)) return;
+  if (!session.storeOpen) {
+    throw new Error(
+      `held spawn ${id} cannot be adopted: the pool has finished; Restart the ` +
+        "Console to adopt it",
+    );
+  }
+  const problem = spawnProposalProblem(session, held.proposal, {
+    ids: new Set(session.markers.map((m) => m.id)),
+    conversations: knownConversationIds(session.poolDir),
   });
+  if (problem !== null) throw new Error(`held spawn ${id} cannot be adopted: ${problem}`);
+  session.heldSpawns.beginAdopt(id);
+  session.pendingSpawns.push({
+    parentId: held.parentId,
+    proposals: [held.proposal],
+    origin: held.origin,
+    heldId: id,
+  });
+  if (!session.driving) {
+    adoptSpawnProposals(session);
+    kickProcessing(session);
+  } else {
+    emitSnapshot(session, "running");
+  }
+}
+
+// The operator's Discard of a Held spawn (ADR-0029): gone for good, the
+// discard on the parent's log. One an Adopt has already queued is past
+// discarding: the boundary is about to write it.
+function discardHeldSpawn(session: Session, id: string): void {
+  const held = session.heldSpawns.get(id);
+  if (!held) throw new Error(`no held spawn ${id}`);
+  if (session.heldSpawns.adopting.has(id)) {
+    throw new Error(`held spawn ${id} is already being adopted`);
+  }
+  session.heldSpawns.remove(id);
+  appendEvent(session.runsDir, held.parentId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, held.parentId),
+    kind: "spawn-discarded",
+    payload: { id, title: held.proposal.title },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${held.parentId}: held spawn ${id} ('${held.proposal.title}') ` +
+        "discarded by the operator",
+    ],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+// The per-attempt cap every pool ran under before ADR-0029 made it a
+// setting: what a pre-ADR truncation was measured against.
+const PRE_ADR_0029_PER_ATTEMPT = 5;
+
+// Recovery of the proposals the caps truncated before ADR-0029 (issue
+// #149's og-review loss): at boot, each is held as if the cap had held it.
+// What survives of one is the parent's checkpointed Outcome, whose spawn
+// array is every schema-valid proposal in order, and the parent's last
+// `spawn-adopted` event, which a pre-ADR adoption wrote with the ids it
+// adopted and a `truncated` count (a post-ADR one has no such count, so it
+// is never mistaken for one). The adoption dropped the proposals it
+// rejected, logging each as a `spawn-rejected` event carrying its title just
+// before the `spawn-adopted`, then honored the survivors in order and
+// truncated the tail; so the truncated proposals are the last `truncated`
+// survivors once those rejected titles are taken out. The rule holds only
+// when the parent's Outcome is the one that adoption read, which the count
+// checks (survivors must number exactly adopted plus truncated), and when
+// the rejected titles are unambiguous (none is shared by two proposals);
+// otherwise the parent is left alone with a log line. Only the last adoption of a parent
+// can match its Outcome, and only a Ticket has an Outcome, so a truncated
+// Conversation batch is past recovering. Each recovery is keyed by parent
+// and event time and recorded with its holds in one write, so it runs once
+// however the operator later adopts or discards what it held.
+function recoverTruncatedSpawns(session: Session): void {
+  const log: string[] = [];
+  for (const [parentId, outcome] of Object.entries(session.state.outcomes)) {
+    if (!outcome?.spawn?.length) continue;
+    const events = readEvents(session.runsDir, parentId);
+    const adoptions = events.flatMap((event, index) =>
+      event.kind === "spawn-adopted" ? [index] : [],
+    );
+    const last = adoptions.at(-1);
+    if (last === undefined) continue;
+    const event = events[last]!;
+    const truncated = event.payload.truncated;
+    if (typeof truncated !== "number" || truncated <= 0) continue;
+    const key = `${parentId}@${event.at}`;
+    if (session.heldSpawns.wasRecovered(key)) continue;
+
+    const rejected = events
+      .slice((adoptions.at(-2) ?? -1) + 1, last)
+      .filter((e) => e.kind === "spawn-rejected" && typeof e.payload.title === "string")
+      .map((e) => e.payload.title as string);
+    // A rejected title shared by two proposals leaves which one was
+    // rejected unknown, and guessing could hold one already adopted, whose
+    // Adopt would write it twice: such a parent is not recovered.
+    const twin = rejected.find(
+      (title) => outcome.spawn!.filter((proposal) => proposal.title === title).length > 1,
+    );
+    if (twin !== undefined) {
+      session.heldSpawns.recover(key, []);
+      log.push(
+        `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
+          "truncated before held spawns existed could not be recovered: its " +
+          `rejected proposal '${twin}' shares a title with another, so which ` +
+          "one was rejected is unknown",
+      );
+      continue;
+    }
+    const survivors = outcome.spawn.filter((proposal) => {
+      const at = rejected.indexOf(proposal.title);
+      if (at === -1) return true;
+      rejected.splice(at, 1);
+      return false;
+    });
+    const adopted = Array.isArray(event.payload.adopted) ? event.payload.adopted.length : 0;
+    if (survivors.length !== adopted + truncated) {
+      session.heldSpawns.recover(key, []);
+      log.push(
+        `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
+          "truncated before held spawns existed could not be matched to its " +
+          "Outcome; not recovered",
+      );
+      continue;
+    }
+    const first = survivors.length - truncated;
+    const held = session.heldSpawns.recover(
+      key,
+      survivors.slice(first).map((proposal, i) => ({
+        parentId,
+        origin: "ticket" as const,
+        proposal,
+        reason: (first + i >= PRE_ADR_0029_PER_ATTEMPT ? "per-attempt" : "per-run") as HeldSpawnReason,
+        at: event.at,
+      })),
+    );
+    appendEvent(session.runsDir, parentId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, parentId),
+      kind: "spawn-held",
+      payload: {
+        held: held.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
+        recovered: true,
+      },
+    });
+    log.push(
+      `ticket ${parentId}: recovered ${held.length} spawn proposal` +
+        `${held.length === 1 ? "" : "s"} a cap truncated before held spawns ` +
+        `existed: ${held.map((h) => h.id).join(", ")}`,
+    );
+  }
+  if (log.length > 0) session.state = applyUpdate(session.state, { log });
 }
 
 // Merging one finished ticket's branch onto the pool's working branch.
@@ -9808,6 +10257,7 @@ async function runTicket(
     roster: snapshot.config.roster ?? "",
     upstream,
     outcomePath,
+    spawnCaps: spawnCapsOf(snapshot.config),
   });
 
   // The attempt itself is the Attempt-run module's (ADR-0014): spawn,
@@ -9959,6 +10409,7 @@ export function parseConfig(raw: string | null, poolDir: string): PoolConfig {
   if (parsed.terminal !== undefined && parsed.terminal !== "herdr") {
     throw new Error(`pool config: terminal must be "herdr"`);
   }
+  checkSpawnCaps(parsed.spawnCaps);
   return parsed as PoolConfig;
 }
 
