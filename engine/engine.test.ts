@@ -8188,6 +8188,114 @@ describe("spawn adoption", () => {
     await again.shutdown(0);
   }, 20000);
 
+  // Titles are all recovery has to tell rejected proposals apart by, so an
+  // Outcome where a rejected title is shared cannot say which one went:
+  // recovering could hold one already adopted, and its Adopt would write a
+  // duplicate ticket. Such a parent is left alone, as a count mismatch is.
+  it("refuses to recover a parent whose rejected proposal shares its title with another", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-t.md",
+          marker: "<!-- state: id=01 blocked-by=none status=done -->",
+        },
+        {
+          file: "01-spawn-1.md",
+          marker: "<!-- state: id=01-spawn-1 blocked-by=none status=done spawned-by=01 -->",
+        },
+      ],
+      config: stubConfig,
+    });
+    const store = new SqliteCheckpointStore(poolDir);
+    store.write({
+      tickets: { "01": "done", "01-spawn-1": "done" },
+      log: [],
+      outcomes: {
+        "01": {
+          status: "done",
+          summary: "s",
+          commitSha: null,
+          spawn: [proposal("Twin"), proposal("Truncated"), proposal("Twin", ["99"])],
+        },
+      },
+      interrupts: [],
+      reviewApproved: false,
+    });
+    store.close();
+    const runsDir = join(poolDir, "runs");
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.000Z",
+      attempt: 1,
+      kind: "spawn-rejected",
+      payload: { title: "Twin", reason: "blockedBy names tickets outside the pool: 99" },
+    });
+    appendEvent(runsDir, "01", {
+      at: "2026-09-27T10:00:00.001Z",
+      attempt: 1,
+      kind: "spawn-adopted",
+      payload: { adopted: ["01-spawn-1"], truncated: 1 },
+    });
+    const rig = stubHarness(poolDir, {});
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await run.settled;
+
+    expect(run.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    expect(run.final.log).toContain(
+      "ticket 01: 1 spawn proposal truncated before held spawns existed could " +
+        "not be recovered: its rejected proposal 'Twin' shares a title with " +
+        "another, so which one was rejected is unknown",
+    );
+    await run.shutdown(0);
+  }, 20000);
+
+  // ADR-0029: an Adopt the boundary refuses (here a blocks target finished
+  // while the Adopt waited) leaves the spawn held, with the reason on it,
+  // rather than losing the proposal the operator meant to rescue.
+  it("keeps a held spawn whose Adopt the boundary refuses, with the reason on it", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01"), readyTicket("02", "01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 1 } },
+    });
+    const release = join(poolDir, "release-02");
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [proposal("Adopted"), { ...proposal("Fix before two"), blocks: ["02"] }] },
+      "02": { waitFor: release },
+    });
+
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() =>
+      run.snapshots.some((s) => s.state.tickets["02"] === "in-progress"),
+    );
+    // 02 is still running, so the Adopt passes its check and waits for the
+    // boundary; by then 02 is done and has no next attempt to hold.
+    run.adoptHeldSpawn("held-1");
+    expect(run.snapshots.at(-1)!.heldSpawns[0]!.adopting).toBe(true);
+    writeFileSync(release, "");
+    const settled = await run.settled;
+
+    const reason = "blocks names done tickets, which have no next attempt to hold: 02";
+    expect(settled.snapshots.at(-1)!.heldSpawns).toEqual([
+      expect.objectContaining({ id: "held-1", adopting: false, adoptError: reason }),
+    ]);
+    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(false);
+    expect(
+      readEventLines(poolDir, "01").filter((e) => e.kind === "spawn-rejected").at(-1)!.payload,
+    ).toEqual({ title: "Fix before two", reason, fromHeld: "held-1" });
+    expect(settled.final.log).toContain(
+      `ticket 01: adopting held spawn held-1 ('Fix before two') refused: ${reason}; it stays held`,
+    );
+    await settled.shutdown(0);
+
+    // The refusal survives a restart, and the spawn is still there to decide.
+    const again = startPool({ poolDir, harnesses: rig.harnesses });
+    await again.settled;
+    expect(again.snapshots.at(-1)!.heldSpawns.map((h) => [h.id, h.adoptError])).toEqual([
+      ["held-1", reason],
+    ]);
+    await again.shutdown(0);
+  }, 20000);
+
   // Issue #149: both caps live in the pool config, each field falling back
   // to its default on its own, and the snapshot carries them with the count.
   it("reads the caps from the pool config field by field and carries the usage on the snapshot", async () => {

@@ -9767,8 +9767,23 @@ function adoptSpawnProposals(session: Session): void {
         at: new Date().toISOString(),
         attempt: lastAttempt(session.runsDir, parentId),
         kind: "spawn-rejected",
-        payload: { title: proposal.title, reason },
+        payload: {
+          title: proposal.title,
+          reason,
+          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
+        },
       });
+      // A held spawn's Adopt the pool can no longer take (it passed its
+      // check when queued, and the pool moved since) is refused, not lost:
+      // the proposal stays held with the reason on it (ADR-0029).
+      if (heldId !== undefined) {
+        session.heldSpawns.refuseAdopt(heldId, reason);
+        log.push(
+          `ticket ${parentId}: adopting held spawn ${heldId} ('${proposal.title}') ` +
+            `refused: ${reason}; it stays held`,
+        );
+        continue;
+      }
       log.push(
         `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
           `rejected: ${reason}`,
@@ -9842,9 +9857,9 @@ function adoptSpawnProposals(session: Session): void {
       adopted.push(id);
       if (origin !== "conversation") session.spawnedThisRun += 1;
     }
-    // The held spawn leaves the Held spawns once the boundary has settled
-    // it, adopted or rejected: until then a restart finds it still held.
-    if (heldId !== undefined) session.heldSpawns.remove(heldId);
+    // The held spawn leaves the Held spawns once the boundary has adopted
+    // it: until then a restart finds it still held, and a refused one stays.
+    if (heldId !== undefined && adopted.length > 0) session.heldSpawns.remove(heldId);
     const at = new Date().toISOString();
     const heldNow =
       held.length > 0
@@ -9931,7 +9946,9 @@ function adoptSpawnProposals(session: Session): void {
 // with the spawn still held. Otherwise it queues for the boundary like any
 // proposal, carrying its held id past the caps: at once when the engine is
 // idle, the way a Conversation's spawn.json is adopted, and at the next
-// boundary when a drive is in flight.
+// boundary when a drive is in flight. A boundary that finds the pool has
+// moved since and refuses it leaves it held with the reason (adoptError),
+// which the next Adopt clears.
 function adoptHeldSpawn(session: Session, id: string): void {
   const held = session.heldSpawns.get(id);
   if (!held) throw new Error(`no held spawn ${id}`);
@@ -9947,7 +9964,7 @@ function adoptHeldSpawn(session: Session, id: string): void {
     conversations: knownConversationIds(session.poolDir),
   });
   if (problem !== null) throw new Error(`held spawn ${id} cannot be adopted: ${problem}`);
-  session.heldSpawns.adopting.add(id);
+  session.heldSpawns.beginAdopt(id);
   session.pendingSpawns.push({
     parentId: held.parentId,
     proposals: [held.proposal],
@@ -10003,8 +10020,9 @@ const PRE_ADR_0029_PER_ATTEMPT = 5;
 // truncated the tail; so the truncated proposals are the last `truncated`
 // survivors once those rejected titles are taken out. The rule holds only
 // when the parent's Outcome is the one that adoption read, which the count
-// checks: survivors must number exactly adopted plus truncated, or the
-// parent is left alone with a log line. Only the last adoption of a parent
+// checks (survivors must number exactly adopted plus truncated), and when
+// the rejected titles are unambiguous (none is shared by two proposals);
+// otherwise the parent is left alone with a log line. Only the last adoption of a parent
 // can match its Outcome, and only a Ticket has an Outcome, so a truncated
 // Conversation batch is past recovering. Each recovery is keyed by parent
 // and event time and recorded with its holds in one write, so it runs once
@@ -10029,6 +10047,22 @@ function recoverTruncatedSpawns(session: Session): void {
       .slice((adoptions.at(-2) ?? -1) + 1, last)
       .filter((e) => e.kind === "spawn-rejected" && typeof e.payload.title === "string")
       .map((e) => e.payload.title as string);
+    // A rejected title shared by two proposals leaves which one was
+    // rejected unknown, and guessing could hold one already adopted, whose
+    // Adopt would write it twice: such a parent is not recovered.
+    const twin = rejected.find(
+      (title) => outcome.spawn!.filter((proposal) => proposal.title === title).length > 1,
+    );
+    if (twin !== undefined) {
+      session.heldSpawns.recover(key, []);
+      log.push(
+        `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
+          "truncated before held spawns existed could not be recovered: its " +
+          `rejected proposal '${twin}' shares a title with another, so which ` +
+          "one was rejected is unknown",
+      );
+      continue;
+    }
     const survivors = outcome.spawn.filter((proposal) => {
       const at = rejected.indexOf(proposal.title);
       if (at === -1) return true;

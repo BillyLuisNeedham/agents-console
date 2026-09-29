@@ -30,6 +30,8 @@ export interface HeldSpawn {
   reason: HeldSpawnReason;
   /** When it was held (for a recovered one, when the cap truncated it). */
   at: string;
+  /** Why the boundary refused its last Adopt, until the next Adopt. */
+  adoptError?: string;
 }
 
 /** One held spawn as the Console shows it (wire.ts re-exports this). */
@@ -50,6 +52,10 @@ export interface HeldSpawnView {
   /** An Adopt is on its way to the boundary: the spawn is still held until
    *  the engine writes it, so a restart before then loses nothing. */
   adopting: boolean;
+  /** Why the boundary refused the last Adopt (a blocker gone, a blocks
+   *  target finished while the Adopt waited): the spawn stayed held.
+   *  Absent until a refusal, and cleared by the next Adopt. */
+  adoptError?: string;
 }
 
 interface HeldSpawnsFile {
@@ -72,6 +78,10 @@ export interface HeldSpawns {
   /** The ids an Adopt has queued for the boundary. In memory only: after a
    *  restart the spawn is simply held again. */
   adopting: Set<string>;
+  /** An Adopt is queued: mark it adopting and clear any earlier refusal. */
+  beginAdopt(id: string): void;
+  /** The boundary refused the Adopt: still held, the reason kept on it. */
+  refuseAdopt(id: string, reason: string): void;
   views(): HeldSpawnView[];
 }
 
@@ -138,6 +148,20 @@ export function loadHeldSpawns(runsDir: string): HeldSpawns {
       return held;
     },
     adopting,
+    beginAdopt: (id) => {
+      adopting.add(id);
+      const held = file.held.find((h) => h.id === id);
+      if (held?.adoptError === undefined) return;
+      delete held.adoptError;
+      write();
+    },
+    refuseAdopt: (id, reason) => {
+      adopting.delete(id);
+      const held = file.held.find((h) => h.id === id);
+      if (!held) return;
+      held.adoptError = reason;
+      write();
+    },
     views: () =>
       file.held.map((held) => ({
         id: held.id,
@@ -151,6 +175,7 @@ export function loadHeldSpawns(runsDir: string): HeldSpawns {
         reason: held.reason,
         at: held.at,
         adopting: adopting.has(held.id),
+        ...(held.adoptError !== undefined ? { adoptError: held.adoptError } : {}),
       })),
   };
 }

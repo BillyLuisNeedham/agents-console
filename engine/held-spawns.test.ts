@@ -66,6 +66,30 @@ describe("held spawns", () => {
     expect(reloaded.list()).toEqual([]);
   });
 
+  // An Adopt the boundary refused leaves the spawn held with the reason
+  // (ADR-0029), kept across a restart, and the next Adopt clears it.
+  it("records a refused Adopt's reason on the held spawn until the next Adopt", () => {
+    const dir = runsDir();
+    const store = loadHeldSpawns(dir);
+    store.hold([
+      { parentId: "01", origin: "ticket", proposal: proposal("A"), reason: "per-run", at: "t1" },
+    ]);
+    store.beginAdopt("held-1");
+    expect(store.views()[0]).toMatchObject({ adopting: true });
+    expect(store.views()[0]!.adoptError).toBeUndefined();
+
+    store.refuseAdopt("held-1", "blocks names done tickets: 02");
+    expect(store.views()[0]).toMatchObject({
+      adopting: false,
+      adoptError: "blocks names done tickets: 02",
+    });
+    expect(loadHeldSpawns(dir).views()[0]!.adoptError).toBe("blocks names done tickets: 02");
+
+    store.beginAdopt("held-1");
+    expect(store.views()[0]!.adoptError).toBeUndefined();
+    expect(loadHeldSpawns(dir).views()[0]!.adoptError).toBeUndefined();
+  });
+
   it("writes through a rename, leaving no temporary file behind", () => {
     const dir = runsDir();
     loadHeldSpawns(dir).hold([
@@ -95,7 +119,7 @@ describe("held spawns", () => {
       },
       { parentId: "c-1", origin: "conversation", proposal: { ...proposal("B"), kind: "conversation" }, reason: "per-attempt", at: "t2" },
     ]);
-    store.adopting.add("held-2");
+    store.beginAdopt("held-2");
     expect(store.views()).toEqual([
       {
         id: "held-1",
