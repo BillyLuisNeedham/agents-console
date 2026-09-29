@@ -37,6 +37,7 @@ function row(overrides: Partial<HeldSpawnRow> = {}): HeldSpawnRow {
     blocks: "blocks every ticket not yet started",
     body: "The login test fails one run in five.",
     adopting: false,
+    adoptError: null,
     ...overrides,
   };
 }
@@ -138,6 +139,20 @@ describe("HeldSpawnsStore", () => {
     expect(failure("held-2")).toBeNull();
     void rig.store.adopt("held-1");
     expect(failure("held-1")).toBeNull();
+  });
+
+  it("shows why the boundary refused the last Adopt until this tab's own answer", async () => {
+    let paint = () => {};
+    const rig = harness(() => paint());
+    const mounted = mount(rig.store, () => [row({ adoptError: "blocker 09 is gone" })]);
+    paint = mounted.paint;
+    rig.store.open();
+    const failure = () => mounted.root.querySelector(".held-spawn-failure")?.textContent;
+    expect(failure()).toBe("last Adopt refused: blocker 09 is gone");
+    const adopt = rig.store.adopt("held-1");
+    rig.adopts[0]!.deferred.reject(new Error("no held spawn held-1"));
+    await adopt;
+    expect(failure()).toBe("no held spawn held-1");
   });
 
   it("asks before a Discard, and Cancel sends nothing", async () => {

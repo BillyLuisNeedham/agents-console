@@ -158,7 +158,11 @@ export class HeldSpawnsStore {
 
   private renderRow(row: HeldSpawnRow): HTMLElement {
     const open = this.expanded.has(row.id);
-    const failure = this.failures.get(row.id) ?? null;
+    // This tab's own refusal is the newer news; the engine's is from a
+    // boundary that refused an Adopt queued earlier.
+    const failure =
+      this.failures.get(row.id) ??
+      (row.adoptError && !row.adopting ? `last Adopt refused: ${row.adoptError}` : null);
     const meta = [row.parent, row.reason, row.blockedBy, row.blocks].filter(
       (part): part is string => part !== null,
     );

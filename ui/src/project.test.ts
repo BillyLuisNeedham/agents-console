@@ -1533,6 +1533,12 @@ describe("projectTimeline", () => {
         event(1, "spawn-adopted", { adopted: ["03-spawn-2", "03-spawn-3"] }),
         event(1, "spawn-adopted", { adopted: [], truncated: 1 }),
         event(1, "spawn-discarded", { id: "held-2", title: "Write the docs" }),
+        event(1, "spawn-rejected", {
+          title: "Fix the login test",
+          reason: "blocker 09 is gone",
+          fromHeld: "held-1",
+        }),
+        event(1, "spawn-rejected", { reason: "no title", index: 2 }),
         event(1, "spawned"),
       ]),
       "done",
@@ -1544,6 +1550,8 @@ describe("projectTimeline", () => {
       "adopted 03-spawn-2, 03-spawn-3",
       "adopted none · 1 truncated by the cap",
       "held spawn 'Write the docs' discarded",
+      "adopting held spawn 'Fix the login test' refused: blocker 09 is gone; still held",
+      null,
       null,
     ]);
   });
@@ -3345,5 +3353,14 @@ describe("projectHeldSpawns (issue #149)", () => {
 
   it("marks one whose Adopt is on its way to the boundary", () => {
     expect(projectHeldSpawns([heldSpawn({ adopting: true })], NOW)[0]?.adopting).toBe(true);
+  });
+
+  it("carries why the boundary refused the last Adopt, and null before any refusal", () => {
+    const [refused, fresh] = projectHeldSpawns(
+      [heldSpawn({ adoptError: "blocker 09 is gone" }), heldSpawn({ id: "held-2" })],
+      NOW,
+    );
+    expect(refused?.adoptError).toBe("blocker 09 is gone");
+    expect(fresh?.adoptError).toBeNull();
   });
 });

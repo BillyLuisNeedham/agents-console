@@ -289,7 +289,9 @@ const isStringList = (value: unknown): value is string[] =>
 // "2 spawns held (per-run cap): 'A', 'B'", "adopted 03-spawn-1 from held-1
 // · 03-spawn-1 blocks 04, 05", "held spawn 'A' discarded". A pre-ADR
 // adoption carries a `truncated` count instead of holding, and says so. Like
-// the reassignment line, a payload of the wrong shape decodes to null.
+// the reassignment line, a payload of the wrong shape decodes to null. Of
+// the spawn-rejected events, only a held spawn's refused Adopt is worded:
+// the rest are an Outcome's own proposals, which the plain row covers.
 function spawnFromPayload(kind: string, payload: Record<string, unknown>): string | null {
   if (kind === "spawn-held") {
     const held = payload.held;
@@ -327,6 +329,12 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
       parts.push(`${truncated} truncated by the cap`);
     }
     return parts.join(" · ");
+  }
+  if (kind === "spawn-rejected") {
+    const { title, reason, fromHeld } = payload;
+    if (typeof fromHeld !== "string" || typeof title !== "string") return null;
+    if (typeof reason !== "string") return null;
+    return `adopting held spawn '${title}' refused: ${reason}; still held`;
   }
   if (kind === "spawn-discarded") {
     return typeof payload.title === "string"
@@ -1442,6 +1450,9 @@ export interface HeldSpawnRow {
   body: string;
   /** An Adopt is on its way to the boundary: nothing more to decide. */
   adopting: boolean;
+  /** Why the boundary refused the last Adopt (the pool moved while it
+   *  waited); null until a refusal, and cleared by the next Adopt. */
+  adoptError: string | null;
 }
 
 export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawnRow[] {
@@ -1467,6 +1478,7 @@ export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawn
             : null,
       body: spawn.body,
       adopting: spawn.adopting,
+      adoptError: spawn.adoptError ?? null,
     };
   });
 }
