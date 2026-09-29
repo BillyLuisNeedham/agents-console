@@ -244,8 +244,8 @@ describe("validatePoolDraft", () => {
     expect(validatePoolDraft({ ...EMPTY, agents: '{"a":1}' })).toBeNull();
   });
 
-  it("refuses a Spawn cap that is not a positive whole number (issue #149)", () => {
-    for (const bad of ["0", "2.5", "-1", "lots"]) {
+  it("refuses a Spawn cap that is not a whole number of 0 or more (issue #149, #150)", () => {
+    for (const bad of ["2.5", "-1", "lots"]) {
       expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: bad })).toMatch(
         /spawns per attempt must be/,
       );
@@ -254,6 +254,12 @@ describe("validatePoolDraft", () => {
       );
     }
     expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: " 3 ", spawnsPerRun: "40" })).toBeNull();
+    // A cap of 0 holds every proposal for the operator (issue #150).
+    expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: "0", spawnsPerRun: "0" })).toBeNull();
+    expect(poolPatchFrom({ ...EMPTY, spawnsPerAttempt: "0", spawnsPerRun: "" }).spawnCaps).toEqual({
+      perAttempt: 0,
+      perRun: null,
+    });
   });
 });
 

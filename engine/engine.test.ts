@@ -3924,13 +3924,17 @@ describe("config reload (ADR-0018)", () => {
 
     expect(run.phase).toBe("done");
     expect(run.final.log).toContain("config reloaded: spawnCaps");
-    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(true);
-    expect(existsSync(join(poolDir, "issues", "01-spawn-2.md"))).toBe(false);
+    expect(existsSync(join(poolDir, "issues", "02-spawn-1.md"))).toBe(true);
+    expect(existsSync(join(poolDir, "issues", "02-spawn-2.md"))).toBe(false);
+    expect(run.snapshots.at(-1)!.heldSpawns.map((h) => h.reason)).toEqual([
+      "per-attempt",
+      "per-attempt",
+    ]);
     expect(rig.spawned["01"].body).toContain("5 proposals honored per attempt and 20 per run");
     expect(rig.spawned["02"].body).toContain("1 proposal honored per attempt and 7 per run");
   });
 
-  it("rejects a reload whose spawn cap is not a positive integer, keeping the caps it had", async () => {
+  it("rejects a reload whose spawn cap is not a whole number of 0 or more, keeping the caps it had", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: { ...stubConfig, spawnCaps: { perRun: 9 } },
@@ -3941,7 +3945,7 @@ describe("config reload (ADR-0018)", () => {
         if (ctx.id === "01") {
           writeFileSync(
             join(poolDir, "console.json"),
-            JSON.stringify({ ...stubConfig, spawnCaps: { perRun: 0 } }),
+            JSON.stringify({ ...stubConfig, spawnCaps: { perRun: -1 } }),
           );
         }
         return rig.harnesses.stub(ctx);
@@ -3951,7 +3955,7 @@ describe("config reload (ADR-0018)", () => {
     const run = await approveReview(await runPool({ poolDir, harnesses }));
 
     expect(run.final.log).toContain(
-      "config reload rejected: pool config: spawnCaps.perRun must be a positive integer",
+      "config reload rejected: pool config: spawnCaps.perRun must be a whole number, 0 or more",
     );
     expect(run.snapshots.at(-1)!.spawnUsage.perRun).toBe(9);
   });

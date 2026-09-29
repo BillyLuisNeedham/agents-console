@@ -181,7 +181,7 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
 /**
  * What is wrong with a draft, or null when it is sendable. Only the fields
  * with a shape the operator can get wrong are checked here: a port that is
- * not a port, a Spawn cap that is not a positive whole number, and an agents
+ * not a port, a Spawn cap that is not a whole number of 0 or more, and an agents
  * roster that is not JSON. Everything else is free text the engine validates
  * on its own terms.
  */
@@ -198,8 +198,9 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
     ["spawnsPerRun", "spawns per run"],
   ] as const) {
     const cap = draft[field].trim();
-    if (cap && (!/^\d+$/.test(cap) || Number(cap) < 1)) {
-      return `${label} must be a whole number of 1 or more, or empty for the default`;
+    // A cap of 0 holds every proposal for the operator (issue #150).
+    if (cap && !/^\d+$/.test(cap)) {
+      return `${label} must be a whole number of 0 or more, or empty for the default`;
     }
   }
   const agents = draft.agents.trim();
@@ -754,7 +755,7 @@ export class SettingsStore {
         "spawnsPerRun",
         "spawns per run",
         DEFAULT_SPAWN_CAPS.perRun,
-        "counted since this Console boot",
+        "counted since this Console boot; 0 holds every proposal for you",
       ),
       text("roster", "roster", { badge: "roster", area: true }),
       text("agents", "agents", {
@@ -917,7 +918,7 @@ export class SettingsStore {
         class: "settings-input settings-number",
         key: `pool-${name}-input`,
         type: "number",
-        min: "1",
+        min: "0",
         value: this.poolDraft[name],
         placeholder: `${fallback} (default)`,
         oninput: (event: Event) =>

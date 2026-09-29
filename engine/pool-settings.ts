@@ -25,7 +25,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readConfig, type PoolConfig } from "./engine.ts";
 import { normaliseTitle } from "./pool-title.ts";
-import { isPositiveInteger, type SpawnCapsConfig } from "./spawn-caps.ts";
+import { isSpawnCap, type SpawnCapsConfig } from "./spawn-caps.ts";
 import type { MachineDefaults } from "./machine-defaults.ts";
 
 /**
@@ -180,8 +180,9 @@ function normaliseKey(
 // The Spawn caps (issue #149) are replaced whole, like `defaults`: the pane
 // shows both fields at once, so one the operator emptied goes back to the
 // engine's default. Each field is a text input, so a numeric string is a
-// cap; anything but a positive integer is refused by name, because a cap of
-// zero would hold every proposal and the engine refuses it at reload too.
+// cap; anything but a whole number of zero or more is refused by name, as
+// the engine refuses it at reload. A cap of 0 holds every proposal for the
+// operator (issue #150).
 function normaliseSpawnCaps(value: unknown): SpawnCapsConfig | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("pool settings: spawnCaps must be an object");
@@ -195,8 +196,8 @@ function normaliseSpawnCaps(value: unknown): SpawnCapsConfig | undefined {
       if (entry.trim() === "") continue;
       entry = /^\d+$/.test(entry.trim()) ? Number(entry.trim()) : entry;
     }
-    if (!isPositiveInteger(entry)) {
-      throw new Error(`pool settings: spawnCaps.${field} must be a positive integer`);
+    if (!isSpawnCap(entry)) {
+      throw new Error(`pool settings: spawnCaps.${field} must be a whole number, 0 or more`);
     }
     out[field] = entry;
   }
