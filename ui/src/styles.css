@@ -2403,7 +2403,8 @@ textarea.conversations-field {
   resize: vertical;
 }
 
-.settings-port {
+.settings-port,
+.settings-number {
   max-width: 220px;
 }
 

@@ -9,10 +9,10 @@
  * Two forms sit in one pane because they answer one question between them:
  * what this pool runs with, and what a pool inherits when it says nothing.
  * Each has its own Save, its own dirty flag and its own inline status, so a
- * refused machine write never loses a pool edit. The assignment slice takes
- * effect through the engine's Config reload at the next super-step boundary;
- * the boot-only keys carry a "restart to apply" badge until the Restart in
- * the footer hands off to Boot.
+ * refused machine write never loses a pool edit. The assignment slice and the
+ * Spawn caps take effect through the engine's Config reload at the next
+ * super-step boundary; the boot-only keys carry a "restart to apply" badge
+ * until the Restart in the footer hands off to Boot.
  */
 
 import { h } from "./dom";
@@ -74,6 +74,9 @@ export interface PoolDraft {
   agents: string;
   reviewer: string;
   checkpoint: string;
+  /** The Spawn caps (issue #149): empty means the engine's default. */
+  spawnsPerAttempt: string;
+  spawnsPerRun: string;
 }
 
 export interface MachineDraft {
@@ -107,7 +110,13 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   agents: "",
   reviewer: "",
   checkpoint: "",
+  spawnsPerAttempt: "",
+  spawnsPerRun: "",
 };
+
+/** The engine's Spawn caps when the file sets none (engine/spawn-caps.ts),
+ *  shown as the fields' placeholders. */
+const DEFAULT_SPAWN_CAPS = { perAttempt: 5, perRun: 20 };
 
 const EMPTY_MACHINE_DRAFT: MachineDraft = {
   harness: "",
@@ -148,7 +157,13 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     agents: config.agents ?? "",
     reviewer: config.reviewer ?? "",
     checkpoint: config.checkpoint ?? "",
+    spawnsPerAttempt: capField(config.spawnCaps?.perAttempt),
+    spawnsPerRun: capField(config.spawnCaps?.perRun),
   };
+}
+
+function capField(value: number | undefined): string {
+  return typeof value === "number" ? String(value) : "";
 }
 
 /** The machine draft the defaults file seeds; the merged view is placeholders. */
@@ -164,10 +179,11 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
 }
 
 /**
- * What is wrong with a draft, or null when it is sendable. Only the two
- * fields with a shape the operator can get wrong are checked here: a port
- * that is not a port, and an agents roster that is not JSON. Everything else
- * is free text the engine validates on its own terms.
+ * What is wrong with a draft, or null when it is sendable. Only the fields
+ * with a shape the operator can get wrong are checked here: a port that is
+ * not a port, a Spawn cap that is not a positive whole number, and an agents
+ * roster that is not JSON. Everything else is free text the engine validates
+ * on its own terms.
  */
 export function validatePoolDraft(draft: PoolDraft): string | null {
   const port = draft.port.trim();
@@ -175,6 +191,15 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
     const parsed = Number(port);
     if (!/^\d+$/.test(port) || !Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       return "port must be a whole number between 1 and 65535, or empty for auto";
+    }
+  }
+  for (const [field, label] of [
+    ["spawnsPerAttempt", "spawns per attempt"],
+    ["spawnsPerRun", "spawns per run"],
+  ] as const) {
+    const cap = draft[field].trim();
+    if (cap && (!/^\d+$/.test(cap) || Number(cap) < 1)) {
+      return `${label} must be a whole number of 1 or more, or empty for the default`;
     }
   }
   const agents = draft.agents.trim();
@@ -217,6 +242,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
   }
   const port = trim(draft.port);
   const selection = trim(draft.selection);
+  const cap = (value: string): number | null => (trim(value) ? Number(trim(value)) : null);
   return {
     defaults: {
       harness: trim(draft.harness),
@@ -233,6 +259,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     reviewer: orNull(draft.reviewer),
     checkpoint: orNull(draft.checkpoint),
     title: orNull(draft.title),
+    spawnCaps: { perAttempt: cap(draft.spawnsPerAttempt), perRun: cap(draft.spawnsPerRun) },
   };
 }
 
@@ -720,6 +747,15 @@ export class SettingsStore {
         }),
         badges.has("port"),
       ),
+      // The Spawn caps (issue #149, ADR-0029) reload at the next boundary,
+      // or at once on an idle pool, so they carry no badge.
+      this.renderCapField("spawnsPerAttempt", "spawns per attempt", DEFAULT_SPAWN_CAPS.perAttempt),
+      this.renderCapField(
+        "spawnsPerRun",
+        "spawns per run",
+        DEFAULT_SPAWN_CAPS.perRun,
+        "counted since this Console boot",
+      ),
       text("roster", "roster", { badge: "roster", area: true }),
       text("agents", "agents", {
         badge: "agents",
@@ -865,6 +901,30 @@ export class SettingsStore {
         this.machineError,
         () => void this.saveMachine(),
       ),
+    );
+  }
+
+  private renderCapField(
+    name: "spawnsPerAttempt" | "spawnsPerRun",
+    label: string,
+    fallback: number,
+    hint?: string,
+  ): HTMLElement {
+    return this.renderField(
+      `pool-${name}`,
+      label,
+      h("input", {
+        class: "settings-input settings-number",
+        key: `pool-${name}-input`,
+        type: "number",
+        min: "1",
+        value: this.poolDraft[name],
+        placeholder: `${fallback} (default)`,
+        oninput: (event: Event) =>
+          this.setPoolField(name, (event.currentTarget as HTMLInputElement).value),
+      }),
+      false,
+      hint,
     );
   }
 

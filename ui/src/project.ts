@@ -1506,6 +1506,9 @@ export interface PoolConfigPatch {
   checkpoint?: string | null;
   /** The Pool title (issue #100); null clears it back to the directory name. */
   title?: string | null;
+  /** The Spawn caps (issue #149), replaced whole: a null field goes back to
+   *  the engine's default, and both null removes the key. */
+  spawnCaps?: { perAttempt: number | null; perRun: number | null };
 }
 
 /**

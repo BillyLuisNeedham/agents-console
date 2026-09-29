@@ -156,6 +156,13 @@ describe("poolDraftFrom", () => {
     expect(poolDraftFrom({ title: "Jev as the grader" }).title).toBe("Jev as the grader");
     expect(EMPTY.title).toBe("");
   });
+
+  it("seeds the Spawn caps the file sets, and an unset one as an empty field (issue #149)", () => {
+    const draft = poolDraftFrom({ spawnCaps: { perRun: 40 } });
+    expect(draft.spawnsPerRun).toBe("40");
+    expect(draft.spawnsPerAttempt).toBe("");
+    expect(EMPTY.spawnsPerRun).toBe("");
+  });
 });
 
 describe("poolPatchFrom", () => {
@@ -207,6 +214,13 @@ describe("poolPatchFrom", () => {
     expect(poolPatchFrom(EMPTY).title).toBeNull();
   });
 
+  it("sends the Spawn caps whole, as numbers, an emptied one as null (issue #149)", () => {
+    expect(
+      poolPatchFrom({ ...EMPTY, spawnsPerAttempt: " 8 ", spawnsPerRun: "" }).spawnCaps,
+    ).toEqual({ perAttempt: 8, perRun: null });
+    expect(poolPatchFrom(EMPTY).spawnCaps).toEqual({ perAttempt: null, perRun: null });
+  });
+
   it("drops a selection that is neither auto nor human", () => {
     expect(poolPatchFrom({ ...EMPTY, selection: "sometimes" }).selection).toBeNull();
   });
@@ -228,6 +242,18 @@ describe("validatePoolDraft", () => {
       "agents must be valid JSON",
     );
     expect(validatePoolDraft({ ...EMPTY, agents: '{"a":1}' })).toBeNull();
+  });
+
+  it("refuses a Spawn cap that is not a positive whole number (issue #149)", () => {
+    for (const bad of ["0", "2.5", "-1", "lots"]) {
+      expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: bad })).toMatch(
+        /spawns per attempt must be/,
+      );
+      expect(validatePoolDraft({ ...EMPTY, spawnsPerRun: bad })).toMatch(
+        /spawns per run must be/,
+      );
+    }
+    expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: " 3 ", spawnsPerRun: "40" })).toBeNull();
   });
 });
 
@@ -570,6 +596,7 @@ describe("SettingsStore.render", () => {
       ["pool", "pool-model-input", "sonnet", "opus"],
       ["pool", "pool-title-input", "Release train", ""],
       ["pool", "pool-port-input", "4301", "4300"],
+      ["pool", "pool-spawnsPerRun-input", "40", ""],
       ["machine", "machine-model-input", "sonnet", ""],
       ["machine", "machine-engine-input", "/other/engine", ""],
     ] as const) {
@@ -591,6 +618,34 @@ describe("SettingsStore.render", () => {
     // Display-only and live: never badged for a Restart.
     const field = root.querySelector('[data-key="pool-title"]');
     expect(field?.querySelector(".settings-badge")).toBeNull();
+  });
+
+  it("offers both Spawn caps with their defaults as placeholders and no Restart badge (issue #149)", async () => {
+    const rig = await opened(
+      settings({
+        pool: {
+          ...settings().pool,
+          config: { spawnCaps: { perAttempt: 3 } },
+          effective: { port: 4300, terminal: null, stale: ["spawnCaps"] },
+        },
+      }),
+    );
+    const { root, paint } = mount(rig.store);
+    paint();
+    const perAttempt = root.querySelector<HTMLInputElement>(
+      '[data-key="pool-spawnsPerAttempt-input"]',
+    );
+    const perRun = root.querySelector<HTMLInputElement>('[data-key="pool-spawnsPerRun-input"]');
+    expect(perAttempt?.value).toBe("3");
+    expect(perAttempt?.getAttribute("placeholder")).toBe("5 (default)");
+    expect(perRun?.value).toBe("");
+    expect(perRun?.getAttribute("placeholder")).toBe("20 (default)");
+    expect(root.querySelector('[data-key="pool-spawnsPerRun"]')?.textContent).toContain(
+      "since this Console boot",
+    );
+    // They reload at the next boundary: never badged for a Restart.
+    expect(root.querySelector('[data-key="pool-spawnsPerAttempt"] .settings-badge')).toBeNull();
+    expect(root.querySelector('[data-key="pool-spawnsPerRun"] .settings-badge')).toBeNull();
   });
 
   it("gives the body its own scroll region, keyed so the scroll survives", async () => {
