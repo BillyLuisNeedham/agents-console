@@ -242,6 +242,10 @@ _Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits
 A Spawn proposal within the caps, waiting for the next super-step boundary to land. Kept across restarts and visible before it lands, to the operator in the Console and to the pool's agents, so a second agent can see the work is already coming. Until the boundary the operator may Hold it (it becomes a Held spawn) or Discard it. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150.
 _Avoid_: queued spawn (too close to the Merge queue), proposed spawn (a Held spawn is proposed too), draft ticket
 
+**Spawn ledger**:
+The one file in a Pool that lists the work it has and the work on its way: every Ticket and Conversation, every Pending spawn and every Held spawn. The engine keeps it current; agents read it before they propose a Spawn, so they do not propose work already listed, and mark a proposal that still overlaps something listed so it is held for the operator. The prompts name where it is and never carry what it says. Introduced by ADR-0029's issue #150 addendum.
+_Avoid_: pool index, backlog (it holds running and finished work too), spawn log (the parent's Ticket log records the events; the ledger is only the current state)
+
 **Conversation**:
 An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
 _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
