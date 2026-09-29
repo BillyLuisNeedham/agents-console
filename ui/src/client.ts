@@ -12,6 +12,8 @@ import type {
   EnlistRequest,
   EnlistResponse,
   EnrichedSnapshot,
+  HeldSpawnRequest,
+  HeldSpawnResponse,
   KeepTalkingRequest,
   KeepTalkingResponse,
   PanesResponse,
@@ -406,6 +408,40 @@ export class PoolClient {
     if (!res.ok) {
       throw new Error(
         (await refusalReason(res)) ?? `close finished terminals failed: ${res.status}`,
+      );
+    }
+    return res.json();
+  }
+
+  /**
+   * Adopt a Held spawn (issue #149, ADR-0029): take a proposal a Spawn cap
+   * held into the pool past both caps. 202 once the adoption is queued; the
+   * spawn stays on the snapshot, marked adopting, until the engine writes
+   * it. A refusal (no such spawn, one the pool would reject, a finished
+   * pool) is a 409 `reason`, shown beside the spawn's buttons.
+   */
+  async adoptHeldSpawn(id: string): Promise<HeldSpawnResponse> {
+    return this.decideHeldSpawn("adopt", id);
+  }
+
+  /** Discard a Held spawn for good (issue #149): 200 once it is gone. */
+  async discardHeldSpawn(id: string): Promise<HeldSpawnResponse> {
+    return this.decideHeldSpawn("discard", id);
+  }
+
+  private async decideHeldSpawn(
+    decision: "adopt" | "discard",
+    id: string,
+  ): Promise<HeldSpawnResponse> {
+    const request: HeldSpawnRequest = { id };
+    const res = await fetch(`${this.base}/api/spawns/held/${decision}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      throw new Error(
+        (await refusalReason(res)) ?? `${decision} held spawn failed: ${res.status}`,
       );
     }
     return res.json();
