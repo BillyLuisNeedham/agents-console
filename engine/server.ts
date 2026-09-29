@@ -69,6 +69,7 @@ import type {
   CloseFinishedTerminalsResponse,
   EnrichedSnapshot,
   HeldSpawnResponse,
+  PendingSpawnResponse,
   KeepTalkingResponse,
   LogAttemptInfo,
   ReconstructedAttempt,
@@ -280,6 +281,7 @@ function enrich(
     poolDir,
     finishedTerminals: snapshot.finishedTerminals,
     spawnUsage: snapshot.spawnUsage,
+    pendingSpawns: snapshot.pendingSpawns,
     heldSpawns: snapshot.heldSpawns,
     state: {
       tickets: meta.map((m) => {
@@ -1984,6 +1986,38 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ id } satisfies HeldSpawnResponse, {
               status: adopt ? 202 : 200,
             });
+          } catch (err) {
+            return Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status: 409 },
+            );
+          }
+        }
+
+        if (
+          (pathname === "/api/spawns/pending/hold" ||
+            pathname === "/api/spawns/pending/discard") &&
+          req.method === "POST"
+        ) {
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const fields = (body ?? {}) as Record<string, unknown>;
+          const id = typeof fields.id === "string" ? fields.id : "";
+          if (!id) {
+            return Response.json({ reason: "id is required" }, { status: 400 });
+          }
+          const run = currentRun;
+          if (!run) {
+            return Response.json({ reason: "pool not started" }, { status: 409 });
+          }
+          try {
+            if (pathname === "/api/spawns/pending/hold") run.holdPendingSpawn(id);
+            else run.discardPendingSpawn(id);
+            return Response.json({ id } satisfies PendingSpawnResponse);
           } catch (err) {
             return Response.json(
               { reason: err instanceof Error ? err.message : String(err) },

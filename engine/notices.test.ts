@@ -428,8 +428,8 @@ describe("Conversation spawn.json adoption", () => {
       );
       expect(held?.payload).toEqual({
         held: [
-          { id: "held-1", title: "Follow-up 6", reason: "per-attempt" },
-          { id: "held-2", title: "Follow-up 7", reason: "per-attempt" },
+          { id: "proposal-6", title: "Follow-up 6", reason: "per-attempt" },
+          { id: "proposal-7", title: "Follow-up 7", reason: "per-attempt" },
         ],
       });
 
@@ -439,6 +439,49 @@ describe("Conversation spawn.json adoption", () => {
       // out from under a still-live runtime leaves the interval ticking
       // against a deleted directory into later tests (a real hazard this
       // suite hit while under development).
+      await run.endConversation(view.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 20000);
+
+  // Issue #150: a Conversation's spawn.json is taken like a Ticket's
+  // Outcome. The plain entry lands at once on the idle pool; the one the
+  // agent marked as overlapping waits for the operator.
+  it("holds an entry that names what it overlaps, landing the rest at once", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: { defaults: { harness: "convo", model: "stub-model" }, terminal: "herdr" },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { convo: () => ["cat"] },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Plan" });
+
+      writeSpawnJson(poolDir, view.id, [
+        { title: "Again", body: BODY, overlaps: ["01"] },
+        { title: "New", body: BODY },
+      ]);
+
+      await waitFor(() => existsSync(join(poolDir, "issues", `${view.id}-spawn-1.md`)));
+      expect(existsSync(join(poolDir, "issues", `${view.id}-spawn-2.md`))).toBe(false);
+      expect(run.snapshots.at(-1)!.heldSpawns).toEqual([
+        expect.objectContaining({
+          id: "proposal-1",
+          parentId: view.id,
+          origin: "conversation",
+          title: "Again",
+          reason: "overlaps",
+          overlaps: ["01"],
+        }),
+      ]);
+      expect(run.snapshots.at(-1)!.pendingSpawns).toEqual([]);
+
       await run.endConversation(view.id).catch(() => {});
       await run.shutdown(0);
     } finally {

@@ -34,7 +34,7 @@ export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
 export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
 export type { HeldPaneRecord } from "./held-panes.ts";
-export type { HeldSpawnReason, HeldSpawnView } from "./held-spawns.ts";
+export type { HeldSpawnReason, HeldSpawnView, PendingSpawnView } from "./spawn-proposals.ts";
 export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
@@ -68,7 +68,7 @@ import type { TicketStatus } from "./pool.ts";
 import type { AssignmentView } from "./assignment.ts";
 import type { LiveAttemptRecord } from "./live-attempts.ts";
 import type { HeldPaneRecord } from "./held-panes.ts";
-import type { HeldSpawnView } from "./held-spawns.ts";
+import type { HeldSpawnView, PendingSpawnView } from "./spawn-proposals.ts";
 import type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
@@ -161,9 +161,17 @@ export interface EnrichedSnapshot {
    */
   spawnUsage: SpawnUsage;
   /**
-   * The Held spawns (issue #149, ADR-0029), oldest first, from the engine's
-   * snapshot verbatim: the proposals a Spawn cap had no room for, each
-   * waiting for the operator to Adopt it (past the caps) or Discard it.
+   * The Pending spawns (issue #150), oldest first, from the engine's
+   * snapshot verbatim: proposals within the caps that land at the next
+   * super-step boundary unless the operator Holds or Discards them first.
+   */
+  pendingSpawns: PendingSpawnView[];
+  /**
+   * The Held spawns (issue #149, ADR-0029, widened by issue #150), oldest
+   * first, from the engine's snapshot verbatim: the proposals a Spawn cap
+   * had no room for, the agent marked as overlapping, or the operator held
+   * back, each waiting for the operator to Adopt it (past the caps) or
+   * Discard it.
    */
   heldSpawns: HeldSpawnView[];
   state: {
@@ -316,6 +324,25 @@ export interface HeldSpawnRequest {
 }
 
 export interface HeldSpawnResponse {
+  id: string;
+}
+
+// ---------------------------------------------------------------------------
+// Pending spawns (POST /api/spawns/pending/hold, /api/spawns/pending/discard)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hold or Discard one Pending spawn before the boundary lands it (issue
+ * #150), by its id. Hold answers 200 once it is a Held spawn (held by the
+ * operator, same id); Discard answers 200 once it is gone. One that has
+ * already landed, or is not pending, is refused with the 409 `reason`
+ * envelope.
+ */
+export interface PendingSpawnRequest {
+  id: string;
+}
+
+export interface PendingSpawnResponse {
   id: string;
 }
 

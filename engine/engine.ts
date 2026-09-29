@@ -44,11 +44,16 @@ import {
   type TicketStatus,
 } from "./pool.ts";
 import {
-  loadHeldSpawns,
+  loadSpawnProposals,
+  type HeldSpawn,
   type HeldSpawnReason,
   type HeldSpawnView,
-  type HeldSpawns,
-} from "./held-spawns.ts";
+  type PendingSpawn,
+  type PendingSpawnView,
+  type SpawnProposals,
+  type TakenProposal,
+} from "./spawn-proposals.ts";
+import { renderSpawnLedger, spawnLedgerPath, writeSpawnLedger } from "./spawn-ledger.ts";
 import {
   checkSpawnCaps,
   spawnCapsOf,
@@ -246,6 +251,11 @@ export interface SpawnProposal {
   // The tickets the Spawn blocks once adopted (ADR-0029): named ids, or
   // "all" for every ticket not yet started at that moment.
   blocks?: string[] | "all";
+  // The pool work the proposing agent read in the Spawn ledger and judged
+  // this proposal to overlap (issue #150): Tickets, Conversations, or
+  // Pending or Held spawns, by id. A proposal that names any is held for
+  // the operator to decide instead of landing.
+  overlaps?: string[];
 }
 
 // One spawn entry the schema rejected: where it sat in the array and why.
@@ -255,22 +265,6 @@ export interface SpawnRejection {
   // Absent when the spawn key itself is malformed rather than one entry.
   index?: number;
   reason: string;
-}
-
-// One attempt's surviving proposals, buffered between the moment an outcome
-// becomes the ticket's (a solo attempt's exit, a lone attempt's completion, a
-// selection's winner) and the boundary that adopts them. `origin` is the
-// Conversations ADR's addition: "conversation" is a Conversation's own
-// spawn.json batch (engine/notices.ts's poller), which bypasses the per-run
-// cap (spec: "no run-wide cap for Conversation Spawns") but keeps the
-// per-proposal cap; every ticket-outcome push stays "ticket". `heldId` marks
-// the operator's Adopt of a Held spawn (ADR-0029): one proposal, past both
-// caps, leaving the Held spawns once the boundary settles it.
-export interface PendingSpawn {
-  parentId: string;
-  proposals: SpawnProposal[];
-  origin: "ticket" | "conversation";
-  heldId?: string;
 }
 
 export interface Outcome {
@@ -449,6 +443,9 @@ export interface PoolSnapshot {
   // The Spawn caps in force and this run's count against the per-run one
   // (ADR-0029), so the Console shows how close the pool is to a cap.
   spawnUsage: SpawnUsage;
+  // The Pending spawns (issue #150), oldest first: proposals within the
+  // caps that land at the next boundary, as the Console shows them.
+  pendingSpawns: PendingSpawnView[];
   // The Held spawns (ADR-0029), oldest first, as the Console shows them.
   heldSpawns: HeldSpawnView[];
 }
@@ -593,6 +590,15 @@ export interface PoolRun {
   adoptHeldSpawn: (id: string) => void;
   /** Discard a Held spawn for good; throws when there is no such one. */
   discardHeldSpawn: (id: string) => void;
+  /**
+   * Hold a Pending spawn back from the boundary (issue #150): it becomes a
+   * Held spawn, held by the operator, under the same id. Throws when it is
+   * not pending: landed already, discarded, or never.
+   */
+  holdPendingSpawn: (id: string) => void;
+  /** Discard a Pending spawn for good, freeing its cap room; throws when it
+   *  is not pending. */
+  discardPendingSpawn: (id: string) => void;
 }
 
 const reduceTickets = (
@@ -823,12 +829,14 @@ interface Session {
   launchCadence?: Partial<LaunchCadence>;
   // The Pool workspace (issue #94): where every tab this pool opens lands.
   poolWorkspace: PoolWorkspaceState;
-  // Spawn proposals awaiting the boundary (ADR-0010), pushed where an outcome
-  // becomes the ticket's and drained by adoptSpawnProposals.
-  pendingSpawns: PendingSpawn[];
-  // The Held spawns (ADR-0029, held-spawns.ts): proposals the caps had no
-  // room for, waiting on disk for the operator's Adopt or Discard.
-  heldSpawns: HeldSpawns;
+  // The Pending and Held spawns (ADR-0029, issue #150, spawn-proposals.ts):
+  // every proposal taken from an exited attempt or a spawn.json and not yet
+  // landed or discarded, on disk. Pending ones land at the next boundary;
+  // held ones wait for the operator's Adopt or Discard.
+  spawnProposals: SpawnProposals;
+  // The Spawn ledger as last written (issue #150, spawn-ledger.ts), so an
+  // emit that changed nothing an agent reads there writes nothing.
+  spawnLedger: string | null;
   // Ticket-origin Spawns adopted so far this run, bounding the per-run cap.
   // A run is this Console boot (ADR-0029): the count starts at zero at every
   // start, whatever the pool spawned before.
@@ -1021,16 +1029,19 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
       const { proposals, rejections } = validateSpawnProposals(raw);
       onRejected(rejections);
       if (proposals.length > 0) {
-        session.pendingSpawns.push({ parentId, proposals, origin: "conversation" });
-        // Idle: adopt (write the files / start the child Conversations) and
-        // kick a drive at once, since nothing else will reach the boundary
-        // that does this. In flight: leave it queued — the driving
-        // super-step's own adoptSpawnProposals call at its next boundary
-        // picks it up, and adopting here too would mutate session.markers
-        // and session.state concurrently with that in-flight work.
-        if (!session.driving) {
+        const { pending } = takeSpawnProposals(session, parentId, proposals, "conversation");
+        // Idle: land what is pending (write the files / start the child
+        // Conversations) and kick a drive at once, since nothing else will
+        // reach the boundary that does this. In flight: leave it pending —
+        // the driving super-step's own adoptSpawnProposals call at its next
+        // boundary picks it up, and landing here too would mutate
+        // session.markers and session.state concurrently with that
+        // in-flight work.
+        if (!session.driving && pending.length > 0) {
           adoptSpawnProposals(session);
           kickProcessing(session);
+        } else {
+          emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
         }
       }
     },
@@ -1212,8 +1223,8 @@ export function startPool(options: RunOptions): PoolRun {
       wanted: poolWorkspaceLabel(titleOf(config), poolDir),
       relabelling: Promise.resolve(),
     },
-    pendingSpawns: [],
-    heldSpawns: loadHeldSpawns(runsDir),
+    spawnProposals: loadSpawnProposals(runsDir),
+    spawnLedger: null,
     spawnedThisRun: 0,
     terminalReconcile: Promise.resolve(),
     adopted: new Map(),
@@ -1251,6 +1262,7 @@ export function startPool(options: RunOptions): PoolRun {
   seedEnlistedWork(session);
   rehydrate(session);
   recoverTruncatedSpawns(session);
+  settleLandingSpawns(session);
   // The pane survey (issue #139) only has panes to list in a terminal-backed
   // pool. It lists on its cadence and whenever the engine holds a pane, so a
   // Held pane from before a restart is looked for at once (seedHeldPanes
@@ -1399,6 +1411,8 @@ function makeHandle(session: Session): PoolRun {
     reloadConfig: () => reloadConfigWhenIdle(session),
     adoptHeldSpawn: (id) => adoptHeldSpawn(session, id),
     discardHeldSpawn: (id) => discardHeldSpawn(session, id),
+    holdPendingSpawn: (id) => holdPendingSpawn(session, id),
+    discardPendingSpawn: (id) => discardPendingSpawn(session, id),
   };
   return handle;
 }
@@ -1569,8 +1583,12 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
       spawnedThisRun: session.spawnedThisRun,
       ...spawnCapsOf(session.state.config),
     },
-    heldSpawns: session.heldSpawns.views(),
+    pendingSpawns: session.spawnProposals.pendingViews(),
+    heldSpawns: session.spawnProposals.heldViews(),
   };
+  // The Spawn ledger follows every emit, so what agents read there is never
+  // staler than what the Console shows (issue #150).
+  refreshSpawnLedger(session);
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
   session.onSnapshot?.(snapshot);
@@ -1895,11 +1913,7 @@ async function runSuperStep(
         // adoption buffer (ADR-0010). A verify candidate carries none:
         // its proposals ride or die with selection.
         if (result.spawnProposals && result.spawnProposals.length > 0) {
-          session.pendingSpawns.push({
-            parentId: marker.id,
-            proposals: result.spawnProposals,
-            origin: "ticket",
-          });
+          takeSpawnProposals(session, marker.id, result.spawnProposals, "ticket");
         }
         if (plan.verify) {
           // A verify candidate never merges and never writes the
@@ -3906,11 +3920,7 @@ function endEnlistedAttempt(
   }
   if (status === "done") {
     if (outcome.ok && outcome.outcome.spawn?.length) {
-      session.pendingSpawns.push({
-        parentId: ticketId,
-        proposals: outcome.outcome.spawn,
-        origin: "ticket",
-      });
+      takeSpawnProposals(session, ticketId, outcome.outcome.spawn, "ticket");
     }
     chainEnlistedMerge(session, marker, attempt, branch);
     return;
@@ -4813,11 +4823,7 @@ function endContinuedAttempt(
       read.outcome.status === "done" &&
       read.outcome.spawn?.length
     ) {
-      session.pendingSpawns.push({
-        parentId: ticketId,
-        proposals: read.outcome.spawn,
-        origin: "ticket",
-      });
+      takeSpawnProposals(session, ticketId, read.outcome.spawn, "ticket");
     }
     recordAdoptedExit(session, marker, attempt, decision, logPath, outcomePath, "continued attempt");
     return;
@@ -4850,7 +4856,7 @@ function endContinuedAttempt(
     );
     session.state = applyUpdate(session.state, { outcomes: { [ticketId]: outcome } });
     if (outcome.spawn?.length) {
-      session.pendingSpawns.push({ parentId: ticketId, proposals: outcome.spawn, origin: "ticket" });
+      takeSpawnProposals(session, ticketId, outcome.spawn, "ticket");
     }
     finishAdoptedFinalize(session);
     return;
@@ -7269,11 +7275,7 @@ function resolveLoneAttempt(
         outcomes: { [marker.id]: outcome.outcome },
       });
       if (outcome.outcome.spawn?.length) {
-        session.pendingSpawns.push({
-          parentId: marker.id,
-          proposals: outcome.outcome.spawn,
-          origin: "ticket",
-        });
+        takeSpawnProposals(session, marker.id, outcome.outcome.spawn, "ticket");
       }
     }
     return;
@@ -7386,11 +7388,7 @@ function completeLoneAttempt(
   if (outcome.ok) {
     update.outcomes = { [marker.id]: outcome.outcome };
     if (outcome.outcome.spawn?.length) {
-      session.pendingSpawns.push({
-        parentId: marker.id,
-        proposals: outcome.outcome.spawn,
-        origin: "ticket",
-      });
+      takeSpawnProposals(session, marker.id, outcome.outcome.spawn, "ticket");
     }
   }
   session.state = applyUpdate(session.state, {
@@ -7768,11 +7766,7 @@ function completeSelection(
   if (outcome.ok) {
     update.outcomes = { [marker.id]: outcome.outcome };
     if (outcome.outcome.spawn?.length) {
-      session.pendingSpawns.push({
-        parentId: marker.id,
-        proposals: outcome.outcome.spawn,
-        origin: "ticket",
-      });
+      takeSpawnProposals(session, marker.id, outcome.outcome.spawn, "ticket");
     }
   }
   session.state = applyUpdate(session.state, update);
@@ -8812,6 +8806,18 @@ function validateSpawnProposals(
       });
       return;
     }
+    const overlaps = proposal.overlaps;
+    if (
+      overlaps !== undefined &&
+      (!Array.isArray(overlaps) ||
+        overlaps.some((id) => typeof id !== "string" || id.trim() === ""))
+    ) {
+      rejections.push({
+        index,
+        reason: "proposal's overlaps is not a list of ids",
+      });
+      return;
+    }
     if (blocks !== undefined && kindRaw === "conversation") {
       rejections.push({
         index,
@@ -8848,6 +8854,9 @@ function validateSpawnProposals(
       ...(kindRaw !== undefined ? { kind: kindRaw as "ticket" | "conversation" } : {}),
       ...(assign !== undefined ? { assign } : {}),
       ...(blocks !== undefined ? { blocks: blocks as string[] | "all" } : {}),
+      ...(overlaps !== undefined && overlaps.length > 0
+        ? { overlaps: overlaps as string[] }
+        : {}),
     });
   });
   return { proposals, rejections };
@@ -9710,177 +9719,329 @@ function applySpawnBlocks(
   return blocked;
 }
 
-// The boundary's spawn adoption (ADR-0010, extended by the Conversations
-// ADR and ADR-0029): every buffered proposal is validated against the pool
-// as the boundary found it, the accepted ones are written as ordinary ticket
-// files or started as Conversations, and the pool's markers and assignments
-// reload so the drive loop schedules the ticket ones like any other. Every
-// aspect of that stays per proposal, never per batch: a dropped proposal
-// logs its reason on the proposing parent's log (a spawn-rejected event) and
-// the parent's own result stands. The per-attempt cap always applies; the
-// per-run cap is skipped for a Conversation's own spawn.json batch (spec:
-// "no run-wide cap for Conversation Spawns" — a Ticket's outcome.spawn still
-// counts against it, `origin: "ticket"`, whatever kind its entries request).
-// A proposal beyond either cap is held for the operator (ADR-0029), never
-// dropped: it waits in the Held spawns until an Adopt, which comes back
-// through here carrying its held id and passes both caps. Writing the files
-// is the commit point; a crash after them but before the reload leaves the
-// adopted tickets in the pool for the next start, ids stable. The
-// Conversation host and an idle Adopt call this directly (nothing else would
-// reach this boundary for them otherwise).
-function adoptSpawnProposals(session: Session): void {
-  if (session.pendingSpawns.length === 0) return;
-  const pending = session.pendingSpawns.splice(0);
-  // Membership validates against the markers as the boundary found them, so
-  // a proposal naming another proposal's future id drops as unknown: the
-  // agent never proposes ids and cannot know one.
-  const known = {
+// What a proposal may name as known work: the pool's Tickets and its
+// recorded Conversations, as the caller finds them.
+interface KnownPoolIds {
+  ids: Set<string>;
+  conversations: Set<string>;
+}
+
+function knownPoolIds(session: Session): KnownPoolIds {
+  return {
     ids: new Set(session.markers.map((m) => m.id)),
     conversations: knownConversationIds(session.poolDir),
   };
-  const counters = combinedSpawnCounters(session);
-  // The caps as this boundary's Config reload left them (ADR-0029).
+}
+
+// Why a proposal's `overlaps` mark (issue #150) cannot stand, or null when
+// it can: every id must be something the agent could have read in the Spawn
+// ledger, a Ticket, a Conversation, or a proposal of this pool (pending,
+// held, or one since landed or discarded, since the ledger the agent read
+// may be older than the pool). Checked when the proposal is taken, like
+// blocks, and never again: once held, the operator decides it.
+function overlapsProblem(
+  session: Session,
+  proposal: SpawnProposal,
+  known: KnownPoolIds,
+): string | null {
+  const unknown = (proposal.overlaps ?? []).filter(
+    (id) =>
+      !known.ids.has(id) &&
+      !known.conversations.has(id) &&
+      !session.spawnProposals.isProposalId(id),
+  );
+  return unknown.length > 0
+    ? `overlaps names ids neither in the pool nor in the Spawn ledger: ${unknown.join(", ")}`
+    : null;
+}
+
+// The per-run room Pending spawns hold (issue #150): a Ticket-origin Pending
+// spawn reserves its place under the run cap until it lands, when it counts
+// toward the run, or is held or discarded, when the room is free again.
+function pendingRunReservations(session: Session): number {
+  return session.spawnProposals.pending().filter((p) => p.origin !== "conversation").length;
+}
+
+// Taking a parent's proposals (issue #150, on ADR-0010 and ADR-0029): the
+// moment an Outcome becomes its ticket's, or a Conversation's spawn.json is
+// read, each proposal is checked against the pool as it stands and settled
+// on disk before anything else happens, so a restart before the boundary
+// finds every one of them. A proposal the pool would reject is dropped with
+// the reason on the parent's log (a spawn-rejected event), the parent's own
+// result standing. One the agent marked as overlapping work in the pool is
+// held for the operator. The rest meet the caps: the per-attempt cap takes
+// the first ones in order, and the per-run cap, for a Ticket's own
+// outcome.spawn only (a Conversation's spawn.json has none), takes what the
+// run has room for once this run's landed Spawns and the Pending spawns
+// already reserving room are counted. What a cap cannot take is held, in its
+// place in the proposal's order; what it takes is a Pending spawn, landing
+// at the next boundary unless the operator holds or discards it first. A
+// cap of 0 holds everything.
+function takeSpawnProposals(
+  session: Session,
+  parentId: string,
+  proposals: SpawnProposal[],
+  origin: "ticket" | "conversation",
+): { pending: PendingSpawn[]; held: HeldSpawn[] } {
+  const known = knownPoolIds(session);
   const caps = spawnCapsOf(session.state.config);
-  const capsPhrase = `${caps.perAttempt} per attempt, ${caps.perRun} per run`;
+  const at = new Date().toISOString();
+  const attempt = lastAttempt(session.runsDir, parentId);
+  const log: string[] = [];
+  const taken: TakenProposal[] = [];
+  let attemptRoom = caps.perAttempt;
+  let runRoom =
+    origin === "conversation"
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, caps.perRun - session.spawnedThisRun - pendingRunReservations(session));
+  for (const proposal of proposals) {
+    const reason =
+      spawnProposalProblem(session, proposal, known) ??
+      overlapsProblem(session, proposal, known);
+    if (reason !== null) {
+      appendEvent(session.runsDir, parentId, {
+        at,
+        attempt,
+        kind: "spawn-rejected",
+        payload: { title: proposal.title, reason },
+      });
+      log.push(`ticket ${parentId}: spawn proposal '${proposal.title}' rejected: ${reason}`);
+      continue;
+    }
+    const entry = { parentId, origin, proposal, at };
+    if ((proposal.overlaps ?? []).length > 0) {
+      taken.push({ ...entry, held: "overlaps" });
+    } else if (attemptRoom <= 0) {
+      taken.push({ ...entry, held: "per-attempt" });
+    } else if (runRoom <= 0) {
+      attemptRoom -= 1;
+      taken.push({ ...entry, held: "per-run" });
+    } else {
+      attemptRoom -= 1;
+      runRoom -= 1;
+      taken.push(entry);
+    }
+  }
+  const { pending, held } =
+    taken.length > 0 ? session.spawnProposals.take(taken) : { pending: [], held: [] };
+  if (pending.length > 0) {
+    appendEvent(session.runsDir, parentId, {
+      at,
+      attempt,
+      kind: "spawn-pending",
+      payload: { pending: pending.map((p) => ({ id: p.id, title: p.proposal.title })) },
+    });
+    log.push(
+      `ticket ${parentId}: spawn proposal${pending.length === 1 ? "" : "s"} ` +
+        `${pending.map((p) => p.id).join(", ")} pending for the next boundary`,
+    );
+  }
+  if (held.length > 0) {
+    appendEvent(session.runsDir, parentId, {
+      at,
+      attempt,
+      kind: "spawn-held",
+      payload: { held: held.map(heldEventEntry) },
+    });
+    const atCaps = held.filter((h) => h.reason === "per-attempt" || h.reason === "per-run");
+    if (atCaps.length > 0) {
+      log.push(
+        `ticket ${parentId}: ${atCaps.length} proposal${atCaps.length === 1 ? "" : "s"} held ` +
+          `at the caps (${caps.perAttempt} per attempt, ${caps.perRun} per run): ` +
+          atCaps.map((h) => h.id).join(", "),
+      );
+    }
+    for (const h of held.filter((h) => h.reason === "overlaps")) {
+      log.push(
+        `ticket ${parentId}: ${h.id} ('${h.proposal.title}') held: it overlaps ` +
+          (h.proposal.overlaps ?? []).join(", "),
+      );
+    }
+  }
+  if (log.length > 0) session.state = applyUpdate(session.state, { log });
+  refreshSpawnLedger(session);
+  return { pending, held };
+}
+
+// One held spawn as a spawn-held event names it: its id, title and reason,
+// and the ids an overlaps hold named.
+function heldEventEntry(held: HeldSpawn): Record<string, unknown> {
+  return {
+    id: held.id,
+    title: held.proposal.title,
+    reason: held.reason,
+    ...(held.reason === "overlaps" ? { overlaps: held.proposal.overlaps ?? [] } : {}),
+  };
+}
+
+// Landing one proposal under its minted id: a Conversation started, or a
+// ticket file written (true, so the caller reloads the pool's markers).
+function landSpawn(
+  session: Session,
+  parentId: string,
+  id: string,
+  proposal: SpawnProposal,
+): boolean {
+  if (proposal.kind === "conversation") {
+    // Fire-and-forget: startConversation opens a herdr tab and waits up
+    // to 60s for the TUI's ready frame (pane-session.ts's
+    // READINESS_TIMEOUT_MS), and this boundary is synchronous by
+    // ADR-0010's own contract (write-then-reload, never awaited). A
+    // launch failure is logged on the proposing parent, the same
+    // disposition a malformed proposal gets; the child Conversation
+    // itself joins the module's views (or is recorded crashed) once its
+    // own launch settles, same as an operator-started one racing the
+    // snapshot stream. The module holds the id reserved until then, so
+    // a second adoptSpawnProposals call before this Conversation's own
+    // record hits disk cannot mint it again (combinedSpawnCounters).
+    void session.conversations
+      .start({
+        id,
+        title: proposal.title.trim(),
+        opening: proposal.body,
+        assign: proposal.assign,
+        spawnedBy: parentId,
+      })
+      .catch((err) => {
+        appendEvent(session.runsDir, parentId, {
+          at: new Date().toISOString(),
+          attempt: lastAttempt(session.runsDir, parentId),
+          kind: "spawn-rejected",
+          payload: {
+            title: proposal.title,
+            reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        });
+      });
+    return false;
+  }
+  writeSpawnTicket(session, parentId, id, proposal);
+  return true;
+}
+
+// The boundary's spawn landing (ADR-0010, extended by the Conversations
+// ADR, ADR-0029 and issue #150): every Pending spawn, and every Held spawn
+// the operator has adopted since, is checked again against the pool as the
+// boundary found it, and the ones that pass are written as ordinary ticket
+// files or started as Conversations, after which the pool's markers and
+// assignments reload so the drive loop schedules the ticket ones like any
+// other. Every aspect of that stays per proposal, never per batch.
+//
+// The caps were met when each proposal was taken (takeSpawnProposals): a
+// Pending spawn lands on the room it reserved, and an adopted Held spawn
+// passes both caps, the Adopt being the decision the caps exist to ask for.
+// A Pending spawn the pool can no longer take is dropped with the reason on
+// its parent's log. A held one's Adopt is refused instead: it stays held
+// with the reason on it (ADR-0029).
+//
+// Writing the files is the commit point. The Pending spawns' landing ids go
+// on disk first, so a crash after a ticket file but before its Pending spawn
+// is forgotten is settled at the next start (settleLandingSpawns) instead of
+// landing it twice. The Conversation host and an idle Adopt call this
+// directly (nothing else would reach this boundary for them otherwise).
+function adoptSpawnProposals(session: Session): void {
+  const store = session.spawnProposals;
+  const pending = store.pending();
+  const adopting = [...store.adopting].flatMap((id) => {
+    const held = store.getHeld(id);
+    return held ? [held] : [];
+  });
+  if (pending.length === 0 && adopting.length === 0) return;
+  // Membership validates against the markers as the boundary found them, so
+  // a proposal naming another proposal's future id drops as unknown: the
+  // agent never proposes ids and cannot know one.
+  const known = knownPoolIds(session);
+  const counters = combinedSpawnCounters(session);
   const log: string[] = [];
   let wrote = false;
-  // What each parent's adoption settled, recorded on its log once the
-  // blocks below have landed, so its spawn-adopted event names them.
+  const mint = (parentId: string): string => {
+    const n = (counters.get(parentId) ?? 0) + 1;
+    counters.set(parentId, n);
+    return `${parentId}-spawn-${n}`;
+  };
+  // What each landing settled, recorded on its parent's log once the blocks
+  // below have landed, so its spawn-adopted event names them.
   const settled: {
     parentId: string;
     adopted: string[];
-    heldId?: string;
-    heldNow: { id: string; proposal: SpawnProposal; reason: HeldSpawnReason }[];
+    fromPending?: string[];
+    fromHeld?: string;
     at: string;
   }[] = [];
   const blocking: { parentId: string; spawnId: string; blocks: string[] | "all" }[] = [];
+  const landOne = (parentId: string, spawnId: string, record: PendingSpawn | HeldSpawn) => {
+    if (landSpawn(session, parentId, spawnId, record.proposal)) {
+      wrote = true;
+      if (record.proposal.blocks !== undefined) {
+        blocking.push({ parentId, spawnId, blocks: record.proposal.blocks });
+      }
+    }
+    if (record.origin !== "conversation") session.spawnedThisRun += 1;
+  };
 
-  for (const { parentId, proposals, origin, heldId } of pending) {
-    const accepted: SpawnProposal[] = [];
-    for (const proposal of proposals) {
-      const reason = spawnProposalProblem(session, proposal, known);
-      if (reason === null) {
-        accepted.push(proposal);
-        continue;
-      }
-      appendEvent(session.runsDir, parentId, {
+  const landing = new Map<string, string>();
+  for (const entry of pending) {
+    const reason = spawnProposalProblem(session, entry.proposal, known);
+    if (reason === null) {
+      landing.set(entry.id, mint(entry.parentId));
+      continue;
+    }
+    store.removePending(entry.id);
+    appendEvent(session.runsDir, entry.parentId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, entry.parentId),
+      kind: "spawn-rejected",
+      payload: { title: entry.proposal.title, reason, fromPending: entry.id },
+    });
+    log.push(
+      `ticket ${entry.parentId}: pending spawn ${entry.id} ('${entry.proposal.title}') ` +
+        `rejected: ${reason}`,
+    );
+  }
+  store.markLanding(landing);
+  const byParent = new Map<string, { adopted: string[]; fromPending: string[] }>();
+  for (const entry of pending) {
+    const spawnId = landing.get(entry.id);
+    if (spawnId === undefined) continue;
+    landOne(entry.parentId, spawnId, entry);
+    const group = byParent.get(entry.parentId) ?? { adopted: [], fromPending: [] };
+    group.adopted.push(spawnId);
+    group.fromPending.push(entry.id);
+    byParent.set(entry.parentId, group);
+  }
+  store.landed([...landing.keys()]);
+  const at = new Date().toISOString();
+  for (const [parentId, { adopted, fromPending }] of byParent) {
+    settled.push({ parentId, adopted, fromPending, at });
+    log.push(`ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}`);
+  }
+
+  for (const held of adopting) {
+    const reason = spawnProposalProblem(session, held.proposal, known);
+    if (reason !== null) {
+      // An Adopt the pool can no longer take (it passed its check when
+      // queued, and the pool moved since) is refused, not lost: the
+      // proposal stays held with the reason on it (ADR-0029).
+      appendEvent(session.runsDir, held.parentId, {
         at: new Date().toISOString(),
-        attempt: lastAttempt(session.runsDir, parentId),
+        attempt: lastAttempt(session.runsDir, held.parentId),
         kind: "spawn-rejected",
-        payload: {
-          title: proposal.title,
-          reason,
-          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
-        },
+        payload: { title: held.proposal.title, reason, fromHeld: held.id },
       });
-      // A held spawn's Adopt the pool can no longer take (it passed its
-      // check when queued, and the pool moved since) is refused, not lost:
-      // the proposal stays held with the reason on it (ADR-0029).
-      if (heldId !== undefined) {
-        session.heldSpawns.refuseAdopt(heldId, reason);
-        log.push(
-          `ticket ${parentId}: adopting held spawn ${heldId} ('${proposal.title}') ` +
-            `refused: ${reason}; it stays held`,
-        );
-        continue;
-      }
+      store.refuseAdopt(held.id, reason);
       log.push(
-        `ticket ${parentId}: spawn proposal '${proposal.title}' ` +
-          `rejected: ${reason}`,
+        `ticket ${held.parentId}: adopting held spawn ${held.id} ('${held.proposal.title}') ` +
+          `refused: ${reason}; it stays held`,
       );
+      continue;
     }
-    // The per-attempt cap honors the first survivors, always. The per-run
-    // cap holds whatever the run has no room left for, but only for a
-    // Ticket's own outcome.spawn: a Conversation's spawn.json has none. What
-    // either cap holds keeps its place in the proposal's order. A held
-    // spawn the operator adopted passes both: the Adopt is the decision the
-    // caps exist to ask for.
-    let honored = accepted;
-    const held: { proposal: SpawnProposal; reason: HeldSpawnReason }[] = [];
-    if (heldId === undefined) {
-      honored = accepted.slice(0, caps.perAttempt);
-      const overAttempt = accepted.slice(caps.perAttempt);
-      if (origin !== "conversation") {
-        const room = Math.max(0, caps.perRun - session.spawnedThisRun);
-        for (const proposal of honored.slice(room)) {
-          held.push({ proposal, reason: "per-run" });
-        }
-        honored = honored.slice(0, room);
-      }
-      for (const proposal of overAttempt) {
-        held.push({ proposal, reason: "per-attempt" });
-      }
-    }
-    const adopted: string[] = [];
-    for (const proposal of honored) {
-      const n = (counters.get(parentId) ?? 0) + 1;
-      counters.set(parentId, n);
-      const id = `${parentId}-spawn-${n}`;
-      if (proposal.kind === "conversation") {
-        // Fire-and-forget: startConversation opens a herdr tab and waits up
-        // to 60s for the TUI's ready frame (pane-session.ts's
-        // READINESS_TIMEOUT_MS), and this boundary is synchronous by
-        // ADR-0010's own contract (write-then-reload, never awaited). A
-        // launch failure is logged on the proposing parent, the same
-        // disposition a malformed proposal gets; the child Conversation
-        // itself joins the module's views (or is recorded crashed) once its
-        // own launch settles, same as an operator-started one racing the
-        // snapshot stream. The module holds the id reserved until then, so
-        // a second adoptSpawnProposals call before this Conversation's own
-        // record hits disk cannot mint it again (combinedSpawnCounters).
-        void session.conversations
-          .start({
-            id,
-            title: proposal.title.trim(),
-            opening: proposal.body,
-            assign: proposal.assign,
-            spawnedBy: parentId,
-          })
-          .catch((err) => {
-            appendEvent(session.runsDir, parentId, {
-              at: new Date().toISOString(),
-              attempt: lastAttempt(session.runsDir, parentId),
-              kind: "spawn-rejected",
-              payload: {
-                title: proposal.title,
-                reason: `conversation start failed: ${err instanceof Error ? err.message : String(err)}`,
-              },
-            });
-          });
-      } else {
-        writeSpawnTicket(session, parentId, id, proposal);
-        wrote = true;
-        if (proposal.blocks !== undefined) {
-          blocking.push({ parentId, spawnId: id, blocks: proposal.blocks });
-        }
-      }
-      adopted.push(id);
-      if (origin !== "conversation") session.spawnedThisRun += 1;
-    }
-    // The held spawn leaves the Held spawns once the boundary has adopted
-    // it: until then a restart finds it still held, and a refused one stays.
-    if (heldId !== undefined && adopted.length > 0) session.heldSpawns.remove(heldId);
-    const at = new Date().toISOString();
-    const heldNow =
-      held.length > 0
-        ? session.heldSpawns.hold(
-            held.map(({ proposal, reason }) => ({ parentId, origin, proposal, reason, at })),
-          )
-        : [];
-    settled.push({ parentId, adopted, ...(heldId !== undefined ? { heldId } : {}), heldNow, at });
-    const heldPhrase =
-      `${heldNow.length} proposal${heldNow.length === 1 ? "" : "s"} held at ` +
-      `the caps (${capsPhrase}): ${heldNow.map((h) => h.id).join(", ")}`;
-    if (adopted.length > 0) {
-      log.push(
-        heldId !== undefined
-          ? `ticket ${parentId}: adopted held spawn ${heldId} as ${adopted.join(", ")}`
-          : `ticket ${parentId}: adopted spawn tickets ${adopted.join(", ")}` +
-              (heldNow.length > 0 ? `; ${heldPhrase}` : ""),
-      );
-    } else if (heldNow.length > 0) {
-      log.push(`ticket ${parentId}: ${heldPhrase}`);
-    }
+    const spawnId = mint(held.parentId);
+    landOne(held.parentId, spawnId, held);
+    // The held spawn leaves the Held spawns once it has landed: until then
+    // a restart finds it still held.
+    store.removeHeld(held.id);
+    settled.push({ parentId: held.parentId, adopted: [spawnId], fromHeld: held.id, at });
+    log.push(`ticket ${held.parentId}: adopted held spawn ${held.id} as ${spawnId}`);
   }
 
   if (wrote) {
@@ -9908,33 +10069,86 @@ function adoptSpawnProposals(session: Session): void {
     blocked.set(parentId, { ...blocked.get(parentId), [spawnId]: targets });
     log.push(`ticket ${parentId}: spawn ${spawnId} blocks ${targets.join(", ")}`);
   }
-  for (const { parentId, adopted, heldId, heldNow, at } of settled) {
-    if (adopted.length > 0) {
-      const blocks = blocked.get(parentId);
-      appendEvent(session.runsDir, parentId, {
-        at,
-        attempt: lastAttempt(session.runsDir, parentId),
-        kind: "spawn-adopted",
-        payload: {
-          adopted,
-          ...(heldId !== undefined ? { fromHeld: heldId } : {}),
-          ...(blocks ? { blocks } : {}),
-        },
-      });
-    }
-    if (heldNow.length > 0) {
-      appendEvent(session.runsDir, parentId, {
-        at,
-        attempt: lastAttempt(session.runsDir, parentId),
-        kind: "spawn-held",
-        payload: {
-          held: heldNow.map((h) => ({ id: h.id, title: h.proposal.title, reason: h.reason })),
-        },
-      });
-    }
+  for (const { parentId, adopted, fromPending, fromHeld, at } of settled) {
+    const blocks = blocked.get(parentId);
+    const mine = blocks
+      ? Object.fromEntries(Object.entries(blocks).filter(([id]) => adopted.includes(id)))
+      : {};
+    appendEvent(session.runsDir, parentId, {
+      at,
+      attempt: lastAttempt(session.runsDir, parentId),
+      kind: "spawn-adopted",
+      payload: {
+        adopted,
+        ...(fromPending !== undefined ? { fromPending } : {}),
+        ...(fromHeld !== undefined ? { fromHeld } : {}),
+        ...(Object.keys(mine).length > 0 ? { blocks: mine } : {}),
+      },
+    });
   }
   if (log.length > 0) {
     session.state = applyUpdate(session.state, { log });
+  }
+  refreshSpawnLedger(session);
+}
+
+// A crash between a Pending spawn's landing mark and its forgetting
+// (adoptSpawnProposals) leaves it pending with the id it was landing under.
+// At boot the pool says which way it went: a ticket (or Conversation) under
+// that id landed, and the Pending spawn is forgotten with its spawn-adopted
+// event; otherwise the mark is cleared and it lands at the next boundary,
+// as it would have.
+function settleLandingSpawns(session: Session): void {
+  const store = session.spawnProposals;
+  const log: string[] = [];
+  const conversations = knownConversationIds(session.poolDir);
+  for (const entry of store.pending()) {
+    if (entry.landing === undefined) continue;
+    const landed =
+      session.markers.some((m) => m.id === entry.landing) || conversations.has(entry.landing);
+    if (!landed) {
+      store.clearLanding(entry.id);
+      continue;
+    }
+    store.landed([entry.id]);
+    appendEvent(session.runsDir, entry.parentId, {
+      at: new Date().toISOString(),
+      attempt: lastAttempt(session.runsDir, entry.parentId),
+      kind: "spawn-adopted",
+      payload: { adopted: [entry.landing], fromPending: [entry.id] },
+    });
+    log.push(
+      `ticket ${entry.parentId}: pending spawn ${entry.id} had landed as ` +
+        `${entry.landing} before the restart`,
+    );
+  }
+  if (log.length > 0) session.state = applyUpdate(session.state, { log });
+}
+
+// The Spawn ledger (issue #150, spawn-ledger.ts), rewritten when what it
+// lists has changed since the last write: the pool's Tickets at their
+// current statuses, its Conversations, and every Pending and Held spawn.
+// Best-effort: a ledger that fails to write leaves the previous one, and an
+// agent reading a stale ledger is what `overlaps` and the operator are for.
+function refreshSpawnLedger(session: Session): void {
+  const text = renderSpawnLedger({
+    tickets: session.markers.map((m) => ({
+      id: m.id,
+      title: m.title,
+      status: session.state.tickets[m.id] ?? m.status,
+    })),
+    conversations: session.conversations
+      .views()
+      .map((c) => ({ id: c.id, title: c.title, status: c.status })),
+    pending: session.spawnProposals.pending(),
+    held: session.spawnProposals.held(),
+  });
+  if (text === session.spawnLedger) return;
+  try {
+    writeSpawnLedger(session.runsDir, text);
+    session.spawnLedger = text;
+  } catch {
+    // Left for the next change to try again.
   }
 }
 
@@ -9943,34 +10157,26 @@ function adoptSpawnProposals(session: Session): void {
 // proposal (a blocker gone from the pool, a harness no longer known) or when
 // the pool has finished and its store is closed, since the drive that would
 // schedule the new ticket could not record it; a Restart reopens the pool
-// with the spawn still held. Otherwise it queues for the boundary like any
-// proposal, carrying its held id past the caps: at once when the engine is
-// idle, the way a Conversation's spawn.json is adopted, and at the next
-// boundary when a drive is in flight. A boundary that finds the pool has
-// moved since and refuses it leaves it held with the reason (adoptError),
-// which the next Adopt clears.
+// with the spawn still held. Otherwise it queues for the boundary, past the
+// caps: at once when the engine is idle, the way a Conversation's
+// spawn.json is adopted, and at the next boundary when a drive is in
+// flight. A boundary that finds the pool has moved since and refuses it
+// leaves it held with the reason (adoptError), which the next Adopt clears.
+// An overlaps mark is not checked again: the Adopt is the operator's answer
+// to it.
 function adoptHeldSpawn(session: Session, id: string): void {
-  const held = session.heldSpawns.get(id);
+  const held = session.spawnProposals.getHeld(id);
   if (!held) throw new Error(`no held spawn ${id}`);
-  if (session.heldSpawns.adopting.has(id)) return;
+  if (session.spawnProposals.adopting.has(id)) return;
   if (!session.storeOpen) {
     throw new Error(
       `held spawn ${id} cannot be adopted: the pool has finished; Restart the ` +
         "Console to adopt it",
     );
   }
-  const problem = spawnProposalProblem(session, held.proposal, {
-    ids: new Set(session.markers.map((m) => m.id)),
-    conversations: knownConversationIds(session.poolDir),
-  });
+  const problem = spawnProposalProblem(session, held.proposal, knownPoolIds(session));
   if (problem !== null) throw new Error(`held spawn ${id} cannot be adopted: ${problem}`);
-  session.heldSpawns.beginAdopt(id);
-  session.pendingSpawns.push({
-    parentId: held.parentId,
-    proposals: [held.proposal],
-    origin: held.origin,
-    heldId: id,
-  });
+  session.spawnProposals.beginAdopt(id);
   if (!session.driving) {
     adoptSpawnProposals(session);
     kickProcessing(session);
@@ -9983,12 +10189,12 @@ function adoptHeldSpawn(session: Session, id: string): void {
 // discard on the parent's log. One an Adopt has already queued is past
 // discarding: the boundary is about to write it.
 function discardHeldSpawn(session: Session, id: string): void {
-  const held = session.heldSpawns.get(id);
+  const held = session.spawnProposals.getHeld(id);
   if (!held) throw new Error(`no held spawn ${id}`);
-  if (session.heldSpawns.adopting.has(id)) {
+  if (session.spawnProposals.adopting.has(id)) {
     throw new Error(`held spawn ${id} is already being adopted`);
   }
-  session.heldSpawns.remove(id);
+  session.spawnProposals.removeHeld(id);
   appendEvent(session.runsDir, held.parentId, {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, held.parentId),
@@ -9998,6 +10204,61 @@ function discardHeldSpawn(session: Session, id: string): void {
   session.state = applyUpdate(session.state, {
     log: [
       `ticket ${held.parentId}: held spawn ${id} ('${held.proposal.title}') ` +
+        "discarded by the operator",
+    ],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+// Why a Pending spawn cannot be held or discarded: it is not pending. The
+// boundary lands pending spawns synchronously, so an operator's action that
+// arrives after it finds the spawn gone rather than half landed.
+function notPending(session: Session, id: string): Error {
+  return new Error(
+    session.spawnProposals.getHeld(id)
+      ? `spawn ${id} is already held`
+      : `no pending spawn ${id}: it has landed or been discarded`,
+  );
+}
+
+// The operator's Hold of a Pending spawn (issue #150): kept back from the
+// boundary as a Held spawn, held by the operator, under the same id, so the
+// Spawn ledger's name for it still holds. Its run room is free again until
+// an Adopt lands it.
+function holdPendingSpawn(session: Session, id: string): void {
+  const pending = session.spawnProposals.getPending(id);
+  if (!pending) throw notPending(session, id);
+  const held = session.spawnProposals.holdPending(id, new Date().toISOString())!;
+  appendEvent(session.runsDir, held.parentId, {
+    at: held.at,
+    attempt: lastAttempt(session.runsDir, held.parentId),
+    kind: "spawn-held",
+    payload: { held: [heldEventEntry(held)] },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${held.parentId}: pending spawn ${id} ('${held.proposal.title}') ` +
+        "held by the operator",
+    ],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+// The operator's Discard of a Pending spawn (issue #150): gone for good, the
+// discard on the parent's log, its run room free again.
+function discardPendingSpawn(session: Session, id: string): void {
+  const pending = session.spawnProposals.getPending(id);
+  if (!pending) throw notPending(session, id);
+  session.spawnProposals.removePending(id);
+  appendEvent(session.runsDir, pending.parentId, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, pending.parentId),
+    kind: "spawn-discarded",
+    payload: { id, title: pending.proposal.title, pending: true },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `ticket ${pending.parentId}: pending spawn ${id} ('${pending.proposal.title}') ` +
         "discarded by the operator",
     ],
   });
@@ -10041,7 +10302,7 @@ function recoverTruncatedSpawns(session: Session): void {
     const truncated = event.payload.truncated;
     if (typeof truncated !== "number" || truncated <= 0) continue;
     const key = `${parentId}@${event.at}`;
-    if (session.heldSpawns.wasRecovered(key)) continue;
+    if (session.spawnProposals.wasRecovered(key)) continue;
 
     const rejected = events
       .slice((adoptions.at(-2) ?? -1) + 1, last)
@@ -10054,7 +10315,7 @@ function recoverTruncatedSpawns(session: Session): void {
       (title) => outcome.spawn!.filter((proposal) => proposal.title === title).length > 1,
     );
     if (twin !== undefined) {
-      session.heldSpawns.recover(key, []);
+      session.spawnProposals.recover(key, []);
       log.push(
         `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
           "truncated before held spawns existed could not be recovered: its " +
@@ -10071,7 +10332,7 @@ function recoverTruncatedSpawns(session: Session): void {
     });
     const adopted = Array.isArray(event.payload.adopted) ? event.payload.adopted.length : 0;
     if (survivors.length !== adopted + truncated) {
-      session.heldSpawns.recover(key, []);
+      session.spawnProposals.recover(key, []);
       log.push(
         `ticket ${parentId}: ${truncated} spawn proposal${truncated === 1 ? "" : "s"} ` +
           "truncated before held spawns existed could not be matched to its " +
@@ -10080,7 +10341,7 @@ function recoverTruncatedSpawns(session: Session): void {
       continue;
     }
     const first = survivors.length - truncated;
-    const held = session.heldSpawns.recover(
+    const held = session.spawnProposals.recover(
       key,
       survivors.slice(first).map((proposal, i) => ({
         parentId,
