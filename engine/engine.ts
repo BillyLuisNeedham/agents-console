@@ -4586,6 +4586,7 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
       issuePath: marker.file,
       outcomePath,
       attempt,
+      ledgerPath: spawnLedgerPath(session.runsDir),
     }),
   });
   // Registered last: the registration emits, and the snapshot it sends must
@@ -9273,6 +9274,7 @@ export async function enlistTicket(
     issuePath,
     outcomePath,
     branch: usedBranch,
+    ledgerPath: spawnLedgerPath(session.runsDir),
   });
 
   // The claim: report the agent identity, relabel the operator's tab and type
@@ -10519,6 +10521,7 @@ async function runTicket(
     upstream,
     outcomePath,
     spawnCaps: spawnCapsOf(snapshot.config),
+    ledgerPath: spawnLedgerPath(env.runsDir),
   });
 
   // The attempt itself is the Attempt-run module's (ADR-0014): spawn,

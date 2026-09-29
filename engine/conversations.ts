@@ -80,6 +80,7 @@ import {
   type PaneTailer,
 } from "./attempt-run.ts";
 import { buildConversationTeaching } from "./prompt.ts";
+import { spawnLedgerPath } from "./spawn-ledger.ts";
 import {
   conversationEndedNoticeText,
   diffStatSummary,
@@ -1274,6 +1275,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       { harness, model, ...(effort ? { effort } : {}), drivers },
       host.config().defaults,
       spawnCapsOf(host.config()).perAttempt,
+      spawnLedgerPath(env.runsDir),
     );
     const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
 
@@ -1509,6 +1511,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           { harness, model: "", drivers: DEFAULT_DRIVERS },
           host.config().defaults,
           spawnCapsOf(host.config()).perAttempt,
+          spawnLedgerPath(env.runsDir),
         ),
       });
       if (opening.trim()) {
