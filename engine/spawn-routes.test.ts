@@ -80,6 +80,7 @@ describe("held spawns on the snapshot", () => {
         blocks: null,
         overlaps: [],
         reason: "per-attempt",
+        unknownOverlaps: [],
         at: expect.any(String),
         adopting: false,
       },

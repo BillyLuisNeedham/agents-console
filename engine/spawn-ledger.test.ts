@@ -64,5 +64,9 @@ describe("the Spawn ledger (issue #150)", () => {
     expect(heldReasonText("per-run")).toBe("per-run cap");
     expect(heldReasonText("overlaps", ["02"])).toBe("overlaps 02");
     expect(heldReasonText("operator")).toBe("held by operator");
+    expect(heldReasonText("overlaps", ["02", "99"], ["99"])).toBe("overlaps 02, 99 (99 not in the pool)");
+    expect(heldReasonText("refused", [], [], "blocks names done tickets: 02")).toBe(
+      "refused at landing: blocks names done tickets: 02",
+    );
   });
 });

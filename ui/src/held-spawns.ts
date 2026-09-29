@@ -20,6 +20,7 @@
  */
 
 import { h } from "./dom";
+import { REFUSED_AT_LANDING } from "./project";
 import type {
   HeldSpawnResponse,
   HeldSpawnRow,
@@ -278,11 +279,12 @@ export class HeldSpawnsStore {
     state: SpawnState,
   ): (HTMLElement | null)[] {
     // This tab's own refusal is the newer news; the engine's is from a
-    // boundary that refused an Adopt queued earlier.
+    // boundary that refused an Adopt queued earlier, or refused to land the
+    // spawn while it was pending (issue #150).
     const failure =
       this.failures.get(row.id) ??
       ("adoptError" in row && row.adoptError && !row.adopting
-        ? `last Adopt refused: ${row.adoptError}`
+        ? `${row.reason === REFUSED_AT_LANDING ? "the boundary could not land it" : "last Adopt refused"}: ${row.adoptError}`
         : null);
     return [
       this.renderActions(row, state),

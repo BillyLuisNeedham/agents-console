@@ -132,6 +132,7 @@ describe("held spawns in the spawn proposals", () => {
         blocks: "all",
         overlaps: [],
         reason: "per-run",
+        unknownOverlaps: [],
         at: "t1",
         adopting: false,
       },
@@ -146,6 +147,7 @@ describe("held spawns in the spawn proposals", () => {
         blocks: null,
         overlaps: [],
         reason: "per-attempt",
+        unknownOverlaps: [],
         at: "t2",
         adopting: true,
       },
@@ -231,8 +233,50 @@ describe("pending spawns in the spawn proposals", () => {
     expect(store.isProposalId("proposal-1")).toBe(true);
     expect(store.isProposalId("proposal-2")).toBe(true);
     expect(store.isProposalId("proposal-3")).toBe(false);
-    expect(store.isProposalId("held-2")).toBe(true);
+    // No held-N was ever issued in this pool.
+    expect(store.isProposalId("held-2")).toBe(false);
     expect(store.isProposalId("07")).toBe(false);
+  });
+
+  // A pool that held spawns before issue #150 issued held-1..held-N; the
+  // ids issued since are proposal-N, and neither name stands for the other.
+  it("tells the held-N ids issued before issue #150 from the proposal-N ids after", () => {
+    const dir = runsDir();
+    writeFileSync(
+      join(dir, "held-spawns.json"),
+      JSON.stringify({ seq: 2, held: [], recovered: [] }),
+    );
+    const store = loadSpawnProposals(dir);
+    store.take([taken("A")]);
+    const reloaded = loadSpawnProposals(dir);
+    for (const s of [store, reloaded]) {
+      expect(s.isProposalId("held-1")).toBe(true);
+      expect(s.isProposalId("held-2")).toBe(true);
+      expect(s.isProposalId("held-3")).toBe(false);
+      expect(s.isProposalId("proposal-2")).toBe(false);
+      expect(s.isProposalId("proposal-3")).toBe(true);
+    }
+  });
+
+  // Issue #150 review: the boundary refusing a Pending spawn holds it, the
+  // reason kept, rather than dropping it.
+  it("holds a Pending spawn the boundary refused, under the same id, with the reason", () => {
+    const dir = runsDir();
+    const store = loadSpawnProposals(dir);
+    store.take([taken("A")]);
+    expect(store.holdRefused("proposal-1", "blocks names done tickets: 02", "t2")).toMatchObject({
+      id: "proposal-1",
+      reason: "refused",
+      adoptError: "blocks names done tickets: 02",
+      at: "t2",
+    });
+    expect(store.pending()).toEqual([]);
+    expect(loadSpawnProposals(dir).heldViews()[0]).toMatchObject({
+      id: "proposal-1",
+      reason: "refused",
+      adoptError: "blocks names done tickets: 02",
+    });
+    expect(store.holdRefused("proposal-1", "again", "t3")).toBeNull();
   });
 
   // A pool that held spawns before issue #150 has no pending list.

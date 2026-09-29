@@ -310,6 +310,18 @@ describe("HeldSpawnsStore", () => {
   });
 
   // The Detail of a faded card offers the list's own decisions.
+  it("says why the boundary could not land a spawn it held for that", () => {
+    const rig = harness();
+    const { root, paint } = mount(rig.store, () => [
+      row({ reason: "refused at landing", adoptError: "blocks names done tickets: 02" }),
+    ]);
+    rig.store.open();
+    paint();
+    expect(root.querySelector(".held-spawn-failure")?.textContent).toBe(
+      "the boundary could not land it: blocks names done tickets: 02",
+    );
+  });
+
   it("draws one spawn's decisions for the Detail, sharing the list's state", () => {
     const rig = harness();
     void rig.store.hold("proposal-3");

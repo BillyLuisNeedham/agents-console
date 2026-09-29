@@ -1574,6 +1574,21 @@ describe("projectTimeline", () => {
         event(1, "spawn-held", {
           held: [{ id: "proposal-2", title: "Write the docs", reason: "operator" }],
         }),
+        event(1, "spawn-held", {
+          held: [
+            {
+              id: "proposal-6",
+              title: "Late",
+              reason: "refused",
+              refusal: "blocks names done tickets: 04",
+            },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [
+            { id: "proposal-7", title: "Maybe", reason: "overlaps", overlaps: ["99"], unknownOverlaps: ["99"] },
+          ],
+        }),
         event(1, "spawn-adopted", {
           adopted: ["03-spawn-1"],
           fromPending: ["proposal-1"],
@@ -1592,6 +1607,8 @@ describe("projectTimeline", () => {
       "2 spawns pending for the next boundary: 'Fix the login test', 'Write the docs'",
       "1 spawn held (overlaps 02, proposal-1): 'Again'",
       "1 spawn held (held by operator): 'Write the docs'",
+      "1 spawn held (refused at landing: blocks names done tickets: 04): 'Late'",
+      "1 spawn held (overlaps 99 (99 not in the pool)): 'Maybe'",
       "landed 03-spawn-1 from proposal-1 · 03-spawn-1 blocks 04",
       "pending spawn 'Stale' discarded",
       "pending spawn 'Late' rejected at the boundary: blockedBy names tickets outside the pool: 09",
@@ -3327,6 +3344,7 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     blockedBy: [],
     blocks: null,
     overlaps: [],
+    unknownOverlaps: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,
@@ -3415,6 +3433,25 @@ describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
     );
     expect(overlapping?.reason).toBe("overlaps 02, proposal-1");
     expect(operator?.reason).toBe("held by operator");
+  });
+
+  it("notes the overlaps ids the pool never knew, and a spawn refused at landing", () => {
+    const [unknown, refused] = projectHeldSpawns(
+      [
+        heldSpawn({ reason: "overlaps", overlaps: ["02", "99"], unknownOverlaps: ["99"] }),
+        heldSpawn({
+          id: "proposal-5",
+          reason: "refused",
+          adoptError: "blocks names done tickets, which have no next attempt to hold: 02",
+        }),
+      ],
+      NOW,
+    );
+    expect(unknown?.reason).toBe("overlaps 02, 99 (99 not in the pool)");
+    expect(refused?.reason).toBe("refused at landing");
+    expect(refused?.adoptError).toBe(
+      "blocks names done tickets, which have no next attempt to hold: 02",
+    );
   });
 });
 

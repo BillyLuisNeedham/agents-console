@@ -44,16 +44,26 @@ function summary(body: string): string {
 }
 
 /** Why a Held spawn waits, in the words the Console uses. */
-export function heldReasonText(reason: HeldSpawnReason, overlaps: string[] = []): string {
+export function heldReasonText(
+  reason: HeldSpawnReason,
+  overlaps: string[] = [],
+  unknown: string[] = [],
+  refusal?: string,
+): string {
   switch (reason) {
     case "per-attempt":
       return "per-attempt cap";
     case "per-run":
       return "per-run cap";
     case "overlaps":
-      return `overlaps ${overlaps.join(", ")}`;
+      return (
+        `overlaps ${overlaps.join(", ")}` +
+        (unknown.length > 0 ? ` (${unknown.join(", ")} not in the pool)` : "")
+      );
     case "operator":
       return "held by operator";
+    case "refused":
+      return refusal ? `refused at landing: ${refusal}` : "refused at landing";
   }
 }
 
@@ -116,7 +126,7 @@ export function renderSpawnLedger(input: SpawnLedgerInput): string {
         h.id,
         cell(h.parentId),
         kind(h),
-        cell(heldReasonText(h.reason, h.proposal.overlaps)),
+        cell(heldReasonText(h.reason, h.proposal.overlaps, h.unknownOverlaps, h.adoptError)),
         cell(h.proposal.title),
         summary(h.proposal.body),
       ]),

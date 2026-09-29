@@ -151,6 +151,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
       blockedBy: [],
       blocks: i === 0 ? ("all" as const) : null,
       overlaps: i === 2 ? ["t-2", "proposal-1"] : [],
+      unknownOverlaps: [],
       reason:
         i === 2
           ? ("overlaps" as const)

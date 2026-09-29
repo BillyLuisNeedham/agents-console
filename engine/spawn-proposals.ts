@@ -33,10 +33,11 @@ import type { SpawnProposal } from "./engine.ts";
 /**
  * Why a proposal is held: which cap had no room (the attempt's, or a
  * spawn.json's, own; or the run's), the proposing agent's own `overlaps`
- * mark (the ids ride on the proposal), or the operator's Hold of a Pending
- * spawn.
+ * mark (the ids ride on the proposal), the operator's Hold of a Pending
+ * spawn, or a Pending spawn the boundary refused to land because the pool
+ * moved after it was taken (the reason rides as `adoptError`).
  */
-export type HeldSpawnReason = "per-attempt" | "per-run" | "overlaps" | "operator";
+export type HeldSpawnReason = "per-attempt" | "per-run" | "overlaps" | "operator" | "refused";
 
 interface SpawnProposalRecord {
   id: string;
@@ -61,8 +62,13 @@ export interface HeldSpawn extends SpawnProposalRecord {
   reason: HeldSpawnReason;
   /** When it was held (for a recovered one, when the cap truncated it). */
   at: string;
-  /** Why the boundary refused its last Adopt, until the next Adopt. */
+  /** Why the boundary refused to land it: its last Adopt, or, held for
+   *  "refused", its landing as a Pending spawn. Cleared by the next Adopt. */
   adoptError?: string;
+  /** Held for "overlaps": the ids it named that neither the pool nor any
+   *  proposal of it ever had, kept so the operator sees the mark may be
+   *  stale or mistaken. Absent when every id was known. */
+  unknownOverlaps?: string[];
 }
 
 /** A proposal as the Console shows it, pending or held. */
@@ -93,14 +99,22 @@ export interface HeldSpawnView extends SpawnProposalViewBase {
   /** An Adopt is on its way to the boundary: the spawn is still held until
    *  the engine writes it, so a restart before then loses nothing. */
   adopting: boolean;
-  /** Why the boundary refused the last Adopt (a blocker gone, a blocks
-   *  target finished while the Adopt waited): the spawn stayed held.
-   *  Absent until a refusal, and cleared by the next Adopt. */
+  /** Why the boundary refused to land it (a blocker gone, a blocks target
+   *  finished while it waited): the spawn stayed held, or, for "refused",
+   *  was held instead of landing. Absent until a refusal, and cleared by
+   *  the next Adopt. */
   adoptError?: string;
+  /** The ids an "overlaps" hold named that the pool never knew; empty when
+   *  every one was known. */
+  unknownOverlaps: string[];
 }
 
 interface SpawnProposalsFile {
   seq: number;
+  /** The counter's value when ids became `proposal-N` (issue #150): every
+   *  id at or below it was issued as `held-N`, every one above it as
+   *  `proposal-N`. A file from before has none, and takes its seq. */
+  proposalFrom: number;
   pending: PendingSpawn[];
   held: HeldSpawn[];
   recovered: string[];
@@ -113,6 +127,8 @@ export interface TakenProposal {
   proposal: SpawnProposal;
   at: string;
   held?: HeldSpawnReason;
+  /** With `held: "overlaps"`, the ids named that the pool never knew. */
+  unknownOverlaps?: string[];
 }
 
 export interface SpawnProposals {
@@ -131,7 +147,10 @@ export interface SpawnProposals {
    *  same id, in one write. Null when it is not pending (landed, discarded,
    *  or never). */
   holdPending(id: string, at: string): HeldSpawn | null;
-  /** Drop a Pending spawn (discarded, or rejected at the boundary). */
+  /** The boundary could not land a Pending spawn: held for "refused" under
+   *  the same id, the reason kept as its adoptError, in one write. */
+  holdRefused(id: string, reason: string, at: string): HeldSpawn | null;
+  /** Drop a Pending spawn (discarded by the operator). */
   removePending(id: string): PendingSpawn | null;
   /** Record the ids the boundary is about to land these Pending spawns
    *  under, in one write before any ticket file is. */
@@ -142,8 +161,9 @@ export interface SpawnProposals {
   landed(ids: string[]): void;
   /** Drop one held spawn (adopted or discarded), written before this returns. */
   removeHeld(id: string): HeldSpawn | null;
-  /** Whether this id has ever named a proposal of this pool: pending, held,
-   *  or since landed or discarded. An `overlaps` mark may name any of them. */
+  /** Whether this id was ever issued to a proposal of this pool: pending,
+   *  held, or since landed or discarded. An `overlaps` mark may name any of
+   *  them. */
   isProposalId(id: string): boolean;
   /** Whether boot has already recovered the truncation under this key. */
   wasRecovered(key: string): boolean;
@@ -165,7 +185,7 @@ export function spawnProposalsPath(runsDir: string): string {
   return join(runsDir, "held-spawns.json");
 }
 
-const PROPOSAL_ID = /^(?:proposal|held)-(\d+)$/;
+const PROPOSAL_ID = /^(proposal|held)-(\d+)$/;
 
 function viewBase(record: SpawnProposalRecord & { at: string }): SpawnProposalViewBase {
   return {
@@ -190,12 +210,14 @@ function viewBase(record: SpawnProposalRecord & { at: string }): SpawnProposalVi
  */
 export function loadSpawnProposals(runsDir: string): SpawnProposals {
   const path = spawnProposalsPath(runsDir);
-  let file: SpawnProposalsFile = { seq: 0, pending: [], held: [], recovered: [] };
+  let file: SpawnProposalsFile = { seq: 0, proposalFrom: 0, pending: [], held: [], recovered: [] };
   if (existsSync(path)) {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<SpawnProposalsFile>;
+      const seq = typeof parsed.seq === "number" ? parsed.seq : 0;
       file = {
-        seq: typeof parsed.seq === "number" ? parsed.seq : 0,
+        seq,
+        proposalFrom: typeof parsed.proposalFrom === "number" ? parsed.proposalFrom : seq,
         pending: Array.isArray(parsed.pending) ? parsed.pending : [],
         held: Array.isArray(parsed.held) ? parsed.held : [],
         recovered: Array.isArray(parsed.recovered) ? parsed.recovered : [],
@@ -226,10 +248,17 @@ export function loadSpawnProposals(runsDir: string): SpawnProposals {
     take: (entries) => {
       const pending: PendingSpawn[] = [];
       const held: HeldSpawn[] = [];
-      for (const { held: reason, ...entry } of entries) {
+      for (const { held: reason, unknownOverlaps, ...entry } of entries) {
         const id = nextId();
         if (reason === undefined) pending.push({ id, ...entry });
-        else held.push({ id, ...entry, reason });
+        else {
+          held.push({
+            id,
+            ...entry,
+            reason,
+            ...(unknownOverlaps && unknownOverlaps.length > 0 ? { unknownOverlaps } : {}),
+          });
+        }
       }
       file.pending.push(...pending);
       file.held.push(...held);
@@ -253,6 +282,23 @@ export function loadSpawnProposals(runsDir: string): SpawnProposals {
         proposal: found.proposal,
         reason: "operator",
         at,
+      };
+      file.held.push(held);
+      write();
+      return held;
+    },
+    holdRefused: (id, reason, at) => {
+      const found = file.pending.find((p) => p.id === id);
+      if (!found) return null;
+      file.pending = file.pending.filter((p) => p.id !== id);
+      const held: HeldSpawn = {
+        id,
+        parentId: found.parentId,
+        origin: found.origin,
+        proposal: found.proposal,
+        reason: "refused",
+        at,
+        adoptError: reason,
       };
       file.held.push(held);
       write();
@@ -294,7 +340,11 @@ export function loadSpawnProposals(runsDir: string): SpawnProposals {
     },
     isProposalId: (id) => {
       const match = PROPOSAL_ID.exec(id);
-      return match !== null && Number(match[1]) >= 1 && Number(match[1]) <= file.seq;
+      if (match === null) return false;
+      const n = Number(match[2]);
+      return match[1] === "held"
+        ? n >= 1 && n <= file.proposalFrom
+        : n > file.proposalFrom && n <= file.seq;
     },
     wasRecovered: (key) => file.recovered.includes(key),
     recover: (key, entries) => {
@@ -324,6 +374,7 @@ export function loadSpawnProposals(runsDir: string): SpawnProposals {
       file.held.map((held) => ({
         ...viewBase(held),
         reason: held.reason,
+        unknownOverlaps: held.unknownOverlaps ?? [],
         adopting: adopting.has(held.id),
         ...(held.adoptError !== undefined ? { adoptError: held.adoptError } : {}),
       })),

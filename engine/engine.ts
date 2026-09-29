@@ -2183,7 +2183,11 @@ async function closeDrive(
     // An interrupt can outlive its ticket's done: a conflicted merge leaves
     // the ticket done and the interrupt pending.
     phase = "quiescent";
-  } else if (outside.length > 0 || session.continuedGrades.length > 0) {
+  } else if (
+    outside.length > 0 ||
+    session.continuedGrades.length > 0 ||
+    spawnsAwaitBoundary(session)
+  ) {
     phase = "quiescent";
   } else if (pending.length === 0) {
     phase = "done";
@@ -2199,7 +2203,12 @@ async function closeDrive(
             ? `pool quiescent: interrupts pending for ${session.state.interrupts
                 .map((i) => i.ticketId)
                 .join(", ")}`
-            : `pool quiescent: waiting on ${outside.join(", ") || "a continued attempt's grading"}`
+            : `pool quiescent: waiting on ${
+                outside.join(", ") ||
+                (session.continuedGrades.length > 0
+                  ? "a continued attempt's grading"
+                  : "spawns to land")
+              }`
           : `pool stalled: ${pending.join(", ")} cannot run`,
     ],
   });
@@ -2207,13 +2216,29 @@ async function closeDrive(
   // retries the run waits quiescent for a human, the store open, instead of
   // closing it or reporting a phase the pending interrupt contradicts.
   if (!(await persistWithRetry(session))) phase = "quiescent";
+  // A proposal taken, or a Held spawn adopted, while this drive was closing
+  // (a Conversation's spawn.json, an Adopt from the Console) waits for a
+  // boundary this drive will not reach: the store stays open for it.
+  if (spawnsAwaitBoundary(session)) phase = "quiescent";
   emit(phase);
   if (phase !== "quiescent") closeStore(session);
   settleDrive(session, phase, null);
   // A Continued attempt that ended done while this drive was closing kicked
   // a drive that was still in flight, which does nothing: its grading would
   // wait for an unrelated kick, so the drive that closes starts the next.
-  if (session.continuedGrades.length > 0) kickProcessing(session);
+  // The same holds for spawns waiting to land (issue #150).
+  if (session.continuedGrades.length > 0 || spawnsAwaitBoundary(session)) {
+    kickProcessing(session);
+  }
+}
+
+// Spawns waiting for a boundary to land them (issue #150): Pending spawns,
+// and Held spawns an Adopt has queued. A drive that closes with any leaves
+// the next drive to land them.
+function spawnsAwaitBoundary(session: Session): boolean {
+  return (
+    session.spawnProposals.pending().length > 0 || session.spawnProposals.adopting.size > 0
+  );
 }
 
 const ENGINE_BRIEF_HEADING = "## Brief, written by the engine";
@@ -9735,26 +9760,24 @@ function knownPoolIds(session: Session): KnownPoolIds {
   };
 }
 
-// Why a proposal's `overlaps` mark (issue #150) cannot stand, or null when
-// it can: every id must be something the agent could have read in the Spawn
-// ledger, a Ticket, a Conversation, or a proposal of this pool (pending,
-// held, or one since landed or discarded, since the ledger the agent read
-// may be older than the pool). Checked when the proposal is taken, like
-// blocks, and never again: once held, the operator decides it.
-function overlapsProblem(
+// The ids a proposal's `overlaps` mark (issue #150) names that the agent
+// could not have read in the Spawn ledger: neither a Ticket, a Conversation,
+// nor any proposal this pool ever issued (pending, held, or since landed or
+// discarded, since the ledger the agent read may be older than the pool).
+// They never reject the proposal: the agent flagged a possible duplicate,
+// so it is held for the operator either way, the unknown ids noted beside
+// the mark in case it is stale or mistaken.
+function unknownOverlaps(
   session: Session,
   proposal: SpawnProposal,
   known: KnownPoolIds,
-): string | null {
-  const unknown = (proposal.overlaps ?? []).filter(
+): string[] {
+  return (proposal.overlaps ?? []).filter(
     (id) =>
       !known.ids.has(id) &&
       !known.conversations.has(id) &&
       !session.spawnProposals.isProposalId(id),
   );
-  return unknown.length > 0
-    ? `overlaps names ids neither in the pool nor in the Spawn ledger: ${unknown.join(", ")}`
-    : null;
 }
 
 // The per-run room Pending spawns hold (issue #150): a Ticket-origin Pending
@@ -9771,7 +9794,7 @@ function pendingRunReservations(session: Session): number {
 // finds every one of them. A proposal the pool would reject is dropped with
 // the reason on the parent's log (a spawn-rejected event), the parent's own
 // result standing. One the agent marked as overlapping work in the pool is
-// held for the operator. The rest meet the caps: the per-attempt cap takes
+// held for the operator, whatever ids the mark names. The rest meet the caps: the per-attempt cap takes
 // the first ones in order, and the per-run cap, for a Ticket's own
 // outcome.spawn only (a Conversation's spawn.json has none), takes what the
 // run has room for once this run's landed Spawns and the Pending spawns
@@ -9797,9 +9820,7 @@ function takeSpawnProposals(
       ? Number.POSITIVE_INFINITY
       : Math.max(0, caps.perRun - session.spawnedThisRun - pendingRunReservations(session));
   for (const proposal of proposals) {
-    const reason =
-      spawnProposalProblem(session, proposal, known) ??
-      overlapsProblem(session, proposal, known);
+    const reason = spawnProposalProblem(session, proposal, known);
     if (reason !== null) {
       appendEvent(session.runsDir, parentId, {
         at,
@@ -9812,7 +9833,11 @@ function takeSpawnProposals(
     }
     const entry = { parentId, origin, proposal, at };
     if ((proposal.overlaps ?? []).length > 0) {
-      taken.push({ ...entry, held: "overlaps" });
+      taken.push({
+        ...entry,
+        held: "overlaps",
+        unknownOverlaps: unknownOverlaps(session, proposal, known),
+      });
     } else if (attemptRoom <= 0) {
       taken.push({ ...entry, held: "per-attempt" });
     } else if (runRoom <= 0) {
@@ -9856,7 +9881,10 @@ function takeSpawnProposals(
     for (const h of held.filter((h) => h.reason === "overlaps")) {
       log.push(
         `ticket ${parentId}: ${h.id} ('${h.proposal.title}') held: it overlaps ` +
-          (h.proposal.overlaps ?? []).join(", "),
+          (h.proposal.overlaps ?? []).join(", ") +
+          (h.unknownOverlaps
+            ? ` (${h.unknownOverlaps.join(", ")} not in the pool or the Spawn ledger)`
+            : ""),
       );
     }
   }
@@ -9866,13 +9894,18 @@ function takeSpawnProposals(
 }
 
 // One held spawn as a spawn-held event names it: its id, title and reason,
-// and the ids an overlaps hold named.
+// the ids an overlaps hold named (and which of them the pool never knew),
+// and why the boundary refused to land a "refused" one.
 function heldEventEntry(held: HeldSpawn): Record<string, unknown> {
   return {
     id: held.id,
     title: held.proposal.title,
     reason: held.reason,
     ...(held.reason === "overlaps" ? { overlaps: held.proposal.overlaps ?? [] } : {}),
+    ...(held.unknownOverlaps ? { unknownOverlaps: held.unknownOverlaps } : {}),
+    ...(held.reason === "refused" && held.adoptError !== undefined
+      ? { refusal: held.adoptError }
+      : {}),
   };
 }
 
@@ -9932,9 +9965,10 @@ function landSpawn(
 // The caps were met when each proposal was taken (takeSpawnProposals): a
 // Pending spawn lands on the room it reserved, and an adopted Held spawn
 // passes both caps, the Adopt being the decision the caps exist to ask for.
-// A Pending spawn the pool can no longer take is dropped with the reason on
-// its parent's log. A held one's Adopt is refused instead: it stays held
-// with the reason on it (ADR-0029).
+// A Pending spawn the pool can no longer take (a blocks target finished
+// after it was taken) is held for "refused" instead, the reason on it, so
+// the operator sees why and decides. A held one's Adopt is refused the same
+// way: it stays held with the reason on it (ADR-0029).
 //
 // Writing the files is the commit point. The Pending spawns' landing ids go
 // on disk first, so a crash after a ticket file but before its Pending spawn
@@ -9988,16 +10022,17 @@ function adoptSpawnProposals(session: Session): void {
       landing.set(entry.id, mint(entry.parentId));
       continue;
     }
-    store.removePending(entry.id);
+    const held = store.holdRefused(entry.id, reason, new Date().toISOString());
+    if (!held) continue;
     appendEvent(session.runsDir, entry.parentId, {
-      at: new Date().toISOString(),
+      at: held.at,
       attempt: lastAttempt(session.runsDir, entry.parentId),
-      kind: "spawn-rejected",
-      payload: { title: entry.proposal.title, reason, fromPending: entry.id },
+      kind: "spawn-held",
+      payload: { held: [heldEventEntry(held)] },
     });
     log.push(
       `ticket ${entry.parentId}: pending spawn ${entry.id} ('${entry.proposal.title}') ` +
-        `rejected: ${reason}`,
+        `could not land: ${reason}; it is held for the operator`,
     );
   }
   store.markLanding(landing);
@@ -10113,15 +10148,27 @@ function settleLandingSpawns(session: Session): void {
       continue;
     }
     store.landed([entry.id]);
+    // The crash may have come before the landing's blocks: they go on again,
+    // the way the boundary puts them on, and a target that already waits on
+    // the Spawn is left as it is.
+    const blocked =
+      entry.proposal.blocks !== undefined
+        ? applySpawnBlocks(session, entry.landing, entry.proposal.blocks, log)
+        : [];
     appendEvent(session.runsDir, entry.parentId, {
       at: new Date().toISOString(),
       attempt: lastAttempt(session.runsDir, entry.parentId),
       kind: "spawn-adopted",
-      payload: { adopted: [entry.landing], fromPending: [entry.id] },
+      payload: {
+        adopted: [entry.landing],
+        fromPending: [entry.id],
+        ...(blocked.length > 0 ? { blocks: { [entry.landing]: blocked } } : {}),
+      },
     });
     log.push(
       `ticket ${entry.parentId}: pending spawn ${entry.id} had landed as ` +
-        `${entry.landing} before the restart`,
+        `${entry.landing} before the restart` +
+        (blocked.length > 0 ? `; it blocks ${blocked.join(", ")}` : ""),
     );
   }
   if (log.length > 0) session.state = applyUpdate(session.state, { log });

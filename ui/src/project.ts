@@ -320,11 +320,21 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
     const reasons = new Set<string>();
     for (const entry of held) {
       if (typeof entry !== "object" || entry === null) return null;
-      const { title, reason, overlaps } = entry as Record<string, unknown>;
+      const { title, reason, overlaps, unknownOverlaps, refusal } = entry as Record<
+        string,
+        unknown
+      >;
       if (typeof title !== "string") return null;
       if (!isHeldSpawnReason(reason)) return null;
       titles.push(`'${title}'`);
-      reasons.add(heldReasonCopy(reason, isStringList(overlaps) ? overlaps : []));
+      reasons.add(
+        heldReasonCopy(
+          reason,
+          isStringList(overlaps) ? overlaps : [],
+          isStringList(unknownOverlaps) ? unknownOverlaps : [],
+          typeof refusal === "string" ? refusal : undefined,
+        ),
+      );
     }
     const why = [...reasons].sort();
     if (payload.recovered === true) why.push("recovered at boot");
@@ -1565,7 +1575,11 @@ function projectSpawnCard(
     label:
       state === "pending"
         ? "lands next boundary"
-        : `held · ${heldReasonCopy((spawn as HeldSpawnView).reason, spawn.overlaps)}`,
+        : `held · ${heldReasonCopy(
+            (spawn as HeldSpawnView).reason,
+            spawn.overlaps,
+            (spawn as HeldSpawnView).unknownOverlaps,
+          )}`,
     title: spawn.title,
     parentCardId: spawnParentCardId(spawn, ticketIds, conversationIds) ?? START_CARD_ID,
     parentId: spawn.parentId,
@@ -1597,22 +1611,44 @@ function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
 type SpawnProposalView = PendingSpawnView | HeldSpawnView;
 
 /** How the list, the faded card and the timeline name why a spawn is held:
- *  a cap, the proposing agent's overlaps mark (with what it named), or the
- *  operator's Hold (issue #150). */
-export function heldReasonCopy(reason: HeldSpawnReason, overlaps: string[] = []): string {
+ *  a cap, the proposing agent's overlaps mark (with what it named, and
+ *  which of those the pool never knew), the operator's Hold, or a Pending
+ *  spawn the boundary could not land (with why, where it is shown inline)
+ *  (issue #150). */
+export function heldReasonCopy(
+  reason: HeldSpawnReason,
+  overlaps: string[] = [],
+  unknown: string[] = [],
+  refusal?: string,
+): string {
   switch (reason) {
     case "per-attempt":
       return "per-attempt cap";
     case "per-run":
       return "per-run cap";
     case "overlaps":
-      return overlaps.length > 0 ? `overlaps ${overlaps.join(", ")}` : "overlaps";
+      return (
+        (overlaps.length > 0 ? `overlaps ${overlaps.join(", ")}` : "overlaps") +
+        (unknown.length > 0 ? ` (${unknown.join(", ")} not in the pool)` : "")
+      );
     case "operator":
       return "held by operator";
+    case "refused":
+      return refusal ? `refused at landing: ${refusal}` : "refused at landing";
   }
 }
 
-const HELD_SPAWN_REASONS: readonly string[] = ["per-attempt", "per-run", "overlaps", "operator"];
+/** The list's reason copy for a Pending spawn the boundary could not land:
+ *  the row shows why beside its buttons. */
+export const REFUSED_AT_LANDING = heldReasonCopy("refused");
+
+const HELD_SPAWN_REASONS: readonly string[] = [
+  "per-attempt",
+  "per-run",
+  "overlaps",
+  "operator",
+  "refused",
+];
 
 function isHeldSpawnReason(value: unknown): value is HeldSpawnReason {
   return typeof value === "string" && HELD_SPAWN_REASONS.includes(value);
@@ -1685,7 +1721,7 @@ export function projectPendingSpawns(pending: PendingSpawnView[], now: number): 
 export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawnRow[] {
   return held.map((spawn) => ({
     ...spawnRowBase(spawn, now),
-    reason: heldReasonCopy(spawn.reason, spawn.overlaps),
+    reason: heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps),
     adopting: spawn.adopting,
     adoptError: spawn.adoptError ?? null,
   }));

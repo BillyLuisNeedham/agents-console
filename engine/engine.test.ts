@@ -8861,7 +8861,7 @@ describe("pending spawns (issue #150)", () => {
   // A crash between the landing mark and forgetting the Pending spawn: the
   // ticket file says it landed, so it is not landed twice; one whose ticket
   // never got written lands as it would have.
-  it("settles a landing a restart interrupted without landing it twice", async () => {
+  it("settles a landing a restart interrupted without landing it twice, its blocks put back", async () => {
     const poolDir = makePool({
       tickets: [
         { file: "01-t.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
@@ -8869,6 +8869,7 @@ describe("pending spawns (issue #150)", () => {
           file: "01-spawn-1.md",
           marker: "<!-- state: id=01-spawn-1 blocked-by=none status=done spawned-by=01 -->",
         },
+        readyTicket("02"),
       ],
       config: stubConfig,
     });
@@ -8878,7 +8879,7 @@ describe("pending spawns (issue #150)", () => {
       JSON.stringify({
         seq: 2,
         pending: [
-          { id: "proposal-1", parentId: "01", origin: "ticket", proposal: proposal("Landed"), at: "t0", landing: "01-spawn-1" },
+          { id: "proposal-1", parentId: "01", origin: "ticket", proposal: proposal("Landed", { blocks: ["02"] }), at: "t0", landing: "01-spawn-1" },
           { id: "proposal-2", parentId: "01", origin: "ticket", proposal: proposal("Not yet"), at: "t0", landing: "01-spawn-2" },
         ],
         held: [],
@@ -8890,8 +8891,18 @@ describe("pending spawns (issue #150)", () => {
     const run = await approveReview(await runPool({ poolDir, harnesses: rig.harnesses }));
 
     expect(run.final.log).toContain(
-      "ticket 01: pending spawn proposal-1 had landed as 01-spawn-1 before the restart",
+      "ticket 01: pending spawn proposal-1 had landed as 01-spawn-1 before the restart; " +
+        "it blocks 02",
     );
+    // The crash came before the landing's blocks: they are put back.
+    expect(markerLine(poolDir, "02-t.md")).toContain("blocked-by=01-spawn-1");
+    expect(
+      readEventLines(poolDir, "01").find((e) => e.kind === "spawn-adopted")?.payload,
+    ).toEqual({
+      adopted: ["01-spawn-1"],
+      fromPending: ["proposal-1"],
+      blocks: { "01-spawn-1": ["02"] },
+    });
     expect(readFileSync(join(poolDir, "issues", "01-spawn-2.md"), "utf8")).toContain("# 01-spawn-2: Not yet");
     expect(existsSync(join(poolDir, "issues", "01-spawn-3.md"))).toBe(false);
     expect(storeFile(poolDir).pending).toEqual([]);
@@ -9012,19 +9023,103 @@ describe("pending spawns (issue #150)", () => {
     expect(ledger(poolDir)).toContain("| proposal-1 | 01 | ticket | overlaps 02 | Maybe a duplicate |");
   }, 20000);
 
-  it("rejects an overlaps mark naming nothing the pool or the ledger knows", async () => {
+  // The agent flagged a possible duplicate, so a mark naming ids nobody
+  // knows still holds the proposal, the unknown ids noted beside it.
+  it("holds a proposal whose overlaps names ids the pool never knew, noting them", async () => {
     const poolDir = makePool({ tickets: [readyTicket("01")], config: stubConfig });
     const rig = stubHarness(poolDir, {
-      "01": { spawn: [proposal("Ghostly", { overlaps: ["99", "proposal-7"] })] },
+      "01": { spawn: [proposal("Ghostly", { overlaps: ["01", "99", "proposal-7"] })] },
     });
 
     const run = await approveReview(await runPool({ poolDir, harnesses: rig.harnesses }));
 
-    expect(run.snapshots.at(-1)!.heldSpawns).toEqual([]);
-    expect(readEventLines(poolDir, "01").find((e) => e.kind === "spawn-rejected")?.payload).toEqual({
-      title: "Ghostly",
-      reason: "overlaps names ids neither in the pool nor in the Spawn ledger: 99, proposal-7",
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    expect(run.snapshots.at(-1)!.heldSpawns).toEqual([
+      expect.objectContaining({
+        id: "proposal-1",
+        reason: "overlaps",
+        overlaps: ["01", "99", "proposal-7"],
+        unknownOverlaps: ["99", "proposal-7"],
+      }),
+    ]);
+    expect(readEventLines(poolDir, "01").find((e) => e.kind === "spawn-held")?.payload).toEqual({
+      held: [
+        {
+          id: "proposal-1",
+          title: "Ghostly",
+          reason: "overlaps",
+          overlaps: ["01", "99", "proposal-7"],
+          unknownOverlaps: ["99", "proposal-7"],
+        },
+      ],
     });
+    expect(run.final.log).toContain(
+      "ticket 01: proposal-1 ('Ghostly') held: it overlaps 01, 99, proposal-7 " +
+        "(99, proposal-7 not in the pool or the Spawn ledger)",
+    );
+    expect(ledger(poolDir)).toContain("overlaps 01, 99, proposal-7 (99, proposal-7 not in the pool)");
+  }, 20000);
+
+  // The pool moved between the take and the boundary: the spawn's blocks
+  // target finished. It is held with the reason instead of dropped.
+  it("holds a Pending spawn the boundary can no longer land, with the reason on it", async () => {
+    const { poolDir, release, run } = pendingRig([proposal("Fix first", { blocks: ["02"] })]);
+    await waitFor(() => (run.snapshots.at(-1)?.pendingSpawns.length ?? 0) === 1);
+    writeFileSync(release, "");
+    const settled = await run.settled;
+
+    const reason = "blocks names done tickets, which have no next attempt to hold: 02";
+    expect(existsSync(join(poolDir, "issues", "01-spawn-1.md"))).toBe(false);
+    expect(settled.snapshots.at(-1)!.pendingSpawns).toEqual([]);
+    expect(settled.snapshots.at(-1)!.heldSpawns).toEqual([
+      expect.objectContaining({ id: "proposal-1", reason: "refused", adoptError: reason }),
+    ]);
+    expect(readEventLines(poolDir, "01").filter((e) => e.kind === "spawn-held").at(-1)!.payload)
+      .toEqual({
+        held: [{ id: "proposal-1", title: "Fix first", reason: "refused", refusal: reason }],
+      });
+    expect(settled.final.log).toContain(
+      `ticket 01: pending spawn proposal-1 ('Fix first') could not land: ${reason}; ` +
+        "it is held for the operator",
+    );
+    expect(ledger(poolDir)).toContain(`refused at landing: ${reason}`);
+    await settled.shutdown(0);
+  }, 20000);
+
+  // An Adopt (or a spawn.json read) that lands while the drive is closing
+  // waits for a boundary that drive will not reach: the next one lands it.
+  it("lands a spawn queued while the drive was closing, without another kick", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, spawnCaps: { perAttempt: 1 } },
+    });
+    const rig = stubHarness(poolDir, { "01": { spawn: [proposal("Lands"), proposal("Held")] } });
+    let run: PoolRun | null = null;
+    let adopted = false;
+    const inner = new SqliteCheckpointStore(poolDir);
+    const store: CheckpointStore = {
+      write: (state) => {
+        inner.write(state);
+        const closing = (state as { interrupts: { kind: string }[] }).interrupts.some(
+          (i) => i.kind === "review",
+        );
+        if (closing && !adopted && run) {
+          adopted = true;
+          run.adoptHeldSpawn("proposal-2");
+        }
+      },
+      latest: () => inner.latest(),
+      close: () => inner.close(),
+    };
+    run = startPool({ poolDir, harnesses: rig.harnesses, store });
+
+    await waitFor(() => existsSync(join(poolDir, "issues", "01-spawn-2.md")));
+    const settled = await run.settled;
+    expect(adopted).toBe(true);
+    await waitFor(() => settled.snapshots.at(-1)!.state.tickets["01-spawn-2"] === "done");
+    await run.settled;
+    expect(run.snapshots.at(-1)!.heldSpawns).toEqual([]);
+    await approveReview(run);
   }, 20000);
 
   it("rejects an overlaps that is not a list of ids", async () => {
