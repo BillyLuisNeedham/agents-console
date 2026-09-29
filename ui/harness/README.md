@@ -12,8 +12,9 @@ spec), then does what an operator does:
 
 - scrolls every `overflow: auto` region styles.css declares and a live module
   renders (`.detail-open`, `.log-pane-content`, `.log-lines`,
-  `.needs-input-rows`, `.conversations-tray`, `.enlist-picker`, and the three
-  `<pre>` blocks that only scroll when their content is taller than the panel)
+  `.needs-input-rows`, `.conversations-tray`, `.enlist-picker`, the Spawns
+  list and an expanded proposal's body, and the three `<pre>` blocks that only
+  scroll when their content is taller than the panel)
 - focuses the Needs input tray's note field with a caret mid-text
 - pans the canvas with a pointer drag
 - records the identity of a few nodes (cards, the Detail, the trays)
@@ -22,7 +23,8 @@ then renders five times with the same model (a poll tick) and once more from a
 changed snapshot (a live SSE snapshot), and after each render asserts that
 scroll positions, focus, caret, canvas pan and node identity are unchanged.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
-one is on screen at a time.
+one is on screen at a time, and one more the Detail of a Pending spawn's faded
+card (issue #150), whose card and a Held spawn's keep their nodes too.
 
 ## Run it
 
