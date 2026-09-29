@@ -16,6 +16,8 @@ import type {
   EnrichedTicketState,
   Grade,
   HeldPaneRecord,
+  HeldSpawnReason,
+  HeldSpawnView,
   Interrupt,
   LiveAttemptRecord,
   MergeQueueEntry,
@@ -55,6 +57,9 @@ export type {
   EnrichedTicketState,
   Grade,
   HeldPaneRecord,
+  HeldSpawnReason,
+  HeldSpawnResponse,
+  HeldSpawnView,
   InterruptKind,
   KeepTalkingRequest,
   KeepTalkingResponse,
@@ -875,6 +880,21 @@ export interface PoolView {
   log: string[];
   /** The canvas header's Merge queue line (issue #129); null with no hold. */
   mergeQueueLine: string | null;
+  /** The canvas header's Spawn caps line (issue #149). */
+  spawnLine: SpawnLineView;
+  /** The Held spawns list the line opens (issue #149), oldest first. */
+  heldSpawns: HeldSpawnRow[];
+}
+
+/**
+ * The Spawn caps line (issue #149): "Spawns 3/20 this run · 5 per attempt",
+ * with "· N held" while Held spawns wait. `warn` while the run is at or over
+ * its cap, or anything is held: either way the next proposal, or one
+ * already made, needs the operator.
+ */
+export interface SpawnLineView {
+  text: string;
+  warn: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,7 +1340,77 @@ export function projectPool(
     ],
     log: snapshot.state.log,
     mergeQueueLine: mergeQueueLine(snapshot, now),
+    spawnLine: spawnLine(snapshot),
+    heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
   };
+}
+
+function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
+  const { spawnedThisRun, perAttempt, perRun } = snapshot.spawnUsage;
+  const held = snapshot.heldSpawns.length;
+  const parts = [`Spawns ${spawnedThisRun}/${perRun} this run`, `${perAttempt} per attempt`];
+  if (held > 0) parts.push(`${held} held`);
+  return { text: parts.join(" · "), warn: spawnedThisRun >= perRun || held > 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Held spawns (issue #149, ADR-0029)
+// ---------------------------------------------------------------------------
+
+/** How the list names the cap that held a spawn. */
+const HELD_SPAWN_REASON: Record<HeldSpawnReason, string> = {
+  "per-attempt": "per-attempt cap",
+  "per-run": "per-run cap",
+};
+
+/** One Held spawn as the list shows it, in the engine's order, oldest first. */
+export interface HeldSpawnRow {
+  id: string;
+  title: string;
+  /** What adopting it starts. */
+  kind: "ticket" | "conversation";
+  /** "from 03", or "from Conversation c-1". */
+  parent: string;
+  /** "per-attempt cap" or "per-run cap". */
+  reason: string;
+  /** How long it has waited: "12m ago". */
+  waited: string;
+  /** When it was held, as the wire carries it, for the hover. */
+  at: string;
+  /** "waits on 01, 02"; null when it waits on nothing. */
+  blockedBy: string | null;
+  /** "blocks 04, 05", or every ticket not yet started; null for none. */
+  blocks: string | null;
+  body: string;
+  /** An Adopt is on its way to the boundary: nothing more to decide. */
+  adopting: boolean;
+}
+
+export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawnRow[] {
+  return held.map((spawn) => {
+    const at = Date.parse(spawn.at);
+    return {
+      id: spawn.id,
+      title: spawn.title,
+      kind: spawn.kind,
+      parent:
+        spawn.origin === "conversation"
+          ? `from Conversation ${spawn.parentId}`
+          : `from ${spawn.parentId}`,
+      reason: HELD_SPAWN_REASON[spawn.reason],
+      waited: Number.isNaN(at) ? "" : `${shortDurationCopy(now - at)} ago`,
+      at: spawn.at,
+      blockedBy: spawn.blockedBy.length > 0 ? `waits on ${spawn.blockedBy.join(", ")}` : null,
+      blocks:
+        spawn.blocks === "all"
+          ? "blocks every ticket not yet started"
+          : spawn.blocks && spawn.blocks.length > 0
+            ? `blocks ${spawn.blocks.join(", ")}`
+            : null,
+      body: spawn.body,
+      adopting: spawn.adopting,
+    };
+  });
 }
 
 /** How the header words a Merge queue state after the ticket ids. */

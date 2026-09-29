@@ -740,6 +740,8 @@ export class ConsoleSession {
         ? isTerminalBacked(this.snapshot.state.config)
         : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
+      spawnLine: this.view?.spawnLine ?? null,
+      heldSpawns: this.view?.heldSpawns ?? [],
       detail,
       detailTabs:
         detail?.kind === "ticket" ? projectDetailTabs(detail, this.tabOverride) : null,

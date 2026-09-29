@@ -37,6 +37,7 @@ import {
   ENLIST_BECOMES_HINT,
   projectLogPane,
   projectNeedsInput,
+  projectHeldSpawns,
   projectPool,
   projectTimeline,
   selectLogAttempt,
@@ -55,6 +56,7 @@ import {
   type TabOverride,
   type TerminalSurfaceView,
   type TicketActivityResponse,
+  type HeldSpawnView,
   type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
@@ -3189,5 +3191,105 @@ describe("a Conversation the engine says is ending (issue #140)", () => {
     const card = view.cards.find((c) => c.kind === "conversation");
     expect(card?.kind === "conversation" && card.endView.ending).toBe(true);
     expect(card?.kind === "conversation" && card.terminal).toBe(null);
+  });
+});
+
+/** A Held spawn as the wire carries it (issue #149). */
+function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
+  return {
+    id: "held-1",
+    parentId: "03",
+    origin: "ticket",
+    kind: "ticket",
+    title: "Fix the flaky login test",
+    body: "The login test fails one run in five.",
+    blockedBy: [],
+    blocks: null,
+    reason: "per-run",
+    at: "2026-09-29T10:00:00Z",
+    adopting: false,
+    ...overrides,
+  };
+}
+
+describe("the Spawn caps header line (issue #149)", () => {
+  const line = (overrides: Parameters<typeof snapshot>[0]) =>
+    projectPool(snapshot(overrides)).spawnLine;
+
+  it("shows this run's count against the run cap and the per-attempt cap", () => {
+    expect(line({ spawnUsage: { spawnedThisRun: 3, perAttempt: 5, perRun: 20 } })).toEqual({
+      text: "Spawns 3/20 this run · 5 per attempt",
+      warn: false,
+    });
+  });
+
+  it("warns once the run is at its cap", () => {
+    expect(line({ spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 } })).toEqual({
+      text: "Spawns 20/20 this run · 5 per attempt",
+      warn: true,
+    });
+    // A cap lowered under the count is over it, and still a warning.
+    expect(line({ spawnUsage: { spawnedThisRun: 12, perAttempt: 5, perRun: 10 } })?.warn).toBe(
+      true,
+    );
+  });
+
+  it("warns and counts the Held spawns while any wait on the operator", () => {
+    expect(
+      line({
+        spawnUsage: { spawnedThisRun: 1, perAttempt: 2, perRun: 20 },
+        heldSpawns: [heldSpawn(), heldSpawn({ id: "held-2" })],
+      }),
+    ).toEqual({ text: "Spawns 1/20 this run · 2 per attempt · 2 held", warn: true });
+  });
+});
+
+describe("projectHeldSpawns (issue #149)", () => {
+  const NOW = Date.parse("2026-09-29T10:12:00Z");
+
+  it("words which cap held each spawn and how long it has waited, oldest first", () => {
+    const rows = projectHeldSpawns(
+      [heldSpawn(), heldSpawn({ id: "held-2", reason: "per-attempt", at: "2026-09-29T10:11:30Z" })],
+      NOW,
+    );
+    expect(rows.map((row) => [row.id, row.reason, row.waited])).toEqual([
+      ["held-1", "per-run cap", "12m ago"],
+      ["held-2", "per-attempt cap", "30s ago"],
+    ]);
+    expect(rows[0]).toMatchObject({
+      title: "Fix the flaky login test",
+      parent: "from 03",
+      body: "The login test fails one run in five.",
+      adopting: false,
+    });
+  });
+
+  it("says what an adopted spawn would wait on and what it would block", () => {
+    const [waits, all, none] = projectHeldSpawns(
+      [
+        heldSpawn({ blockedBy: ["01", "02"], blocks: ["04", "05"] }),
+        heldSpawn({ id: "held-2", blocks: "all" }),
+        heldSpawn({ id: "held-3" }),
+      ],
+      NOW,
+    );
+    expect(waits?.blockedBy).toBe("waits on 01, 02");
+    expect(waits?.blocks).toBe("blocks 04, 05");
+    expect(all?.blocks).toBe("blocks every ticket not yet started");
+    expect(none?.blockedBy).toBeNull();
+    expect(none?.blocks).toBeNull();
+  });
+
+  it("names a Conversation proposal and a Conversation parent as such", () => {
+    const [row] = projectHeldSpawns(
+      [heldSpawn({ kind: "conversation", origin: "conversation", parentId: "c-1" })],
+      NOW,
+    );
+    expect(row?.parent).toBe("from Conversation c-1");
+    expect(row?.kind).toBe("conversation");
+  });
+
+  it("marks one whose Adopt is on its way to the boundary", () => {
+    expect(projectHeldSpawns([heldSpawn({ adopting: true })], NOW)[0]?.adopting).toBe(true);
   });
 });
