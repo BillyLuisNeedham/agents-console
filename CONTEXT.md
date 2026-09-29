@@ -235,8 +235,12 @@ A follow-up ticket an attempt proposes in its Outcome and the engine writes into
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 **Held spawn**:
-A Spawn proposal a cap had no room for, kept for the operator instead of dropped. It waits, across restarts, until the operator Adopts it (it lands past both caps) or Discards it (gone for good). Not a Spawn yet: it has no ticket and no id in the pool until it is adopted. Introduced by ADR-0029 (`docs/adr/0029-spawn-caps-are-pool-settings-and-hold-what-they-cannot-take.md`).
+A Spawn proposal a cap had no room for, one the proposing agent marked as overlapping work already in the pool, or one the operator held back, kept for the operator instead of landing. It waits, across restarts, until the operator Adopts it (it lands past both caps) or Discards it (gone for good). Not a Spawn yet: it has no ticket and no id in the pool until it is adopted. A cap of 0 holds every proposal. Introduced by ADR-0029 (`docs/adr/0029-spawn-caps-are-pool-settings-and-hold-what-they-cannot-take.md`); overlap and operator holds by issue #150.
 _Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the boundary)
+
+**Pending spawn**:
+A Spawn proposal within the caps, waiting for the next super-step boundary to land. Kept across restarts and visible before it lands, to the operator in the Console and to the pool's agents, so a second agent can see the work is already coming. Until the boundary the operator may Hold it (it becomes a Held spawn) or Discard it. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150.
+_Avoid_: queued spawn (too close to the Merge queue), proposed spawn (a Held spawn is proposed too), draft ticket
 
 **Conversation**:
 An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
