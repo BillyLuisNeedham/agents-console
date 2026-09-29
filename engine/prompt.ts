@@ -1,9 +1,6 @@
 import { SPAWN_BODY_MIN_CHARS, type Outcome } from "./engine.ts";
 import type { SpawnCaps } from "./spawn-caps.ts";
 
-// The `blocks` teaching (ADR-0029), one sentence shared by the attempt
-// prompt and the Conversation teaching so the two cannot drift: what a
-// follow-up that must run first adds to its entry.
 // The Spawn ledger (issue #150, spawn-ledger.ts): the path, never the
 // contents, so the prompt stays short (issue #84) and the agent reads the
 // pool as it is when it proposes, not as it was at launch.
@@ -18,6 +15,9 @@ function spawnLedgerTeaching(ledgerPath: string): string {
   );
 }
 
+// The `blocks` teaching (ADR-0029), one sentence shared by the attempt
+// prompt and the Conversation teaching so the two cannot drift: what a
+// follow-up that must run first adds to its entry.
 const SPAWN_BLOCKS_TEACHING =
   'A follow-up that must run before other work may add "blocks": ["id", ' +
   '...] to make those tickets wait for it, or "blocks": "all" to make ' +

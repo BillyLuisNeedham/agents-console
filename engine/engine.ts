@@ -1588,7 +1588,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   };
   // The Spawn ledger follows every emit, so what agents read there is never
   // staler than what the Console shows (issue #150).
-  refreshSpawnLedger(session);
+  refreshSpawnLedger(session, snapshot.conversations);
   session.snapshots.push(snapshot);
   session.holdWatch.emitted(hold);
   session.onSnapshot?.(snapshot);
@@ -10179,16 +10179,17 @@ function settleLandingSpawns(session: Session): void {
 // current statuses, its Conversations, and every Pending and Held spawn.
 // Best-effort: a ledger that fails to write leaves the previous one, and an
 // agent reading a stale ledger is what `overlaps` and the operator are for.
-function refreshSpawnLedger(session: Session): void {
+function refreshSpawnLedger(
+  session: Session,
+  conversations: ConversationView[] = session.snapshots.at(-1)?.conversations ?? [],
+): void {
   const text = renderSpawnLedger({
     tickets: session.markers.map((m) => ({
       id: m.id,
       title: m.title,
       status: session.state.tickets[m.id] ?? m.status,
     })),
-    conversations: session.conversations
-      .views()
-      .map((c) => ({ id: c.id, title: c.title, status: c.status })),
+    conversations: conversations.map((c) => ({ id: c.id, title: c.title, status: c.status })),
     pending: session.spawnProposals.pending(),
     held: session.spawnProposals.held(),
   });
