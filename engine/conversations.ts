@@ -380,6 +380,8 @@ export interface ConversationRuntime {
   /** What this Steward has been told about (steward.ts's freshStewardItems),
    *  in memory only, so a re-adopted Steward hears everything still pending. */
   told: Set<string>;
+  /** Set once its first offer has taken what merged before it as told. */
+  baselined?: boolean;
   /** False when this Conversation's tabs may not be closed by id: a runtime
    *  rebuilt for an End whose pane herdr lists as something else (issue
    *  #139), where the id no longer names this Conversation's terminal. */
@@ -1393,11 +1395,13 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   function offerSteward(runtime: ConversationRuntime): void {
     const items = host.stewardItems();
     const queued = new Set(runtime.notices.flatMap((n) => (n.key ? [n.key] : [])));
-    for (const item of freshStewardItems(runtime.told, items)) {
+    const fresh = freshStewardItems(runtime.told, items, runtime.baselined !== true);
+    runtime.baselined = true;
+    for (const item of fresh) {
       if (queued.has(item.key)) continue;
       runtime.notices.push({
         to: runtime.id,
-        from: item.ticketId,
+        from: item.ticketId ?? runtime.id,
         kind: item.kind,
         text: item.text,
         key: item.key,
@@ -2275,7 +2279,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     current: Map<string, StewardItem> | null,
   ): { text: string; notices: Notice[] }[] {
     const turns: { text: string; notices: Notice[] }[] = [];
-    const steward: { notices: Notice[]; texts: string[] } = { notices: [], texts: [] };
+    const steward: { notices: Notice[]; items: StewardItem[] } = { notices: [], items: [] };
     let stewardAt = -1;
     for (const notice of queue) {
       if (notice.key === undefined) {
@@ -2286,10 +2290,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       if (!item) continue;
       if (stewardAt === -1) stewardAt = turns.length;
       steward.notices.push(notice);
-      steward.texts.push(item.text);
+      steward.items.push(item);
     }
     if (stewardAt !== -1) {
-      turns.splice(stewardAt, 0, { text: stewardBatchText(steward.texts), notices: steward.notices });
+      turns.splice(stewardAt, 0, { text: stewardBatchText(steward.items), notices: steward.notices });
     }
     return turns;
   }

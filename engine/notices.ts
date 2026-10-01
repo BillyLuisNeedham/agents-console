@@ -20,7 +20,9 @@ export interface Notice {
    * Notice, so both land only while the pane is waiting.
    * "steward-interrupt" and "steward-merge-stall" are what a Steward is told
    * about (ADR-0030): a pending Ticket Interrupt, and a stalled Merge queue
-   * head. `from` names the Ticket, so its log records the telling.
+   * head; "steward-merged" and "steward-pool" only inform it: a Ticket that
+   * merged, and the pool reaching Review. `from` names the Ticket, so its
+   * log records the telling (the Steward itself for the pool's own).
    */
   kind:
     | "ticket-ended"
@@ -28,7 +30,9 @@ export interface Notice {
     | "enlist-teaching"
     | "opening-turn"
     | "steward-interrupt"
-    | "steward-merge-stall";
+    | "steward-merge-stall"
+    | "steward-merged"
+    | "steward-pool";
   text: string;
   /** A Steward Notice's item key (steward.ts's StewardItem): delivery checks
    *  the item is still pending, and types its current text. */

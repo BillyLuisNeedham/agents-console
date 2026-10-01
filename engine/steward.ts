@@ -227,13 +227,18 @@ export function loadStewardNotes(runsDir: string): StewardNotes {
 /** The Interrupt kinds the Steward never answers: the operator's final judgement, and an engine store failure. */
 export const STEWARD_EXCLUDED_KINDS: readonly string[] = ["review", "persistence"];
 
-/** One thing the Steward should hear about, as a Notice: its identity, the Ticket it is about, and the text. */
+/**
+ * One thing the Steward should hear about, as a Notice: its identity, the
+ * Ticket it is about, and the text. A waiting Ticket and a stalled head ask
+ * for an act; a merged Ticket and the pool reaching Review only inform, so
+ * the Steward can tell when its orders are done.
+ */
 export interface StewardItem {
-  /** `interrupt:<ticket>:<kind>` or `merge-stall:<ticket>`. */
+  /** `interrupt:<ticket>:<kind>`, `merge-stall:<ticket>`, `merged:<ticket>` or `pool:<review|done>`. */
   key: string;
-  kind: "steward-interrupt" | "steward-merge-stall";
-  /** The Ticket the item is about: its Ticket log records the Notice. */
-  ticketId: string;
+  kind: "steward-interrupt" | "steward-merge-stall" | "steward-merged" | "steward-pool";
+  /** The Ticket the item is about, whose log records the Notice; null for the pool's own. */
+  ticketId: string | null;
   text: string;
 }
 
@@ -252,6 +257,10 @@ export interface StewardPoolView {
   budget: number;
   used: (ticketId: string) => number;
   mergeQueue: readonly { ticketId: string; state: string }[];
+  /** Tickets done with their branch landed: what has merged. */
+  merged: readonly string[];
+  /** Where the final Review stands: waiting for the operator, approved, or not yet raised. */
+  review: "pending" | "approved" | null;
 }
 
 /** A pending Interrupt the Steward may answer at all: a Ticket's, not review or persistence, not a Conversation's. */
@@ -297,6 +306,26 @@ export function stewardItems(pool: StewardPoolView): StewardItem[] {
       }),
     });
   }
+  for (const ticketId of pool.merged) {
+    const title = pool.titleOf(ticketId);
+    items.push({
+      key: `merged:${ticketId}`,
+      kind: "steward-merged",
+      ticketId,
+      text: title ? `${ticketId} "${title}"` : ticketId,
+    });
+  }
+  if (pool.review !== null) {
+    items.push({
+      key: `pool:${pool.review === "pending" ? "review" : "done"}`,
+      kind: "steward-pool",
+      ticketId: null,
+      text:
+        pool.review === "pending"
+          ? "Every Ticket is done and merged; Review waits for the operator."
+          : "The operator approved Review: the pool is done.",
+    });
+  }
   return items;
 }
 
@@ -307,12 +336,18 @@ export function stewardItems(pool: StewardPoolView): StewardItem[] {
  * again after it went, is told again; each fresh item is remembered. Kept in
  * memory only, per Steward runtime, so a restart re-delivers.
  */
-export function freshStewardItems(told: Set<string>, items: readonly StewardItem[]): StewardItem[] {
+export function freshStewardItems(
+  told: Set<string>,
+  items: readonly StewardItem[],
+  // A Steward's first look (its start, or its re-adoption): what merged
+  // before it is no news, so it is remembered as told rather than told.
+  baseline = false,
+): StewardItem[] {
   const offered = new Set(items.map((item) => item.key));
   for (const key of [...told]) if (!offered.has(key)) told.delete(key);
   const fresh = items.filter((item) => !told.has(item.key));
   for (const item of fresh) told.add(item.key);
-  return fresh;
+  return baseline ? fresh.filter((item) => item.kind !== "steward-merged") : fresh;
 }
 
 // How much of an Interrupt's body a Notice carries: a Brief is usually short,
@@ -390,10 +425,20 @@ export function stewardMergeStallText(params: {
   ].join("\n");
 }
 
-/** One Turn telling the Steward everything delivered together. */
-export function stewardBatchText(texts: readonly string[]): string {
-  if (texts.length === 1) return `Pool news for the Steward:\n\n${texts[0]}`;
-  return `Pool news for the Steward (${texts.length} items):\n\n${texts.join("\n\n---\n\n")}`;
+/**
+ * One Turn telling the Steward everything delivered together: what asks for
+ * an act first, then, tersely, what merged since its last Notice and where
+ * the pool stands.
+ */
+export function stewardBatchText(items: readonly { kind: StewardItem["kind"]; text: string }[]): string {
+  const sections = items
+    .filter((item) => item.kind === "steward-interrupt" || item.kind === "steward-merge-stall")
+    .map((item) => item.text);
+  const merged = items.filter((item) => item.kind === "steward-merged").map((item) => item.text);
+  if (merged.length > 0) sections.push(`Merged since your last Notice: ${merged.join(", ")}.`);
+  sections.push(...items.filter((item) => item.kind === "steward-pool").map((item) => item.text));
+  if (sections.length === 1) return `Pool news for the Steward:\n\n${sections[0]}`;
+  return `Pool news for the Steward (${sections.length} items):\n\n${sections.join("\n\n---\n\n")}`;
 }
 
 // ---------------------------------------------------------------------------

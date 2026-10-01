@@ -428,7 +428,11 @@ export function buildStewardTeaching(parts: {
     "You do not poll. Whenever you are waiting, the engine types a Turn here " +
       "naming every pending Ticket Interrupt you may answer and have not " +
       "left, and a Merge queue head that has stalled. Items that arrive " +
-      "together come as one Turn.",
+      "together come as one Turn. The same Turn also tells you, with " +
+      "nothing to answer, which Tickets merged since your last Notice and " +
+      "when every Ticket is done and Review waits for the operator: that is " +
+      "how you know when orders like \"watch the next super-step, then " +
+      'finish" are done, and can end yourself.',
     "",
     "Act with this command, run in your shell:",
     "",

@@ -31,6 +31,7 @@ import {
   freshStewardItems,
   loadStewardNotes,
   stewardBudgetOf,
+  stewardBatchText,
   stewardBudgetUsed,
   stewardCommand,
   stewardItems,
@@ -124,6 +125,8 @@ function view(overrides: Partial<StewardPoolView> = {}): StewardPoolView {
     budget: 5,
     used: () => 0,
     mergeQueue: [],
+    merged: [],
+    review: null,
     ...overrides,
   };
 }
@@ -168,6 +171,42 @@ describe("what the Steward is told about", () => {
     expect(stall.key).toBe("merge-stall:05");
     expect(stall.text).toContain("The Merge queue head, Ticket 05");
     expect(stall.text).toContain("Waiting behind it: 06.");
+  });
+
+  it("tells what merged and where Review stands, only informing", () => {
+    const items = stewardItems(view({ merged: ["01", "03"], review: "pending" }));
+    expect(items.map((i) => [i.key, i.kind, i.ticketId])).toEqual([
+      ["merged:01", "steward-merged", "01"],
+      ["merged:03", "steward-merged", "03"],
+      ["pool:review", "steward-pool", null],
+    ]);
+    expect(stewardItems(view({ review: "approved" }))[0].text).toBe(
+      "The operator approved Review: the pool is done.",
+    );
+  });
+
+  it("batches news into one Turn: what asks for an act first, then one line of merges, then the pool", () => {
+    const items = stewardItems(
+      view({
+        interrupts: [{ ticketId: "02", kind: "crash", body: "died" }],
+        merged: ["01", "03"],
+        review: null,
+      }),
+    );
+    const text = stewardBatchText(items);
+    expect(text).toStartWith("Pool news for the Steward (2 items):\n\nTicket 02");
+    expect(text).toEndWith('Merged since your last Notice: 01 "title of 01", 03 "title of 03".');
+    expect(stewardBatchText(stewardItems(view({ merged: ["01"] })))).toBe(
+      'Pool news for the Steward:\n\nMerged since your last Notice: 01 "title of 01".',
+    );
+  });
+
+  it("takes what merged before a Steward's first look as told, and tells later merges", () => {
+    const told = new Set<string>();
+    const first = stewardItems(view({ merged: ["01"], mergeQueue: [{ ticketId: "02", state: "stalled" }] }));
+    expect(freshStewardItems(told, first, true).map((i) => i.key)).toEqual(["merge-stall:02"]);
+    const later = stewardItems(view({ merged: ["01", "02"] }));
+    expect(freshStewardItems(told, later).map((i) => i.key)).toEqual(["merged:02"]);
   });
 
   it("tells each item once, and again once it went and came back (a new stall, a new raise)", () => {
@@ -512,12 +551,17 @@ describe("Notices to the Steward", () => {
     expect(turn).toContain("Ticket 02");
   }, 40_000);
 
-  it("never tells or takes the review Interrupt", async () => {
+  it("never offers or takes the review Interrupt, only says the pool reached it", async () => {
     const pool = await stewardPool({ tickets: [{ file: "01.md", marker: DONE, body: "# Done\n\nbody" }] });
     await until("the review gate", () => pool.run.interrupts.some((i) => i.kind === "review"));
     const id = await enlistSteward(pool.run);
+    await until("the pool's news", () => stewardTurns(pool.fake).length === 1);
     await Bun.sleep(400);
-    expect(stewardTurns(pool.fake)).toEqual([]);
+    // What merged before the Steward started is no news; the Review gate is,
+    // as information, never as an Interrupt to answer.
+    expect(stewardTurns(pool.fake)).toEqual([
+      "Pool news for the Steward:\n\nEvery Ticket is done and merged; Review waits for the operator.",
+    ]);
     expect(() => pool.run.steward.answer(id, "REVIEW", "approve")).toThrow(
       "the review Interrupt is the operator's final judgement",
     );
@@ -543,6 +587,31 @@ describe("Notices to the Steward", () => {
     await Bun.sleep(400);
     expect(stewardTurns(pool.fake)).toHaveLength(1);
   }, 40_000);
+});
+
+describe("news that only informs the Steward", () => {
+  it("tells it a Ticket merged and the pool reached Review, so it knows its orders are done", async () => {
+    const pool = await stewardPool({
+      outcomes: { "01": [checkpoint("ask me"), { status: "done", summary: "ok", commitSha: null }] },
+    });
+    await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run, "Watch 01 through, then finish.");
+    await until("the backlog Notice", () => stewardTurns(pool.fake).length === 1);
+    pool.run.steward.answer(id, "01", "resume");
+    await until("the merge and Review news", () =>
+      stewardTurns(pool.fake).some((t) => t.includes("Review waits for the operator")),
+      30_000,
+    );
+    const news = stewardTurns(pool.fake).slice(1).join("\n");
+    expect(news).toContain('Merged since your last Notice: 01 "Talk it through".');
+    // Informing costs nothing: the one answer is all the budget spent.
+    expect(latest(pool.run).stewardBudget.used).toEqual({ "01": 1 });
+    expect(
+      readEvents(join(pool.poolDir, "runs"), "01").some(
+        (e) => e.kind === "notice" && e.payload.kind === "steward-merged" && e.payload.delivered === true,
+      ),
+    ).toBe(true);
+  }, 60_000);
 });
 
 describe("Notices that cannot land", () => {

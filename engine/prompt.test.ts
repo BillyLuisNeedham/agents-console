@@ -355,6 +355,8 @@ describe("buildStewardTeaching (ADR-0030)", () => {
       expect(teaching).toContain(verb);
     }
     expect(teaching).toContain("Your Steward budget is 1 answer per Ticket");
+    expect(teaching).toContain("which Tickets merged since your last Notice");
+    expect(teaching).toContain("Review waits for the operator");
   });
 
   it("states the exclusions, the hands-off rule, the push rule, and how to leave and end", () => {

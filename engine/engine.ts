@@ -9177,10 +9177,13 @@ function stewardUsedAtBoot(runsDir: string, markers: TicketMarker[]): Map<string
 }
 
 // What the Steward should be told about now, built from the Session for
-// steward.ts's rule. The Merge queue is the last emitted one: it is derived
-// at each emit and never stored.
+// steward.ts's rule. The Merge queue and the hold are the last emitted ones:
+// both are derived at each emit and never stored. A Ticket has merged when it
+// is done and its branch is held by nothing; engine-run judges never merge.
 function stewardItemsOf(session: Session): StewardItem[] {
   const titles = new Map(session.markers.map((marker) => [marker.id, marker.title]));
+  const last = session.snapshots.at(-1);
+  const held = new Set(last?.mergeHold ?? []);
   return stewardItems({
     interrupts: session.state.interrupts,
     titleOf: (id) => titles.get(id) ?? null,
@@ -9190,7 +9193,22 @@ function stewardItemsOf(session: Session): StewardItem[] {
     keepTalking: (id) => session.held.has(id),
     budget: stewardBudgetOf(session.state.config),
     used: (id) => session.stewardUsed.get(id) ?? 0,
-    mergeQueue: session.snapshots.at(-1)?.mergeQueue ?? [],
+    mergeQueue: last?.mergeQueue ?? [],
+    merged: last
+      ? session.markers
+          .filter(
+            (marker) =>
+              session.state.tickets[marker.id] === "done" &&
+              !held.has(marker.id) &&
+              engineTicketBuildId(marker.id) === null,
+          )
+          .map((marker) => marker.id)
+      : [],
+    review: session.state.interrupts.some((i) => i.kind === "review")
+      ? "pending"
+      : session.state.reviewApproved
+        ? "approved"
+        : null,
   });
 }
 

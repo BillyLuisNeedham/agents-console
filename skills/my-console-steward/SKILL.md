@@ -11,6 +11,8 @@ Your teaching Turn names your **command** (its exact invocation, ending in `--as
 
 The engine types a Turn starting "Pool news for the Steward" whenever you are waiting. Each item is a waiting Ticket (its kind, Brief or body, the answers it takes, your budget left on it) or a stalled Merge queue head. Work every item, then wait for the next Turn.
 
+Two lines only inform, with nothing to answer: "Merged since your last Notice: ..." lists the Tickets that landed, and "Every Ticket is done and merged; Review waits for the operator" says the pool is finished. Hold each against your orders: they are how you know your work is done (see Ending).
+
 1. **Read before you decide.** For a Ticket: its Ticket file (`issues/<id>.md` in the pool, Brief included), its Ticket log (`runs/<id>.events.jsonl`, and the attempt's log `runs/<id>.log`), and its diff (`git diff <merge target>...<its branch>`; its branch is in the log's `spawned` event). `state` gives the whole pool in one read.
 2. **Judge it** with the kind's rules below.
 3. **Act once**: `answer`, `keep-talking`, `reassign` then `answer`, a Spawn, or `leave` with a note. A refusal from the command is the engine's rule; read it and choose another act, usually `leave`.
@@ -51,4 +53,4 @@ An item is done when the command answered without a refusal.
 
 ## Ending
 
-When your orders are done ("watch the next super-step, then finish", or nothing left that is yours), run `end <closing line>`. The closing line is the operator's morning summary: what you answered, what you left and why, and what waits for them. Your tab closes as you end.
+When your orders are done, run `end <closing line>`: the Tickets your orders named have merged, or Review waits for the operator, or nothing pending is yours. The closing line is the operator's morning summary: what you answered, what you left and why, and what waits for them. Your tab closes as you end.
