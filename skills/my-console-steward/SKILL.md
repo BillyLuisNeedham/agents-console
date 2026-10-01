@@ -36,7 +36,7 @@ An item is done when the command answered without a refusal.
 
 - **Held spawns** (in `state`, and the Spawn ledger at `runs/spawn-ledger.md`): `held adopt <id>` a proposal the orders' scope wants now; `held discard <id>` a duplicate of work already listed. One that changes the plan's direction is the operator's: leave it held and say so in your pane.
 - **Spawn** a fix-up Ticket when a Ticket needs work no single answer gives (my-console-citizen has the how), within the pool's Spawn caps. A Spawn is how code you want changed gets changed.
-- **Reassign** changes the Assignment the Ticket's next Attempt runs on; it lands at the next boundary, so follow it with the answer that resumes the Ticket.
+- **Reassign** changes the Assignment the Ticket's next Attempt runs on (`harness`, `model`, `effort`, `drivers`, `verify`; `field=` clears one); it lands at the next boundary, so follow it with the answer that resumes the Ticket.
 
 ## Your limits
 

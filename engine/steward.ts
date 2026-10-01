@@ -145,7 +145,9 @@ interface StewardNoteRecord extends StewardNote {
  * no longer pending, so the same Ticket raising again starts with none. A
  * note on an Interrupt is also the record that the Steward left it, so the
  * Steward is not told about it again until it changes. The file is
- * rewritten whole through a rename, as the queued answers are.
+ * rewritten whole through a rename, as the queued answers are. A Ticket has
+ * at most one pending Interrupt at a time, so set and clear go by Ticket
+ * alone; a kind that let one Ticket hold two would need them keyed by kind.
  */
 export interface StewardNotes {
   get(ticketId: string, kind: string): StewardNote | null;

@@ -446,7 +446,7 @@ export function buildStewardTeaching(parts: {
       "about that Interrupt again until it changes.",
     "- held adopt|discard <proposal-id>: decide a Held spawn.",
     "- reassign <ticket> field=value...: change a Ticket's Assignment " +
-      "(harness, model, effort, drivers; field= clears one). The engine " +
+      "(harness, model, effort, drivers, verify; field= clears one). The engine " +
       "picks it up at the next boundary, so resume the Ticket after.",
     "- state: the pending Interrupts, the Merge queue, the Pending and Held " +
       "spawns, and your budget left per Ticket.",
