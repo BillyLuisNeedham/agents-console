@@ -133,7 +133,14 @@ export function stewardCall(
         const field = pair.slice(0, eq);
         const value = pair.slice(eq + 1).trim();
         if (field === "verify") {
-          fields.verify = value === "" ? null : Number(value);
+          if (value === "") {
+            fields.verify = null;
+          } else {
+            // NaN would reach the route as null and clear verify instead.
+            const count = Number(value);
+            if (!Number.isInteger(count)) throw new UsageError(`reassign: verify=${value} is not a whole number`);
+            fields.verify = count;
+          }
         } else {
           fields[field] = value === "" ? null : value;
         }

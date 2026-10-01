@@ -9295,6 +9295,10 @@ async function stewardKeepTalking(
     throw stewardRefusal(`ticket ${ticketId} is not waiting at a checkpoint`);
   }
   if (!message.trim()) throw stewardRefusal("keep talking needs a message for the agent");
+  // The budget is read before keepTalking's await, and the answered event it
+  // counts lands after it. No second action slips between: keepTalking claims
+  // the checkpoint synchronously once its await returns, and a ticket no
+  // longer at a checkpoint refuses. Keep that claim synchronous.
   checkStewardBudget(session, ticketId);
   return keepTalking(session, ticketId, { conversation, message });
 }

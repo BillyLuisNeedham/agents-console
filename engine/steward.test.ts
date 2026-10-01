@@ -240,6 +240,7 @@ describe("the Steward's command", () => {
       tickets: ["01"],
       fields: { model: "big", effort: null, verify: 2 },
     });
+    expect(() => stewardCall("conv-1", "reassign", ["01", "verify=abc"], stdin)).toThrow("not a whole number");
     expect(stewardCall("conv-1", "state", [], stdin)).toEqual({
       method: "GET",
       path: "/api/steward/state?conversation=conv-1",
