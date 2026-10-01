@@ -9,9 +9,9 @@
  * Two forms sit in one pane because they answer one question between them:
  * what this pool runs with, and what a pool inherits when it says nothing.
  * Each has its own Save, its own dirty flag and its own inline status, so a
- * refused machine write never loses a pool edit. The assignment slice and the
- * Spawn caps take effect through the engine's Config reload at the next
- * super-step boundary; the boot-only keys carry a "restart to apply" badge
+ * refused machine write never loses a pool edit. The assignment slice, the
+ * Spawn caps and the Steward entry take effect through the engine's Config
+ * reload at the next super-step boundary; the boot-only keys carry a "restart to apply" badge
  * until the Restart in the footer hands off to Boot.
  */
 
@@ -77,6 +77,13 @@ export interface PoolDraft {
   /** The Spawn caps (issue #149): empty means the engine's default. */
   spawnsPerAttempt: string;
   spawnsPerRun: string;
+  /** The Steward budget (ADR-0030): empty means the engine's 5. */
+  stewardBudget: string;
+  /** The Steward's Assignment: each empty field falls to the pool defaults. */
+  stewardHarness: string;
+  stewardModel: string;
+  stewardEffort: string;
+  stewardDrivers: string;
 }
 
 export interface MachineDraft {
@@ -112,7 +119,16 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   checkpoint: "",
   spawnsPerAttempt: "",
   spawnsPerRun: "",
+  stewardBudget: "",
+  stewardHarness: "",
+  stewardModel: "",
+  stewardEffort: "",
+  stewardDrivers: "",
 };
+
+/** The engine's Steward budget when the file sets none (engine/steward.ts),
+ *  shown as the field's placeholder. */
+const DEFAULT_STEWARD_BUDGET = 5;
 
 /** The engine's Spawn caps when the file sets none (engine/spawn-caps.ts),
  *  shown as the fields' placeholders. */
@@ -159,6 +175,11 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     checkpoint: config.checkpoint ?? "",
     spawnsPerAttempt: capField(config.spawnCaps?.perAttempt),
     spawnsPerRun: capField(config.spawnCaps?.perRun),
+    stewardBudget: capField(config.steward?.budget),
+    stewardHarness: config.steward?.assign?.harness ?? "",
+    stewardModel: config.steward?.assign?.model ?? "",
+    stewardEffort: config.steward?.assign?.effort ?? "",
+    stewardDrivers: config.steward?.assign?.drivers ?? "",
   };
 }
 
@@ -181,8 +202,9 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
 /**
  * What is wrong with a draft, or null when it is sendable. Only the fields
  * with a shape the operator can get wrong are checked here: a port that is
- * not a port, a Spawn cap that is not a whole number of 0 or more, and an agents
- * roster that is not JSON. Everything else is free text the engine validates
+ * not a port, a Spawn cap that is not a whole number of 0 or more, a Steward
+ * budget that is not a whole number of 1 or more, and an agents roster that
+ * is not JSON. Everything else is free text the engine validates
  * on its own terms.
  */
 export function validatePoolDraft(draft: PoolDraft): string | null {
@@ -202,6 +224,12 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
     if (cap && !/^\d+$/.test(cap)) {
       return `${label} must be a whole number of 0 or more, or empty for the default`;
     }
+  }
+  // The engine refuses a budget of 0: a Steward that may never answer is no
+  // Steward, and ending it is how the operator takes over.
+  const budget = draft.stewardBudget.trim();
+  if (budget && (!/^\d+$/.test(budget) || Number(budget) < 1)) {
+    return "Steward budget must be a whole number of 1 or more, or empty for the default";
   }
   const agents = draft.agents.trim();
   if (agents) {
@@ -261,6 +289,15 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     checkpoint: orNull(draft.checkpoint),
     title: orNull(draft.title),
     spawnCaps: { perAttempt: cap(draft.spawnsPerAttempt), perRun: cap(draft.spawnsPerRun) },
+    steward: {
+      budget: cap(draft.stewardBudget),
+      assign: {
+        harness: trim(draft.stewardHarness),
+        model: trim(draft.stewardModel),
+        effort: trim(draft.stewardEffort),
+        drivers: trim(draft.stewardDrivers),
+      },
+    },
   };
 }
 
@@ -757,6 +794,7 @@ export class SettingsStore {
         DEFAULT_SPAWN_CAPS.perRun,
         "counted since this Console boot; 0 holds every proposal for you",
       ),
+      ...this.renderStewardFields(data),
       text("roster", "roster", { badge: "roster", area: true }),
       text("agents", "agents", {
         badge: "agents",
@@ -903,6 +941,74 @@ export class SettingsStore {
         () => void this.saveMachine(),
       ),
     );
+  }
+
+  /**
+   * The Steward entry (ADR-0030): its budget and its Assignment. Both reload
+   * at the next boundary, like the Spawn caps, so neither carries a badge.
+   * The Assignment's empty fields show the pool defaults they fall to, the
+   * Steward resolving its own entry ahead of them the way the resolver does.
+   */
+  private renderStewardFields(data: SettingsResponse): HTMLElement[] {
+    const text = (
+      name: "stewardModel" | "stewardDrivers",
+      placeholder: string,
+    ): HTMLElement =>
+      h("input", {
+        class: "settings-input settings-pair-model",
+        key: `pool-${name}`,
+        type: "text",
+        value: this.poolDraft[name],
+        placeholder,
+        oninput: (event: Event) =>
+          this.setPoolField(name, (event.currentTarget as HTMLInputElement).value),
+      });
+    return [
+      this.renderField(
+        "pool-stewardBudget",
+        "steward budget",
+        h("input", {
+          class: "settings-input settings-number",
+          key: "pool-stewardBudget-input",
+          type: "number",
+          min: "1",
+          value: this.poolDraft.stewardBudget,
+          placeholder: `${DEFAULT_STEWARD_BUDGET} (default)`,
+          oninput: (event: Event) =>
+            this.setPoolField("stewardBudget", (event.currentTarget as HTMLInputElement).value),
+        }),
+        false,
+        "answers the Steward may give one Ticket since you last answered it",
+      ),
+      this.renderField(
+        "pool-steward",
+        "steward",
+        h(
+          "div",
+          { class: "settings-pair settings-steward" },
+          this.renderHarnessSelect(
+            "pool-steward-harness",
+            data.harnesses,
+            this.poolDraft.stewardHarness,
+            "(pool default)",
+            null,
+            (value) => this.setPoolField("stewardHarness", value),
+          ),
+          text("stewardModel", "model (pool default)"),
+          effortInput({
+            key: "pool-steward-effort",
+            class: "settings-input settings-pair-effort",
+            harness: this.poolDraft.stewardHarness || this.poolDraft.harness,
+            value: this.poolDraft.stewardEffort,
+            placeholder: "effort (pool default)",
+            onInput: (value) => this.setPoolField("stewardEffort", value),
+          }),
+          text("stewardDrivers", "drivers (pool default)"),
+        ),
+        false,
+        "the Steward's Assignment; empty fields use the pool defaults",
+      ),
+    ];
   }
 
   private renderCapField(
