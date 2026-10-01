@@ -597,3 +597,57 @@ describe("NeedsInputTray width (issue #147)", () => {
     expect(trayEl().style.width).toBe("300px");
   });
 });
+
+describe("NeedsInputTray Steward note (ADR-0030)", () => {
+  const note = { text: "rebase onto main, then resume", at: "2026-10-01T02:00:00Z", conversation: "conv-3" };
+  const withNote = (queued = false): NeedsInputRow => {
+    const base = row("01", "checkpoint", queued);
+    return { ...base, interrupt: { ...base.interrupt, stewardNote: note } };
+  };
+
+  it("shows the note between the row's line and its own note field", () => {
+    const el = stateTray().render([withNote()], [], trayHandlers())!;
+    const box = el.querySelector(".needs-input-row .steward-note");
+    expect(box?.querySelector(".steward-note-text")?.textContent).toBe(note.text);
+    expect(box?.nextElementSibling?.classList.contains("needs-input-note")).toBe(true);
+  });
+
+  it("shows no note box on a row the Steward left nothing on", () => {
+    const el = stateTray().render([row("01", "checkpoint")], [], trayHandlers())!;
+    expect(el.querySelector(".steward-note")).toBeNull();
+  });
+
+  it("Use as answer makes the note the ticket's Draft answer, which every surface shares", () => {
+    const drafts = new DraftAnswers();
+    drafts.set("01", "my half-written answer");
+    let changes = 0;
+    const tray = new NeedsInputTray({
+      onAnswer: () => Promise.resolve(),
+      onChange: () => {
+        changes += 1;
+      },
+      drafts,
+    });
+    const el = tray.render([withNote()], [], trayHandlers())!;
+    el.querySelector<HTMLButtonElement>(".steward-note-use")!.click();
+    expect(drafts.get("01")).toBe(note.text);
+    expect(changes).toBe(1);
+    // The re-render the change asks for draws the field holding it.
+    const again = tray.render([withNote()], [], trayHandlers())!;
+    expect(again.querySelector<HTMLTextAreaElement>("textarea.needs-input-note")!.value).toBe(
+      note.text,
+    );
+  });
+
+  it("sends nothing: the operator still answers with the note", () => {
+    const fake = fakeAnswer();
+    const el = trayWith(fake).render([withNote()], [], trayHandlers())!;
+    el.querySelector<HTMLButtonElement>(".steward-note-use")!.click();
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("disables Use as answer once an answer is queued", () => {
+    const el = stateTray().render([withNote(true)], [], trayHandlers())!;
+    expect(el.querySelector<HTMLButtonElement>(".steward-note-use")!.disabled).toBe(true);
+  });
+});

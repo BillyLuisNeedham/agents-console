@@ -15,6 +15,8 @@ import {
   checkpointNotice,
   conversationTurnLabel,
   statusLabel,
+  stewardLiveReason,
+  stewardOnDutyLine,
   UNASSIGNED_LABEL,
   VITALS_MAX_SAMPLES,
   type AssignmentView,
@@ -24,6 +26,7 @@ import {
   type SpawnCardView,
   type RunPhase,
   type SpawnLineView,
+  type StewardOnDutyView,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -45,6 +48,7 @@ import {
 } from "./geometry";
 import { h } from "./dom";
 import { renderTerminalSurface } from "./terminal";
+import { renderStewardBadge } from "./steward";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
@@ -346,6 +350,9 @@ export interface CanvasModel {
   spawnLine: SpawnLineView | null;
   /** The header's "Close N finished terminals" control (issue #139). */
   closeTerminals: CloseTerminalsView;
+  /** The Steward on duty (ADR-0030): the header says so, a click focusing
+   *  its card, and Start Steward stands disabled. Null when none is. */
+  steward: StewardOnDutyView | null;
 }
 
 /**
@@ -398,6 +405,8 @@ export class Canvas {
   private readonly onCardTap: (nodeId: string) => void;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
+  private readonly onStartSteward: () => void;
+  private readonly onFocusSteward: (cardId: string) => void;
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
   private readonly onOpenHeldSpawns: () => void;
@@ -417,6 +426,11 @@ export class Canvas {
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
     onNewConversation: () => void;
+    /** The header's "Start Steward" button (ADR-0030): opens the
+     *  Conversations tray's Start Steward form. */
+    onStartSteward: () => void;
+    /** The header's "Steward on duty" line: select and reveal its card. */
+    onFocusSteward: (cardId: string) => void;
     /** The header's "Enlist terminal" button (issue #101): opens the pane
      *  picker. Offered only on a Terminal-backed pool. */
     onEnlist: () => void;
@@ -447,6 +461,8 @@ export class Canvas {
     this.onCardTap = options.onCardTap;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
+    this.onStartSteward = options.onStartSteward;
+    this.onFocusSteward = options.onFocusSteward;
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
@@ -730,6 +746,7 @@ export class Canvas {
       "div",
       { class: "node-card-head" },
       h("span", { class: "node-card-id" }, card.conversationId),
+      card.steward ? renderStewardBadge() : null,
       h(
         "span",
         { class: `node-card-state conversation-turn-${card.turn.state}` },
@@ -788,6 +805,7 @@ export class Canvas {
       {
         class:
           `node-card conversation-card conversation-card-${card.status}` +
+          (card.steward ? " conversation-card-steward" : "") +
           this.flowClass(card.id, selection),
         key: card.id,
         "data-node-id": card.id,
@@ -866,6 +884,7 @@ export class Canvas {
       "div",
       { class: "canvas-header" },
       h("span", { class: "dim" }, canvasStatusText(model)),
+      model.steward ? this.renderStewardOnDuty(model.steward) : null,
       model.mergeQueueLine
         ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
         : null,
@@ -936,6 +955,18 @@ export class Canvas {
           },
           "New Conversation",
         ),
+        h(
+          "button",
+          {
+            class: "btn canvas-start-steward",
+            disabled: model.steward !== null,
+            title: model.steward
+              ? stewardLiveReason(model.steward)
+              : "start a Steward to answer Interrupts while you are away",
+            onclick: () => this.onStartSteward(),
+          },
+          "Start Steward",
+        ),
         this.renderCloseTerminalsControl(model.closeTerminals),
         this.renderStopControl(model.stop),
         h(
@@ -957,6 +988,40 @@ export class Canvas {
         ),
       ),
     );
+  }
+
+  /**
+   * The header's word that a Steward is on duty (ADR-0030), first after the
+   * status line because it says who is answering while the operator is
+   * away. A click selects the Steward's card and brings it into view.
+   */
+  private renderStewardOnDuty(steward: StewardOnDutyView): HTMLElement {
+    return h(
+      "button",
+      {
+        class: "canvas-steward",
+        type: "button",
+        title: `${steward.title} is on duty (show its card)`,
+        onclick: () => this.onFocusSteward(steward.cardId),
+      },
+      stewardOnDutyLine(steward),
+    );
+  }
+
+  /**
+   * Pan the canvas so a card stands in view, its middle across and a third
+   * of the way down, at the current zoom: the header's Steward line uses it
+   * to take the operator to a card that may be far off screen.
+   */
+  reveal(nodeId: string): void {
+    const pos = this.nodePos.get(nodeId);
+    if (!pos || !this.canvas) return;
+    const rect = this.canvas.viewport.getBoundingClientRect();
+    // Whole pixels, as a drag leaves them, so the pan stays crisp.
+    this.view.x = Math.round(rect.width / 2 - (pos.x + CARD_WIDTH / 2) * this.view.zoom);
+    this.view.y = Math.round(rect.height / 3 - pos.y * this.view.zoom);
+    this.view.seeded = true;
+    this.applyTransform();
   }
 
   /**

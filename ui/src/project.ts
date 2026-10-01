@@ -29,6 +29,7 @@ import type {
   ResumeAction,
   RunPhase,
   StartConversationRequest,
+  StewardBudgetView,
   TicketReassignView,
   TicketActivityResponse,
   TicketEvent,
@@ -81,6 +82,10 @@ export type {
   RunPhase,
   SettingsResponse,
   StartConversationRequest,
+  StewardAssign,
+  StewardBudgetView,
+  StewardConfig,
+  StewardNote,
   TerminalPeekResponse,
   TicketActivityResponse,
   TicketBodyResponse,
@@ -231,6 +236,10 @@ interface TimelineEventView {
   /** The files a merge-conflict, merge-blocked or resolver event names;
    *  null on every other kind, and on a payload without a string list. */
   files: string[] | null;
+  /** What the Steward did (ADR-0030), as one line with its note: an answer,
+   *  a Keep talking, a Steward note left for the operator, a Reassign, or
+   *  its own End. Null on the operator's events and every other kind. */
+  steward: string | null;
 }
 
 function formatEventTime(iso: string): string {
@@ -378,8 +387,58 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
   return null;
 }
 
+// What the Steward did (ADR-0030), read off an event it wrote: every event
+// the Steward causes carries `by: "steward"`, and one with no `by` is the
+// operator's, so an operator's answer decodes to null and keeps its plain
+// row. An answer names the Interrupt as its form is titled and gives the
+// note, a Keep talking the message the engine typed, a reassign-requested
+// the fields set or cleared, an End the closing line. A steward-note event
+// is the Steward's by definition. A payload of the wrong shape still says
+// who did it, without the detail.
+function stewardFromPayload(kind: string, payload: Record<string, unknown>): string | null {
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value.trim() : null;
+  if (kind === "steward-note") {
+    const note = text(payload.note);
+    return note ? `Steward left this for you: ${note}` : "Steward left this for you";
+  }
+  if (payload.by !== "steward") return null;
+  if (kind === "answered") {
+    if (payload.action === "keep-talking") {
+      const message = text(payload.message);
+      return message ? `the Steward kept talking: ${message}` : "the Steward kept talking";
+    }
+    const interruptKind = typeof payload.kind === "string" ? payload.kind : null;
+    const what = interruptKind
+      ? (INTERRUPT_FORMS[interruptKind]?.title ?? interruptKind)
+      : "the interrupt";
+    const action =
+      payload.action === "approve" || payload.action === "reject" ? payload.action : "resume";
+    const note = text(payload.note);
+    return `the Steward answered ${what}: ${action}` + (note ? ` · ${note}` : "");
+  }
+  if (kind === "reassign-requested") {
+    const fields = payload.fields;
+    if (typeof fields !== "object" || fields === null) return "the Steward reassigned";
+    const parts = Object.entries(fields)
+      .filter(
+        ([, value]) => value === null || typeof value === "string" || typeof value === "number",
+      )
+      .map(([field, value]) => (value === null ? `${field} cleared` : `${field} ${value}`));
+    return parts.length > 0
+      ? `the Steward reassigned: ${parts.join(" · ")}`
+      : "the Steward reassigned";
+  }
+  if (kind === "end-requested") {
+    const closing = text(payload.closing);
+    return closing ? `the Steward ended itself: ${closing}` : "the Steward ended itself";
+  }
+  return null;
+}
+
 /** One raw event decoded into its timeline row. */
 function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
+  const spawn = spawnFromPayload(event.kind, event.payload);
   return {
     kind: event.kind,
     at: event.at,
@@ -387,8 +446,10 @@ function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
     grade: event.kind === "graded" ? gradeFromPayload(event.payload) : null,
     reassignment:
       event.kind === "reassigned" ? reassignmentFromPayload(event.payload) : null,
-    spawn: spawnFromPayload(event.kind, event.payload),
+    // A Held spawn the Steward adopted or discarded reads as its decision.
+    spawn: spawn !== null && event.payload.by === "steward" ? `${spawn} · by the Steward` : spawn,
     files: FILE_EVENT_KINDS.has(event.kind) ? filesFromPayload(event.payload) : null,
+    steward: stewardFromPayload(event.kind, event.payload),
   };
 }
 
@@ -864,6 +925,9 @@ export interface TicketCardView {
   hasLiveAttempt: boolean;
   outcome: Outcome | null;
   interrupt: InterruptView | null;
+  /** The Steward budget on this ticket (ADR-0030), present only while the
+   *  Steward has answered it since the operator last did. */
+  stewardBudget: StewardBudgetLine | null;
   /** The ticket's latest grade, for the card summary. Null when ungraded:
    *  no grade UI renders at all, so there is no empty state. */
   grade: TicketGradeSummary | null;
@@ -962,6 +1026,8 @@ export interface ConversationCardView {
   /** The Conversation was enlisted from a live herdr pane (issue #101): the
    *  badge reads "as found" where a started Conversation names a model. */
   enlisted: boolean;
+  /** It is the Steward (ADR-0030): the card is marked as such. */
+  steward: boolean;
   /** The card's terminal surface, reused from ticket cards; present while
    *  the Conversation is live and carries a pane id. */
   terminal: TerminalSurfaceView | null;
@@ -1021,6 +1087,8 @@ export interface PoolView {
   pendingSpawns: PendingSpawnRow[];
   /** The Held spawns list the line opens (issue #149), oldest first. */
   heldSpawns: HeldSpawnRow[];
+  /** The Steward on duty (ADR-0030), which the header names; null when none is. */
+  steward: StewardOnDutyView | null;
 }
 
 /**
@@ -1402,6 +1470,7 @@ function projectTicket(
   terminal: TerminalSurfaceView | undefined,
   now: number,
   keepTalking: KeepTalkingState | undefined,
+  stewardBudget: StewardBudgetView | undefined,
 ): TicketCardView {
   const raw = state.interrupts.find((i) => i.ticketId === ticket.id) ?? null;
   const paneId = ticketPaneId(ticket);
@@ -1421,6 +1490,7 @@ function projectTicket(
     hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
     interrupt: toInterruptView(raw, state, ticket.heldPane, keepTalking),
+    stewardBudget: projectStewardBudget(stewardBudget, ticket.id),
     grade,
     vitals: projectVitals(
       vitals,
@@ -1486,6 +1556,7 @@ function projectConversation(
     turn: conversation.turn,
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
+    steward: conversation.role === "steward",
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id], conversation.ending),
     x: pos.x,
@@ -1550,6 +1621,7 @@ export function projectPool(
         terminal[ticket.id],
         now,
         keepTalking[ticket.id],
+        snapshot.stewardBudget,
       ),
     ),
     ...snapshot.pendingSpawns.map((spawn) =>
@@ -1574,6 +1646,7 @@ export function projectPool(
     spawnLine: spawnLine(snapshot),
     pendingSpawns: projectPendingSpawns(snapshot.pendingSpawns, now),
     heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
+    steward: stewardOnDuty(conversations),
   };
 }
 
@@ -1792,6 +1865,8 @@ export interface ConversationTrayRow {
   status: ConversationStatus;
   turn: ConversationTurn;
   idleAge: string | null;
+  /** It is the Steward (ADR-0030): the row is marked as such. */
+  steward: boolean;
 }
 
 /**
@@ -1815,6 +1890,7 @@ export function projectConversationsTray(
       status: c.status,
       turn: c.turn,
       idleAge: conversationIdleAge(c.turn.idleSince, now),
+      steward: c.role === "steward",
     }));
   return rows.sort((a, b) => {
     const aWaiting = a.turn.state === "waiting" ? 0 : 1;
@@ -1844,14 +1920,17 @@ export interface ConversationNeedsInputRow {
  * Needs input's Conversation rows: every live Conversation whose Turn state
  * is `waiting`, in Conversation order (the same order the lane and the tray
  * use). A Notice queued for delivery does not change this: the Conversation
- * only counts as needing the operator once its own Turn is waiting.
+ * only counts as needing the operator once its own Turn is waiting. The
+ * Steward (ADR-0030) never lists: it waits between the Notices the engine
+ * delivers it, not on the operator, and what it leaves for the operator
+ * arrives as a Steward note on the Interrupt's own row.
  */
 export function projectConversationsNeedsInput(
   snapshot: EnrichedSnapshot,
 ): ConversationNeedsInputRow[] {
   const conversations = snapshot.state.conversations;
   return conversations
-    .filter((c) => c.status === "live" && c.turn.state === "waiting")
+    .filter((c) => c.status === "live" && c.turn.state === "waiting" && c.role !== "steward")
     .map((c) => ({
       cardId: conversationCardId(c.id),
       conversationId: c.id,
@@ -1891,6 +1970,93 @@ export function poolAssignmentDefaults(
  */
 export function isTerminalBacked(config: Record<string, unknown>): boolean {
   return config.terminal === "herdr";
+}
+
+// ---------------------------------------------------------------------------
+// The Steward (ADR-0030; CONTEXT.md: Steward, Steward budget, Steward note):
+// a Conversation in a role, one live per Pool. The engine's shapes carry the
+// role, the note and the budget; what lives here is how the Console reads
+// them.
+// ---------------------------------------------------------------------------
+
+/** The Steward on duty, as the pool header names it and focuses its card. */
+export interface StewardOnDutyView {
+  conversationId: string;
+  cardId: string;
+  title: string;
+}
+
+/**
+ * The live Steward, or null when none is. A Steward whose End is under way
+ * still counts, the way the engine counts it when it refuses a second one:
+ * its record stays live until the End lands.
+ */
+export function stewardOnDuty(conversations: ConversationView[]): StewardOnDutyView | null {
+  const steward = conversations.find((c) => c.role === "steward" && c.status === "live");
+  if (!steward) return null;
+  return {
+    conversationId: steward.id,
+    cardId: conversationCardId(steward.id),
+    title: steward.title,
+  };
+}
+
+/** Why Start Steward and Enlist as Steward stand disabled while one is live. */
+export function stewardLiveReason(steward: StewardOnDutyView): string {
+  return `a Steward is already on duty (${steward.conversationId}); a Pool has one at a time`;
+}
+
+/** The pool header's word that a Steward is on duty. */
+export function stewardOnDutyLine(steward: StewardOnDutyView): string {
+  return `Steward on duty · ${steward.conversationId}`;
+}
+
+/**
+ * The Steward's Assignment as the Start Steward form's placeholders: the
+ * Pool settings' Steward entry, field by field, ahead of the pool defaults,
+ * the order the engine resolves it in when a field is left blank.
+ */
+export function stewardAssignmentDefaults(
+  config: Record<string, unknown>,
+): NonNullable<StartConversationRequest["assign"]> {
+  const defaults = poolAssignmentDefaults(config);
+  const steward = config.steward;
+  const assign =
+    steward && typeof steward === "object"
+      ? (steward as Record<string, unknown>).assign
+      : undefined;
+  if (!assign || typeof assign !== "object") return defaults;
+  for (const field of ["harness", "model", "effort", "drivers"] as const) {
+    const value = (assign as Record<string, unknown>)[field];
+    if (typeof value === "string" && value) defaults[field] = value;
+  }
+  return defaults;
+}
+
+/** The Steward budget on one ticket, as the ticket's Detail shows it. */
+export interface StewardBudgetLine {
+  used: number;
+  budget: number;
+  remaining: number;
+}
+
+/**
+ * A ticket's Steward budget, or null when the Steward has not answered it
+ * since the operator last did: the engine lists a ticket in `used` only
+ * then. Remaining never reads below zero.
+ */
+function projectStewardBudget(
+  view: StewardBudgetView | undefined,
+  ticketId: string,
+): StewardBudgetLine | null {
+  const used = view?.used[ticketId] ?? 0;
+  if (!view || used <= 0) return null;
+  return { used, budget: view.budget, remaining: Math.max(0, view.budget - used) };
+}
+
+/** The Detail's budget line: "Steward budget · 2 of 5 used · 3 left". */
+export function stewardBudgetText(line: StewardBudgetLine): string {
+  return `Steward budget · ${line.used} of ${line.budget} used · ${line.remaining} left`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2072,13 +2238,22 @@ export function projectReassignTickets(
     }));
 }
 
-/** The two kinds a picked pane can become, fixed at enlist time (issue #101). */
-export type EnlistBecomes = "ticket" | "conversation";
+/** The kinds a picked pane can become, fixed at enlist time (issue #101): a
+ *  Ticket, a Conversation, or a Conversation as the Steward (ADR-0030). */
+export type EnlistBecomes = "ticket" | "conversation" | "steward";
 
 /** The one-line reminder beside the Becomes switch, so the operator picks the
  *  right kind without re-reading the glossary. */
 export const ENLIST_BECOMES_HINT =
-  "Ticket ends in an Outcome and can be waited on; Conversation is an open talk that cannot block anything.";
+  "Ticket ends in an Outcome and can be waited on; Conversation is an open talk that cannot block anything; Steward is a Conversation that answers Interrupts while you are away.";
+
+/**
+ * The greyed note that stands where Blocks would be when the form is in
+ * Steward mode: what the pane is taught, and that its rights to push or open
+ * pull requests come only from the operator's own words.
+ */
+export const ENLIST_STEWARD_NOTE =
+  "The Steward is taught to answer Interrupts while you are away. It pushes or opens pull requests only if your standing orders say so.";
 
 /**
  * The greyed note that stands where Blocks would be when the form is in
@@ -2100,22 +2275,46 @@ export interface EnlistFormView {
   showsSpec: boolean;
   /** The Blocks tick list (Ticket only). */
   showsBlocks: boolean;
-  /** The optional opening-Turn textarea (Conversation only). */
+  /** The optional opening-Turn textarea (Conversation and Steward). */
   showsOpening: boolean;
-  /** The greyed note standing in for Blocks in Conversation mode; null in
-   *  Ticket mode, where the tick list shows. */
+  /** The opening textarea's label: a Steward's opening is its standing orders. */
+  openingLabel: string;
+  /** Whether a blank title is refused: a Steward's defaults to "Steward". */
+  requiresTitle: boolean;
+  /** The greyed note standing in for Blocks in Conversation and Steward mode;
+   *  null in Ticket mode, where the tick list shows. */
   note: string | null;
 }
 
 export function projectEnlistForm(becomes: EnlistBecomes): EnlistFormView {
-  return becomes === "ticket"
-    ? { showsSpec: true, showsBlocks: true, showsOpening: false, note: null }
-    : {
-        showsSpec: false,
-        showsBlocks: false,
-        showsOpening: true,
-        note: ENLIST_CONVERSATION_NOTE,
-      };
+  if (becomes === "ticket") {
+    return {
+      showsSpec: true,
+      showsBlocks: true,
+      showsOpening: false,
+      openingLabel: "opening (optional)",
+      requiresTitle: true,
+      note: null,
+    };
+  }
+  if (becomes === "steward") {
+    return {
+      showsSpec: false,
+      showsBlocks: false,
+      showsOpening: true,
+      openingLabel: "standing orders (optional)",
+      requiresTitle: false,
+      note: ENLIST_STEWARD_NOTE,
+    };
+  }
+  return {
+    showsSpec: false,
+    showsBlocks: false,
+    showsOpening: true,
+    openingLabel: "opening (optional)",
+    requiresTitle: true,
+    note: ENLIST_CONVERSATION_NOTE,
+  };
 }
 
 /**
@@ -2264,6 +2463,9 @@ export interface TicketDetailView {
   /** An Attempt is in flight: the Reassign editor stands aside for the
    *  read-only view while one is. */
   hasLiveAttempt: boolean;
+  /** Mirrors the card's: the Steward budget used and left on this ticket,
+   *  null until the Steward has answered it (ADR-0030). */
+  stewardBudget: StewardBudgetLine | null;
 }
 
 interface UtilityDetailView {
@@ -2288,6 +2490,8 @@ export interface ConversationDetailView {
   idleAge: string | null;
   terminal: TerminalSurfaceView | null;
   endView: ConversationEndView;
+  /** Mirrors the card's: it is the Steward (ADR-0030). */
+  steward: boolean;
 }
 
 /**
@@ -2369,6 +2573,7 @@ export function projectDetail(
       enlisted: card.enlisted,
       reassign: card.reassign,
       hasLiveAttempt: card.hasLiveAttempt,
+      stewardBudget: card.stewardBudget,
     };
   }
   if (card.kind === "conversation") {
@@ -2385,6 +2590,7 @@ export function projectDetail(
       idleAge: card.idleAge,
       terminal: card.terminal,
       endView: card.endView,
+      steward: card.steward,
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };

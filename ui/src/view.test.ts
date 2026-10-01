@@ -327,3 +327,83 @@ describe("ConsoleView: Pending spawns in the list, on the canvas and in the Deta
     expect(c.q(".spawn-detail")).toBeNull();
   });
 });
+
+describe("ConsoleView: the Steward (ADR-0030)", () => {
+  const note = { text: "resume with: use the fixture, not the live API", at: "2026-10-01T02:00:00Z", conversation: "conv-3" };
+  const STEWARD_SNAPSHOT: EnrichedSnapshot = {
+    ...SNAPSHOT,
+    stewardBudget: { budget: 5, used: { B: 1 } },
+    state: {
+      ...SNAPSHOT.state,
+      conversations: [
+        {
+          id: "conv-3",
+          title: "Steward",
+          status: "live",
+          spawnedBy: null,
+          assignment: { harness: "claude", model: "opus", drivers: "implement" },
+          paneId: null,
+          branch: null,
+          turn: { state: "waiting", lastLine: "", idleSince: null },
+          children: [],
+          enlisted: false,
+          ending: false,
+          role: "steward",
+        },
+      ],
+      interrupts: [
+        { ticketId: "A", kind: "checkpoint", body: "brief A", stewardNote: note },
+        { ticketId: "B", kind: "checkpoint", body: "brief B" },
+      ],
+    },
+  };
+
+  it("Use as answer in the Detail fills the Draft answer the tray row shows too", () => {
+    const c = mountConsole(STEWARD_SNAPSHOT);
+    c.type(c.trayNote("A"), "my own words");
+    c.session.select("ticket:A");
+    c.session.selectTab("A", "progress");
+    c.q<HTMLButtonElement>(".detail-open .steward-note-use")!.click();
+    expect(c.detailNote()!.value).toBe(note.text);
+    expect(c.trayNote("A").value).toBe(note.text);
+    expect(c.trayNote("B").value).toBe("");
+  });
+
+  it("Use as answer in the tray fills the open Detail's note too", () => {
+    const c = mountConsole(STEWARD_SNAPSHOT);
+    c.session.select("ticket:A");
+    c.session.selectTab("A", "progress");
+    c.q<HTMLButtonElement>('.needs-input-row[data-key="ticket:A"] .steward-note-use')!.click();
+    expect(c.detailNote()!.value).toBe(note.text);
+  });
+
+  it("selects the Steward's card from the header's on-duty line, and keeps it selected on a second click", () => {
+    const c = mountConsole(STEWARD_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-steward")!.click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("conv-3");
+    c.q<HTMLButtonElement>(".canvas-steward")!.click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("conv-3");
+    expect(c.q(".detail-open .steward-badge")).not.toBeNull();
+  });
+
+  it("leaves the waiting Steward out of Needs input", () => {
+    const c = mountConsole(STEWARD_SNAPSHOT);
+    expect(c.q(".needs-input-row-conversation")).toBeNull();
+  });
+
+  it("opens the tray's Start Steward form from the header while none is on duty", () => {
+    const c = mountConsole({ ...STEWARD_SNAPSHOT, state: { ...STEWARD_SNAPSHOT.state, conversations: [] } });
+    c.q<HTMLButtonElement>(".canvas-start-steward")!.click();
+    expect(c.q(".steward-form")).not.toBeNull();
+    expect(c.q<HTMLButtonElement>(".steward-start")!.disabled).toBe(false);
+  });
+
+  it("shows the Steward budget on the ticket it has answered", () => {
+    const c = mountConsole(STEWARD_SNAPSHOT);
+    c.session.select("ticket:B");
+    c.session.selectTab("B", "progress");
+    expect(c.q(".detail-steward-budget")?.textContent).toBe(
+      "Steward budget · 1 of 5 used · 4 left",
+    );
+  });
+});

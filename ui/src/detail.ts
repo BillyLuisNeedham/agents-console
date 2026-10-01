@@ -18,6 +18,7 @@ import {
   parseStoredDetailWidth,
   resolverFiles,
   statusLabel,
+  stewardBudgetText,
   ticketBodyHtml,
   UNASSIGNED_LABEL,
   type AssignmentSource,
@@ -43,6 +44,7 @@ import {
 import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
+import { renderStewardBadge, renderStewardNote } from "./steward";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -71,6 +73,10 @@ export interface DetailHandlers {
    *  forget, like onAnswer; the session holds the in-flight and refusal
    *  state the interrupt's `keepTalking` view reads back. */
   onKeepTalking: (ticketId: string) => void;
+  /** "Use as answer" on a Steward note (ADR-0030): the composition makes it
+   *  the ticket's Draft answer and re-renders, so the note field here and
+   *  the Needs input row's both show it. */
+  onUseStewardNote: (ticketId: string, text: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
   /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
    *  Conversations store tracks the in-flight/failure state on `endView`. */
@@ -275,7 +281,8 @@ export class Detail {
   // engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
   // or attempt. A checkpoint whose Held pane is still alive also offers Keep
   // talking beside Resume (issue #139); it is not an answer, so the note
-  // stays with Resume and the button sends none.
+  // stays with Resume and the button sends none. A Steward note (ADR-0030)
+  // sits above the note field, with "Use as answer" to take it as the draft.
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -298,6 +305,15 @@ export class Detail {
         ),
       );
       return box;
+    }
+    const stewardNote = interrupt.stewardNote;
+    if (stewardNote) {
+      box.append(
+        renderStewardNote(stewardNote, {
+          disabled: false,
+          onUse: () => handlers.onUseStewardNote(interrupt.ticketId, stewardNote.text),
+        }),
+      );
     }
     const note = h("textarea", {
       class: "interrupt-note",
@@ -451,6 +467,9 @@ export class Detail {
             row.append(h("div", { class: "timeline-reassigned" }, event.reassignment));
           }
           if (event.spawn) row.append(h("div", { class: "timeline-spawn" }, event.spawn));
+          if (event.steward) {
+            row.append(h("div", { class: "timeline-steward" }, event.steward));
+          }
         }
       }
       body.append(row);
@@ -646,6 +665,22 @@ export class Detail {
         statusLabel(detail.status, detail.mergeState),
       ),
     );
+    // The Steward budget (ADR-0030), only once the Steward has answered this
+    // ticket since the operator last did: how much more it may answer here.
+    if (detail.stewardBudget) {
+      panel.append(
+        h(
+          "div",
+          {
+            class:
+              "detail-steward-budget" +
+              (detail.stewardBudget.remaining === 0 ? " detail-steward-budget-spent" : ""),
+            title: "answers the Steward may still give this ticket before it waits for you",
+          },
+          stewardBudgetText(detail.stewardBudget),
+        ),
+      );
+    }
     if (detail.resolver) {
       panel.append(this.renderResolver(detail.ticketId, detail.resolver, timeline, handlers));
     }
@@ -1037,6 +1072,7 @@ export class Detail {
     const panel = h(
       "div",
       { class: "detail-body conversation-detail" },
+      detail.steward ? renderStewardBadge() : null,
       h("div", { class: "dim" }, "assignment"),
       h(
         "div",

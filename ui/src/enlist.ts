@@ -1,9 +1,9 @@
 /**
  * Enlist: the picker for live herdr panes and the form that turns one into a
- * Ticket or a Conversation (issue #101), one module owning the whole session
- * state (whether the picker is open, the panes herdr reported, the in-flight
- * read and its failure, and the draft form) and rendering from the pure
- * projections. The pane read fires when the picker opens, never on the
+ * Ticket, a Conversation (issue #101) or the Steward (ADR-0030), one module
+ * owning the whole session state (whether the picker is open, the panes
+ * herdr reported, the in-flight read and its failure, and the draft form)
+ * and rendering from the pure projections. The pane read fires when the picker opens, never on the
  * snapshot cadence: the list is ephemeral, not pool state, so it gets no
  * channel and no cache.
  *
@@ -11,7 +11,9 @@
  * prefilled from the pane's own terminal title. The form's "Blocks" tick list
  * is every ticket not yet done, projected from the snapshot; submitting sends
  * only the fields for the kind the Becomes switch is on, and surfaces a
- * refusal from the engine's 409 inline without losing the draft.
+ * refusal from the engine's 409 inline without losing the draft. Steward
+ * stands disabled, the reason on hover, while a Steward is on duty: a Pool
+ * has one at a time.
  */
 
 import { h } from "./dom";
@@ -19,6 +21,7 @@ import {
   ENLIST_BECOMES_HINT,
   projectEnlistForm,
   projectEnlistPicker,
+  stewardLiveReason,
   type EnlistBecomes,
   type EnlistBlockRow,
   type EnlistFormView,
@@ -27,6 +30,7 @@ import {
   type EnlistRequest,
   type EnlistResponse,
   type PanesResponse,
+  type StewardOnDutyView,
 } from "./project";
 
 export type ListPanesHandler = () => Promise<PanesResponse>;
@@ -39,7 +43,7 @@ export interface EnlistOptions {
   onChange: () => void;
 }
 
-type DraftField = "title" | "spec" | "opening";
+type DraftField = "title" | "spec" | "opening" | "orders";
 
 export class EnlistStore {
   private isPickerOpen = false;
@@ -54,12 +58,14 @@ export class EnlistStore {
   // The form's session state. Non-null formPaneId means the form is open.
   private formPaneId: string | null = null;
   // Which kind the picked pane becomes, fixed at submit; the form opens on
-  // Ticket. Title is shared across the switch; spec and opening each belong
-  // to one kind and survive a round trip through the other.
+  // Ticket. Title is shared across the switch; spec, opening and the
+  // Steward's standing orders each belong to one kind and survive a round
+  // trip through the others.
   private becomes: EnlistBecomes = "ticket";
   private draftTitle = "";
   private draftSpec = "";
   private draftOpening = "";
+  private draftOrders = "";
   private ticked = new Set<string>();
   private submitting = false;
   private submitError: string | null = null;
@@ -118,12 +124,14 @@ export class EnlistStore {
   field(name: DraftField): string {
     if (name === "title") return this.draftTitle;
     if (name === "spec") return this.draftSpec;
+    if (name === "orders") return this.draftOrders;
     return this.draftOpening;
   }
 
   setField(name: DraftField, value: string): void {
     if (name === "title") this.draftTitle = value;
     else if (name === "spec") this.draftSpec = value;
+    else if (name === "orders") this.draftOrders = value;
     else this.draftOpening = value;
   }
 
@@ -202,6 +210,7 @@ export class EnlistStore {
     this.draftTitle = pane.title;
     this.draftSpec = "";
     this.draftOpening = "";
+    this.draftOrders = "";
     this.ticked = new Set();
     this.submitting = false;
     this.submitError = null;
@@ -215,6 +224,7 @@ export class EnlistStore {
     this.draftTitle = "";
     this.draftSpec = "";
     this.draftOpening = "";
+    this.draftOrders = "";
     this.ticked = new Set();
     this.submitting = false;
     this.submitError = null;
@@ -230,12 +240,14 @@ export class EnlistStore {
   /**
    * Submit the form. Only the fields for the chosen kind travel: a Ticket
    * sends title, spec and blocks, a Conversation title and an optional
-   * opening Turn. A refusal leaves the draft open with the reason inline.
+   * opening Turn, the Steward an optional title ("Steward" when blank) and
+   * its standing orders. A refusal, the engine's word that a Steward is
+   * already on duty included, leaves the draft open with the reason inline.
    */
   async submit(): Promise<void> {
     if (this.submitting || this.formPaneId === null) return;
     const title = this.draftTitle.trim();
-    if (!title) {
+    if (!title && this.formView().requiresTitle) {
       this.submitError = "title is required";
       this.onChange();
       return;
@@ -244,7 +256,15 @@ export class EnlistStore {
     this.submitError = null;
     this.onChange();
     try {
-      if (this.becomes === "conversation") {
+      if (this.becomes === "steward") {
+        const orders = this.draftOrders.trim();
+        await this.onEnlist({
+          becomes: "steward",
+          paneId: this.formPaneId,
+          ...(title ? { title } : {}),
+          ...(orders ? { opening: orders } : {}),
+        });
+      } else if (this.becomes === "conversation") {
         const opening = this.draftOpening.trim();
         await this.onEnlist({
           becomes: "conversation",
@@ -266,6 +286,7 @@ export class EnlistStore {
       this.draftTitle = "";
       this.draftSpec = "";
       this.draftOpening = "";
+      this.draftOrders = "";
       this.ticked = new Set();
     } catch (err) {
       this.submitError = err instanceof Error ? err.message : String(err);
@@ -276,8 +297,8 @@ export class EnlistStore {
   }
 
   /** The picker panel or the form panel, or null while neither is open. */
-  render(blocks: EnlistBlockRow[]): HTMLElement | null {
-    if (this.isFormOpen) return this.renderForm(blocks);
+  render(blocks: EnlistBlockRow[], steward: StewardOnDutyView | null = null): HTMLElement | null {
+    if (this.isFormOpen) return this.renderForm(blocks, steward);
     if (!this.isPickerOpen) return null;
     const rows = this.rows();
     const body = this.inFlight
@@ -335,8 +356,11 @@ export class EnlistStore {
     );
   }
 
-  private renderForm(blocks: EnlistBlockRow[]): HTMLElement {
+  private renderForm(blocks: EnlistBlockRow[], steward: StewardOnDutyView | null): HTMLElement {
     const view = this.formView();
+    // A Steward that came on duty while this form stood in Steward mode
+    // blocks the submit in place, with the reason.
+    const stewardBlocked = steward !== null && this.becomes === "steward";
     const field = (
       name: DraftField,
       label: string,
@@ -364,13 +388,29 @@ export class EnlistStore {
       value: this.draftSpec,
       oninput: typed("spec"),
     });
-    const openingInput = h("textarea", {
-      class: "enlist-input enlist-opening",
-      value: this.draftOpening,
-      oninput: typed("opening"),
-    });
+    // The Steward's standing orders are its own draft, so the textarea is
+    // keyed apart from a Conversation's opening and never trades text with it.
+    const openingInput =
+      this.becomes === "steward"
+        ? h("textarea", {
+            class: "enlist-input enlist-opening enlist-orders",
+            key: "enlist-orders",
+            value: this.draftOrders,
+            placeholder: "what to watch, when to end itself, whether it may push or open pull requests",
+            oninput: typed("orders"),
+          })
+        : h("textarea", {
+            class: "enlist-input enlist-opening",
+            key: "enlist-opening",
+            value: this.draftOpening,
+            oninput: typed("opening"),
+          });
 
-    const becomesButton = (becomes: EnlistBecomes, label: string): HTMLElement =>
+    const becomesButton = (
+      becomes: EnlistBecomes,
+      label: string,
+      refusal: string | null = null,
+    ): HTMLElement =>
       h(
         "button",
         {
@@ -379,6 +419,8 @@ export class EnlistStore {
             (this.becomes === becomes ? " active" : ""),
           type: "button",
           "aria-pressed": this.becomes === becomes ? "true" : "false",
+          disabled: refusal !== null && this.becomes !== becomes,
+          title: refusal,
           onclick: () => this.setBecomes(becomes),
         },
         label,
@@ -427,14 +469,13 @@ export class EnlistStore {
           { class: "enlist-becomes-switch" },
           becomesButton("ticket", "ticket"),
           becomesButton("conversation", "conversation"),
+          becomesButton("steward", "steward", steward ? stewardLiveReason(steward) : null),
         ),
         h("div", { class: "enlist-becomes-hint dim" }, ENLIST_BECOMES_HINT),
       ),
-      field("title", "title", titleInput),
+      field("title", view.requiresTitle ? "title" : "title (optional)", titleInput),
       view.showsSpec ? field("spec", "spec", specInput) : null,
-      view.showsOpening
-        ? field("opening", "opening (optional)", openingInput)
-        : null,
+      view.showsOpening ? field("opening", view.openingLabel, openingInput) : null,
       view.showsBlocks
         ? h(
             "div",
@@ -447,6 +488,9 @@ export class EnlistStore {
             { class: "enlist-conversation-note dim" },
             view.note ?? "",
           ),
+      stewardBlocked && steward
+        ? h("div", { class: "error-inline enlist-failure" }, stewardLiveReason(steward))
+        : null,
       this.submitError
         ? h("div", { class: "error-inline enlist-failure" }, this.submitError)
         : null,
@@ -454,7 +498,7 @@ export class EnlistStore {
         "button",
         {
           class: "btn btn-primary enlist-submit",
-          disabled: this.submitting,
+          disabled: this.submitting || stewardBlocked,
           onclick: () => void this.submit(),
         },
         this.submitting ? "enlisting…" : "enlist",

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { EnlistStore } from "./enlist";
 import type { EnlistRequest, EnlistResponse, PanesResponse } from "./project";
+import { useDom } from "./test-dom";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -357,3 +358,77 @@ describe("EnlistStore Becomes switch", () => {
   });
 });
 
+
+describe("EnlistStore as the Steward (ADR-0030)", () => {
+  it("submits the Steward's title and standing orders, never spec, blocks or a Conversation's opening", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setField("spec", "not sent");
+    store.toggleBlock("01");
+    store.setBecomes("conversation");
+    store.setField("opening", "not sent either");
+    store.setBecomes("steward");
+    store.setField("title", "night Steward");
+    store.setField("orders", "keep the merge queue moving; do not push");
+
+    const submitting = store.submit();
+    expect(enlists[0]!.request).toEqual({
+      becomes: "steward",
+      paneId: "pane-work",
+      title: "night Steward",
+      opening: "keep the merge queue moving; do not push",
+    });
+    enlists[0]!.deferred.resolve({ conversationId: "conv-3" });
+    await submitting;
+    expect(store.isFormOpen).toBe(false);
+    expect(store.field("orders")).toBe("");
+  });
+
+  it("takes a blank title, which the engine names Steward", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setBecomes("steward");
+    store.setField("title", "  ");
+    const submitting = store.submit();
+    expect(enlists[0]!.request).toEqual({ becomes: "steward", paneId: "pane-work" });
+    enlists[0]!.deferred.resolve({ conversationId: "conv-3" });
+    await submitting;
+  });
+
+  it("keeps the standing orders and the refusal when a Steward is already on duty", async () => {
+    const { store, enlists } = await pickEligible();
+    store.setBecomes("steward");
+    store.setField("orders", "answer checkpoints");
+    const submitting = store.submit();
+    enlists[0]!.deferred.reject(new Error("a Steward is already on duty: conv-3"));
+    await submitting;
+    expect(store.mode).toBe("steward");
+    expect(store.submitFailure).toBe("a Steward is already on duty: conv-3");
+    expect(store.field("orders")).toBe("answer checkpoints");
+  });
+
+  describe("drawn", () => {
+    useDom();
+    const onDuty = { conversationId: "conv-3", cardId: "conversation:conv-3", title: "Steward" };
+
+    it("offers Steward as a third choice, disabled with the reason while one is on duty", async () => {
+      const { store } = await pickEligible();
+      const free = store.render([], null)!;
+      expect(
+        [...free.querySelectorAll(".enlist-becomes-switch button")].map((b) => b.textContent),
+      ).toEqual(["ticket", "conversation", "steward"]);
+      expect(free.querySelector<HTMLButtonElement>(".enlist-becomes-steward")!.disabled).toBe(false);
+      const taken = store.render([], onDuty)!;
+      const choice = taken.querySelector<HTMLButtonElement>(".enlist-becomes-steward")!;
+      expect(choice.disabled).toBe(true);
+      expect(choice.title).toContain("conv-3");
+    });
+
+    it("blocks the submit in place if a Steward came on duty while the form stood on Steward", async () => {
+      const { store } = await pickEligible();
+      store.setBecomes("steward");
+      const el = store.render([], onDuty)!;
+      expect(el.querySelector<HTMLButtonElement>(".enlist-submit")!.disabled).toBe(true);
+      expect(el.querySelector(".enlist-failure")?.textContent).toContain("conv-3");
+      expect(el.querySelector(".enlist-orders")).not.toBeNull();
+    });
+  });
+});

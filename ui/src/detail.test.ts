@@ -83,6 +83,7 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
     assignment: { harness: "claude", model: "opus", drivers: "implement" },
     enlisted: false,
     hasLiveAttempt: false,
+    stewardBudget: null,
     reassign: {
       eligible: true,
       reason: null,
@@ -133,6 +134,7 @@ function rig(detail: TicketDetailView) {
     onLoadEarlier: () => {},
     onAnswer: () => {},
     onKeepTalking: () => {},
+    onUseStewardNote: () => {},
     onSelectTab: () => {},
     onEndConversation: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
@@ -490,6 +492,7 @@ describe("Detail: Keep talking (issue #139)", () => {
       onLoadEarlier: () => {},
       onAnswer: (ticketId, action) => answers.push(`${ticketId}:${action}`),
       onKeepTalking: (ticketId) => keepTalks.push(ticketId),
+      onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
@@ -601,6 +604,7 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
       onLoadEarlier: () => {},
       onAnswer: (ticketId, action, note) => answers.push({ ticketId, action, note }),
       onKeepTalking: () => {},
+      onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
@@ -695,6 +699,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
       reassignment: null,
       spawn,
       files: null,
+      steward: null,
     });
     const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const base = model(detailView());
@@ -729,6 +734,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
             onLoadEarlier: () => {},
             onAnswer: () => {},
             onKeepTalking: () => {},
+            onUseStewardNote: () => {},
             onSelectTab: () => {},
             onEndConversation: () => {},
             onFocusConversationTerminal: () => Promise.resolve(true),
@@ -746,5 +752,119 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
     });
     const lines = [...root.querySelectorAll(".timeline-spawn")].map((el) => el.textContent);
     expect(lines).toEqual(["1 spawn held (per-run cap): 'Fix the login test'"]);
+  });
+});
+
+describe("Detail: the Steward (ADR-0030)", () => {
+  // The Detail on Progress, its Steward note uses recorded.
+  function paintProgress(detail: TicketDetailView, timeline: DetailModel["timeline"] = null) {
+    const uses: { ticketId: string; text: string }[] = [];
+    const answers: string[] = [];
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: (ticketId, action) => answers.push(`${ticketId}:${action}`),
+      onKeepTalking: () => {},
+      onUseStewardNote: (ticketId, text) => uses.push({ ticketId, text }),
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        pane.render(
+          {
+            ...model(detail),
+            timeline,
+            detailTabs: [
+              { id: "spec", label: "Spec", active: false, interruptDot: false },
+              { id: "progress", label: "Progress", active: true, interruptDot: false },
+              { id: "outcome", label: "Outcome", active: false, interruptDot: false },
+            ],
+          },
+          handlers,
+        ),
+      );
+      return shell;
+    });
+    return { root, uses, answers };
+  }
+
+  const note = { text: "needs a product call: keep both flags?", at: "2026-10-01T02:00:00Z", conversation: "conv-3" };
+  const interrupt = (queued = false): TicketDetailView["interrupt"] => ({
+    ticketId: "A",
+    kind: "checkpoint",
+    body: "the brief",
+    form: { title: "checkpoint", actions: [{ action: "resume", label: "resume", tone: "primary" }] },
+    queued,
+    keepTalking: null,
+    stewardNote: note,
+  });
+
+  it("shows the Steward note above the note field, and Use as answer hands it to the draft seam", () => {
+    const r = paintProgress(detailView({ status: "checkpoint", interrupt: interrupt() }));
+    const box = r.root.querySelector(".interrupt-box .steward-note");
+    expect(box?.querySelector(".steward-note-text")?.textContent).toBe(note.text);
+    expect(box?.nextElementSibling?.classList.contains("interrupt-note")).toBe(true);
+    box!.querySelector<HTMLButtonElement>(".steward-note-use")!.click();
+    expect(r.uses).toEqual([{ ticketId: "A", text: note.text }]);
+    expect(r.answers).toEqual([]);
+  });
+
+  it("steps the note aside with the form once an answer is queued", () => {
+    const r = paintProgress(detailView({ status: "checkpoint", interrupt: interrupt(true) }));
+    expect(r.root.querySelector(".steward-note")).toBeNull();
+  });
+
+  it("shows the Steward budget used and left once the Steward has answered the ticket", () => {
+    const r = paintProgress(
+      detailView({ status: "in-progress", stewardBudget: { used: 5, budget: 5, remaining: 0 } }),
+    );
+    const line = r.root.querySelector(".detail-steward-budget");
+    expect(line?.textContent).toBe("Steward budget · 5 of 5 used · 0 left");
+    expect(line?.classList.contains("detail-steward-budget-spent")).toBe(true);
+    expect(paintProgress(detailView()).root.querySelector(".detail-steward-budget")).toBeNull();
+  });
+
+  it("shows a Steward act's line under its timeline row", () => {
+    const r = paintProgress(detailView({ status: "checkpoint" }), {
+      reconstructed: false,
+      attempts: [
+        {
+          number: 1,
+          reconstructed: false,
+          running: false,
+          logFile: null,
+          streamFile: null,
+          events: [
+            {
+              kind: "answered",
+              at: "2026-10-01T02:00:00Z",
+              timeLabel: "02:00:00",
+              grade: null,
+              reassignment: null,
+              spawn: null,
+              files: null,
+              steward: "the Steward answered checkpoint: resume · tests pass now",
+            },
+          ],
+        },
+      ],
+    });
+    expect(r.root.querySelector(".timeline-steward")?.textContent).toBe(
+      "the Steward answered checkpoint: resume · tests pass now",
+    );
   });
 });

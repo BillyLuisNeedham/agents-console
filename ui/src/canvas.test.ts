@@ -50,6 +50,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     mergeQueueLine: null,
     spawnLine: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
+    steward: null,
     ...overrides,
   };
 }
@@ -158,6 +159,8 @@ function mountCanvas(
     onCardTap: () => {},
     onFocusTerminal: async () => true,
     onNewConversation: () => {},
+    onStartSteward: () => {},
+    onFocusSteward: () => {},
     onEnlist: () => {},
     onOpenSettings: () => {},
     onOpenHeldSpawns: () => {},
@@ -217,6 +220,7 @@ describe("Canvas across a morphing render", () => {
         hasLiveAttempt: true,
         outcome: null,
         interrupt: null,
+        stewardBudget: null,
         grade: null,
         vitals: null,
         paneId: null,
@@ -502,5 +506,90 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     expect(held.classList.contains("spawn-card-held")).toBe(true);
     expect(held.querySelector(".spawn-card-label")?.textContent).toBe("held · overlaps 02");
     expect(held.querySelector(".spawn-card-parent")?.textContent).toBe("Conversation from 01");
+  });
+});
+
+describe("the Steward on the canvas (ADR-0030)", () => {
+  function stewardPool(): CanvasModel {
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "running",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
+      heldSpawns: [],
+      state: {
+        tickets: [],
+        conversations: [
+          {
+            id: "conv-3",
+            title: "Steward",
+            status: "live",
+            spawnedBy: null,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            paneId: null,
+            branch: null,
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+            children: [],
+            enlisted: false,
+            ending: false,
+            role: "steward",
+          },
+        ],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: {},
+      },
+    };
+    const view = projectPool(snapshot);
+    return model({ cards: view.cards, steward: view.steward });
+  }
+
+  it("marks the Steward's card", () => {
+    const { root, commit } = mountCanvas(stewardPool());
+    commit();
+    const card = root.querySelector('[data-conversation-id="conv-3"]')!;
+    expect(card.classList.contains("conversation-card-steward")).toBe(true);
+    expect(card.querySelector(".steward-badge")?.textContent).toBe("Steward");
+  });
+
+  it("says a Steward is on duty in the header, a click focusing its card", () => {
+    const focused: string[] = [];
+    const { root, commit } = mountCanvas(stewardPool(), {
+      onFocusSteward: (cardId) => focused.push(cardId),
+    });
+    commit();
+    const line = root.querySelector<HTMLButtonElement>(".canvas-steward")!;
+    expect(line.textContent).toBe("Steward on duty · conv-3");
+    line.click();
+    expect(focused).toEqual(["conversation:conv-3"]);
+  });
+
+  it("disables Start Steward with the reason while one is on duty", () => {
+    const { root, commit } = mountCanvas(stewardPool());
+    commit();
+    const start = root.querySelector<HTMLButtonElement>(".canvas-start-steward")!;
+    expect(start.disabled).toBe(true);
+    expect(start.title).toContain("already on duty (conv-3)");
+  });
+
+  it("offers Start Steward, and no on-duty line, while none is", () => {
+    const started: number[] = [];
+    const { root, commit } = mountCanvas(
+      model({ cards: [{ kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 }] }),
+      { onStartSteward: () => started.push(1) },
+    );
+    commit();
+    expect(root.querySelector(".canvas-steward")).toBeNull();
+    const start = root.querySelector<HTMLButtonElement>(".canvas-start-steward")!;
+    expect(start.disabled).toBe(false);
+    start.click();
+    expect(started).toEqual([1]);
   });
 });
