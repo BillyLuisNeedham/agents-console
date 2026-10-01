@@ -32,6 +32,11 @@ const SELECTED_TICKET = "t-3";
 const DONE_TICKET = "t-2";
 const CHANGED_TICKET = "t-1";
 const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textarea.needs-input-note`;
+/** The Steward on duty (ADR-0030), and the note it left on the selected
+ *  ticket's checkpoint, which the tray row and the Detail both show. */
+const STEWARD = "steward-1";
+const STEWARD_NOTE =
+  "Recommend resume with: keep the old endpoint behind the flag until the migration lands, then delete it in a follow-up ticket.";
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -164,16 +169,26 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
       at: "2026-09-29T10:00:00Z",
       adopting: false,
     })),
+    // The Steward has answered the selected ticket twice since the operator
+    // last did (ADR-0030), so its Detail shows the budget line.
+    stewardBudget: { budget: 5, used: { [SELECTED_TICKET]: 2 } },
     state: {
       tickets,
-      conversations: Array.from({ length: 30 }, (_, i) =>
-        conversation(`c-${i + 1}`, {
-          turn:
-            i % 3 === 0
-              ? { state: "waiting", lastLine: "waiting on you", idleSince: "2026-09-21T10:00:00Z" }
-              : { state: "working", lastLine: `working on ${i}`, idleSince: null },
+      conversations: [
+        conversation(STEWARD, {
+          title: "Steward",
+          role: "steward",
+          turn: { state: "waiting", lastLine: "left t-3 to you", idleSince: "2026-09-21T10:00:00Z" },
         }),
-      ),
+        ...Array.from({ length: 30 }, (_, i) =>
+          conversation(`c-${i + 1}`, {
+            turn:
+              i % 3 === 0
+                ? { state: "waiting", lastLine: "waiting on you", idleSince: "2026-09-21T10:00:00Z" }
+                : { state: "working", lastLine: `working on ${i}`, idleSince: null },
+          }),
+        ),
+      ],
       log: Array.from({ length: 120 }, (_, i) => `[log] pool line ${i + 1}`),
       outcomes: {
         [DONE_TICKET]: {
@@ -183,7 +198,12 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         },
       },
       interrupts: [
-        { ticketId: "t-3", kind: "checkpoint", body: lines("checkpoint brief", 60) },
+        {
+          ticketId: "t-3",
+          kind: "checkpoint",
+          body: lines("checkpoint brief", 60),
+          stewardNote: { text: STEWARD_NOTE, at: "2026-09-21T10:00:00Z", conversation: STEWARD },
+        },
         { ticketId: "t-4", kind: "crash", body: lines("crash log", 10) },
         { ticketId: "t-5", kind: "review", body: lines("review", 10) },
         { ticketId: "t-1", kind: "merge-approval", body: lines("merge", 10) },
@@ -480,6 +500,9 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     ["canvas viewport", ".canvas-viewport"],
     // The faded cards (issue #150) keep their own keys across renders.
     ["pending spawn card", '.node-card[data-node-id="spawn:proposal-1"]'],
+    // The Steward's card and its note on the tray row (ADR-0030).
+    ["steward card", `.node-card[data-node-id="conversation:${STEWARD}"]`],
+    ["steward note", `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] .steward-note`],
     ["held spawn card", '.node-card[data-node-id="spawn:held-3"]'],
     ["spawns list", ".held-spawns-pane"],
   ] as const) {
@@ -690,6 +713,103 @@ async function settingsTyping(): Promise<void> {
   input.blur();
 }
 
+/**
+ * The Steward (ADR-0030), the parts only a laid-out page can say: the
+ * header's on-duty line brings a card panned far off screen back into view,
+ * "Use as answer" fills the tray row's note and the open Detail's from one
+ * click, and the note box fits the tray row without widening it.
+ */
+async function stewardChecks(): Promise<void> {
+  const name = "steward";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  session.select(card(SELECTED_TICKET));
+  session.selectTab(SELECTED_TICKET, "progress");
+  await settleAll();
+
+  const viewport = q<HTMLElement>(".canvas-viewport");
+  const stewardCard = () => q<HTMLElement>(`.node-card[data-node-id="conversation:${STEWARD}"]`);
+  if (viewport && stewardCard()) {
+    // Pan the card well out of view, then follow the header's line to it.
+    const rect = viewport.getBoundingClientRect();
+    const x = rect.right - 20;
+    const y = rect.bottom - 20;
+    pointer("pointerdown", viewport, x, y);
+    pointer("pointermove", viewport, x - 600, y - 400);
+    pointer("pointermove", viewport, x - 1400, y - 900);
+    pointer("pointerup", viewport, x - 1400, y - 900);
+    const inView = () => {
+      const box = stewardCard()!.getBoundingClientRect();
+      const view = viewport.getBoundingClientRect();
+      return box.left >= view.left && box.right <= view.right && box.top >= view.top && box.top < view.bottom;
+    };
+    const hiddenFirst = !inView();
+    q<HTMLButtonElement>(".canvas-steward")?.click();
+    await settleAll();
+    const selected = q(".detail-open .detail-title")?.textContent;
+    push(
+      "on-duty line reveals and selects the Steward",
+      hiddenFirst && inView() && selected === STEWARD
+        ? null
+        : `hidden first ${hiddenFirst}, in view after ${inView()}, Detail ${selected}`,
+      "panned off screen, then in view with its Detail open",
+    );
+    q<HTMLButtonElement>('.canvas-tools button[title="reset pan and zoom"]')?.click();
+  } else {
+    report.push({ scenario: name, assertion: "on-duty line reveals and selects the Steward", pass: null, detail: "steward card absent" });
+  }
+
+  session.select(card(SELECTED_TICKET));
+  session.selectTab(SELECTED_TICKET, "progress");
+  await settleAll();
+  const row = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"]`;
+  const box = q<HTMLElement>(`${row} .steward-note`);
+  const tray = q<HTMLElement>(".needs-input-tray");
+  if (box && tray) {
+    const b = box.getBoundingClientRect();
+    const t = tray.getBoundingClientRect();
+    push(
+      "steward note fits the tray row",
+      box.scrollWidth <= box.clientWidth + 1 && b.right <= t.right + 1
+        ? null
+        : `scrollWidth ${box.scrollWidth} > clientWidth ${box.clientWidth}, or right ${b.right} past the tray's ${t.right}`,
+      `${Math.round(b.width)}px wide inside a ${Math.round(t.width)}px tray`,
+    );
+  }
+  const budget = q(".detail-open .detail-steward-budget")?.textContent ?? null;
+  push(
+    "budget line on the answered ticket",
+    budget === "Steward budget · 2 of 5 used · 3 left" ? null : `read ${budget}`,
+    budget ?? "",
+  );
+  const trayNote = q<HTMLTextAreaElement>(TRAY_NOTE);
+  q<HTMLButtonElement>(`${row} .steward-note-use`)?.click();
+  await settle();
+  const detailNote = q<HTMLTextAreaElement>(".detail-open textarea.interrupt-note");
+  push(
+    "use as answer fills both notes",
+    trayNote && q(TRAY_NOTE) === trayNote && trayNote.value === STEWARD_NOTE && detailNote?.value === STEWARD_NOTE
+      ? null
+      : `tray "${trayNote?.value.slice(0, 20)}", detail "${detailNote?.value.slice(0, 20)}"`,
+    "the tray row's note (same node) and the Detail's hold the Steward note",
+  );
+  // Put the drafts back for whatever runs next.
+  if (trayNote) {
+    trayNote.value = "";
+    trayNote.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const header = q<HTMLElement>(".canvas-header");
+  if (header) {
+    push(
+      "canvas header holds its width",
+      header.scrollWidth <= header.clientWidth + 1 ? null : `scrollWidth ${header.scrollWidth} > clientWidth ${header.clientWidth}`,
+      `${header.clientWidth}px, the on-duty line and Start Steward included`,
+    );
+  }
+}
+
 function parsePan(transform: string): { x: number; y: number; zoom: number } {
   const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(transform);
   return m ? { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) } : { x: NaN, y: NaN, zoom: NaN };
@@ -779,6 +899,11 @@ async function main(): Promise<void> {
   await runScenario("spawn detail", async () => {
     session.select("spawn:proposal-1");
   });
+  // The Steward's Detail, reached the operator's way: the header's on-duty
+  // line (ADR-0030).
+  await runScenario("steward detail", async () => {
+    q<HTMLButtonElement>(".canvas-steward")?.click();
+  });
   await runScenario("fullscreen detail", async () => {
     session.select(card(SELECTED_TICKET));
     session.selectTab(SELECTED_TICKET, "progress");
@@ -786,6 +911,7 @@ async function main(): Promise<void> {
     q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
+  await stewardChecks();
   await settingsTyping();
 
   for (const selector of DEAD_SELECTORS) {
