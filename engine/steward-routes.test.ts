@@ -127,7 +127,7 @@ describe("the Steward's routes and command", () => {
         registry,
       }),
     ).toBe(1);
-    expect(err.at(-1)).toBe(`steward: steward: conv-9 is not the Steward on duty (${id} is)`);
+    expect(err.at(-1)).toBe(`steward: conv-9 is not the Steward on duty (${id} is)`);
 
     const malformed = await post(server, "/api/steward/answer", { conversation: id, ticketId: "01" });
     expect(malformed.status).toBe(400);

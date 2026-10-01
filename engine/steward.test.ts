@@ -285,7 +285,7 @@ describe("the Steward's command", () => {
       { out: (l) => out.push(l), err: (l) => err.push(l), stdin: () => "", fetch: refused, registry },
     );
     expect(code2).toBe(1);
-    expect(err.at(-1)).toBe("steward: steward: the Steward budget on ticket 01 is spent");
+    expect(err.at(-1)).toBe("steward: the Steward budget on ticket 01 is spent");
   });
 });
 

@@ -279,7 +279,9 @@ export async function runStewardCli(
     }
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
-      io.err(`steward: ${String(payload.reason ?? payload.error ?? `HTTP ${response.status}`)}`);
+      // The engine's reason is printed as it gave it: it already names its
+      // subject ("steward: ...", "reassign: ...").
+      io.err(String(payload.reason ?? payload.error ?? `steward: HTTP ${response.status}`));
       return 1;
     }
     io.out(
