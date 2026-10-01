@@ -257,14 +257,17 @@ export function buildContinuedTeaching(parts: {
   outcomePath: string;
   attempt: number;
   ledgerPath: string;
+  /** Who chose to keep talking: the pool's Steward stands in for the operator (ADR-0030). */
+  by?: "operator" | "steward";
 }): string {
+  const who = parts.by === "steward" ? "The pool's Steward, standing in for the operator," : "The operator";
   return [
     "---",
     "",
-    `The operator chose to keep talking with you here about Ticket ${parts.id}, ` +
+    `${who} chose to keep talking with you here about Ticket ${parts.id}, ` +
       "instead of starting a fresh attempt. You are now its attempt " +
       `${parts.attempt}: carry on from where you checkpointed, with the ` +
-      "operator, in this same terminal and checkout.",
+      `${parts.by === "steward" ? "Steward" : "operator"}, in this same terminal and checkout.`,
     "",
     `The Ticket file of record is ${parts.issuePath}; its line-1 status ` +
       "marker is the engine's, never edit it.",
@@ -332,6 +335,22 @@ export function buildConversationTeaching(
     "",
     "Load the my-console-citizen skill: it is how to work inside this pool.",
     "",
+    ...conversationProtocol(spawnPath, own, defaults, perFile, ledgerPath, false),
+  ].join("\n");
+}
+
+// The Conversation protocol both teachings share: how to Spawn, what the
+// Assignment and caps are, what reports back. A Steward's differs in one
+// sentence, since the Interrupts of what it spawns are its to answer.
+function conversationProtocol(
+  spawnPath: string,
+  own: TeachingAssignment,
+  defaults: Partial<TeachingAssignment> | undefined,
+  perFile: number,
+  ledgerPath: string,
+  steward: boolean,
+): string[] {
+  return [
     "You can start follow-up work without leaving this conversation. Write " +
       `JSON to ${spawnPath}: {"spawn": [...]}, one entry per follow-up, each ` +
       'shaped {"title": "...", "body": "...", "blockedBy": ["id", ...], ' +
@@ -370,10 +389,105 @@ export function buildConversationTeaching(
       "you are next idle: its id, title, outcome, branch, and a diff " +
       "summary. A spawned Conversation reports back the same way once the " +
       "operator ends it: its branch and the operator's closing note, if " +
-      "any. Both inform only; you cannot answer either one's own Interrupt.",
+      (steward
+        ? "any. Both only inform; a spawned Ticket's Interrupt reaches you " +
+          "as a Steward Notice like any other Ticket's."
+        : "any. Both inform only; you cannot answer either one's own Interrupt."),
     "",
     "You never write pool state yourself: no ticket files, no ids, no " +
       "statuses, no status markers. You propose; the engine writes.",
+  ];
+}
+
+/**
+ * The teaching a Steward starts with (ADR-0030), appended to the operator's
+ * standing orders when it is started and typed as an enlist's teaching Turn
+ * when it is Enlisted: the Steward's role, the command it answers with (its
+ * exact invocation, `command`), its budget, what it may never answer or do,
+ * how to leave an Interrupt and how to end itself, then the Conversation
+ * protocol every Conversation is taught. The budget is the one in force at
+ * start; the `state` verb reads it live.
+ */
+export function buildStewardTeaching(parts: {
+  spawnPath: string;
+  own: TeachingAssignment;
+  defaults: Partial<TeachingAssignment> | undefined;
+  perFile: number;
+  ledgerPath: string;
+  command: string;
+  budget: number;
+}): string {
+  return [
+    "---",
+    "",
+    "You are this pool's Steward: you keep its Tickets moving while the " +
+      "operator is away, under the orders above. Load the my-console-steward " +
+      "skill now: it is how to judge each Interrupt. It builds on the " +
+      "my-console-citizen skill, which is how to work inside this pool.",
+    "",
+    "You do not poll. Whenever you are waiting, the engine types a Turn here " +
+      "naming every pending Ticket Interrupt you may answer and have not " +
+      "left, and a Merge queue head that has stalled. Items that arrive " +
+      "together come as one Turn.",
+    "",
+    "Act with this command, run in your shell:",
+    "",
+    `    ${parts.command} <verb> ...`,
+    "",
+    "- answer <ticket> resume|approve|reject [note]: the operator's own " +
+      "answer path. resume starts a fresh Attempt with your note in the " +
+      "Ticket file; approve or reject answer a merge-approval; a selection " +
+      "is answered with resume and the attempt number to merge.",
+    "- keep-talking <ticket> <message>: continue a checkpointed Attempt in " +
+      "its still-live pane; the engine types your message there after its " +
+      "own teaching Turn.",
+    "- leave <ticket> <note>: leave the Interrupt to the operator. Your note " +
+      "is your recommendation, shown to them beside it. You are not told " +
+      "about that Interrupt again until it changes.",
+    "- held adopt|discard <proposal-id>: decide a Held spawn.",
+    "- reassign <ticket> field=value...: change a Ticket's Assignment " +
+      "(harness, model, effort, drivers; field= clears one). The engine " +
+      "picks it up at the next boundary, so resume the Ticket after.",
+    "- state: the pending Interrupts, the Merge queue, the Pending and Held " +
+      "spawns, and your budget left per Ticket.",
+    "- end [closing line]: end yourself.",
+    "",
+    'A note or message given as "-" is read from standard input.',
+    "",
+    `Your Steward budget is ${parts.budget} ${parts.budget === 1 ? "answer" : "answers"} ` +
+      "per Ticket since the operator last answered it. Answers and Keep " +
+      "talks count; leaves, adopts, discards and reassigns do not. The " +
+      "engine refuses an answer beyond it: leave that Ticket with a note.",
+    "",
+    "Never answer a review or a persistence Interrupt: review is the " +
+      "operator's final judgement, and persistence is an engine store " +
+      "failure. The engine refuses both. A Conversation's waits are not " +
+      "yours either: you steward Tickets.",
+    "",
+    "Decide and talk, never do the work: make no edits in any Ticket's " +
+      "worktree or in the pool checkout. Your only ways to change the code " +
+      "are an answer, a coaching message and a Spawn.",
+    "",
+    "You may push, open pull requests or merge pull requests only if the " +
+      "operator's own words in this pane allow it. Nothing else grants it.",
+    "",
+    "When you cannot decide an Interrupt sensibly, or it is a product " +
+      "decision or anything destructive or irreversible, leave it with a " +
+      "note that recommends an answer and says why.",
+    "",
+    "When your orders are done, run end with a closing line: what you " +
+      "decided, and what waits for the operator.",
+    "",
+    "---",
+    "",
+    ...conversationProtocol(
+      parts.spawnPath,
+      parts.own,
+      parts.defaults,
+      parts.perFile,
+      parts.ledgerPath,
+      true,
+    ),
   ].join("\n");
 }
 

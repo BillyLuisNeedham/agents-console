@@ -50,7 +50,8 @@ export interface PanesResponse {
 /**
  * The enlist request body (issue #101), declared once here so the server
  * route and the Console type-import the same shape. `becomes` is fixed at
- * enlist time, and one of the two arms is chosen from it. The engine
+ * enlist time, and one of the arms is chosen from it: a Ticket, a
+ * Conversation, or a Conversation as the Steward (ADR-0030). The engine
  * re-judges the pane at submit rather than
  * trusting a picker read that may be stale. The branch is never on the wire:
  * the engine resolves the found directory's branch with git and applies the
@@ -73,9 +74,23 @@ export interface EnlistConversationWireRequest {
   opening?: string;
 }
 
+/**
+ * Enlist as the Steward (ADR-0030): a Conversation in that role, refused
+ * while a Steward is already on duty. The opening, when given, is the
+ * operator's standing orders, typed after the Steward's teaching Turn.
+ */
+export interface EnlistStewardWireRequest {
+  becomes: "steward";
+  paneId: string;
+  /** Optional: "Steward" when blank. */
+  title?: string;
+  opening?: string;
+}
+
 export type EnlistRequest =
   | EnlistTicketRequest
-  | EnlistConversationWireRequest;
+  | EnlistConversationWireRequest
+  | EnlistStewardWireRequest;
 
 /** The enlist answer: the minted id, a 201 on success. */
 export type EnlistResponse =

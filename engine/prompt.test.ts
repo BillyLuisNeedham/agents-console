@@ -5,6 +5,7 @@ import {
   buildConversationTeaching as build,
   buildHeadToHeadPrompt,
   buildPrompt,
+  buildStewardTeaching,
 } from "./prompt.ts";
 
 const LEDGER = "/tmp/pool/runs/spawn-ledger.md";
@@ -333,5 +334,41 @@ describe("buildContinuedTeaching", () => {
     expect(teaching).toContain('"brief"');
     expect(teaching).toContain('"spawn" array');
     expect(teaching).toContain(`at least ${SPAWN_BODY_MIN_CHARS} characters`);
+  });
+});
+
+describe("buildStewardTeaching (ADR-0030)", () => {
+  const teaching = buildStewardTeaching({
+    spawnPath: "/pool/runs/conv-2.spawn.json",
+    own: { harness: "claude", model: "opus", drivers: "implement" },
+    defaults: { harness: "claude", model: "sonnet", drivers: "implement" },
+    perFile: 5,
+    ledgerPath: LEDGER,
+    command: "bun /engine/steward-cli.ts --pool /pool --as conv-2",
+    budget: 1,
+  });
+
+  it("names the skill, the exact command and every verb, and the budget in force", () => {
+    expect(teaching).toContain("Load the my-console-steward skill");
+    expect(teaching).toContain("    bun /engine/steward-cli.ts --pool /pool --as conv-2 <verb> ...");
+    for (const verb of ["answer <ticket>", "keep-talking <ticket>", "leave <ticket>", "held adopt|discard", "reassign <ticket>", "- state:", "- end [closing line]"]) {
+      expect(teaching).toContain(verb);
+    }
+    expect(teaching).toContain("Your Steward budget is 1 answer per Ticket");
+  });
+
+  it("states the exclusions, the hands-off rule, the push rule, and how to leave and end", () => {
+    expect(teaching).toContain("Never answer a review or a persistence Interrupt");
+    expect(teaching).toContain("make no edits in any Ticket's worktree or in the pool checkout");
+    expect(teaching).toContain("only if the operator's own words in this pane allow it");
+    expect(teaching).toContain("leave it with a note that recommends an answer");
+    expect(teaching).toContain("When your orders are done, run end with a closing line");
+  });
+
+  it("carries the Conversation protocol, with a spawned Ticket's Interrupt the Steward's to answer", () => {
+    expect(teaching).toContain('Write JSON to /pool/runs/conv-2.spawn.json: {"spawn": [...]}');
+    expect(teaching).toContain(`read the Spawn ledger at ${LEDGER}`);
+    expect(teaching).toContain("reaches you as a Steward Notice");
+    expect(teaching).not.toContain("you cannot answer either one's own Interrupt");
   });
 });

@@ -102,6 +102,14 @@ const EVENT_KINDS = [
   // (issue #139, ADR-0027): the worktree and branch it would have merged,
   // so the next boot chains it again through the ordinary merge path.
   "merge-deferred",
+  // The Steward (ADR-0030) left a pending Interrupt to the operator: the
+  // Interrupt's kind and the Steward note, its recommendation, with `by`
+  // and the Steward's `conversation`. Never counts against its budget.
+  "steward-note",
+  // The Steward wrote this Ticket's assign entry (ADR-0030): the fields it
+  // set or cleared, with `by` and `conversation`. The engine's own
+  // `reassigned` follows at the next Config reload, as for the operator's.
+  "reassign-requested",
 ] as const;
 
 export type TicketEventKind = (typeof EVENT_KINDS)[number];

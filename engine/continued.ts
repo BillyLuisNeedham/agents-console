@@ -69,6 +69,15 @@ export interface ContinuedInput {
   harness: string;
   /** The teaching Turn; null for a pane re-adopted at boot, taught before the restart. */
   teaching: string | null;
+  /**
+   * A Turn typed after the teaching, once the pane is waiting again: the
+   * Steward's coaching message when the Steward chose Keep talking
+   * (ADR-0030). Absent for the operator's own, who types in the pane.
+   */
+  message?: string;
+  /** Told whether the message landed: null once it is in, or why not. The
+   *  Attempt carries on either way, since the agent was taught. */
+  onMessage?: (failure: string | null) => void;
   /** Whether to bring the pane forward in the operator's herdr first. */
   focus: boolean;
   /** Where the agent writes this attempt's Outcome; the ending race reads it. */
@@ -108,8 +117,28 @@ export function runContinued(env: ContinuedEnv, input: ContinuedInput): Continue
     // attempt is theirs. Best-effort, as every focus is.
     if (input.focus) await focusPane(env.herdrSocket, input.paneId).catch(() => {});
     if (input.teaching !== null) {
-      const taught = await teach(env.herdrSocket, input, pollMs, teachingWaitMs, released.signal);
+      const taught = await teach(
+        env.herdrSocket,
+        input,
+        input.teaching,
+        pollMs,
+        teachingWaitMs,
+        released.signal,
+      );
       if (taught !== null) return { kind: "untaught", reason: taught };
+      if (input.message !== undefined) {
+        // The same wait as the teaching's: the agent answers the teaching
+        // first, and a Turn typed mid-reply would land in its work.
+        const said = await teach(
+          env.herdrSocket,
+          input,
+          input.message,
+          pollMs,
+          teachingWaitMs,
+          released.signal,
+        );
+        input.onMessage?.(said);
+      }
     }
     return { kind: await waitForContinuedEnding(env.herdrSocket, input, released.signal, pollMs) };
   };
@@ -173,7 +202,8 @@ function outcomeIsOnDisk(path: string): boolean {
 }
 
 /**
- * Type the teaching Turn once the pane is waiting on the operator: one read
+ * Type one Turn (the teaching, or the message after it) once the pane is
+ * waiting on the operator: one read
  * establishes the transcript, IDLE_STABLE_READS more with the idle pattern
  * present settle it as waiting (turn-state.ts's rule, as an enlist settles
  * it), and a pane still working is re-read every poll up to the bound.
@@ -184,11 +214,11 @@ function outcomeIsOnDisk(path: string): boolean {
 async function teach(
   socketPath: string,
   input: ContinuedInput,
+  teaching: string,
   pollMs: number,
   waitMs: number,
   signal: AbortSignal,
 ): Promise<string | null> {
-  const teaching = input.teaching!;
   const descriptor = defaultHarnessDescriptors[input.harness.trim().toLowerCase()];
   if (descriptor) {
     const idle = idlePatternFor(descriptor);
@@ -229,5 +259,5 @@ async function teach(
   } catch {
     delivered = false;
   }
-  return delivered ? null : "the teaching Turn could not be delivered";
+  return delivered ? null : "the Turn could not be delivered";
 }

@@ -55,6 +55,21 @@ import {
 } from "./spawn-proposals.ts";
 import { renderSpawnLedger, spawnLedgerPath, writeSpawnLedger } from "./spawn-ledger.ts";
 import {
+  checkStewardConfig,
+  loadStewardNotes,
+  stewardBudgetOf,
+  stewardBudgetUsed,
+  stewardItems,
+  stewardMayAnswer,
+  type AnswerBy,
+  type StewardBudgetView,
+  type StewardConfig,
+  type StewardItem,
+  type StewardNote,
+  type StewardNotes,
+  type StewardStateResponse,
+} from "./steward.ts";
+import {
   checkSpawnCaps,
   spawnCapsOf,
   type SpawnCaps,
@@ -136,6 +151,7 @@ import {
   type EnlistConversationWireRequest,
   type EnlistRequest,
   type EnlistResponse,
+  type EnlistStewardWireRequest,
   type EnlistTicketRequest,
 } from "./enlist.ts";
 import { ChildTracker, orphanIsLive, stopOrphan } from "./children.ts";
@@ -320,6 +336,10 @@ export interface PoolConfig {
   // the pool's identity. Read live by the server for the Console, and by the
   // engine for the label of a Pool workspace it created.
   title?: string;
+  // The Steward entry (ADR-0030, steward.ts): the Steward budget, 5 unless
+  // set, and the Steward's Assignment, ahead of the pool defaults. Reloads
+  // with the assignment slice and the Spawn caps.
+  steward?: StewardConfig;
 }
 
 export type InterruptKind =
@@ -355,6 +375,10 @@ export interface Interrupt {
   // after a restart (a superseded round's graded attempts would otherwise
   // pass for candidates).
   candidates?: number[];
+  // The Steward note on it (ADR-0030), on the snapshot's copy only: the
+  // Steward left this Interrupt to the operator with this recommendation.
+  // Never persisted with the Interrupt; steward.ts's store keeps it.
+  stewardNote?: StewardNote;
 }
 
 interface PoolState {
@@ -448,6 +472,9 @@ export interface PoolSnapshot {
   pendingSpawns: PendingSpawnView[];
   // The Held spawns (ADR-0029), oldest first, as the Console shows them.
   heldSpawns: HeldSpawnView[];
+  // The Steward budget (ADR-0030): the Pool's, and what the Steward has
+  // used on each Ticket since the operator last answered it.
+  stewardBudget: StewardBudgetView;
 }
 
 // What the Console shows of the Spawn caps: `spawnedThisRun` of `perRun`
@@ -512,6 +539,9 @@ interface RunOptions {
   // Absent, the pool gets the unconfigured port and every call site takes
   // its heuristic path, exactly as before Jev existed. Tests inject a fake.
   jev?: Jev;
+  // The Console's URL when a server runs this engine (ADR-0030): the
+  // Steward's teaching names it in the command it answers with.
+  consoleUrl?: string;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -599,6 +629,37 @@ export interface PoolRun {
   /** Discard a Pending spawn for good, freeing its cap room; throws when it
    *  is not pending. */
   discardPendingSpawn: (id: string) => void;
+  /**
+   * The Steward's actions (ADR-0030), each naming the Steward's Conversation
+   * id, which must be the live Steward's: that check attributes the action
+   * and enforces the budget, and is not a security boundary. Each throws
+   * the reason it is refused.
+   */
+  steward: StewardActions;
+}
+
+/** What the Steward does through its command (steward-cli.ts and the server's /api/steward/ routes). */
+export interface StewardActions {
+  /** Throws unless `conversation` is the live Steward. */
+  check: (conversation: string) => void;
+  /** Answer on the operator's path, as the Steward's: never review or persistence, never past the budget. */
+  answer: (
+    conversation: string,
+    ticketId: string,
+    action: "resume" | "approve" | "reject",
+    note?: string,
+  ) => void;
+  /** Keep talking, the message typed after the teaching Turn; counts against the budget. */
+  keepTalking: (conversation: string, ticketId: string, message: string) => Promise<{ attempt: number }>;
+  /** Leave a pending Interrupt to the operator with a Steward note; never counts. */
+  leave: (conversation: string, ticketId: string, note: string) => void;
+  adoptHeldSpawn: (conversation: string, id: string) => void;
+  discardHeldSpawn: (conversation: string, id: string) => void;
+  /** Record on each Ticket's log that the Steward wrote its assign entry. */
+  reassigned: (conversation: string, tickets: string[], fields: Record<string, unknown>) => void;
+  state: (conversation: string) => StewardStateResponse;
+  /** The Steward ends itself, as an operator End would. */
+  end: (conversation: string, closing?: string) => Promise<void>;
 }
 
 const reduceTickets = (
@@ -954,6 +1015,16 @@ interface Session {
   // Every pane and tab an enlisted owner's events name (untouchable, issue
   // #139), re-read with each survey listing like openedTabs.
   enlistedTerminals: { panes: Set<string>; tabs: Set<string> };
+  // The Steward notes (ADR-0030, steward.ts): one per pending Interrupt the
+  // Steward left to the operator, on disk so they survive a restart.
+  stewardNotes: StewardNotes;
+  // The Steward budget used per Ticket, as the Ticket logs say it: seeded
+  // from them at boot and kept in step with every answer, so a snapshot
+  // reads no events files. Only Tickets with some used are kept.
+  stewardUsed: Map<string, number>;
+  // Held spawns the Steward adopted, by id, waiting for the boundary that
+  // lands them, so their spawn-adopted event names the Steward.
+  stewardAdopts: Map<string, string>;
 }
 
 // One Continued attempt in flight (issue #139). `work` is its own Held pane
@@ -1060,6 +1131,7 @@ function conversationHostOf(sessionOf: () => Session): ConversationHost {
       sessionOf().state.interrupts.some(
         (i) => i.ticketId === id && (i.kind === "merge-conflict" || i.kind === "merge-approval"),
       ),
+    stewardItems: () => stewardItemsOf(sessionOf()),
   };
 }
 
@@ -1169,6 +1241,7 @@ export function startPool(options: RunOptions): PoolRun {
       ...(options.enlistTeachingWaitMs !== undefined
         ? { teachingWaitMs: options.enlistTeachingWaitMs }
         : {}),
+      ...(options.consoleUrl !== undefined ? { consoleUrl: options.consoleUrl } : {}),
     },
     conversationHostOf(() => session),
   );
@@ -1257,6 +1330,9 @@ export function startPool(options: RunOptions): PoolRun {
       onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
     }),
     conversations,
+    stewardNotes: loadStewardNotes(runsDir),
+    stewardUsed: stewardUsedAtBoot(runsDir, markers),
+    stewardAdopts: new Map(),
   };
 
   seedEnlistedWork(session);
@@ -1399,11 +1475,10 @@ function makeHandle(session: Session): PoolRun {
     shutdown: (graceMs) => shutdownSession(session, graceMs),
     startConversation: (req) => session.conversations.start(req),
     endConversation: (id, closing) => session.conversations.end(id, closing),
-    // The `becomes` the operator fixed at enlist time chooses the arm.
+    // The `becomes` the operator fixed at enlist time chooses the arm; a
+    // Steward is a Conversation in a role (ADR-0030).
     enlist: (req) =>
-      req.becomes === "conversation"
-        ? enlistConversation(session, req)
-        : enlistTicket(session, req),
+      req.becomes === "ticket" ? enlistTicket(session, req) : enlistConversation(session, req),
     paneRead: (paneId) => session.paneReads.latest(paneId),
     retitle: (title) => retitlePoolWorkspace(session, title),
     keepTalking: (ticketId) => keepTalking(session, ticketId),
@@ -1413,6 +1488,7 @@ function makeHandle(session: Session): PoolRun {
     discardHeldSpawn: (id) => discardHeldSpawn(session, id),
     holdPendingSpawn: (id) => holdPendingSpawn(session, id),
     discardPendingSpawn: (id) => discardPendingSpawn(session, id),
+    steward: stewardActionsOf(session),
   };
   return handle;
 }
@@ -1559,7 +1635,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   const snapshot: PoolSnapshot = {
     seq: session.snapshots.length,
     phase,
-    state: session.state,
+    state: withStewardNotes(session),
     queuedAnswers: session.answers.pending(),
     assignments: Object.fromEntries(
       [...session.assignments].map(([id, a]) => [id, assignmentWireView(session, a)]),
@@ -1585,6 +1661,10 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
     },
     pendingSpawns: session.spawnProposals.pendingViews(),
     heldSpawns: session.spawnProposals.heldViews(),
+    stewardBudget: {
+      budget: stewardBudgetOf(session.state.config),
+      used: Object.fromEntries(session.stewardUsed),
+    },
   };
   // The Spawn ledger follows every emit, so what agents read there is never
   // staler than what the Console shows (issue #150).
@@ -4466,7 +4546,13 @@ function keepTalkingRefusal(ticketId: string, why: string): Error {
  * The runtime (continued.ts) then brings the pane forward, types the one
  * teaching Turn once the agent is waiting, and watches for the ending.
  */
-async function keepTalking(session: Session, ticketId: string): Promise<{ attempt: number }> {
+async function keepTalking(
+  session: Session,
+  ticketId: string,
+  // The Steward choosing Keep talking (ADR-0030): its message is typed after
+  // the teaching Turn, and the answer is its own, counted on its budget.
+  steward?: { conversation: string; message: string },
+): Promise<{ attempt: number }> {
   if (session.paneSurvey === null) {
     throw keepTalkingRefusal(ticketId, "is in a pool that is not terminal-backed");
   }
@@ -4554,8 +4640,13 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
     at,
     attempt: held.attempt,
     kind: "answered",
-    payload: { kind: "checkpoint", action: "keep-talking" },
+    payload: {
+      kind: "checkpoint",
+      action: "keep-talking",
+      ...(steward ? { by: "steward", conversation: steward.conversation, message: steward.message } : {}),
+    },
   });
+  noteAnswered(session, ticketId, steward ? "steward" : "operator");
   appendEvent(session.runsDir, ticketId, {
     at,
     attempt,
@@ -4589,8 +4680,8 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
     tickets: { [ticketId]: "in-progress" },
     interrupts: session.state.interrupts.filter((i) => i.ticketId !== ticketId),
     log: [
-      `ticket ${ticketId}: keep talking; attempt ${attempt} continues attempt ` +
-        `${held.attempt} in pane ${held.paneId}`,
+      `ticket ${ticketId}: keep talking${steward ? " (the Steward)" : ""}; attempt ` +
+        `${attempt} continues attempt ${held.attempt} in pane ${held.paneId}`,
     ],
   });
   const work: HeldPane = { ...held, attempt, stream: streamPath, spawnedAt: at };
@@ -4612,7 +4703,9 @@ async function keepTalking(session: Session, ticketId: string): Promise<{ attemp
       outcomePath,
       attempt,
       ledgerPath: spawnLedgerPath(session.runsDir),
+      ...(steward ? { by: "steward" as const } : {}),
     }),
+    ...(steward ? { message: stewardMessageTurn(steward.message) } : {}),
   });
   // Registered last: the registration emits, and the snapshot it sends must
   // already show the ticket running with no Interrupt.
@@ -4643,6 +4736,7 @@ function startContinued(
     outcomePath: string;
     streamOffset: number;
     teaching: string | null;
+    message?: string;
   },
 ): void {
   const run = runContinued(
@@ -4663,6 +4757,22 @@ function startContinued(
       streamPath: started.work.stream,
       streamOffset: started.streamOffset,
       logPath: started.logPath,
+      ...(started.message !== undefined
+        ? {
+            message: started.message,
+            onMessage: (failure: string | null) => {
+              if (failure === null) return;
+              session.state = applyUpdate(session.state, {
+                log: [
+                  `ticket ${marker.id}: the Steward's message could not be typed into pane ` +
+                    `${started.work.paneId} (${failure}); continued attempt ${started.attempt} ` +
+                    "carries on without it",
+                ],
+              });
+              emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+            },
+          }
+        : {}),
     },
   );
   session.continued.set(marker.id, {
@@ -5171,6 +5281,9 @@ function acceptAnswer(
   ticketId: string,
   note: string | undefined,
   approve: boolean | undefined,
+  // The Steward answering on the operator's path (ADR-0030): the answer is
+  // recorded as its own, with its note, and counts against its budget.
+  steward?: { conversation: string },
 ): QueuedAnswer {
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === ticketId,
@@ -5220,15 +5333,20 @@ function acceptAnswer(
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, ticketId),
     kind: "answered",
-    payload: { kind: interrupt.kind },
+    payload: {
+      kind: interrupt.kind,
+      ...(steward ? stewardAnswerPayload(steward.conversation, approve, note) : {}),
+    },
   });
   const record = session.answers.enqueue({
     ticketId,
     kind: interrupt.kind,
     ...(approve !== undefined ? { approve } : {}),
     ...(note !== undefined ? { note } : {}),
+    ...(steward ? { by: "steward" as const } : {}),
     at: new Date().toISOString(),
   });
+  noteAnswered(session, ticketId, steward ? "steward" : "operator");
   // Mid-flight acceptance is the one moment the queue changes without an
   // emit of its own, so push one: the answered-and-waiting state broadcasts
   // now rather than at the next boundary. Idle acceptance skips this, as the
@@ -5393,7 +5511,10 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     marker.status = "ready";
   }
   if (record.note && record.note.trim()) {
-    appendFileSync(marker.file, `\n## Resume note\n\n${record.note.trim()}\n`);
+    // The Steward's note is marked as its own (ADR-0030): the agent that
+    // reads the Ticket file next should know who wrote it.
+    const heading = record.by === "steward" ? "## Resume note, from the Steward" : "## Resume note";
+    appendFileSync(marker.file, `\n${heading}\n\n${record.note.trim()}\n`);
   }
   session.state = applyUpdate(session.state, {
     tickets: Object.fromEntries(
@@ -5404,7 +5525,8 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
     ),
     log: [
       `interrupt answered for ${record.ticketId} (${interrupt.kind}): ` +
-        (marker.status === "done" ? "already done on disk" : "resumed"),
+        (marker.status === "done" ? "already done on disk" : "resumed") +
+        (record.by === "steward" ? " by the Steward" : ""),
     ],
   });
 }
@@ -6399,18 +6521,20 @@ function resolveUnseenAssignments(
 // ---------------------------------------------------------------------------
 
 // The keys the reload touches: the assignment slice, and the Spawn caps
-// beside it (ADR-0029). Everything else on PoolConfig (roster, agents,
-// selection, terminal, port) stays exactly as it was at boot, whatever the
-// file says, for the life of the run.
-const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver", "spawnCaps"] as const;
+// (ADR-0029) and the Steward entry (ADR-0030) beside it. Everything else on
+// PoolConfig (roster, agents, selection, terminal, port) stays exactly as it
+// was at boot, whatever the file says, for the life of the run.
+const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver", "spawnCaps", "steward"] as const;
 
 type ConfigSlice = Pick<PoolConfig, (typeof CONFIG_SLICE_KEYS)[number]>;
 
 // Parses only the reloadable slice out of a console.json body: defaults,
-// assign, resolver, spawnCaps. Deliberately does not validate selection or
-// terminal (readConfig's job, boot-only) — an edit to a field the reload
-// never touches must never block an otherwise-good edit of the slice. The
-// caps are checked here, since nothing downstream resolves them.
+// assign, resolver, spawnCaps, steward. Deliberately does not validate
+// selection or terminal (readConfig's job, boot-only) — an edit to a field
+// the reload never touches must never block an otherwise-good edit of the
+// slice. The caps and the Steward entry's shape are checked here, since
+// nothing downstream resolves them; the Steward's harness is checked in the
+// dry run, beside every ticket's.
 function parseConfigSlice(raw: string, poolDir: string): ConfigSlice {
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -6423,6 +6547,7 @@ function parseConfigSlice(raw: string, poolDir: string): ConfigSlice {
     assign: parsed.assign,
     resolver: parsed.resolver,
     spawnCaps: checkSpawnCaps(parsed.spawnCaps),
+    steward: checkStewardConfig(parsed.steward),
   };
 }
 
@@ -6492,6 +6617,7 @@ function reloadConfigAtBoundary(session: Session): void {
     assign: slice.assign,
     resolver: slice.resolver,
     spawnCaps: slice.spawnCaps,
+    steward: slice.steward,
   };
   const changed = changedSliceKeys(session.state.config, candidate);
   if (changed.length === 0) return;
@@ -6512,6 +6638,7 @@ function reloadConfigAtBoundary(session: Session): void {
   }
   try {
     resolveAssignmentsInto(session.markers, resolved, candidate, session.harnesses);
+    checkStewardHarness(candidate, session.harnesses);
   } catch (error) {
     logConfigReloadRejected(session, error);
     return;
@@ -8997,6 +9124,304 @@ export function addBlockerToTicket(
 }
 
 // ---------------------------------------------------------------------------
+// The Steward (ADR-0030, steward.ts): a Conversation in the role of keeping
+// the Pool's Tickets moving while the operator is away. The Conversation
+// module owns its pane and its Notices; what it may do to the pool, and the
+// budget that bounds it, live here, on the operator's own paths.
+// ---------------------------------------------------------------------------
+
+// The fields an answer by the Steward adds to its `answered` event: who
+// answered, and the note it gave, so the Ticket log shows the operator next
+// morning what was decided and why.
+function stewardAnswerPayload(
+  conversation: string,
+  approve: boolean | undefined,
+  note: string | undefined,
+): Record<string, unknown> {
+  return {
+    by: "steward",
+    conversation,
+    ...(approve !== undefined ? { action: approve ? "approve" : "reject" } : {}),
+    ...(note !== undefined && note.trim() ? { note: note.trim() } : {}),
+  };
+}
+
+// An Interrupt was answered, by the operator or the Steward: the budget
+// moves (the Steward's answer counts, the operator's resets it), the Steward
+// note goes with the Interrupt it was on, and a Steward hears about the
+// Ticket's next Interrupt afresh.
+function noteAnswered(session: Session, ticketId: string, by: AnswerBy): void {
+  if (by === "steward") {
+    session.stewardUsed.set(ticketId, (session.stewardUsed.get(ticketId) ?? 0) + 1);
+  } else {
+    session.stewardUsed.delete(ticketId);
+  }
+  session.stewardNotes.clear(ticketId);
+  session.conversations.stewardForget(ticketId);
+}
+
+// The Turn a Steward's coaching message is typed as after the Keep talking
+// teaching Turn, marked as the Steward's so the agent knows who is talking.
+function stewardMessageTurn(message: string): string {
+  return `From the pool's Steward:\n\n${message.trim()}`;
+}
+
+// The budget used per Ticket at boot, read off every Ticket log once.
+function stewardUsedAtBoot(runsDir: string, markers: TicketMarker[]): Map<string, number> {
+  const used = new Map<string, number>();
+  for (const marker of markers) {
+    const n = stewardBudgetUsed(readEvents(runsDir, marker.id));
+    if (n > 0) used.set(marker.id, n);
+  }
+  return used;
+}
+
+// What the Steward should be told about now, built from the Session for
+// steward.ts's rule. The Merge queue is the last emitted one: it is derived
+// at each emit and never stored.
+function stewardItemsOf(session: Session): StewardItem[] {
+  const titles = new Map(session.markers.map((marker) => [marker.id, marker.title]));
+  return stewardItems({
+    interrupts: session.state.interrupts,
+    titleOf: (id) => titles.get(id) ?? null,
+    conversations: knownConversationIds(session.poolDir),
+    queued: new Set(session.answers.pending().map((answer) => answer.ticketId)),
+    left: (id, kind) => session.stewardNotes.get(id, kind) !== null,
+    keepTalking: (id) => session.held.has(id),
+    budget: stewardBudgetOf(session.state.config),
+    used: (id) => session.stewardUsed.get(id) ?? 0,
+    mergeQueue: session.snapshots.at(-1)?.mergeQueue ?? [],
+  });
+}
+
+// The state a snapshot carries, with each Steward note on its Interrupt's
+// copy. A note whose Interrupt is no longer pending is pruned first, so a
+// Ticket that raises again starts with none.
+function withStewardNotes(session: Session): PoolState {
+  if (session.stewardNotes.size() === 0) return session.state;
+  session.stewardNotes.prune(session.state.interrupts);
+  if (session.stewardNotes.size() === 0) return session.state;
+  return {
+    ...session.state,
+    interrupts: session.state.interrupts.map((interrupt) => {
+      const note = session.stewardNotes.get(interrupt.ticketId, interrupt.kind);
+      return note ? { ...interrupt, stewardNote: note } : interrupt;
+    }),
+  };
+}
+
+function stewardRefusal(why: string): Error {
+  return new Error(`steward: ${why}`);
+}
+
+// The check every Steward action starts with: the id it names is the live
+// Steward's. It attributes the action and enforces the budget; the Console's
+// API has no authentication, so it is no security boundary (ADR-0030).
+function checkSteward(session: Session, conversation: string): void {
+  const onDuty = session.conversations.stewardId();
+  if (onDuty === null) throw stewardRefusal("no Steward is on duty");
+  if (onDuty !== conversation) {
+    throw stewardRefusal(`${conversation} is not the Steward on duty (${onDuty} is)`);
+  }
+}
+
+// The pending Interrupt a Steward action is about, refused when it is not
+// the Steward's to touch: review, persistence and a Conversation's own.
+function stewardInterrupt(session: Session, conversation: string, ticketId: string): Interrupt {
+  checkSteward(session, conversation);
+  const interrupt = session.state.interrupts.find((i) => i.ticketId === ticketId);
+  if (!interrupt) throw stewardRefusal(`ticket ${ticketId} has no pending Interrupt`);
+  if (interrupt.kind === "review") {
+    throw stewardRefusal("the review Interrupt is the operator's final judgement, never the Steward's");
+  }
+  if (interrupt.kind === "persistence") {
+    throw stewardRefusal("the persistence Interrupt is an engine store failure, never the Steward's");
+  }
+  if (!stewardMayAnswer(interrupt, knownConversationIds(session.poolDir))) {
+    throw stewardRefusal(`${ticketId} is a Conversation: the Steward stewards Tickets, never talks`);
+  }
+  if (session.answers.pending().some((answer) => answer.ticketId === ticketId)) {
+    throw stewardRefusal(`ticket ${ticketId} already has an answer queued`);
+  }
+  return interrupt;
+}
+
+// The budget check (Steward budget): read off the Ticket log, the record
+// of truth, at the moment of answering.
+function checkStewardBudget(session: Session, ticketId: string): void {
+  const budget = stewardBudgetOf(session.state.config);
+  const used = stewardBudgetUsed(readEvents(session.runsDir, ticketId));
+  if (used >= budget) {
+    throw stewardRefusal(
+      `the Steward budget on ticket ${ticketId} is spent (${used} of ${budget} answers since ` +
+        "the operator last answered it): leave it to the operator with a note",
+    );
+  }
+}
+
+function stewardAnswer(
+  session: Session,
+  conversation: string,
+  ticketId: string,
+  action: "resume" | "approve" | "reject",
+  note: string | undefined,
+): void {
+  const interrupt = stewardInterrupt(session, conversation, ticketId);
+  if (interrupt.kind === "merge-approval" && action === "resume") {
+    throw stewardRefusal(`ticket ${ticketId}'s merge-approval takes approve or reject`);
+  }
+  if (interrupt.kind !== "merge-approval" && action !== "resume") {
+    throw stewardRefusal(`ticket ${ticketId}'s ${interrupt.kind} Interrupt takes resume`);
+  }
+  checkStewardBudget(session, ticketId);
+  acceptAnswer(
+    session,
+    ticketId,
+    note,
+    action === "approve" ? true : action === "reject" ? false : undefined,
+    { conversation },
+  );
+  kickProcessing(session);
+}
+
+async function stewardKeepTalking(
+  session: Session,
+  conversation: string,
+  ticketId: string,
+  message: string,
+): Promise<{ attempt: number }> {
+  const interrupt = stewardInterrupt(session, conversation, ticketId);
+  if (interrupt.kind !== "checkpoint") {
+    throw stewardRefusal(`ticket ${ticketId} is not waiting at a checkpoint`);
+  }
+  if (!message.trim()) throw stewardRefusal("keep talking needs a message for the agent");
+  checkStewardBudget(session, ticketId);
+  return keepTalking(session, ticketId, { conversation, message });
+}
+
+// Leaving an Interrupt to the operator (Steward note): the note is kept with
+// the Interrupt across restarts and shown in Needs input, and the leave is
+// on the Ticket log. It never counts against the budget, and the Steward is
+// not told about the Interrupt again until it changes.
+function stewardLeave(session: Session, conversation: string, ticketId: string, note: string): void {
+  const interrupt = stewardInterrupt(session, conversation, ticketId);
+  const text = note.trim();
+  if (!text) throw stewardRefusal("a leave needs a note: the Steward's recommendation");
+  const at = new Date().toISOString();
+  session.stewardNotes.set(ticketId, interrupt.kind, { text, at, conversation });
+  appendEvent(session.runsDir, ticketId, {
+    at,
+    attempt: lastAttempt(session.runsDir, ticketId),
+    kind: "steward-note",
+    payload: { kind: interrupt.kind, note: text, by: "steward", conversation },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [`ticket ${ticketId}: the Steward left its ${interrupt.kind} Interrupt to the operator`],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+function stewardAdoptHeldSpawn(session: Session, conversation: string, id: string): void {
+  checkSteward(session, conversation);
+  // Before the Adopt, which lands at once on an idle pool.
+  session.stewardAdopts.set(id, conversation);
+  try {
+    adoptHeldSpawn(session, id);
+  } catch (error) {
+    session.stewardAdopts.delete(id);
+    throw error;
+  }
+}
+
+// A Reassign by the Steward is the Console's own write of console.json (the
+// server's, reassign.ts); the engine records whose it was on each Ticket's
+// log, since its own `reassigned` follows only at the next Config reload.
+function stewardReassigned(
+  session: Session,
+  conversation: string,
+  tickets: string[],
+  fields: Record<string, unknown>,
+): void {
+  checkSteward(session, conversation);
+  const at = new Date().toISOString();
+  for (const ticketId of tickets) {
+    appendEvent(session.runsDir, ticketId, {
+      at,
+      attempt: lastAttempt(session.runsDir, ticketId),
+      kind: "reassign-requested",
+      payload: { fields, by: "steward", conversation },
+    });
+  }
+  session.state = applyUpdate(session.state, {
+    log: [`the Steward reassigned ${tickets.join(", ")}`],
+  });
+  emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
+}
+
+function stewardState(session: Session, conversation: string): StewardStateResponse {
+  checkSteward(session, conversation);
+  const conversations = knownConversationIds(session.poolDir);
+  const queued = new Set(session.answers.pending().map((answer) => answer.ticketId));
+  const titles = new Map(session.markers.map((marker) => [marker.id, marker.title]));
+  const budget = stewardBudgetOf(session.state.config);
+  return {
+    steward: conversation,
+    budget,
+    phase: session.driving ? "running" : (session.settledPhase ?? "running"),
+    interrupts: session.state.interrupts.map((interrupt) => {
+      const used = session.stewardUsed.get(interrupt.ticketId) ?? 0;
+      return {
+        ticketId: interrupt.ticketId,
+        title: titles.get(interrupt.ticketId) ?? null,
+        kind: interrupt.kind,
+        answerable: stewardMayAnswer(interrupt, conversations),
+        keepTalking: interrupt.kind === "checkpoint" && session.held.has(interrupt.ticketId),
+        queued: queued.has(interrupt.ticketId),
+        note: session.stewardNotes.get(interrupt.ticketId, interrupt.kind)?.text ?? null,
+        used,
+        remaining: Math.max(0, budget - used),
+      };
+    }),
+    mergeQueue: session.snapshots.at(-1)?.mergeQueue ?? [],
+    pendingSpawns: session.spawnProposals
+      .pendingViews()
+      .map(({ id, parentId, title }) => ({ id, parentId, title })),
+    heldSpawns: session.spawnProposals
+      .heldViews()
+      .map(({ id, parentId, title, reason }) => ({ id, parentId, title, reason })),
+    ledger: spawnLedgerPath(session.runsDir),
+  };
+}
+
+function stewardActionsOf(session: Session): StewardActions {
+  return {
+    check: (conversation) => checkSteward(session, conversation),
+    answer: (conversation, ticketId, action, note) =>
+      stewardAnswer(session, conversation, ticketId, action, note),
+    keepTalking: (conversation, ticketId, message) =>
+      stewardKeepTalking(session, conversation, ticketId, message),
+    leave: (conversation, ticketId, note) => stewardLeave(session, conversation, ticketId, note),
+    adoptHeldSpawn: (conversation, id) => stewardAdoptHeldSpawn(session, conversation, id),
+    discardHeldSpawn: (conversation, id) => {
+      checkSteward(session, conversation);
+      discardHeldSpawn(session, id, conversation);
+    },
+    reassigned: (conversation, tickets, fields) =>
+      stewardReassigned(session, conversation, tickets, fields),
+    state: (conversation) => stewardState(session, conversation),
+    // The one way a Conversation ends without the operator (ADR-0030).
+    end: (conversation, closing) => {
+      try {
+        checkSteward(session, conversation);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return session.conversations.end(conversation, closing, "steward");
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Enlist (issue #101, docs/specs/2026-09-19-enlist-herdr-terminal.md)
 // ---------------------------------------------------------------------------
 
@@ -9139,10 +9564,17 @@ function applyEnlistBranchRule(
  */
 async function enlistConversation(
   session: Session,
-  req: EnlistConversationWireRequest,
+  req: EnlistConversationWireRequest | EnlistStewardWireRequest,
 ): Promise<EnlistResponse> {
-  const title = (req.title ?? "").trim();
+  const steward = req.becomes === "steward";
+  const title = (req.title ?? "").trim() || (steward ? "Steward" : "");
   if (!title) throw new Error("enlist: title is required");
+  // One Steward at a time (ADR-0030), refused before the pane is touched;
+  // the Conversation module checks again as it claims, against a race.
+  const onDuty = steward ? session.conversations.stewardId() : null;
+  if (onDuty !== null) {
+    throw new Error(`enlist: a Steward is already on duty (${onDuty}); end it before starting another`);
+  }
   if (!session.git) {
     throw new Error(
       "enlist: the pool has no git checkout, so it cannot give the Conversation a branch",
@@ -9187,6 +9619,7 @@ async function enlistConversation(
     directory: pane.directory,
     branch: usedBranch,
     sessionId: pane.sessionId,
+    ...(steward ? { role: "steward" as const } : {}),
   });
   if (!result.ok) {
     if (branchCreated) removeEnlistedBranch(pane.directory, pane.branch, usedBranch);
@@ -9223,9 +9656,9 @@ async function enlistConversation(
   session.state = applyUpdate(session.state, {
     log: [
       branchRule === "created"
-        ? `conversation ${id}: enlisted from pane ${pane.paneId}; branch ` +
+        ? `conversation ${id}${steward ? " (the Steward)" : ""}: enlisted from pane ${pane.paneId}; branch ` +
           `${usedBranch} created at HEAD and checked out in ${pane.directory}`
-        : `conversation ${id}: enlisted from pane ${pane.paneId}; branch ` +
+        : `conversation ${id}${steward ? " (the Steward)" : ""}: enlisted from pane ${pane.paneId}; branch ` +
           `${pane.branch} used as found in ${pane.directory}`,
     ],
   });
@@ -10002,6 +10435,8 @@ function adoptSpawnProposals(session: Session): void {
     adopted: string[];
     fromPending?: string[];
     fromHeld?: string;
+    // The Steward whose Adopt this was (ADR-0030).
+    steward?: string;
     at: string;
   }[] = [];
   const blocking: { parentId: string; spawnId: string; blocks: string[] | "all" }[] = [];
@@ -10066,6 +10501,7 @@ function adoptSpawnProposals(session: Session): void {
         payload: { title: held.proposal.title, reason, fromHeld: held.id },
       });
       store.refuseAdopt(held.id, reason);
+      session.stewardAdopts.delete(held.id);
       log.push(
         `ticket ${held.parentId}: adopting held spawn ${held.id} ('${held.proposal.title}') ` +
           `refused: ${reason}; it stays held`,
@@ -10077,8 +10513,19 @@ function adoptSpawnProposals(session: Session): void {
     // The held spawn leaves the Held spawns once it has landed: until then
     // a restart finds it still held.
     store.removeHeld(held.id);
-    settled.push({ parentId: held.parentId, adopted: [spawnId], fromHeld: held.id, at });
-    log.push(`ticket ${held.parentId}: adopted held spawn ${held.id} as ${spawnId}`);
+    const steward = session.stewardAdopts.get(held.id);
+    session.stewardAdopts.delete(held.id);
+    settled.push({
+      parentId: held.parentId,
+      adopted: [spawnId],
+      fromHeld: held.id,
+      ...(steward !== undefined ? { steward } : {}),
+      at,
+    });
+    log.push(
+      `ticket ${held.parentId}: adopted held spawn ${held.id} as ${spawnId}` +
+        (steward !== undefined ? " (the Steward's Adopt)" : ""),
+    );
   }
 
   if (wrote) {
@@ -10106,7 +10553,7 @@ function adoptSpawnProposals(session: Session): void {
     blocked.set(parentId, { ...blocked.get(parentId), [spawnId]: targets });
     log.push(`ticket ${parentId}: spawn ${spawnId} blocks ${targets.join(", ")}`);
   }
-  for (const { parentId, adopted, fromPending, fromHeld, at } of settled) {
+  for (const { parentId, adopted, fromPending, fromHeld, steward, at } of settled) {
     const blocks = blocked.get(parentId);
     const mine = blocks
       ? Object.fromEntries(Object.entries(blocks).filter(([id]) => adopted.includes(id)))
@@ -10119,6 +10566,7 @@ function adoptSpawnProposals(session: Session): void {
         adopted,
         ...(fromPending !== undefined ? { fromPending } : {}),
         ...(fromHeld !== undefined ? { fromHeld } : {}),
+        ...(steward !== undefined ? { by: "steward", conversation: steward } : {}),
         ...(Object.keys(mine).length > 0 ? { blocks: mine } : {}),
       },
     });
@@ -10238,7 +10686,7 @@ function adoptHeldSpawn(session: Session, id: string): void {
 // The operator's Discard of a Held spawn (ADR-0029): gone for good, the
 // discard on the parent's log. One an Adopt has already queued is past
 // discarding: the boundary is about to write it.
-function discardHeldSpawn(session: Session, id: string): void {
+function discardHeldSpawn(session: Session, id: string, steward?: string): void {
   const held = session.spawnProposals.getHeld(id);
   if (!held) throw new Error(`no held spawn ${id}`);
   if (session.spawnProposals.adopting.has(id)) {
@@ -10249,12 +10697,16 @@ function discardHeldSpawn(session: Session, id: string): void {
     at: new Date().toISOString(),
     attempt: lastAttempt(session.runsDir, held.parentId),
     kind: "spawn-discarded",
-    payload: { id, title: held.proposal.title },
+    payload: {
+      id,
+      title: held.proposal.title,
+      ...(steward !== undefined ? { by: "steward", conversation: steward } : {}),
+    },
   });
   session.state = applyUpdate(session.state, {
     log: [
       `ticket ${held.parentId}: held spawn ${id} ('${held.proposal.title}') ` +
-        "discarded by the operator",
+        `discarded by the ${steward !== undefined ? "Steward" : "operator"}`,
     ],
   });
   emitSnapshot(session, session.driving ? "running" : (session.settledPhase ?? "running"));
@@ -10722,7 +11174,20 @@ export function parseConfig(raw: string | null, poolDir: string): PoolConfig {
     throw new Error(`pool config: terminal must be "herdr"`);
   }
   checkSpawnCaps(parsed.spawnCaps);
+  checkStewardConfig(parsed.steward);
   return parsed as PoolConfig;
+}
+
+// The Steward's harness, when its entry names one, must be one the pool
+// knows (ADR-0030): checked where the harness table is, the reload's dry run,
+// so a bad entry is refused whole like a bad assign.
+function checkStewardHarness(config: PoolConfig, harnesses: Record<string, HarnessCommand>): void {
+  const harness = config.steward?.assign?.harness?.trim();
+  if (!harness || harnesses[harness]) return;
+  throw new Error(
+    `pool config: steward.assign names unknown harness '${harness}'. ` +
+      `Known: ${Object.keys(harnesses).sort().join(", ")}`,
+  );
 }
 
 function readOptional(path: string): string | null {

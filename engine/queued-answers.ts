@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { InterruptKind } from "./engine.ts";
+import type { AnswerBy } from "./steward.ts";
 
 export interface QueuedAnswer {
   seq: number;
@@ -21,6 +22,8 @@ export interface QueuedAnswer {
   /** The answer payload: true approve, false reject, undefined resume. */
   approve?: boolean;
   note?: string;
+  /** The Steward gave it (ADR-0030); absent is the operator's. */
+  by?: AnswerBy;
   at: string;
   processedAt: string | null;
 }
