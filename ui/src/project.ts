@@ -22,6 +22,7 @@ import type {
   LiveAttemptRecord,
   MergeQueueEntry,
   MergeQueueState,
+  NoticeDelivery,
   Outcome,
   PendingSpawnView,
   PoolConfig,
@@ -69,6 +70,7 @@ export type {
   MachineDefaultsView,
   MergeQueueEntry,
   MergeQueueState,
+  NoticeDelivery,
   PanesResponse,
   PendingSpawnResponse,
   PendingSpawnView,
@@ -1028,6 +1030,8 @@ export interface ConversationCardView {
   enlisted: boolean;
   /** It is the Steward (ADR-0030): the card is marked as such. */
   steward: boolean;
+  /** Notices are not reaching its pane; null while they land. */
+  delivery: DeliveryWarningView | null;
   /** The card's terminal surface, reused from ticket cards; present while
    *  the Conversation is live and carries a pane id. */
   terminal: TerminalSurfaceView | null;
@@ -1557,6 +1561,7 @@ function projectConversation(
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
     steward: conversation.role === "steward",
+    delivery: projectDelivery(conversation.delivery),
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id], conversation.ending),
     x: pos.x,
@@ -1867,6 +1872,8 @@ export interface ConversationTrayRow {
   idleAge: string | null;
   /** It is the Steward (ADR-0030): the row is marked as such. */
   steward: boolean;
+  /** Notices are not reaching its pane; null while they land. */
+  delivery: DeliveryWarningView | null;
 }
 
 /**
@@ -1891,6 +1898,7 @@ export function projectConversationsTray(
       turn: c.turn,
       idleAge: conversationIdleAge(c.turn.idleSince, now),
       steward: c.role === "steward",
+      delivery: projectDelivery(c.delivery),
     }));
   return rows.sort((a, b) => {
     const aWaiting = a.turn.state === "waiting" ? 0 : 1;
@@ -1979,11 +1987,38 @@ export function isTerminalBacked(config: Record<string, unknown>): boolean {
 // them.
 // ---------------------------------------------------------------------------
 
+/**
+ * A Conversation whose Notices keep failing to land (the engine's
+ * NoticeDelivery): usually a harness dialog sitting in the pane, which looks
+ * idle while it swallows every Turn. The card, its tray row and its Detail
+ * say so in one line; the engine's last error rides along for the hover
+ * and the Detail.
+ */
+export interface DeliveryWarningView {
+  text: string;
+  lastError: string;
+}
+
+function projectDelivery(delivery: NoticeDelivery | undefined): DeliveryWarningView | null {
+  if (!delivery) return null;
+  const at = new Date(delivery.failingSince);
+  const since = Number.isNaN(at.getTime())
+    ? ""
+    : ` since ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+  return {
+    text: `Notices not reaching this pane${since}: something in the pane is in the way`,
+    lastError: delivery.lastError,
+  };
+}
+
 /** The Steward on duty, as the pool header names it and focuses its card. */
 export interface StewardOnDutyView {
   conversationId: string;
   cardId: string;
   title: string;
+  /** Notices are not reaching the Steward's pane: it is on duty but blind
+   *  to the Interrupts the engine delivers it, and the header warns. */
+  delivery: DeliveryWarningView | null;
 }
 
 /**
@@ -1998,6 +2033,7 @@ export function stewardOnDuty(conversations: ConversationView[]): StewardOnDutyV
     conversationId: steward.id,
     cardId: conversationCardId(steward.id),
     title: steward.title,
+    delivery: projectDelivery(steward.delivery),
   };
 }
 
@@ -2006,9 +2042,11 @@ export function stewardLiveReason(steward: StewardOnDutyView): string {
   return `a Steward is already on duty (${steward.conversationId}); a Pool has one at a time`;
 }
 
-/** The pool header's word that a Steward is on duty. */
+/** The pool header's word that a Steward is on duty, and that it cannot
+ *  hear the engine while its Notices are not landing. */
 export function stewardOnDutyLine(steward: StewardOnDutyView): string {
-  return `Steward on duty · ${steward.conversationId}`;
+  const line = `Steward on duty · ${steward.conversationId}`;
+  return steward.delivery ? `${line} · Notices not landing` : line;
 }
 
 /**
@@ -2499,6 +2537,8 @@ export interface ConversationDetailView {
   endView: ConversationEndView;
   /** Mirrors the card's: it is the Steward (ADR-0030). */
   steward: boolean;
+  /** Mirrors the card's: Notices are not reaching its pane. */
+  delivery: DeliveryWarningView | null;
 }
 
 /**
@@ -2598,6 +2638,7 @@ export function projectDetail(
       terminal: card.terminal,
       endView: card.endView,
       steward: card.steward,
+      delivery: card.delivery,
     };
   }
   return { kind: "utility", id: card.id, label: card.label, interrupt: card.interrupt };

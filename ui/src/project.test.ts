@@ -3058,6 +3058,7 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
+      delivery: null,
     });
   });
 });
@@ -3663,6 +3664,7 @@ describe("the Steward (ADR-0030)", () => {
       conversationId: "conv-3",
       cardId: "conversation:conv-3",
       title: "Steward",
+      delivery: null,
     });
     expect(stewardOnDuty([conversation("conv-1")])).toBeNull();
     expect(stewardOnDuty([steward({ status: "ended" })])).toBeNull();
@@ -3863,5 +3865,56 @@ describe("the Steward (ADR-0030)", () => {
     });
     expect(projectEnlistForm("conversation").requiresTitle).toBe(true);
     expect(ENLIST_BECOMES_HINT).toContain("Steward");
+  });
+});
+
+describe("a Conversation whose Notices are not landing", () => {
+  const delivery = {
+    failingSince: "2026-10-01T02:05:00.000Z",
+    lastError: "the Turn never echoed: Teach auto mode? (y/n)",
+  };
+  const since = new Date(delivery.failingSince).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  it("warns on its card, its tray row and its Detail, the error carried along", () => {
+    const snap = snapshot({
+      state: { conversations: [conversation("conv-1", { delivery }), conversation("conv-2")] },
+    });
+    const cards = projectPool(snap).cards.filter(
+      (card): card is ConversationCardView => card.kind === "conversation",
+    );
+    const warning = {
+      text: `Notices not reaching this pane since ${since}: something in the pane is in the way`,
+      lastError: delivery.lastError,
+    };
+    expect(cards.map((card) => card.delivery)).toEqual([warning, null]);
+    const rows = projectConversationsTray(snap.state.conversations);
+    expect(rows.find((row) => row.id === "conv-1")?.delivery).toEqual(warning);
+    expect(rows.find((row) => row.id === "conv-2")?.delivery).toBeNull();
+    const detail = detailOf(snap, "conversation:conv-1");
+    expect(detail?.kind === "conversation" && detail.delivery).toEqual(warning);
+  });
+
+  it("drops the time it cannot read rather than printing nonsense", () => {
+    const snap = snapshot({
+      state: {
+        conversations: [conversation("conv-1", { delivery: { ...delivery, failingSince: "?" } })],
+      },
+    });
+    const rows = projectConversationsTray(snap.state.conversations);
+    expect(rows[0].delivery?.text).toBe(
+      "Notices not reaching this pane: something in the pane is in the way",
+    );
+  });
+
+  it("makes the Steward on duty read as blind in the header", () => {
+    const blind = stewardOnDuty([conversation("conv-3", { role: "steward", delivery })])!;
+    expect(blind.delivery?.lastError).toBe(delivery.lastError);
+    expect(stewardOnDutyLine(blind)).toBe("Steward on duty · conv-3 · Notices not landing");
+    const fine = stewardOnDuty([conversation("conv-3", { role: "steward" })])!;
+    expect(stewardOnDutyLine(fine)).toBe("Steward on duty · conv-3");
   });
 });

@@ -14,12 +14,32 @@ import {
   stewardLiveReason,
   type ConversationTrayRow,
   type ConversationView,
+  type DeliveryWarningView,
   type StartConversationRequest,
   type StewardOnDutyView,
 } from "./project";
 import { h } from "./dom";
 import { effortInput } from "./effort";
 import { renderStewardBadge } from "./steward";
+
+/**
+ * The warning a Conversation whose Notices keep failing carries on its card,
+ * its tray row and its Detail: one line, the engine's last error on hover,
+ * or written out beneath it where there is room (the Detail).
+ */
+export function renderDeliveryWarning(
+  delivery: DeliveryWarningView,
+  options: { showError?: boolean } = {},
+): HTMLElement {
+  return h(
+    "div",
+    { class: "conversation-delivery-warn", key: "delivery-warn", title: delivery.lastError },
+    h("div", {}, delivery.text),
+    options.showError
+      ? h("div", { class: "conversation-delivery-error" }, delivery.lastError)
+      : null,
+  );
+}
 
 export type StartConversationHandler = (
   request: StartConversationRequest,
@@ -540,7 +560,10 @@ export class ConversationsTray {
   private renderRow(row: ConversationTrayRow, handlers: ConversationsHandlers): HTMLElement {
     return h(
       "div",
-      { class: "conversations-row", key: row.id },
+      {
+        class: "conversations-row" + (row.delivery ? " conversations-row-blocked" : ""),
+        key: row.id,
+      },
       h(
         "button",
         {
@@ -557,6 +580,7 @@ export class ConversationsTray {
         conversationTurnLabel(row.turn.state),
       ),
       row.idleAge ? h("span", { class: "dim conversations-idle" }, row.idleAge) : null,
+      row.delivery ? renderDeliveryWarning(row.delivery) : null,
     );
   }
 }

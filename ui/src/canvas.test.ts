@@ -593,3 +593,57 @@ describe("the Steward on the canvas (ADR-0030)", () => {
     expect(started).toEqual([1]);
   });
 });
+
+describe("Notices not landing on the canvas", () => {
+  it("warns on the card and turns the Steward's on-duty line amber, the error on hover", () => {
+    const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "running",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
+      heldSpawns: [],
+      state: {
+        tickets: [],
+        conversations: [
+          {
+            id: "conv-3",
+            title: "Steward",
+            status: "live",
+            spawnedBy: null,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            paneId: null,
+            branch: null,
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+            children: [],
+            enlisted: false,
+            ending: false,
+            role: "steward",
+            delivery,
+          },
+        ],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: {},
+      },
+    };
+    const view = projectPool(snapshot);
+    const { root, commit } = mountCanvas(model({ cards: view.cards, steward: view.steward }));
+    commit();
+    const warn = root.querySelector<HTMLElement>(
+      '[data-conversation-id="conv-3"] .conversation-delivery-warn',
+    );
+    expect(warn?.textContent).toContain("Notices not reaching this pane");
+    expect(warn?.title).toBe("a dialog is open");
+    const line = root.querySelector<HTMLElement>(".canvas-steward")!;
+    expect(line.classList.contains("canvas-steward-warn")).toBe(true);
+    expect(line.title).toContain("a dialog is open");
+  });
+});

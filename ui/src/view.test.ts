@@ -407,3 +407,35 @@ describe("ConsoleView: the Steward (ADR-0030)", () => {
     );
   });
 });
+
+describe("ConsoleView: Notices not landing", () => {
+  it("writes the engine's last error out in the Conversation's Detail", () => {
+    const c = mountConsole({
+      ...SNAPSHOT,
+      state: {
+        ...SNAPSHOT.state,
+        conversations: [
+          {
+            id: "conv-1",
+            title: "a talk",
+            status: "live",
+            spawnedBy: null,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            paneId: null,
+            branch: null,
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+            children: [],
+            enlisted: false,
+            ending: false,
+            delivery: { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" },
+          },
+        ],
+      },
+    });
+    c.session.select("conversation:conv-1");
+    expect(c.q(".detail-open .conversation-delivery-warn")?.textContent).toContain(
+      "Notices not reaching this pane",
+    );
+    expect(c.q(".detail-open .conversation-delivery-error")?.textContent).toBe("a dialog is open");
+  });
+});

@@ -182,6 +182,11 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         }),
         ...Array.from({ length: 30 }, (_, i) =>
           conversation(`c-${i + 1}`, {
+            // One whose Notices are not landing, so its tray row wraps a
+            // warning line under the scroll and identity checks.
+            ...(i === 1
+              ? { delivery: { failingSince: "2026-09-21T10:00:00Z", lastError: "a dialog is open" } }
+              : {}),
             turn:
               i % 3 === 0
                 ? { state: "waiting", lastLine: "waiting on you", idleSince: "2026-09-21T10:00:00Z" }

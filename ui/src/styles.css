@@ -3175,3 +3175,36 @@ textarea.steward-orders {
   flex: 1 1 8em;
   min-width: 0;
 }
+
+/* A Conversation whose Notices keep failing to land: a harness dialog, as a
+   rule, sitting in its pane. Amber, the Spawn caps line's warn colour, on
+   its card, its tray row and its Detail; the error rides the hover. */
+.conversation-delivery-warn {
+  margin: 4px 0;
+  padding: 3px 6px;
+  border-left: 2px solid var(--status-running);
+  color: var(--status-running);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.conversation-delivery-error {
+  margin-top: 2px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+
+/* The tray row wraps so its warning takes a line of its own. */
+.conversations-row-blocked {
+  flex-wrap: wrap;
+}
+
+.conversations-row-blocked .conversation-delivery-warn {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* The Steward on duty but blind: its Notices are not landing. */
+.canvas-steward-warn {
+  color: var(--status-running);
+}

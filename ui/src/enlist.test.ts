@@ -407,7 +407,12 @@ describe("EnlistStore as the Steward (ADR-0030)", () => {
 
   describe("drawn", () => {
     useDom();
-    const onDuty = { conversationId: "conv-3", cardId: "conversation:conv-3", title: "Steward" };
+    const onDuty = {
+      conversationId: "conv-3",
+      cardId: "conversation:conv-3",
+      title: "Steward",
+      delivery: null,
+    };
 
     it("offers Steward as a third choice, disabled with the reason while one is on duty", async () => {
       const { store } = await pickEligible();

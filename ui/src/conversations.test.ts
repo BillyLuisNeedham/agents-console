@@ -328,7 +328,12 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
 
   describe("drawn", () => {
     useDom();
-    const onDuty = { conversationId: "conv-3", cardId: "conversation:conv-3", title: "Steward" };
+    const onDuty = {
+      conversationId: "conv-3",
+      cardId: "conversation:conv-3",
+      title: "Steward",
+      delivery: null,
+    };
     const handlers = { onSelect: () => {} };
 
     it("disables the tray's start steward toggle with the reason while one is on duty", () => {
@@ -364,6 +369,7 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
         turn: { state: "working" as const, lastLine: "", idleSince: null },
         idleAge: null,
         steward,
+        delivery: null,
       });
       const el = tray.render([row("conv-1", false), row("conv-3", true)], {}, handlers);
       const marked = [...el.querySelectorAll(".conversations-row")].map(
@@ -371,5 +377,34 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
       );
       expect(marked).toEqual([false, true]);
     });
+  });
+});
+
+describe("ConversationsTray: Notices not landing", () => {
+  useDom();
+  it("puts the warning on the row, its error on hover", () => {
+    const { tray } = trayHarness();
+    const delivery = { text: "Notices not reaching this pane since 02:05", lastError: "a dialog is open" };
+    const el = tray.render(
+      [
+        {
+          id: "conv-1",
+          cardId: "conversation:conv-1",
+          title: "conv-1",
+          status: "live",
+          turn: { state: "waiting", lastLine: "", idleSince: null },
+          idleAge: null,
+          steward: false,
+          delivery,
+        },
+      ],
+      {},
+      { onSelect: () => {} },
+    );
+    const row = el.querySelector(".conversations-row")!;
+    expect(row.classList.contains("conversations-row-blocked")).toBe(true);
+    const warn = row.querySelector<HTMLElement>(".conversation-delivery-warn")!;
+    expect(warn.textContent).toBe(delivery.text);
+    expect(warn.title).toBe("a dialog is open");
   });
 });

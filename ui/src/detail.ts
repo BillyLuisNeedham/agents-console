@@ -45,6 +45,7 @@ import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } fr
 import { h } from "./dom";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
+import { renderDeliveryWarning } from "./conversations";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -1073,6 +1074,7 @@ export class Detail {
       "div",
       { class: "detail-body conversation-detail" },
       detail.steward ? renderStewardBadge() : null,
+      detail.delivery ? renderDeliveryWarning(detail.delivery, { showError: true }) : null,
       h("div", { class: "dim" }, "assignment"),
       h(
         "div",

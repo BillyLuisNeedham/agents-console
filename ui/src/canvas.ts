@@ -49,6 +49,7 @@ import {
 import { h } from "./dom";
 import { renderTerminalSurface } from "./terminal";
 import { renderStewardBadge } from "./steward";
+import { renderDeliveryWarning } from "./conversations";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
@@ -756,6 +757,7 @@ export class Canvas {
     const body: (Node | string | null)[] = [
       this.assignmentBadge(card),
       h("div", { class: "card-text conversation-card-title" }, card.title),
+      card.delivery ? renderDeliveryWarning(card.delivery) : null,
     ];
     if (card.status === "live") {
       body.push(
@@ -993,15 +995,19 @@ export class Canvas {
   /**
    * The header's word that a Steward is on duty (ADR-0030), first after the
    * status line because it says who is answering while the operator is
-   * away. A click selects the Steward's card and brings it into view.
+   * away. A click selects the Steward's card and brings it into view. While
+   * its Notices keep failing it is on duty but blind to every Interrupt, so
+   * the line warns and the hover says why.
    */
   private renderStewardOnDuty(steward: StewardOnDutyView): HTMLElement {
     return h(
       "button",
       {
-        class: "canvas-steward",
+        class: "canvas-steward" + (steward.delivery ? " canvas-steward-warn" : ""),
         type: "button",
-        title: `${steward.title} is on duty (show its card)`,
+        title: steward.delivery
+          ? `${steward.delivery.text} (${steward.delivery.lastError}); show its card`
+          : `${steward.title} is on duty (show its card)`,
         onclick: () => this.onFocusSteward(steward.cardId),
       },
       stewardOnDutyLine(steward),
