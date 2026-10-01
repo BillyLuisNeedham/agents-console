@@ -86,6 +86,7 @@ import {
   diffStatSummary,
   ticketEndedNoticeText,
   type Notice,
+  type NoticeDelivery,
 } from "./notices.ts";
 import type { PaneReadRegister } from "./pane-reads.ts";
 import { listedAsRecorded, type PaneListing } from "./pane-survey.ts";
@@ -365,6 +366,9 @@ export interface ConversationRuntime {
   // Notices from spawned work that ended, delivered as a Turn once the tick
   // sees this Conversation waiting.
   notices: Notice[];
+  // Set while Notices keep failing to land in the pane, from the first
+  // failure until one lands (NoticeDelivery).
+  delivery?: NoticeDelivery;
   // Set the moment End is called; guards the background crash watcher
   // (watchForCrash) from racing the ending it already knows about.
   ending: boolean;
@@ -412,6 +416,14 @@ export interface ConversationView {
   ending: boolean;
   /** The Steward (ADR-0030): present only on a Conversation in that role. */
   role?: ConversationRole;
+  /**
+   * Notices are not reaching this pane: present from the first failed
+   * delivery until one lands. The Turn state may still read waiting, since
+   * a Blocking dialog in the pane looks idle while it swallows every Turn,
+   * and the engine answers no dialog but Folder trust; the operator has to
+   * look at the pane.
+   */
+  delivery?: NoticeDelivery;
 }
 
 export interface StartConversationRequest {
@@ -773,6 +785,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       enlisted: rec.enlisted !== undefined,
       ending,
       ...(rec.role ? { role: rec.role } : {}),
+      ...(runtime?.delivery ? { delivery: runtime.delivery } : {}),
     };
   }
 
@@ -2208,14 +2221,35 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         } catch (err) {
           error = err instanceof Error ? err.message : String(err);
         }
-        for (const notice of turn.notices) {
-          const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
-          event(notice.from, "notice", { ...payload, to: notice.to }, lastAttempt(env.runsDir, notice.from));
-          event(id, "notice", { ...payload, from: notice.from }, lastAttempt(env.runsDir, id));
+        // A stuck pane is retried every tick: only the first failure of the
+        // episode is on the logs, and then the delivery that ends it.
+        const firstFailure = !delivered && runtime.delivery === undefined;
+        if (delivered || firstFailure) {
+          for (const notice of turn.notices) {
+            const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
+            event(notice.from, "notice", { ...payload, to: notice.to }, lastAttempt(env.runsDir, notice.from));
+            event(id, "notice", { ...payload, from: notice.from }, lastAttempt(env.runsDir, id));
+          }
         }
         if (!delivered) {
           runtime.notices.unshift(...turns.slice(i).flatMap((t) => t.notices));
+          runtime.delivery = {
+            failingSince: runtime.delivery?.failingSince ?? nowIso(),
+            lastError: error ?? "the Turn never showed in the pane, so it was not sent",
+          };
+          if (firstFailure) {
+            host.log(
+              `conversation ${id}: Notices are not reaching its pane (${runtime.delivery.lastError}); ` +
+                "retrying while it reads as waiting",
+            );
+            publish();
+          }
           return;
+        }
+        if (runtime.delivery !== undefined) {
+          host.log(`conversation ${id}: Notices reach its pane again (failing since ${runtime.delivery.failingSince})`);
+          runtime.delivery = undefined;
+          publish();
         }
       }
     } catch {

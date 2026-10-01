@@ -34,6 +34,7 @@ export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
 export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
 export type { HeldPaneRecord } from "./held-panes.ts";
+export type { NoticeDelivery } from "./notices.ts";
 export type { HeldSpawnReason, HeldSpawnView, PendingSpawnView } from "./spawn-proposals.ts";
 export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";

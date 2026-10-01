@@ -545,6 +545,45 @@ describe("Notices to the Steward", () => {
   }, 40_000);
 });
 
+describe("Notices that cannot land", () => {
+  it("shows a pane that swallows every Notice on the view, logs the episode once, and clears it when one lands", async () => {
+    const pool = await stewardPool({ outcomes: { "01": [checkpoint("one"), checkpoint("two")] } });
+    await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run);
+    await until("the backlog Notice", () => stewardTurns(pool.fake).length === 1);
+    // Something in the pane eats every Turn from here (a Blocking dialog,
+    // live), while it still reads as waiting.
+    pool.fake.dropPaneInput(STEWARD_PANE, 1_000_000);
+    pool.run.accept("01");
+    await until("the delivery failure on the view", () =>
+      latest(pool.run).conversations.some((c) => c.id === id && c.delivery !== undefined),
+      30_000,
+    );
+    const failing = latest(pool.run).conversations.find((c) => c.id === id)!.delivery!;
+    expect(failing.lastError).toBe("the Turn never showed in the pane, so it was not sent");
+    // Retries go on, but the logs carry the episode's first failure only.
+    const retriesSeen = () =>
+      pool.fake.requests.filter((r) => r.method === "pane.send_input" && r.params.pane_id === STEWARD_PANE).length;
+    const before = retriesSeen();
+    await until("more retries", () => retriesSeen() > before + 4, 30_000);
+    const failed = (owner: string) =>
+      readEvents(join(pool.poolDir, "runs"), owner).filter(
+        (e) => e.kind === "notice" && e.payload.delivered === false,
+      );
+    expect(failed("01")).toHaveLength(1);
+    expect(failed(id)).toHaveLength(1);
+    expect(pool.run.final.log.filter((line) => line.includes("Notices are not reaching its pane"))).toHaveLength(1);
+
+    pool.fake.dropPaneInput(STEWARD_PANE, -2_000_000);
+    await until("the Notice lands", () => stewardTurns(pool.fake).some((t) => t.includes("Brief:\ntwo")), 30_000);
+    await until("the view clears", () => latest(pool.run).conversations.find((c) => c.id === id)?.delivery === undefined);
+    expect(
+      readEvents(join(pool.poolDir, "runs"), "01").filter((e) => e.kind === "notice" && e.payload.delivered === true),
+    ).toHaveLength(2);
+    expect(failed("01")).toHaveLength(1);
+  }, 90_000);
+});
+
 describe("the Steward's answers", () => {
   it("answers on the operator's path, recorded as its own with its note", async () => {
     const pool = await stewardPool({ outcomes: { "01": [checkpoint("ask me"), { status: "done", summary: "ok", commitSha: null }] } });

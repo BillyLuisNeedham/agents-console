@@ -35,6 +35,18 @@ export interface Notice {
   key?: string;
 }
 
+/**
+ * A Conversation whose Notices keep failing to land (ADR-0030's live e2e):
+ * since when, and why the last try failed. Turn state can read "waiting"
+ * while something in the pane (a Blocking dialog the engine never answers)
+ * swallows every Turn, so the failure is shown rather than retried
+ * invisibly. Cleared by the first Notice that lands.
+ */
+export interface NoticeDelivery {
+  failingSince: string;
+  lastError: string;
+}
+
 export function diffStatSummary(cwd: string, range: string): string {
   const probe = git(cwd, ["diff", "--stat", range]);
   const out = probe.ok ? probe.out.trim() : "";
