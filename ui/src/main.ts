@@ -8,6 +8,7 @@
 import "./styles.css";
 import { PoolClient } from "./client";
 import { POOL_TAB_COLORS, poolTabTitle, type EnrichedSnapshot } from "./project";
+import { RenderLoop } from "./frame";
 import { ConsoleSession } from "./session";
 import { TerminalSurface } from "./terminal";
 import { ConsoleView } from "./view";
@@ -45,13 +46,26 @@ function setFavicon(color: string): void {
 
 setFavicon(POOL_TAB_COLORS.idle);
 
+// Every store below asks for a render when it changes, and the asks come in
+// bursts (a snapshot, then a Vitals answer per live ticket and a peek per
+// pane), so they are folded into one render per animation frame (issue
+// #157). The tab title and favicon are not left to the frame: a hidden tab
+// gets none, and the tab strip is exactly where an operator on another tab
+// watches the pool's status.
+const renders = new RenderLoop(() => render());
+
+function requestRender(): void {
+  updateTab();
+  renders.request();
+}
+
 // The Vitals store: polls the activity endpoint per live-attempt ticket and
 // holds the payloads and sparkline samples the cards' footers project from.
 // Its onChange fires on poll responses and on the 2s wall-clock tick that
 // keeps staleness copy honest while the snapshot stream is silent.
 const vitals = new Vitals({
   fetch: (ticketId) => client.getActivity(ticketId),
-  onChange: () => render(),
+  onChange: requestRender,
 });
 
 // The Terminal surface store: polls the peek endpoint per terminal-backed
@@ -60,7 +74,7 @@ const vitals = new Vitals({
 const terminal = new TerminalSurface({
   peek: (ticketId) => client.peekTerminal(ticketId),
   focus: (ticketId) => client.focusTerminal(ticketId),
-  onChange: () => render(),
+  onChange: requestRender,
 });
 
 // The Console session: owns the snapshot, the selection, the ticket-body
@@ -85,7 +99,7 @@ const session = new ConsoleSession({
   vitals,
   terminal,
   visibility: document,
-  onChange: () => render(),
+  onChange: requestRender,
 });
 
 // The per-session view state: selection, dragged card positions, panel
@@ -96,7 +110,7 @@ const session = new ConsoleSession({
 // banner.
 const consoleView = new ConsoleView({
   onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
-  onChange: () => render(),
+  onChange: requestRender,
   onFocusTerminal: (ticketId) => terminal.focus(ticketId),
   onListPanes: () => client.listPanes(),
   onEnlist: (request) => client.enlist(request),
@@ -169,14 +183,18 @@ function handOverTo(port: number): void {
   location.reload();
 }
 
-function render(): void {
-  // The tab title and favicon follow the latest snapshot's pool status; the
-  // session computes it, the DOM write is the bootstrap's.
+/** The tab title and favicon follow the latest snapshot's pool status; the
+ *  session computes it, the DOM write is the bootstrap's. */
+function updateTab(): void {
   const status = session.tabStatus;
   if (status && session.poolName) {
-    document.title = poolTabTitle(session.poolName, status);
+    const title = poolTabTitle(session.poolName, status);
+    if (document.title !== title) document.title = title;
     setFavicon(status.color);
   }
+}
+
+function render(): void {
   consoleView.render(root, session.model(consoleView.conversationEndState()), {
     onToggleLog: () => session.toggleLog(),
     onToggleInspector: () => session.toggleInspector(),
