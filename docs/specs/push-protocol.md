@@ -92,7 +92,7 @@ Why JSON-string equality per entity: tickets are about 1 KB each and there are t
 | `settings.machine.put` | `{defaults}` | `SettingsResponse` | PUT /api/settings/machine |
 | `panes.list` | `{}` | `PanesResponse` | GET /api/panes |
 | `log.read` | `{id, attempt?, offset, end?, stream?}` | `TicketLogResponse` | GET /api/log |
-| `log.follow` | `{id, attempt: number\|null, stream}` | `TicketLogResponse` (the tail window) | GET /api/log (a tail read) |
+| `log.follow` | `{id, attempt: number\|null, stream}` | `LogFollowResult`: the tail window plus the resolved `attempt` and `stream` | GET /api/log (a tail read) |
 | `poolLog.read` | `{before, limit?}` | `PoolLogRange {start, lines, total}` | GET /api/pool-log (**new route**) |
 
 Three things are deliberately not on the socket:
