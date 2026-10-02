@@ -95,10 +95,18 @@ bun run engine/server.ts --pool <dir>   # pool server
 ```
 
 The pool server binds one pool at a time and serves the built SPA, a small JSON
-API, and an SSE stream pushing a state snapshot on every change. It prints its
-URL (`pool server on http://localhost:<port>`); open it in a browser. An
-optional `--port <n>` overrides the pinned port, and a busy pinned port fails
-loudly (see `docs/adr/0001-one-console-per-pool.md`).
+API, and the one WebSocket the Console talks over, `/api/ws`
+(`docs/adr/0032-the-console-talks-over-one-pushed-websocket.md`). The served
+page carries the first snapshot, so it paints before the socket opens; the
+socket then pushes the snapshot's changes as deltas, the live values (activity,
+peeks, grades) while the tab is visible, and the data of the cards the Console
+subscribes to, and it carries every action and read as a request answered by
+the same function as its HTTP twin. The messages are declared in
+`engine/protocol.ts`, the server's side is `engine/ws.ts`, and every HTTP route
+but the old `/api/stream` stays for the Steward's command, Boot and scripts.
+It prints its URL (`pool server on http://localhost:<port>`); open it in a
+browser. An optional `--port <n>` overrides the pinned port, and a busy pinned
+port fails loudly (see `docs/adr/0001-one-console-per-pool.md`).
 
 `bun run fleet` lists the machine's live Consoles from the fleet registry, one
 per pool, so any of them can be found.
