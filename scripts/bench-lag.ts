@@ -30,9 +30,11 @@
  * both sides of issue #161.
  *
  * The UI half (scripts/bench-lag/ui-bench.ts) mounts the checkout's real
- * Console in headless Chromium over fake seams and measures render cost,
- * long tasks, click-to-Detail and drag under the same churn, at the snapshot
- * rate the server half measured.
+ * Console in headless Chromium over a fake socket that plays the server's
+ * frames (or, on a checkout from before the push protocol, over its old
+ * fetch and stream seams) and measures render cost, long tasks,
+ * click-to-Detail and drag under the same churn, at the snapshot rate the
+ * server half measured.
  *
  * `--rtt` adds a simulated round trip to every tab request (not the
  * responsiveness probe), for a browser on another machine; the default is

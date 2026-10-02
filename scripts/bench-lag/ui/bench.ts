@@ -1,300 +1,334 @@
 /**
- * The lag bench's UI half (issue #157): mounts the real ConsoleView over the
- * real ConsoleSession, wired the way ui/src/main.ts wires them, with the
- * network replaced by seams that answer in a task of their own within a few
- * milliseconds, as a localhost fetch does. With the server out of the
- * picture every millisecond measured here is the page's own: the render,
- * the morph, the layout the canvas edges force, and whatever else the main
- * thread does per store change.
+ * The lag bench's UI half (issues #157, #161): mounts the real Console,
+ * composed by the checkout's own createConsole (ui/src/console.ts) exactly as
+ * its main.ts composes it, over a fake socket that plays the pool server's
+ * side of the push protocol (ADR-0032). With the server out of the picture
+ * every millisecond measured here is the page's own: decoding and applying
+ * the frames, the render, the morph, the layout the canvas edges force, and
+ * whatever else the main thread does per store change.
  *
- * The churn is the app's own. The real Vitals and TerminalSurface stores run
- * their real 2 s polls against fake fetches whose answers change every time,
- * and the stream seam pushes a fresh snapshot (parsed from JSON, as the SSE
- * client would) `sps` times a second, each with a moved Conversation turn
- * line and a new pool log line. While that runs the page clicks cards the
- * way an operator does (pointerdown and pointerup on the card, which is the
- * canvas's tap) and drags one, timing each.
+ * The fake is the wire itself, not a stand-in for a store: every frame it
+ * sends is built with the checkout's own protocol functions (toPushed,
+ * diffSnapshot, encodeMessage) and handed to the Console as JSON text, the
+ * way a WebSocket message arrives, in a task of its own. It sends what the
+ * real server sends a visible socket: hello and the snapshot on open (the
+ * same epoch and revision the page booted with, so it repaints nothing), a
+ * delta `sps` times a second as a Conversation's turn line moves and a pool
+ * log line lands, a live frame every LIVE_CHECK_MS with the running tickets'
+ * activity and every pane's peek moved, and for every card the page
+ * subscribes, one card frame with its body, events and log window, then the
+ * log's appends as the running tickets' agents write. Requests are answered
+ * by kind under their own id.
  *
- * The page imports the target checkout through the `@console` alias
- * (vite.config.ts), so the same file measures any checkout whose ConsoleView
- * and ConsoleSession keep the constructor seams main.ts uses. The stores ask
- * for renders and send their background polls through `@bench/frame` and
- * `@bench/poll`: the checkout's own render loop and request cap where it has
- * them (issue #157), else a render per ask and no cap, as its main.ts does.
- * It POSTs its report to `/report` on its own origin; ui-bench.ts serves
- * both.
+ * While that runs the page clicks cards the way an operator does
+ * (pointerdown and pointerup on the card, which is the canvas's tap) and
+ * drags one, timing each, and reports the same numbers bench-sse.ts reports
+ * for a checkout from before the protocol, on the same pool (fixture.ts).
+ * vite.config.ts builds this page for a checkout that has ui/src/console.ts
+ * and that one for any other. It POSTs its report to `/report` on its own
+ * origin; ui-bench.ts serves both.
  */
 
 import "@console/styles.css";
-import { ConsoleSession } from "@console/session";
-import { ConsoleView, type Handlers } from "@console/view";
-import { Vitals } from "@console/vitals";
-import { TerminalSurface } from "@console/terminal";
-import { RenderLoop } from "@bench/frame";
-import { BACKGROUND_REQUESTS, RequestLimiter } from "@bench/poll";
-import type {
-  ConversationView,
-  EnrichedSnapshot,
-  EnrichedTicketState,
-  SettingsResponse,
-  TicketActivityResponse,
-  TicketEvent,
-  TicketEventsResponse,
-  TicketGradeSummary,
-} from "@console/project";
-import type { LogChunk } from "@console/log-pane";
+import { createConsole, type ConsoleApp } from "@console/console";
+import type { TicketLogResponse } from "@console/project";
+import {
+  decodeClientMessage,
+  diffSnapshot,
+  encodeMessage,
+  HEARTBEAT_MS,
+  LIVE_CHECK_MS,
+  PROTOCOL_VERSION,
+  toPushed,
+  type CardSubscription,
+  type ClientMessage,
+  type LogPush,
+  type PushedSnapshot,
+  type ServerMessage,
+  type SocketLike,
+} from "@engine/protocol.ts";
+import {
+  activity,
+  bodyOf,
+  CONVERSATIONS,
+  DONE,
+  eventsFor,
+  grades,
+  LOG_TEXT,
+  peekText,
+  poolLog,
+  RUNNING,
+  SETTINGS,
+  snapshot,
+  WAITING,
+} from "./fixture";
 
 const params = new URLSearchParams(location.search);
 const DURATION_MS = Number(params.get("dur") ?? 30_000);
 const SNAPSHOTS_PER_SEC = Number(params.get("sps") ?? 1);
 
 // ---------------------------------------------------------------------------
-// Fixture: 20 ticket cards and 3 Conversations, the shape of a pool partway
-// through a day's run.
+// The pool server, played in the page.
 // ---------------------------------------------------------------------------
 
-const DONE = Array.from({ length: 12 }, (_, i) => `t-${String(i + 1).padStart(2, "0")}`);
-const RUNNING = ["t-13", "t-14", "t-15", "t-16"];
-const WAITING = ["t-17", "t-18", "t-19", "t-20"];
-const CONVERSATIONS = ["conv-1", "conv-2", "conv-3"];
-const started = new Date(Date.now() - 20 * 60_000).toISOString();
-/** The done tickets whose branches have not landed: the Merge queue. */
-const UNMERGED = new Set(["t-10", "t-11", "t-12"]);
+const EPOCH = "bench-ui";
+/** The log window a subscribe sends: the last 64 KiB, as the server's is. */
+const LOG_WINDOW_BYTES = 64 * 1024;
+/** How often a running ticket's agent writes to its log. */
+const APPEND_MS = 1_500;
 
-function lines(prefix: string, n: number): string {
-  return Array.from({ length: n }, (_, i) => `${prefix} line ${i + 1}`).join("\n");
+let seq = 1;
+let pushed: PushedSnapshot = toPushed(snapshot(seq), 0);
+let focusCalls = 0;
+const serverTimers: ReturnType<typeof setInterval>[] = [];
+
+/** A socket frame's arrival: never inside the task that caused it. */
+function later(run: () => void): void {
+  setTimeout(run, 0);
 }
 
-function ticket(id: string, overrides: Partial<EnrichedTicketState>): EnrichedTicketState {
-  const base = {
-    id,
-    title: `Ticket ${id}: make the thing behave under load`,
-    blockedBy: [] as string[],
-    status: "ready" as const,
-    mergeState: null,
-    enlisted: false,
-    heldPane: null,
-    assignment: { harness: "claude", model: "opus", drivers: "implement" },
-    liveAttempt: null,
-    ...overrides,
+/** What a running ticket's agent has written since the bench began. */
+const written = new Map<string, string>();
+const logOf = (id: string): string => LOG_TEXT + (written.get(id) ?? "");
+
+/** The attempt a card's log follows when it names none: the live one, or a done ticket's first. */
+function latestAttempt(id: string): number | null {
+  const t = pushed.snapshot.state.tickets.find((x) => x.id === id);
+  if (!t) return null;
+  return t.liveAttempt?.attempt ?? (t.status === "done" ? 1 : null);
+}
+
+function attemptsUpTo(n: number): TicketLogResponse["attempts"] {
+  return Array.from({ length: n }, (_, i) => ({
+    attempt: i + 1,
+    kind: "implement" as const,
+    logFile: `runs/bench/attempt-${i + 1}.log`,
+    streamFile: null,
+    current: i + 1 === n,
+  }));
+}
+
+/** A log's last window, as the server reads it for a subscribe or a follow. */
+function tail(id: string, attempt: number): TicketLogResponse {
+  const text = logOf(id);
+  const offset = Math.max(0, text.length - LOG_WINDOW_BYTES);
+  return {
+    content: text.slice(offset),
+    offset,
+    nextOffset: text.length,
+    totalSize: text.length,
+    attempts: attemptsUpTo(attempt),
   };
-  const eligible = base.liveAttempt === null && base.status !== "done";
-  return {
-    ...base,
-    reassign: {
-      eligible,
-      reason: eligible ? null : "an Attempt is in flight",
-      verify: null,
-      sources: { harness: "default", model: "pinned", drivers: "default" },
-    },
-  } as EnrichedTicketState;
 }
 
-function conversation(id: string, seq: number, i: number): ConversationView {
-  const waiting = (seq + i) % 3 === 0;
-  return {
-    id,
-    title: `Conversation ${id}`,
-    status: "live",
-    spawnedBy: null,
-    assignment: { harness: "claude", model: "opus", drivers: "implement" },
-    paneId: `pane-${id}`,
-    branch: `pool/bench/${id}`,
-    turn: waiting
-      ? { state: "waiting", lastLine: `waiting on you (${seq})`, idleSince: new Date().toISOString() }
-      : { state: "working", lastLine: `editing src/module-${(seq + i) % 17}.ts`, idleSince: null },
-    children: [],
-    enlisted: false,
-    ending: false,
-  } as ConversationView;
+/** One card the page has subscribed: its attempt and how far its log has been sent. */
+interface Followed {
+  attempt: number | null;
+  sent: number;
 }
 
-const poolLog: string[] = Array.from({ length: 150 }, (_, i) => `[pool] boot line ${i + 1}`);
+class FakeSocket implements SocketLike {
+  readyState = 0;
+  onopen: SocketLike["onopen"] = null;
+  onmessage: SocketLike["onmessage"] = null;
+  onclose: SocketLike["onclose"] = null;
+  onerror: SocketLike["onerror"] = null;
+  visible = true;
+  private readonly cards = new Map<string, Followed>();
 
-function snapshot(seq: number): EnrichedSnapshot {
-  const tickets: EnrichedTicketState[] = [
-    ...DONE.map((id, i) =>
-      ticket(id, {
-        status: "done",
-        // A chain of done work, so the canvas has edges to route.
-        blockedBy: i > 0 && i % 3 !== 0 ? [DONE[i - 1]!] : [],
-        mergeState: UNMERGED.has(id) ? "queued" : null,
-      }),
-    ),
-    ...RUNNING.map((id, i) =>
-      ticket(id, {
-        status: "in-progress",
-        blockedBy: [DONE[i * 3 + 2]!],
-        liveAttempt: { attempt: 1 + (i % 2), paneId: `pane-${id}`, role: "agent", startedAt: started },
-      }),
-    ),
-    ...WAITING.map((id, i) =>
-      ticket(id, {
-        status: "ready",
-        blockedBy: i === 3 ? [RUNNING[0]!, RUNNING[1]!] : [RUNNING[i]!],
-      }),
-    ),
-  ];
-  const outcomes: EnrichedSnapshot["state"]["outcomes"] = {};
-  for (const id of DONE) {
-    outcomes[id] = { status: "done", summary: lines(`outcome of ${id}`, 12), commitSha: "abc1234" };
+  constructor() {
+    sockets.add(this);
+    later(() => this.opened());
   }
-  return {
-    seq,
-    phase: "running",
-    poolName: "bench/lag",
-    poolTitle: "Lag bench",
-    poolDir: "/tmp/bench-pool",
-    finishedTerminals: 2,
-    spawnUsage: { spawnedThisRun: 6, perAttempt: 5, perRun: 20 },
-    pendingSpawns: [],
-    heldSpawns: [],
-    stewardBudget: { budget: 5, used: {} },
-    state: {
-      tickets,
-      conversations: CONVERSATIONS.map((id, i) => conversation(id, seq, i)),
-      log: [...poolLog],
-      outcomes,
-      interrupts: [],
-      mergeQueue: [...UNMERGED].map((ticketId) => ({ ticketId, state: "queued" as const })),
-      queuedAnswers: [],
-      config: { terminal: "herdr", defaults: { harness: "claude", model: "opus" } },
-    },
-  } as EnrichedSnapshot;
-}
 
-/** A few hundred events: several attempts' worth of launches, exits,
- *  grades, checkpoints and answers, which is what a long-lived ticket's
- *  events file reads like by the afternoon. */
-function events(id: string): TicketEventsResponse {
-  const list: TicketEvent[] = [];
-  const t0 = Date.now() - 3 * 3600_000;
-  let n = 0;
-  const ev = (attempt: number, kind: TicketEvent["kind"], payload: Record<string, unknown> = {}) =>
-    list.push({ at: new Date(t0 + n++ * 30_000).toISOString(), attempt, kind, payload });
-  for (let attempt = 1; attempt <= 8; attempt++) {
-    ev(attempt, "scheduled");
-    for (let r = 0; r < 4; r++) ev(attempt, "launch-retried", { reason: "the wrapper never ran" });
-    ev(attempt, "spawned", { paneId: `pane-${id}` });
-    for (let k = 0; k < 10; k++) {
-      ev(attempt, "checkpoint", { brief: lines("brief", 4) });
-      ev(attempt, "answered", { action: "resume", note: "carry on with the smaller change" });
+  /** The server's side of an open: hello, the snapshot, the whole live cache. */
+  private opened(): void {
+    this.readyState = 1;
+    this.onopen?.({});
+    this.deliver({ type: "hello", protocol: PROTOCOL_VERSION, epoch: EPOCH, heartbeatMs: HEARTBEAT_MS });
+    this.deliver({ type: "snapshot", rev: pushed.rev, logTotal: pushed.logTotal, snapshot: pushed.snapshot });
+    this.deliver(liveFrame(true));
+  }
+
+  send(data: string): void {
+    const message = decodeClientMessage(data);
+    later(() => this.receive(message));
+  }
+
+  close(code = 1000, reason = ""): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    sockets.delete(this);
+    later(() => this.onclose?.({ code, reason }));
+  }
+
+  /** A frame to the page, as JSON text, the way a WebSocket message arrives. */
+  deliver(message: ServerMessage): void {
+    if (this.readyState !== 1) return;
+    this.onmessage?.({ data: encodeMessage(message) });
+  }
+
+  private receive(message: ClientMessage): void {
+    switch (message.type) {
+      case "hello":
+        this.visible = message.visible;
+        for (const card of message.cards) this.subscribe(card);
+        return;
+      case "visibility":
+        this.visible = message.visible;
+        return;
+      case "subscribe":
+        this.subscribe(message.card);
+        return;
+      case "unsubscribe":
+        this.cards.delete(message.id);
+        return;
+      case "request":
+        this.deliver(this.answer(message));
+        return;
     }
-    ev(attempt, "exited", { code: 0 });
-    ev(attempt, "graded", {
-      score: 6 + (attempt % 4),
-      verdict: attempt % 3 ? "pass" : "flag",
-      reasons: lines("reason", 6),
+  }
+
+  /** A new subscription's one frame, everything in it; a repeat only moves the follow. */
+  private subscribe(card: CardSubscription): void {
+    const attempt = card.follow?.attempt ?? latestAttempt(card.id);
+    const held = this.cards.get(card.id);
+    if (held) {
+      held.attempt = attempt;
+      return;
+    }
+    const latest = attempt === null ? null : tail(card.id, attempt);
+    this.cards.set(card.id, { attempt, sent: latest?.nextOffset ?? 0 });
+    const conversation = CONVERSATIONS.includes(card.id);
+    this.deliver({
+      type: "card",
+      id: card.id,
+      body: conversation ? null : { id: card.id, body: bodyOf(card.id) },
+      events: conversation ? { events: [], attempts: [], reconstructed: false, spec: "" } : eventsFor(card.id),
+      log: latest && attempt !== null ? { mode: "window", attempt, stream: false, ...latest } : null,
     });
-    for (let k = 0; k < 6; k++) ev(attempt, "merge-conflict", { files: [`src/f${k}.ts`, `src/g${k}.ts`] });
   }
-  return { events: list, attempts: [], reconstructed: false, spec: `# ${id}\n\n${lines("spec", 40)}` };
+
+  /** The bytes each followed log gained since it was last sent. Hidden sockets wait. */
+  appendLogs(): void {
+    if (!this.visible) return;
+    for (const [id, card] of this.cards) {
+      if (card.attempt === null) continue;
+      const text = logOf(id);
+      if (text.length <= card.sent) continue;
+      const push: LogPush = {
+        mode: "append",
+        attempt: card.attempt,
+        stream: false,
+        content: text.slice(card.sent),
+        offset: card.sent,
+        nextOffset: text.length,
+        totalSize: text.length,
+      };
+      card.sent = text.length;
+      this.deliver({ type: "card", id, log: push });
+    }
+  }
+
+  private answer(request: Extract<ClientMessage, { type: "request" }>): ServerMessage {
+    const ok = (result: unknown) =>
+      ({ type: "reply", id: request.id, kind: request.kind, rev: pushed.rev, ok: true, result }) as ServerMessage;
+    switch (request.kind) {
+      case "terminal.focus":
+        focusCalls += 1;
+        return ok({ ok: true, paneId: `pane-${request.payload.ticketId}` });
+      case "log.read": {
+        const text = logOf(request.payload.id);
+        const from = Math.min(request.payload.offset, text.length);
+        const to = Math.min(request.payload.end ?? text.length, text.length);
+        return ok({
+          content: text.slice(from, to),
+          offset: from,
+          nextOffset: to,
+          totalSize: text.length,
+          attempts: attemptsUpTo(request.payload.attempt ?? latestAttempt(request.payload.id) ?? 1),
+        });
+      }
+      case "log.follow": {
+        const attempt = request.payload.attempt ?? latestAttempt(request.payload.id) ?? 1;
+        const latest = tail(request.payload.id, attempt);
+        const card = this.cards.get(request.payload.id);
+        if (card) {
+          card.attempt = attempt;
+          card.sent = latest.nextOffset;
+        }
+        return ok(latest);
+      }
+      case "poolLog.read": {
+        const before = Math.min(request.payload.before, poolLog.length);
+        const start = Math.max(0, before - (request.payload.limit ?? 500));
+        return ok({ start, lines: poolLog.slice(start, before), total: poolLog.length });
+      }
+      case "settings.get":
+      case "settings.pool.put":
+      case "settings.machine.put":
+        return ok(SETTINGS);
+      case "panes.list":
+        return ok({ panes: [] });
+      default:
+        return ok({});
+    }
+  }
 }
 
-const EVENTS = new Map<string, TicketEventsResponse>();
-function eventsFor(id: string): TicketEventsResponse {
-  let cached = EVENTS.get(id);
-  if (!cached) {
-    cached = events(id);
-    EVENTS.set(id, cached);
-  }
-  // A fresh object per fetch, as a parsed response would be.
-  return JSON.parse(JSON.stringify(cached)) as TicketEventsResponse;
-}
+const sockets = new Set<FakeSocket>();
 
-const LOG_TEXT = lines("[agent] raw log output, a tool call or a diff hunk", 3000);
-
-function logChunk(offset: number, end?: number): LogChunk {
-  const total = LOG_TEXT.length;
-  const from = Math.min(offset, total);
-  const to = Math.min(end ?? total, total);
+/** A live check's frame: every running ticket's activity and every pane's peek moved. */
+function liveFrame(withGrades: boolean): ServerMessage {
+  const panes = [...RUNNING, ...CONVERSATIONS];
   return {
-    content: LOG_TEXT.slice(from, to),
-    offset: from,
-    nextOffset: to,
-    totalSize: total,
-    attempts: [
-      { attempt: 1, streamFile: null },
-      { attempt: 2, streamFile: null },
-    ],
+    type: "live",
+    activity: Object.fromEntries(RUNNING.map((id) => [id, activity(id)])),
+    peeks: Object.fromEntries(panes.map((id) => [id, { ticket: id, paneId: `pane-${id}`, text: peekText(id) }])),
+    ...(withGrades ? { grades: grades() } : {}),
   };
 }
 
-function grades(): Record<string, TicketGradeSummary> {
-  const out: Record<string, TicketGradeSummary> = {};
-  for (const [i, id] of DONE.entries()) {
-    out[id] = { attempt: 1, score: 6 + (i % 4), verdict: i % 5 ? "pass" : "flag", winner: 1 };
-  }
-  return out;
+/** The server's cadences: deltas, live checks, log appends, heartbeats. */
+function startServer(): void {
+  serverTimers.push(
+    setInterval(() => {
+      seq += 1;
+      poolLog.push(`[pool] snapshot ${seq}: a turn moved`);
+      const next = toPushed(snapshot(seq), pushed.rev + 1);
+      const delta = diffSnapshot(pushed, next);
+      if (!delta) return;
+      pushed = next;
+      for (const socket of sockets) socket.deliver({ type: "delta", delta });
+    }, 1000 / SNAPSHOTS_PER_SEC),
+    setInterval(() => {
+      const frame = liveFrame(false);
+      for (const socket of sockets) if (socket.visible) socket.deliver(frame);
+    }, LIVE_CHECK_MS),
+    setInterval(() => {
+      for (const id of RUNNING) {
+        written.set(id, (written.get(id) ?? "") + `\n[${id}] the agent wrote another step at ${Date.now()}`);
+      }
+      for (const socket of sockets) socket.appendLogs();
+    }, APPEND_MS),
+    setInterval(() => {
+      for (const socket of sockets) socket.deliver({ type: "heartbeat" });
+    }, HEARTBEAT_MS),
+  );
 }
 
-let activityTick = 0;
-function activity(ticketId: string): TicketActivityResponse {
-  activityTick += 1;
-  const files = Array.from({ length: 3 + (activityTick % 5) }, (_, i) => `src/area-${i}/file-${i}.ts`);
-  return {
-    ticketId,
-    running: true,
-    diff: { added: 40 + activityTick, removed: 10 + (activityTick % 13), files },
-    log: { size: 100_000 + activityTick * 512, mtime: new Date().toISOString() },
-    lastEventAt: new Date(Date.now() - 5_000).toISOString(),
-  };
-}
-
-let peekTick = 0;
-function peekText(ticketId: string): string {
-  peekTick += 1;
-  return [
-    `● ${ticketId}: reading src/module-${peekTick % 23}.ts`,
-    `  ⎿  ${peekTick % 40} lines`,
-    `● running bun test (${peekTick})`,
-    "  ⎿  412 pass, 0 fail",
-    "> ",
-  ].join("\n");
-}
-
-const SETTINGS: SettingsResponse = {
-  pool: {
-    path: "/tmp/bench-pool/console.json",
-    config: { defaults: { harness: "claude", model: "opus" }, port: 4300 },
-    bootOnly: ["selection", "terminal", "port"],
-    effective: { port: 4300, terminal: "herdr", stale: [] },
-  },
-  machine: {
-    path: "/home/me/.agent-graphs/defaults.json",
-    defaults: { harness: "claude" },
-    own: { harness: "claude" },
-  },
-  harnesses: ["claude", "opencode"],
-};
-
-/**
- * A seam's answer, in a task of its own the way a fetch response arrives:
- * never inside the caller's task. A microtask would chain every poll's
- * answer (seven peeks, four activities, the grades) and its render into the
- * one task that asked, and report a long task the real app never has.
- */
-function soon<T>(make: () => T): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(make()), 0));
-}
-
-/** A poll's answer, a few milliseconds out as a localhost fetch would be, so
- *  a burst of polls lands spread over tasks rather than back to back. */
-function polled<T>(make: () => T): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(make()), 1 + Math.random() * 8));
+function stopServer(): void {
+  for (const timer of serverTimers.splice(0)) clearInterval(timer);
 }
 
 // ---------------------------------------------------------------------------
-// Mount: main.ts's bootstrap with the network replaced.
+// Mount: main.ts's createConsole, with the fake socket and the boot snapshot
+// the served page would embed.
 // ---------------------------------------------------------------------------
 
 const root = document.getElementById("app") as HTMLElement;
-let seq = 1;
-let current = snapshot(seq);
-let streamTimer: ReturnType<typeof setInterval> | null = null;
-let focusCalls = 0;
 
-// Whether the page is inside an animation frame's callbacks, where a render
+// Whether the page is inside an animation frame's callbacks, where the render
 // loop renders: what it changes there is painted at the end of this frame,
 // where a render in a handler waits for the next (clickCard below).
 let inAnimationFrame = false;
@@ -309,96 +343,21 @@ window.requestAnimationFrame = (callback: FrameRequestCallback): number =>
     }
   });
 
-// main.ts's render loop and background cap, or the unbatched wiring of a
-// checkout without them.
-const loop = new RenderLoop(() => render());
-const requestRender = (): void => loop.request();
-const background = new RequestLimiter(BACKGROUND_REQUESTS);
-
-const vitals = new Vitals({
-  fetch: (ticketId) => background.run(() => polled(() => activity(ticketId))),
-  onChange: requestRender,
-});
-
-const terminal = new TerminalSurface({
-  peek: (ticketId) =>
-    background.run(() =>
-      polled(() => ({ ticket: ticketId, paneId: `pane-${ticketId}`, text: peekText(ticketId) })),
-    ),
-  focus: () =>
-    soon(() => {
-      focusCalls += 1;
+const app = createConsole({
+  root,
+  openSocket: () => new FakeSocket(),
+  // The served page's embedded snapshot, parsed from its JSON as main.ts reads it.
+  boot: JSON.parse(
+    JSON.stringify({
+      protocol: PROTOCOL_VERSION,
+      epoch: EPOCH,
+      rev: pushed.rev,
+      logTotal: pushed.logTotal,
+      snapshot: pushed.snapshot,
     }),
-  onChange: requestRender,
+  ),
+  render: (a) => render(a),
 });
-
-const session = new ConsoleSession({
-  getState: () => soon(() => current),
-  getEvents: (id) => soon(() => eventsFor(id)),
-  getTicket: (id) => soon(() => ({ id, body: `# ${id}\n\n${lines("spec paragraph", 60)}` })),
-  getGrades: () => background.run(() => polled(() => grades())),
-  getLog: (_ticketId, _attempt, offset, end) => soon(() => logChunk(offset, end)),
-  answer: () => soon(() => current),
-  stop: () => soon(() => undefined),
-  restart: () => soon(() => ({ ok: true, port: 4300 }) as never),
-  keepTalking: () => soon(() => ({ ok: true }) as never),
-  closeFinishedTerminals: () => soon(() => ({ closed: 0 }) as never),
-  stream: (handlers) => {
-    // The SSE stream: a fresh snapshot on the pool's cadence, parsed from
-    // its JSON as the client's EventSource handler parses it.
-    streamTimer = setInterval(() => {
-      seq += 1;
-      poolLog.push(`[pool] snapshot ${seq}: a turn moved`);
-      current = snapshot(seq);
-      handlers.onSnapshot(JSON.parse(JSON.stringify(current)) as EnrichedSnapshot);
-    }, 1000 / SNAPSHOTS_PER_SEC);
-    return () => {
-      if (streamTimer !== null) clearInterval(streamTimer);
-    };
-  },
-  vitals,
-  terminal,
-  onChange: requestRender,
-});
-
-const consoleView = new ConsoleView({
-  onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
-  onChange: requestRender,
-  onFocusTerminal: (ticketId) => terminal.focus(ticketId),
-  onListPanes: () => soon(() => ({ panes: [] })),
-  onEnlist: () => soon(() => ({ ok: true }) as never),
-  onGetSettings: () => soon(() => SETTINGS),
-  onSavePoolSettings: () => soon(() => SETTINGS),
-  onSaveMachineDefaults: () => soon(() => SETTINGS),
-  onReassign: () => soon(() => ({ applied: [], skipped: [], snapshot: current }) as never),
-  onAdoptHeldSpawn: (id) => soon(() => ({ id }) as never),
-  onDiscardHeldSpawn: (id) => soon(() => ({ id }) as never),
-  onHoldPendingSpawn: (id) => soon(() => ({ id }) as never),
-  onDiscardPendingSpawn: (id) => soon(() => ({ id }) as never),
-  onStart: () => soon(() => conversation("conv-new", 0, 0)),
-  onEnd: () => soon(() => undefined),
-} as ConstructorParameters<typeof ConsoleView>[0]);
-
-const handlers: Handlers = {
-  onToggleLog: () => session.toggleLog(),
-  onToggleInspector: () => session.toggleInspector(),
-  onSelectNode: (nodeId) => session.select(nodeId),
-  onSelectAttempt: (ticketId, attempt) => session.logs.selectAttempt(ticketId, attempt),
-  onSelectStream: (ticketId, attempt) => session.logs.selectStream(ticketId, attempt),
-  onLoadEarlier: (ticketId, attempt) => void session.logs.loadEarlier(ticketId, attempt),
-  onAnswer: () => {},
-  onKeepTalking: () => {},
-  onSelectTab: (ticketId, tab) => session.selectTab(ticketId, tab),
-  onArmStop: () => {},
-  onCancelStop: () => {},
-  onConfirmStop: () => {},
-  onArmRestart: () => {},
-  onCancelRestart: () => {},
-  onConfirmRestart: () => {},
-  onArmCloseTerminals: () => {},
-  onCancelCloseTerminals: () => {},
-  onConfirmCloseTerminals: () => {},
-};
 
 // ---------------------------------------------------------------------------
 // Measurement
@@ -419,11 +378,11 @@ const renderLayoutMs: number[] = [];
  *  that did ran inside an animation frame. */
 let titleWatch: { id: string; shown: (inFrame: boolean) => void } | null = null;
 
-function render(): void {
+function render(a: ConsoleApp): void {
   const t0 = performance.now();
-  const model = session.model(consoleView.conversationEndState());
+  const model = a.session.model(a.view.conversationEndState());
   const tm = performance.now();
-  consoleView.render(root, model, handlers);
+  a.view.render(root, model, a.handlers);
   const t1 = performance.now();
   void document.body.offsetHeight;
   const t2 = performance.now();
@@ -594,10 +553,10 @@ async function dragCard(
 
 async function run(): Promise<Record<string, unknown>> {
   requestAnimationFrame(frameLoop);
-  render();
-  session.setSnapshot(current);
-  session.connect();
-  // Warm up: the first mount, the first poll answers, the edge layout.
+  // The boot snapshot paints now; the socket opens and the server starts.
+  app.start();
+  startServer();
+  // Warm up: the first mount, the first frames, the edge layout.
   await sleep(2_500);
   measuring = true;
   const start = performance.now();
@@ -641,9 +600,8 @@ async function run(): Promise<Record<string, unknown>> {
   if (left > 0) await sleep(left);
   measuring = false;
   const elapsed = performance.now() - start;
-  if (streamTimer !== null) clearInterval(streamTimer);
-  vitals.dispose();
-  terminal.dispose();
+  stopServer();
+  app.dispose();
 
   const renderStats = stats(renderMs);
   const frames = stats(frameGaps);
