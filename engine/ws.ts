@@ -243,9 +243,21 @@ const LOG_PANE_MAX_BYTES = 256 * 1024;
  *  have been cheaper, and the gap rule above sends one. */
 const APPENDS_PER_CHECK = 8;
 
-/** How many activity reads, and how many peeks, the live check has in
- *  flight at once. */
+/** How many peeks the live check has in flight at once: reads over the
+ *  herdr daemon's socket, which cost the loop next to nothing. */
 const LIVE_READS = 4;
+
+/**
+ * How many activity reads the live check has in flight at once. Each one
+ * starts git (the worktree's diff), and Bun starts a child on the event
+ * loop's own thread: a burst of them was one stall of 10 ms and more that
+ * every request and frame waited behind. One at a time, with a turn of the
+ * loop before each, nothing waits behind more than one start.
+ */
+const ACTIVITY_READS = 1;
+
+/** A turn of the event loop: whatever arrived meanwhile is answered first. */
+const nextTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /** The most cards one socket holds. The Console holds the selected one and
  *  two hovered; the rest of a hello past this is dropped unread. */
@@ -544,7 +556,10 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     const due = [...candidates].filter(([id, key]) => parked.get(id) !== key).map(([id]) => id);
     const paneIds = [...panes.keys()];
     const [activities, peeked] = await Promise.all([
-      mapLimit(due, LIVE_READS, (id) => sources.activity(id).catch(() => null)),
+      mapLimit(due, ACTIVITY_READS, async (id) => {
+        await nextTurn();
+        return sources.activity(id).catch(() => null);
+      }),
       mapLimit(paneIds, LIVE_READS, async (id): Promise<TerminalPeekResponse | PeekFailure> => {
         try {
           const answer = await sources.peek(id);

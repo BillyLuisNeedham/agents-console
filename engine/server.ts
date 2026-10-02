@@ -740,13 +740,14 @@ function countLines(text: string): number {
 // The worktree's diff summary, read with git off the engine's thread (issue
 // #157): the live check asks for it every ~2 s per live ticket, and a
 // synchronous read stalled every other request and the snapshot push while
-// git and the untracked-file reads ran.
+// git and the untracked-file reads ran. The two run one after the other
+// (issue #161): Bun starts a child on the event loop's own thread, so two
+// started together are one longer stall, where one at a time lets the loop
+// answer whatever arrived between them.
 async function computeActivityDiff(cwd: string): Promise<TicketActivityResponse["diff"]> {
   try {
-    const [numstat, status] = await Promise.all([
-      gitAsync(cwd, ["diff", "--numstat", "HEAD"]),
-      gitAsync(cwd, ["status", "--porcelain"]),
-    ]);
+    const numstat = await gitAsync(cwd, ["diff", "--numstat", "HEAD"]);
+    const status = await gitAsync(cwd, ["status", "--porcelain"]);
     if (!numstat.ok || !status.ok) return null;
     const lines = new Map<string, { added: number; removed: number }>();
     const order: string[] = [];
