@@ -540,6 +540,11 @@ interface RunOptions {
   // The Console's URL when a server runs this engine (ADR-0030): the
   // Steward's teaching names it in the command it answers with.
   consoleUrl?: string;
+  // How many emitted snapshots the handle's `snapshots` keeps, newest last
+  // (issue #157). The engine itself reads only the last, so the server keeps
+  // one and a long run no longer holds every snapshot it ever emitted;
+  // unset keeps them all, for a test that reads the history.
+  snapshotHistory?: number;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -870,6 +875,10 @@ interface Session {
   markers: TicketMarker[];
   state: PoolState;
   snapshots: PoolSnapshot[];
+  // How many of `snapshots` are kept (RunOptions.snapshotHistory), and the
+  // seq the next emit carries: the count of every emit so far, kept or not.
+  snapshotHistory: number;
+  emitted: number;
   store: CheckpointStore;
   storeOpen: boolean;
   superStep: number;
@@ -1272,6 +1281,8 @@ export function startPool(options: RunOptions): PoolRun {
       reviewApproved: false,
     },
     snapshots: [],
+    snapshotHistory: options.snapshotHistory ?? Number.POSITIVE_INFINITY,
+    emitted: 0,
     store: options.store ?? new SqliteCheckpointStore(poolDir),
     storeOpen: true,
     superStep: 0,
@@ -1643,7 +1654,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   const liveAttempts = session.liveAttempts.records((id) => session.conversations.isLive(id));
   const listing = session.paneSurvey?.latest() ?? null;
   const snapshot: PoolSnapshot = {
-    seq: session.snapshots.length,
+    seq: session.emitted,
     phase,
     state: withStewardNotes(session),
     queuedAnswers: session.answers.pending(),
@@ -1679,7 +1690,11 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   // The Spawn ledger follows every emit, so what agents read there is never
   // staler than what the Console shows (issue #150).
   refreshSpawnLedger(session, snapshot.conversations);
+  session.emitted += 1;
   session.snapshots.push(snapshot);
+  if (session.snapshots.length > session.snapshotHistory) {
+    session.snapshots.splice(0, session.snapshots.length - session.snapshotHistory);
+  }
   session.holdWatch.emitted(hold);
   session.onSnapshot?.(snapshot);
 }
