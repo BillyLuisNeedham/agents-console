@@ -4,8 +4,9 @@
  * whose enriched snapshot entry carries a pane (`ticketPaneId`: a live
  * attempt's while a terminal-backed attempt runs, or a Held pane's while
  * the ticket waits at a checkpoint, issue #139), every 2s and
- * once per pool snapshot, and holds the peek text and focus confirmations
- * the cards' surfaces project from. A ticket whose pane leaves the snapshot (the
+ * once per pool snapshot (throttled, so a burst asks once, issue #157), and
+ * holds the peek text and focus confirmations the cards' surfaces project
+ * from. A ticket whose pane leaves the snapshot (the
  * attempt ended, the checkpoint was answered or its pane closed, or the
  * ticket left the pool) is pruned, so its polling
  * stops with its surface; a re-spawned attempt's new pane id resets the
@@ -23,6 +24,7 @@ import {
   type TerminalSurfaceView,
 } from "./project";
 import { h } from "./dom";
+import { TargetPoller } from "./poll";
 
 /** The peek poll cadence: one request per terminal-backed ticket per interval. */
 export const TERMINAL_POLL_MS = 2_000;
@@ -54,8 +56,9 @@ export class TerminalSurface {
   private candidates = new Map<string, string>();
   /** Ticket id -> the surface state the projection renders from. */
   private readonly entries = new Map<string, TerminalSurfaceView>();
-  /** Fetches already out; a slow answer never stacks or delays the others. */
-  private readonly inFlight = new Set<string>();
+  /** The per-pane cadence: one peek out per pane, so a slow answer never
+   *  stacks or delays the others, and the snapshot's peek throttled. */
+  private readonly poller: TargetPoller;
   /** Focus calls already out; a double click never fires twice. */
   private readonly focusing = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -66,6 +69,10 @@ export class TerminalSurface {
     this.notify = options.onChange;
     this.pollMs = options.pollMs ?? TERMINAL_POLL_MS;
     this.confirmMs = options.confirmMs ?? TERMINAL_CONFIRM_MS;
+    this.poller = new TargetPoller({
+      run: (ticketId) => this.peek(ticketId),
+      gapMs: this.pollMs / 2,
+    });
     if (typeof setInterval !== "undefined") {
       this.timer = setInterval(() => this.tick(), this.pollMs);
     }
@@ -98,8 +105,25 @@ export class TerminalSurface {
       const paneId = paneOf.get(id);
       // The attempt ended or the ticket left the pool: the surface and its
       // polling stop together.
-      if (paneId === undefined) this.entries.delete(id);
-      else if (paneId !== entry.paneId) {
+      if (paneId === undefined) {
+        this.entries.delete(id);
+        this.poller.forget(id);
+      } else if (paneId !== entry.paneId) {
+        this.entries.set(id, {
+          paneId,
+          status: "pending",
+          text: "",
+          justFocused: false,
+        });
+        // A new pane is owed its first peek now, not after the throttle.
+        this.poller.forget(id);
+      }
+    }
+    this.candidates = paneOf;
+    for (const [id, paneId] of paneOf) {
+      // First sight of this candidate: seed a pending entry so the card
+      // renders the surface shell while the first peek is out.
+      if (!this.entries.has(id)) {
         this.entries.set(id, {
           paneId,
           status: "pending",
@@ -107,33 +131,43 @@ export class TerminalSurface {
           justFocused: false,
         });
       }
+      this.poller.pollSoon(id);
     }
-    this.candidates = paneOf;
-    for (const id of paneOf.keys()) this.peek(id);
   }
 
   /** The per-ticket surface input the projection renders from. */
   state(): Record<string, TerminalSurfaceView> {
     const state: Record<string, TerminalSurfaceView> = {};
-    for (const [id, entry] of this.entries) state[id] = { ...entry };
+    for (const [id, entry] of this.entries) {
+      state[id] = this.focusing.has(id) ? { ...entry, focusing: true } : { ...entry };
+    }
     return state;
   }
 
   /**
-   * "Open in herdr": focus the attempt's pane. Resolves true when the server
-   * accepted the focus (the card shows its transient confirmation); false on
-   * any failure or when the ticket no longer holds a live pane, leaving the
-   * card as it was.
+   * "Open in herdr": focus the attempt's pane. The request goes out before
+   * anything else happens, and the button reads as opening from the next
+   * frame until the server answers (issue #157), so a slow focus never looks
+   * like a click that missed. Resolves true when the server accepted the
+   * focus (the card shows its transient confirmation); false on any failure
+   * or when the ticket no longer holds a live pane, leaving the card as it
+   * was.
    */
   async focus(ticketId: string): Promise<boolean> {
     if (!this.candidates.has(ticketId) || this.focusing.has(ticketId)) return false;
     this.focusing.add(ticketId);
+    const request = this.focusFetch(ticketId);
+    this.notify();
+    let accepted = true;
     try {
-      await this.focusFetch(ticketId);
+      await request;
     } catch {
+      accepted = false;
+    }
+    this.focusing.delete(ticketId);
+    if (!accepted) {
+      this.notify();
       return false;
-    } finally {
-      this.focusing.delete(ticketId);
     }
     const entry = this.entries.get(ticketId);
     if (entry) this.entries.set(ticketId, { ...entry, justFocused: true });
@@ -154,44 +188,29 @@ export class TerminalSurface {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.poller.dispose();
   }
 
   private tick(): void {
-    for (const id of this.candidates.keys()) this.peek(id);
+    for (const id of this.candidates.keys()) this.poller.poll(id);
   }
 
-  private peek(ticketId: string): void {
-    if (this.inFlight.has(ticketId)) return;
+  private async peek(ticketId: string): Promise<void> {
     const paneId = this.candidates.get(ticketId);
     if (paneId === undefined) return;
-    // First sight of this candidate: seed a pending entry so the card
-    // renders the surface shell while the first peek is out.
-    if (!this.entries.has(ticketId)) {
-      this.entries.set(ticketId, {
-        paneId,
-        status: "pending",
-        text: "",
-        justFocused: false,
-      });
+    try {
+      const response = await this.peekFetch(ticketId);
+      const text = typeof response.text === "string" ? response.text : "";
+      // An empty read (a background tab still warming up, per the
+      // prototype's herdr findings) is "waiting", never an error.
+      this.settle(ticketId, paneId, text === "" ? "waiting" : "live", text);
+    } catch {
+      // A missing or unreadable pane renders "pane unavailable" and
+      // disables the focus button; polling continues so a transient
+      // daemon failure recovers, and the snapshot drops the entry for
+      // good once the attempt truly ends.
+      this.settle(ticketId, paneId, "unavailable", "");
     }
-    this.inFlight.add(ticketId);
-    this.peekFetch(ticketId)
-      .then((response) => {
-        const text = typeof response.text === "string" ? response.text : "";
-        // An empty read (a background tab still warming up, per the
-        // prototype's herdr findings) is "waiting", never an error.
-        this.settle(ticketId, paneId, text === "" ? "waiting" : "live", text);
-      })
-      .catch(() => {
-        // A missing or unreadable pane renders "pane unavailable" and
-        // disables the focus button; polling continues so a transient
-        // daemon failure recovers, and the snapshot drops the entry for
-        // good once the attempt truly ends.
-        this.settle(ticketId, paneId, "unavailable", "");
-      })
-      .finally(() => {
-        this.inFlight.delete(ticketId);
-      });
   }
 
   // A peek's outcome lands on the entry, and the view repaints only when
@@ -265,7 +284,7 @@ export function renderTerminalSurface(
         {
           class: "btn terminal-focus",
           type: "button",
-          disabled: view.status === "unavailable",
+          disabled: view.status === "unavailable" || view.focusing === true,
           title: actions.focusLabel
             ? `${actions.focusLabel}: focus its tab in the herdr TUI`
             : "focus the attempt's tab in the herdr TUI",
@@ -273,7 +292,7 @@ export function renderTerminalSurface(
             void actions.onFocus();
           },
         },
-        actions.focusLabel ?? "Open in herdr",
+        view.focusing ? "opening..." : (actions.focusLabel ?? "Open in herdr"),
       ),
       h(
         "button",

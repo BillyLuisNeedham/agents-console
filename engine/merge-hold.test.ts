@@ -1,15 +1,21 @@
 /// <reference types="bun" />
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   createMergeHoldWatch,
   createMergeLine,
   deriveMergeHold,
+  gitMergeHoldProbe,
   type HoldHost,
   type MergeHoldProbe,
+  memoizedMergeHold,
   throughMergeHold,
 } from "./merge-hold.ts";
 import type { TicketStatus } from "./pool.ts";
+import { makeTempDir } from "./tmp.ts";
+import { branchFor } from "./worktrees.ts";
 
 /**
  * A fake git: the target branch, which pool branches exist, and which of
@@ -99,6 +105,200 @@ describe("merge hold derivation", () => {
       if (c.gitCalls !== undefined) expect(probe?.calls ?? 0).toBe(c.gitCalls);
     });
   }
+});
+
+// The memo (issue #157) answers from the last derivation while the key is
+// unchanged. ADR-0014 cannot afford a stale "landed": every case that moves
+// what git would answer must move the key.
+describe("merge hold memo", () => {
+  function stamped(repo: Parameters<typeof fakeProbe>[0], stamp: { value: string | null }) {
+    const probe = fakeProbe(repo);
+    return Object.assign(probe, { stamp: () => stamp.value });
+  }
+
+  it("answers an unchanged stamp from the last derivation, spawning no git", () => {
+    const stamp = { value: "refs-1" };
+    const probe = stamped({ branches: ["pool/key/01"] }, stamp);
+    const derive = memoizedMergeHold();
+    expect(derive({ "01": "done" }, engineRun, probe)).toEqual(["01"]);
+    const calls = probe.calls;
+    expect(derive({ "01": "done" }, engineRun, probe)).toEqual(["01"]);
+    expect(probe.calls).toBe(calls);
+  });
+
+  it("derives again when the stamp moves, so a merge that landed is seen", () => {
+    const stamp = { value: "refs-1" };
+    const repo = { branches: ["pool/key/01"], landed: [] as string[] };
+    const probe = stamped(repo, stamp);
+    const derive = memoizedMergeHold();
+    expect(derive({ "01": "done" }, engineRun, probe)).toEqual(["01"]);
+    // The fake's sets are live: land the branch, and move the stamp with it.
+    repo.landed.push("pool/key/01->main");
+    const landed = stamped(repo, { value: "refs-2" });
+    expect(derive({ "01": "done" }, engineRun, landed)).toEqual([]);
+  });
+
+  it("derives again when another ticket reaches done, whatever the stamp says", () => {
+    const stamp = { value: "refs-1" };
+    const probe = stamped({ branches: ["pool/key/01", "pool/key/02"] }, stamp);
+    const derive = memoizedMergeHold();
+    expect(derive({ "01": "done", "02": "in-progress" }, engineRun, probe)).toEqual(["01"]);
+    expect(derive({ "01": "done", "02": "done" }, engineRun, probe)).toEqual(["01", "02"]);
+  });
+
+  it("derives every time a probe cannot vouch for its refs", () => {
+    const probe = stamped({ branches: ["pool/key/01"] }, { value: null });
+    const derive = memoizedMergeHold();
+    derive({ "01": "done" }, engineRun, probe);
+    const calls = probe.calls;
+    derive({ "01": "done" }, engineRun, probe);
+    expect(probe.calls).toBeGreaterThan(calls);
+  });
+
+  it("hands every caller its own list", () => {
+    const probe = stamped({ branches: ["pool/key/01"] }, { value: "refs-1" });
+    const derive = memoizedMergeHold();
+    derive({ "01": "done" }, engineRun, probe).pop();
+    expect(derive({ "01": "done" }, engineRun, probe)).toEqual(["01"]);
+  });
+});
+
+// The memo over a real repository and the real probe. Every ref file is
+// aged out of the racy window before each derivation that should be
+// answered from the memo, the way a pool that sat quiet would be; the
+// counting wrapper says whether git ran.
+describe("merge hold memo over git", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length > 0) rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+
+  function run(cwd: string, args: string[]): string {
+    const probe = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+    if (probe.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${probe.stderr.toString()}`);
+    return probe.stdout.toString().trim();
+  }
+
+  function repo(): string {
+    const root = makeTempDir("hold-memo-");
+    dirs.push(root);
+    run(root, ["init", "-q", "-b", "main"]);
+    run(root, ["config", "user.email", "memo@test"]);
+    run(root, ["config", "user.name", "memo"]);
+    writeFileSync(join(root, "base.txt"), "base\n");
+    run(root, ["add", "-A"]);
+    run(root, ["commit", "-qm", "base"]);
+    return root;
+  }
+
+  function commitOn(root: string, branch: string, file: string): void {
+    run(root, ["checkout", "-qb", branch]);
+    writeFileSync(join(root, file), `${file}\n`);
+    run(root, ["add", "-A"]);
+    run(root, ["commit", "-qm", file]);
+    run(root, ["checkout", "-q", "main"]);
+  }
+
+  // Ages every file under the git dir out of the racy window.
+  function quiet(gitDir: string): void {
+    const past = new Date(Date.now() - 60 * 60 * 1000);
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "objects") walk(path);
+        } else utimesSync(path, past, past);
+      }
+    };
+    walk(gitDir);
+  }
+
+  function counted(root: string): MergeHoldProbe & { calls: number } {
+    const base = gitMergeHoldProbe(root);
+    const probe = {
+      ...base,
+      calls: 0,
+      branchExists: (branch: string) => {
+        probe.calls += 1;
+        return base.branchExists(branch);
+      },
+      isAncestor: (branch: string, target: string) => {
+        probe.calls += 1;
+        return base.isAncestor(branch, target);
+      },
+    };
+    return probe;
+  }
+
+  it("holds while quiet with no git, releases on the merge, and holds again when the merge is undone", () => {
+    const root = repo();
+    const branch = branchFor(root, "01");
+    commitOn(root, branch, "one.txt");
+    const derive = memoizedMergeHold();
+    const tickets = { "01": "done" } as const;
+
+    expect(derive(tickets, engineRun, counted(root))).toEqual(["01"]);
+    quiet(join(root, ".git"));
+    const warm = counted(root);
+    expect(derive(tickets, engineRun, warm)).toEqual(["01"]);
+    expect(derive(tickets, engineRun, warm)).toEqual(["01"]);
+    const quietCalls = warm.calls;
+    expect(derive(tickets, engineRun, warm)).toEqual(["01"]);
+    expect(warm.calls).toBe(quietCalls);
+
+    const before = run(root, ["rev-parse", "main"]);
+    run(root, ["merge", "-q", "--no-edit", branch]);
+    expect(derive(tickets, engineRun, counted(root))).toEqual([]);
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual([]);
+
+    // The merge undone, and the ref file's times put back at once: the
+    // rename git writes it with still moves the stamp, so the hold returns.
+    run(root, ["update-ref", "refs/heads/main", before]);
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual(["01"]);
+  });
+
+  it("sees refs packed away from their loose files, and a branch deleted and made again", () => {
+    const root = repo();
+    const branch = branchFor(root, "01");
+    commitOn(root, branch, "one.txt");
+    const derive = memoizedMergeHold();
+    const tickets = { "01": "done" } as const;
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual(["01"]);
+
+    run(root, ["pack-refs", "--all"]);
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual(["01"]);
+
+    // Gone reads as landed (ADR-0014); made again off main, it has landed.
+    run(root, ["branch", "-D", branch]);
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual([]);
+    commitOn(root, branch, "again.txt");
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(root))).toEqual(["01"]);
+  });
+
+  it("follows a linked checkout's own HEAD to its target", () => {
+    const root = repo();
+    const linked = join(makeTempDir("hold-memo-linked-"), "checkout");
+    dirs.push(dirname(linked));
+    run(root, ["worktree", "add", "-q", linked, "-b", "feature"]);
+    const branch = branchFor(linked, "01");
+    commitOn(root, branch, "one.txt");
+    run(root, ["merge", "-q", "--no-edit", branch]);
+    const derive = memoizedMergeHold();
+    const tickets = { "01": "done" } as const;
+    // Landed in main, not in the linked checkout's feature branch.
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(linked))).toEqual(["01"]);
+    run(linked, ["checkout", "-q", "--detach"]);
+    run(linked, ["checkout", "-qB", "feature", "main"]);
+    quiet(join(root, ".git"));
+    expect(derive(tickets, engineRun, counted(linked))).toEqual([]);
+  });
 });
 
 describe("merge hold watch", () => {

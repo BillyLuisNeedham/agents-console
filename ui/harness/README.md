@@ -19,9 +19,14 @@ spec), then does what an operator does:
 - pans the canvas with a pointer drag
 - records the identity of a few nodes (cards, the Detail, the trays)
 
-then renders five times with the same model (a poll tick) and once more from a
-changed snapshot (a live SSE snapshot), and after each render asserts that
-scroll positions, focus, caret, canvas pan and node identity are unchanged.
+then renders five times with the same model (a poll tick), once more from a
+changed snapshot (a live SSE snapshot), and once for a burst (ten snapshots
+and the log drawer shut and opened again inside one frame), and after each
+render asserts that scroll positions, focus, caret, canvas pan and node
+identity are unchanged. The stores ask for renders through the app's render
+loop (issue #157), which folds every ask before the next frame into one; the
+burst must cost exactly one render. The loop's frame is a timer here, since
+under `--virtual-time-budget` a `requestAnimationFrame` may never fire.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
 one is on screen at a time, one more the Detail of a Pending spawn's faded
 card (issue #150), whose card and a Held spawn's keep their nodes too, and one

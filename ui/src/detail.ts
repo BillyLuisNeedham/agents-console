@@ -636,9 +636,9 @@ export class Detail {
     } else if (body === null) {
       panel.append(h("div", { class: "dim" }, "no ticket body"));
     } else {
-      const md = h("div", { class: "detail-md" });
-      md.innerHTML = ticketBodyHtml(body);
-      panel.append(md);
+      // `html` lets the morph leave the rendered body alone while it is the
+      // same body, rather than diffing the whole parsed tree every render.
+      panel.append(h("div", { class: "detail-md", html: ticketBodyHtml(body) }));
     }
     return panel;
   }

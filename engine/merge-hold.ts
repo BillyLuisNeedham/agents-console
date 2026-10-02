@@ -42,7 +42,7 @@
  */
 
 import type { TicketStatus } from "./pool.ts";
-import { branchFor, currentBranch, git } from "./worktrees.ts";
+import { branchFor, currentBranch, git, refStamp } from "./worktrees.ts";
 
 /** How often a held pool re-derives the hold looking for a merge done by hand. */
 export const MERGE_HOLD_WATCH_MS = 2_000;
@@ -62,6 +62,13 @@ export interface MergeHoldProbe {
   branchFor(ticketId: string): string;
   branchExists(branch: string): boolean;
   isAncestor(branch: string, target: string): boolean;
+  /**
+   * A stamp of everything the three git answers above read for these
+   * branches and the merge target: equal stamps promise equal answers. Null
+   * when the probe cannot vouch for that right now; absent on a probe that
+   * never can. Only the memo below reads it.
+   */
+  stamp?(branches: readonly string[]): string | null;
 }
 
 export function gitMergeHoldProbe(repoRoot: string): MergeHoldProbe {
@@ -71,6 +78,7 @@ export function gitMergeHoldProbe(repoRoot: string): MergeHoldProbe {
     branchExists: (branch) => git(repoRoot, ["rev-parse", "--verify", branch]).ok,
     isAncestor: (branch, target) =>
       git(repoRoot, ["merge-base", "--is-ancestor", branch, target]).ok,
+    stamp: (branches) => refStamp(repoRoot, branches),
   };
 }
 
@@ -86,9 +94,7 @@ export function deriveMergeHold(
   probe: MergeHoldProbe | null,
 ): string[] {
   if (!probe) return [];
-  const candidates = Object.entries(tickets)
-    .filter(([id, status]) => status === "done" && !engineRun(id))
-    .map(([id]) => id);
+  const candidates = holdCandidates(tickets, engineRun);
   if (candidates.length === 0) return [];
   const target = probe.currentBranch();
   return candidates.filter((id) => {
@@ -96,6 +102,53 @@ export function deriveMergeHold(
     if (!probe.branchExists(branch)) return false;
     return !probe.isAncestor(branch, target);
   });
+}
+
+function holdCandidates(
+  tickets: Record<string, TicketStatus>,
+  engineRun: (ticketId: string) => boolean,
+): string[] {
+  return Object.entries(tickets)
+    .filter(([id, status]) => status === "done" && !engineRun(id))
+    .map(([id]) => id);
+}
+
+/**
+ * The derivation behind a memo (issue #157). The hold is derived at every
+ * emit and on every tick of a wait and of the watch, and each derivation
+ * spawned git synchronously on the engine's one thread. The memo keeps the
+ * last answer under a key of the done candidates, their branch names and
+ * the probe's stamp of the refs those names read, and answers from it while
+ * the key is unchanged, with no git at all.
+ *
+ * What makes it safe for ADR-0014, where a stale "landed" would release the
+ * hold early: the answer is a function of the key's parts alone. Which
+ * tickets are candidates and what their branches are called is in the key;
+ * whether a branch exists and whether it has landed depends only on the
+ * refs the stamp covers, since commits never change. The stamp is taken
+ * before the derivation, so a ref that moves while git runs leaves the
+ * answer under a stamp the next call no longer matches: a stale answer is
+ * never kept under a fresh key. A probe that cannot vouch (no stamp, or a
+ * ref written too recently to trust its file times) is derived every time,
+ * as before.
+ */
+export function memoizedMergeHold(): (
+  tickets: Record<string, TicketStatus>,
+  engineRun: (ticketId: string) => boolean,
+  probe: MergeHoldProbe | null,
+) => string[] {
+  let last: { key: string; hold: string[] } | null = null;
+  return (tickets, engineRun, probe) => {
+    if (!probe?.stamp) return deriveMergeHold(tickets, engineRun, probe);
+    const candidates = holdCandidates(tickets, engineRun);
+    if (candidates.length === 0) return [];
+    const branches = candidates.map((id) => probe.branchFor(id));
+    const stamp = probe.stamp(branches);
+    if (stamp === null) return deriveMergeHold(tickets, engineRun, probe);
+    const key = JSON.stringify([candidates, branches, stamp]);
+    if (last?.key !== key) last = { key, hold: deriveMergeHold(tickets, engineRun, probe) };
+    return [...last.hold];
+  };
 }
 
 /**

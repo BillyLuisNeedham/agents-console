@@ -88,11 +88,6 @@ export class Drawers {
     model: DrawersModel,
     handlers: DrawersHandlers,
   ): HTMLElement {
-    const body = h(
-      "pre",
-      { class: "inspector-channels", style: `height:${this.height}vh` },
-      model.inspectorJson,
-    );
     return h(
       "div",
       { class: "inspector-drawer" + (model.inspectorOpen ? " inspector-open" : "") },
@@ -101,7 +96,13 @@ export class Drawers {
         { class: "drawer-bar", onclick: () => handlers.onToggleInspector() },
         `state ${model.inspectorOpen ? "▾" : "▴"}`,
       ),
-      model.inspectorOpen ? body : null,
+      model.inspectorOpen
+        ? h(
+            "pre",
+            { class: "inspector-channels", style: `height:${this.height}vh` },
+            model.inspectorJson,
+          )
+        : null,
     );
   }
 

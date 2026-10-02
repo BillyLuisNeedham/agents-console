@@ -354,6 +354,30 @@ function readEventLines(poolDir: string, id: string) {
     });
 }
 
+// The handle keeps only as many snapshots as its caller asks for (issue
+// #157); the seq goes on counting every emit, kept or not.
+describe("snapshot history", () => {
+  it("keeps the last snapshot only when asked to, with the seq still counting every emit", async () => {
+    const tickets = [readyTicket("01")];
+    const allDir = makePool({ tickets, config: stubConfig });
+    const all = await approveReview(
+      await runPool({ poolDir: allDir, harnesses: stubHarness(allDir, {}).harnesses }),
+    );
+    const poolDir = makePool({ tickets, config: stubConfig });
+    const last = await approveReview(
+      await runPool({
+        poolDir,
+        harnesses: stubHarness(poolDir, {}).harnesses,
+        snapshotHistory: 1,
+      }),
+    );
+    expect(all.snapshots.map((s) => s.seq)).toEqual(all.snapshots.map((_, i) => i));
+    expect(last.snapshots).toHaveLength(1);
+    expect(last.snapshots[0]!.seq).toBeGreaterThan(2);
+    expect(last.snapshots[0]!.phase).toBe("done");
+  });
+});
+
 describe("pool loading", () => {
   it("rejects a pool with a missing line-1 marker", async () => {
     const poolDir = makePool({

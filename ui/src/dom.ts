@@ -2,8 +2,10 @@
  * The one DOM builder the view modules share: an element from a tag, props,
  * and children. `class` sets className, `key` becomes the `data-key`
  * attribute a morph matches siblings by, `checked`/`disabled`/`on*` set
- * properties, `value` on a form control sets the live property, everything
- * else becomes an attribute; null children drop out.
+ * properties, `value` on a form control sets the live property, `html` is
+ * markup the element holds as its children (the morph leaves them be while
+ * the markup is unchanged), everything else becomes an attribute; null
+ * children drop out.
  *
  * Every prop `h` set is remembered against the element (`propsOf`) so the
  * morph can diff two builds property by property, including a handler that
@@ -40,6 +42,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(
     set[key] = value;
     if (key === "class") node.className = String(value);
     else if (key === "key") node.setAttribute("data-key", String(value));
+    else if (key === "html") node.innerHTML = String(value);
     else if (isProperty(tag, key)) {
       (node as unknown as Record<string, unknown>)[key] = value;
     } else {

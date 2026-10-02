@@ -47,6 +47,8 @@ import {
   type ViewTransform,
 } from "./geometry";
 import { h } from "./dom";
+import { nextFrame } from "./frame";
+import { KEEP_CHILDREN } from "./morph";
 import { renderTerminalSurface } from "./terminal";
 import { renderStewardBadge } from "./steward";
 import { renderDeliveryWarning } from "./conversations";
@@ -108,20 +110,29 @@ function sparkline(samples: number[]): SVGSVGElement {
   svg.setAttribute("height", String(SPARK_HEIGHT));
   svg.setAttribute("viewBox", `0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`);
   const poly = document.createElementNS(SVG_NS, "polyline");
-  if (samples.length > 1) {
-    const max = Math.max(...samples, 1);
-    const step = SPARK_WIDTH / (VITALS_MAX_SAMPLES - 1);
-    const points = samples
-      .map((value, i) => {
-        const x = SPARK_WIDTH - (samples.length - 1 - i) * step;
-        const y = SPARK_HEIGHT - 1 - (value / max) * (SPARK_HEIGHT - 2);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(" ");
-    poly.setAttribute("points", points);
-  }
+  if (samples.length > 1) poly.setAttribute("points", sparkPoints(samples));
   svg.appendChild(poly);
   return svg;
+}
+
+// The Vitals store keeps a ticket's samples array until a poll moves it, so
+// the points it draws are worked out once per array, not once per render.
+const sparkPointsOf = new WeakMap<number[], string>();
+
+function sparkPoints(samples: number[]): string {
+  const held = sparkPointsOf.get(samples);
+  if (held !== undefined) return held;
+  const max = Math.max(...samples, 1);
+  const step = SPARK_WIDTH / (VITALS_MAX_SAMPLES - 1);
+  const points = samples
+    .map((value, i) => {
+      const x = SPARK_WIDTH - (samples.length - 1 - i) * step;
+      const y = SPARK_HEIGHT - 1 - (value / max) * (SPARK_HEIGHT - 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  sparkPointsOf.set(samples, points);
+  return points;
 }
 
 /**
@@ -232,6 +243,9 @@ interface DrawnEdge {
   /** Drawn dashed: a conditional edge, or one to or from a Pending or Held
    *  spawn's faded card (issue #150). */
   dashed: boolean;
+  /** The route last written, so an edge whose cards did not move is not
+   *  written again. */
+  route: string;
 }
 
 interface CanvasBind {
@@ -239,7 +253,12 @@ interface CanvasBind {
   world: HTMLElement;
   svg: SVGSVGElement;
   nodesById: Map<string, HTMLElement>;
-  edgeEls: DrawnEdge[];
+  /** The drawn edges, keyed by source and target, kept across renders and
+   *  updated in place (issue #157). */
+  edges: Map<string, DrawnEdge>;
+  /** Each card's box: its position from the held layout, its size as last
+   *  measured. The edges route from these, and a drag moves one in place. */
+  boxes: Map<string, CardBox>;
 }
 
 /** The slice of the app model the canvas renders from. */
@@ -400,6 +419,16 @@ export class Canvas {
   private edgeMode: EdgeMode = "ortho";
   private canvas: CanvasBind | null = null;
   private drag: Drag | null = null;
+  /** A card drag's DOM work is waiting on the next frame. */
+  private dragFrame = false;
+  /** The zoom the edges' strokes were last scaled for. */
+  private strokeZoom: number | null = null;
+  /** Each card's size as last measured, so the render sizes the world the
+   *  way the fit after it would, and the fit has nothing to write. */
+  private readonly sizes = new Map<string, { w: number; h: number }>();
+  /** The stored layout, read from localStorage once and kept in step with
+   *  every write, rather than read and parsed on every render. */
+  private stored: Record<string, Point> | null = null;
   /** Cards whose Assignment badge the operator has clicked open. */
   private readonly expandedBadges = new Set<string>();
   private readonly onChange: () => void;
@@ -555,9 +584,11 @@ export class Canvas {
 
   /**
    * Bind the mechanics to the viewport now on the page: seed the pan on
-   * first mount (it needs the viewport's width), fit the world to its cards,
-   * and draw the edges. The gesture handlers are already on the viewport,
-   * put there by the render.
+   * first mount (it needs the viewport's width), measure the cards, fit the
+   * world to them, and draw the edges. The cards are measured in one pass
+   * after the commit, the one layout read a render makes, and everything
+   * after it only writes, and only what moved (issue #157). The gesture
+   * handlers are already on the viewport, put there by the render.
    */
   bindCanvas(
     viewport: HTMLElement,
@@ -572,16 +603,20 @@ export class Canvas {
       const id = el.dataset.nodeId;
       if (id) nodesById.set(id, el);
     }
-    this.canvas = { viewport, world, svg, nodesById, edgeEls: [] };
+    // The edge layer keeps its paths across renders (the morph leaves its
+    // children be), so the drawn edges carry over while it is the same layer.
+    const kept = this.canvas?.svg === svg ? this.canvas.edges : new Map<string, DrawnEdge>();
+    if (kept.size === 0) this.strokeZoom = null;
+    this.canvas = { viewport, world, svg, nodesById, edges: kept, boxes: new Map() };
     if (!this.view.seeded && viewport.clientWidth > 0) {
       this.view.seeded = true;
       this.view.x = Math.max(8, (viewport.clientWidth - WORLD_MIN_WIDTH) / 2);
       this.view.y = 8;
       this.applyTransform();
     }
-    this.fitWorld(world);
-    this.drawEdges(world, edges, selectedId);
-    this.updateEdges();
+    this.measure();
+    this.fitWorld();
+    this.drawEdges(edges, selectedId);
   }
 
   // -------------------------------------------------------------------------
@@ -862,15 +897,17 @@ export class Canvas {
     return this.renderUtilityCard(card, selection);
   }
 
+  // The world's size from the held positions and the last measured heights:
+  // the same sum the fit after the commit makes, so the two agree and a
+  // render with nothing moved writes nothing.
   private worldSize(cards: Positioned[]): { width: number; height: number } {
-    let width = WORLD_MIN_WIDTH;
-    let height = 400;
-    for (const card of cards) {
-      const pos = this.posOf(card);
-      width = Math.max(width, pos.x + CARD_WIDTH + 48);
-      height = Math.max(height, pos.y + 48);
-    }
-    return { width, height };
+    return fitSize(
+      cards.map((card) => {
+        const pos = this.posOf(card);
+        const size = this.sizes.get(card.id) ?? { w: CARD_WIDTH, h: 0 };
+        return { x: pos.x, y: pos.y, ...size };
+      }),
+    );
   }
 
   private renderCanvasHeader(model: CanvasModel): HTMLElement {
@@ -879,7 +916,7 @@ export class Canvas {
       checked: this.edgeMode === "ortho",
       onchange: (event: Event) => {
         this.edgeMode = (event.currentTarget as HTMLInputElement).checked ? "ortho" : "straight";
-        this.updateEdges();
+        this.routeEdges();
       },
     });
     return h(
@@ -979,10 +1016,8 @@ export class Canvas {
             onclick: () => {
               this.resetLayout(model.cards);
               this.applyPositions();
-              if (this.canvas) {
-                this.fitWorld(this.canvas.world);
-                this.updateEdges();
-              }
+              this.fitWorld();
+              this.routeEdges();
               this.onResetLayout();
             },
           },
@@ -1122,12 +1157,15 @@ export class Canvas {
   // Positions and their persistence
   // -------------------------------------------------------------------------
 
+  // A write reads the file fresh, so what another tab stored since is kept,
+  // and the copy held for seeding follows it.
   private readStored(): Record<string, Point> {
     try {
-      return parseStoredLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
+      this.stored = parseStoredLayout(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
     } catch {
-      return {};
+      this.stored = {};
     }
+    return this.stored;
   }
 
   private writeStored(): void {
@@ -1140,8 +1178,11 @@ export class Canvas {
     }
   }
 
+  // Seeding runs on every render but only has work when a card arrives, and
+  // then reads the layout held since the first read, not the file.
   private seedPositions(cards: Positioned[]): void {
-    const stored = this.readStored();
+    if (cards.every((card) => this.nodePos.has(card.id))) return;
+    const stored = this.stored ?? this.readStored();
     const defaults: Record<string, Point> = {};
     const overrides: Record<string, Point> = {};
     for (const card of cards) {
@@ -1177,6 +1218,11 @@ export class Canvas {
       if (!pos) continue;
       card.style.left = `${pos.x}px`;
       card.style.top = `${pos.y}px`;
+      const box = this.canvas.boxes.get(id);
+      if (box) {
+        box.x = pos.x;
+        box.y = pos.y;
+      }
     }
   }
 
@@ -1229,25 +1275,49 @@ export class Canvas {
     if (!this.drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     this.drag.moved = true;
     if (this.drag.kind === "node") {
-      const next = {
+      // The held position follows the pointer at once, so a render landing
+      // mid-drag draws the card where the pointer has it; moving the card
+      // and its edges waits for the next frame, once for however many moves
+      // came before it (issue #157).
+      this.nodePos.set(this.drag.nodeId, {
         x: this.drag.startNode.x + dx / this.view.zoom,
         y: this.drag.startNode.y + dy / this.view.zoom,
-      };
-      this.nodePos.set(this.drag.nodeId, next);
-      const el = this.canvas.nodesById.get(this.drag.nodeId);
-      if (el) {
-        el.style.left = `${next.x}px`;
-        el.style.top = `${next.y}px`;
-        el.classList.add("node-card-dragging");
+      });
+      if (!this.dragFrame) {
+        this.dragFrame = true;
+        nextFrame(() => this.paintDrag());
       }
-      this.fitWorld(this.canvas.world);
-      this.updateEdges();
     } else {
       this.view.x = this.drag.startView.x + dx;
       this.view.y = this.drag.startView.y + dy;
       this.canvas.viewport.classList.add("canvas-panning");
       this.applyTransform();
     }
+  }
+
+  /**
+   * A card drag's frame: the card to its held position, its box with it,
+   * the world fitted around it, and the edges that touch it re-routed. No
+   * layout is read: a dragged card keeps the size last measured.
+   */
+  private paintDrag(): void {
+    if (!this.dragFrame) return;
+    this.dragFrame = false;
+    if (this.drag?.kind !== "node" || !this.canvas) return;
+    const id = this.drag.nodeId;
+    const pos = this.nodePos.get(id);
+    const el = this.canvas.nodesById.get(id);
+    if (!pos || !el) return;
+    el.style.left = `${pos.x}px`;
+    el.style.top = `${pos.y}px`;
+    el.classList.add("node-card-dragging");
+    const box = this.canvas.boxes.get(id);
+    if (box) {
+      box.x = pos.x;
+      box.y = pos.y;
+    }
+    this.fitWorld();
+    this.routeEdges(id);
   }
 
   private wheel(event: WheelEvent): void {
@@ -1274,31 +1344,44 @@ export class Canvas {
     this.paintStrokeScale();
   }
 
+  // The strokes depend on the zoom alone, so a pan, which moves the world
+  // and not the zoom, rewrites none of them.
   private paintStrokeScale(): void {
+    if (!this.canvas || this.strokeZoom === this.view.zoom) return;
+    this.strokeZoom = this.view.zoom;
+    for (const edge of this.canvas.edges.values()) this.strokeEdge(edge);
+  }
+
+  /** An edge's stroke, dash and label size, held constant on screen at any zoom. */
+  private strokeEdge(edge: DrawnEdge): void {
+    const zoom = this.view.zoom;
+    edge.el.setAttribute("stroke-width", String(strokeWidthForZoom(zoom)));
+    if (edge.dashed) edge.el.setAttribute("stroke-dasharray", `${4 / zoom} ${3 / zoom}`);
+    else edge.el.removeAttribute("stroke-dasharray");
+    edge.label?.setAttribute("font-size", String(10 / zoom));
+  }
+
+  /** Re-route the drawn edges from the held boxes, or only those touching one card. */
+  private routeEdges(only?: string): void {
     if (!this.canvas) return;
-    const width = strokeWidthForZoom(this.view.zoom);
-    const dash = `${4 / this.view.zoom} ${3 / this.view.zoom}`;
-    for (const edge of this.canvas.edgeEls) {
-      edge.el.setAttribute("stroke-width", String(width));
-      if (edge.dashed) edge.el.setAttribute("stroke-dasharray", dash);
-      edge.label?.setAttribute("font-size", String(10 / this.view.zoom));
+    for (const edge of this.canvas.edges.values()) {
+      if (only !== undefined && edge.source !== only && edge.target !== only) continue;
+      this.routeEdge(edge);
     }
   }
 
-  private updateEdges(): void {
-    if (!this.canvas) return;
-    const boxes = new Map<string, CardBox>();
-    for (const [id, el] of this.canvas.nodesById) boxes.set(id, cardBox(el));
-    for (const edge of this.canvas.edgeEls) {
-      const source = boxes.get(edge.source);
-      const target = boxes.get(edge.target);
-      if (!source || !target) continue;
-      const geom = edgePath(source, target, this.edgeMode);
-      edge.el.setAttribute("d", geom.d);
-      edge.label?.setAttribute("x", String(geom.lx));
-      edge.label?.setAttribute("y", String(geom.ly));
-    }
-    this.paintStrokeScale();
+  /** Route one edge between its cards' boxes; a route that did not move is not written. */
+  private routeEdge(edge: DrawnEdge): void {
+    const source = this.canvas?.boxes.get(edge.source);
+    const target = this.canvas?.boxes.get(edge.target);
+    if (!source || !target) return;
+    const geom = edgePath(source, target, this.edgeMode);
+    const route = `${geom.d}|${geom.lx}|${geom.ly}`;
+    if (route === edge.route) return;
+    edge.route = route;
+    edge.el.setAttribute("d", geom.d);
+    edge.label?.setAttribute("x", String(geom.lx));
+    edge.label?.setAttribute("y", String(geom.ly));
   }
 
   private zoomBy(factor: number): void {
@@ -1327,6 +1410,9 @@ export class Canvas {
 
   private endDrag(event?: PointerEvent): void {
     if (!this.drag) return;
+    // A move still waiting on its frame lands first, so the drag ends where
+    // the pointer let go.
+    this.paintDrag();
     const nodeId = this.drag.kind === "node" ? this.drag.nodeId : "";
     const wasClick = event != null && this.drag.kind === "node" && !this.drag.moved;
     if (event && this.canvas) {
@@ -1348,11 +1434,14 @@ export class Canvas {
     this.onCardTap(nodeId);
   }
 
+  // The edge layer's children are the canvas's own, drawn after the commit,
+  // so the morph is told to leave them be and only the layer itself renders.
   private makeSvg(): SVGSVGElement {
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("class", "canvas-edges");
     svg.setAttribute("width", "100%");
     svg.setAttribute("height", "100%");
+    svg.setAttribute(KEEP_CHILDREN, "");
     const defs = document.createElementNS(SVG_NS, "defs");
     const marker = document.createElementNS(SVG_NS, "marker");
     marker.setAttribute("id", ARROW_ID);
@@ -1371,68 +1460,106 @@ export class Canvas {
     return svg;
   }
 
-  private fitWorld(world: HTMLElement): void {
-    let width = world.offsetWidth;
-    let height = world.offsetHeight;
-    for (const el of world.querySelectorAll<HTMLElement>("[data-node-id]")) {
-      width = Math.max(width, el.offsetLeft + el.offsetWidth + 48);
-      height = Math.max(height, el.offsetTop + el.offsetHeight + 48);
+  /**
+   * Read every card's size in one pass: the one layout read a render makes.
+   * A card's position is the held layout's, which is what the render just
+   * wrote into its style.
+   */
+  private measure(): void {
+    if (!this.canvas) return;
+    for (const [id, el] of this.canvas.nodesById) {
+      const pos = this.nodePos.get(id) ?? { x: el.offsetLeft, y: el.offsetTop };
+      const box = { x: pos.x, y: pos.y, w: el.offsetWidth, h: el.offsetHeight };
+      this.canvas.boxes.set(id, box);
+      this.sizes.set(id, { w: box.w, h: box.h });
     }
-    world.style.width = `${width}px`;
-    world.style.height = `${height}px`;
+    for (const id of [...this.sizes.keys()]) {
+      if (!this.canvas.nodesById.has(id)) this.sizes.delete(id);
+    }
   }
 
-  private drawEdges(
-    world: HTMLElement,
-    edges: TopologyEdge[],
-    selectedId: string | null,
-  ): void {
-    const svg = world.querySelector("svg.canvas-edges");
-    if (!(svg instanceof SVGSVGElement) || !this.canvas) return;
-    for (const child of [...svg.children]) {
-      if (child.tagName.toLowerCase() !== "defs") child.remove();
-    }
-    this.canvas.edgeEls = [];
-    const boxes = new Map<string, CardBox>();
-    for (const [id, el] of this.canvas.nodesById) boxes.set(id, cardBox(el));
+  /** Fit the world around the cards' boxes; a size it already has is not written again. */
+  private fitWorld(): void {
+    if (!this.canvas) return;
+    const size = fitSize(this.canvas.boxes.values());
+    const style = this.canvas.world.style;
+    if (style.width !== `${size.width}px`) style.width = `${size.width}px`;
+    if (style.height !== `${size.height}px`) style.height = `${size.height}px`;
+  }
+
+  /**
+   * Draw the model's edges into the kept layer: one already drawn is
+   * updated in place, its class, label and route written only where they
+   * moved; a new one is added; one the model no longer has is removed.
+   * Keyed by source and target, counted for a pair drawn twice.
+   */
+  private drawEdges(edges: TopologyEdge[], selectedId: string | null): void {
+    if (!this.canvas) return;
+    const { svg, boxes, edges: drawn } = this.canvas;
+    const wanted = new Set<string>();
+    const pairs = new Map<string, number>();
     for (const edge of edges) {
-      const source = boxes.get(edge.source);
-      const target = boxes.get(edge.target);
-      if (!source || !target) continue;
-      const geom = edgePath(source, target, this.edgeMode);
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", geom.d);
-      path.setAttribute(
-        "class",
-        "canvas-edge" +
-          (edge.conditional ? " canvas-edge-conditional" : "") +
-          (edge.proposed ? " canvas-edge-proposed" : "") +
-          (edge.target === selectedId ? " canvas-edge-inflow" : "") +
-          (edge.source === selectedId ? " canvas-edge-outflow" : ""),
-      );
-      path.setAttribute("marker-end", `url(#${ARROW_ID})`);
-      svg.appendChild(path);
-      let label: SVGTextElement | null = null;
-      if (edge.data) {
-        label = document.createElementNS(SVG_NS, "text");
-        label.setAttribute("class", "canvas-edge-label");
-        label.setAttribute("x", String(geom.lx));
-        label.setAttribute("y", String(geom.ly));
-        label.textContent = edge.data;
-        svg.appendChild(label);
+      if (!boxes.has(edge.source) || !boxes.has(edge.target)) continue;
+      const pair = `${edge.source}>${edge.target}`;
+      const n = pairs.get(pair) ?? 0;
+      pairs.set(pair, n + 1);
+      const key = `${pair}#${n}`;
+      wanted.add(key);
+      const dashed = edge.conditional === true || edge.proposed === true;
+      let line = drawn.get(key);
+      if (!line) {
+        const el = document.createElementNS(SVG_NS, "path");
+        el.setAttribute("marker-end", `url(#${ARROW_ID})`);
+        svg.appendChild(el);
+        line = { el, label: null, source: edge.source, target: edge.target, dashed, route: "" };
+        drawn.set(key, line);
+        this.strokeEdge(line);
       }
-      this.canvas.edgeEls.push({
-        el: path,
-        label,
-        source: edge.source,
-        target: edge.target,
-        dashed: edge.conditional === true || edge.proposed === true,
-      });
+      const cls =
+        "canvas-edge" +
+        (edge.conditional ? " canvas-edge-conditional" : "") +
+        (edge.proposed ? " canvas-edge-proposed" : "") +
+        (edge.target === selectedId ? " canvas-edge-inflow" : "") +
+        (edge.source === selectedId ? " canvas-edge-outflow" : "");
+      if (line.el.getAttribute("class") !== cls) line.el.setAttribute("class", cls);
+      if (line.dashed !== dashed) {
+        line.dashed = dashed;
+        this.strokeEdge(line);
+      }
+      if (edge.data) {
+        if (!line.label) {
+          line.label = document.createElementNS(SVG_NS, "text");
+          line.label.setAttribute("class", "canvas-edge-label");
+          line.el.after(line.label);
+          // The new label needs placing even where the path did not move.
+          line.route = "";
+          this.strokeEdge(line);
+        }
+        if (line.label.textContent !== edge.data) line.label.textContent = edge.data;
+      } else if (line.label) {
+        line.label.remove();
+        line.label = null;
+      }
+      this.routeEdge(line);
+    }
+    for (const [key, line] of drawn) {
+      if (wanted.has(key)) continue;
+      line.el.remove();
+      line.label?.remove();
+      drawn.delete(key);
     }
     this.paintStrokeScale();
   }
 }
 
-function cardBox(el: HTMLElement): CardBox {
-  return { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+/** The world's size around a set of card boxes: room for each and a margin,
+ *  never under the minimum. */
+function fitSize(boxes: Iterable<CardBox>): { width: number; height: number } {
+  let width = WORLD_MIN_WIDTH;
+  let height = 400;
+  for (const box of boxes) {
+    width = Math.max(width, box.x + box.w + 48);
+    height = Math.max(height, box.y + box.h + 48);
+  }
+  return { width, height };
 }

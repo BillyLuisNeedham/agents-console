@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cachedByStamp } from "./stat-cache.ts";
 
 const TICKET_STATUSES = [
   "ready",
@@ -94,6 +95,11 @@ export function readMarker(file: string): TicketMarker {
   return { ...marker, title: readTitle(lines), spec: readSpec(lines) };
 }
 
+// Every load re-reads the issues directory, and the server loads on every
+// snapshot (issue #157): a file whose stamp has not moved since its last
+// parse is served from that parse, a changed one is parsed afresh.
+const readMarkerCached = cachedByStamp(readMarker);
+
 export function writeMarkerStatus(file: string, status: TicketStatus): void {
   const raw = readFileSync(file, "utf8");
   const newline = raw.includes("\r\n") ? "\r\n" : "\n";
@@ -174,7 +180,7 @@ export function loadPoolMarkers(
         "conversations/ directory)",
     );
   }
-  const markers = files.map((file) => readMarker(join(issuesDir, file)));
+  const markers = files.map((file) => readMarkerCached(join(issuesDir, file)));
   const seen = new Set<string>();
   for (const marker of markers) {
     if (seen.has(marker.id)) {

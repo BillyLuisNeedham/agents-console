@@ -61,6 +61,63 @@ describe("ticket events", () => {
   });
 });
 
+// The reader keeps its parse per file and reads only what was appended since
+// (issue #157); every case here is one the whole-file parse it replaced got
+// right, so each is checked against a fresh parse of the same bytes.
+describe("ticket events read again", () => {
+  const line = (second: number, kind: string): string =>
+    `${JSON.stringify({ at: `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`, attempt: 1, kind, payload: {} })}\n`;
+  const kinds = (runs: string): string[] => readEvents(runs, "01").map((e) => e.kind);
+  const file = (runs: string): string => join(runs, "01.events.jsonl");
+
+  it("picks up each append, and a torn final line once the rest of it lands", () => {
+    const runs = tempRuns();
+    writeFileSync(file(runs), line(0, "scheduled"));
+    expect(kinds(runs)).toEqual(["scheduled"]);
+    const spawned = line(1, "spawned");
+    writeFileSync(file(runs), spawned.slice(0, 20), { flag: "a" });
+    expect(kinds(runs)).toEqual(["scheduled"]);
+    writeFileSync(file(runs), spawned.slice(20), { flag: "a" });
+    expect(kinds(runs)).toEqual(["scheduled", "spawned"]);
+    writeFileSync(file(runs), line(2, "exited"), { flag: "a" });
+    expect(kinds(runs)).toEqual(["scheduled", "spawned", "exited"]);
+  });
+
+  it("reads a final line with no newline yet when it is whole, and never keeps it", () => {
+    const runs = tempRuns();
+    writeFileSync(file(runs), line(0, "scheduled") + line(1, "spawned").trimEnd());
+    expect(kinds(runs)).toEqual(["scheduled", "spawned"]);
+    writeFileSync(file(runs), `\n${line(2, "exited")}`, { flag: "a" });
+    expect(kinds(runs)).toEqual(["scheduled", "spawned", "exited"]);
+  });
+
+  it("reads a file removed and written again as a new file, at the same size too", () => {
+    const runs = tempRuns();
+    writeFileSync(file(runs), line(0, "scheduled") + line(1, "spawned"));
+    expect(kinds(runs)).toEqual(["scheduled", "spawned"]);
+    rmSync(file(runs));
+    expect(kinds(runs)).toEqual([]);
+    // Same length as before, and on most filesystems the same inode.
+    writeFileSync(file(runs), line(5, "spawned") + line(6, "scheduled"));
+    expect(kinds(runs)).toEqual(["spawned", "scheduled"]);
+  });
+
+  it("reads a file cut shorter as a new file", () => {
+    const runs = tempRuns();
+    writeFileSync(file(runs), line(0, "scheduled") + line(1, "spawned"));
+    expect(kinds(runs)).toEqual(["scheduled", "spawned"]);
+    writeFileSync(file(runs), line(2, "exited"));
+    expect(kinds(runs)).toEqual(["exited"]);
+  });
+
+  it("hands every caller its own list", () => {
+    const runs = tempRuns();
+    writeFileSync(file(runs), line(0, "scheduled"));
+    readEvents(runs, "01").pop();
+    expect(kinds(runs)).toEqual(["scheduled"]);
+  });
+});
+
 describe("attempt log naming", () => {
   it("names the well-known base log and the attempt-numbered logs", () => {
     expect(attemptLogName("01", null, false)).toBe("01.log");

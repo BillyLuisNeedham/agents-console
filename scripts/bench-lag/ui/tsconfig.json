@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "typeRoots": ["../../../node_modules/@types"],
+    "types": ["bun"],
+    "paths": {
+      "@console/*": ["../../../ui/src/*"],
+      "@bench/frame": ["../../../ui/src/frame.ts"],
+      "@bench/poll": ["../../../ui/src/poll.ts"]
+    }
+  },
+  "include": ["./bench.ts", "./probe.ts", "./unbatched.ts", "./env.d.ts"]
+}

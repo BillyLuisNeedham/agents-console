@@ -292,6 +292,37 @@ describe("TerminalSurface store", () => {
     expect(h.store.state()["01"]?.justFocused).toBe(false);
   });
 
+  it("sends the focus at once and shows it opening until the server answers (#157)", async () => {
+    const order: string[] = [];
+    const gate: { answer: (() => void) | null } = { answer: null };
+    const store = new TerminalSurface({
+      peek: () => Promise.resolve(peekResponse("output")),
+      focus: () => {
+        order.push("focus sent");
+        return new Promise<void>((resolve) => {
+          gate.answer = resolve;
+        });
+      },
+      onChange: () => {
+        order.push("repaint");
+      },
+      pollMs: POLL_MS,
+      confirmMs: CONFIRM_MS,
+    });
+    store.update(snap({ "01": "pane-7" }));
+    await ticks();
+    order.length = 0;
+    const focused = store.focus("01");
+    // Out before anything else, and the button already reads as opening.
+    expect(order).toEqual(["focus sent", "repaint"]);
+    expect(store.state()["01"]?.focusing).toBe(true);
+    gate.answer?.();
+    expect(await focused).toBe(true);
+    store.dispose();
+    expect(store.state()["01"]?.focusing).toBeUndefined();
+    expect(store.state()["01"]?.justFocused).toBe(true);
+  });
+
   it("focus failure leaves the card untouched and resolves false", async () => {
     const peeked: string[] = [];
     const store = new TerminalSurface({
@@ -309,6 +340,7 @@ describe("TerminalSurface store", () => {
     expect(await store.focus("01")).toBe(false);
     store.dispose();
     expect(store.state()["01"]?.justFocused).toBe(false);
+    expect(store.state()["01"]?.focusing).toBeUndefined();
     expect(store.state()["01"]?.status).toBe("live");
   });
 
