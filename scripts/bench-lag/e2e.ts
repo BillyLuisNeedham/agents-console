@@ -355,7 +355,13 @@ export interface ProbeReport {
   frames: { at: number; mutated: boolean }[];
   batches: { at: number; records: number }[];
   cardsShown: { cards: number; at: number; paintedAt: number | null }[];
-  startup: { htmlEnd: number | null; domInteractive: number | null; resources: ProbeResource[] };
+  startup: {
+    htmlEnd: number | null;
+    domInteractive: number | null;
+    resources: ProbeResource[];
+    /** The start's long animation frames: what their scripts ran and forced, and when rendering began. */
+    longFrames?: { start: number; duration: number; renderStart: number; scriptMs: number; forcedLayoutMs: number }[];
+  };
   clicks: ProbeClick[];
   focuses: ProbeFocus[];
   domNodes: number;
@@ -644,8 +650,9 @@ export interface E2eResult {
   /** First tab: mutation batches under #app (one per render that changed
    *  the DOM), frames that carried one, and the records in them. */
   renders: { batchesPerSec: number; framesWithMutationsPerSec: number; recordsPerSec: number };
-  /** First tab's frames over the window; `tabs` is every tab's budget over the window and the idle
-   *  one, its late frames' times in ms from that tab's window start. */
+  /** First tab's frames over the window; `tabs` is every tab's budget from the bench's first
+   *  press (the setup's, so the page's first renders of a Detail count) to the end of the idle
+   *  window, its late frames' times in ms from that tab's window start (negative: before it). */
   frames: { perSec: number; gapMs: Stats; over50ms: number; tabs: FrameBudget[] };
   longTasks: { api: boolean; count: number; longestMs: number; totalMs: number; over100ms: number };
   longFrames: { count: number; longestMs: number; blockingMs: number };
@@ -678,6 +685,10 @@ export interface E2eResult {
  * committed render showing every Ticket's card, and that render painted.
  * `socketAt` is the page's first socket frame in, to tell a page that
  * painted from its embedded snapshot from one that waited on the socket.
+ * `blocked` is what the start's long animation frames, up to the paint,
+ * spent: running script (and, of that, layout the script forced) and
+ * rendering (style, layout and paint after their scripts); null where the
+ * browser has no Long Animation Frames API.
  */
 export interface StartBreakdown {
   htmlMs: number | null;
@@ -685,6 +696,7 @@ export interface StartBreakdown {
   committedMs: number | null;
   paintedMs: number | null;
   socketAt: number | null;
+  blocked: { scriptMs: number; forcedLayoutMs: number; renderMs: number } | null;
 }
 
 /** A socket request and its reply, or a card's subscribe and its first
@@ -696,7 +708,16 @@ export interface SocketTrip {
   id: number | string;
   /** From the browser's frame leaving it to the answer handed back to it. */
   ms: number;
+  /**
+   * The same with exactly the simulated round trip: the proxy's timers fire
+   * a few ms late under load, and that is the bench's delay, not the
+   * network's or the server's, so the gates take this one where there is one.
+   */
+  idealMs?: number;
 }
+
+/** A trip's network time, the proxy's own timer lateness left out. */
+const wireMs = (trip: SocketTrip): number => trip.idealMs ?? trip.ms;
 
 export interface E2eOptions {
   rttMs: number;
@@ -754,7 +775,8 @@ export function summarizeE2e(
     stats(focusRows.flatMap((f, i) => (focusFetches[i] ? [pick(focusFetches[i]!) - f.released!] : [])));
   // The answer as the network has it, on either protocol: the POST's
   // responseEnd, or the page's send of the request frame plus the proxy's
-  // time from that frame leaving the browser to its reply coming back. Not
+  // time from that frame leaving the browser to its reply coming back, with
+  // exactly the simulated round trip (the proxy's timer lateness out). Not
   // when the page's handler runs: Chromium runs the frame that paints a
   // press before it dispatches what arrived after the press, so that reads
   // a frame late whatever the server did (`handledMs`, kept beside it).
@@ -767,7 +789,7 @@ export function summarizeE2e(
       if (at === -1) return null;
       const [wire] = unclaimed.splice(at, 1);
       return {
-        ms: trip.request.at - f.released + wire!.ms,
+        ms: trip.request.at - f.released + wireMs(wire!),
         via: "socket",
         handled: trip.reply ? trip.reply.at - f.released : null,
       };
@@ -800,7 +822,7 @@ export function summarizeE2e(
     if (c.released === null || subscribed(c)) return null;
     const sent = subscribeSent(c);
     const wire = sent ? subscribeTrip(c, sent) : null;
-    return sent && wire ? sent.at - c.released + wire.ms : null;
+    return sent && wire ? sent.at - c.released + wireMs(wire) : null;
   });
   const coldPage = coldData.map((c) => {
     if (subscribed(c)) return null;
@@ -816,12 +838,20 @@ export function summarizeE2e(
     const parsed = r.startup.domInteractive;
     const scriptMs = scriptEnd === null ? parsed : parsed === null ? scriptEnd : Math.max(scriptEnd, parsed);
     const at = (v: number | null | undefined) => (v === null || v === undefined ? null : round(v));
+    const long = (r.startup.longFrames ?? []).filter((f) => f.start < (shown?.paintedAt ?? Infinity));
     return {
       htmlMs: at(r.startup.htmlEnd),
       scriptMs: at(scriptMs),
       committedMs: at(shown?.at),
       paintedMs: at(shown?.paintedAt),
       socketAt: at(r.socketFrames.find((f) => f.dir === "in")?.at),
+      blocked: r.startup.longFrames
+        ? {
+            scriptMs: round(long.reduce((n, f) => n + f.scriptMs, 0)),
+            forcedLayoutMs: round(long.reduce((n, f) => n + f.forcedLayoutMs, 0)),
+            renderMs: round(long.reduce((n, f) => n + (f.renderStart > 0 ? f.start + f.duration - f.renderStart : 0), 0)),
+          }
+        : null,
     };
   });
 
@@ -851,7 +881,7 @@ export function summarizeE2e(
   }
 
   // --- frames, the idle window and the start, every tab.
-  const windowFrames = first.frames.filter((f) => f.at <= w1);
+  const windowFrames = first.frames.filter((f) => f.at >= w0 && f.at <= w1);
   const gaps = windowFrames.slice(1).map((f, i) => f.at - windowFrames[i]!.at);
   // On each tab's window clock, so a late frame's time says where in the run it was.
   const budgets = reports.map((r) => frameBudget(r.frames.map((f) => f.at - r.window[0])));

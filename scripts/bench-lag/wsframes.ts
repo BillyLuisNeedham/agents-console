@@ -75,6 +75,39 @@ export class FrameReader {
   }
 }
 
+/** What a frame from the browser asks for: a request by number, or a card by id. */
+export function askOf(text: string): { kind: string; id: number | string } | null {
+  const head = text.slice(0, 160);
+  if (!head.includes('"request"') && !head.includes('"subscribe"')) return null;
+  try {
+    const m = JSON.parse(text) as { type?: unknown; id?: unknown; kind?: unknown; card?: { id?: unknown } };
+    if (m.type === "request" && typeof m.id === "number" && typeof m.kind === "string") return { kind: m.kind, id: m.id };
+    if (m.type === "subscribe" && typeof m.card?.id === "string") return { kind: "subscribe", id: m.card.id };
+  } catch {
+    // Not one of the page's frames.
+  }
+  return null;
+}
+
+/**
+ * What a frame from the server answers: a reply by its request's number, or
+ * a card by its id. Only the head is read, never the whole frame, so a
+ * 64 KiB log window costs nothing: the server writes `type` and `id` first,
+ * as JSON.stringify keeps its message literals' order.
+ */
+export function answerOf(text: string): { kind: "reply" | "card"; id: number | string } | null {
+  const head = text.slice(0, 160);
+  if (head.startsWith('{"type":"reply"')) {
+    const id = /"id":(\d+)/.exec(head);
+    return id ? { kind: "reply", id: Number(id[1]) } : null;
+  }
+  if (head.startsWith('{"type":"card"')) {
+    const id = /"id":"([^"]*)"/.exec(head);
+    return id ? { kind: "card", id: id[1]! } : null;
+  }
+  return null;
+}
+
 /** The end of an HTTP head in a byte stream: the index just past "\r\n\r\n", or -1. */
 export function headEnd(bytes: Uint8Array): number {
   for (let i = 3; i < bytes.length; i++) {

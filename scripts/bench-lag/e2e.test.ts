@@ -241,6 +241,10 @@ describe("summarizeE2e's gate samples", () => {
     expect(result.focus.handledMs?.max).toBe(16);
     expect(result.focus.toRequestFrameMs?.max).toBe(0.5);
 
+    // The proxy's own timer lateness is the bench's, so the trip without it is the one taken.
+    const lateTrips = [{ id: 7, kind: "terminal.focus", ms: 5.5, idealMs: 1.5 }];
+    expect(summarizeE2e([r], metrics, options({ socketTrips: lateTrips })).gateInputs.focusAnsweredMs).toEqual([2]);
+
     // With no network time for it, the answer is unmeasured, never the page's.
     expect(summarizeE2e([r], metrics, options()).gateInputs.focusAnsweredMs).toEqual([null]);
   });
@@ -287,11 +291,24 @@ describe("summarizeE2e's gate samples", () => {
           { path: "/assets/index-abc.js", start: 45, requestStart: 45, responseEnd: 88.4 },
           { path: "/assets/index-abc.css", start: 45, requestStart: 45, responseEnd: 86 },
         ],
+        longFrames: [
+          // The bundle's first run, then the frame that rendered it; a later one is past the paint.
+          { start: 90, duration: 60, renderStart: 0, scriptMs: 58, forcedLayoutMs: 20 },
+          { start: 150, duration: 28, renderStart: 158, scriptMs: 6, forcedLayoutMs: 0 },
+          { start: 400, duration: 80, renderStart: 0, scriptMs: 80, forcedLayoutMs: 0 },
+        ],
       },
       socketFrames: [inn(0, 150, { type: "hello" })],
     });
     expect(summarizeE2e([r], metrics, options()).start.breakdown).toEqual([
-      { htmlMs: 41.2, scriptMs: 88.4, committedMs: 170, paintedMs: 180, socketAt: 150 },
+      {
+        htmlMs: 41.2,
+        scriptMs: 88.4,
+        committedMs: 170,
+        paintedMs: 180,
+        socketAt: 150,
+        blocked: { scriptMs: 64, forcedLayoutMs: 20, renderMs: 20 },
+      },
     ]);
   });
 

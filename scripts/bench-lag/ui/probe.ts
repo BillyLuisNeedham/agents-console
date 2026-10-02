@@ -165,6 +165,16 @@ interface Watcher {
   const watchers: Watcher[] = [];
   let nextPress: Watcher | null = null;
   let mutatedSinceFrame = false;
+  /** The long animation frames of the page's start (Long Animation Frames API). */
+  const startFrames: {
+    start: number;
+    duration: number;
+    renderStart: number;
+    scriptMs: number;
+    forcedLayoutMs: number;
+  }[] = [];
+  /** Where the frames the bench judges begin: before its first press, so the page's first renders count. */
+  let frames0 = 0;
   /** The measured window and the idle one after it, set by the bench. */
   let window0 = 0;
   let window1 = 0;
@@ -197,13 +207,29 @@ interface Watcher {
     });
   });
   const longTaskApi = observe("longtask", (e) => longTasks.push({ start: e.startTime, duration: e.duration }));
-  observe("long-animation-frame", (e) =>
+  observe("long-animation-frame", (e) => {
     longFrames.push({
       start: e.startTime,
       duration: e.duration,
       blocking: (e as unknown as { blockingDuration?: number }).blockingDuration ?? 0,
-    }),
-  );
+    });
+    // The start's long frames, attributed: the scripts they ran (and the
+    // layout those forced) and when their rendering began, so the bench can
+    // say where a slow start went.
+    if (window0 === 0) {
+      const f = e as unknown as {
+        renderStart?: number;
+        scripts?: { duration: number; forcedStyleAndLayoutDuration?: number }[];
+      };
+      startFrames.push({
+        start: e.startTime,
+        duration: e.duration,
+        renderStart: f.renderStart ?? 0,
+        scriptMs: (f.scripts ?? []).reduce((n, s) => n + s.duration, 0),
+        forcedLayoutMs: (f.scripts ?? []).reduce((n, s) => n + (s.forcedStyleAndLayoutDuration ?? 0), 0),
+      });
+    }
+  });
 
   // --- the network the page opens ---------------------------------------------
 
@@ -591,6 +617,10 @@ interface Watcher {
     /** `how` is the bench's own label for the click: "cold" or "hover". */
     armClick: (id: string, how = "cold") => arm("card", id, how),
     armFocus: (id: string) => arm("focus", id, "focus"),
+    /** Frames are judged from here: called before the bench's first press. */
+    watchFrames: () => {
+      frames0 = performance.now();
+    },
     begin: () => {
       window0 = performance.now();
       clicks.length = 0;
@@ -625,6 +655,7 @@ interface Watcher {
           htmlEnd: nav?.responseEnd ?? null,
           domInteractive: nav?.domInteractive ?? null,
           resources: resources.filter((r) => r.start < window0),
+          longFrames: startFrames,
         },
         longTaskApi,
         resources: resources.filter((r) => r.responseEnd >= window0),
@@ -633,7 +664,8 @@ interface Watcher {
         socketFrames: rawFrames.map(envelope),
         longTasks: longTasks.filter((t) => inside(t.start)),
         longFrames: longFrames.filter((t) => inside(t.start)),
-        frames: frames.filter((f) => inside(f.at)),
+        // From the bench's first press when it said so, else the window's start.
+        frames: frames.filter((f) => f.at >= (frames0 || window0) && f.at <= last),
         batches: batches.filter((b) => inside(b.at)),
         cardsShown,
         clicks,

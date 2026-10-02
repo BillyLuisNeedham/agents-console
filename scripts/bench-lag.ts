@@ -93,6 +93,7 @@ import {
   type SocketTrip,
 } from "./bench-lag/e2e.ts";
 import { evaluateGates, formatGates, IDLE_MIN_MS, type GateResult } from "./bench-lag/gates.ts";
+import { describeSlow, slowAnswers, type Mark, type SlowAnswer, type WireTrip } from "./bench-lag/timeline.ts";
 
 // --- arguments ---------------------------------------------------------------
 
@@ -515,6 +516,10 @@ interface E2eHalfResult extends E2eResult {
     syncSpawnBlockedPercent: number;
   };
   herdrRequests: Record<string, number>;
+  /** How late the proxy's timers handed on each half-tripped chunk, by direction. */
+  proxyLatenessMs: { up: Summary; down: Summary };
+  /** Socket answers at the gates' limit or over, read against the server's and herdr's timelines. */
+  slowAnswers: SlowAnswer[];
   gates: GateResult[];
 }
 
@@ -663,6 +668,10 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
       pressing = run.catch(() => {});
       return run;
     };
+    // Frames are judged from here, so these first presses count: the first
+    // tab's opens the page's first Progress Detail, the costliest render a
+    // fresh page does.
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.watchFrames()");
     for (const [i, tab] of tabs.entries()) await press(tab, "cold", i === 0 ? pool.live[0]! : pool.quick[0]!);
     // Where the pointer parks, found now the Detail is open, outside the window.
     for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.parkPoint()");
@@ -673,6 +682,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     //    tab, every other click a hovered one.
     console.error(`measuring for ${durationS}s…`);
     await serve.ask("begin", "begun");
+    const windowWall = performance.timeOrigin + performance.now();
     const before = await browser.metrics(tabs[0]!);
     for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.begin()");
     const stream = countSnapshots(base, serverProtocol);
@@ -707,7 +717,21 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const after = await browser.metrics(tabs[0]!);
     const report = (await serve.ask("report", "report")) as ServerResult["server"];
     const herdrCounts = ((await herdr.ask({ requests: true }, "requests")) as { counts: Record<string, number> }).counts;
-    const socketTrips = ((await proxy.ask({ trips: true }, "trips")) as { trips: SocketTrip[] }).trips;
+    const proxied = (await proxy.ask({ trips: true }, "trips")) as {
+      trips: (SocketTrip & WireTrip)[];
+      lateness: { up: number[]; down: number[] };
+    };
+    const socketTrips = proxied.trips;
+    // The answers the proxy timed at the gates' limit or over, read beside
+    // what the server and the fake herdr were doing then (timeline.ts).
+    const serverMarks = ((await serve.ask("timeline", "timeline")) as { marks: Mark[] }).marks;
+    const herdrMarks = ((await herdr.ask({ timeline: true }, "timeline")) as { marks: Mark[] }).marks;
+    const slow = slowAnswers(
+      socketTrips.filter((t) => t.at >= windowWall),
+      serverMarks,
+      herdrMarks.filter((m) => m.at >= windowWall),
+      rttMs + 5,
+    );
 
     // 4. The idle window: no input at all, the pointer parked on bare canvas,
     //    every tab open and visible. Whatever the pages send now, they send
@@ -737,6 +761,8 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
         syncSpawnBlockedPercent: Math.round(report.syncSpawn.blockedPercent * 10) / 10,
       },
       herdrRequests: herdrCounts,
+      proxyLatenessMs: { up: summarize(proxied.lateness.up), down: summarize(proxied.lateness.down) },
+      slowAnswers: slow,
       gates: evaluateGates(measured.gateInputs),
     };
   } finally {
@@ -846,7 +872,10 @@ if (e2eResult) {
     ["e2e start -> usable", `${ms(e.start.usableMs)}  each ${e.start.each.map((v) => v ?? "never").join(", ")}`],
     ...e.start.breakdown.map((b, i): [string, string] => [
       `e2e   tab ${i + 1} from navigation`,
-      `HTML ${b.htmlMs ?? "?"} -> script ${b.scriptMs ?? "?"} -> cards committed ${b.committedMs ?? "never"} -> painted ${b.paintedMs ?? "never"} ms; first socket frame ${b.socketAt ?? "none"} ms`,
+      `HTML ${b.htmlMs ?? "?"} -> script ${b.scriptMs ?? "?"} -> cards committed ${b.committedMs ?? "never"} -> painted ${b.paintedMs ?? "never"} ms; first socket frame ${b.socketAt ?? "none"} ms` +
+        (b.blocked
+          ? `; long frames: script ${b.blocked.scriptMs} ms (forced layout ${b.blocked.forcedLayoutMs}), rendering ${b.blocked.renderMs} ms`
+          : ""),
     ]),
     ["e2e snapshots", `${e.snapshots.perSec}/s  mean ${Math.round(e.snapshots.meanBytes / 1024)} KiB`],
     ["e2e card click -> shell", `${ms(e.click.shellMs)}; ${frames(e.click.shellFrames)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
@@ -872,7 +901,7 @@ if (e2eResult) {
       "e2e frames over budget",
       e.frames.tabs
         .map((f, i) => {
-          const at = f.overAt.slice(0, 5).map((t) => `+${Math.round(t / 100) / 10}s`).join(" ");
+          const at = f.overAt.slice(0, 5).map((t) => `${t >= 0 ? "+" : ""}${Math.round(t / 100) / 10}s`).join(" ");
           return `tab ${i + 1}: ${f.over} of ${f.frames}${at ? ` at ${at}${f.over > 5 ? " ..." : ""}` : ""} (interval ${f.intervalMs} ms, longest gap ${f.longestGapMs} ms, idle from +${Math.round(e.idle.fromMs[i]! / 100) / 10}s)`;
         })
         .join("; "),
@@ -884,6 +913,8 @@ if (e2eResult) {
     ["e2e idle window", e.idle.tabs.map((t, i) => `tab ${i + 1}: ${Math.round(t.ms / 100) / 10} s, ${t.resources} resources, ${t.fetches} fetches, ${t.socketFramesSent} frames sent`).join("; ")],
     ["e2e   idle frames received", e.ws ? tally(e.idle.received) : na],
     ["e2e server", `ping ${ms(e.server.pingMs)}  CPU ${e.server.cpuPercent}%  loop lag p95 ${e.server.loopLagMs.p95} ms  sync spawns ${e.server.syncSpawnBlockedPercent}% of the window`],
+    ["e2e proxy timer lateness", e.rttMs > 0 ? `up ${ms(e.proxyLatenessMs.up)}; down ${ms(e.proxyLatenessMs.down)}` : "none (RTT 0)"],
+    ...e.slowAnswers.slice(0, 12).map((s): [string, string] => ["e2e slow answer", describeSlow(s)]),
   );
   for (const [kind, r] of Object.entries(e.requests.byKind)) {
     rows.push([`  ${kind}`, `${r.perSec}/s  ${ms(r.totalMs)}  wait mean ${r.waitMeanMs} ms`]);
