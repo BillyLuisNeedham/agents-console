@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
 /**
- * The lag bench (issue #157): a repeatable yardstick for how sluggish the
- * Console feels, so a fix can be measured against the code it replaced.
+ * The lag bench (issues #157, #161): a repeatable yardstick for how sluggish
+ * the Console feels, so a fix can be measured against the code it replaced,
+ * and, end to end, a set of gates the Console must pass.
  *
  *   bun run scripts/bench-lag.ts [--repo <checkout>] [--out <file.json>]
  *       [--duration <s>] [--tabs <n>] [--rtt <ms>] [--ui-duration <s>] [--skip-ui] [--skip-server]
- *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>] [--out <file.json>]
+ *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>]
+ *       [--idle <s>] [--out <file.json>]
  *
  * `--repo` points it at any checkout of this repository (default: the one
  * this script lives in) whose root and ui/ have had `bun install`: the
@@ -20,14 +22,19 @@
  * blocked, three Conversations whose panes keep moving), then opens N
  * simulated Console tabs (scripts/bench-lag/load.ts) and measures for the
  * window: the server's responsiveness to a trivial GET every 25 ms, the
- * operator's card clicks and Open in herdr through a tab's six connections,
- * the snapshot rate and size, the server's RSS, CPU, event-loop lag and time
- * blocked in synchronous spawns.
+ * operator's card clicks and Open in herdr (over the push protocol's socket,
+ * or through a tab's six connections on a checkout that predates it), the
+ * snapshot rate and size, the server's RSS, CPU, event-loop lag and time
+ * blocked in synchronous spawns. Which protocol a checkout speaks is asked
+ * of its running server (load.ts detectProtocol), so the same bench runs on
+ * both sides of issue #161.
  *
  * The UI half (scripts/bench-lag/ui-bench.ts) mounts the checkout's real
- * Console in headless Chromium over fake seams and measures render cost,
- * long tasks, click-to-Detail and drag under the same churn, at the snapshot
- * rate the server half measured.
+ * Console in headless Chromium over a fake socket that plays the server's
+ * frames (or, on a checkout from before the push protocol, over its old
+ * fetch and stream seams) and measures render cost, long tasks,
+ * click-to-Detail and drag under the same churn, at the snapshot rate the
+ * server half measured.
  *
  * `--rtt` adds a simulated round trip to every tab request (not the
  * responsiveness probe), for a browser on another machine; the default is
@@ -40,25 +47,40 @@
  * (scripts/bench-lag/e2e.ts) through a TCP proxy that holds every chunk for
  * half the `--rtt` each way (scripts/bench-lag/proxy.ts), so the browser's
  * own connection limit, keep-alive and polling apply. On the first window it
- * makes the server half's clicks and Open in herdrs as real mouse input, and
- * a probe injected into the page (scripts/bench-lag/ui/probe.ts) times them
- * and counts renders, long tasks, frames and requests in flight, through web
- * APIs alone, so it measures any checkout's Console.
+ * makes the server half's clicks and Open in herdrs as real mouse input,
+ * every other click after resting the pointer on the card (a hover that
+ * lets the Console prefetch it), and parks the pointer on bare canvas after
+ * each press, so no other click is ever hovered. Then it stops all input
+ * for an idle window (`--idle`, at least 10 s). A probe injected into the
+ * page (scripts/bench-lag/ui/probe.ts) times the presses, the page's start
+ * and its frames, and counts renders, long tasks, requests and socket
+ * frames, through web APIs alone, so it measures any checkout's Console.
  *
- * Bun must be on PATH for the child processes (`PATH=$HOME/.bun/bin:$PATH`).
- * Not a test: nothing here is named *.test.ts, and `bun test` never runs it.
+ * The end-to-end run ends in the gate table (scripts/bench-lag/gates.ts):
+ * press feedback, click to Detail, click to data cold and hovered, Open in
+ * herdr answered, frames over budget, background polling and start to
+ * usable, each judged over every sample, and exits 1 when any gate fails.
+ *
+ * Bun must be on PATH for the child processes (`PATH=$HOME/.bun/bin:$PATH`),
+ * and Chromium or Chrome must be installed (scripts/bench-lag/chromium.ts
+ * finds it on Linux and macOS; CHROMIUM overrides). Not a test itself: its
+ * pure parts are, in scripts/bench-lag/*.test.ts.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { decodeServerMessage, encodeMessage, HOVER_DWELL_MS, PROTOCOL_VERSION } from "../engine/protocol.ts";
 import { buildPool, modeFor, type BenchPool } from "./bench-lag/pool.ts";
 import {
   CONNECTIONS_PER_HOST,
   ConnectionPool,
+  detectProtocol,
   setSimulatedRtt,
+  socketUrl,
   Tab,
   timedFetch,
+  type Protocol,
   type Timing,
 } from "./bench-lag/load.ts";
 import type { UiBenchResult } from "./bench-lag/ui-bench.ts";
@@ -68,7 +90,9 @@ import {
   type BrowserTab,
   type E2eResult,
   type ProbeReport,
+  type SocketTrip,
 } from "./bench-lag/e2e.ts";
+import { evaluateGates, formatGates, IDLE_MIN_MS, type GateResult } from "./bench-lag/gates.ts";
 
 // --- arguments ---------------------------------------------------------------
 
@@ -87,6 +111,8 @@ const skipUi = e2e || argv.includes("--skip-ui");
 const skipServer = e2e || argv.includes("--skip-server");
 const rttMs = Number(flag("rtt") ?? 0);
 setSimulatedRtt(rttMs);
+/** The end-to-end run's idle window, no input at all; the polling gate needs at least 10 s. */
+const idleS = Number(flag("idle") ?? 15);
 
 for (const dir of [join(repo, "node_modules"), join(repo, "ui", "node_modules")]) {
   if (!existsSync(dir)) {
@@ -120,16 +146,6 @@ function summarize(values: number[]): Summary {
     p99: round(at(99)),
     max: round(s.at(-1) ?? 0),
   };
-}
-
-function rssOf(pid: number): number {
-  try {
-    const status = readFileSync(`/proc/${pid}/status`, "utf8");
-    const kb = Number(/VmRSS:\s+(\d+)/.exec(status)?.[1] ?? 0);
-    return kb * 1024;
-  } catch {
-    return 0;
-  }
 }
 
 async function waitFor<T>(what: string, timeoutMs: number, probe: () => Promise<T | null> | T | null): Promise<T> {
@@ -209,12 +225,17 @@ interface ServerResult {
   durationS: number;
   tabs: number;
   rttMs: number;
+  /** What the server spoke to the tabs. */
+  protocol: Protocol;
   pool: { tickets: number; done: number; inProgress: number; ready: number; conversations: number; mergeHold: number; interrupts: number };
   pingMs: Summary;
   pingFailures: number;
   clickMs: Summary & { queuedMean: number };
   focusMs: Summary & { queuedMean: number; serverP50: number };
   requestsByKind: Record<string, Summary & { queuedMean: number; perSec: number; meanBytes: number }>;
+  /** Over the socket: every frame the tabs took, by type; and clicks or focuses never answered. */
+  frames: Record<string, { perSec: number; meanBytes: number }>;
+  unanswered: number;
   snapshots: { perSec: number; meanBytes: number; maxBytes: number; gapP50Ms: number };
   server: {
     rssStartMb: number;
@@ -341,20 +362,21 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
   try {
     // 3. The tabs: the first has a live Ticket open in the Detail, the
     //    second a done one, as an operator's two windows would, sharing
-    //    the browser's connections to the server.
+    //    the browser's connections to the server (or each on its socket).
+    const protocol = await detectProtocol(base);
     const browser = new ConnectionPool(CONNECTIONS_PER_HOST);
     const tabs = Array.from(
       { length: tabCount },
-      (_, i) => new Tab(base, browser, i === 0 ? pool.live[0]! : pool.quick[0]!),
+      (_, i) => new Tab(base, browser, i === 0 ? pool.live[0]! : pool.quick[0]!, protocol),
     );
     for (const tab of tabs) await tab.open();
-    console.error(`settling with ${tabCount} tabs open…`);
+    console.error(`settling with ${tabCount} tabs open over ${protocol === "ws" ? "the socket" : "SSE"}…`);
     await Bun.sleep(5_000);
 
     // 4. The window.
     console.error(`measuring for ${durationS}s…`);
     const begun = (await serve.ask("begin", "begun")) as { rssBytes: number };
-    const rssStart = rssOf(serve.proc.pid) || begun.rssBytes;
+    const rssStart = begun.rssBytes;
     for (const tab of tabs) tab.record(true);
     const t0 = performance.now();
     const end = t0 + durationS * 1000;
@@ -388,7 +410,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
     const elapsedS = (performance.now() - t0) / 1000;
     for (const tab of tabs) tab.record(false);
     const report = (await serve.ask("report", "report")) as ServerResult["server"] & { rssBytes: number };
-    const rssEnd = rssOf(serve.proc.pid) || report.rssBytes;
+    const rssEnd = report.rssBytes;
     const herdrCounts = ((await herdr.ask({ requests: true }, "requests")) as { counts: Record<string, number> }).counts;
     const final = await state();
     for (const tab of tabs) tab.close();
@@ -407,6 +429,18 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
         meanBytes: Math.round(list.reduce((n, t) => n + t.bytes, 0) / (list.length || 1)),
       };
     }
+    const frames: ServerResult["frames"] = {};
+    const frameTotals: Record<string, { count: number; bytes: number }> = {};
+    for (const tab of tabs) {
+      for (const [type, t] of Object.entries(tab.stats.frames)) {
+        const sum = (frameTotals[type] ??= { count: 0, bytes: 0 });
+        sum.count += t.count;
+        sum.bytes += t.bytes;
+      }
+    }
+    for (const [type, t] of Object.entries(frameTotals)) {
+      frames[type] = { perSec: Math.round((t.count / elapsedS) * 100) / 100, meanBytes: Math.round(t.bytes / (t.count || 1)) };
+    }
     const first = tabs[0]!.stats;
     const gaps = first.snapshotArrivals.slice(1).map((t, i) => t - first.snapshotArrivals[i]!);
     const mb = (b: number) => Math.round((b / 1024 / 1024) * 10) / 10;
@@ -415,6 +449,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
       durationS: Math.round(elapsedS),
       tabs: tabCount,
       rttMs,
+      protocol,
       pool: {
         tickets: statuses.length,
         done: statuses.filter((s) => s === "done").length,
@@ -433,6 +468,8 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
         serverP50: summarize(focuses.map((f) => f.serverMs)).p50,
       },
       requestsByKind,
+      frames,
+      unanswered: tabs.reduce((n, tab) => n + tab.stats.unanswered, 0),
       snapshots: {
         perSec: Math.round((first.snapshots / elapsedS) * 100) / 100,
         meanBytes: Math.round(first.snapshotBytes.reduce((a, b) => a + b, 0) / (first.snapshots || 1)),
@@ -467,6 +504,8 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
 // --- the end-to-end half ---------------------------------------------------------
 
 interface E2eHalfResult extends E2eResult {
+  /** What the pool server spoke; `protocol` is what the page did. */
+  serverProtocol: Protocol;
   snapshots: { perSec: number; meanBytes: number };
   server: {
     pingMs: Summary;
@@ -476,17 +515,47 @@ interface E2eHalfResult extends E2eResult {
     syncSpawnBlockedPercent: number;
   };
   herdrRequests: Record<string, number>;
+  gates: GateResult[];
 }
 
 /**
- * The snapshot stream's rate, read on a connection of the bench's own
+ * The snapshot pushes' rate, read on a connection of the bench's own
  * straight to the server, so the numbers say how often the engine pushed
- * (its rate decides how much rendering the page has to do).
+ * (its rate decides how much rendering the page has to do). Over the
+ * socket, each `snapshot` and `delta` frame, on a socket that says it is
+ * hidden so the server does no live work for it; over SSE, each snapshot
+ * event. Either way the one the connection opens with is the server
+ * catching it up, not a push, and is left out.
  */
-function countSnapshots(base: string): { stop: () => { count: number; bytes: number } } {
-  const abort = new AbortController();
+function countSnapshots(base: string, protocol: Protocol): { stop: () => { count: number; bytes: number } } {
+  let opening = true;
   let count = 0;
   let bytes = 0;
+  const take = (size: number) => {
+    if (opening) {
+      opening = false;
+      return;
+    }
+    count++;
+    bytes += size;
+  };
+  if (protocol === "ws") {
+    const socket = new WebSocket(socketUrl(base));
+    socket.onopen = () =>
+      socket.send(encodeMessage({ type: "hello", protocol: PROTOCOL_VERSION, visible: false, cards: [] }));
+    socket.onmessage = (event) => {
+      const text = String(event.data);
+      const type = decodeServerMessage(text).type;
+      if (type === "snapshot" || type === "delta") take(Buffer.byteLength(text));
+    };
+    return {
+      stop: () => {
+        socket.close();
+        return { count, bytes };
+      },
+    };
+  }
+  const abort = new AbortController();
   void (async () => {
     const res = await fetch(`${base}/api/stream`, { signal: abort.signal });
     const reader = res.body!.getReader();
@@ -500,9 +569,7 @@ function countSnapshots(base: string): { stop: () => { count: number; bytes: num
       while ((at = buffer.indexOf("\n\n")) >= 0) {
         const frame = buffer.slice(0, at);
         buffer = buffer.slice(at + 2);
-        if (!frame.startsWith("event: snapshot")) continue;
-        count++;
-        bytes += frame.length;
+        if (frame.startsWith("event: snapshot")) take(frame.length);
       }
     }
   })().catch(() => {});
@@ -513,6 +580,9 @@ function countSnapshots(base: string): { stop: () => { count: number; bytes: num
     },
   };
 }
+
+/** A press's target as the probe armed it, and where the pointer goes after. */
+type Armed = { x: number; y: number; park: { x: number; y: number } | null } | null;
 
 async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
   // 1. The checkout's own UI, built by its own build script into the
@@ -529,9 +599,19 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
   const proxy = await child([join(here, "proxy.ts"), "--target", base, "--rtt", String(rttMs)], "proxy");
   const browser = await ConsoleBrowser.launch({ profileDir: join(root, "chromium") });
   try {
+    const serverProtocol = await detectProtocol(base);
+
     // 2. The tabs: real windows on the real page, through the proxy. The
     //    first has a live Ticket open in the Detail, the second a done one,
-    //    as in the server half.
+    //    as in the server half. A throwaway page on the same origin goes
+    //    first, so a fresh browser's renderer process start (a cost the
+    //    operator's long-open browser does not pay) is not counted in the
+    //    Console's start; it is the server's static ping file, so it warms
+    //    nothing of the Console's own: no script, style or HTTP cache entry.
+    const warm = await browser.open(`${proxy.ready}/ping.txt`);
+    await waitFor("the warm-up page", 10_000, async () =>
+      (await browser.evaluate<string>(warm, "document.readyState")) === "complete" ? true : null,
+    );
     const tabs: BrowserTab[] = [];
     for (let i = 0; i < tabCount; i++) tabs.push(await browser.open(`${proxy.ready}/`));
     const ticketCount = pool.quick.length + pool.conflicting.length + pool.live.length + pool.blocked.length;
@@ -540,47 +620,73 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
         (await browser.evaluate<number>(tab, "window.__lagProbe ? window.__lagProbe.cards() : 0")) >= ticketCount ? true : null,
       );
     }
-    // The cards each tab will press, the server half's targets: the first
-    // tab clicks round a live Ticket, a done one, a held one, a blocked one,
-    // and opens the live ones in herdr.
-    const clickTargets = [pool.live[1]!, pool.quick[2]!, pool.conflicting[2]!, pool.blocked[0]!, pool.live[0]!];
-    const framed = [[...new Set([...clickTargets, ...pool.live])], [pool.quick[0]!]];
+    await browser.closeTab(warm);
+    // The cards the first tab presses. Cold clicks go round the server
+    // half's targets: a live Ticket, a done one, a held one, a blocked one.
+    // Hovered clicks go round other live and blocked Tickets, whose Detail
+    // tabs (Progress, Spec) have content to bring, and never a card a cold
+    // click presses, so no cold click lands on a card a hover subscribed.
+    // Open in herdr goes round the live ones.
+    const coldTargets = [pool.live[1]!, pool.quick[2]!, pool.conflicting[2]!, pool.blocked[0]!, pool.live[0]!];
+    const hoverTargets = [pool.live[2]!, pool.blocked[1]!, pool.live[3]!, pool.blocked[2]!];
+    const framed = [[...new Set([...coldTargets, ...hoverTargets, ...pool.live])], [pool.quick[0]!]];
     for (const [i, tab] of tabs.entries()) {
       if (!(await browser.frame(tab, framed[Math.min(i, 1)]!))) console.error(`tab ${i + 1}: not every card it presses fits in view`);
     }
+    // A hovered click rests the pointer on the card for long enough that a
+    // prefetch which works has landed: the Console's dwell before it
+    // subscribes, the round trip, and 200 ms for the server's reads and the
+    // page's apply. What is judged is that the click then draws the data in
+    // its own frame, not whether a hand is slower than the network.
+    const hoverMs = HOVER_DWELL_MS + rttMs + 200;
     // One press at a time: the probe times the next press it was armed for.
+    // After each, the pointer goes straight to bare canvas, so it rests on
+    // no card a click is about to press cold.
     let pressing: Promise<unknown> = Promise.resolve();
-    const press = (tab: BrowserTab, kind: "Click" | "Focus", id: string): Promise<boolean> => {
+    const press = (tab: BrowserTab, how: "cold" | "hover" | "focus", id: string): Promise<boolean> => {
       const run = pressing.then(async () => {
-        const at = await browser.evaluate<{ x: number; y: number } | null>(
+        const at = await browser.evaluate<Armed>(
           tab,
-          `window.__lagProbe.arm${kind}(${JSON.stringify(id)})`,
+          how === "focus"
+            ? `window.__lagProbe.armFocus(${JSON.stringify(id)})`
+            : `window.__lagProbe.armClick(${JSON.stringify(id)}, ${JSON.stringify(how)})`,
         );
         if (!at) return false;
+        if (how === "hover") {
+          await browser.move(tab, at);
+          await Bun.sleep(hoverMs);
+        }
         await browser.click(tab, at);
+        if (at.park) await browser.move(tab, at.park);
         return true;
       });
       pressing = run.catch(() => {});
       return run;
     };
-    for (const [i, tab] of tabs.entries()) await press(tab, "Click", i === 0 ? pool.live[0]! : pool.quick[0]!);
-    console.error(`settling with ${tabCount} browser tabs open, RTT ${rttMs} ms…`);
+    for (const [i, tab] of tabs.entries()) await press(tab, "cold", i === 0 ? pool.live[0]! : pool.quick[0]!);
+    // Where the pointer parks, found now the Detail is open, outside the window.
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.parkPoint()");
+    console.error(`settling with ${tabCount} browser tabs open, RTT ${rttMs} ms, the server on ${serverProtocol}…`);
     await Bun.sleep(5_000);
 
-    // 3. The window: the server half's schedule, made by hand on the first tab.
+    // 3. The window: the server half's schedule, made by hand on the first
+    //    tab, every other click a hovered one.
     console.error(`measuring for ${durationS}s…`);
     await serve.ask("begin", "begun");
     const before = await browser.metrics(tabs[0]!);
     for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.begin()");
-    const stream = countSnapshots(base);
+    const stream = countSnapshots(base, serverProtocol);
     const t0 = performance.now();
     const end = t0 + durationS * 1000;
     const pinger = pingUntil(base, end);
-    const unreachable = { click: 0, focus: 0 };
+    const unreachable = { cold: 0, hover: 0, focus: 0 };
     const clicker = (async () => {
       let k = 0;
       while (performance.now() < end - 3_000) {
-        if (!(await press(tabs[0]!, "Click", clickTargets[k++ % clickTargets.length]!))) unreachable.click++;
+        const how = k % 2 === 0 ? "cold" : "hover";
+        const targets = how === "cold" ? coldTargets : hoverTargets;
+        if (!(await press(tabs[0]!, how, targets[Math.floor(k / 2) % targets.length]!))) unreachable[how]++;
+        k++;
         await Bun.sleep(3_000);
       }
     })();
@@ -588,7 +694,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
       await Bun.sleep(1_500);
       let k = 0;
       while (performance.now() < end - 3_000) {
-        if (!(await press(tabs[0]!, "Focus", pool.live[k++ % pool.live.length]!))) unreachable.focus++;
+        if (!(await press(tabs[0]!, "focus", pool.live[k++ % pool.live.length]!))) unreachable.focus++;
         await Bun.sleep(3_000);
       }
     })();
@@ -601,11 +707,24 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const after = await browser.metrics(tabs[0]!);
     const report = (await serve.ask("report", "report")) as ServerResult["server"];
     const herdrCounts = ((await herdr.ask({ requests: true }, "requests")) as { counts: Record<string, number> }).counts;
+    const socketTrips = ((await proxy.ask({ trips: true }, "trips")) as { trips: SocketTrip[] }).trips;
+
+    // 4. The idle window: no input at all, the pointer parked on bare canvas,
+    //    every tab open and visible. Whatever the pages send now, they send
+    //    on their own.
+    console.error(`idle for ${idleS}s, no input…`);
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.idle()");
+    await Bun.sleep(idleS * 1000);
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.idleEnd()");
+    // A request the idle window started has its timing entry once it ends.
+    await Bun.sleep(1_000);
     const reports: ProbeReport[] = [];
     for (const tab of tabs) reports.push(await browser.evaluate<ProbeReport>(tab, "window.__lagProbe.report()"));
 
+    const measured = summarizeE2e(reports, { before, after }, { rttMs, socketTrips, unreachable, tickets: ticketCount, hoverMs });
     return {
-      ...summarizeE2e(reports, { before, after }, rttMs, unreachable),
+      ...measured,
+      serverProtocol,
       snapshots: {
         perSec: Math.round((streamed.count / elapsedS) * 100) / 100,
         meanBytes: Math.round(streamed.bytes / (streamed.count || 1)),
@@ -618,6 +737,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
         syncSpawnBlockedPercent: Math.round(report.syncSpawn.blockedPercent * 10) / 10,
       },
       herdrRequests: herdrCounts,
+      gates: evaluateGates(measured.gateInputs),
     };
   } finally {
     await browser.close();
@@ -678,19 +798,23 @@ const rows: [string, string][] = [];
 const ms = (s: { p50: number; p95: number; max: number }) => `p50 ${s.p50}  p95 ${s.p95}  max ${s.max} ms`;
 if (serverResult) {
   const s = serverResult;
+  const socket = s.protocol === "ws";
   rows.push(
-    ["load", `${s.tabs} tabs sharing ${CONNECTIONS_PER_HOST} connections, simulated RTT ${s.rttMs} ms, ${s.durationS} s`],
+    ["load", `${s.tabs} tabs ${socket ? "on a socket each" : `sharing ${CONNECTIONS_PER_HOST} connections over SSE`}, simulated RTT ${s.rttMs} ms, ${s.durationS} s`],
     ["pool", `${s.pool.tickets} tickets (${s.pool.done} done, ${s.pool.inProgress} in progress, ${s.pool.ready} waiting), ${s.pool.conversations} conversations, merge queue ${s.pool.mergeHold}, interrupts ${s.pool.interrupts}`],
     ["ping (GET, every 25 ms)", `${ms(s.pingMs)}  p99 ${s.pingMs.p99}  n=${s.pingMs.n}${s.pingFailures ? `  failed ${s.pingFailures}` : ""}`],
-    ["card click (events+log+body)", `${ms(s.clickMs)}  queued mean ${s.clickMs.queuedMean} ms  n=${s.clickMs.n}`],
-    ["Open in herdr (focus)", `${ms(s.focusMs)}  queued mean ${s.focusMs.queuedMean} ms  server p50 ${s.focusMs.serverP50} ms  n=${s.focusMs.n}`],
-    ["snapshots", `${s.snapshots.perSec}/s  mean ${Math.round(s.snapshots.meanBytes / 1024)} KiB  max ${Math.round(s.snapshots.maxBytes / 1024)} KiB  gap p50 ${s.snapshots.gapP50Ms} ms`],
+    [socket ? "card click (subscribe -> card)" : "card click (events+log+body)", `${ms(s.clickMs)}  queued mean ${s.clickMs.queuedMean} ms  n=${s.clickMs.n}`],
+    [socket ? "Open in herdr (request -> reply)" : "Open in herdr (focus)", `${ms(s.focusMs)}  queued mean ${s.focusMs.queuedMean} ms  server p50 ${s.focusMs.serverP50} ms  n=${s.focusMs.n}${s.unanswered ? `  UNANSWERED ${s.unanswered}` : ""}`],
+    [socket ? "snapshots (snapshot+delta)" : "snapshots", `${s.snapshots.perSec}/s  mean ${Math.round(s.snapshots.meanBytes / 1024)} KiB  max ${Math.round(s.snapshots.maxBytes / 1024)} KiB  gap p50 ${s.snapshots.gapP50Ms} ms`],
     ["server", `RSS ${s.server.rssStartMb} -> ${s.server.rssEndMb} MB  CPU ${s.server.cpuPercent}%`],
     ["server loop lag", `p50 ${s.server.loopLagMs.p50}  p95 ${s.server.loopLagMs.p95}  p99 ${s.server.loopLagMs.p99}  max ${Math.round(s.server.loopLagMs.max)} ms  >50ms ${s.server.loopLagMs.over50ms}x`],
     ["server sync spawns", `${s.server.syncSpawn.calls} calls, ${s.server.syncSpawn.totalMs} ms blocked (${s.server.syncSpawn.blockedPercent}% of the window); top: ${s.server.syncSpawn.byCommand.slice(0, 4).map((c) => `${c.cmd} ${c.calls}x/${c.totalMs}ms`).join(", ")}`],
   );
   for (const [kind, r] of Object.entries(s.requestsByKind).sort()) {
     rows.push([`  ${kind}`, `${r.perSec}/s  ${ms(r)}  queued mean ${r.queuedMean} ms  ${Math.round(r.meanBytes / 1024)} KiB`]);
+  }
+  for (const [type, r] of Object.entries(s.frames).sort()) {
+    rows.push([`  frames in: ${type}`, `${r.perSec}/s  mean ${r.meanBytes} B`]);
   }
 }
 if (uiResult) {
@@ -709,22 +833,56 @@ if (uiResult) {
 if (e2eResult) {
   const e = e2eResult;
   const kinds = Object.entries(e.click.tabs).map(([tab, n]) => `${n} ${tab}`).join(", ");
+  const frames = (s: { p50: number; p95: number; max: number }) => `p50 ${s.p50}  p95 ${s.p95}  max ${s.max} frames`;
+  const na = "n/a (no socket)";
+  const tally = (counts: Record<string, { count: number; bytes: number }>) =>
+    Object.entries(counts)
+      .sort()
+      .map(([type, t]) => `${type} ${t.count}x/${Math.round(t.bytes / 1024)} KiB`)
+      .join(", ") || "none";
+  const protocols = e.serverProtocol === e.protocol ? e.protocol : `server ${e.serverProtocol}, page ${e.protocol}`;
   rows.push(
-    ["e2e load", `${e.tabs} Chromium tabs on the built Console through a ${e.rttMs} ms RTT proxy, ${e.durationS} s, ${e.cards} cards, ${e.domNodes} DOM nodes`],
+    ["e2e load", `${e.tabs} Chromium tabs on the built Console through a ${e.rttMs} ms RTT proxy, ${e.durationS} s, ${e.cards} cards, ${e.domNodes} DOM nodes, protocol ${protocols}`],
+    ["e2e start -> usable", `${ms(e.start.usableMs)}  each ${e.start.each.map((v) => v ?? "never").join(", ")}`],
+    ...e.start.breakdown.map((b, i): [string, string] => [
+      `e2e   tab ${i + 1} from navigation`,
+      `HTML ${b.htmlMs ?? "?"} -> script ${b.scriptMs ?? "?"} -> cards committed ${b.committedMs ?? "never"} -> painted ${b.paintedMs ?? "never"} ms; first socket frame ${b.socketAt ?? "none"} ms`,
+    ]),
     ["e2e snapshots", `${e.snapshots.perSec}/s  mean ${Math.round(e.snapshots.meanBytes / 1024)} KiB`],
-    ["e2e card click -> shell", `${ms(e.click.shellMs)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
-    ["e2e card click -> data", `${ms(e.click.dataMs)}  n=${e.click.dataMs.n}  unfilled ${e.click.unfilled}  missed ${e.click.missed}  unreachable ${e.click.unreachable}`],
+    ["e2e card click -> shell", `${ms(e.click.shellMs)}; ${frames(e.click.shellFrames)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
+    ["e2e cold click -> data", `${ms(e.click.cold.dataMs)}  n=${e.click.cold.n}  not cold ${e.click.notCold}  unreachable ${e.click.unreachable.cold}`],
+    ["e2e   card frame at the network", e.click.cold.networkMs ? `${ms(e.click.cold.networkMs)}  n=${e.click.cold.networkMs.n}` : na],
+    ["e2e   handled -> painted", e.click.cold.pageFrames ? `${frames(e.click.cold.pageFrames)}  n=${e.click.cold.pageFrames.n}` : na],
+    ["e2e cold click -> card frame", e.click.cold.cardFrameMs ? `${ms(e.click.cold.cardFrameMs)}  n=${e.click.cold.cardFrameMs.n}` : na],
+    ["e2e   of which -> subscribe sent", e.click.cold.toSubscribeMs ? ms(e.click.cold.toSubscribeMs) : na],
+    ["e2e hovered click -> data", `${frames(e.click.hover.dataFrames)}; ${ms(e.click.hover.dataMs)}  n=${e.click.hover.n}  hover ${e.click.hoverMs} ms  prefetched ${e.click.hover.prefetched ?? na}  unreachable ${e.click.unreachable.hover}`],
+    ["e2e   clicks unfilled, missed", `${e.click.unfilled} never showed their data, ${e.click.missed} landed elsewhere`],
     ["e2e   of which Progress", `${ms(e.click.progressDataMs)}  n=${e.click.progressDataMs.n} (timeline and log tail)`],
-    ["e2e Open in herdr -> fetch", ms(e.focus.toFetchMs)],
-    ["e2e Open in herdr -> request", ms(e.focus.toRequestMs)],
-    ["e2e Open in herdr -> response", `${ms(e.focus.toResponseMs)}  n=${e.focus.toResponseMs.n}`],
+    ["e2e Open in herdr -> feedback", `${frames(e.focus.feedbackFrames)}  n=${e.focus.feedbackFrames.n}`],
+    ["e2e Open in herdr -> answered", `${ms(e.focus.answeredMs)}  n=${e.focus.answeredMs.n} (socket ${e.focus.answeredVia.socket}, http ${e.focus.answeredVia.http})  unanswered ${e.focus.unanswered}`],
+    ["e2e   of which -> request sent", e.focus.toRequestFrameMs ? ms(e.focus.toRequestFrameMs) : na],
+    ["e2e   page handled the reply", e.focus.handledMs ? `${ms(e.focus.handledMs)} (held behind the press's frame)` : na],
+    ["e2e Open in herdr -> fetch", e.focus.toFetchMs.n ? ms(e.focus.toFetchMs) : "none (no HTTP)"],
     ["e2e Open in herdr -> confirmed", `${ms(e.focus.confirmedMs)}  unconfirmed ${e.focus.unconfirmed}  missed ${e.focus.missed}  unreachable ${e.focus.unreachable}`],
     ["e2e renders (mutation batches)", `${e.renders.batchesPerSec}/s  frames with mutations ${e.renders.framesWithMutationsPerSec}/s  records ${e.renders.recordsPerSec}/s`],
     ["e2e main thread", `busy ${e.mainThread.busyPct}%  script ${e.mainThread.scriptMs} ms  layout ${e.mainThread.layoutMs} ms (${e.mainThread.layouts}x)  style ${e.mainThread.styleMs} ms (${e.mainThread.styleRecalcs}x)`],
     ["e2e long tasks", `${e.longTasks.count} (longest ${e.longTasks.longestMs} ms, total ${e.longTasks.totalMs} ms, >100ms ${e.longTasks.over100ms}x); long frames ${e.longFrames.count}, longest ${e.longFrames.longestMs} ms`],
     ["e2e frames", `${e.frames.perSec}/s  gap p50 ${e.frames.gapMs.p50}  p95 ${e.frames.gapMs.p95}  max ${e.frames.gapMs.max} ms, ${e.frames.over50ms} over 50 ms`],
-    ["e2e requests in flight", `max ${e.requests.inFlight.max}  mean ${e.requests.inFlight.mean}; on the wire max ${e.requests.onWire.max}  mean ${e.requests.onWire.mean} (+1 stream per tab)`],
+    [
+      "e2e frames over budget",
+      e.frames.tabs
+        .map((f, i) => {
+          const at = f.overAt.slice(0, 5).map((t) => `+${Math.round(t / 100) / 10}s`).join(" ");
+          return `tab ${i + 1}: ${f.over} of ${f.frames}${at ? ` at ${at}${f.over > 5 ? " ..." : ""}` : ""} (interval ${f.intervalMs} ms, longest gap ${f.longestGapMs} ms, idle from +${Math.round(e.idle.fromMs[i]! / 100) / 10}s)`;
+        })
+        .join("; "),
+    ],
+    ["e2e requests in flight", `max ${e.requests.inFlight.max}  mean ${e.requests.inFlight.mean}; on the wire max ${e.requests.onWire.max}  mean ${e.requests.onWire.mean}${e.protocol === "sse" ? " (+1 stream per tab)" : ""}`],
     ["e2e wait for a connection", `${ms(e.requests.waitForConnectionMs)}  ${e.requests.perSec} requests/s`],
+    ["e2e socket frames sent", e.ws ? tally(e.ws.sent) : na],
+    ["e2e socket frames received", e.ws ? tally(e.ws.received) : na],
+    ["e2e idle window", e.idle.tabs.map((t, i) => `tab ${i + 1}: ${Math.round(t.ms / 100) / 10} s, ${t.resources} resources, ${t.fetches} fetches, ${t.socketFramesSent} frames sent`).join("; ")],
+    ["e2e   idle frames received", e.ws ? tally(e.idle.received) : na],
     ["e2e server", `ping ${ms(e.server.pingMs)}  CPU ${e.server.cpuPercent}%  loop lag p95 ${e.server.loopLagMs.p95} ms  sync spawns ${e.server.syncSpawnBlockedPercent}% of the window`],
   );
   for (const [kind, r] of Object.entries(e.requests.byKind)) {
@@ -735,8 +893,16 @@ const width = Math.max(...rows.map(([k]) => k.length));
 console.log(`\nlag bench: ${result.revision} (${repo}), load average at start ${loadavgAtStart.join(" ")}`);
 for (const [k, v] of rows) console.log(`${k.padEnd(width)}  ${v}`);
 
+// The gates: an end-to-end run fails when any one is missed.
+const gates = e2eResult?.gates ?? null;
+if (gates) {
+  if (idleS * 1000 < IDLE_MIN_MS) console.log(`\n--idle ${idleS} is under the polling gate's ${IDLE_MIN_MS / 1000} s`);
+  console.log(`\ngates (RTT ${rttMs} ms):`);
+  for (const line of formatGates(gates)) console.log(`  ${line}`);
+}
+
 if (outPath) {
   writeFileSync(outPath, JSON.stringify(result, null, 2) + "\n");
   console.log(`\nwrote ${outPath}`);
 }
-process.exit(0);
+process.exit(gates && gates.some((gate) => !gate.pass) ? 1 : 0);

@@ -1,14 +1,25 @@
 /**
  * The lag bench's load: what N open Console tabs ask the server for, and the
  * operator's clicks timed through the same constraint a browser puts on them.
+ * A tab speaks whichever protocol the server under test does
+ * (detectProtocol): the push protocol over one WebSocket (issue #161,
+ * ADR-0032), or, on a checkout from before it, the SSE stream and polls.
  *
- * A browser speaks HTTP/1.1 to the pool server and holds at most six
- * connections per host for the whole browser, not per tab, and every open
- * tab's snapshot stream keeps one of them for good: two tabs on one pool
- * leave four for everything else. A click's fetch queues behind whatever
- * polls are already out. The simulated tabs share one such budget, and each
- * mirrors the real stores' request pattern (ui/src/session.ts, vitals.ts,
- * terminal.ts):
+ * Over the push protocol each tab holds one socket, says hello as visible
+ * with its selected card subscribed, and sends nothing else on its own: the
+ * server checks activity, peeks and grades once for every tab and pushes
+ * what moved. A card click is an unsubscribe of the card it leaves and a
+ * subscribe of the new one, timed to the new card's first `card` frame; Open
+ * in herdr is a `terminal.focus` request, timed to its reply. The socket
+ * takes no HTTP connection.
+ *
+ * Over the old protocol a browser speaks HTTP/1.1 to the pool server and
+ * holds at most six connections per host for the whole browser, not per
+ * tab, and every open tab's snapshot stream keeps one of them for good: two
+ * tabs on one pool leave four for everything else. A click's fetch queues
+ * behind whatever polls are already out. The simulated tabs share one such
+ * budget, and each mirrors the old stores' request pattern
+ * (ui/src/session.ts, vitals.ts, terminal.ts):
  *
  * - every snapshot: /api/grades; the selected card's /api/events and then
  *   its log tail; /api/activity for every in-progress or checkpoint Ticket;
@@ -16,11 +27,67 @@
  *   Conversations'), each skipped while that id's previous one is in flight;
  * - every 2 s: the same activity and peek polls, on their own timers.
  *
- * The probes then time what the operator feels: a card click (the body,
- * events, then the log pane's two reads), Open in herdr (POST
+ * The probes then time what the operator feels there: a card click (the
+ * body, events, then the log pane's two reads), Open in herdr (POST
  * /api/terminal/focus), from the moment of the click to the last byte, with
  * the time spent queued for a connection broken out.
  */
+
+import {
+  decodeServerMessage,
+  encodeMessage,
+  PROTOCOL_VERSION,
+  WS_PATH,
+  type ClientMessage,
+  type ServerMessage,
+} from "../../engine/protocol.ts";
+
+/** What a server under test speaks to its Console. */
+export type Protocol = "ws" | "sse";
+
+/** The server's socket URL, from its http base. */
+export function socketUrl(base: string): string {
+  return base.replace(/^http/, "ws") + WS_PATH;
+}
+
+/**
+ * Which protocol the server at `base` speaks: the push protocol when a
+ * socket at WS_PATH opens and says hello, the SSE stream when /api/stream
+ * answers as one. Asked of the running server, not read off the checkout,
+ * so a checkout part way through the change is measured as what it serves.
+ */
+export async function detectProtocol(base: string, timeoutMs = 5_000): Promise<Protocol> {
+  const hello = await new Promise<boolean>((resolve) => {
+    const socket = new WebSocket(socketUrl(base));
+    let settled = false;
+    // The first word counts: Bun runs onclose inside close(), so settle before it.
+    const done = (said: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(said);
+      socket.close();
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    socket.onmessage = (event) => {
+      try {
+        done(decodeServerMessage(String(event.data)).type === "hello");
+      } catch {
+        done(false);
+      }
+    };
+    socket.onerror = () => done(false);
+    socket.onclose = () => done(false);
+  });
+  if (hello) return "ws";
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  const res = await fetch(`${base}/api/stream`, { signal: abort.signal }).catch(() => null);
+  clearTimeout(timer);
+  abort.abort();
+  if (res?.ok && (res.headers.get("content-type") ?? "").includes("text/event-stream")) return "sse";
+  throw new Error(`${base} serves neither a socket at ${WS_PATH} nor an SSE stream at /api/stream`);
+}
 
 export interface Timing {
   /** Waiting for one of the tab's connections. */
@@ -116,11 +183,19 @@ interface WireSnapshot {
 }
 
 export interface TabStats {
+  /** Snapshots: each SSE snapshot event, or each socket `snapshot` and `delta` frame. */
   snapshots: number;
   snapshotBytes: number[];
   snapshotArrivals: number[];
   requests: Record<string, Timing[]>;
+  /** Every frame the tab's socket took, by type (none over SSE). */
+  frames: Record<string, { count: number; bytes: number }>;
+  /** Clicks and Open in herdrs the socket never answered within ANSWER_TIMEOUT_MS. */
+  unanswered: number;
 }
+
+/** How long a socket tab waits for a card frame or a reply before giving up on it. */
+const ANSWER_TIMEOUT_MS = 10_000;
 
 const POLL_MS = 2_000;
 /** The log pane's first window: the last 64 KiB (ui/src/project.ts). */
@@ -139,7 +214,14 @@ export const CONNECTIONS_PER_HOST = 6;
 
 /** One open Console tab. */
 export class Tab {
-  readonly stats: TabStats = { snapshots: 0, snapshotBytes: [], snapshotArrivals: [], requests: {} };
+  readonly stats: TabStats = {
+    snapshots: 0,
+    snapshotBytes: [],
+    snapshotArrivals: [],
+    requests: {},
+    frames: {},
+    unanswered: 0,
+  };
   latest: WireSnapshot | null = null;
   /** The card this tab has open in the Detail: a ticket id or null. */
   selected: string | null;
@@ -149,12 +231,19 @@ export class Tab {
   private timers: ReturnType<typeof setInterval>[] = [];
   private abort = new AbortController();
   private recording = false;
+  // The push protocol's socket, its request numbers and who waits on what.
+  private socket: WebSocket | null = null;
+  private nextRequest = 1;
+  private readonly replies = new Map<number, (reply: Extract<ServerMessage, { type: "reply" }>) => void>();
+  private readonly cardWaiters = new Map<string, (() => void)[]>();
 
   constructor(
     private readonly base: string,
     /** The browser's connections to this host, shared with its other tabs. */
     readonly pool: ConnectionPool,
     selected: string | null,
+    /** What the server speaks; a socket tab takes none of the HTTP connections. */
+    readonly protocol: Protocol = "sse",
   ) {
     this.selected = selected;
   }
@@ -179,6 +268,7 @@ export class Tab {
   }
 
   async open(): Promise<void> {
+    if (this.protocol === "ws") return this.openSocket();
     // The stream holds one of the browser's six connections for the tab's life.
     await this.pool.acquire();
     const res = await fetch(`${this.base}/api/stream`, { signal: this.abort.signal });
@@ -187,10 +277,118 @@ export class Tab {
   }
 
   close(): void {
+    if (this.protocol === "ws") {
+      this.socket?.close();
+      return;
+    }
     for (const t of this.timers) clearInterval(t);
     this.abort.abort();
     this.pool.release();
   }
+
+  // --- the push protocol --------------------------------------------------------
+
+  /** One socket for the tab's life, visible, with its selected card subscribed. */
+  private openSocket(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(socketUrl(this.base));
+      this.socket = socket;
+      socket.onopen = () => {
+        this.send({
+          type: "hello",
+          protocol: PROTOCOL_VERSION,
+          visible: true,
+          cards: this.selected ? [{ id: this.selected }] : [],
+        });
+        resolve();
+      };
+      socket.onerror = () => reject(new Error(`could not open ${socketUrl(this.base)}`));
+      socket.onmessage = (event) => this.onFrame(String(event.data));
+    });
+  }
+
+  private send(message: ClientMessage): void {
+    this.socket?.send(encodeMessage(message));
+  }
+
+  private onFrame(text: string): void {
+    const message = decodeServerMessage(text);
+    const bytes = Buffer.byteLength(text);
+    if (this.recording) {
+      const tally = (this.stats.frames[message.type] ??= { count: 0, bytes: 0 });
+      tally.count++;
+      tally.bytes += bytes;
+      if (message.type === "snapshot" || message.type === "delta") {
+        this.stats.snapshots++;
+        this.stats.snapshotBytes.push(bytes);
+        this.stats.snapshotArrivals.push(performance.now());
+      }
+    }
+    if (message.type === "card") {
+      for (const wake of this.cardWaiters.get(message.id)?.splice(0) ?? []) wake();
+    } else if (message.type === "reply") {
+      this.replies.get(message.id)?.(message);
+      this.replies.delete(message.id);
+    }
+  }
+
+  /** Resolves true on the next `card` frame for `id`, false after ANSWER_TIMEOUT_MS. */
+  private nextCard(id: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ANSWER_TIMEOUT_MS);
+      (this.cardWaiters.get(id) ?? this.cardWaiters.set(id, []).get(id)!).push(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+
+  /** A click over the socket: leave the old card, subscribe the new one, until its first frame. */
+  private async clickOverSocket(id: string): Promise<{ totalMs: number; queuedMs: number; requests: number }> {
+    const previous = this.selected;
+    this.selected = id;
+    const t0 = performance.now();
+    const halfTrip = simulatedRttMs / 2;
+    if (halfTrip) await Bun.sleep(halfTrip);
+    const arrived = this.nextCard(id);
+    if (previous !== null) this.send({ type: "unsubscribe", id: previous });
+    this.send({ type: "subscribe", card: { id } });
+    if (!(await arrived)) this.stats.unanswered++;
+    if (halfTrip) await Bun.sleep(halfTrip);
+    return { totalMs: performance.now() - t0, queuedMs: 0, requests: 1 };
+  }
+
+  /** Open in herdr over the socket: a terminal.focus request, until its reply. */
+  private async focusOverSocket(id: string): Promise<Timing> {
+    const t0 = performance.now();
+    const halfTrip = simulatedRttMs / 2;
+    if (halfTrip) await Bun.sleep(halfTrip);
+    const n = this.nextRequest++;
+    const reply = new Promise<Extract<ServerMessage, { type: "reply" }> | null>((resolve) => {
+      const timer = setTimeout(() => {
+        this.replies.delete(n);
+        resolve(null);
+      }, ANSWER_TIMEOUT_MS);
+      this.replies.set(n, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
+    });
+    this.send({ type: "request", id: n, kind: "terminal.focus", payload: { ticketId: id } });
+    const answer = await reply;
+    if (!answer) this.stats.unanswered++;
+    if (halfTrip) await Bun.sleep(halfTrip);
+    const totalMs = performance.now() - t0;
+    return {
+      queuedMs: 0,
+      serverMs: totalMs,
+      totalMs,
+      status: answer === null ? 0 : answer.ok ? 200 : answer.refusal.status,
+      bytes: 0,
+    };
+  }
+
+  // --- the SSE stream and polls ------------------------------------------------
 
   private async readStream(res: Response): Promise<void> {
     const reader = res.body!.getReader();
@@ -272,11 +470,13 @@ export class Tab {
   }
 
   /**
-   * A card click, as the session and log pane make it: the body once, the
-   * events, then the log pane's probe of the size and its tail window. The
-   * tab's selection moves too, so its later snapshot refetches follow.
+   * A card click. Over the socket, a subscribe (clickOverSocket). Over SSE,
+   * as the old session and log pane made it: the body once, the events,
+   * then the log pane's probe of the size and its tail window. The tab's
+   * selection moves too, so its later snapshot refetches follow.
    */
   async click(id: string): Promise<{ totalMs: number; queuedMs: number; requests: number }> {
+    if (this.protocol === "ws") return this.clickOverSocket(id);
     this.selected = id;
     const t0 = performance.now();
     let queued = 0;
@@ -307,6 +507,7 @@ export class Tab {
 
   /** Open in herdr. */
   focus(id: string): Promise<Timing> {
+    if (this.protocol === "ws") return this.focusOverSocket(id);
     return timedFetch(this.pool, `${this.base}/api/terminal/focus?ticket=${id}`, { method: "POST" });
   }
 }
