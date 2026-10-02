@@ -17,6 +17,7 @@ import {
   HOVER_SUBSCRIPTIONS,
   type CardSubscription,
   type LogFollow,
+  type LogFollowResult,
   type PushedSnapshot,
   type RequestKind,
   type RequestPayload,
@@ -58,7 +59,6 @@ import {
   type TicketBodyResponse,
   type TicketEventsResponse,
   type TicketGradeSummary,
-  type TicketLogResponse,
   type TicketStatus,
   type TimelineView,
   type VitalsState,
@@ -86,7 +86,7 @@ export interface SessionSocket {
   request<K extends RequestKind>(kind: K, payload: RequestPayload<K>): Promise<RequestResult<K>>;
   subscribe(card: CardSubscription): void;
   unsubscribe(id: string): void;
-  follow(id: string, follow: LogFollow): Promise<TicketLogResponse>;
+  follow(id: string, follow: LogFollow): Promise<LogFollowResult>;
 }
 
 export interface ConsoleSessionOptions {

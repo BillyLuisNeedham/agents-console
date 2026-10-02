@@ -8,6 +8,7 @@ import {
   toPushed,
   type CardSubscription,
   type LogFollow,
+  type LogFollowResult,
   type LogPush,
   type RequestKind,
   type ServerMessage,
@@ -24,7 +25,6 @@ import {
   type HeldSpawnView,
   type TicketEventKind,
   type TicketEventsResponse,
-  type TicketLogResponse,
 } from "./project";
 
 /** The Reassign view the wire carries per ticket (issue #126), derived so a
@@ -202,7 +202,7 @@ interface SentRequest {
 function rig() {
   const requests: SentRequest[] = [];
   const subscriptions: string[] = [];
-  const follows: { id: string; follow: LogFollow; deferred: Deferred<TicketLogResponse> }[] = [];
+  const follows: { id: string; follow: LogFollow; deferred: Deferred<LogFollowResult> }[] = [];
   const probes: number[] = [];
   const relaunched: number[] = [];
   const activity: unknown[] = [];
@@ -227,7 +227,7 @@ function rig() {
         subscriptions.push(`-${id}`);
       },
       follow: (id, follow) => {
-        const d = deferred<TicketLogResponse>();
+        const d = deferred<LogFollowResult>();
         follows.push({ id, follow, deferred: d });
         return d.promise;
       },

@@ -1,7 +1,12 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import type { LogFollow, LogPush, LogReadRequest } from "../../engine/protocol.ts";
+import type {
+  LogFollow,
+  LogFollowResult,
+  LogPush,
+  LogReadRequest,
+} from "../../engine/protocol.ts";
 import { LOG_PANE_MAX_CHARS, LogPane, noteLogScroll } from "./log-pane";
 import { earlierLogOffset, type TicketLogResponse } from "./project";
 
@@ -66,18 +71,23 @@ function response(
   return { content, offset, nextOffset, totalSize, attempts };
 }
 
+/** A `log.follow` reply: the window, naming the attempt and variant read. */
+function followed(attempt: number, stream: boolean, window: TicketLogResponse): LogFollowResult {
+  return { ...window, attempt, stream };
+}
+
 /**
  * A pane over hand-settled seams: every follow and read parks on a deferred
  * the test settles when it chooses, and repaints are counted, so a test
  * pins what was asked and when the pane repainted before any answer lands.
  */
 function rig() {
-  const follows: { ticketId: string; follow: LogFollow; d: Deferred<TicketLogResponse> }[] = [];
+  const follows: { ticketId: string; follow: LogFollow; d: Deferred<LogFollowResult> }[] = [];
   const reads: { request: LogReadRequest; d: Deferred<TicketLogResponse> }[] = [];
   let changes = 0;
   const pane = new LogPane({
     follow: (ticketId, follow) => {
-      const d = deferred<TicketLogResponse>();
+      const d = deferred<LogFollowResult>();
       follows.push({ ticketId, follow, d });
       return d.promise;
     },
@@ -184,17 +194,23 @@ describe("LogPane appends", () => {
     // While the follow is out, appends wait for its window.
     r.pane.push("01", appendPush("def", 3));
     expect(r.pane.state.content).toBe("abc");
-    r.follows[0]!.d.resolve(response("fresh tail", 100, 110, 110, [attemptRow(1)]));
+    // A follow of the latest attempt: the reply names the attempt the server
+    // read, here a newer one than the pane held.
+    r.follows[0]!.d.resolve(
+      followed(2, false, response("fresh tail", 100, 110, 110, [attemptRow(1), attemptRow(2)])),
+    );
     await flush();
     expect(r.pane.state).toMatchObject({
-      attempt: 1,
+      attempt: 2,
       stream: false,
       content: "fresh tail",
       firstOffset: 100,
       offset: 110,
       totalSize: 110,
     });
-    r.pane.push("01", appendPush("!", 110));
+    r.pane.push("01", appendPush("stale", 110));
+    expect(r.pane.state.content).toBe("fresh tail");
+    r.pane.push("01", appendPush("!", 110, { attempt: 2 }));
     expect(r.pane.state.content).toBe("fresh tail!");
   });
 
@@ -203,7 +219,7 @@ describe("LogPane appends", () => {
     r.pane.show("01");
     r.pane.push("01", windowPush("one", 0, 3, 3, { attempt: 3 }));
     r.pane.selectStream("01", 2);
-    r.follows[0]!.d.resolve(response("stream", 0, 6, 6));
+    r.follows[0]!.d.resolve(followed(2, true, response("stream", 0, 6, 6)));
     await flush();
     expect(r.pane.state).toMatchObject({ attempt: 2, stream: true, clicked: true, content: "stream" });
     r.pane.push("01", appendPush("gap", 50, { attempt: 2, stream: true }));
@@ -223,7 +239,9 @@ describe("LogPane picked attempts", () => {
     expect(r.pane.state).toMatchObject({ attempt: 1, clicked: true, stream: false, content: "" });
     expect(r.follows).toHaveLength(1);
     expect(r.follows[0]).toMatchObject({ ticketId: "01", follow: { attempt: 1, stream: false } });
-    r.follows[0]!.d.resolve(response("one", 7, 10, 10, [attemptRow(1), attemptRow(2)]));
+    r.follows[0]!.d.resolve(
+      followed(1, false, response("one", 7, 10, 10, [attemptRow(1), attemptRow(2)])),
+    );
     await flush();
     expect(r.pane.state).toMatchObject({
       attempt: 1,
@@ -243,7 +261,7 @@ describe("LogPane picked attempts", () => {
     r.pane.selectStream("01", 1);
     expect(r.pane.state).toMatchObject({ attempt: 1, stream: true, clicked: true, content: "" });
     expect(r.follows[0]).toMatchObject({ follow: { attempt: 1, stream: true } });
-    r.follows[0]!.d.resolve(response("{\"raw\":1}", 0, 9, 9));
+    r.follows[0]!.d.resolve(followed(1, true, response("{\"raw\":1}", 0, 9, 9)));
     await flush();
     expect(r.pane.state).toMatchObject({ stream: true, content: "{\"raw\":1}" });
   });
@@ -256,7 +274,7 @@ describe("LogPane picked attempts", () => {
     expect(r.follows).toHaveLength(0);
     r.pane.selectStream("01", 1);
     expect(r.follows).toHaveLength(1);
-    r.follows[0]!.d.resolve(response("raw", 0, 3, 3));
+    r.follows[0]!.d.resolve(followed(1, true, response("raw", 0, 3, 3)));
     await flush();
     r.pane.selectStream("01", 1);
     expect(r.follows).toHaveLength(1);
@@ -271,10 +289,10 @@ describe("LogPane picked attempts", () => {
     r.pane.push("01", windowPush("three", 0, 5, 5, { attempt: 3 }));
     r.pane.selectAttempt("01", 1);
     r.pane.selectAttempt("01", 2);
-    r.follows[0]!.d.resolve(response("one", 0, 3, 3));
+    r.follows[0]!.d.resolve(followed(1, false, response("one", 0, 3, 3)));
     await flush();
     expect(r.pane.state).toMatchObject({ attempt: 2, content: "" });
-    r.follows[1]!.d.resolve(response("two", 0, 3, 3));
+    r.follows[1]!.d.resolve(followed(2, false, response("two", 0, 3, 3)));
     await flush();
     expect(r.pane.state).toMatchObject({ attempt: 2, content: "two" });
   });
@@ -286,7 +304,7 @@ describe("LogPane picked attempts", () => {
     r.pane.selectAttempt("01", 1);
     r.pane.push("01", windowPush("new latest", 0, 10, 10, { attempt: 3 }));
     expect(r.pane.state).toMatchObject({ attempt: 1, content: "" });
-    r.follows[0]!.d.resolve(response("one", 0, 3, 3));
+    r.follows[0]!.d.resolve(followed(1, false, response("one", 0, 3, 3)));
     await flush();
     expect(r.pane.state).toMatchObject({ attempt: 1, content: "one" });
   });
@@ -347,7 +365,7 @@ describe("LogPane.loadEarlier", () => {
     const r = rig();
     r.pane.show("01");
     r.pane.selectStream("01", 1);
-    r.follows[0]!.d.resolve(response("raw", 900, 903, 903));
+    r.follows[0]!.d.resolve(followed(1, true, response("raw", 900, 903, 903)));
     await flush();
     void r.pane.loadEarlier("01", 1);
     expect(r.reads[0]!.request).toMatchObject({ stream: true, end: 900 });
@@ -455,7 +473,7 @@ describe("LogPane prefetch (issue #161)", () => {
     r.pane.push("02", windowPush("again", 0, 5, 5));
     r.pane.selectAttempt("02", 4);
     r.pane.forget("02");
-    r.follows[0]!.d.resolve(response("late", 0, 4, 4));
+    r.follows[0]!.d.resolve(followed(4, false, response("late", 0, 4, 4)));
     await flush();
     expect(r.pane.state).toMatchObject({ ticketId: "02", attempt: null, content: "" });
   });

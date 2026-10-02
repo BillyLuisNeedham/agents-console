@@ -341,7 +341,12 @@ const socket: SessionSocket = {
     );
   },
   unsubscribe: () => {},
-  follow: () => Promise.resolve(logChunk(Math.max(0, LOG_TEXT.length - 64 * 1024))),
+  follow: (_id, follow) =>
+    Promise.resolve({
+      ...logChunk(Math.max(0, LOG_TEXT.length - 64 * 1024)),
+      attempt: follow.attempt ?? 2,
+      stream: follow.stream,
+    }),
 };
 
 const session = new ConsoleSession({

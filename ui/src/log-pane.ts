@@ -19,7 +19,12 @@
  */
 
 import { earlierLogOffset, logAtBottom, type TicketLogResponse } from "./project";
-import type { LogFollow, LogPush, LogReadRequest } from "../../engine/protocol.ts";
+import type {
+  LogFollow,
+  LogFollowResult,
+  LogPush,
+  LogReadRequest,
+} from "../../engine/protocol.ts";
 
 /**
  * The most text the pane holds while it follows the tail: four of the
@@ -32,8 +37,8 @@ export const LOG_PANE_MAX_CHARS = 256 * 1024;
 
 export interface LogPaneOptions {
   /** Point a subscribed card's appends at another attempt or variant;
-   *  answers with that log's tail window. */
-  follow: (ticketId: string, follow: LogFollow) => Promise<TicketLogResponse>;
+   *  answers with that log's tail window, naming the attempt and variant. */
+  follow: (ticketId: string, follow: LogFollow) => Promise<LogFollowResult>;
   /** One byte range of an attempt's log: how "load earlier" reads. */
   read: (request: LogReadRequest) => Promise<TicketLogResponse>;
   /** Called after every change to the shown log the view should repaint. */
@@ -284,16 +289,9 @@ export class LogPane {
       const window = await this.followSeam(entry.ticketId, follow);
       if (!this.isCurrent(entry, generation)) return;
       entry.following = false;
-      this.replace(
-        entry,
-        {
-          mode: "window",
-          attempt: follow.attempt ?? entry.attempt ?? latestAttempt(window),
-          stream: follow.stream,
-          ...window,
-        },
-        follow.stream,
-      );
+      // The reply names the attempt and variant the server read, which is
+      // how a follow of the latest attempt learns which one that is.
+      this.replace(entry, { mode: "window", ...window }, window.stream);
       entry.attempts = window.attempts;
       this.changed(entry.ticketId);
     } catch {
@@ -332,11 +330,6 @@ export class LogPane {
   private changed(ticketId: string): void {
     if (ticketId === this.shown) this.onChange();
   }
-}
-
-/** The latest attempt a log response lists, for a follow of the latest. */
-function latestAttempt(response: TicketLogResponse): number {
-  return response.attempts.reduce((max, row) => Math.max(max, row.attempt), 0);
 }
 
 /**

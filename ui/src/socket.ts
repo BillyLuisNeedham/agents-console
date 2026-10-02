@@ -31,6 +31,7 @@ import {
   type ClientMessage,
   type EmbeddedBoot,
   type LogFollow,
+  type LogFollowResult,
   type PushedSnapshot,
   type Refusal,
   type RequestKind,
@@ -40,7 +41,6 @@ import {
   type SnapshotDelta,
   type SocketLike,
 } from "../../engine/protocol.ts";
-import type { TicketLogResponse } from "../../engine/wire.ts";
 
 /** A `live` frame: the activity, peeks and grades that moved. */
 export type LiveMessage = Extract<ServerMessage, { type: "live" }>;
@@ -223,7 +223,7 @@ export class ConsoleSocket {
    * follow the next hello carries, and a `log.follow` request whose reply
    * is the new tail window.
    */
-  follow(id: string, follow: LogFollow): Promise<TicketLogResponse> {
+  follow(id: string, follow: LogFollow): Promise<LogFollowResult> {
     if (this.cards.has(id)) this.cards.set(id, { id, follow });
     return this.request("log.follow", { id, ...follow });
   }
