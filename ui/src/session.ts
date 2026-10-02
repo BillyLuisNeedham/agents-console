@@ -66,8 +66,11 @@ export interface SessionTerminal {
 
 export interface ConsoleSessionOptions {
   getState: () => Promise<EnrichedSnapshot | null>;
-  getEvents: (id: string) => Promise<TicketEventsResponse>;
-  getTicket: (id: string) => Promise<TicketBodyResponse | null>;
+  /** The selected card's events; the signal aborts it once the selection
+   *  moves on. */
+  getEvents: (id: string, signal?: AbortSignal) => Promise<TicketEventsResponse>;
+  /** The selected ticket's body, aborted the same way. */
+  getTicket: (id: string, signal?: AbortSignal) => Promise<TicketBodyResponse | null>;
   getGrades: () => Promise<Record<string, TicketGradeSummary>>;
   /** The log pane's byte-range fetch, handed to the LogPane the session owns. */
   getLog: LogFetch;
@@ -215,6 +218,12 @@ export class ConsoleSession {
     ticketId: null,
     view: null,
   };
+  // The events fetch out for the selected card, one at a time (issue #157):
+  // a snapshot landing while it is out owes one refetch after it, never a
+  // second alongside, and a new selection aborts it, so clicking across
+  // cards never queues fetches for cards already left behind.
+  private timelineFetch: { id: string; abort: AbortController; owed: boolean } | null =
+    null;
 
   // The latest grade per ticket, for the card summaries; refetched on the
   // snapshot cadence. Absent until the first fetch lands: the cards render
@@ -226,9 +235,11 @@ export class ConsoleSession {
   // Ticket bodies for the Spec tab: fetched once per ticket on first
   // selection and held for the session; a 404 caches null so a known-missing
   // body is never refetched. A failed fetch surfaces on the Spec tab, and
-  // the next selection retries because nothing was cached.
+  // the next selection retries because nothing was cached. A fetch still out
+  // when the selection leaves its ticket is aborted and caches nothing, so
+  // the next selection of that ticket asks again.
   private readonly ticketBodies = new Map<string, string | null>();
-  private readonly ticketBodyFetches = new Set<string>();
+  private readonly ticketBodyFetches = new Map<string, AbortController>();
   private readonly ticketBodyErrors = new Map<string, string>();
 
   // The manually chosen Detail tab, carrying its ticket id: the projection
@@ -329,7 +340,7 @@ export class ConsoleSession {
       // otherwise start a second poll.
       this.awaitRelaunch(this.restartPort);
     }
-    if (this.selectedId) void this.loadTimeline();
+    if (this.selectedId) this.refetchTimeline();
     this.refreshGrades();
     this.onChange();
   }
@@ -384,14 +395,20 @@ export class ConsoleSession {
 
   /**
    * The selection, reported by the view: hold it, fetch the newly selected
-   * ticket's body once, reload the timeline, and repaint.
+   * ticket's body once, reload the timeline, and repaint. The repaint waits
+   * on none of the fetches: the selection and the Detail's shell show at
+   * once, and the rows fill in as their answers land. What is still out for
+   * a card the operator has left is aborted.
    */
   select(nodeId: string | null): void {
     this.selectedId = nodeId;
-    if (nodeId) {
-      const ticketId = this.selectedTicketId();
-      if (ticketId) this.ensureTicketBody(ticketId);
+    const ticketId = nodeId ? this.selectedTicketId() : null;
+    for (const [id, abort] of [...this.ticketBodyFetches]) {
+      if (id === ticketId) continue;
+      abort.abort();
+      this.ticketBodyFetches.delete(id);
     }
+    if (ticketId) this.ensureTicketBody(ticketId);
     void this.loadTimeline();
     this.onChange();
   }
@@ -849,9 +866,24 @@ export class ConsoleSession {
     return null;
   }
 
+  /**
+   * The snapshot cadence's refetch of the selected card's timeline: owed
+   * after the fetch already out for the same card, else started now.
+   */
+  private refetchTimeline(): void {
+    const id = this.selectedEventsId();
+    if (id !== null && this.timelineFetch?.id === id) {
+      this.timelineFetch.owed = true;
+      return;
+    }
+    void this.loadTimeline();
+  }
+
   private async loadTimeline(): Promise<void> {
     const id = this.selectedEventsId();
     const token = this.guard.begin(TIMELINE_KEY);
+    this.timelineFetch?.abort.abort();
+    this.timelineFetch = null;
     if (!id) {
       this.timelineState.ticketId = null;
       this.timelineState.view = null;
@@ -864,8 +896,10 @@ export class ConsoleSession {
     // log-tailing story is not part of this surface yet).
     const isTicket = this.selectedTicketId() === id;
     this.timelineState.ticketId = id;
+    const request = { id, abort: new AbortController(), owed: false };
+    this.timelineFetch = request;
     try {
-      const response = await this.getEvents(id);
+      const response = await this.getEvents(id, request.abort.signal);
       // A newer selection or refetch may have begun while the fetch was out.
       if (!this.guard.isCurrent(TIMELINE_KEY, token)) return;
       this.applyTimeline(id, response);
@@ -887,6 +921,11 @@ export class ConsoleSession {
       if (this.guard.isCurrent(TIMELINE_KEY, token)) {
         this.timelineState.view = null;
         this.onChange();
+      }
+    } finally {
+      if (this.timelineFetch === request) {
+        this.timelineFetch = null;
+        if (request.owed) void this.loadTimeline();
       }
     }
   }
@@ -933,22 +972,29 @@ export class ConsoleSession {
    */
   private ensureTicketBody(ticketId: string): void {
     if (this.ticketBodies.has(ticketId) || this.ticketBodyFetches.has(ticketId)) return;
-    this.ticketBodyFetches.add(ticketId);
+    const abort = new AbortController();
+    this.ticketBodyFetches.set(ticketId, abort);
     const token = this.guard.begin(BODY_KEY);
-    this.getTicket(ticketId)
+    this.getTicket(ticketId, abort.signal)
       .then((ticket) => {
+        if (abort.signal.aborted) return;
         this.ticketBodies.set(ticketId, ticket?.body ?? null);
         this.ticketBodyErrors.delete(ticketId);
       })
       .catch((err) => {
+        // An abort is the selection moving on, not a failure to show.
+        if (abort.signal.aborted) return;
         this.ticketBodyErrors.set(
           ticketId,
           `ticket body fetch failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       })
       .finally(() => {
-        this.ticketBodyFetches.delete(ticketId);
+        if (this.ticketBodyFetches.get(ticketId) === abort) {
+          this.ticketBodyFetches.delete(ticketId);
+        }
         if (
+          !abort.signal.aborted &&
           this.guard.isCurrent(BODY_KEY, token) &&
           this.selectedTicketId() === ticketId
         ) {

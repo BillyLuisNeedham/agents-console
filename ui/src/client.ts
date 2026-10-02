@@ -184,11 +184,13 @@ export class PoolClient {
   /**
    * The selected ticket's parsed events, plus reconstructed attempt rows for
    * a ticket with no events file (a pre-feature pool). Fetched lazily for the
-   * selected ticket and refetched when a new snapshot arrives.
+   * selected ticket and refetched when a new snapshot arrives; `signal`
+   * aborts it once the operator has clicked away.
    */
-  async getEvents(ticketId: string): Promise<TicketEventsResponse> {
+  async getEvents(ticketId: string, signal?: AbortSignal): Promise<TicketEventsResponse> {
     const res = await fetch(
       `${this.base}/api/events?ticket=${encodeURIComponent(ticketId)}`,
+      { signal },
     );
     if (!res.ok) throw new Error(`ticket events failed: ${res.status}`);
     return res.json();
@@ -218,11 +220,13 @@ export class PoolClient {
   /**
    * The selected ticket's markdown body (the line-1 `<!-- state: ... -->`
    * marker stripped server-side) for the ticket Detail. Null when no Issue
-   * file matches the id.
+   * file matches the id. `signal` aborts it once the operator has clicked
+   * away.
    */
-  async getTicket(ticketId: string): Promise<TicketBodyResponse | null> {
+  async getTicket(ticketId: string, signal?: AbortSignal): Promise<TicketBodyResponse | null> {
     const res = await fetch(
       `${this.base}/api/ticket?id=${encodeURIComponent(ticketId)}`,
+      { signal },
     );
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`ticket body failed: ${res.status}`);
@@ -236,7 +240,8 @@ export class PoolClient {
    * total. The optional `end` bounds the range, which is how "load earlier"
    * reads exactly the prefix before the bytes the pane already holds. With
    * `stream`, the same range is read from the attempt's Stream file (the raw
-   * stream tee) instead of its derived log.
+   * stream tee) instead of its derived log. `signal` aborts it once the pane
+   * has moved to another window.
    */
   async getLog(
     ticketId: string,
@@ -244,6 +249,7 @@ export class PoolClient {
     offset: number,
     end?: number,
     stream?: boolean,
+    signal?: AbortSignal,
   ): Promise<TicketLogResponse> {
     const params = new URLSearchParams({
       ticket: ticketId,
@@ -252,7 +258,7 @@ export class PoolClient {
     });
     if (end !== undefined) params.set("end", String(end));
     if (stream) params.set("stream", "1");
-    const res = await fetch(`${this.base}/api/log?${params}`);
+    const res = await fetch(`${this.base}/api/log?${params}`, { signal });
     if (!res.ok) throw new Error(`ticket log failed: ${res.status}`);
     return res.json();
   }

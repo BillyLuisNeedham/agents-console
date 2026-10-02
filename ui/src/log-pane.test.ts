@@ -1,7 +1,7 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { LogPane, type LogChunk } from "./log-pane";
+import { LOG_PANE_MAX_CHARS, LogPane, noteLogScroll, type LogChunk } from "./log-pane";
 import type { TimelineView } from "./project";
 
 // The byte window the pane pages by, mirroring the pool server's chunk size.
@@ -483,5 +483,94 @@ describe("LogPane stream variant", () => {
     await flush();
     expect(pane.state.content).toBe("stream-head");
     expect(pane.state.stream).toBe(true);
+  });
+});
+
+describe("LogPane under load (issue #157)", () => {
+  it("repaints once for a catch-up tail, however many chunks it reads", async () => {
+    const fake = fakeFetch();
+    let changes = 0;
+    const pane = new LogPane({
+      fetch: fake.fetch,
+      onChange: () => {
+        changes += 1;
+      },
+    });
+    const opened = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 30, 30, 30));
+    await flush();
+    fake.pending[1].resolve(chunk("a", 0, 10, 30));
+    await opened;
+    await flush();
+    const atTail = changes;
+    fake.pending[2].resolve(chunk("b", 10, 20, 30));
+    await flush();
+    fake.pending[3].resolve(chunk("c", 20, 30, 30));
+    await flush();
+    expect(pane.state.content).toBe("abc");
+    expect(changes - atTail).toBe(1);
+  });
+
+  it("aborts the old window's reads when the pane moves to another", () => {
+    const signals: AbortSignal[] = [];
+    const pane = new LogPane({
+      fetch: (_ticketId, _attempt, _offset, _end, _stream, signal) => {
+        if (signal) signals.push(signal);
+        return new Promise<LogChunk>(() => {});
+      },
+      onChange: () => {},
+    });
+    void pane.open("01", 1, false);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    pane.selectAttempt("02", 1);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+    pane.reset();
+    expect(signals[1]!.aborted).toBe(true);
+  });
+
+  it("lets go of the oldest whole chunks past the cap while it follows, and load earlier reads them back", async () => {
+    noteLogScroll(100, 100, 200);
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const big = (letter: string) => letter.repeat(100_000);
+    const opened = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 100, 100, 400));
+    await flush();
+    fake.pending[1].resolve(chunk(big("a"), 0, 100, 400));
+    await opened;
+    await flush();
+    fake.pending[2].resolve(chunk(big("b"), 100, 200, 400));
+    await flush();
+    fake.pending[3].resolve(chunk(big("c"), 200, 300, 400));
+    await flush();
+    fake.pending[4].resolve(chunk(big("d"), 300, 400, 400));
+    await flush();
+    // 400k held is past the 256k cap: the two oldest chunks go, whole.
+    expect(pane.state.content.length).toBeLessThanOrEqual(LOG_PANE_MAX_CHARS);
+    expect(pane.state.content).toBe(big("c") + big("d"));
+    expect(pane.state.firstOffset).toBe(200);
+    void pane.loadEarlier("01", 1);
+    expect(fake.calls[5]).toMatchObject({ end: 200 });
+  });
+
+  it("skips a backlog past the cap to the last window instead of reading it all", async () => {
+    noteLogScroll(100, 100, 200);
+    const fake = fakeFetch();
+    const pane = paneWith(fake.fetch);
+    const total = 10_000_000;
+    const opened = pane.open("01", 1, false);
+    fake.pending[0].resolve(chunk("", 1, 1, 1));
+    await flush();
+    fake.pending[1].resolve(chunk("old", 0, 1, total));
+    await opened;
+    await flush();
+    expect(fake.calls[2]).toMatchObject({ offset: total - LOG_TAIL_BYTES });
+    fake.pending[2].resolve(chunk("newest", total - LOG_TAIL_BYTES, total, total));
+    await flush();
+    expect(pane.state.content).toBe("newest");
+    expect(pane.state.firstOffset).toBe(total - LOG_TAIL_BYTES);
+    expect(fake.calls).toHaveLength(3);
   });
 });

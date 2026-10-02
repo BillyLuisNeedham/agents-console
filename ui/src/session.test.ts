@@ -341,22 +341,101 @@ describe("stale-answer guards", () => {
     expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("exited");
   });
 
-  it("keeps only the newest events fetch when snapshots outpace it", async () => {
+  it("owes one refetch when snapshots outpace the events fetch, never a second alongside (#157)", async () => {
     const r = rig();
     const session = new ConsoleSession(r.options);
     session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
     session.model({});
     session.select("ticket:A");
-    // A second snapshot refetches on the same selection; the first fetch's
-    // answer is the stale one now.
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    expect(r.events.get("A")).toHaveLength(2);
+    // Snapshots land on the same selection while its fetch is out: nothing
+    // more goes out until it answers, then exactly one refetch does.
+    for (let i = 0; i < 3; i++) {
+      session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
+    }
+    expect(r.events.get("A")).toHaveLength(1);
     r.events.get("A")![0].resolve(eventsResponse("spawned"));
     await flush();
-    expect(session.model({}).timeline).toBeNull();
+    expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("spawned");
+    expect(r.events.get("A")).toHaveLength(2);
     r.events.get("A")![1].resolve(eventsResponse("exited"));
     await flush();
     expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("exited");
+    expect(r.events.get("A")).toHaveLength(2);
+  });
+
+  it("aborts what is still out for a card the operator clicked away from (#157)", async () => {
+    const signals = new Map<string, AbortSignal[]>();
+    const r = rig();
+    const keep = (id: string, signal?: AbortSignal) => {
+      const list = signals.get(id) ?? [];
+      if (signal) list.push(signal);
+      signals.set(id, list);
+    };
+    const getEvents = r.options.getEvents;
+    const getTicket = r.options.getTicket;
+    const session = new ConsoleSession({
+      ...r.options,
+      getEvents: (id, signal) => {
+        keep(`events:${id}`, signal);
+        return getEvents(id, signal);
+      },
+      getTicket: (id, signal) => {
+        keep(`body:${id}`, signal);
+        return getTicket(id, signal);
+      },
+    });
+    session.setSnapshot(snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }));
+    session.model({});
+    session.select("ticket:A");
+    const changes = r.changes();
+    session.select("ticket:B");
+    // The selection repaints at once, before any of B's fetches answer.
+    expect(r.changes()).toBe(changes + 1);
+    expect(signals.get("events:A")![0]!.aborted).toBe(true);
+    expect(signals.get("body:A")![0]!.aborted).toBe(true);
+    expect(signals.get("events:B")![0]!.aborted).toBe(false);
+    expect(signals.get("body:B")![0]!.aborted).toBe(false);
+    // A's body was dropped, not cached: coming back asks for it again.
+    r.bodies.get("A")![0].resolve({ id: "A", body: "body A" });
+    await flush();
+    session.select("ticket:A");
+    expect(r.bodies.get("A")).toHaveLength(2);
+  });
+
+  it("prints the State inspector only while it is open, once per snapshot (#157)", () => {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    const first = snapshot({ state: { tickets: [ticket("A")] } });
+    session.setSnapshot(first);
+    expect(session.model({}).inspectorJson).toBe("");
+    session.toggleInspector();
+    const printed = session.model({}).inspectorJson;
+    expect(JSON.parse(printed)).toEqual(first.state);
+    // The same snapshot hands back the very same string, not a fresh print.
+    expect(session.model({}).inspectorJson).toBe(printed);
+    session.setSnapshot(snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }));
+    expect(session.model({}).inspectorJson).not.toBe(printed);
+  });
+
+  it("fetches the grades one at a time however fast snapshots land (#157)", async () => {
+    const r = rig();
+    const grades: Deferred<Record<string, TicketGradeSummary>>[] = [];
+    const session = new ConsoleSession({
+      ...r.options,
+      getGrades: () => {
+        const d = deferred<Record<string, TicketGradeSummary>>();
+        grades.push(d);
+        return d.promise;
+      },
+    });
+    for (let i = 0; i < 5; i++) session.setSnapshot(snapshot());
+    expect(grades).toHaveLength(1);
+    grades[0]!.resolve({});
+    await flush();
+    expect(grades).toHaveLength(2);
+    grades[1]!.resolve({});
+    await flush();
+    expect(grades).toHaveLength(2);
   });
 
   it("drops a body answer that lands after the selection moved on", async () => {
@@ -371,7 +450,7 @@ describe("stale-answer guards", () => {
     const changesAtSelect = r.changes();
     r.bodies.get("A")![0].resolve({ id: "A", body: "body A" });
     await flush();
-    // A's late body caches silently: no repaint while B is showing.
+    // A's late body belongs to an aborted fetch: no repaint while B is showing.
     expect(r.changes()).toBe(changesAtSelect);
     expect(session.model({}).detailBody).toBeUndefined();
     r.bodies.get("B")![0].resolve({ id: "B", body: "body B" });

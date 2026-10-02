@@ -90,11 +90,11 @@ const terminal = new TerminalSurface({
 // it and renders when it changes; it never touches the DOM.
 const session = new ConsoleSession({
   getState: () => client.getState(),
-  getEvents: (id) => client.getEvents(id),
-  getTicket: (id) => client.getTicket(id),
+  getEvents: (id, signal) => client.getEvents(id, signal),
+  getTicket: (id, signal) => client.getTicket(id, signal),
   getGrades: () => background.run(() => client.getGrades()),
-  getLog: (ticketId, attempt, offset, end, stream) =>
-    client.getLog(ticketId, attempt, offset, end, stream),
+  getLog: (ticketId, attempt, offset, end, stream, signal) =>
+    client.getLog(ticketId, attempt, offset, end, stream, signal),
   answer: (ticketId, action, note) => client.answer(ticketId, action, note),
   stop: () => client.stop(),
   restart: () => client.restart(),
