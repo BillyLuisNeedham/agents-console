@@ -2,9 +2,10 @@
  * The pool server: one Bun process per pool. It drives the pool engine and
  * serves the built SPA, a small JSON API (get state, start, resume-with-
  * answer, ticket reads, terminal peek/focus), and an SSE stream that pushes
- * a full state snapshot on every change. The UI renders from those
- * snapshots only. The terminal endpoints are the UI's only path to the
- * herdr daemon (ADR-0014): the Console never talks to herdr directly.
+ * a full state snapshot on every change, a burst of changes as one. The UI
+ * renders from those snapshots only. The terminal endpoints are the UI's
+ * only path to the herdr daemon (ADR-0014): the Console never talks to
+ * herdr directly.
  *
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
@@ -32,6 +33,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   parseConfig,
@@ -63,6 +65,7 @@ import {
 import {
   attemptLogName,
   attemptStreamName,
+  eventsStamp,
   parseAttemptLogName,
   readEvents,
 } from "./events.ts";
@@ -126,7 +129,7 @@ import { DEFAULT_PORT, resolvePort, type PortResolution } from "./ports.ts";
 import { defaultHarnesses } from "./spawn.ts";
 // The one git use left in this file is the activity endpoint's diff summary;
 // no snapshot or terminal route reaches it.
-import { git } from "./worktrees.ts";
+import { gitAsync } from "./worktrees.ts";
 
 export interface PoolServerOptions {
   poolDir: string;
@@ -157,6 +160,8 @@ export interface PoolServerOptions {
   jev?: Jev;
   /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
+  /** The snapshot stream's coalescing window in ms (issue #157); 0 sends every emit as it lands. Defaults to SNAPSHOT_COALESCE_MS. */
+  snapshotCoalesceMs?: number;
   /** How often an enlisted attempt re-reads its pane for Turn state (issue
    *  #101); tests shrink it so a queued teaching Turn lands without a
    *  real-time wait. Production leaves it unset (2 s). */
@@ -216,6 +221,14 @@ export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
 // farewell before every connection is cut. Over loopback a single turn of
 // the event loop is enough; the margin is for a slower link.
 const STREAM_DRAIN_MS = 50;
+
+/**
+ * How long the snapshot stream gathers the engine's emits before sending
+ * the latest of them (issue #157). Short enough that a tab never sees the
+ * delay, long enough that a burst of emits (a super-step's boundary, a
+ * merge, several panes' Turns at once) goes out as one frame.
+ */
+export const SNAPSHOT_COALESCE_MS = 50;
 
 export interface PoolServer {
   latest: EnrichedSnapshot | null;
@@ -617,10 +630,16 @@ function countLines(text: string): number {
   return text.endsWith("\n") ? lines : lines + 1;
 }
 
-function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
+// The worktree's diff summary, read with git off the engine's thread (issue
+// #157): the UI asks for it every ~2 s per live ticket per tab, and a
+// synchronous read stalled every other request and the snapshot stream
+// while git and the untracked-file reads ran.
+async function computeActivityDiff(cwd: string): Promise<TicketActivityResponse["diff"]> {
   try {
-    const numstat = git(cwd, ["diff", "--numstat", "HEAD"]);
-    const status = git(cwd, ["status", "--porcelain"]);
+    const [numstat, status] = await Promise.all([
+      gitAsync(cwd, ["diff", "--numstat", "HEAD"]),
+      gitAsync(cwd, ["status", "--porcelain"]),
+    ]);
     if (!numstat.ok || !status.ok) return null;
     const lines = new Map<string, { added: number; removed: number }>();
     const order: string[] = [];
@@ -653,15 +672,15 @@ function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
       }
       try {
         const full = join(cwd, path);
-        const stat = statSync(full);
-        if (!stat.isFile()) continue;
-        if (stat.size >= UNTRACKED_MAX_BYTES) {
+        const info = await stat(full);
+        if (!info.isFile()) continue;
+        if (info.size >= UNTRACKED_MAX_BYTES) {
           // Over the read cap it still counts as a touched file, just with no
           // line counts.
           record(path, 0, 0);
           continue;
         }
-        record(path, countLines(readFileSync(full, "utf8")), 0);
+        record(path, countLines(await readFile(full, "utf8")), 0);
       } catch {
         continue;
       }
@@ -676,11 +695,18 @@ function computeActivityDiff(cwd: string): TicketActivityResponse["diff"] {
   }
 }
 
-function readTicketActivity(
+/**
+ * A ticket's Vitals. `running` and everything read from the runs directory
+ * are read fresh on every request, since each is a stat or a cached events
+ * parse; only the worktree diff, the one part that runs git, comes through
+ * `diffOf`, the server's shared and briefly cached read.
+ */
+async function readTicketActivity(
   poolDir: string,
   ticketId: string,
   running: boolean,
-): TicketActivityResponse {
+  diffOf: (worktree: string) => Promise<TicketActivityResponse["diff"]>,
+): Promise<TicketActivityResponse> {
   const runsDir = join(poolDir, "runs");
   const events = readEvents(runsDir, ticketId);
   let worktree: string | null = null;
@@ -699,16 +725,14 @@ function readTicketActivity(
   // a conflicted merge). The events are read here only for the worktree.
   const lastEventAt = events.length > 0 ? events[events.length - 1].at : null;
   const diff =
-    worktree !== null && existsSync(worktree)
-      ? computeActivityDiff(worktree)
-      : null;
+    worktree !== null && existsSync(worktree) ? await diffOf(worktree) : null;
   const attempts = listAttemptLogs(runsDir, ticketId);
   const current = attempts[attempts.length - 1];
   let log: TicketActivityResponse["log"] = null;
   if (current) {
     try {
-      const stat = statSync(join(runsDir, current.logFile));
-      log = { size: stat.size, mtime: stat.mtime.toISOString() };
+      const info = statSync(join(runsDir, current.logFile));
+      log = { size: info.size, mtime: info.mtime.toISOString() };
     } catch {
       log = null;
     }
@@ -716,7 +740,12 @@ function readTicketActivity(
   return { ticketId, running, diff, log, lastEventAt };
 }
 
-export const ACTIVITY_CACHE_TTL_MS = 1000;
+/**
+ * How long one worktree diff answers every request for its ticket. Just
+ * under the UI's ~2 s poll, so one tab still sees each poll's diff fresh,
+ * while a second tab, or a burst of requests, shares the read already made.
+ */
+export const ACTIVITY_CACHE_TTL_MS = 1500;
 
 // ---------------------------------------------------------------------------
 // Grades endpoint
@@ -1027,24 +1056,59 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let conversationIds = new Set(conversationRecords.map((c) => c.id));
   const poolName = poolDir.split("/").slice(-2).join("/");
 
-  // A short in-memory cache per ticket id absorbs the client's rapid repeat
-  // polls (ADR 0011): one entry per known ticket id, so it never grows past
-  // the pool's size. No mtime-based invalidation in v1.
-  const activityCache = new Map<
+  // A short in-memory cache of each ticket's worktree diff absorbs the
+  // client's repeat polls (ADR 0011): one entry per known ticket id, so it
+  // never grows past the pool's size. A read in flight is shared by every
+  // request that arrives while it runs, and its answer then serves for the
+  // TTL from when it landed; a new worktree (the next attempt) reads afresh.
+  // No mtime-based invalidation.
+  const diffCache = new Map<
     string,
-    { at: number; value: TicketActivityResponse }
+    { worktree: string; landedAt: number | null; diff: Promise<TicketActivityResponse["diff"]> }
   >();
-  function readTicketActivityCached(ticketId: string): TicketActivityResponse {
-    const hit = activityCache.get(ticketId);
-    const now = Date.now();
-    if (hit && now - hit.at < ACTIVITY_CACHE_TTL_MS) return hit.value;
-    const value = readTicketActivity(
+  function worktreeDiff(
+    ticketId: string,
+    worktree: string,
+  ): Promise<TicketActivityResponse["diff"]> {
+    const hit = diffCache.get(ticketId);
+    if (
+      hit?.worktree === worktree &&
+      (hit.landedAt === null || Date.now() - hit.landedAt < ACTIVITY_CACHE_TTL_MS)
+    ) {
+      return hit.diff;
+    }
+    const entry = {
+      worktree,
+      landedAt: null as number | null,
+      diff: computeActivityDiff(worktree).finally(() => {
+        entry.landedAt = Date.now();
+      }),
+    };
+    diffCache.set(ticketId, entry);
+    return entry.diff;
+  }
+  function readTicketActivityCached(ticketId: string): Promise<TicketActivityResponse> {
+    return readTicketActivity(
       poolDir,
       ticketId,
-      (latest?.state.tickets.find((t) => t.id === ticketId)?.liveAttempt ?? null) !== null,
+      (current()?.state.tickets.find((t) => t.id === ticketId)?.liveAttempt ?? null) !== null,
+      (worktree) => worktreeDiff(ticketId, worktree),
     );
-    activityCache.set(ticketId, { at: now, value });
-    return value;
+  }
+
+  // The grades as last derived, under a key of the ticket ids and each one's
+  // events file stamp (issue #157): the Console asks on every snapshot, and
+  // the answer moves only when a ticket or an events file does. An events
+  // file inside the racy window has no stamp, so the grades are derived
+  // afresh until it settles.
+  let gradesCache: { key: string; grades: Record<string, TicketGradeSummary> } | null = null;
+  function poolGrades(): Record<string, TicketGradeSummary> {
+    const runsDir = join(poolDir, "runs");
+    const stamps = meta.map((m) => [m.id, eventsStamp(runsDir, m.id)] as const);
+    if (stamps.some(([, stamp]) => stamp === null)) return readPoolGrades(poolDir, meta);
+    const key = JSON.stringify(stamps);
+    if (gradesCache?.key !== key) gradesCache = { key, grades: readPoolGrades(poolDir, meta) };
+    return gradesCache.grades;
   }
 
   // Pool meta is read from disk, never cached from boot: the engine writes
@@ -1070,18 +1134,42 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     // re-read (writeConversation happens before the herdr tab opens), so
     // this is belt-and-braces rather than the primary source, matching how
     // `ticketIds` trusts the disk read as the ground truth.
-    const fromSnapshot = latest?.state.conversations.map((c) => c.id) ?? [];
+    const fromSnapshot = lastRaw?.conversations.map((c) => c.id) ?? [];
     conversationIds = new Set([
       ...conversationRecords.map((c) => c.id),
       ...fromSnapshot,
     ]);
   }
 
+  // The enriched snapshot as last built. Read it through current(), never
+  // directly: an engine snapshot that arrived since is enriched there first.
   let latest: EnrichedSnapshot | null = null;
   // The last engine snapshot as it arrived, kept so a Reassign write can
   // rebuild the enriched snapshot from the file it just wrote without waiting
   // for the run to tick: a quiescent pool has no next tick to wait for.
   let lastRaw: PoolSnapshot | null = null;
+  // An engine snapshot not yet enriched (issue #157). The engine emits in
+  // bursts, a Turn's last line every couple of seconds per live pane among
+  // them, and enriching each one re-read the pool's files and serialised the
+  // whole snapshot for every emit. Now the enrichment waits until something
+  // reads the snapshot: a request, or the stream's coalesced send below.
+  let pendingRaw: PoolSnapshot | null = null;
+
+  /**
+   * The enriched snapshot as of the engine's last emit. Every reader comes
+   * through here, so a route answering right after the engine emitted (an
+   * accepted answer, a Reassign write) answers with that emit, exactly as
+   * when every emit was enriched on arrival.
+   */
+  function current(): EnrichedSnapshot | null {
+    if (pendingRaw !== null) {
+      const raw = pendingRaw;
+      refreshMeta();
+      latest = enrich(raw, meta, poolName, poolDir, reassignRows(raw, meta), titleNow());
+      pendingRaw = null;
+    }
+    return latest;
+  }
   let currentRun: PoolRun | null = null;
   let started = false;
 
@@ -1176,37 +1264,86 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
    * actually moves the run, and it will emit the `reassigned` events then.
    */
   function reenrich(): EnrichedSnapshot | null {
-    if (!lastRaw) return latest;
-    refreshMeta();
-    broadcast(
-      enrich(lastRaw, meta, poolName, poolDir, reassignRows(lastRaw, meta), titleNow()),
-    );
-    return latest;
+    if (!lastRaw) return current();
+    received(lastRaw);
+    return current();
   }
 
   // Every open snapshot stream, each with the teardown of its own heartbeat
   // so a shutdown can end the streams cleanly rather than leaving them to be
-  // cut by the socket close.
-  const clients = new Map<ReadableStreamDefaultController<Uint8Array>, () => void>();
+  // cut by the socket close, and the snapshot it was last sent, so a send
+  // never repeats one.
+  const clients = new Map<
+    ReadableStreamDefaultController<Uint8Array>,
+    { stopHeartbeat: () => void; sent: EnrichedSnapshot | null }
+  >();
 
-  function broadcast(snapshot: EnrichedSnapshot): void {
-    latest = snapshot;
-    const bytes = encodeSnapshot(snapshot);
-    for (const [controller, stopHeartbeat] of [...clients]) {
-      try {
-        controller.enqueue(bytes);
-      } catch {
-        stopHeartbeat();
-        clients.delete(controller);
-      }
+  // The stream's coalescing window (issue #157): an emit starts it, every
+  // emit inside it joins it, and at its end the snapshot as it stands then
+  // goes out once, serialised once for every tab. A burst of emits is one
+  // send, at most this long after its first.
+  const coalesceMs = options.snapshotCoalesceMs ?? SNAPSHOT_COALESCE_MS;
+  let sendTimer: ReturnType<typeof setTimeout> | null = null;
+  // The frame of the snapshot last serialised, so a send and a connect
+  // never encode the same snapshot twice.
+  let framed: { snapshot: EnrichedSnapshot; bytes: Uint8Array } | null = null;
+
+  function frameOf(snapshot: EnrichedSnapshot): Uint8Array {
+    if (framed?.snapshot !== snapshot) framed = { snapshot, bytes: encodeSnapshot(snapshot) };
+    return framed.bytes;
+  }
+
+  // Sends one stream the snapshot as it stands, unless it already has it.
+  function sendTo(controller: ReadableStreamDefaultController<Uint8Array>): void {
+    const client = clients.get(controller);
+    const snapshot = current();
+    if (!client || snapshot === null || client.sent === snapshot) return;
+    try {
+      controller.enqueue(frameOf(snapshot));
+      client.sent = snapshot;
+    } catch {
+      client.stopHeartbeat();
+      clients.delete(controller);
+    }
+  }
+
+  // The window's end. The snapshot is brought up to date even with no tab
+  // open, so the ids the ticket routes accept and the Pool title the run
+  // is told follow the engine without waiting for a reader.
+  function sendNow(): void {
+    if (sendTimer !== null) clearTimeout(sendTimer);
+    sendTimer = null;
+    current();
+    for (const controller of [...clients.keys()]) sendTo(controller);
+  }
+
+  // An engine snapshot arrived (or a Reassign write rebuilt the last one):
+  // readers see it at once, the streams at the end of the window.
+  function received(snapshot: PoolSnapshot): void {
+    pendingRaw = snapshot;
+    if (coalesceMs <= 0) sendNow();
+    else if (sendTimer === null) sendTimer = setTimeout(sendLater, coalesceMs);
+  }
+
+  // The timed send has no caller to throw to: an enrichment that fails is
+  // reported, and the next emit or request tries again.
+  function sendLater(): void {
+    try {
+      sendNow();
+    } catch (err) {
+      console.error(
+        `snapshot stream: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
   // End every snapshot stream after its last frame (the farewell, when the
   // run sent one): the client sees an orderly end-of-stream behind a
-  // `stopped` snapshot, not a reset socket.
+  // `stopped` snapshot, not a reset socket. A send still waiting out its
+  // window goes first, so the farewell is never left behind.
   function closeStreams(): void {
-    for (const [controller, stopHeartbeat] of [...clients]) {
+    sendNow();
+    for (const [controller, { stopHeartbeat }] of [...clients]) {
       stopHeartbeat();
       clients.delete(controller);
       try {
@@ -1238,22 +1375,14 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       ...(jev !== undefined ? { jev } : {}),
       // The Steward's teaching names where its command reaches (ADR-0030).
       consoleUrl: `http://localhost:${server.port}`,
+      // The server reads only the snapshot it was last handed (issue #157).
+      snapshotHistory: 1,
       onSnapshot: (snapshot) => {
-        refreshMeta();
         lastRaw = snapshot;
-        broadcast(
-          enrich(
-            snapshot,
-            meta,
-            poolName,
-            poolDir,
-            reassignRows(snapshot, meta),
-            titleNow(),
-          ),
-        );
+        received(snapshot);
       },
     });
-    return latest!;
+    return current()!;
   }
 
   const start = (): Promise<EnrichedSnapshot> => {
@@ -1261,7 +1390,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       started = true;
       driveRun();
     }
-    return Promise.resolve(latest!);
+    return Promise.resolve(current()!);
   };
 
   // Acceptance only (ADR-0004): the engine records the answer synchronously
@@ -1280,7 +1409,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       // merge-approval take approve/reject; anything else is a malformed
       // request, so fail at the seam instead of the engine silently treating
       // it as a resume.
-      const kind = latest?.state.interrupts.find(
+      const kind = current()?.state.interrupts.find(
         (i) => i.ticketId === ticketId,
       )?.kind;
       // No pending interrupt: this may be a retry of an answer already
@@ -1305,13 +1434,13 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     // synchronously inside accept. Returning the pre-accept snapshot instead
     // would race that SSE frame and could clobber the waiting state in the
     // UI.
-    return latest!;
+    return current()!;
   }
 
   const settled = (): Promise<EnrichedSnapshot> => {
     const run = currentRun;
-    if (!run) return Promise.resolve(latest!);
-    return run.settled.then(() => latest!);
+    if (!run) return Promise.resolve(current()!);
+    return run.settled.then(() => current()!);
   };
 
   // Conversations (issue #60): thin proxies onto the engine's own
@@ -1369,11 +1498,11 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   function resolveTerminalRequest(ticketId: string):
     | { ok: true; paneId: string }
     | { ok: false; status: number; error: string } {
-    const ticket = latest?.state.tickets.find((t) => t.id === ticketId);
+    const ticket = current()?.state.tickets.find((t) => t.id === ticketId);
     const paneId =
       ticket?.liveAttempt?.paneId ??
       ticket?.heldPane?.paneId ??
-      latest?.state.conversations.find((c) => c.id === ticketId)?.paneId ??
+      current()?.state.conversations.find((c) => c.id === ticketId)?.paneId ??
       null;
     if (paneId === null || paneId === "") {
       return {
@@ -1535,7 +1664,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         const pathname = url.pathname;
 
         if (pathname === "/api/state") {
-          return Response.json({ snapshot: latest });
+          return Response.json({ snapshot: current() });
         }
 
         if (pathname === "/api/start" && req.method === "POST") {
@@ -1552,7 +1681,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         // learns the stop landed. A stop already under way is acknowledged
         // again rather than started twice.
         if (pathname === "/api/stop" && req.method === "POST") {
-          const phase = latest?.phase ?? null;
+          const phase = current()?.phase ?? null;
           if (!stopUnderWay() && phase !== "done") {
             return Response.json(
               {
@@ -1756,7 +1885,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
         if (pathname === "/api/grades") {
           refreshMeta();
-          return Response.json({ grades: readPoolGrades(poolDir, meta) });
+          return Response.json({ grades: poolGrades() });
         }
 
         if (pathname === "/api/log") {
@@ -2216,15 +2345,19 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ reason: message }, { status });
           }
           refreshMeta();
-          return Response.json({ snapshot: latest }, { status: 202 });
+          return Response.json({ snapshot: current() }, { status: 202 });
         }
 
         if (pathname === "/api/activity") {
           const ticketId = url.searchParams.get("ticket") ?? "";
+          // The ids as of the engine's last emit: a ticket the engine wrote
+          // a moment ago is known once its snapshot is (current() refreshes
+          // the meta behind ticketIds when one is waiting).
+          current();
           if (!ticketIds.has(ticketId)) {
             return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
           }
-          return Response.json(readTicketActivityCached(ticketId));
+          return Response.json(await readTicketActivityCached(ticketId));
         }
 
         // The card's Peek: the pane's viewport as plain text (ANSI stripped
@@ -2311,11 +2444,11 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             );
           }
           const registeredPanes = new Set<string>();
-          for (const ticket of latest?.state.tickets ?? []) {
+          for (const ticket of current()?.state.tickets ?? []) {
             const paneId = ticket.liveAttempt?.paneId ?? ticket.heldPane?.paneId;
             if (paneId) registeredPanes.add(paneId);
           }
-          for (const conversation of latest?.state.conversations ?? []) {
+          for (const conversation of current()?.state.conversations ?? []) {
             if (conversation.paneId) registeredPanes.add(conversation.paneId);
           }
           try {
@@ -2361,9 +2494,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           const stream = new ReadableStream<Uint8Array>({
             start(ctrl) {
               controller = ctrl;
-              clients.set(ctrl, stopHeartbeat);
               ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
-              if (latest) ctrl.enqueue(encodeSnapshot(latest));
+              clients.set(ctrl, { stopHeartbeat, sent: null });
+              sendTo(ctrl);
               heartbeat = setInterval(() => {
                 try {
                   ctrl.enqueue(HEARTBEAT_FRAME);
@@ -2428,7 +2561,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
 
   return {
     get latest() {
-      return latest;
+      return current();
     },
     start,
     answer,
@@ -2439,6 +2572,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     keepTalking,
     url: `http://localhost:${server.port}`,
     close: async () => {
+      if (sendTimer !== null) clearTimeout(sendTimer);
+      sendTimer = null;
       await server.stop(true);
       currentRun?.close();
     },

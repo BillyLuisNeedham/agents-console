@@ -181,12 +181,12 @@ import {
   createMergeHoldWatch,
   MERGE_HOLD_POLL_MS,
   createMergeLine,
-  deriveMergeHold,
   gitMergeHoldProbe,
   type HoldHost,
   type MergeHoldWatch,
   type MergeLine,
   type MergeQueueEntry,
+  memoizedMergeHold,
   throughMergeHold,
 } from "./merge-hold.ts";
 import {
@@ -540,6 +540,11 @@ interface RunOptions {
   // The Console's URL when a server runs this engine (ADR-0030): the
   // Steward's teaching names it in the command it answers with.
   consoleUrl?: string;
+  // How many emitted snapshots the handle's `snapshots` keeps, newest last
+  // (issue #157). The engine itself reads only the last, so the server keeps
+  // one and a long run no longer holds every snapshot it ever emitted;
+  // unset keeps them all, for a test that reads the history.
+  snapshotHistory?: number;
 }
 
 // The live run handle. `startPool` returns it from the very first super-step,
@@ -720,7 +725,8 @@ function mergeHold(session: Session): string[] {
   // `enlistedWork`. The hold must read that branch, or an as-found done ticket
   // would look already-landed and the pool would schedule its blocked tickets
   // before its merge.
-  return deriveMergeHold(
+  const target = session.mergeTarget;
+  return session.deriveHold(
     session.state.tickets,
     (id) => engineTicketBuildId(id) !== null,
     {
@@ -729,8 +735,14 @@ function mergeHold(session: Session): string[] {
       // read: an enlist that moved the pool's own checkout onto its created
       // pool branch would otherwise make that branch the target and read the
       // done ticket as already landed.
-      currentBranch: () => session.mergeTarget ?? base.currentBranch(),
+      currentBranch: () => target ?? base.currentBranch(),
       branchFor: (id) => session.enlistedWork.get(id)?.branch ?? base.branchFor(id),
+      // The memo's stamp names the captured target and covers its refs, so
+      // a target captured after the last derivation is a new key.
+      stamp: (branches) => {
+        const refs = base.stamp?.(target === null ? branches : [...branches, target]) ?? null;
+        return refs === null ? null : `${target ?? ""}\n${refs}`;
+      },
     },
   );
 }
@@ -863,6 +875,10 @@ interface Session {
   markers: TicketMarker[];
   state: PoolState;
   snapshots: PoolSnapshot[];
+  // How many of `snapshots` are kept (RunOptions.snapshotHistory), and the
+  // seq the next emit carries: the count of every emit so far, kept or not.
+  snapshotHistory: number;
+  emitted: number;
   store: CheckpointStore;
   storeOpen: boolean;
   superStep: number;
@@ -947,6 +963,10 @@ interface Session {
   // The Merge hold watch (merge-hold.ts): re-derives the hold while the last
   // emitted set is non-empty, so a merge done by hand reaches the snapshot.
   holdWatch: MergeHoldWatch;
+  // The Merge hold's derivation behind its memo (issue #157): every emit,
+  // wait tick and watch tick derives the hold, and git runs only once a ref
+  // the derivation reads has moved.
+  deriveHold: ReturnType<typeof memoizedMergeHold>;
   // Enlisted attempts (issue #101, engine/enlisted.ts): the runtime behind
   // every pane the operator enlisted, owning its Turn state and the Turns the
   // engine types into it. Built once at startPool, reached through the
@@ -1261,6 +1281,8 @@ export function startPool(options: RunOptions): PoolRun {
       reviewApproved: false,
     },
     snapshots: [],
+    snapshotHistory: options.snapshotHistory ?? Number.POSITIVE_INFINITY,
+    emitted: 0,
     store: options.store ?? new SqliteCheckpointStore(poolDir),
     storeOpen: true,
     superStep: 0,
@@ -1323,6 +1345,7 @@ export function startPool(options: RunOptions): PoolRun {
     paneSurvey: null,
     openedTabs: [],
     enlistedTerminals: { panes: new Set(), tabs: new Set() },
+    deriveHold: memoizedMergeHold(),
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
       onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
@@ -1631,7 +1654,7 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   const liveAttempts = session.liveAttempts.records((id) => session.conversations.isLive(id));
   const listing = session.paneSurvey?.latest() ?? null;
   const snapshot: PoolSnapshot = {
-    seq: session.snapshots.length,
+    seq: session.emitted,
     phase,
     state: withStewardNotes(session),
     queuedAnswers: session.answers.pending(),
@@ -1667,7 +1690,11 @@ export function emitSnapshot(session: Session, phase: RunPhase): void {
   // The Spawn ledger follows every emit, so what agents read there is never
   // staler than what the Console shows (issue #150).
   refreshSpawnLedger(session, snapshot.conversations);
+  session.emitted += 1;
   session.snapshots.push(snapshot);
+  if (session.snapshots.length > session.snapshotHistory) {
+    session.snapshots.splice(0, session.snapshots.length - session.snapshotHistory);
+  }
   session.holdWatch.emitted(hold);
   session.onSnapshot?.(snapshot);
 }

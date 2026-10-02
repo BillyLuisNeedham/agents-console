@@ -41,6 +41,7 @@ import {
   type TicketEventKind,
 } from "./events.ts";
 import type { TicketMarker } from "./pool.ts";
+import { cachedByStamp } from "./stat-cache.ts";
 import {
   branchFor,
   worktreePathFor,
@@ -262,13 +263,18 @@ export function readConversation(file: string): ConversationRecord {
   return { ...marker, file, title: readTitle(lines), opening: readOpening(lines) };
 }
 
+// Every view re-reads the conversations directory, once per snapshot and
+// more (issue #157): a file whose stamp has not moved since its last parse
+// is served from that parse, a changed one is parsed afresh.
+const readConversationCached = cachedByStamp(readConversation);
+
 /** Every Conversation on disk, sorted by file name. An absent directory reads as none: a pool with no Conversations yet is ordinary, unlike issues/. */
 export function loadConversations(dir: string): ConversationRecord[] {
   if (!existsSync(dir)) return [];
   const files = readdirSync(dir)
     .filter((file) => file.endsWith(".md"))
     .sort();
-  return files.map((file) => readConversation(join(dir, file)));
+  return files.map((file) => readConversationCached(join(dir, file)));
 }
 
 export function writeConversation(dir: string, rec: ConversationRecord): void {
@@ -2174,7 +2180,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   }
 
   function harnessDescriptorFor(runtime: ConversationRuntime) {
-    const rec = readConversation(runtime.file);
+    const rec = readConversationCached(runtime.file);
     return defaultHarnessDescriptors[rec.harness];
   }
 
