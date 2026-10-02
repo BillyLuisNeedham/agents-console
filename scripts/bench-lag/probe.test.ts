@@ -66,8 +66,13 @@ let browser: ConsoleBrowser | null = null;
 let tab: BrowserTab | null = null;
 let profile = "";
 
+/**
+ * Waits on a condition, never on a clock: a loaded machine runs the browser
+ * slowly but not wrongly, so every check waits for what it needs to have
+ * happened, with a deadline far past any honest delay.
+ */
 async function until<T>(what: string, probe: () => Promise<T | null | false | undefined>): Promise<T> {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 60_000;
   for (;;) {
     const value = await probe();
     if (value) return value;
@@ -112,7 +117,7 @@ describe.skipIf(!chromium)("the page probe in Chromium", () => {
       return r?.socketFrames.some((f) => f.dir === "out" && f.type === "hello") ?? false;
     });
     await evaluate("window.__lagProbe.begin()");
-  }, 30_000);
+  }, 120_000);
 
   afterAll(async () => {
     await browser?.close();
@@ -132,23 +137,28 @@ describe.skipIf(!chromium)("the page probe in Chromium", () => {
     const click = await until("the shell", async () => (await report()).clicks.find((c) => c.id === "07" && c.shellPaintedMs !== null));
     expect(click.missed).toBe(false);
     expect(click.released).not.toBeNull();
+    // Counted in frames, not ms: the order of events decides it, however slow the machine.
     expect(click.shellFrames).toBe(1);
     expect(click.shellPaintedMs).toBeGreaterThan(0);
-  }, 20_000);
+    // The subscribe's card frame is in before the next press, so the frames' order below is the presses'.
+    await until("the card's frame", async () =>
+      (await report()).socketFrames.some((f) => f.dir === "in" && f.type === "card" && f.id === "07"),
+    );
+  }, 90_000);
 
   test("one drawn two animation frames later is counted as frame 2", async () => {
     await press(`window.__lagProbe.armClick("08", "hover")`);
     const click = await until("the shell", async () => (await report()).clicks.find((c) => c.id === "08" && c.shellPaintedMs !== null));
     expect(click.how).toBe("hover");
     expect(click.shellFrames).toBe(2);
-  }, 20_000);
+  }, 90_000);
 
   test("Open in herdr: the button's row changing is the feedback, the note the confirmation", async () => {
     await press(`window.__lagProbe.armFocus("07")`);
     const focus = await until("the confirmation", async () => (await report()).focuses.find((f) => f.confirmedPaintedMs !== null));
     expect(focus.feedbackFrames).toBe(1);
     expect(focus.missed).toBe(false);
-  }, 20_000);
+  }, 90_000);
 
   test("every socket frame is counted by direction and type, with its bytes and the ids the bench matches on", async () => {
     await evaluate("window.__lagProbe.end()");
@@ -178,7 +188,10 @@ describe.skipIf(!chromium)("the page probe in Chromium", () => {
     expect(subscribedAt(r.socketFrames, r.sockets, "07", Number.MAX_SAFE_INTEGER)).toBe(true);
     expect(cardFrameAfter(r.socketFrames, "07", click!.t0!)).not.toBeNull();
     expect(focusRoundTrip(r.socketFrames, "07", focus!.t0!)?.reply).not.toBeNull();
-  }, 20_000);
+    // Every socket frame is stamped with the animation frame it crossed in, which only moves on.
+    const stamped = r.socketFrames.map((f) => f.frame);
+    expect(stamped.every((n, i) => Number.isInteger(n) && n >= (stamped[i - 1] ?? 0))).toBe(true);
+  }, 90_000);
 
   test("a fetch is counted as it starts and again by its timing entry; frames and the cards shown too", async () => {
     await evaluate("fetch('/ping?late=1').then((res) => res.text())");
@@ -187,8 +200,14 @@ describe.skipIf(!chromium)("the page probe in Chromium", () => {
       return now.resources.some((x) => x.path === "/ping?late=1") ? now : null;
     });
     expect(r.fetches.map((f) => f.path)).toContain("/ping?late=1");
-    expect(r.frames.length).toBeGreaterThan(10);
+    // Frames are recorded, in order: however few a loaded machine draws, each comes after the last.
+    const framed = await until("a few frames", async () => {
+      const now = await report();
+      return now.frames.length >= 3 ? now : null;
+    });
+    expect(framed.frames.every((f, i) => i === 0 || f.at > framed.frames[i - 1]!.at)).toBe(true);
     expect(r.cardsShown.at(-1)?.cards).toBe(2);
-    expect(r.cardsShown.at(-1)?.paintedAt).toBeGreaterThan(0);
-  }, 20_000);
+    const shown = await until("the cards painted", async () => (await report()).cardsShown.at(-1)?.paintedAt);
+    expect(shown).toBeGreaterThan(0);
+  }, 90_000);
 });

@@ -9,6 +9,15 @@ import {
 import { ConnectionPool, detectProtocol, Tab } from "./load.ts";
 
 const servers: ReturnType<typeof Bun.serve>[] = [];
+
+/** Waits on a condition, never on a clock, so a loaded machine is slow but never wrong. */
+async function until(ok: () => boolean): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!ok()) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await Bun.sleep(10);
+  }
+}
 afterEach(() => {
   for (const s of servers.splice(0)) s.stop(true);
 });
@@ -61,7 +70,7 @@ function socketServer(options: { refuseFocus?: boolean } = {}) {
 describe("detectProtocol", () => {
   test("a server whose socket says hello speaks the push protocol", async () => {
     expect(await detectProtocol(socketServer().base)).toBe("ws");
-  });
+  }, 30_000);
 
   test("a server with only an SSE stream speaks the old one", async () => {
     const server = Bun.serve({
@@ -80,13 +89,13 @@ describe("detectProtocol", () => {
     });
     servers.push(server);
     expect(await detectProtocol(`http://127.0.0.1:${server.port}`)).toBe("sse");
-  });
+  }, 30_000);
 
   test("a server that serves neither is an error, not a guess", async () => {
     const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("nope", { status: 404 }) });
     servers.push(server);
     await expect(detectProtocol(`http://127.0.0.1:${server.port}`)).rejects.toThrow(/neither/);
-  });
+  }, 30_000);
 });
 
 describe("a tab over the socket", () => {
@@ -94,10 +103,12 @@ describe("a tab over the socket", () => {
     const fake = socketServer();
     const tab = new Tab(fake.base, new ConnectionPool(6), "07", "ws");
     await tab.open();
+    await until(() => fake.received.length > 0);
+    // Nothing more, however long it is given: load only slows a send, never invents one.
     await Bun.sleep(300);
     expect(fake.received).toEqual([{ type: "hello", protocol: PROTOCOL_VERSION, visible: true, cards: [{ id: "07" }] }]);
     tab.close();
-  });
+  }, 30_000);
 
   test("a click leaves the old card, subscribes the new one and lasts until its card frame", async () => {
     const fake = socketServer();
@@ -112,7 +123,7 @@ describe("a tab over the socket", () => {
     expect(click.queuedMs).toBe(0);
     expect(tab.stats.unanswered).toBe(0);
     tab.close();
-  });
+  }, 30_000);
 
   test("Open in herdr is a terminal.focus request, its reply's status the HTTP twin's", async () => {
     const ok = socketServer();
@@ -127,13 +138,14 @@ describe("a tab over the socket", () => {
     await other.open();
     expect((await other.focus("13")).status).toBe(409);
     other.close();
-  });
+  }, 30_000);
 
   test("while recording, every snapshot and delta counts as a snapshot and every frame by type", async () => {
     const fake = socketServer();
     const tab = new Tab(fake.base, new ConnectionPool(6), null, "ws");
     await tab.open();
-    await Bun.sleep(100);
+    // A round trip on the ordered socket: its reply comes after the opening hello and snapshot.
+    await tab.focus("13");
     tab.record(true);
     fake.push();
     fake.push();
@@ -144,5 +156,5 @@ describe("a tab over the socket", () => {
     expect(tab.stats.frames.reply?.count).toBe(1);
     expect(tab.stats.frames.hello).toBeUndefined();
     tab.close();
-  });
+  }, 30_000);
 });
