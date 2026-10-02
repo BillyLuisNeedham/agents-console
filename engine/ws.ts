@@ -39,6 +39,7 @@ import {
   type ClientMessage,
   type EmbeddedBoot,
   type LogFollow,
+  type LogFollowResult,
   type LogPush,
   type PeekFailure,
   type PushedSnapshot,
@@ -870,35 +871,45 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   }
 
   // `log.follow`: point the card's appends at another attempt or variant,
-  // answering with that file's tail window, which is GET /api/log's read.
-  // A frame already on the wire may still name the old one; the Console
-  // drops an append that does not match its pane.
-  function follow(ws: Socket, payload: Record<string, unknown>): RequestAnswer<TicketLogResponse> {
+  // answering with that file's tail window, which is GET /api/log's read,
+  // named by the attempt and variant it was read from: a follow of the
+  // latest attempt learns here which one that is. A frame already on the
+  // wire may still name the old one; the Console drops an append that does
+  // not match its pane.
+  function follow(ws: Socket, payload: Record<string, unknown>): RequestAnswer<LogFollowResult> {
     const id = typeof payload.id === "string" ? payload.id : "";
     const wanted = followOf(payload);
-    const answer = sources.log({
+    const read = sources.log({
       id,
       ...(wanted.attempt !== null ? { attempt: wanted.attempt } : {}),
       offset: "tail",
       stream: wanted.stream,
     });
+    // The follow moves even when there is nothing to read yet: the window
+    // comes with the first check that finds the file.
     const sub = ws.data.cards.get(id);
     if (sub) {
       sub.follow = wanted;
       sub.log = null;
       sub.attempts = null;
-      const target = answer.ok ? targetOf(wanted, answer.result.attempts) : null;
-      if (answer.ok && target !== null) {
-        sub.log = {
-          attempt: target.attempt,
-          stream: target.stream,
-          ino: statOf(join(sources.runsDir, target.file))?.ino ?? 0,
-          offset: answer.result.nextOffset,
-        };
-        sub.attempts = JSON.stringify(answer.result.attempts);
-      }
     }
-    return answer;
+    if (!read.ok) return read;
+    // The read resolves the attempt and its file exactly as targetOf does,
+    // so a read that answered has a target.
+    const target = targetOf(wanted, read.result.attempts)!;
+    if (sub) {
+      sub.log = {
+        attempt: target.attempt,
+        stream: target.stream,
+        ino: statOf(join(sources.runsDir, target.file))?.ino ?? 0,
+        offset: read.result.nextOffset,
+      };
+      sub.attempts = JSON.stringify(read.result.attempts);
+    }
+    return {
+      ...read,
+      result: { ...read.result, attempt: target.attempt, stream: target.stream },
+    };
   }
 
   // The runs and issues directories, watched while any socket is open: the

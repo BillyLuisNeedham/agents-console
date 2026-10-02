@@ -420,11 +420,16 @@ describe("cards", () => {
     expect(followed.ok).toBe(true);
     const tail = (followed as Extract<typeof followed, { ok: true }>).result;
     expect(tail.content).toBe("attempt one\n");
-    // The same read as GET /api/log's tail.
+    // The same read as GET /api/log's tail, named by what it was read from.
     const http = (await (
       await fetch(`${server.url}/api/log?ticket=01&attempt=1&offset=0`)
     ).json()) as TicketLogResponse;
-    expect(tail).toEqual(http);
+    expect(tail).toEqual({ ...http, attempt: 1, stream: false });
+
+    // A follow of the latest attempt says which attempt that resolved to.
+    const latest = await client.request("log.follow", { id: "01", attempt: null, stream: false });
+    expect(latest).toMatchObject({ ok: true, result: { attempt: 2, stream: false } });
+    await client.request("log.follow", { id: "01", attempt: 1, stream: false });
 
     // Appends now follow the first attempt, and not the second.
     const from = client.frames.length;
@@ -744,7 +749,15 @@ describe("socket and HTTP parity", () => {
       if (reply.ok) {
         expect(`${kind} ${res.status < 300}`).toBe(`${kind} true`);
         const { snapshot: _snapshot, ...rest } = body;
-        expect([kind, reply.result]).toEqual([kind, rest as never]);
+        let result: unknown = reply.result;
+        if (reply.kind === "log.follow") {
+          // The follow's reply names the attempt and variant it read, which
+          // its HTTP twin, a plain read of the same tail, does not.
+          const { attempt, stream, ...window } = reply.result;
+          expect({ attempt, stream }).toEqual({ attempt: 1, stream: false });
+          result = window;
+        }
+        expect([kind, result]).toEqual([kind, rest as never]);
       } else {
         expect([kind, reply.refusal]).toEqual([
           kind,
