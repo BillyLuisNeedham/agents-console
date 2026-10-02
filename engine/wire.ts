@@ -34,11 +34,38 @@ export type { TicketStatus } from "./pool.ts";
 export type { AssignmentView } from "./assignment.ts";
 export type { AttemptRole, LiveAttemptRecord } from "./live-attempts.ts";
 export type { HeldPaneRecord } from "./held-panes.ts";
+export type { NoticeDelivery } from "./notices.ts";
 export type { HeldSpawnReason, HeldSpawnView, PendingSpawnView } from "./spawn-proposals.ts";
 export type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 export type { QueuedAnswer } from "./queued-answers.ts";
 export type { TurnSide } from "./turn-state.ts";
-export type { EnlistPane, PanesResponse, EnlistRequest, EnlistResponse } from "./enlist.ts";
+export type {
+  EnlistPane,
+  PanesResponse,
+  EnlistRequest,
+  EnlistResponse,
+  EnlistStewardWireRequest,
+} from "./enlist.ts";
+// The Steward (ADR-0030): its role on a Conversation, its note on an
+// Interrupt, its budget on the snapshot, who answered on a Ticket log
+// event, the Pool settings entry, and the bodies its command sends.
+export type {
+  AnswerBy,
+  ConversationRole,
+  StewardActionResponse,
+  StewardAnswerRequest,
+  StewardAssign,
+  StewardBudgetView,
+  StewardConfig,
+  StewardEndRequest,
+  StewardHeldRequest,
+  StewardKeepTalkingRequest,
+  StewardLeaveRequest,
+  StewardNote,
+  StewardReassignRequest,
+  StewardStateInterrupt,
+  StewardStateResponse,
+} from "./steward.ts";
 // The Settings pane (issue #121): the Pool settings payload and the two
 // write bodies live beside the module that validates and writes them, and
 // the Machine defaults shape beside the file it describes.
@@ -73,6 +100,7 @@ import type { MergeQueueEntry, MergeQueueState } from "./merge-hold.ts";
 import type { QueuedAnswer } from "./queued-answers.ts";
 import type { TicketEvent } from "./events.ts";
 import type { TicketReassignView } from "./reassign.ts";
+import type { StewardBudgetView } from "./steward.ts";
 
 /** The action a resume request carries (POST /api/resume): `approve` and
  *  `reject` answer the review gate and merge-approval interrupts; plain
@@ -174,6 +202,14 @@ export interface EnrichedSnapshot {
    * Discard it.
    */
   heldSpawns: HeldSpawnView[];
+  /**
+   * The Steward budget (ADR-0030), from the engine's snapshot verbatim: the
+   * Pool's budget per Ticket, and what the Steward has used on each Ticket
+   * it answered since the operator last did (absent from `used` is 0).
+   * Remaining is `budget - used`. Always sent; optional only so a fixture
+   * written before the Steward still types.
+   */
+  stewardBudget?: StewardBudgetView;
   state: {
     tickets: EnrichedTicketState[];
     /** Every Conversation the pool knows about (issue #60), passed through

@@ -35,6 +35,12 @@ import {
   projectReassignTickets,
   projectEnlistPicker,
   ENLIST_BECOMES_HINT,
+  ENLIST_STEWARD_NOTE,
+  stewardAssignmentDefaults,
+  stewardBudgetText,
+  stewardLiveReason,
+  stewardOnDuty,
+  stewardOnDutyLine,
   projectLogPane,
   projectNeedsInput,
   projectHeldSpawns,
@@ -1094,6 +1100,7 @@ describe("projectDetailTabs", () => {
         sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
       },
       hasLiveAttempt: false,
+      stewardBudget: null,
     };
   }
 
@@ -3050,6 +3057,8 @@ describe("projectDetail for a Conversation card", () => {
       idleAge: null,
       terminal: null,
       endView: { ending: false, failure: null },
+      steward: false,
+      delivery: null,
     });
   });
 });
@@ -3643,5 +3652,269 @@ describe("projectHeldSpawns (issue #149)", () => {
     );
     expect(refused?.adoptError).toBe("blocker 09 is gone");
     expect(fresh?.adoptError).toBeNull();
+  });
+});
+
+describe("the Steward (ADR-0030)", () => {
+  const steward = (overrides: Partial<ConversationView> = {}): ConversationView =>
+    conversation("conv-3", { title: "Steward", role: "steward", ...overrides });
+
+  it("finds the live Steward, and none among ordinary or ended Conversations", () => {
+    expect(stewardOnDuty([conversation("conv-1"), steward()])).toEqual({
+      conversationId: "conv-3",
+      cardId: "conversation:conv-3",
+      title: "Steward",
+      delivery: null,
+    });
+    expect(stewardOnDuty([conversation("conv-1")])).toBeNull();
+    expect(stewardOnDuty([steward({ status: "ended" })])).toBeNull();
+    expect(stewardOnDuty([steward({ status: "crashed" })])).toBeNull();
+  });
+
+  it("still counts a Steward whose End is under way, as the engine's refusal does", () => {
+    expect(stewardOnDuty([steward({ ending: true })])?.conversationId).toBe("conv-3");
+  });
+
+  it("names the Steward on duty in the header and in the reason Start Steward is disabled", () => {
+    const onDuty = stewardOnDuty([steward()])!;
+    expect(stewardOnDutyLine(onDuty)).toBe("Steward on duty · conv-3");
+    expect(stewardLiveReason(onDuty)).toContain("conv-3");
+  });
+
+  it("marks the Steward's card, Detail and tray row, and puts it on the pool view", () => {
+    const snap = snapshot({ state: { conversations: [conversation("conv-1"), steward()] } });
+    const view = projectPool(snap);
+    const cards = view.cards.filter(
+      (card): card is ConversationCardView => card.kind === "conversation",
+    );
+    expect(cards.map((card) => [card.conversationId, card.steward])).toEqual([
+      ["conv-1", false],
+      ["conv-3", true],
+    ]);
+    expect(view.steward?.cardId).toBe("conversation:conv-3");
+    const detail = detailOf(snap, "conversation:conv-3");
+    expect(detail?.kind === "conversation" && detail.steward).toBe(true);
+    const rows = projectConversationsTray(snap.state.conversations);
+    expect(rows.find((row) => row.id === "conv-3")?.steward).toBe(true);
+    expect(rows.find((row) => row.id === "conv-1")?.steward).toBe(false);
+  });
+
+  it("leaves a waiting Steward out of Needs input: it waits on Notices, not on the operator", () => {
+    const waiting = { state: "waiting" as const, lastLine: "", idleSince: null };
+    const snap = snapshot({
+      state: {
+        conversations: [conversation("conv-1", { turn: waiting }), steward({ turn: waiting })],
+      },
+    });
+    expect(projectConversationsNeedsInput(snap).map((row) => row.conversationId)).toEqual([
+      "conv-1",
+    ]);
+  });
+
+  it("has no Steward on the pool view when none is live", () => {
+    expect(projectPool(snapshot()).steward).toBeNull();
+  });
+
+  it("reads the Steward's Assignment from its Pool settings entry ahead of the pool defaults", () => {
+    const config = {
+      defaults: { harness: "claude", model: "sonnet", drivers: "implement" },
+      steward: { budget: 3, assign: { model: "opus", effort: "high" } },
+    };
+    expect(stewardAssignmentDefaults(config)).toEqual({
+      harness: "claude",
+      model: "opus",
+      effort: "high",
+      drivers: "implement",
+    });
+    expect(stewardAssignmentDefaults({ defaults: { harness: "claude" } })).toEqual({
+      harness: "claude",
+    });
+  });
+
+  it("carries a Steward note on the ticket's interrupt to the card, Detail and Needs input row", () => {
+    const note = { text: "rebase onto main, then resume", at: "2026-10-01T02:00:00Z", conversation: "conv-3" };
+    const snap = snapshot({
+      state: {
+        tickets: [ticket("A", { status: "checkpoint" })],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "stuck", stewardNote: note }],
+      },
+    });
+    const rows = projectNeedsInput(projectPool(snap).cards);
+    expect(rows[0].interrupt.stewardNote).toEqual(note);
+    const detail = detailOf(snap, "ticket:A");
+    expect(detail?.kind === "ticket" && detail.interrupt?.stewardNote).toEqual(note);
+  });
+
+  describe("the Steward budget on a ticket's Detail", () => {
+    const budgetOf = (snap: EnrichedSnapshot, id = "A") => {
+      const detail = detailOf(snap, `ticket:${id}`);
+      return detail?.kind === "ticket" ? detail.stewardBudget : undefined;
+    };
+
+    it("is used and left once the Steward has answered the ticket", () => {
+      const snap = snapshot({
+        stewardBudget: { budget: 5, used: { A: 2 } },
+        state: { tickets: [ticket("A"), ticket("B")] },
+      });
+      expect(budgetOf(snap)).toEqual({ used: 2, budget: 5, remaining: 3 });
+      expect(budgetOf(snap, "B")).toBeNull();
+    });
+
+    it("is absent with no budget on the snapshot, and never reads below zero left", () => {
+      expect(budgetOf(snapshot({ state: { tickets: [ticket("A")] } }))).toBeNull();
+      const over = snapshot({
+        stewardBudget: { budget: 2, used: { A: 3 } },
+        state: { tickets: [ticket("A")] },
+      });
+      expect(budgetOf(over)).toEqual({ used: 3, budget: 2, remaining: 0 });
+    });
+
+    it("reads as one line", () => {
+      expect(stewardBudgetText({ used: 2, budget: 5, remaining: 3 })).toBe(
+        "Steward budget · 2 of 5 used · 3 left",
+      );
+    });
+  });
+
+  describe("the Ticket log", () => {
+    function event(kind: TicketEventKind, payload: Record<string, unknown>): TicketEvent {
+      return { at: "2026-10-01T02:00:00.000Z", attempt: 1, kind, payload };
+    }
+    function stewardLines(events: TicketEvent[]): (string | null)[] {
+      const view = projectTimeline(
+        { events, attempts: [], reconstructed: false, spec: "the spec" },
+        "checkpoint",
+      );
+      return view.attempts[0].events.map((e) => e.steward);
+    }
+    const by = { by: "steward", conversation: "conv-3" };
+
+    it("reads the Steward's answers as its own, with the note", () => {
+      expect(
+        stewardLines([
+          event("answered", { kind: "checkpoint", ...by, note: "tests pass now, carry on" }),
+          event("answered", { kind: "merge-approval", ...by, action: "approve" }),
+          event("answered", { kind: "checkpoint", action: "keep-talking", ...by, message: "run the linter first" }),
+        ]),
+      ).toEqual([
+        "the Steward answered checkpoint: resume · tests pass now, carry on",
+        "the Steward answered merge approval: approve",
+        "the Steward kept talking: run the linter first",
+      ]);
+    });
+
+    it("leaves the operator's answers as they were", () => {
+      expect(stewardLines([event("answered", { kind: "checkpoint" })])).toEqual([null]);
+      expect(
+        stewardLines([event("answered", { kind: "checkpoint", action: "keep-talking" })]),
+      ).toEqual([null]);
+    });
+
+    it("shows a Steward note as left for the operator", () => {
+      expect(
+        stewardLines([
+          event("steward-note", { kind: "checkpoint", note: "needs a product call", ...by }),
+        ]),
+      ).toEqual(["Steward left this for you: needs a product call"]);
+    });
+
+    it("reads the Steward's Reassign and its own End", () => {
+      expect(
+        stewardLines([
+          event("reassign-requested", { fields: { model: "opus", effort: null }, ...by }),
+          event("end-requested", { closing: "the super-step is done", ...by }),
+          event("end-requested", { closing: null }),
+        ]),
+      ).toEqual([
+        "the Steward reassigned: model opus · effort cleared",
+        "the Steward ended itself: the super-step is done",
+        null,
+      ]);
+    });
+
+    it("marks a Held spawn the Steward adopted or discarded as its decision", () => {
+      const view = projectTimeline(
+        {
+          events: [
+            event("spawn-adopted", { adopted: ["A-spawn-1"], fromHeld: "held-1", ...by }),
+            event("spawn-discarded", { id: "held-2", title: "Fix the test", ...by }),
+            event("spawn-discarded", { id: "held-3", title: "Fix the docs" }),
+          ],
+          attempts: [],
+          reconstructed: false,
+          spec: "",
+        },
+        "checkpoint",
+      );
+      expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
+        "adopted A-spawn-1 from held-1 · by the Steward",
+        "held spawn 'Fix the test' discarded · by the Steward",
+        "held spawn 'Fix the docs' discarded",
+      ]);
+    });
+  });
+
+  it("offers Steward as an Enlist kind: standing orders, an optional title, no Blocks", () => {
+    expect(projectEnlistForm("steward")).toEqual({
+      showsSpec: false,
+      showsBlocks: false,
+      showsOpening: true,
+      openingLabel: "standing orders (optional)",
+      requiresTitle: false,
+      note: ENLIST_STEWARD_NOTE,
+    });
+    expect(projectEnlistForm("conversation").requiresTitle).toBe(true);
+    expect(ENLIST_BECOMES_HINT).toContain("Steward");
+  });
+});
+
+describe("a Conversation whose Notices are not landing", () => {
+  const delivery = {
+    failingSince: "2026-10-01T02:05:00.000Z",
+    lastError: "the Turn never echoed: Teach auto mode? (y/n)",
+  };
+  const since = new Date(delivery.failingSince).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  it("warns on its card, its tray row and its Detail, the error carried along", () => {
+    const snap = snapshot({
+      state: { conversations: [conversation("conv-1", { delivery }), conversation("conv-2")] },
+    });
+    const cards = projectPool(snap).cards.filter(
+      (card): card is ConversationCardView => card.kind === "conversation",
+    );
+    const warning = {
+      text: `Notices not reaching this pane since ${since}: something in the pane is in the way`,
+      lastError: delivery.lastError,
+    };
+    expect(cards.map((card) => card.delivery)).toEqual([warning, null]);
+    const rows = projectConversationsTray(snap.state.conversations);
+    expect(rows.find((row) => row.id === "conv-1")?.delivery).toEqual(warning);
+    expect(rows.find((row) => row.id === "conv-2")?.delivery).toBeNull();
+    const detail = detailOf(snap, "conversation:conv-1");
+    expect(detail?.kind === "conversation" && detail.delivery).toEqual(warning);
+  });
+
+  it("drops the time it cannot read rather than printing nonsense", () => {
+    const snap = snapshot({
+      state: {
+        conversations: [conversation("conv-1", { delivery: { ...delivery, failingSince: "?" } })],
+      },
+    });
+    const rows = projectConversationsTray(snap.state.conversations);
+    expect(rows[0].delivery?.text).toBe(
+      "Notices not reaching this pane: something in the pane is in the way",
+    );
+  });
+
+  it("makes the Steward on duty read as blind in the header", () => {
+    const blind = stewardOnDuty([conversation("conv-3", { role: "steward", delivery })])!;
+    expect(blind.delivery?.lastError).toBe(delivery.lastError);
+    expect(stewardOnDutyLine(blind)).toBe("Steward on duty · conv-3 · Notices not landing");
+    const fine = stewardOnDuty([conversation("conv-3", { role: "steward" })])!;
+    expect(stewardOnDutyLine(fine)).toBe("Steward on duty · conv-3");
   });
 });

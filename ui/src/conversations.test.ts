@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { ConversationsTray } from "./conversations";
 import type { ConversationView, StartConversationRequest } from "./project";
+import { useDom } from "./test-dom";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -260,5 +261,150 @@ describe("ConversationsTray onChange", () => {
     startDeferreds[0]!.resolve(CONVERSATION);
     await submitted;
     expect(changes()).toBe(3); // submit settle
+  });
+});
+
+describe("ConversationsTray Start Steward (ADR-0030)", () => {
+  it("starts the Steward with its standing orders as the opening and only the fields filled in", async () => {
+    const { tray, startCalls, startDeferreds } = trayHarness();
+    tray.openStewardForm();
+    tray.setStewardField("orders", "watch the next super-step, then end yourself; you may push");
+    tray.setStewardField("model", " opus ");
+    const submitted = tray.submitSteward();
+    expect(tray.isStewardSubmitting).toBe(true);
+    expect(startCalls).toEqual([
+      {
+        title: "Steward",
+        role: "steward",
+        opening: "watch the next super-step, then end yourself; you may push",
+        assign: { model: "opus" },
+      },
+    ]);
+    startDeferreds[0].resolve({ ...CONVERSATION, id: "conv-3", role: "steward" });
+    await submitted;
+    expect(tray.isStewardFormOpen).toBe(false);
+    expect(tray.stewardField("orders")).toBe("");
+  });
+
+  it("sends no opening and no assign when both are left blank", async () => {
+    const { tray, startCalls, startDeferreds } = trayHarness();
+    tray.openStewardForm();
+    const submitted = tray.submitSteward();
+    expect(startCalls[0]).toEqual({
+      title: "Steward",
+      role: "steward",
+      opening: undefined,
+      assign: undefined,
+    });
+    startDeferreds[0].resolve(CONVERSATION);
+    await submitted;
+  });
+
+  it("shows the engine's refusal inline and keeps the orders for a retry", async () => {
+    const { tray, startDeferreds } = trayHarness();
+    tray.openStewardForm();
+    tray.setStewardField("orders", "keep the merge queue moving");
+    const submitted = tray.submitSteward();
+    startDeferreds[0].reject(new Error("a Steward is already on duty: conv-3"));
+    await submitted;
+    expect(tray.stewardFailure).toBe("a Steward is already on duty: conv-3");
+    expect(tray.isStewardFormOpen).toBe(true);
+    expect(tray.stewardField("orders")).toBe("keep the merge queue moving");
+  });
+
+  it("shows one form at a time, each keeping its own draft", () => {
+    const { tray } = trayHarness();
+    tray.openForm();
+    tray.setField("title", "plan the migration");
+    tray.openStewardForm();
+    expect(tray.isFormOpen).toBe(false);
+    expect(tray.isStewardFormOpen).toBe(true);
+    tray.setStewardField("orders", "answer checkpoints");
+    tray.openForm();
+    expect(tray.isStewardFormOpen).toBe(false);
+    expect(tray.field("title")).toBe("plan the migration");
+    expect(tray.stewardField("orders")).toBe("answer checkpoints");
+  });
+
+  describe("drawn", () => {
+    useDom();
+    const onDuty = {
+      conversationId: "conv-3",
+      cardId: "conversation:conv-3",
+      title: "Steward",
+      delivery: null,
+    };
+    const handlers = { onSelect: () => {} };
+
+    it("disables the tray's start steward toggle with the reason while one is on duty", () => {
+      const { tray } = trayHarness();
+      const el = tray.render([], {}, handlers, { onDuty, defaults: {} });
+      const toggle = el.querySelector<HTMLButtonElement>(".conversations-steward-toggle")!;
+      expect(toggle.disabled).toBe(true);
+      expect(toggle.title).toContain("conv-3");
+    });
+
+    it("shows the Steward entry's Assignment as placeholders, and disables Start once one is on duty", () => {
+      const { tray } = trayHarness();
+      tray.openStewardForm();
+      const defaults = { harness: "claude", model: "opus", drivers: "implement" };
+      const open = tray.render([], {}, handlers, { onDuty: null, defaults });
+      const placeholders = [...open.querySelectorAll<HTMLInputElement>(".steward-form input")].map(
+        (input) => input.placeholder,
+      );
+      expect(placeholders).toEqual(["claude", "opus", "effort", "implement"]);
+      expect(open.querySelector<HTMLButtonElement>(".steward-start")!.disabled).toBe(false);
+      const blocked = tray.render([], {}, handlers, { onDuty, defaults });
+      expect(blocked.querySelector<HTMLButtonElement>(".steward-start")!.disabled).toBe(true);
+      expect(blocked.querySelector(".steward-form-blocked")?.textContent).toContain("conv-3");
+    });
+
+    it("marks the Steward's row", () => {
+      const { tray } = trayHarness();
+      const row = (id: string, steward: boolean) => ({
+        id,
+        cardId: `conversation:${id}`,
+        title: id,
+        status: "live" as const,
+        turn: { state: "working" as const, lastLine: "", idleSince: null },
+        idleAge: null,
+        steward,
+        delivery: null,
+      });
+      const el = tray.render([row("conv-1", false), row("conv-3", true)], {}, handlers);
+      const marked = [...el.querySelectorAll(".conversations-row")].map(
+        (r) => r.querySelector(".steward-badge") !== null,
+      );
+      expect(marked).toEqual([false, true]);
+    });
+  });
+});
+
+describe("ConversationsTray: Notices not landing", () => {
+  useDom();
+  it("puts the warning on the row, its error on hover", () => {
+    const { tray } = trayHarness();
+    const delivery = { text: "Notices not reaching this pane since 02:05", lastError: "a dialog is open" };
+    const el = tray.render(
+      [
+        {
+          id: "conv-1",
+          cardId: "conversation:conv-1",
+          title: "conv-1",
+          status: "live",
+          turn: { state: "waiting", lastLine: "", idleSince: null },
+          idleAge: null,
+          steward: false,
+          delivery,
+        },
+      ],
+      {},
+      { onSelect: () => {} },
+    );
+    const row = el.querySelector(".conversations-row")!;
+    expect(row.classList.contains("conversations-row-blocked")).toBe(true);
+    const warn = row.querySelector<HTMLElement>(".conversation-delivery-warn")!;
+    expect(warn.textContent).toBe(delivery.text);
+    expect(warn.title).toBe("a dialog is open");
   });
 });

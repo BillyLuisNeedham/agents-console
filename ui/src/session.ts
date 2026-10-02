@@ -17,6 +17,7 @@ import {
   joinStreamFiles,
   phaseLabel,
   poolAssignmentDefaults,
+  stewardAssignmentDefaults,
   poolDisplayName,
   poolStatus,
   projectConversationsNeedsInput,
@@ -785,6 +786,10 @@ export class ConsoleSession {
         : [],
       conversationDefaults: this.snapshot
         ? poolAssignmentDefaults(this.snapshot.state.config)
+        : {},
+      steward: this.view?.steward ?? null,
+      stewardDefaults: this.snapshot
+        ? stewardAssignmentDefaults(this.snapshot.state.config)
         : {},
       enlistBlocks: this.snapshot
         ? projectEnlistBlocks(this.snapshot.state.tickets)

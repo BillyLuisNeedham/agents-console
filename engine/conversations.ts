@@ -79,13 +79,14 @@ import {
   type AttemptHandle,
   type PaneTailer,
 } from "./attempt-run.ts";
-import { buildConversationTeaching } from "./prompt.ts";
+import { buildConversationTeaching, buildStewardTeaching } from "./prompt.ts";
 import { spawnLedgerPath } from "./spawn-ledger.ts";
 import {
   conversationEndedNoticeText,
   diffStatSummary,
   ticketEndedNoticeText,
   type Notice,
+  type NoticeDelivery,
 } from "./notices.ts";
 import type { PaneReadRegister } from "./pane-reads.ts";
 import { listedAsRecorded, type PaneListing } from "./pane-survey.ts";
@@ -106,6 +107,18 @@ import {
 } from "./assignment.ts";
 import type { Interrupt, PoolConfig } from "./engine.ts";
 import { spawnCapsOf } from "./spawn-caps.ts";
+import {
+  freshStewardItems,
+  stewardBatchText,
+  stewardBudgetOf,
+  stewardCommand,
+  type AnswerBy,
+  type ConversationRole,
+  type StewardItem,
+} from "./steward.ts";
+
+// The Steward's command (ADR-0030), named by its exact path in the teaching.
+const STEWARD_CLI = join(import.meta.dir, "steward-cli.ts");
 
 // ---------------------------------------------------------------------------
 // Storage: the marker format and its parser, in the style of pool.ts.
@@ -143,6 +156,9 @@ export interface ConversationRecord {
   effort?: string;
   drivers: string;
   enlisted?: EnlistedConversation;
+  /** The role it was started or Enlisted in (ADR-0030): a Steward. Absent
+   *  for an ordinary Conversation, and fixed for its life. */
+  role?: ConversationRole;
 }
 
 export const CONVERSATION_MARKER_RE = /^<!--\s*conversation:\s*(.+?)\s*-->\s*$/;
@@ -188,6 +204,7 @@ function parseConversationMarkerLine(
           sessionId: fields.get("session") ? decodeURIComponent(fields.get("session")!) : null,
         }
       : undefined;
+  const role = fields.get("role") === "steward" ? ("steward" as const) : undefined;
   return {
     id,
     status: status as ConversationStatus,
@@ -197,6 +214,7 @@ function parseConversationMarkerLine(
     ...(fields.get("effort") ? { effort: decodeURIComponent(fields.get("effort")!) } : {}),
     drivers: decodeURIComponent(fields.get("drivers") ?? ""),
     ...(enlisted ? { enlisted } : {}),
+    ...(role ? { role } : {}),
   };
 }
 
@@ -219,6 +237,8 @@ function markerLine(rec: Omit<ConversationRecord, "file" | "title" | "opening">)
           `session=${rec.enlisted.sessionId ? encodeURIComponent(rec.enlisted.sessionId) : "none"}`,
         ]
       : []),
+    // Written only for a Steward, so an ordinary record reads exactly as before.
+    ...(rec.role ? [`role=${rec.role}`] : []),
   ];
   return `<!-- conversation: ${fields.join(" ")} -->`;
 }
@@ -346,10 +366,22 @@ export interface ConversationRuntime {
   // Notices from spawned work that ended, delivered as a Turn once the tick
   // sees this Conversation waiting.
   notices: Notice[];
+  // Set while Notices keep failing to land in the pane, from the first
+  // failure until one lands (NoticeDelivery).
+  delivery?: NoticeDelivery;
   // Set the moment End is called; guards the background crash watcher
   // (watchForCrash) from racing the ending it already knows about.
   ending: boolean;
   closing?: string;
+  /** Who asked for the End: the operator, or a Steward ending itself (ADR-0030). */
+  endedBy?: AnswerBy;
+  /** The Steward role (ADR-0030), from the record; null for an ordinary Conversation. */
+  role: ConversationRole | null;
+  /** What this Steward has been told about (steward.ts's freshStewardItems),
+   *  in memory only, so a re-adopted Steward hears everything still pending. */
+  told: Set<string>;
+  /** Set once its first offer has taken what merged before it as told. */
+  baselined?: boolean;
   /** False when this Conversation's tabs may not be closed by id: a runtime
    *  rebuilt for an End whose pane herdr lists as something else (issue
    *  #139), where the id no longer names this Conversation's terminal. */
@@ -384,11 +416,25 @@ export interface ConversationView {
    *  End disabled, and `paneId` is null so nothing peeks or focuses a pane
    *  that is going. */
   ending: boolean;
+  /** The Steward (ADR-0030): present only on a Conversation in that role. */
+  role?: ConversationRole;
+  /**
+   * Notices are not reaching this pane: present from the first failed
+   * delivery until one lands. The Turn state may still read waiting, since
+   * a Blocking dialog in the pane looks idle while it swallows every Turn,
+   * and the engine answers no dialog but Folder trust; the operator has to
+   * look at the pane.
+   */
+  delivery?: NoticeDelivery;
 }
 
 export interface StartConversationRequest {
   title: string;
   opening?: string;
+  /** Start it as the Steward (ADR-0030): `opening` is then the operator's
+   *  standing orders, and its Assignment comes from the Steward entry of
+   *  the Pool settings ahead of the pool defaults. */
+  role?: ConversationRole;
   assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
   spawnedBy?: string;
   // Spawn adoption (engine.ts's adoptSpawnProposals) precomputes a
@@ -429,6 +475,8 @@ export interface EnlistConversationRegistration {
   directory: string;
   branch: string;
   sessionId: string | null;
+  /** Enlisted as the Steward (ADR-0030). */
+  role?: ConversationRole;
 }
 
 export type EnlistConversationResult =
@@ -459,6 +507,9 @@ export interface ConversationEnv extends AttemptEnv {
    *  teaching Turn can be typed (issue #101); a Launch's readiness bound
    *  unless a test shortens it. */
   teachingWaitMs?: number;
+  /** The Console's URL, when a server runs this engine: the Steward's
+   *  teaching names it beside the pool directory (ADR-0030). */
+  consoleUrl?: string;
 }
 
 /**
@@ -497,6 +548,10 @@ export interface ConversationHost {
   hasMergeInterrupt(id: string): boolean;
   /** The live pool config. */
   config(): PoolConfig;
+  /** What a Steward should be told about now (steward.ts's stewardItems):
+   *  every pending Ticket Interrupt it may answer and has not left, and a
+   *  stalled Merge queue head. */
+  stewardItems(): StewardItem[];
 }
 
 export interface ConversationModule {
@@ -510,8 +565,8 @@ export interface ConversationModule {
    * removed anything it wrote.
    */
   enlist(req: EnlistConversationRegistration): Promise<EnlistConversationResult>;
-  /** End a Conversation the operator is done with. */
-  end(id: string, closing?: string): Promise<void>;
+  /** End a Conversation the operator is done with, or a Steward ending itself. */
+  end(id: string, closing?: string, by?: AnswerBy): Promise<void>;
   /** A merge-conflict or merge-approval answer whose id names a live Conversation. */
   answerMerge(id: string, interrupt: Interrupt, approve: boolean | undefined): void;
   /** Every Conversation the pool knows about, live or not, as the snapshot wants them. */
@@ -536,6 +591,10 @@ export interface ConversationModule {
   isLive(id: string): boolean;
   /** Ids of Conversations whose start is still in flight and has no record on disk yet. */
   reservedIds(): Iterable<string>;
+  /** The live Steward's id (ADR-0030), adopted or not yet; null when none is on duty. */
+  stewardId(): string | null;
+  /** An Interrupt on this Ticket was answered: the Steward is told about the next one afresh. */
+  stewardForget(ticketId: string): void;
   /** Stop every tick; called at shutdown. Runtimes are left as they are. */
   dispose(): void;
 }
@@ -636,6 +695,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     title: string;
     directory: string;
     branch: string;
+    role?: ConversationRole;
   }): ConversationRuntime {
     return {
       id: rec.id,
@@ -652,6 +712,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       turn: FRESH_TURN,
       notices: [],
       ending: false,
+      role: rec.role ?? null,
+      told: new Set(),
       release: new AbortController(),
       timer: null,
     };
@@ -724,6 +786,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       children: childrenOf(rec.id, conversations),
       enlisted: rec.enlisted !== undefined,
       ending,
+      ...(rec.role ? { role: rec.role } : {}),
+      ...(runtime?.delivery ? { delivery: runtime.delivery } : {}),
     };
   }
 
@@ -1061,6 +1125,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       turn: FRESH_TURN,
       notices: [],
       ending: false,
+      role: rec.role ?? null,
+      told: new Set(),
       release: new AbortController(),
       timer: null,
     };
@@ -1143,6 +1209,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         title: rec.title,
         directory: found.directory,
         branch: found.branch,
+        ...(rec.role ? { role: rec.role } : {}),
       });
       await claim(rec.id, async () => {
         try {
@@ -1179,13 +1246,17 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   // Starting.
   // -------------------------------------------------------------------------
 
+  // A spawned Conversation inherits its parent's Assignment; a Steward takes
+  // the Steward entry of the Pool settings (ADR-0030), the way the resolver
+  // pins its own; both sit between the request and the pool defaults.
   function resolveStartAssignment(
     req: StartConversationRequest,
     existing: ConversationRecord[],
   ): Assignment {
     const parent = req.spawnedBy ? existing.find((r) => r.id === req.spawnedBy) : undefined;
+    const steward = req.role === "steward" ? host.config().steward?.assign : undefined;
     return resolveAssignment({
-      subject: "conversation start:",
+      subject: req.role === "steward" ? "steward start:" : "conversation start:",
       request: req.assign,
       inherited: parent
         ? {
@@ -1194,7 +1265,14 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
             ...(parent.effort ? { effort: parent.effort } : {}),
             drivers: parent.drivers,
           }
-        : undefined,
+        : steward
+          ? {
+              harness: steward.harness ?? "",
+              model: steward.model ?? "",
+              ...(steward.effort ? { effort: steward.effort } : {}),
+              drivers: steward.drivers ?? "",
+            }
+          : undefined,
       defaults: host.config().defaults,
       strict: true,
       verify: false,
@@ -1233,6 +1311,10 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     if (!req.title?.trim()) {
       throw new Error("conversation start: title is required");
     }
+    if (req.role === "steward") {
+      const onDuty = stewardOnDuty();
+      if (onDuty !== null) throw new Error(`steward start: ${secondStewardReason(onDuty)}`);
+    }
     const existing = loadConversations(dir);
     const id =
       req.id ??
@@ -1242,10 +1324,97 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // Reserved before the first await, so an adoption that reads the
     // reserved ids right after firing this start already sees it.
     reserved.add(id);
+    if (req.role === "steward") stewardStarting = id;
     try {
       return await launch(id, req, existing);
     } finally {
       reserved.delete(id);
+      if (stewardStarting === id) stewardStarting = null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // The Steward (ADR-0030): at most one live at a time, since two answering
+  // the same Interrupt would race.
+  // -------------------------------------------------------------------------
+
+  // A Steward start or enlist in flight, which holds the slot before its
+  // record is written.
+  let stewardStarting: string | null = null;
+
+  function stewardId(): string | null {
+    return (
+      loadConversations(dir).find((rec) => rec.role === "steward" && rec.status === "live")?.id ??
+      null
+    );
+  }
+
+  function stewardOnDuty(): string | null {
+    return stewardStarting ?? stewardId();
+  }
+
+  function secondStewardReason(onDuty: string): string {
+    return `a Steward is already on duty (${onDuty}); end it before starting another`;
+  }
+
+  // What a Conversation is taught, by role: a Steward its role and command
+  // on top of the Conversation protocol (prompt.ts).
+  function teachingFor(id: string, role: ConversationRole | undefined, own: Assignment): string {
+    const config = host.config();
+    const spawnPath = spawnProposalPath(id);
+    const assignment = {
+      harness: own.harness,
+      model: own.model,
+      ...(own.effort ? { effort: own.effort } : {}),
+      drivers: own.drivers,
+    };
+    const perFile = spawnCapsOf(config).perAttempt;
+    const ledgerPath = spawnLedgerPath(env.runsDir);
+    if (role !== "steward") {
+      return buildConversationTeaching(spawnPath, assignment, config.defaults, perFile, ledgerPath);
+    }
+    return buildStewardTeaching({
+      spawnPath,
+      own: assignment,
+      defaults: config.defaults,
+      perFile,
+      ledgerPath,
+      command: stewardCommand({
+        bun: process.execPath,
+        cli: STEWARD_CLI,
+        poolDir: env.poolDir,
+        url: env.consoleUrl ?? null,
+        conversation: id,
+      }),
+      budget: stewardBudgetOf(config),
+    });
+  }
+
+  // Queue whatever the Steward has not been told about yet, once per item:
+  // an item already queued is not queued twice.
+  function offerSteward(runtime: ConversationRuntime): void {
+    const items = host.stewardItems();
+    const queued = new Set(runtime.notices.flatMap((n) => (n.key ? [n.key] : [])));
+    const fresh = freshStewardItems(runtime.told, items, runtime.baselined !== true);
+    runtime.baselined = true;
+    for (const item of fresh) {
+      if (queued.has(item.key)) continue;
+      runtime.notices.push({
+        to: runtime.id,
+        from: item.ticketId ?? runtime.id,
+        kind: item.kind,
+        text: item.text,
+        key: item.key,
+      });
+    }
+  }
+
+  function stewardForget(ticketId: string): void {
+    for (const runtime of runtimes.values()) {
+      if (runtime.role !== "steward") continue;
+      for (const key of [...runtime.told]) {
+        if (key.startsWith(`interrupt:${ticketId}:`)) runtime.told.delete(key);
+      }
     }
   }
 
@@ -1269,14 +1438,12 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     // outcome naming for a Conversation's own proposal channel:
     // `<id>.spawn.json` beside its `.outcome.json`, polled by this
     // Conversation's tick.
-    const spawnPath = spawnProposalPath(id);
-    const teaching = buildConversationTeaching(
-      spawnPath,
-      { harness, model, ...(effort ? { effort } : {}), drivers },
-      host.config().defaults,
-      spawnCapsOf(host.config()).perAttempt,
-      spawnLedgerPath(env.runsDir),
-    );
+    const teaching = teachingFor(id, req.role, {
+      harness,
+      model,
+      ...(effort ? { effort } : {}),
+      drivers,
+    });
     const toType = opening.trim() ? `${opening}\n\n${teaching}` : teaching;
 
     // The launch: one attempt, the well-known file names, no rotation, no
@@ -1326,6 +1493,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       model,
       ...(effort ? { effort } : {}),
       drivers,
+      ...(req.role ? { role: req.role } : {}),
     };
     writeConversation(dir, record);
 
@@ -1384,6 +1552,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       tailer: handle.tailer,
       notices: [],
       ending: false,
+      role: req.role ?? null,
+      told: new Set(),
       release: new AbortController(),
       timer: null,
     };
@@ -1428,10 +1598,15 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     const harness = req.harness.trim().toLowerCase();
     const descriptor = defaultHarnessDescriptors[harness];
     if (!descriptor) return { ok: false, reason: "no harness the engine knows" };
+    if (req.role === "steward") {
+      const onDuty = stewardOnDuty();
+      if (onDuty !== null) return { ok: false, reason: secondStewardReason(onDuty) };
+    }
 
     // Reserved before the first await: the id is already fixed by the branch
     // rule the engine applied, so a concurrent start must not mint it too.
     reserved.add(req.id);
+    if (req.role === "steward") stewardStarting = req.id;
     try {
       const file = conversationFile(env.poolDir, req.id);
       const found: EnlistedConversation = {
@@ -1450,6 +1625,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         title: req.title,
         directory: req.directory,
         branch: req.branch,
+        ...(req.role ? { role: req.role } : {}),
       });
 
       // Settle the Turn state from consecutive reads, exactly as the
@@ -1495,6 +1671,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         model: "",
         drivers: DEFAULT_DRIVERS,
         enlisted: found,
+        ...(req.role ? { role: req.role } : {}),
       };
       // The record lands before delivery: deliver reads it for the harness
       // descriptor, and the card must exist the moment the enlist does.
@@ -1506,13 +1683,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         to: req.id,
         from: req.id,
         kind: "enlist-teaching",
-        text: buildConversationTeaching(
-          join(env.runsDir, `${req.id}.spawn.json`),
-          { harness, model: "", drivers: DEFAULT_DRIVERS },
-          host.config().defaults,
-          spawnCapsOf(host.config()).perAttempt,
-          spawnLedgerPath(env.runsDir),
-        ),
+        text: teachingFor(req.id, req.role, { harness, model: "", drivers: DEFAULT_DRIVERS }),
       });
       if (opening.trim()) {
         runtime.notices.push({
@@ -1560,6 +1731,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       return { ok: true, view: viewOf(record, loadConversations(dir)) };
     } finally {
       reserved.delete(req.id);
+      if (stewardStarting === req.id) stewardStarting = null;
     }
   }
 
@@ -1650,7 +1822,11 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   function finishEnd(runtime: ConversationRuntime, merged: boolean): void {
     stopTick(runtime);
     writeConversationStatus(runtime.file, "ended");
-    event(runtime.id, "ended", { closing: runtime.closing ?? null, by: "operator", merged });
+    event(runtime.id, "ended", {
+      closing: runtime.closing ?? null,
+      by: runtime.endedBy ?? "operator",
+      merged,
+    });
     releaseAgent(runtime.paneId, runtime.harness);
     env.liveAttempts.clear(runtime.id, 1);
     // An enlisted Conversation's tab is the operator's and never closes
@@ -1699,6 +1875,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         title: rec.title,
         directory: rec.enlisted.directory,
         branch: rec.enlisted.branch,
+        ...(rec.role ? { role: rec.role } : {}),
       });
     }
     const launch = launchOf(id);
@@ -1738,21 +1915,37 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   /**
    * End a Conversation: only the operator does this (card End, Detail End,
    * or closing the herdr tab — the last arrives as a pane loss and is
-   * handled by watchForCrash instead, never here). The tab closes at once,
+   * handled by watchForCrash instead, never here), a Steward ending itself
+   * excepted (ADR-0030), which `by` records. The tab closes at once,
    * before the merge is even attempted: once End is clicked the talk is over
    * regardless of how the merge goes, and a conflict's resolver gets its own
    * fresh tab (host.resolveConflict) rather than reusing the one just
    * closed.
    */
-  async function end(id: string, closing?: string, listing?: PaneListing): Promise<void> {
+  async function end(
+    id: string,
+    closing?: string,
+    listing?: PaneListing,
+    by: AnswerBy = "operator",
+  ): Promise<void> {
     const runtime = runtimes.get(id) ?? (await claimDetached(id, listing));
     if (runtime.ending) return;
     runtime.ending = true;
     runtime.closing = closing;
+    runtime.endedBy = by;
     // Recorded before anything moves (issue #140): an engine that stops mid
     // End leaves the record live, and the next boot finishes this ending
-    // rather than calling the Conversation crashed.
-    if (!endRequested(id)) event(id, "end-requested", { closing: closing ?? null });
+    // rather than calling the Conversation crashed, with the closing line
+    // and who asked for it as they were recorded.
+    if (!endRequested(id)) {
+      event(id, "end-requested", { closing: closing ?? null, ...(by === "steward" ? { by } : {}) });
+    } else if (closing === undefined) {
+      const asked = readEvents(env.runsDir, id)
+        .filter((e) => e.kind === "end-requested")
+        .pop();
+      if (typeof asked?.payload.closing === "string") runtime.closing = asked.payload.closing;
+      if (asked?.payload.by === "steward") runtime.endedBy = "steward";
+    }
     runtime.release.abort();
     // Before the tab goes: the release names a pane, and a pane whose tab
     // has just been closed is a pane the daemon no longer has (issue #94).
@@ -2009,10 +2202,14 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       const runtime = runtimes.get(id);
       if (!runtime || runtime.ending || !runtime.paneId || runtime.notices.length === 0) return;
       const descriptor = harnessDescriptorFor(runtime);
-      const queue = runtime.notices.splice(0);
-      for (let i = 0; i < queue.length; i++) {
-        const notice = queue[i];
-        const echoTargets = [descriptor?.echoPattern, notice.text].filter(
+      // Read before the queue is claimed: a throw here must leave it intact.
+      const current = runtime.notices.some((n) => n.key)
+        ? new Map(host.stewardItems().map((item) => [item.key, item]))
+        : null;
+      const turns = turnsOf(runtime.notices.splice(0), current);
+      for (let i = 0; i < turns.length; i++) {
+        const turn = turns[i];
+        const echoTargets = [descriptor?.echoPattern, turn.text].filter(
           (t): t is string => typeof t === "string" && t.length > 0,
         );
         let delivered = false;
@@ -2021,19 +2218,42 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
           delivered = await typeVerified(
             env.herdrSocket,
             runtime.paneId,
-            notice.text,
+            turn.text,
             echoTargets,
             descriptor?.clearKeys ?? [],
           );
         } catch (err) {
           error = err instanceof Error ? err.message : String(err);
         }
-        const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
-        event(notice.from, "notice", { ...payload, to: notice.to }, lastAttempt(env.runsDir, notice.from));
-        event(id, "notice", { ...payload, from: notice.from }, lastAttempt(env.runsDir, id));
+        // A stuck pane is retried every tick: only the first failure of the
+        // episode is on the logs, and then the delivery that ends it.
+        const firstFailure = !delivered && runtime.delivery === undefined;
+        if (delivered || firstFailure) {
+          for (const notice of turn.notices) {
+            const payload = { kind: notice.kind, delivered, ...(error ? { error } : {}) };
+            event(notice.from, "notice", { ...payload, to: notice.to }, lastAttempt(env.runsDir, notice.from));
+            event(id, "notice", { ...payload, from: notice.from }, lastAttempt(env.runsDir, id));
+          }
+        }
         if (!delivered) {
-          runtime.notices.unshift(...queue.slice(i));
+          runtime.notices.unshift(...turns.slice(i).flatMap((t) => t.notices));
+          runtime.delivery = {
+            failingSince: runtime.delivery?.failingSince ?? nowIso(),
+            lastError: error ?? "the Turn never showed in the pane, so it was not sent",
+          };
+          if (firstFailure) {
+            host.log(
+              `conversation ${id}: Notices are not reaching its pane (${runtime.delivery.lastError}); ` +
+                "retrying while it reads as waiting",
+            );
+            publish();
+          }
           return;
+        }
+        if (runtime.delivery !== undefined) {
+          host.log(`conversation ${id}: Notices reach its pane again (failing since ${runtime.delivery.failingSince})`);
+          runtime.delivery = undefined;
+          publish();
         }
       }
     } catch {
@@ -2044,6 +2264,38 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
       // was already claimed by the inner splice; the next enqueue or waiting
       // read starts a fresh drain.
     }
+  }
+
+  /**
+   * The Turns a claimed queue is typed as: one per Notice, except a
+   * Steward's (ADR-0030), which go together as one Turn where the first of
+   * them stood. Each Steward Notice is checked against the items pending
+   * now (`current`) and typed with its current text, so an Interrupt
+   * answered while its Notice waited is not reported, and a budget is
+   * reported as it stands.
+   */
+  function turnsOf(
+    queue: Notice[],
+    current: Map<string, StewardItem> | null,
+  ): { text: string; notices: Notice[] }[] {
+    const turns: { text: string; notices: Notice[] }[] = [];
+    const steward: { notices: Notice[]; items: StewardItem[] } = { notices: [], items: [] };
+    let stewardAt = -1;
+    for (const notice of queue) {
+      if (notice.key === undefined) {
+        turns.push({ text: notice.text, notices: [notice] });
+        continue;
+      }
+      const item = current?.get(notice.key);
+      if (!item) continue;
+      if (stewardAt === -1) stewardAt = turns.length;
+      steward.notices.push(notice);
+      steward.items.push(item);
+    }
+    if (stewardAt !== -1) {
+      turns.splice(stewardAt, 0, { text: stewardBatchText(steward.items), notices: steward.notices });
+    }
+    return turns;
   }
 
   // Whether `id` names a Conversation the pool has ever recorded, live or
@@ -2184,6 +2436,9 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         // known); re-fetch rather than trusting the closure's reference.
         const live = runtimes.get(id);
         if (!live || live.ending) return;
+        // A Steward hears about what is pending without polling (ADR-0030):
+        // offered here, each item once, and delivered below while it waits.
+        if (live.role === "steward") offerSteward(live);
         if (live.turn.state === "waiting" && live.notices.length > 0) {
           void deliver(id);
         }
@@ -2208,7 +2463,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
   return {
     start,
     enlist,
-    end,
+    end: (id, closing, by) => end(id, closing, undefined, by),
     answerMerge,
     views,
     crashStaleAtBoot,
@@ -2234,6 +2489,8 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     ticketCheckpointed,
     isLive: (id) => runtimes.has(id),
     reservedIds: () => reserved,
+    stewardId,
+    stewardForget,
     dispose,
   };
 }

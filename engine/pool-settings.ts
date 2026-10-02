@@ -9,8 +9,9 @@
  * replacement: `assign` belongs to the Tickets rather than to the pane, and
  * a key this module has never heard of belongs to whoever put it there, so
  * both survive a save untouched. Second, only some of what the pane edits
- * takes effect without a Restart: `defaults`, `assign`, `resolver` and the
- * Spawn caps reload at the next super-step boundary (ADR-0018, ADR-0029),
+ * takes effect without a Restart: `defaults`, `assign`, `resolver`, the
+ * Spawn caps and the Steward entry reload at the next super-step boundary
+ * (ADR-0018, ADR-0029, ADR-0030),
  * or at once on a pool with nothing in flight, the Pool title (issue #100)
  * shows the moment it is saved, and BOOT_ONLY_KEYS is the rest, which the
  * running process froze at boot and the Console badges as such.
@@ -26,6 +27,7 @@ import { join } from "node:path";
 import { readConfig, type PoolConfig } from "./engine.ts";
 import { normaliseTitle } from "./pool-title.ts";
 import { isSpawnCap, type SpawnCapsConfig } from "./spawn-caps.ts";
+import { isStewardBudget, type StewardAssign, type StewardConfig } from "./steward.ts";
 import type { MachineDefaults } from "./machine-defaults.ts";
 
 /**
@@ -45,6 +47,7 @@ export const POOL_SETTINGS_KEYS = [
   "checkpoint",
   "title",
   "spawnCaps",
+  "steward",
 ] as const satisfies readonly (keyof PoolConfig)[];
 
 export type PoolSettingsKey = (typeof POOL_SETTINGS_KEYS)[number];
@@ -174,7 +177,52 @@ function normaliseKey(
       return normalisePoolTitle(value);
     case "spawnCaps":
       return normaliseSpawnCaps(value);
+    case "steward":
+      return normaliseSteward(value, harnesses);
   }
+}
+
+// The Steward entry (ADR-0030) is replaced whole, like `defaults`: the pane
+// shows the budget and the Assignment fields at once, so one the operator
+// emptied goes back to its default (a budget of 5, the pool defaults). The
+// budget is a text input, so a numeric string is a budget; anything but a
+// whole number of 1 or more is refused by name, as the engine refuses it at
+// reload. A named harness must be one the pool knows.
+function normaliseSteward(value: unknown, harnesses: string[]): StewardConfig | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("pool settings: steward must be an object");
+  }
+  const raw = value as Record<string, unknown>;
+  const out: StewardConfig = {};
+  let budget = raw.budget;
+  if (typeof budget === "string") {
+    budget = budget.trim() === "" ? undefined : /^\d+$/.test(budget.trim()) ? Number(budget.trim()) : budget;
+  }
+  if (budget !== undefined && budget !== null) {
+    if (!isStewardBudget(budget)) {
+      throw new Error("pool settings: steward.budget must be a whole number, 1 or more");
+    }
+    out.budget = budget;
+  }
+  if (raw.assign !== undefined && raw.assign !== null) {
+    if (typeof raw.assign !== "object" || Array.isArray(raw.assign)) {
+      throw new Error("pool settings: steward.assign must be an object");
+    }
+    const assign: StewardAssign = {};
+    for (const field of ["harness", "model", "effort", "drivers"] as const) {
+      const entry = (raw.assign as Record<string, unknown>)[field];
+      if (entry === undefined || entry === null) continue;
+      if (typeof entry !== "string") {
+        throw new Error(`pool settings: steward.assign.${field} must be a string`);
+      }
+      if (entry.trim()) assign[field] = entry.trim();
+    }
+    if (assign.harness) {
+      requireKnownHarness("pool settings: steward.assign.harness", assign.harness, harnesses);
+    }
+    if (Object.keys(assign).length > 0) out.assign = assign;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 // The Spawn caps (issue #149) are replaced whole, like `defaults`: the pane

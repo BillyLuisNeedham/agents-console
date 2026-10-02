@@ -18,13 +18,37 @@ export interface Notice {
    * enlisted Conversation starts with (issue #101): the operator's opening
    * Turn and the Spawn teaching travel the same queue-then-deliver path as a
    * Notice, so both land only while the pane is waiting.
+   * "steward-interrupt" and "steward-merge-stall" are what a Steward is told
+   * about (ADR-0030): a pending Ticket Interrupt, and a stalled Merge queue
+   * head; "steward-merged" and "steward-pool" only inform it: a Ticket that
+   * merged, and the pool reaching Review. `from` names the Ticket, so its
+   * log records the telling (the Steward itself for the pool's own).
    */
   kind:
     | "ticket-ended"
     | "conversation-ended"
     | "enlist-teaching"
-    | "opening-turn";
+    | "opening-turn"
+    | "steward-interrupt"
+    | "steward-merge-stall"
+    | "steward-merged"
+    | "steward-pool";
   text: string;
+  /** A Steward Notice's item key (steward.ts's StewardItem): delivery checks
+   *  the item is still pending, and types its current text. */
+  key?: string;
+}
+
+/**
+ * A Conversation whose Notices keep failing to land (ADR-0030's live e2e):
+ * since when, and why the last try failed. Turn state can read "waiting"
+ * while something in the pane (a Blocking dialog the engine never answers)
+ * swallows every Turn, so the failure is shown rather than retried
+ * invisibly. Cleared by the first Notice that lands.
+ */
+export interface NoticeDelivery {
+  failingSince: string;
+  lastError: string;
 }
 
 export function diffStatSummary(cwd: string, range: string): string {

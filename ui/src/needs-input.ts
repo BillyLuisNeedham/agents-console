@@ -23,6 +23,7 @@
 import { h } from "./dom";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderKeepTalkingButton, renderKeepTalkingFailure } from "./terminal";
+import { renderStewardNote } from "./steward";
 import {
   bulkResumeRows,
   clampNeedsInputWidth,
@@ -137,6 +138,17 @@ export class NeedsInputTray {
 
   setNote(ticketId: string, value: string): void {
     this.drafts.set(ticketId, value);
+  }
+
+  /**
+   * "Use as answer" on a row's Steward note (ADR-0030): the note becomes the
+   * ticket's Draft answer, replacing what was there, and the re-render puts
+   * it in every field showing that draft, the Detail's included. Nothing is
+   * sent: the operator answers with it as with any note.
+   */
+  useStewardNote(ticketId: string, text: string): void {
+    this.drafts.set(ticketId, text);
+    this.onChange();
   }
 
   /** The row's failed answer, or null while the row stands unmarked. */
@@ -413,12 +425,14 @@ export class NeedsInputTray {
   // drops the row. A failed answer adds an inline mark under the row with
   // its retry. A checkpoint row whose Held pane is alive also offers Keep
   // talking beside Resume (issue #139), with a refusal's reason under the
-  // row. The interrupt body stays in the Detail; the row is the queue entry,
-  // not the reading surface.
+  // row. A Steward note (ADR-0030) sits between the line and the note, with
+  // "Use as answer" to take it as the draft. The interrupt body stays in the
+  // Detail; the row is the queue entry, not the reading surface.
   private renderRow(row: NeedsInputRow, handlers: NeedsInputHandlers): HTMLElement[] {
     const status = waitingStatus(row);
     const waiting = status !== null;
     const draft = this.note(row.ticketId);
+    const stewardNote = row.interrupt.stewardNote;
     const note = h("textarea", {
       class: "interrupt-note needs-input-note",
       placeholder: row.interrupt.form.notePlaceholder ?? "note",
@@ -487,6 +501,12 @@ export class NeedsInputTray {
               : null,
           ),
         ),
+        stewardNote
+          ? renderStewardNote(stewardNote, {
+              disabled: waiting,
+              onUse: () => this.useStewardNote(row.ticketId, stewardNote.text),
+            })
+          : null,
         note,
       ),
     ];

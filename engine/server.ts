@@ -50,6 +50,7 @@ import { loadConversations, type ConversationRecord } from "./conversations.ts";
 import { titleOf } from "./pool-title.ts";
 import { UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
 import {
+  ConfigUnreadableError,
   ReassignRefusal,
   reassignViews,
   writeReassign,
@@ -98,6 +99,12 @@ import {
   peekPane,
 } from "./herdr.ts";
 import { listEnlistPanes, type EnlistRequest, type EnlistResponse } from "./enlist.ts";
+import type {
+  StewardActionResponse,
+  StewardAnswerRequest,
+  StewardHeldRequest,
+  StewardStateResponse,
+} from "./steward.ts";
 import { createJev, type Jev } from "./jev.ts";
 import {
   defaultMachineDefaultsPaths,
@@ -283,6 +290,7 @@ function enrich(
     spawnUsage: snapshot.spawnUsage,
     pendingSpawns: snapshot.pendingSpawns,
     heldSpawns: snapshot.heldSpawns,
+    stewardBudget: snapshot.stewardBudget,
     state: {
       tickets: meta.map((m) => {
         const row = reassign.get(m.id);
@@ -1228,6 +1236,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         : {}),
       ...(options.paneSurveyMs !== undefined ? { paneSurveyMs: options.paneSurveyMs } : {}),
       ...(jev !== undefined ? { jev } : {}),
+      // The Steward's teaching names where its command reaches (ADR-0030).
+      consoleUrl: `http://localhost:${server.port}`,
       onSnapshot: (snapshot) => {
         refreshMeta();
         lastRaw = snapshot;
@@ -1809,8 +1819,16 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             return Response.json({ reason: "invalid JSON body" }, { status: 400 });
           }
           const fields = (body ?? {}) as Record<string, unknown>;
-          const title = typeof fields.title === "string" ? fields.title : "";
-          if (!title.trim()) {
+          // A Steward (ADR-0030) is a Conversation in a role: its opening is
+          // the operator's standing orders, and its title may be left blank.
+          if (fields.role !== undefined && fields.role !== "steward") {
+            return Response.json({ reason: 'role must be "steward" when given' }, { status: 400 });
+          }
+          const role = fields.role === "steward" ? ("steward" as const) : undefined;
+          const title =
+            (typeof fields.title === "string" ? fields.title : "").trim() ||
+            (role === "steward" ? "Steward" : "");
+          if (!title) {
             return Response.json({ reason: "title is required" }, { status: 400 });
           }
           const opening = typeof fields.opening === "string" ? fields.opening : undefined;
@@ -1829,7 +1847,12 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               }
             : undefined;
           try {
-            const conversation = await startConversation({ title, opening, assign });
+            const conversation = await startConversation({
+              title,
+              opening,
+              assign,
+              ...(role ? { role } : {}),
+            });
             return Response.json({ conversation }, { status: 201 });
           } catch (err) {
             // Every refusal the engine's startConversation throws (not
@@ -1868,18 +1891,22 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           // than defaulted to a Ticket: enlisting is not undoable, and
           // silently picking the kind that has an end is the wrong guess to
           // make on the operator's behalf.
-          if (fields.becomes !== "ticket" && fields.becomes !== "conversation") {
+          if (
+            fields.becomes !== "ticket" &&
+            fields.becomes !== "conversation" &&
+            fields.becomes !== "steward"
+          ) {
             return Response.json(
-              { reason: 'becomes must be "ticket" or "conversation"' },
+              { reason: 'becomes must be "ticket", "conversation" or "steward"' },
               { status: 400 },
             );
           }
           try {
-            if (fields.becomes === "conversation") {
+            if (fields.becomes === "conversation" || fields.becomes === "steward") {
               const opening =
                 typeof fields.opening === "string" ? fields.opening : undefined;
               const answer = await enlist({
-                becomes: "conversation",
+                becomes: fields.becomes,
                 paneId,
                 title,
                 ...(opening !== undefined ? { opening } : {}),
@@ -2023,6 +2050,142 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
               { reason: err instanceof Error ? err.message : String(err) },
               { status: 409 },
             );
+          }
+        }
+
+        // The Steward's command (ADR-0030, steward-cli.ts): its answers,
+        // Keep talks, leaves, Held spawn decisions, Reassigns, state read
+        // and its own End, each naming its Conversation id, which the engine
+        // checks against the live Steward to attribute the action and
+        // enforce the budget. Not a security boundary: this API has no
+        // authentication. A refusal is the 409 `reason` envelope.
+        if (pathname.startsWith("/api/steward/")) {
+          const run = currentRun;
+          if (!run) {
+            return Response.json({ reason: "pool not started" }, { status: 409 });
+          }
+          const done = (message: string, status = 200): Response =>
+            Response.json({ ok: true, message } satisfies StewardActionResponse, { status });
+          const refused = (err: unknown, status = 409): Response =>
+            Response.json(
+              { reason: err instanceof Error ? err.message : String(err) },
+              { status },
+            );
+          if (pathname === "/api/steward/state" && req.method === "GET") {
+            const conversation = url.searchParams.get("conversation") ?? "";
+            try {
+              return Response.json(run.steward.state(conversation) satisfies StewardStateResponse);
+            } catch (err) {
+              return refused(err);
+            }
+          }
+          if (req.method !== "POST") {
+            return Response.json({ reason: `no steward route ${pathname}` }, { status: 404 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = ((await req.json()) ?? {}) as Record<string, unknown>;
+          } catch {
+            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
+          }
+          const text = (key: string): string =>
+            typeof body[key] === "string" ? (body[key] as string) : "";
+          const conversation = text("conversation");
+          if (!conversation) {
+            return Response.json({ reason: "conversation is required" }, { status: 400 });
+          }
+          const ticketId = text("ticketId");
+          try {
+            switch (pathname) {
+              case "/api/steward/answer": {
+                const action = text("action") as StewardAnswerRequest["action"];
+                if (!ticketId || !["resume", "approve", "reject"].includes(action)) {
+                  return Response.json(
+                    { reason: "ticketId and an action of resume, approve or reject are required" },
+                    { status: 400 },
+                  );
+                }
+                const note = typeof body.note === "string" ? body.note : undefined;
+                run.steward.answer(conversation, ticketId, action, note);
+                return done(`answered ${ticketId}: ${action}`, 202);
+              }
+              case "/api/steward/keep-talking": {
+                if (!ticketId || !text("message").trim()) {
+                  return Response.json(
+                    { reason: "ticketId and message are required" },
+                    { status: 400 },
+                  );
+                }
+                const { attempt } = await run.steward.keepTalking(conversation, ticketId, text("message"));
+                return done(`keep talking on ${ticketId}: attempt ${attempt} continues in its pane`, 202);
+              }
+              case "/api/steward/leave": {
+                if (!ticketId || !text("note").trim()) {
+                  return Response.json({ reason: "ticketId and note are required" }, { status: 400 });
+                }
+                run.steward.leave(conversation, ticketId, text("note"));
+                return done(`left ${ticketId} to the operator with your note`);
+              }
+              case "/api/steward/held": {
+                const action = text("action") as StewardHeldRequest["action"];
+                const id = text("id");
+                if (!id || (action !== "adopt" && action !== "discard")) {
+                  return Response.json(
+                    { reason: "id and an action of adopt or discard are required" },
+                    { status: 400 },
+                  );
+                }
+                if (action === "adopt") run.steward.adoptHeldSpawn(conversation, id);
+                else run.steward.discardHeldSpawn(conversation, id);
+                return done(`${action === "adopt" ? "adopted" : "discarded"} held spawn ${id}`);
+              }
+              case "/api/steward/reassign": {
+                run.steward.check(conversation);
+                if (!lastRaw) throw new Error("reassign: pool not started");
+                const tickets = Array.isArray(body.tickets) ? (body.tickets as string[]) : [];
+                const fields =
+                  typeof body.fields === "object" && body.fields !== null && !Array.isArray(body.fields)
+                    ? (body.fields as Record<string, unknown>)
+                    : {};
+                refreshMeta();
+                writeReassign(
+                  poolDir,
+                  { tickets, fields },
+                  {
+                    markers: meta,
+                    harnesses,
+                    liveAttempts: liveAttemptIds(lastRaw),
+                    statuses: lastRaw.state.tickets,
+                    engineAssignments: lastRaw.assignments,
+                  },
+                );
+                run.steward.reassigned(conversation, tickets, fields);
+                reenrich();
+                return done(`reassigned ${tickets.join(", ")}; resume to run on it`);
+              }
+              case "/api/steward/end": {
+                run.steward.check(conversation);
+                const closing = typeof body.closing === "string" ? body.closing : undefined;
+                // Off the request's own turn: the End closes the Steward's
+                // tab, and the command asking for it runs inside that tab, so
+                // the answer goes out first.
+                setTimeout(() => {
+                  void run.steward.end(conversation, closing).catch((err) => {
+                    console.error(
+                      `steward end: ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                  });
+                }, 0);
+                return done("ending: your tab closes now", 202);
+              }
+              default:
+                return Response.json({ reason: `no steward route ${pathname}` }, { status: 404 });
+            }
+          } catch (err) {
+            // A refusal of the Steward's (the engine's own reasons, a refused
+            // Reassign) is a 409; a file this server cannot read is its own
+            // failure, as on the Reassign route.
+            return refused(err, err instanceof ConfigUnreadableError ? 500 : 409);
           }
         }
 

@@ -707,3 +707,89 @@ describe("SettingsStore.render", () => {
     expect(armed?.textContent).not.toContain("Really restart?");
   });
 });
+
+describe("the Steward entry (ADR-0030)", () => {
+  it("seeds the budget and the Assignment from the file, absent as empty", () => {
+    const draft = poolDraftFrom({
+      steward: { budget: 3, assign: { harness: "claude", model: "opus", effort: "high" } },
+    });
+    expect(draft.stewardBudget).toBe("3");
+    expect(draft.stewardHarness).toBe("claude");
+    expect(draft.stewardModel).toBe("opus");
+    expect(draft.stewardEffort).toBe("high");
+    expect(draft.stewardDrivers).toBe("");
+    expect(EMPTY.stewardBudget).toBe("");
+    expect(EMPTY.stewardHarness).toBe("");
+  });
+
+  it("sends the entry whole, the budget as a number and an emptied one as null", () => {
+    expect(
+      poolPatchFrom({ ...EMPTY, stewardBudget: " 7 ", stewardModel: " opus " }).steward,
+    ).toEqual({
+      budget: 7,
+      assign: { harness: "", model: "opus", effort: "", drivers: "" },
+    });
+    expect(poolPatchFrom(EMPTY).steward).toEqual({
+      budget: null,
+      assign: { harness: "", model: "", effort: "", drivers: "" },
+    });
+  });
+
+  it("refuses a budget that is not a whole number of 1 or more, and takes empty as the default", () => {
+    for (const budget of ["0", "-1", "2.5", "lots"]) {
+      expect(validatePoolDraft({ ...EMPTY, stewardBudget: budget })).toMatch(
+        /Steward budget must be a whole number of 1 or more/,
+      );
+    }
+    expect(validatePoolDraft({ ...EMPTY, stewardBudget: "" })).toBeNull();
+    expect(validatePoolDraft({ ...EMPTY, stewardBudget: "5" })).toBeNull();
+  });
+
+  it("saves through the pool form: dirty on an edit, re-seeded from the answer", async () => {
+    const rig = await opened();
+    rig.store.setPoolField("stewardBudget", "3");
+    rig.store.setPoolField("stewardHarness", "opencode");
+    expect(rig.store.poolDirty).toBe(true);
+    const save = rig.store.savePool();
+    expect(rig.poolSaves[0]!.config.steward).toEqual({
+      budget: 3,
+      assign: { harness: "opencode", model: "", effort: "", drivers: "" },
+    });
+    const saved = settings();
+    saved.pool.config.steward = { budget: 3, assign: { harness: "opencode" } };
+    rig.poolSaves[0]!.deferred.resolve(saved);
+    await save;
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.poolField("stewardBudget")).toBe("3");
+  });
+
+  it("refuses a bad budget on the spot, sending nothing", async () => {
+    const rig = await opened();
+    rig.store.setPoolField("stewardBudget", "0");
+    await rig.store.savePool();
+    expect(rig.poolSaves).toHaveLength(0);
+    expect(rig.store.poolFailure).toMatch(/Steward budget/);
+  });
+
+  it("draws the budget and the Assignment, keyed, with the defaults they fall to", async () => {
+    const rig = await opened();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        rig.store.render(
+          { offered: true, state: "idle", failure: null, waiting: false },
+          { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+        )!,
+      );
+      return shell;
+    });
+    const budget = root.querySelector<HTMLInputElement>('[data-key="pool-stewardBudget-input"]');
+    expect(budget?.placeholder).toBe("5 (default)");
+    expect(root.querySelector('[data-key="pool-stewardModel"]')).not.toBeNull();
+    expect(root.querySelector('[data-key="pool-steward-effort"]')).not.toBeNull();
+    expect(root.querySelector('[data-key="pool-stewardDrivers"]')).not.toBeNull();
+    expect(root.querySelector('[data-key="pool-steward"] select')).not.toBeNull();
+  });
+});

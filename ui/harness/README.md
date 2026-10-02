@@ -23,8 +23,10 @@ then renders five times with the same model (a poll tick) and once more from a
 changed snapshot (a live SSE snapshot), and after each render asserts that
 scroll positions, focus, caret, canvas pan and node identity are unchanged.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
-one is on screen at a time, and one more the Detail of a Pending spawn's faded
-card (issue #150), whose card and a Held spawn's keep their nodes too.
+one is on screen at a time, one more the Detail of a Pending spawn's faded
+card (issue #150), whose card and a Held spawn's keep their nodes too, and one
+the Steward's Detail opened from the header's on-duty line (ADR-0030), whose
+card and the Steward note on a tray row keep theirs.
 
 ## Run it
 
@@ -58,7 +60,11 @@ the Detail to fullscreen and checks the class and the measured top edge hold.
 A last one types into a Settings text field key by key, with a caret
 mid-text, and checks each keystroke re-renders on its own, the field keeps its
 node, focus and caret, and the pool's Save enables and greys out again on a
-revert (issue #142).
+revert (issue #142). Before it, a Steward pass (ADR-0030) checks what only a
+laid-out page can: the on-duty line brings the Steward's card back into view
+from far off screen, Use as answer fills the tray row's note and the open
+Detail's from one click, the Steward note fits its tray row, and the canvas
+header keeps its width with the Steward's controls in it.
 
 ## Baseline on the `replaceChildren` renderer (2026-09-21)
 

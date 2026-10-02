@@ -16,6 +16,10 @@
   --status-done: #3fb950;
   --interrupt: #f85149;
   --accent-purple: #a371f7;
+  /* The Steward (ADR-0030): its own hue, apart from the selection ring's
+     accent and the outflow highlight's purple, so its mark never reads as
+     either. */
+  --steward: #db61a2;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
     "Liberation Mono", monospace;
 }
@@ -3031,4 +3035,176 @@ textarea.conversations-field {
 
 .held-spawn-failure {
   overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- Steward */
+
+/* The Steward's badge (ADR-0030): on its card's head, its Detail and its
+   Conversations tray row, so the one Conversation answering Interrupts is
+   never mistaken for an ordinary one. */
+.steward-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--steward);
+  border-radius: 3px;
+  color: var(--steward);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* The Steward's card: a stripe down its left edge in the Steward's hue, not
+   a whole border, so the selection and flow rings still read on it. */
+.conversation-card-steward {
+  border-left: 3px solid var(--steward);
+}
+
+/* The header's "Steward on duty" line: a bare button, the Spawn caps line's
+   shape, that selects the Steward's card and brings it into view. */
+.canvas-steward {
+  flex-shrink: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--steward);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.canvas-steward:hover {
+  text-decoration: underline;
+}
+
+/* The Conversations tray's head carries both form toggles. */
+.conversations-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversations-steward-toggle {
+  flex-shrink: 0;
+}
+
+.steward-form {
+  border-color: var(--steward);
+}
+
+.steward-form-title {
+  font-size: 11px;
+  color: var(--steward);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+textarea.steward-orders {
+  min-height: 72px;
+}
+
+/* The Steward note on a pending Interrupt: its recommendation, in the
+   Steward's hue so it never reads as the operator's own draft. */
+.steward-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--steward);
+  background: var(--bg-panel-2);
+  border-radius: 0 4px 4px 0;
+}
+
+.steward-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.steward-note-label {
+  font-size: 10px;
+  color: var(--steward);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.steward-note-use {
+  flex-shrink: 0;
+}
+
+.steward-note-text {
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A Steward act on the timeline: its answer, Keep talking, note, Reassign or
+   End, the spawn line's shape with the Steward's stripe. */
+.timeline-steward {
+  margin: 2px 0 4px 8px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--steward);
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The ticket Detail's Steward budget line; amber once it is spent, when the
+   ticket waits for the operator whatever the Steward thinks. */
+.detail-steward-budget {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--steward);
+}
+
+.detail-steward-budget-spent {
+  color: var(--status-running);
+}
+
+/* The Steward's Assignment in Pool settings: four controls, wrapping in a
+   narrow pane. */
+.settings-steward {
+  flex-wrap: wrap;
+}
+
+.settings-steward .settings-pair-model {
+  flex: 1 1 8em;
+  min-width: 0;
+}
+
+/* A Conversation whose Notices keep failing to land: a harness dialog, as a
+   rule, sitting in its pane. Amber, the Spawn caps line's warn colour, on
+   its card, its tray row and its Detail; the error rides the hover. */
+.conversation-delivery-warn {
+  margin: 4px 0;
+  padding: 3px 6px;
+  border-left: 2px solid var(--status-running);
+  color: var(--status-running);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.conversation-delivery-error {
+  margin-top: 2px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+
+/* The tray row wraps so its warning takes a line of its own. */
+.conversations-row-blocked {
+  flex-wrap: wrap;
+}
+
+.conversations-row-blocked .conversation-delivery-warn {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* The Steward on duty but blind: its Notices are not landing. */
+.canvas-steward-warn {
+  color: var(--status-running);
 }

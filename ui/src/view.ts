@@ -26,6 +26,7 @@ import {
   type ResumeAction,
   type RunPhase,
   type SpawnLineView,
+  type StewardOnDutyView,
   type TimelineView,
 } from "./project";
 import { flowNeighbourhood, type TopologyEdge } from "./geometry";
@@ -150,6 +151,12 @@ export interface AppModel {
   conversationsTray: ConversationTrayRow[];
   /** The pool's default Assignment, shown as the New Conversation form's placeholders. */
   conversationDefaults: { harness?: string; model?: string; drivers?: string };
+  /** The Steward on duty (ADR-0030); null when none is. The header names it,
+   *  and Start Steward and Enlist as Steward stand disabled while it is. */
+  steward: StewardOnDutyView | null;
+  /** The Steward's Assignment (its Pool settings entry over the pool
+   *  defaults), shown as the Start Steward form's placeholders. */
+  stewardDefaults: { harness?: string; model?: string; effort?: string; drivers?: string };
   /** The Enlist form's "Blocks" tick list: every ticket not yet done. */
   enlistBlocks: EnlistBlockRow[];
   /** Reassign (issue #126): every ticket the engine says can be reassigned,
@@ -244,6 +251,7 @@ export class ConsoleView {
   private readonly reassign: ReassignStore;
   private readonly heldSpawns: HeldSpawnsStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
+  private readonly onChange: () => void;
   // The selection outlives any one render (snapshots never close the panel
   // or lose the selection); its one-hop flow neighbourhood is recomputed from
   // the model's edges on every render, so a live snapshot re-derives the
@@ -266,6 +274,7 @@ export class ConsoleView {
 
   constructor(options: ConsoleViewOptions) {
     this.onFocusTerminal = options.onFocusTerminal;
+    this.onChange = options.onChange;
     this.conversationsTray = new ConversationsTray(options);
     this.enlist = new EnlistStore({
       onListPanes: options.onListPanes,
@@ -296,6 +305,8 @@ export class ConsoleView {
       onCardTap: (nodeId) => this.selectNode(nodeId),
       onFocusTerminal: options.onFocusTerminal,
       onNewConversation: () => this.conversationsTray.openForm(),
+      onStartSteward: () => this.conversationsTray.openStewardForm(),
+      onFocusSteward: (cardId) => this.focusCard(cardId),
       onEnlist: () => {
         void this.enlist.openPicker();
       },
@@ -356,6 +367,12 @@ export class ConsoleView {
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),
       onFocusResolver: (ticketId: string) => this.onFocusTerminal(ticketId),
+      // "Use as answer" on a Steward note (ADR-0030): the note becomes the
+      // shared Draft answer, so the tray's row shows it too.
+      onUseStewardNote: (ticketId: string, text: string) => {
+        this.drafts.set(ticketId, text);
+        this.onChange();
+      },
       reassign: this.reassign,
       renderSpawnDecision: (row, state) => this.heldSpawns.renderDecision(row, state),
     };
@@ -372,10 +389,13 @@ export class ConsoleView {
         onKeepTalking: handlers.onKeepTalking,
         onExpand: (cardId, ticketId) => this.writeFullSize(cardId, ticketId, handlers),
       }),
-      this.conversationsTray.render(model.conversationsTray, model.conversationDefaults, {
-        onSelect: (cardId) => this.selectNode(cardId),
-      }),
-      this.enlist.render(model.enlistBlocks),
+      this.conversationsTray.render(
+        model.conversationsTray,
+        model.conversationDefaults,
+        { onSelect: (cardId) => this.selectNode(cardId) },
+        { onDuty: model.steward, defaults: model.stewardDefaults },
+      ),
+      this.enlist.render(model.enlistBlocks, model.steward),
       this.settings.render(model.restart, handlers),
       this.reassign.render(model.reassignTickets),
       model.spawnLine
@@ -415,6 +435,17 @@ export class ConsoleView {
     this.detail.exitFullscreen();
     this.selectedNodeId = nextNodeSelection(this.selectedNodeId, nodeId);
     this.onSelectNode?.(this.selectedNodeId);
+  }
+
+  // The header's Steward line (ADR-0030): its card selected, its Detail
+  // open, and the canvas panned to it. A select rather than a toggle, so a
+  // second click never closes what the first opened; and out of fullscreen,
+  // which would cover the card it brings into view.
+  private focusCard(cardId: string): void {
+    this.detail.exitFullscreen();
+    this.selectedNodeId = cardId;
+    this.canvas.reveal(cardId);
+    this.onSelectNode?.(cardId);
   }
 
   // A Needs input row's expand (issue #147): the ticket's Detail, full size

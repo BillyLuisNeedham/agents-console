@@ -28,4 +28,6 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states four thing
 
 ## Ending
 
-A Ticket ends with an Outcome; a Conversation ends only when the operator ends it. When a Ticket you proposed ends, the engine posts a Turn into your pane with its Outcome.
+A Ticket ends with an Outcome; a Conversation ends only when the operator ends it, the pool's Steward excepted (it ends itself; the my-console-steward skill). When a Ticket you proposed ends, the engine posts a Turn into your pane with its Outcome.
+
+While the operator is away, the pool's Steward may answer your Interrupt in their place. Its coaching arrives as a Turn marked as the Steward's, and its Resume notes are headed "from the Steward": weigh them as the operator's stand-in.

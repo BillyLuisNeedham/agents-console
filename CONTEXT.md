@@ -247,7 +247,7 @@ The one file in a Pool that lists the work it has and the work on its way: every
 _Avoid_: pool index, backlog (it holds running and finished work too), spawn log (the parent's Ticket log records the events; the ledger is only the current state)
 
 **Conversation**:
-An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
+An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it, a Steward excepted. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
 _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
 
 **Turn**:
@@ -265,6 +265,18 @@ _Avoid_: terminal (that is the herdr pane itself), preview, tail (the Peek is th
 **Notice**:
 The Turn the engine types into a parent Conversation when something it spawned ends: a spawned Ticket's id, title, Outcome and branch, or a child Conversation's branch and the operator's closing line. Queued while the parent's agent is working; delivered when the parent is next waiting on the operator. It informs the parent; it never answers an Interrupt.
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
+
+**Steward**:
+A Conversation started, or Enlisted, in the role of keeping the Pool's Tickets moving while the operator is away. It is a role, not a new kind of citizen. The engine delivers it every pending Ticket Interrupt as a Notice, and also a stalled Merge queue head. It may answer them as the operator would, except Review and persistence. To answer a checkpoint it may Resume with a note or Keep talking with a message of its own. It may also Adopt or Discard Held spawns and Reassign Tickets. Every answer it gives is recorded as the Steward's, with its note. It decides and talks but never does the work itself: it answers, coaches agents, and may Spawn. A Ticket it cannot decide on sensibly, or one that has used up its Steward budget, it leaves to the operator with a Steward note. Conversations are outside its remit: it stewards Tickets, never talks. It watches the whole Pool, and a Pool has at most one Steward at a time. It answers at once; the operator starts one on leaving and ends it on returning, or the Steward ends itself when its orders are done. That is the one way a Conversation ends without the operator. Its Assignment comes from the Pool settings' Steward entry ahead of the pool defaults. It pushes, opens pull requests or merges them only when the operator's own words in that Steward allow it; the engine cannot enforce this.
+_Avoid_: admin (suggests permissions or settings), supervisor, overseer, night watch, autopilot (that suggests an engine mode, not an agent)
+
+**Steward budget**:
+How many answers the Steward may give one Ticket since the operator last answered that Ticket. It is a Pool setting, 5 unless changed, and reloads like the Spawn caps. The engine refuses a Steward answer beyond it, and the Ticket waits for the operator. The operator's answer resets the count.
+_Avoid_: retry limit (Attempts are not what is counted), cap (the Spawn caps bound proposals, not answers)
+
+**Steward note**:
+The Steward's recommendation on a pending Interrupt it has left to the operator. It is kept with the Interrupt, survives a restart, and shows on the Needs input row and in the Detail, where the operator can take it as their Draft answer. Leaving the Interrupt to the operator is recorded, so the Steward is not told about it again until it changes. Unlike a Draft answer, the operator did not write it.
+_Avoid_: draft (the operator's own words, browser-only), suggestion, Brief (the Brief is the stopped agent's account)
 
 **Enlist**:
 The operator's act of making a live herdr pane they opened themselves a Pool citizen, as a Ticket or a Conversation, chosen at that moment and fixed from then on. The pane, its directory and its branch stay as found; the engine claims the pane, teaches its agent the protocol with a Turn, and from then on the result is an ordinary Ticket or Conversation. The engine never closes the enlisted tab, never removes its directory and never deletes its branch. Introduced by ADR-0021 (`docs/adr/0021-enlisted-panes-stay-in-place.md`), closing issue #101.
