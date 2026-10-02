@@ -603,7 +603,15 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
 
     // 2. The tabs: real windows on the real page, through the proxy. The
     //    first has a live Ticket open in the Detail, the second a done one,
-    //    as in the server half.
+    //    as in the server half. A throwaway page on the same origin goes
+    //    first, so a fresh browser's renderer process start (a cost the
+    //    operator's long-open browser does not pay) is not counted in the
+    //    Console's start; it is the server's static ping file, so it warms
+    //    nothing of the Console's own: no script, style or HTTP cache entry.
+    const warm = await browser.open(`${proxy.ready}/ping.txt`);
+    await waitFor("the warm-up page", 10_000, async () =>
+      (await browser.evaluate<string>(warm, "document.readyState")) === "complete" ? true : null,
+    );
     const tabs: BrowserTab[] = [];
     for (let i = 0; i < tabCount; i++) tabs.push(await browser.open(`${proxy.ready}/`));
     const ticketCount = pool.quick.length + pool.conflicting.length + pool.live.length + pool.blocked.length;
@@ -612,6 +620,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
         (await browser.evaluate<number>(tab, "window.__lagProbe ? window.__lagProbe.cards() : 0")) >= ticketCount ? true : null,
       );
     }
+    await browser.closeTab(warm);
     // The cards the first tab presses. Cold clicks go round the server
     // half's targets: a live Ticket, a done one, a held one, a blocked one.
     // Hovered clicks go round other live and blocked Tickets, whose Detail
@@ -835,9 +844,15 @@ if (e2eResult) {
   rows.push(
     ["e2e load", `${e.tabs} Chromium tabs on the built Console through a ${e.rttMs} ms RTT proxy, ${e.durationS} s, ${e.cards} cards, ${e.domNodes} DOM nodes, protocol ${protocols}`],
     ["e2e start -> usable", `${ms(e.start.usableMs)}  each ${e.start.each.map((v) => v ?? "never").join(", ")}`],
+    ...e.start.breakdown.map((b, i): [string, string] => [
+      `e2e   tab ${i + 1} from navigation`,
+      `HTML ${b.htmlMs ?? "?"} -> script ${b.scriptMs ?? "?"} -> cards committed ${b.committedMs ?? "never"} -> painted ${b.paintedMs ?? "never"} ms; first socket frame ${b.socketAt ?? "none"} ms`,
+    ]),
     ["e2e snapshots", `${e.snapshots.perSec}/s  mean ${Math.round(e.snapshots.meanBytes / 1024)} KiB`],
     ["e2e card click -> shell", `${ms(e.click.shellMs)}; ${frames(e.click.shellFrames)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
     ["e2e cold click -> data", `${ms(e.click.cold.dataMs)}  n=${e.click.cold.n}  not cold ${e.click.notCold}  unreachable ${e.click.unreachable.cold}`],
+    ["e2e   card frame at the network", e.click.cold.networkMs ? `${ms(e.click.cold.networkMs)}  n=${e.click.cold.networkMs.n}` : na],
+    ["e2e   handled -> painted", e.click.cold.pageFrames ? `${frames(e.click.cold.pageFrames)}  n=${e.click.cold.pageFrames.n}` : na],
     ["e2e cold click -> card frame", e.click.cold.cardFrameMs ? `${ms(e.click.cold.cardFrameMs)}  n=${e.click.cold.cardFrameMs.n}` : na],
     ["e2e   of which -> subscribe sent", e.click.cold.toSubscribeMs ? ms(e.click.cold.toSubscribeMs) : na],
     ["e2e hovered click -> data", `${frames(e.click.hover.dataFrames)}; ${ms(e.click.hover.dataMs)}  n=${e.click.hover.n}  hover ${e.click.hoverMs} ms  prefetched ${e.click.hover.prefetched ?? na}  unreachable ${e.click.unreachable.hover}`],

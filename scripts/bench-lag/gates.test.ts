@@ -10,7 +10,8 @@ function passing(rttMs = 0): GateInputs {
     rttMs,
     feedbackFrames: [1, 1, 1],
     shellFrames: [1, 1],
-    coldDataMs: [rttMs + 12, rttMs + 15],
+    coldNetworkMs: [rttMs + 2, rttMs + 3],
+    coldPageFrames: [1, 1],
     hoverDataFrames: [1, 1],
     focusAnsweredMs: [rttMs + 2.5],
     frames: [frameBudget(steady(600)), frameBudget(steady(600))],
@@ -79,7 +80,8 @@ describe("evaluateGates", () => {
     expect(results.map((r) => r.name)).toEqual([
       "Press feedback",
       "Click -> Detail",
-      "Click -> card data (cold)",
+      "Cold data, network",
+      "Cold data, page",
       "Click -> card data (hovered)",
       "Open in herdr answered",
       "Frames over budget",
@@ -92,7 +94,7 @@ describe("evaluateGates", () => {
 
   test("a gate with no samples fails, never passing for want of evidence", () => {
     const inputs = passing();
-    for (const key of ["feedbackFrames", "shellFrames", "coldDataMs", "hoverDataFrames", "focusAnsweredMs", "usableMs"] as const) {
+    for (const key of ["feedbackFrames", "shellFrames", "coldNetworkMs", "coldPageFrames", "hoverDataFrames", "focusAnsweredMs", "usableMs"] as const) {
       inputs[key] = [];
     }
     inputs.frames = [];
@@ -120,21 +122,38 @@ describe("evaluateGates", () => {
     }
   });
 
-  test("cold data is under 20 ms at RTT 0, and at most RTT + 20 ms otherwise", () => {
+  test("cold data at the network is back under RTT + 5 ms", () => {
     const at0 = passing(0);
-    at0.coldDataMs = [19.9];
-    expect(gate(at0, "Click -> card data (cold)").pass).toBe(true);
-    at0.coldDataMs = [20];
-    expect(gate(at0, "Click -> card data (cold)").pass).toBe(false);
+    at0.coldNetworkMs = [4.9];
+    expect(gate(at0, "Cold data, network").pass).toBe(true);
+    at0.coldNetworkMs = [5];
+    expect(gate(at0, "Cold data, network").pass).toBe(false);
 
     const at40 = passing(40);
-    at40.coldDataMs = [60];
-    expect(gate(at40, "Click -> card data (cold)").pass).toBe(true);
-    at40.coldDataMs = [12, 60.1];
-    const cold = gate(at40, "Click -> card data (cold)");
+    at40.coldNetworkMs = [44.9];
+    expect(gate(at40, "Cold data, network").pass).toBe(true);
+    at40.coldNetworkMs = [12, 45];
+    const cold = gate(at40, "Cold data, network");
     expect(cold.pass).toBe(false);
-    expect(cold.target).toContain("60 ms");
+    expect(cold.target).toContain("45 ms");
     expect(cold.measured).toContain("1 over");
+  });
+
+  test("cold data on the page is painted in the frame after its card frame, adding none", () => {
+    const inputs = passing();
+    inputs.coldPageFrames = [1, 2];
+    expect(gate(inputs, "Cold data, page").pass).toBe(false);
+  });
+
+  test("a page with no socket has neither cold gate, and fails both rather than pass them", () => {
+    const inputs = passing();
+    inputs.coldNetworkMs = null;
+    inputs.coldPageFrames = null;
+    for (const name of ["Cold data, network", "Cold data, page"]) {
+      const result = gate(inputs, name);
+      expect(result.pass).toBe(false);
+      expect(result.measured).toContain("n/a");
+    }
   });
 
   test("Open in herdr is answered under 5 ms, plus the RTT when there is one", () => {
@@ -186,10 +205,10 @@ describe("formatGates", () => {
     const inputs = passing();
     inputs.usableMs = [400];
     const lines = formatGates(evaluateGates(inputs));
-    expect(lines).toHaveLength(10);
+    expect(lines).toHaveLength(11);
     expect(lines[0]).toMatch(/^gate\s+target\s+measured/);
     expect(lines.find((l) => l.startsWith("Start -> usable"))).toMatch(/FAIL$/);
     expect(lines.find((l) => l.startsWith("Press feedback"))).toMatch(/PASS$/);
-    expect(lines.at(-1)).toBe("1 of 8 gates FAIL");
+    expect(lines.at(-1)).toBe("1 of 9 gates FAIL");
   });
 });

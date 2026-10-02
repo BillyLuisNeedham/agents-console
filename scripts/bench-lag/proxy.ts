@@ -17,11 +17,12 @@
  *
  * It also watches every connection that upgrades to a WebSocket (issue
  * #161) and times each request the page sends on it, from the frame leaving
- * the browser to its reply being handed back to the browser, both on this
- * process's clock: the network's view of an answer, which the page cannot
- * have, since Chromium runs the frame that paints a press before it
- * dispatches anything that arrived after it (wsframes.ts). The parent asks
- * for the times over IPC (`{ trips: true }`).
+ * the browser to its reply being handed back to the browser, and each
+ * card's subscribe to the card's first frame, both ends on this process's
+ * clock: the network's view of an answer, which the page cannot have, since
+ * Chromium runs the frame that paints a press before it dispatches anything
+ * that arrived after it (wsframes.ts). The parent asks for the times over
+ * IPC (`{ trips: true }`).
  */
 
 import type { Socket } from "bun";
@@ -101,32 +102,65 @@ interface Link {
   watch: Watch;
 }
 
-/** A request on a socket and its reply, as the network saw them. */
+/**
+ * A request on a socket and its reply, or a card's subscribe and the card's
+ * first frame after it, as the network saw them cross.
+ */
 interface Trip {
   link: number;
-  id: number;
+  /** A request's kind, or "subscribe". */
   kind: string;
-  /** From the request frame leaving the browser to its reply handed back to it. */
+  /** A request's number, or the subscribed card's id. */
+  id: number | string;
+  /** From the browser's frame leaving it to the answer handed back to it. */
   ms: number;
 }
 const trips: Trip[] = [];
 
-/** A frame's envelope when it is one of `type`, else null; only small heads are looked into. */
-function envelopeOf(text: string, type: "request" | "reply"): { id: number; kind: string } | null {
-  if (!text.slice(0, 120).includes(`"${type}"`)) return null;
+/** What a frame from the browser asks for: a request by number, or a card by id. */
+function askOf(text: string): { kind: string; id: number | string } | null {
+  const head = text.slice(0, 160);
+  if (!head.includes('"request"') && !head.includes('"subscribe"')) return null;
   try {
-    const m = JSON.parse(text) as { type?: unknown; id?: unknown; kind?: unknown };
-    return m.type === type && typeof m.id === "number" && typeof m.kind === "string" ? { id: m.id, kind: m.kind } : null;
+    const m = JSON.parse(text) as { type?: unknown; id?: unknown; kind?: unknown; card?: { id?: unknown } };
+    if (m.type === "request" && typeof m.id === "number" && typeof m.kind === "string") return { kind: m.kind, id: m.id };
+    if (m.type === "subscribe" && typeof m.card?.id === "string") return { kind: "subscribe", id: m.card.id };
   } catch {
-    return null;
+    // Not one of the page's frames.
   }
+  return null;
+}
+
+/**
+ * What a frame from the server answers: a reply by its request's number, or
+ * a card by its id. Only the head is read, never the whole frame, so a
+ * 64 KiB log window costs the hop nothing: the server writes `type` and
+ * `id` first, as JSON.stringify keeps its message literals' order.
+ */
+function answerOf(text: string): { kind: "reply" | "card"; id: number | string } | null {
+  const head = text.slice(0, 160);
+  if (head.startsWith('{"type":"reply"')) {
+    const id = /"id":(\d+)/.exec(head);
+    return id ? { kind: "reply", id: Number(id[1]) } : null;
+  }
+  if (head.startsWith('{"type":"card"')) {
+    const id = /"id":"([^"]*)"/.exec(head);
+    return id ? { kind: "card", id: id[1]! } : null;
+  }
+  return null;
+}
+
+/** When a chunk was handed to the browser, and who waits to know. */
+interface Stamp {
+  at: number | null;
+  then: ((at: number) => void) | null;
 }
 
 /**
  * One connection's WebSocket traffic, once its response turned out to be a
- * 101: the requests the browser sent, by number, and each one's reply timed
- * as it is written back to the browser. A plain HTTP connection is never
- * read past its first head.
+ * 101: the requests the browser sent, by number, and the cards it
+ * subscribed, each timed to its answer being written back to the browser. A
+ * plain HTTP connection is never read past its first head.
  */
 class Watch {
   private socket = false;
@@ -134,35 +168,49 @@ class Watch {
   private downHead: Uint8Array | null = new Uint8Array(0);
   private readonly up = new FrameReader();
   private readonly down = new FrameReader();
-  private readonly asked = new Map<number, { kind: string; at: number }>();
+  private readonly requests = new Map<number, { kind: string; at: number }>();
+  private readonly subscribes = new Map<string, number>();
 
   constructor(private readonly link: number) {}
 
-  fromBrowser(chunk: Uint8Array): void {
-    const at = performance.now();
+  /** A chunk from the browser, which left it `at`. */
+  fromBrowser(chunk: Uint8Array, at: number): void {
     const body = this.pastHead("up", chunk);
     if (!body || !this.socket) return;
     for (const text of this.up.push(body)) {
-      const request = envelopeOf(text, "request");
-      if (request) this.asked.set(request.id, { kind: request.kind, at });
+      const ask = askOf(text);
+      if (!ask) continue;
+      if (ask.kind === "subscribe") {
+        if (!this.subscribes.has(ask.id as string)) this.subscribes.set(ask.id as string, at);
+      } else {
+        this.requests.set(ask.id as number, { kind: ask.kind, at });
+      }
     }
   }
 
-  /** What to run once the chunk is written to the browser, if it carries replies. */
-  fromServer(chunk: Uint8Array): (() => void) | undefined {
+  /** A chunk from the server, handed to the browser when `sent` says. */
+  fromServer(chunk: Uint8Array, sent: Stamp): void {
     const body = this.pastHead("down", chunk);
-    if (!body || !this.socket) return undefined;
-    const replies = this.down.push(body).flatMap((text) => envelopeOf(text, "reply") ?? []);
-    if (replies.length === 0) return undefined;
-    return () => {
-      const at = performance.now();
-      for (const reply of replies) {
-        const request = this.asked.get(reply.id);
-        if (!request) continue;
-        this.asked.delete(reply.id);
-        trips.push({ link: this.link, id: reply.id, kind: reply.kind, ms: at - request.at });
+    if (!body || !this.socket) return;
+    const answers = this.down.push(body).flatMap((text) => answerOf(text) ?? []);
+    if (answers.length === 0) return;
+    const settle = (at: number) => {
+      for (const answer of answers) {
+        if (answer.kind === "reply") {
+          const request = this.requests.get(answer.id as number);
+          if (!request) continue;
+          this.requests.delete(answer.id as number);
+          trips.push({ link: this.link, kind: request.kind, id: answer.id, ms: at - request.at });
+        } else {
+          const asked = this.subscribes.get(answer.id as string);
+          if (asked === undefined) continue;
+          this.subscribes.delete(answer.id as string);
+          trips.push({ link: this.link, kind: "subscribe", id: answer.id, ms: at - asked });
+        }
       }
     };
+    if (sent.at !== null) settle(sent.at);
+    else sent.then = settle;
   }
 
   /** The bytes past a direction's first HTTP head, null while it is still coming. */
@@ -188,6 +236,8 @@ class Watch {
 }
 let links = 0;
 
+// Each chunk goes on its way before it is read, so the watching never
+// delays the hop it times.
 const server = Bun.listen<Link>({
   hostname: "127.0.0.1",
   port: 0,
@@ -207,7 +257,12 @@ const server = Bun.listen<Link>({
             link.up.drain();
           },
           data(_upstream, chunk) {
-            link.down.push(chunk, link.watch.fromServer(chunk));
+            const sent: Stamp = { at: null, then: null };
+            link.down.push(chunk, () => {
+              sent.at = performance.now();
+              sent.then?.(sent.at);
+            });
+            link.watch.fromServer(chunk, sent);
           },
           drain() {
             link.up.drain();
@@ -222,8 +277,9 @@ const server = Bun.listen<Link>({
       }).catch(() => browser.end());
     },
     data(browser, chunk) {
-      browser.data.watch.fromBrowser(chunk);
+      const at = performance.now();
       browser.data.up.push(chunk);
+      browser.data.watch.fromBrowser(chunk, at);
     },
     drain(browser) {
       browser.data.down.drain();

@@ -23,6 +23,7 @@ const out = (socket: number, at: number, rest: Partial<SocketFrame>): SocketFram
   socket,
   dir: "out",
   at,
+  frame: 0,
   bytes: 40,
   type: "?",
   ...rest,
@@ -31,6 +32,7 @@ const inn = (socket: number, at: number, rest: Partial<SocketFrame>): SocketFram
   socket,
   dir: "in",
   at,
+  frame: 0,
   bytes: 400,
   type: "?",
   ...rest,
@@ -123,6 +125,7 @@ const click = (over: Partial<ProbeClick>): ProbeClick => ({
   dataMs: 10,
   dataPaintedMs: 16,
   dataFrames: 1,
+  dataPaintFrame: 61,
   missed: false,
   ...over,
 });
@@ -157,9 +160,10 @@ function report(over: Partial<ProbeReport>): ProbeReport {
     frames: frameTimes.map((at) => ({ at, mutated: false })),
     batches: [],
     cardsShown: [
-      { cards: 0, paintedAt: 90 },
-      { cards: 20, paintedAt: 180 },
+      { cards: 0, at: 80, paintedAt: 90 },
+      { cards: 20, at: 170, paintedAt: 180 },
     ],
+    startup: { htmlEnd: 40, domInteractive: 95, resources: [] },
     clicks: [],
     focuses: [],
     domNodes: 500,
@@ -188,21 +192,29 @@ describe("summarizeE2e's gate samples", () => {
       ],
       focuses: [focus({}), focus({ missed: true, t0: null })],
       socketFrames: [
+        out(0, 1_002, { type: "subscribe", id: "01" }),
+        inn(0, 1_018, { type: "card", id: "01", frame: 60 }),
+        out(0, 1_003, { type: "subscribe", id: "04" }),
+        inn(0, 1_019, { type: "card", id: "04", frame: 60 }),
         out(0, 2_002, { type: "request", id: 1, kind: "terminal.focus", ticket: "13" }),
         inn(0, 2_004, { type: "reply", id: 1, kind: "terminal.focus", ok: true }),
       ],
     });
-    const result = summarizeE2e(
-      [r],
-      metrics,
-      options({ unreachable: { cold: 1, hover: 0, focus: 1 }, socketTrips: [{ id: 1, kind: "terminal.focus", ms: 2 }] }),
-    );
+    const socketTrips = [
+      { kind: "subscribe", id: "01", ms: 3 },
+      { kind: "subscribe", id: "04", ms: 2 },
+      { kind: "terminal.focus", id: 1, ms: 2 },
+    ];
+    const result = summarizeE2e([r], metrics, options({ unreachable: { cold: 1, hover: 0, focus: 1 }, socketTrips }));
     const g = result.gateInputs;
     // Three clicks pressed, one missed and one unreachable; one focus pressed, one missed and one unreachable.
     expect(g.shellFrames).toEqual([1, 1, 1, null, null]);
     expect(g.feedbackFrames).toEqual([1, 1, 1, 1, null, null, null, null]);
-    // Outcome brings no data, so only the Progress cold click is judged, then the missed and unreachable cold ones.
-    expect(g.coldDataMs).toEqual([16, null, null]);
+    // Every cold click's card frame at the network (send after the release plus the proxy's time),
+    // then the missed and unreachable cold ones.
+    expect(g.coldNetworkMs).toEqual([4, 4, null, null]);
+    // On the page, only the Progress click has content to bring: painted in the frame after its card frame.
+    expect(g.coldPageFrames).toEqual([1, null, null]);
     expect(g.hoverDataFrames).toEqual([1]);
     expect(g.focusAnsweredMs).toEqual([3, null, null]);
     expect(result.focus.answeredVia).toEqual({ socket: 1, http: 0 });
@@ -240,7 +252,47 @@ describe("summarizeE2e's gate samples", () => {
     });
     const result = summarizeE2e([r], metrics, options());
     expect(result.click.notCold).toBe(1);
-    expect(result.gateInputs.coldDataMs).toEqual([null]);
+    expect(result.gateInputs.coldNetworkMs).toEqual([null]);
+    expect(result.gateInputs.coldPageFrames).toEqual([null]);
+  });
+
+  test("the page's k-th subscribe of a card is the network's k-th trip for it", () => {
+    const r = report({
+      clicks: [click({ id: "14", t0: 5_000, released: 5_001, dataPaintFrame: 302 })],
+      socketFrames: [
+        // A subscribe of the same card before the window (the setup's), then the measured one.
+        out(0, 300, { type: "subscribe", id: "14" }),
+        inn(0, 320, { type: "card", id: "14", frame: 18 }),
+        out(0, 400, { type: "unsubscribe", id: "14" }),
+        out(0, 5_001.5, { type: "subscribe", id: "14" }),
+        inn(0, 5_020, { type: "card", id: "14", frame: 300 }),
+      ],
+    });
+    const socketTrips = [
+      { kind: "subscribe", id: "14", ms: 9 },
+      { kind: "subscribe", id: "14", ms: 2.5 },
+    ];
+    const g = summarizeE2e([r], metrics, options({ socketTrips })).gateInputs;
+    expect(g.coldNetworkMs).toEqual([3]);
+    // Painted two frames after its card frame was handled: the client added one.
+    expect(g.coldPageFrames).toEqual([2]);
+  });
+
+  test("each tab's start is broken down from navigation", () => {
+    const r = report({
+      startup: {
+        htmlEnd: 41.2,
+        domInteractive: 60,
+        resources: [
+          { path: "/assets/index-abc.js", start: 45, requestStart: 45, responseEnd: 88.4 },
+          { path: "/assets/index-abc.css", start: 45, requestStart: 45, responseEnd: 86 },
+        ],
+      },
+      socketFrames: [inn(0, 150, { type: "hello" })],
+    });
+    expect(summarizeE2e([r], metrics, options()).start.breakdown).toEqual([
+      { htmlMs: 41.2, scriptMs: 88.4, committedMs: 170, paintedMs: 180, socketAt: 150 },
+    ]);
   });
 
   test("an old page's Open in herdr is answered when its POST's last byte lands", () => {
@@ -253,6 +305,8 @@ describe("summarizeE2e's gate samples", () => {
     expect(result.protocol).toBe("sse");
     expect(result.ws).toBeNull();
     expect(result.click.cold.cardFrameMs).toBeNull();
+    expect(result.gateInputs.coldNetworkMs).toBeNull();
+    expect(result.gateInputs.coldPageFrames).toBeNull();
     expect(result.gateInputs.focusAnsweredMs).toEqual([5]);
     expect(result.focus.answeredVia).toEqual({ socket: 0, http: 1 });
   });
@@ -272,7 +326,7 @@ describe("summarizeE2e's gate samples", () => {
   });
 
   test("a tab that never painted every Ticket's card has no start time", () => {
-    const r = report({ cardsShown: [{ cards: 12, paintedAt: 100 }] });
+    const r = report({ cardsShown: [{ cards: 12, at: 95, paintedAt: 100 }] });
     expect(summarizeE2e([r], metrics, options()).gateInputs.usableMs).toEqual([null]);
   });
 });

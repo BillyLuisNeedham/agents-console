@@ -60,6 +60,8 @@ interface RawFrame {
   socket: number;
   dir: "in" | "out";
   at: number;
+  /** The last animation frame begun when it crossed. */
+  frame: number;
   data: unknown;
 }
 
@@ -68,6 +70,7 @@ interface FrameRow {
   socket: number;
   dir: "in" | "out";
   at: number;
+  frame: number;
   bytes: number;
   type: string;
   /** A request's or a reply's kind. */
@@ -104,6 +107,8 @@ interface ClickRow {
   dataMs: number | null;
   dataPaintedMs: number | null;
   dataFrames: number | null;
+  /** The number of the frame that painted the data, to set beside a socket frame's. */
+  dataPaintFrame: number | null;
   /** The press landed somewhere other than the card. */
   missed: boolean;
 }
@@ -152,8 +157,9 @@ interface Watcher {
   /** Each frame's rAF time and whether a mutation batch landed since the last. */
   const frames: { at: number; mutated: boolean }[] = [];
   const batches: { at: number; records: number }[] = [];
-  /** The Ticket cards on the canvas, each time their number changed until the window began. */
-  const cardsShown: { cards: number; paintedAt: number | null }[] = [];
+  /** The Ticket cards on the canvas, each time their number changed until the
+   *  window began: when the DOM first held them, and when that was painted. */
+  const cardsShown: { cards: number; at: number; paintedAt: number | null }[] = [];
   const clicks: ClickRow[] = [];
   const focuses: FocusRow[] = [];
   const watchers: Watcher[] = [];
@@ -164,6 +170,10 @@ interface Watcher {
   let window1 = 0;
   let idle0 = 0;
   let idle1 = 0;
+  // Frames by number. Every animation callback of one frame gets the same
+  // time, so a time not seen before is a new frame beginning.
+  let frameNo = 0;
+  let frameAt = -1;
 
   function observe(type: string, take: (entry: PerformanceEntry) => void): boolean {
     try {
@@ -223,13 +233,13 @@ interface Watcher {
       const index = sockets.push({ url: String(url), opened: performance.now(), closed: null }) - 1;
       this.probeIndex = index;
       this.addEventListener("message", (event) =>
-        rawFrames.push({ socket: index, dir: "in", at: performance.now(), data: event.data }),
+        rawFrames.push({ socket: index, dir: "in", at: performance.now(), frame: frameNo, data: event.data }),
       );
       this.addEventListener("close", () => (sockets[index]!.closed = performance.now()));
     }
 
     override send(data: Parameters<WebSocket["send"]>[0]): void {
-      rawFrames.push({ socket: this.probeIndex, dir: "out", at: performance.now(), data });
+      rawFrames.push({ socket: this.probeIndex, dir: "out", at: performance.now(), frame: frameNo, data });
       super.send(data);
     }
   }
@@ -246,6 +256,7 @@ interface Watcher {
       socket: frame.socket,
       dir: frame.dir,
       at: frame.at,
+      frame: frame.frame,
       bytes: text !== null ? utf8.encode(text).length : size(frame.data),
       type: text !== null ? "unparsed" : "binary",
     };
@@ -335,10 +346,6 @@ interface Watcher {
     else nativeFrame(queue);
   }
 
-  // Frames by number. Every animation callback of one frame gets the same
-  // time, so a time not seen before is a new frame beginning.
-  let frameNo = 0;
-  let frameAt = -1;
   function enterFrame(at: number): void {
     if (at === frameAt) return;
     frameAt = at;
@@ -352,7 +359,7 @@ interface Watcher {
     if (window0 === 0) {
       const n = document.querySelectorAll('.node-card[data-node-id^="ticket:"]').length;
       if (n !== (cardsShown.at(-1)?.cards ?? 0)) {
-        const row = { cards: n, paintedAt: null as number | null };
+        const row = { cards: n, at: now, paintedAt: null as number | null };
         cardsShown.push(row);
         painted(inFrame, (at) => (row.paintedAt = at));
       }
@@ -386,6 +393,7 @@ interface Watcher {
         if (c.shellMs !== null && c.dataMs === null && detailTitle() === watcher.id && dataShown(watcher.id, c.tab)) {
           c.dataMs = now - from;
           c.dataFrames = frames;
+          c.dataPaintFrame = paintFrame(inFrame);
           painted(inFrame, (at) => {
             c.dataPaintedMs = at - from;
             watcher.done = true;
@@ -541,7 +549,7 @@ interface Watcher {
     if (!point) return null;
     let row: ClickRow | FocusRow;
     if (kind === "card") {
-      const click: ClickRow = { id, how, t0: null, released: null, pressFrame: null, inputDelayMs: null, tab: null, shellMs: null, shellPaintedMs: null, shellFrames: null, dataMs: null, dataPaintedMs: null, dataFrames: null, missed: false };
+      const click: ClickRow = { id, how, t0: null, released: null, pressFrame: null, inputDelayMs: null, tab: null, shellMs: null, shellPaintedMs: null, shellFrames: null, dataMs: null, dataPaintedMs: null, dataFrames: null, dataPaintFrame: null, missed: false };
       clicks.push(click);
       row = click;
     } else {
@@ -606,10 +614,18 @@ interface Watcher {
     report: () => {
       const last = Math.max(window1, idle1);
       const inside = (t: number) => t >= window0 && t <= last;
+      const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
       return {
         origin: performance.timeOrigin,
         window: [window0, window1],
         idle: [idle0, idle1],
+        // The page's start, from navigation (time 0): its document's arrival,
+        // its parse, and what it fetched before the window began.
+        startup: {
+          htmlEnd: nav?.responseEnd ?? null,
+          domInteractive: nav?.domInteractive ?? null,
+          resources: resources.filter((r) => r.start < window0),
+        },
         longTaskApi,
         resources: resources.filter((r) => r.responseEnd >= window0),
         fetches: fetches.filter((f) => f.at >= window0),
