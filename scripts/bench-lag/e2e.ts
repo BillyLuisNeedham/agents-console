@@ -573,6 +573,8 @@ export interface E2eResult {
       dataMs: Stats;
       /** The release to the first `card` frame for the card: one round trip on the socket. */
       cardFrameMs: Stats | null;
+      /** Of which: the release to the page sending its `subscribe`. */
+      toSubscribeMs: Stats | null;
     };
     hover: {
       n: number;
@@ -612,6 +614,11 @@ export interface E2eResult {
     answeredVia: { socket: number; http: number };
     feedbackFrames: Stats;
     answeredMs: Stats;
+    /** Over the socket: the release to the request frame leaving the page. */
+    toRequestFrameMs: Stats | null;
+    /** Over the socket: the release to the page's handler getting the reply,
+     *  which waits for the frame after the press (see summarizeE2e). */
+    handledMs: Stats | null;
     toFetchMs: Stats;
     toRequestMs: Stats;
     toResponseMs: Stats;
@@ -648,8 +655,18 @@ export interface E2eResult {
   gateInputs: GateInputs;
 }
 
+/** A socket request and its reply as the proxy saw them cross (proxy.ts). */
+export interface SocketTrip {
+  id: number;
+  kind: string;
+  /** From the request frame leaving the browser to its reply handed back to it. */
+  ms: number;
+}
+
 export interface E2eOptions {
   rttMs: number;
+  /** The first tab's socket requests timed at the network; absent, a socket answer goes unmeasured. */
+  socketTrips?: SocketTrip[];
   /** Presses the bench never made: the card or its button was covered or off screen. */
   unreachable: { cold: number; hover: number; focus: number };
   /** How many Ticket cards the pool's canvas holds once loaded. */
@@ -700,12 +717,28 @@ export function summarizeE2e(
   );
   const toFocus = (pick: (r: ProbeResource) => number) =>
     stats(focusRows.flatMap((f, i) => (focusFetches[i] ? [pick(focusFetches[i]!) - f.released!] : [])));
-  const answers = focusRows.map((f, i): { ms: number; via: "socket" | "http" } | null => {
+  // The answer as the network has it, on either protocol: the POST's
+  // responseEnd, or the page's send of the request frame plus the proxy's
+  // time from that frame leaving the browser to its reply coming back. Not
+  // when the page's handler runs: Chromium runs the frame that paints a
+  // press before it dispatches what arrived after the press, so that reads
+  // a frame late whatever the server did (`handledMs`, kept beside it).
+  const unclaimed = [...(options.socketTrips ?? [])];
+  const answers = focusRows.map((f, i): { ms: number; via: "socket" | "http"; handled: number | null } | null => {
     if (f.released === null) return null;
     const trip = focusRoundTrip(frames, f.id, f.t0!);
-    if (trip?.reply) return { ms: trip.reply.at - f.released, via: "socket" };
+    if (trip) {
+      const at = unclaimed.findIndex((t) => t.id === trip.request.id && t.kind === "terminal.focus");
+      if (at === -1) return null;
+      const [wire] = unclaimed.splice(at, 1);
+      return {
+        ms: trip.request.at - f.released + wire!.ms,
+        via: "socket",
+        handled: trip.reply ? trip.reply.at - f.released : null,
+      };
+    }
     const fetched = focusFetches[i];
-    return fetched ? { ms: fetched.responseEnd - f.released, via: "http" } : null;
+    return fetched ? { ms: fetched.responseEnd - f.released, via: "http", handled: null } : null;
   });
 
   // --- requests: all tabs on one clock: each probe's times are its own
@@ -819,6 +852,15 @@ export function summarizeE2e(
               }),
             )
           : null,
+        toSubscribeMs: socket
+          ? stats(
+              cold.flatMap((c) => {
+                if (c.released === null || subscribed(c)) return [];
+                const sent = frames.find((f) => f.dir === "out" && f.type === "subscribe" && f.id === c.id && f.at >= c.t0!);
+                return sent ? [sent.at - c.released] : [];
+              }),
+            )
+          : null,
       },
       hover: {
         n: hoverData.length,
@@ -851,6 +893,15 @@ export function summarizeE2e(
       },
       feedbackFrames: stats(filled(focusRows.map((f) => f.feedbackFrames))),
       answeredMs: stats(filled(answers.map((a) => a?.ms ?? null))),
+      handledMs: socket ? stats(filled(answers.map((a) => a?.handled ?? null))) : null,
+      toRequestFrameMs: socket
+        ? stats(
+            focusRows.flatMap((f) => {
+              const trip = f.released === null ? null : focusRoundTrip(frames, f.id, f.t0!);
+              return trip ? [trip.request.at - f.released!] : [];
+            }),
+          )
+        : null,
       toFetchMs: toFocus((r) => r.start),
       toRequestMs: toFocus((r) => r.requestStart),
       toResponseMs: toFocus((r) => r.responseEnd),

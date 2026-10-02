@@ -192,7 +192,11 @@ describe("summarizeE2e's gate samples", () => {
         inn(0, 2_004, { type: "reply", id: 1, kind: "terminal.focus", ok: true }),
       ],
     });
-    const result = summarizeE2e([r], metrics, options({ unreachable: { cold: 1, hover: 0, focus: 1 } }));
+    const result = summarizeE2e(
+      [r],
+      metrics,
+      options({ unreachable: { cold: 1, hover: 0, focus: 1 }, socketTrips: [{ id: 1, kind: "terminal.focus", ms: 2 }] }),
+    );
     const g = result.gateInputs;
     // Three clicks pressed, one missed and one unreachable; one focus pressed, one missed and one unreachable.
     expect(g.shellFrames).toEqual([1, 1, 1, null, null]);
@@ -205,6 +209,28 @@ describe("summarizeE2e's gate samples", () => {
     expect(g.usableMs).toEqual([180]);
     expect(g.frames[0]!.over).toBe(0);
     expect(result.protocol).toBe("ws");
+  });
+
+  test("a socket answer is the page's send plus the network's round trip, not the page's handling of it", () => {
+    const r = report({
+      focuses: [focus({ released: 2_001 })],
+      socketFrames: [
+        out(0, 2_001.5, { type: "request", id: 7, kind: "terminal.focus", ticket: "13" }),
+        // The page's handler got the reply only after the press's frame.
+        inn(0, 2_017, { type: "reply", id: 7, kind: "terminal.focus", ok: true }),
+      ],
+    });
+    const trips = [
+      { id: 7, kind: "settings.get", ms: 9 },
+      { id: 7, kind: "terminal.focus", ms: 1.5 },
+    ];
+    const result = summarizeE2e([r], metrics, options({ socketTrips: trips }));
+    expect(result.gateInputs.focusAnsweredMs).toEqual([2]);
+    expect(result.focus.handledMs?.max).toBe(16);
+    expect(result.focus.toRequestFrameMs?.max).toBe(0.5);
+
+    // With no network time for it, the answer is unmeasured, never the page's.
+    expect(summarizeE2e([r], metrics, options()).gateInputs.focusAnsweredMs).toEqual([null]);
   });
 
   test("a cold click on a card the page already held is no cold measurement", () => {

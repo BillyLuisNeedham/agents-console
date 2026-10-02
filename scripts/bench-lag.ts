@@ -90,6 +90,7 @@ import {
   type BrowserTab,
   type E2eResult,
   type ProbeReport,
+  type SocketTrip,
 } from "./bench-lag/e2e.ts";
 import { evaluateGates, formatGates, IDLE_MIN_MS, type GateResult } from "./bench-lag/gates.ts";
 
@@ -697,6 +698,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const after = await browser.metrics(tabs[0]!);
     const report = (await serve.ask("report", "report")) as ServerResult["server"];
     const herdrCounts = ((await herdr.ask({ requests: true }, "requests")) as { counts: Record<string, number> }).counts;
+    const socketTrips = ((await proxy.ask({ trips: true }, "trips")) as { trips: SocketTrip[] }).trips;
 
     // 4. The idle window: no input at all, the pointer parked on bare canvas,
     //    every tab open and visible. Whatever the pages send now, they send
@@ -710,7 +712,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const reports: ProbeReport[] = [];
     for (const tab of tabs) reports.push(await browser.evaluate<ProbeReport>(tab, "window.__lagProbe.report()"));
 
-    const measured = summarizeE2e(reports, { before, after }, { rttMs, unreachable, tickets: ticketCount, hoverMs });
+    const measured = summarizeE2e(reports, { before, after }, { rttMs, socketTrips, unreachable, tickets: ticketCount, hoverMs });
     return {
       ...measured,
       serverProtocol,
@@ -837,11 +839,14 @@ if (e2eResult) {
     ["e2e card click -> shell", `${ms(e.click.shellMs)}; ${frames(e.click.shellFrames)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
     ["e2e cold click -> data", `${ms(e.click.cold.dataMs)}  n=${e.click.cold.n}  not cold ${e.click.notCold}  unreachable ${e.click.unreachable.cold}`],
     ["e2e cold click -> card frame", e.click.cold.cardFrameMs ? `${ms(e.click.cold.cardFrameMs)}  n=${e.click.cold.cardFrameMs.n}` : na],
+    ["e2e   of which -> subscribe sent", e.click.cold.toSubscribeMs ? ms(e.click.cold.toSubscribeMs) : na],
     ["e2e hovered click -> data", `${frames(e.click.hover.dataFrames)}; ${ms(e.click.hover.dataMs)}  n=${e.click.hover.n}  hover ${e.click.hoverMs} ms  prefetched ${e.click.hover.prefetched ?? na}  unreachable ${e.click.unreachable.hover}`],
     ["e2e   clicks unfilled, missed", `${e.click.unfilled} never showed their data, ${e.click.missed} landed elsewhere`],
     ["e2e   of which Progress", `${ms(e.click.progressDataMs)}  n=${e.click.progressDataMs.n} (timeline and log tail)`],
     ["e2e Open in herdr -> feedback", `${frames(e.focus.feedbackFrames)}  n=${e.focus.feedbackFrames.n}`],
     ["e2e Open in herdr -> answered", `${ms(e.focus.answeredMs)}  n=${e.focus.answeredMs.n} (socket ${e.focus.answeredVia.socket}, http ${e.focus.answeredVia.http})  unanswered ${e.focus.unanswered}`],
+    ["e2e   of which -> request sent", e.focus.toRequestFrameMs ? ms(e.focus.toRequestFrameMs) : na],
+    ["e2e   page handled the reply", e.focus.handledMs ? `${ms(e.focus.handledMs)} (held behind the press's frame)` : na],
     ["e2e Open in herdr -> fetch", e.focus.toFetchMs.n ? ms(e.focus.toFetchMs) : "none (no HTTP)"],
     ["e2e Open in herdr -> confirmed", `${ms(e.focus.confirmedMs)}  unconfirmed ${e.focus.unconfirmed}  missed ${e.focus.missed}  unreachable ${e.focus.unreachable}`],
     ["e2e renders (mutation batches)", `${e.renders.batchesPerSec}/s  frames with mutations ${e.renders.framesWithMutationsPerSec}/s  records ${e.renders.recordsPerSec}/s`],

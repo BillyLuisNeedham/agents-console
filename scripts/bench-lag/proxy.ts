@@ -14,9 +14,18 @@
  * once, so a loopback run pays the same proxy hop as a remote one. Run in a
  * process of its own so its timers never share a loop with the server's or
  * the bench's.
+ *
+ * It also watches every connection that upgrades to a WebSocket (issue
+ * #161) and times each request the page sends on it, from the frame leaving
+ * the browser to its reply being handed back to the browser, both on this
+ * process's clock: the network's view of an answer, which the page cannot
+ * have, since Chromium runs the frame that paints a press before it
+ * dispatches anything that arrived after it (wsframes.ts). The parent asks
+ * for the times over IPC (`{ trips: true }`).
  */
 
 import type { Socket } from "bun";
+import { FrameReader, headEnd } from "./wsframes.ts";
 
 function arg(name: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -34,11 +43,16 @@ class Pipe {
   private backlog: Uint8Array[] = [];
   private closing = false;
 
-  /** A chunk read on the other side, written half a round trip from now. */
-  push(chunk: Uint8Array): void {
+  /** A chunk read on the other side, written half a round trip from now;
+   *  `written` runs as it is handed to the socket. */
+  push(chunk: Uint8Array, written?: () => void): void {
     const copy = new Uint8Array(chunk);
-    if (halfTripMs > 0) setTimeout(() => this.write(copy), halfTripMs);
-    else this.write(copy);
+    const send = () => {
+      this.write(copy);
+      written?.();
+    };
+    if (halfTripMs > 0) setTimeout(send, halfTripMs);
+    else send();
   }
 
   /** The other side closed: close this one once what it sent has gone. */
@@ -84,14 +98,102 @@ interface Link {
   up: Pipe;
   /** Server to browser. */
   down: Pipe;
+  watch: Watch;
 }
+
+/** A request on a socket and its reply, as the network saw them. */
+interface Trip {
+  link: number;
+  id: number;
+  kind: string;
+  /** From the request frame leaving the browser to its reply handed back to it. */
+  ms: number;
+}
+const trips: Trip[] = [];
+
+/** A frame's envelope when it is one of `type`, else null; only small heads are looked into. */
+function envelopeOf(text: string, type: "request" | "reply"): { id: number; kind: string } | null {
+  if (!text.slice(0, 120).includes(`"${type}"`)) return null;
+  try {
+    const m = JSON.parse(text) as { type?: unknown; id?: unknown; kind?: unknown };
+    return m.type === type && typeof m.id === "number" && typeof m.kind === "string" ? { id: m.id, kind: m.kind } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One connection's WebSocket traffic, once its response turned out to be a
+ * 101: the requests the browser sent, by number, and each one's reply timed
+ * as it is written back to the browser. A plain HTTP connection is never
+ * read past its first head.
+ */
+class Watch {
+  private socket = false;
+  private upHead: Uint8Array | null = new Uint8Array(0);
+  private downHead: Uint8Array | null = new Uint8Array(0);
+  private readonly up = new FrameReader();
+  private readonly down = new FrameReader();
+  private readonly asked = new Map<number, { kind: string; at: number }>();
+
+  constructor(private readonly link: number) {}
+
+  fromBrowser(chunk: Uint8Array): void {
+    const at = performance.now();
+    const body = this.pastHead("up", chunk);
+    if (!body || !this.socket) return;
+    for (const text of this.up.push(body)) {
+      const request = envelopeOf(text, "request");
+      if (request) this.asked.set(request.id, { kind: request.kind, at });
+    }
+  }
+
+  /** What to run once the chunk is written to the browser, if it carries replies. */
+  fromServer(chunk: Uint8Array): (() => void) | undefined {
+    const body = this.pastHead("down", chunk);
+    if (!body || !this.socket) return undefined;
+    const replies = this.down.push(body).flatMap((text) => envelopeOf(text, "reply") ?? []);
+    if (replies.length === 0) return undefined;
+    return () => {
+      const at = performance.now();
+      for (const reply of replies) {
+        const request = this.asked.get(reply.id);
+        if (!request) continue;
+        this.asked.delete(reply.id);
+        trips.push({ link: this.link, id: reply.id, kind: reply.kind, ms: at - request.at });
+      }
+    };
+  }
+
+  /** The bytes past a direction's first HTTP head, null while it is still coming. */
+  private pastHead(dir: "up" | "down", chunk: Uint8Array): Uint8Array | null {
+    const held = dir === "up" ? this.upHead : this.downHead;
+    if (held === null) return chunk;
+    const joined = new Uint8Array(held.length + chunk.length);
+    joined.set(held);
+    joined.set(chunk, held.length);
+    const end = headEnd(joined);
+    if (end === -1) {
+      if (dir === "up") this.upHead = joined;
+      else this.downHead = joined;
+      return null;
+    }
+    if (dir === "up") this.upHead = null;
+    else {
+      this.downHead = null;
+      this.socket = new TextDecoder().decode(joined.subarray(0, 12)) === "HTTP/1.1 101";
+    }
+    return joined.subarray(end);
+  }
+}
+let links = 0;
 
 const server = Bun.listen<Link>({
   hostname: "127.0.0.1",
   port: 0,
   socket: {
     open(browser) {
-      const link: Link = { up: new Pipe(), down: new Pipe() };
+      const link: Link = { up: new Pipe(), down: new Pipe(), watch: new Watch(links++) };
       browser.data = link;
       link.down.to = browser;
       link.down.drain();
@@ -105,7 +207,7 @@ const server = Bun.listen<Link>({
             link.up.drain();
           },
           data(_upstream, chunk) {
-            link.down.push(chunk);
+            link.down.push(chunk, link.watch.fromServer(chunk));
           },
           drain() {
             link.up.drain();
@@ -120,6 +222,7 @@ const server = Bun.listen<Link>({
       }).catch(() => browser.end());
     },
     data(browser, chunk) {
+      browser.data.watch.fromBrowser(chunk);
       browser.data.up.push(chunk);
     },
     drain(browser) {
@@ -132,6 +235,10 @@ const server = Bun.listen<Link>({
       browser.data.up.end();
     },
   },
+});
+
+process.on("message", (msg: unknown) => {
+  if ((msg as { trips?: boolean }).trips) process.send?.({ kind: "trips", trips });
 });
 
 process.stdout.write(`READY http://127.0.0.1:${server.port}\n`);

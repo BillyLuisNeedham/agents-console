@@ -79,7 +79,8 @@ export interface GateInputs {
   coldDataMs: (number | null)[];
   /** Every hover-prefetched card click on a tab with fetched content: frames to that content painted. */
   hoverDataFrames: (number | null)[];
-  /** Every Open in herdr: ms from the press to the page holding the server's answer. */
+  /** Every Open in herdr: ms from the press to the server's answer reaching
+   *  the browser (at the network: a page's own clock sees it a frame late). */
   focusAnsweredMs: (number | null)[];
   /** Each tab, from the start of the window to the end of the idle window. */
   frames: FrameBudget[];
