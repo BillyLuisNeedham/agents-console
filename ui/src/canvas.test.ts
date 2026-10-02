@@ -6,6 +6,7 @@ import { commit as commitTree } from "./morph";
 import { useDom } from "./test-dom";
 import { projectPool, type EnrichedSnapshot } from "./project";
 import type { CloseTerminalsView, RestartView, StopView } from "./view";
+import type { TopologyEdge } from "./geometry";
 
 useDom();
 
@@ -153,6 +154,7 @@ describe("the pool's name in the header (issue #100)", () => {
 function mountCanvas(
   model: CanvasModel,
   intents: Partial<ConstructorParameters<typeof Canvas>[0]> = {},
+  edges: { current: TopologyEdge[] } = { current: [] },
 ): { canvas: Canvas; root: HTMLElement; commit(): void } {
   const canvas = new Canvas({
     onChange: () => commit(),
@@ -182,7 +184,7 @@ function mountCanvas(
     commitTree(root, () => canvas.render(model, selection));
     const world = root.querySelector<HTMLElement>(".canvas-world")!;
     const viewport = root.querySelector<HTMLElement>(".canvas-viewport")!;
-    canvas.bindCanvas(viewport, world, [], null);
+    canvas.bindCanvas(viewport, world, edges.current, null);
   };
   return { canvas, root, commit };
 }
@@ -286,6 +288,72 @@ describe("Canvas across a morphing render", () => {
     expect(root.querySelector<HTMLElement>('[data-node-id="u-1"]')).toBe(card);
     expect(card.style.left).toBe("140px");
     expect(card.style.top).toBe("135px");
+  });
+
+  it("moves a dragged card once a frame, to where the last pointer move put it (#157)", async () => {
+    const { root, commit } = mountCanvas(withCard);
+    commit();
+    const viewport = root.querySelector<HTMLElement>(".canvas-viewport")!;
+    const card = root.querySelector<HTMLElement>('[data-node-id="u-1"]')!;
+    // Where the card starts depends on the layout an earlier drag stored.
+    const left = parseFloat(card.style.left);
+    const top = parseFloat(card.style.top);
+    pointer(card, "pointerdown", 10, 10);
+    for (let i = 1; i <= 5; i++) pointer(viewport, "pointermove", 10 + i * 10, 10 + i * 5);
+    // The moves are held, not yet painted.
+    expect(card.style.left).toBe(`${left}px`);
+    await Bun.sleep(40);
+    expect(card.style.left).toBe(`${left + 50}px`);
+    expect(card.style.top).toBe(`${top + 25}px`);
+    pointer(viewport, "pointerup", 60, 35);
+  });
+});
+
+describe("the canvas's edges across renders (#157)", () => {
+  const twoCards = model({
+    cards: [
+      { kind: "utility", id: "u-1", label: "a", interrupt: null, x: 100, y: 100 },
+      { kind: "utility", id: "u-2", label: "b", interrupt: null, x: 500, y: 100 },
+      { kind: "utility", id: "u-3", label: "c", interrupt: null, x: 100, y: 400 },
+    ],
+  });
+
+  it("keeps each edge's path and label from one render to the next", () => {
+    const edges = { current: [{ source: "u-1", target: "u-2", data: "spec" }] as TopologyEdge[] };
+    const { root, commit } = mountCanvas(twoCards, {}, edges);
+    commit();
+    const path = root.querySelector<SVGPathElement>("path.canvas-edge")!;
+    const label = root.querySelector<SVGTextElement>("text.canvas-edge-label")!;
+    expect(path).not.toBeNull();
+    expect(label.textContent).toBe("spec");
+    commit();
+    commit();
+    expect(root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    expect(root.querySelector("path.canvas-edge")).toBe(path);
+    expect(root.querySelector("text.canvas-edge-label")).toBe(label);
+    // The arrowhead's defs stay too: the morph leaves the layer's children be.
+    expect(root.querySelector("svg.canvas-edges marker")).not.toBeNull();
+  });
+
+  it("adds, drops and restyles edges in place as the model's edges change", () => {
+    const edges = { current: [{ source: "u-1", target: "u-2" }] as TopologyEdge[] };
+    const { root, commit } = mountCanvas(twoCards, {}, edges);
+    commit();
+    const first = root.querySelector<SVGPathElement>("path.canvas-edge")!;
+    edges.current = [
+      { source: "u-1", target: "u-2", conditional: true },
+      { source: "u-1", target: "u-3" },
+    ];
+    commit();
+    const paths = root.querySelectorAll<SVGPathElement>("path.canvas-edge");
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).toBe(first);
+    expect(first.getAttribute("class")).toContain("canvas-edge-conditional");
+    expect(first.hasAttribute("stroke-dasharray")).toBe(true);
+    edges.current = [{ source: "u-1", target: "u-3" }];
+    commit();
+    expect(root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    expect(first.isConnected).toBe(false);
   });
 });
 
