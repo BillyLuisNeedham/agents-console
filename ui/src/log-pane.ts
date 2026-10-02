@@ -366,9 +366,10 @@ let anchor: { prevHeight: number; prevTop: number } | null = null;
 
 /**
  * Remember the log pane's current scroll metrics, to be applied by the render
- * that lands a prepend. Called just before the held content changes.
+ * that lands a prepend. Called just before the held content changes, or
+ * before the Detail draws more of what it holds above what it shows.
  */
-function captureLogAnchor(): void {
+export function captureLogAnchor(): void {
   if (typeof document === "undefined") return;
   const pre = document.querySelector<HTMLElement>(".log-pane-content");
   if (pre) anchor = { prevHeight: pre.scrollHeight, prevTop: pre.scrollTop };

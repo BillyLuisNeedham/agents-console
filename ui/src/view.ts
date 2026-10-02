@@ -259,6 +259,7 @@ export class ConsoleView {
   private readonly detail = new Detail({
     onClose: () => this.closeDetail(),
     drafts: this.drafts,
+    onChange: () => this.onChange(),
   });
   private readonly drawers = new Drawers();
   private readonly needsInput: NeedsInputTray;

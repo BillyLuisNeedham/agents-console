@@ -24,7 +24,7 @@ import {
   type RequestResult,
   type SnapshotDelta,
 } from "../../engine/protocol.ts";
-import { LogPane } from "./log-pane";
+import { LogPane, type LogPaneState } from "./log-pane";
 import { answered, applyOverlays, type Overlay } from "./optimistic";
 import {
   isTerminalBacked,
@@ -253,11 +253,19 @@ export class ConsoleSession {
   private dwell: ReturnType<typeof setTimeout> | null = null;
   private readonly subscribed = new Set<string>();
   private readonly cards = new Map<string, CardData>();
-  // The selected card's timeline, projected once per events frame and status.
+  // The selected card's timeline, projected once per events frame and
+  // status, a frame that continues the last one carrying its rows over; and
+  // the same joined with the log pane's Stream files, once per either.
   private timeline: {
+    id: string;
     events: TicketEventsResponse;
     status: TicketStatus;
     view: TimelineView;
+  } | null = null;
+  private joined: {
+    view: TimelineView;
+    listing: LogPaneState["attempts"] | null;
+    joined: TimelineView;
   } | null = null;
 
   // The manually chosen Detail tab, carrying its ticket id: the projection
@@ -916,7 +924,10 @@ export class ConsoleSession {
           : null;
     const data = detailCardId !== null ? this.cards.get(detailCardId) : undefined;
     const card = this.view?.cards.find((c) => c.id === this.selectedId);
-    const timelineView = data?.events ? this.timelineOf(data.events, timelineStatus(card)) : null;
+    const timelineView =
+      detailCardId !== null && data?.events
+        ? this.timelineOf(detailCardId, data.events, timelineStatus(card))
+        : null;
     const logIsCurrent =
       detailTicketId !== null && this.logs.state.ticketId === detailTicketId;
     // The timeline joins the log pane's attempt listing (the log frames'
@@ -924,7 +935,7 @@ export class ConsoleSession {
     // Stream file. A pane for another ticket (or no pane yet, or a
     // Conversation, which has no log pane) contributes no listing.
     const timeline = timelineView
-      ? joinStreamFiles(timelineView, logIsCurrent ? this.logs.state.attempts : null)
+      ? this.joinedOf(timelineView, logIsCurrent ? this.logs.state.attempts : null)
       : null;
     const log = this.poolLogLines();
     return {
@@ -1048,11 +1059,24 @@ export class ConsoleSession {
     return this.heldLog.lines;
   }
 
-  private timelineOf(events: TicketEventsResponse, status: TicketStatus): TimelineView {
-    if (this.timeline?.events !== events || this.timeline.status !== status) {
-      this.timeline = { events, status, view: projectTimeline(events, status) };
+  private timelineOf(
+    id: string,
+    events: TicketEventsResponse,
+    status: TicketStatus,
+  ): TimelineView {
+    const held = this.timeline;
+    if (held?.id !== id || held.events !== events || held.status !== status) {
+      const previous = held?.id === id ? { response: held.events, view: held.view } : null;
+      this.timeline = { id, events, status, view: projectTimeline(events, status, previous) };
     }
-    return this.timeline.view;
+    return this.timeline!.view;
+  }
+
+  private joinedOf(view: TimelineView, listing: LogPaneState["attempts"] | null): TimelineView {
+    if (this.joined?.view !== view || this.joined.listing !== listing) {
+      this.joined = { view, listing, joined: joinStreamFiles(view, listing) };
+    }
+    return this.joined.joined;
   }
 
   /**

@@ -53,6 +53,22 @@ export function commit(root: Element, build: () => Element): void {
 // Each stand-in `keep` made, to the node on the page it stands for.
 const kept = new WeakMap<Element, Element>();
 
+// Each keyed node a render built that the morph patched a page node to
+// match, to that page node: what `placed` reads.
+const patched = new WeakMap<Element, Element>();
+
+/**
+ * Where a keyed node a render built stands after its commit: itself when
+ * the morph moved it onto the page, the page node the morph patched to
+ * match it otherwise, or null when neither is on the page any more. A
+ * renderer that keeps what it drew (issue #161) holds the node it built and
+ * asks this for the node to `keep` on the next render.
+ */
+export function placed(node: Element): Element | null {
+  const live = patched.get(node) ?? node;
+  return live.isConnected ? live : null;
+}
+
 /**
  * A stand-in for an element already on the page that this render would
  * draw exactly as it stands (issue #161): the morph keeps that node,
@@ -109,6 +125,7 @@ export function morph(from: Element, to: Element): Element {
   morphAttributes(from, to);
   morphProperties(from, to);
   if (!sameHtml && !to.hasAttribute(KEEP_CHILDREN)) morphChildren(from, to);
+  if (from !== to && to.hasAttribute("data-key")) patched.set(to, from);
   return from;
 }
 

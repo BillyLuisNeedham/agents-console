@@ -1504,6 +1504,37 @@ body {
   font-size: 11px;
 }
 
+/* One event and what it carries beneath (a grade, a Reassign, a spawn, a
+   Steward act), kept or rebuilt as one (issue #161). */
+.timeline-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* An attempt's open or closed toggle, and a closed attempt's one line. */
+.timeline-attempt-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.timeline-attempt-toggle:hover {
+  color: var(--accent);
+}
+
+.timeline-attempt-summary {
+  font-size: 11px;
+}
+
+.timeline-earlier {
+  align-self: flex-start;
+  font-size: 11px;
+}
+
 .timeline-event-kind {
   color: var(--text);
 }
@@ -1643,6 +1674,11 @@ body {
   color: var(--text-dim);
   max-height: 60vh;
   overflow: auto;
+}
+
+/* One slice of the log's text, whole lines, laid out on its own (issue #161). */
+.log-slice {
+  display: block;
 }
 
 .log-pane-more {

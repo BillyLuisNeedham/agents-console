@@ -419,6 +419,19 @@ describe("selection and card subscriptions (issue #161)", () => {
     expect(model.timeline?.attempts[0]?.streamFile).toBeNull();
   });
 
+  it("hands the Detail the same timeline rows across deltas and repeated events frames", () => {
+    const { session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
+    session.select("ticket:A");
+    session.applyCard({ type: "card", id: "A", events: eventsResponse("spawned") });
+    const first = session.model({}).timeline!;
+    // A delta that leaves the ticket alone draws the very same timeline.
+    session.setSnapshot(snapshot({ seq: 2, state: { tickets: [ticket("A")] } }));
+    expect(session.model({}).timeline).toBe(first);
+    // An events frame that repeats what is held keeps every attempt row.
+    session.applyCard({ type: "card", id: "A", events: eventsResponse("spawned") });
+    expect(session.model({}).timeline!.attempts[0]).toBe(first.attempts[0]!);
+  });
+
   it("follows an events frame, a missing body and an unknown id", () => {
     const { session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
     session.select("ticket:A");
