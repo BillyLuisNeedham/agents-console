@@ -334,6 +334,24 @@ ${constraints.join("\n")}
 `;
 }
 
+/**
+ * An existing `AGENT.md` with the engine's half replaced by the template's
+ * (issue #155): the template up to and including its CONFIG marker, then the
+ * file's own bytes after its marker, untouched. Bytes rather than a string
+ * so the pool's half survives exactly as written, whatever it holds. Null
+ * when either side has no marker: a hand-written `AGENT.md` has no line
+ * saying where the engine's half ends, so there is nothing safe to replace.
+ */
+export function refreshAgentHead(existing: Buffer, template: string): Buffer | null {
+  const templateMarker = template.indexOf(CONFIG_MARKER);
+  const marker = existing.indexOf(CONFIG_MARKER);
+  if (templateMarker < 0 || marker < 0) return null;
+  return Buffer.concat([
+    Buffer.from(template.slice(0, templateMarker + CONFIG_MARKER.length), "utf8"),
+    existing.subarray(marker + Buffer.byteLength(CONFIG_MARKER, "utf8")),
+  ]);
+}
+
 function isResolverObject(value: unknown): boolean {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

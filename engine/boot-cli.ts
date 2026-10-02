@@ -53,6 +53,7 @@ import {
   prefillFromSetup,
   readConsoleConfig,
   readSetup,
+  refreshAgentHead,
   setupFromConfig,
   setupPath,
   writeConsoleConfig,
@@ -467,7 +468,11 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
   return { answers, seeded, asked, missing };
 }
 
-/** The pool's prose files, written once and never overwritten afterwards. */
+/**
+ * The pool's prose files, written when they are missing. The pool's own half
+ * of an `AGENT.md` that is already there is never overwritten; the engine's
+ * half is refreshAgentMd's, which runs on every Boot.
+ */
 function writeProseFiles(
   poolDir: string,
   engineDir: string,
@@ -476,9 +481,7 @@ function writeProseFiles(
 ): void {
   const templates = join(engineDir, "skills", "my-console-runner");
   const agentPath = join(poolDir, "AGENT.md");
-  if (existsSync(agentPath)) {
-    io.log("AGENT.md is already there; left as it is");
-  } else {
+  if (!existsSync(agentPath)) {
     const template = join(templates, "AGENT.template.md");
     if (existsSync(template)) {
       writeFileSync(
@@ -502,6 +505,29 @@ function writeProseFiles(
       copyFileSync(template, verifyPath);
       io.log("wrote verify.md from the template");
     }
+  }
+}
+
+/**
+ * The engine's half of the pool's `AGENT.md`, brought up to the current
+ * template on every Boot, a Restart's included (issue #155): a pool booted
+ * before the template changed would otherwise teach its agents the old
+ * engine prose for as long as it lives. The pool's half, below the CONFIG
+ * marker, is kept byte for byte. A missing file is writeProseFiles' job, and
+ * a file with no marker is left alone, because nothing says where its
+ * engine half ends.
+ */
+export function refreshAgentMd(poolDir: string, engineDir: string, io: BootIo): void {
+  const agentPath = join(poolDir, "AGENT.md");
+  const templatePath = join(engineDir, "skills", "my-console-runner", "AGENT.template.md");
+  if (!existsSync(agentPath) || !existsSync(templatePath)) return;
+  const current = readFileSync(agentPath);
+  const refreshed = refreshAgentHead(current, readFileSync(templatePath, "utf8"));
+  if (refreshed === null) {
+    io.log("AGENT.md has no CONFIG marker; left as it is");
+  } else if (!refreshed.equals(current)) {
+    writeFileSync(agentPath, refreshed);
+    io.log("refreshed AGENT.md above the CONFIG marker from the template");
   }
 }
 
@@ -646,6 +672,7 @@ export async function runBoot(options: RunOptions): Promise<number> {
       engine: engineDir,
     });
   }
+  refreshAgentMd(poolDir, engineDir, io);
 
   if (needsRebuild(distMtime(engineDir), uiSourceCommitMs(engineDir))) {
     io.log("the Console build is missing or stale; rebuilding");

@@ -42,11 +42,12 @@ not bind.
 
 The script copies [`AGENT.template.md`](AGENT.template.md) into the pool as `AGENT.md` and fills
 what it detected below the CONFIG marker: the context files beside `issues/`, the commit prefix,
-and the reviewer and checkpoint answers as constraints. It never touches an `AGENT.md` that is
-already there.
+and the reviewer and checkpoint answers as constraints. On every boot after that, a Restart's
+included, it rewrites the part above the marker from the current template and keeps everything
+below the marker byte for byte. An `AGENT.md` with no marker is left alone.
 
 Everything above the marker is the same in every runner and that sameness is the point: leave it
-exactly as it is. Below the marker, improve what the script left:
+as it is, because the next boot replaces it anyway. Below the marker, improve what the script left:
 
 - context files: say what each one is for, not just that it exists
 - this pool's constraints: the reviewer's authority and the checkpoint definition as rules, plus
@@ -86,8 +87,9 @@ In your own library `implement`, `triage`, `to-tickets`, `wayfinder` and
 `thermo-nuclear-code-quality-review` all carry it. `tdd`, `code-review`, `diagnosing-bugs`,
 `research`, `prototype`, `fits-the-codebase` and `resolving-merge-conflicts` do not.
 
-Later skills in a chain run as subagents told to invoke them. That path is designed but unproven,
-so put the weight of a ticket on the first driver rather than the tail of a chain.
+Later skills in a chain reach the agent as a list in its prompt: skills to use, in order, once the
+driver's work is done. The prompt names them and leaves how to run them to the agent (ADR-0031).
+Put the weight of a ticket on the first driver rather than the tail of a chain.
 
 Then check reachability per harness. The first driver goes in the prompt, so it must resolve as a
 command on whatever harness the ticket is assigned:
@@ -142,8 +144,8 @@ Leave these alone rather than rediscovering them:
   `kill -9` a pool server with attempts in flight: that skips the stop, and the attempts run on
   as orphans until the next boot finds and stops them.
 - The spawn kernel is ported from `run.sh`: non-interactive invocation with stdin closed, the
-  fullest auto-approve permission mode per harness, the prompt glued from driver skill, AGENT.md,
-  chain and roster. opencode gets the driver through `--command`; cursor's launch line comes from
+  fullest auto-approve permission mode per harness, the prompt glued from the driver skill,
+  AGENT.md and the chain. opencode gets the driver through `--command`; cursor's launch line comes from
   Cursor's documentation and is unproven.
 - Upstream outcomes are injected into each ticket's prompt at spawn time, so downstream agents
   build on what upstream agents did.
@@ -163,8 +165,8 @@ Leave these alone rather than rediscovering them:
 - Per-ticket logs land in the pool's `runs/` directory.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
   super-step boundary (ADR-0018): an edit lands on any ticket with no Attempt in flight at its
-  next boundary, no restart needed. `roster`, `agents`, `selection`, `terminal` and `port` stay
-  exactly as they were at boot; an edit to any of those takes effect on a Restart, which the
+  next boundary, no restart needed. `selection`, `terminal` and `port` stay exactly as they were
+  at boot; an edit to any of those takes effect on a Restart, which the
   Console offers and which hands back to `agent-console --relaunch`. A restart is otherwise
   cheap: markers and the checkpoint are the truth, so ticket state and a pending interrupt both
   survive it. What does not survive is a headless attempt in flight. A terminal-backed attempt is

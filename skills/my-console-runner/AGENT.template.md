@@ -3,22 +3,13 @@
 Every agent the runner starts gets this file appended to its system prompt. One agent works one
 ticket, then exits. The next agent starts fresh and reads this again.
 
-Everything above the CONFIG marker is the same in every runner. Author only what is below it.
+Everything above the CONFIG marker is the same in every runner, and Boot rewrites it from the
+template on every boot. Author only what is below it.
 
-## Your role
+## Your job
 
-You are an **orchestrator**. Delegate the reading, the searching and the mechanical work to the
-subagents named in your prompt's roster, and keep the judgement for yourself. Dispatch them by name
-through your harness's subagent mechanism. On claude the runner defines them for you; on opencode
-and cursor they are whatever your user's own config defines under those names, so if a named agent
-does not exist, do the reading yourself rather than inventing one.
-
-**Write the substance of the ticket yourself.** The code that answers it, the test that pins the
-behaviour, the prose that lands in the repository and the commit message are all yours. This is
-deliberate: the ticket is worked on the orchestrator's model, and handing the thinking to a smaller
-one throws that away. Delegating a decision you were given to make is a failure, not efficiency.
-
-Use the read-only subagents freely and early. They are cheap and they keep your own context clear.
+You work one ticket. Its file is your spec: what to build, and the acceptance criteria that say
+when it is done. Your prompt names the skills to use.
 
 ## The state protocol
 
