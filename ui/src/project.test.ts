@@ -47,6 +47,7 @@ import {
   projectPendingSpawns,
   projectPool,
   projectTimeline,
+  timelineEvent,
   selectLogAttempt,
   statusLabel,
   ticketBodyHtml,
@@ -1750,6 +1751,8 @@ describe("projectTimeline", () => {
     expect(view.attempts[0]).toEqual({
       number: 1,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: true,
       running: false,
       logFile: "01.log",
@@ -1848,6 +1851,8 @@ describe("joinStreamFiles", () => {
     expect(joined.attempts[0]).toEqual({
       number: 1,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: true,
       running: false,
       logFile: "01.log",
@@ -1856,11 +1861,88 @@ describe("joinStreamFiles", () => {
   });
 });
 
+describe("projectTimeline across frames (issue #161)", () => {
+  function eventRow(attempt: number, i: number, kind: TicketEvent["kind"] = "checkpoint"): TicketEvent {
+    return { at: `2026-01-01T00:00:${String(i).padStart(2, "0")}.000Z`, attempt, kind, payload: {} };
+  }
+  function response(events: TicketEvent[]) {
+    return { events, attempts: [], reconstructed: false, spec: "s" };
+  }
+  // A frame is parsed afresh: equal events, never the same objects.
+  const parsed = (events: TicketEvent[]) => events.map((e) => ({ ...e, payload: { ...e.payload } }));
+
+  it("counts each attempt and names its outcome without decoding its events", () => {
+    const view = projectTimeline(
+      response([
+        eventRow(1, 0, "spawned"),
+        { ...eventRow(1, 1, "graded"), payload: { score: 6, verdict: "flag", reasons: "r" } },
+        eventRow(1, 2, "exited"),
+        eventRow(2, 3, "spawned"),
+      ]),
+      "in-progress",
+    );
+    expect(view.attempts.map((a) => [a.count, a.outcome])).toEqual([
+      [3, "6/10 flag"],
+      [1, "spawned"],
+    ]);
+    expect(timelineEvent(view.attempts[1]!, 0)).toBe(timelineEvent(view.attempts[1]!, 0));
+    expect(view.attempts[1]!.events[0]).toBe(timelineEvent(view.attempts[1]!, 0));
+  });
+
+  it("keeps an attempt with nothing new, and carries a grown one's decoded rows over", () => {
+    const first = [eventRow(1, 0), eventRow(1, 1), eventRow(2, 2)];
+    const before = projectTimeline(response(first), "in-progress");
+    const decoded = timelineEvent(before.attempts[1]!, 0);
+    const after = projectTimeline(response(parsed([...first, eventRow(2, 3)])), "in-progress", {
+      response: response(first),
+      view: before,
+    });
+    expect(after.attempts[0]).toBe(before.attempts[0]!);
+    expect(after.attempts[1]).not.toBe(before.attempts[1]!);
+    expect(after.attempts[1]!.count).toBe(2);
+    expect(timelineEvent(after.attempts[1]!, 0)).toBe(decoded);
+  });
+
+  it("hands back the same timeline for a frame with nothing new", () => {
+    const events = [eventRow(1, 0), eventRow(2, 1)];
+    const before = projectTimeline(response(events), "in-progress");
+    const again = projectTimeline(response(parsed(events)), "in-progress", {
+      response: response(events),
+      view: before,
+    });
+    expect(again).toBe(before);
+  });
+
+  it("starts over on a frame that does not continue the last one", () => {
+    const before = projectTimeline(response([eventRow(1, 0)]), "done");
+    const other = projectTimeline(response([eventRow(1, 9, "exited")]), "done", {
+      response: response([eventRow(1, 0)]),
+      view: before,
+    });
+    expect(other.attempts[0]).not.toBe(before.attempts[0]!);
+    expect(other.attempts[0]!.events[0]!.kind).toBe("exited");
+  });
+
+  it("joins Stream files keeping every row already right, and the rest still decode lazily", () => {
+    const view = projectTimeline(response([eventRow(1, 0), eventRow(2, 1)]), "done");
+    const joined = joinStreamFiles(view, [
+      { attempt: 1, streamFile: null },
+      { attempt: 2, streamFile: "02.stream.jsonl" },
+    ]);
+    expect(joined.attempts[0]).toBe(view.attempts[0]!);
+    expect(joined.attempts[1]!.streamFile).toBe("02.stream.jsonl");
+    expect(timelineEvent(joined.attempts[1]!, 0)).toBe(timelineEvent(view.attempts[1]!, 0));
+    expect(joinStreamFiles(view, [{ attempt: 1, streamFile: null }])).toBe(view);
+  });
+});
+
 function timelineView(attempts: { number: number; running: boolean }[]): TimelineView {
   return {
     attempts: attempts.map(({ number, running }) => ({
       number,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: false,
       running,
       logFile: null,

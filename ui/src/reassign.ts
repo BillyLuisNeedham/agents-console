@@ -31,9 +31,11 @@ import type {
   ReassignTicketRow,
 } from "./project";
 
+/** The Reassign write: what it applied and skipped. The new Assignment
+ *  itself arrives as a delta, ahead of the reply (issue #161). */
 export type ReassignHandler = (
   request: ReassignRequest,
-) => Promise<ReassignResponse>;
+) => Promise<Omit<ReassignResponse, "snapshot">>;
 
 export interface ReassignOptions {
   /** The harness list both surfaces offer, read from the settings endpoint

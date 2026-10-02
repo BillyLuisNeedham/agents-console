@@ -1,62 +1,30 @@
 /**
  * Log pane: the ticket log's byte-window state machine, one deep module for
- * the Console's most delicate behavior. The pane opens an attempt's raw log
- * tail-first, tails it live on the snapshot cadence, and prepends earlier
- * windows on demand. Three guards define it: a clicked attempt is never
- * switched away from (attempt-stay), a slow fetch answering after a newer
- * selection never clobbers the newer pane (stale-selection), and a fetch
- * answering after a newer window began — even a re-open of the same attempt —
- * is dropped by the shared stale-answer generation guard. The fetch is
- * injected at construction, so the guards run under unit tests with fake
- * fetches; the tail pin and the prepend anchor live here too, so the view
- * only renders and the bootstrap only drives.
+ * the Console's most delicate behavior, fed by the socket (issue #161). The
+ * server streams each subscribed card's log: a `window` (the last 64 KiB of
+ * the followed attempt's file) when the card is subscribed or the attempt
+ * it follows changes, then `append` frames with the new bytes. The pane
+ * holds one log per subscribed card, so a card hovered before it is clicked
+ * opens with its tail already in hand, and shows the selected card's.
+ *
+ * Three guards define it. An append continues the window only from the
+ * byte the pane holds up to; a frame naming another attempt or variant (one
+ * already on the wire when the pane moved) is dropped, and a gap re-sends
+ * the follow, whose reply replaces the window. A clicked attempt is the
+ * follow the server keeps (attempt-stay); an unclicked pane follows the
+ * latest attempt, which the server moves it to. And a "load earlier" or a
+ * follow answering after the window it was asked of was replaced is dropped
+ * by the window's generation. The tail pin and the prepend anchor live
+ * here too, so the view only renders and the bootstrap only drives.
  */
 
-import {
-  earlierLogOffset,
-  initialLogWindow,
-  logAtBottom,
-  logTailOffset,
-  selectLogAttempt,
-  type TimelineView,
-} from "./project";
-import { StaleGuard } from "./guard";
-
-// ---------------------------------------------------------------------------
-// Injected fetch seam
-// ---------------------------------------------------------------------------
-
-/**
- * A byte range of an attempt's log, as the wire serves it. `offset` is where
- * the range was read from, `nextOffset` where the next range starts, and
- * `totalSize` the log's full byte size; the pane pages until `nextOffset`
- * reaches `totalSize`. `attempts` is the response's per-attempt listing with
- * each row's resolved Stream file; the pane holds the latest one for the
- * timeline's stream links.
- */
-export interface LogChunk {
-  content: string;
-  offset: number;
-  nextOffset: number;
-  totalSize: number;
-  attempts?: { attempt: number; streamFile: string | null }[];
-}
-
-/**
- * The one wire call the pane needs: a byte range of a ticket's attempt log,
- * or of its Stream file when `stream` is set, optionally bounded by `end`
- * (how "load earlier" reads exactly the prefix before the bytes the pane
- * already holds). `signal` aborts it when the pane moves to another window,
- * so clicking across cards never leaves reads for the old one queued.
- */
-export type LogFetch = (
-  ticketId: string,
-  attempt: number,
-  offset: number,
-  end?: number,
-  stream?: boolean,
-  signal?: AbortSignal,
-) => Promise<LogChunk>;
+import { earlierLogOffset, logAtBottom, type TicketLogResponse } from "./project";
+import type {
+  LogFollow,
+  LogFollowResult,
+  LogPush,
+  LogReadRequest,
+} from "../../engine/protocol.ts";
 
 /**
  * The most text the pane holds while it follows the tail: four of the
@@ -67,355 +35,316 @@ export type LogFetch = (
  */
 export const LOG_PANE_MAX_CHARS = 256 * 1024;
 
-// The pane has one window at a time, so its stale-answer guard lives under
-// a single key.
-const WINDOW_KEY = "window";
-
 export interface LogPaneOptions {
-  fetch: LogFetch;
-  /** Called after every state change the view should repaint. */
+  /** Point a subscribed card's appends at another attempt or variant;
+   *  answers with that log's tail window, naming the attempt and variant. */
+  follow: (ticketId: string, follow: LogFollow) => Promise<LogFollowResult>;
+  /** One byte range of an attempt's log: how "load earlier" reads. */
+  read: (request: LogReadRequest) => Promise<TicketLogResponse>;
+  /** Called after every change to the shown log the view should repaint. */
   onChange: () => void;
 }
 
-// ---------------------------------------------------------------------------
-// The byte-window state machine
-// ---------------------------------------------------------------------------
+/**
+ * One card's held log: which attempt and variant it shows, the bytes held
+ * (`firstOffset`..`offset` bookend the window inside a log of `totalSize`),
+ * and the last read's error. `clicked` records whether the attempt was
+ * picked by hand: a clicked attempt stays when a new attempt starts, an
+ * unclicked pane follows the latest. `stream` is the variant: true shows the
+ * attempt's Stream file (the raw stream tee) rather than its derived log.
+ * `attempts` is the latest per-attempt listing (attempt number to Stream
+ * file), held for the timeline's stream links. A null `attempt` is a card
+ * with no attempt yet, or one whose first window has not landed.
+ */
+export interface LogPaneState {
+  ticketId: string | null;
+  attempt: number | null;
+  clicked: boolean;
+  stream: boolean;
+  content: string;
+  firstOffset: number;
+  offset: number;
+  totalSize: number;
+  error: string | null;
+  attempts: { attempt: number; streamFile: string | null }[];
+}
 
-export class LogPane {
-  /**
-   * The held window: which ticket and attempt the pane shows, the bytes held
-   * (`firstOffset`..`offset` bookend the window inside a log of `totalSize`),
-   * and the last fetch error. `clicked` records whether the attempt was
-   * picked by hand: a clicked attempt stays when a new attempt starts, an
-   * unclicked pane follows the running one. `stream` is the pane's variant:
-   * true shows the attempt's Stream file (the raw stream tee) rather than
-   * its derived log. `attempts` is the latest response's per-attempt listing
-   * (attempt number to Stream file), held for the timeline's stream links.
-   */
-  readonly state = {
-    ticketId: null as string | null,
-    attempt: null as number | null,
+interface HeldLog extends LogPaneState {
+  ticketId: string;
+  // Where each held chunk starts in the log and how much of `content` it
+  // is, oldest first, so the cap can let go of whole chunks and leave
+  // `firstOffset` on a byte the server can page back from.
+  chunks: { offset: number; length: number }[];
+  // Counts the windows: a read answering after the window it was asked of
+  // was replaced is dropped.
+  generation: number;
+  // A follow is out: appends wait for its window.
+  following: boolean;
+  // The window a "load earlier" is out for: one at a time per window, and a
+  // new window is free to ask at once.
+  earlierFor: number | null;
+}
+
+const EMPTY: LogPaneState = Object.freeze({
+  ticketId: null,
+  attempt: null,
+  clicked: false,
+  stream: false,
+  content: "",
+  firstOffset: 0,
+  offset: 0,
+  totalSize: 0,
+  error: null,
+  attempts: [],
+}) as LogPaneState;
+
+function blank(ticketId: string): HeldLog {
+  return {
+    ticketId,
+    attempt: null,
     clicked: false,
     stream: false,
     content: "",
     firstOffset: 0,
     offset: 0,
     totalSize: 0,
-    error: null as string | null,
-    attempts: [] as { attempt: number; streamFile: string | null }[],
+    error: null,
+    attempts: [],
+    chunks: [],
+    generation: 0,
+    following: false,
+    earlierFor: null,
   };
+}
 
-  private readonly fetchChunk: LogFetch;
+export class LogPane {
+  private readonly followSeam: LogPaneOptions["follow"];
+  private readonly readSeam: LogPaneOptions["read"];
   private readonly onChange: () => void;
-  // The stale-answer half of the stale-selection guard: every window reset
-  // (open, reset) begins a new generation, so a fetch answered after one is
-  // dropped even when it names the very ticket, attempt and variant still
-  // showing (a re-open of the same attempt would otherwise double-append).
-  private readonly guard = new StaleGuard();
-  private windowToken = 0;
-  // Aborts the window's reads still out when the next window begins: the
-  // guard already drops their answers, and this frees their connections.
-  private windowAbort = new AbortController();
-  // Where each held chunk starts in the log and how much of `content` it
-  // is, oldest first, so the cap can let go of whole chunks and leave
-  // `firstOffset` on a byte the server can page back from.
-  private chunks: { offset: number; length: number }[] = [];
-  private tailInFlight = false;
-  private earlierInFlight = false;
+  private readonly held = new Map<string, HeldLog>();
+  private shown: string | null = null;
 
   constructor(options: LogPaneOptions) {
-    this.fetchChunk = options.fetch;
+    this.followSeam = options.follow;
+    this.readSeam = options.read;
     this.onChange = options.onChange;
+  }
+
+  /** The shown card's log; an empty pane while none is shown. */
+  get state(): Readonly<LogPaneState> {
+    if (this.shown === null) return EMPTY;
+    return this.held.get(this.shown) ?? { ...EMPTY, ticketId: this.shown };
+  }
+
+  /** Show a card's log: what it holds already (a hovered card's prefetch),
+   *  or an empty pane until its window lands. The caller repaints. */
+  show(ticketId: string | null): void {
+    this.shown = ticketId;
   }
 
   /** Clear the pane: the selection went away. The caller repaints. */
   reset(): void {
-    this.resetWindow(null);
+    this.shown = null;
+  }
+
+  /** The card is no longer subscribed: let its log go. */
+  forget(ticketId: string): void {
+    this.held.delete(ticketId);
   }
 
   /**
-   * Open an attempt's raw log tail-first: probe the size (an offset past EOF
-   * serves empty content plus the total), fetch the last window, then tail
-   * whatever grew in the meantime. A null attempt holds an empty pane for a
-   * ticket with no attempts. `stream` opens the attempt's Stream file
-   * instead of its derived log, through the same byte-window machine. A slow
-   * answer only lands when it is still the selected attempt and variant.
+   * A subscribed card's log, pushed: a window replaces what the card holds,
+   * an append continues it, and null is a card with no attempt.
    */
-  async open(
-    ticketId: string,
-    attempt: number | null,
-    clicked: boolean,
-    stream = false,
-  ): Promise<void> {
-    this.resetWindow(ticketId);
-    const token = this.windowToken;
-    this.state.attempt = attempt;
-    this.state.clicked = clicked;
-    this.state.stream = stream;
-    this.onChange();
-    if (attempt === null) return;
-    try {
-      const probe = await this.read(ticketId, attempt, Number.MAX_SAFE_INTEGER, undefined, stream);
-      if (!this.isCurrent(ticketId, attempt, stream, token)) return;
-      const chunk = await this.read(
-        ticketId,
-        attempt,
-        initialLogWindow(probe.totalSize),
-        undefined,
-        stream,
-      );
-      if (!this.isCurrent(ticketId, attempt, stream, token)) return;
-      this.note(chunk);
-      this.state.content = chunk.content;
-      this.chunks = [{ offset: chunk.offset, length: chunk.content.length }];
-      this.state.firstOffset = chunk.offset;
-      this.state.offset = chunk.nextOffset;
-      this.state.totalSize = chunk.totalSize;
-      this.onChange();
-      // The attempt may have grown while the open fetched.
-      void this.tail(ticketId, attempt, stream, token);
-    } catch {
-      this.fail(ticketId, attempt, stream, token);
-    }
-  }
-
-  /**
-   * The snapshot-cadence liveness step for the open pane. Attempt-stay: a
-   * clicked attempt is never switched away from; an unclicked pane follows
-   * the running attempt as new attempts start, keeping its variant (a pane
-   * following in stream mode stays in stream mode). The selected attempt
-   * tails.
-   */
-  follow(
-    ticketId: string,
-    timeline: TimelineView | null,
-  ): Promise<void> | void {
-    if (!timeline) return;
-    if (this.state.attempt === null) {
-      if (timeline.attempts.length > 0) {
-        return this.open(
-          ticketId,
-          selectLogAttempt(timeline, null),
-          false,
-          this.state.stream,
-        );
-      }
+  push(ticketId: string, log: LogPush | null): void {
+    if (log === null) {
+      const entry = this.entry(ticketId);
+      if (entry.following) return;
+      this.replace(entry, null, false);
+      this.changed(ticketId);
       return;
     }
-    const desired = selectLogAttempt(
-      timeline,
-      this.state.clicked ? this.state.attempt : null,
-    );
-    if (desired === null) return;
-    if (desired !== this.state.attempt) {
-      return this.open(ticketId, desired, false, this.state.stream);
+    if (log.mode === "window") {
+      const entry = this.entry(ticketId);
+      // A window for what a follow still out has moved away from is the
+      // old follow's; the follow's reply brings the window that counts.
+      if (entry.following) return;
+      this.replace(entry, log, log.stream);
+      if (log.attempts) entry.attempts = log.attempts;
+      this.changed(ticketId);
+      return;
     }
-    return this.tail(ticketId, desired, this.state.stream);
+    const entry = this.held.get(ticketId);
+    if (!entry || entry.following) return;
+    // A frame already on the wire when the pane moved names the old log.
+    if (log.attempt !== entry.attempt || log.stream !== entry.stream) return;
+    if (log.attempts) entry.attempts = log.attempts;
+    if (log.offset !== entry.offset) {
+      // A gap: ask for the follow again, and its window starts over.
+      void this.refollow(entry);
+      return;
+    }
+    entry.content += log.content;
+    entry.chunks.push({ offset: log.offset, length: log.content.length });
+    entry.offset = log.nextOffset;
+    entry.totalSize = log.totalSize;
+    if (pinned || ticketId !== this.shown) trimToCap(entry);
+    this.changed(ticketId);
   }
 
   /**
-   * A hand-picked attempt from the timeline: clicked, so attempt-stay keeps
+   * A hand-picked attempt from the timeline: clicked, so the server keeps
    * it when a newer attempt starts. Re-picking the shown attempt's log is a
    * no-op; picking the attempt row while the pane shows its Stream file
    * switches back to the derived log.
    */
   selectAttempt(ticketId: string, attempt: number): void {
-    if (
-      this.state.ticketId === ticketId &&
-      this.state.attempt === attempt &&
-      !this.state.stream
-    ) {
-      return;
-    }
-    void this.open(ticketId, attempt, true, false);
+    const entry = this.held.get(ticketId);
+    if (entry?.attempt === attempt && !entry.stream && !entry.following) return;
+    void this.moveTo(ticketId, attempt, false);
   }
 
   /**
    * A hand-picked Stream file from an attempt row's stream link: clicked,
-   * same attempt-stay rule as `selectAttempt`, in the pane's stream variant.
+   * the same attempt-stay rule as `selectAttempt`, in the stream variant.
    */
   selectStream(ticketId: string, attempt: number): void {
-    if (
-      this.state.ticketId === ticketId &&
-      this.state.attempt === attempt &&
-      this.state.stream
-    ) {
-      return;
-    }
-    void this.open(ticketId, attempt, true, true);
+    const entry = this.held.get(ticketId);
+    if (entry?.attempt === attempt && entry.stream && !entry.following) return;
+    void this.moveTo(ticketId, attempt, true);
   }
 
   /**
    * Prepend the window before the oldest byte held ("load earlier"). The
-   * fetch is bounded by `firstOffset`, so the range cannot overlap the held
-   * content. The anchor captured before the mutation keeps the opened view
+   * read is bounded by `firstOffset`, so it cannot overlap the held
+   * content. The anchor captured before the change keeps the opened view
    * put once the render lands the taller content.
    */
   async loadEarlier(ticketId: string, attempt: number): Promise<void> {
-    if (this.earlierInFlight) return;
-    const token = this.windowToken;
-    if (!this.isCurrent(ticketId, attempt, this.state.stream, token)) return;
-    const from = earlierLogOffset(this.state.firstOffset);
+    const entry = this.held.get(ticketId);
+    if (!entry || entry.attempt !== attempt || entry.earlierFor === entry.generation) return;
+    const from = earlierLogOffset(entry.firstOffset);
     if (from === null) return;
-    this.earlierInFlight = true;
+    const generation = entry.generation;
+    const end = entry.firstOffset;
+    entry.earlierFor = generation;
     try {
-      const chunk = await this.read(
-        ticketId,
+      const chunk = await this.readSeam({
+        id: ticketId,
         attempt,
-        from,
-        this.state.firstOffset,
-        this.state.stream,
-      );
-      if (!this.isCurrent(ticketId, attempt, this.state.stream, token)) return;
-      this.note(chunk);
-      captureLogAnchor();
-      this.state.content = chunk.content + this.state.content;
-      this.chunks.unshift({ offset: chunk.offset, length: chunk.content.length });
-      this.state.firstOffset = chunk.offset;
-      this.onChange();
+        offset: from,
+        end,
+        stream: entry.stream,
+      });
+      if (!this.isCurrent(entry, generation) || entry.firstOffset !== end) return;
+      if (ticketId === this.shown) captureLogAnchor();
+      entry.content = chunk.content + entry.content;
+      entry.chunks.unshift({ offset: chunk.offset, length: chunk.content.length });
+      entry.firstOffset = chunk.offset;
+      this.changed(ticketId);
     } catch {
-      this.fail(ticketId, attempt, this.state.stream, token);
+      this.fail(entry, generation);
     } finally {
-      this.earlierInFlight = false;
+      if (entry.earlierFor === generation) entry.earlierFor = null;
     }
   }
 
-  /**
-   * Append whatever bytes the selected attempt's file has grown since the
-   * last read: the live tail, driven by the snapshot cadence. Fetches only
-   * bytes past the last offset read; a no-op once caught up. The pane
-   * repaints once for the whole catch-up, not once per chunk (issue #157).
-   * While it follows the tail, the oldest chunks past the cap are let go,
-   * and a backlog past the cap skips ahead to the last window instead of
-   * reading every byte the cap would let go of anyway.
-   */
-  private async tail(
-    ticketId: string,
-    attempt: number,
-    stream: boolean,
-    token: number = this.windowToken,
-  ): Promise<void> {
-    if (this.tailInFlight) return;
-    if (!this.isCurrent(ticketId, attempt, stream, token)) return;
-    this.tailInFlight = true;
-    let grew = false;
-    try {
-      while (logTailOffset(this.state.offset, this.state.totalSize) !== null) {
-        if (pinned && this.state.totalSize - this.state.offset > LOG_PANE_MAX_CHARS) {
-          // Everything held is older than what the cap would keep.
-          this.state.offset = initialLogWindow(this.state.totalSize);
-          this.state.firstOffset = this.state.offset;
-          this.state.content = "";
-          this.chunks = [];
-          grew = true;
-        }
-        const from = this.state.offset;
-        const chunk = await this.read(ticketId, attempt, from, undefined, stream);
-        if (!this.isCurrent(ticketId, attempt, stream, token)) return;
-        this.note(chunk);
-        this.state.content += chunk.content;
-        this.chunks.push({ offset: chunk.offset, length: chunk.content.length });
-        this.state.offset = chunk.nextOffset;
-        this.state.totalSize = chunk.totalSize;
-        grew = true;
-        if (chunk.nextOffset <= from) break;
-      }
-    } catch {
-      this.fail(ticketId, attempt, stream, token);
-    } finally {
-      this.tailInFlight = false;
-      if (grew && this.isCurrent(ticketId, attempt, stream, token)) {
-        if (pinned) this.trimToCap();
-        this.onChange();
-      }
+  // -------------------------------------------------------------------------
+  // Internals
+  // -------------------------------------------------------------------------
+
+  private entry(ticketId: string): HeldLog {
+    let entry = this.held.get(ticketId);
+    if (!entry) {
+      entry = blank(ticketId);
+      this.held.set(ticketId, entry);
     }
+    return entry;
   }
 
-  /**
-   * Let go of the oldest whole chunks while the pane holds more than the
-   * cap. `firstOffset` moves to the first chunk kept, so "load earlier"
-   * reads exactly what was let go.
-   */
-  private trimToCap(): void {
-    let drop = 0;
-    while (
-      this.chunks.length > 1 &&
-      this.state.content.length - drop > LOG_PANE_MAX_CHARS
-    ) {
-      drop += this.chunks.shift()!.length;
-    }
-    if (drop === 0) return;
-    this.state.content = this.state.content.slice(drop);
-    this.state.firstOffset = this.chunks[0]!.offset;
+  // Move the pane to a picked attempt and variant: the pane shows it at
+  // once, empty, and the follow's reply fills it.
+  private async moveTo(ticketId: string, attempt: number, stream: boolean): Promise<void> {
+    const entry = this.entry(ticketId);
+    entry.clicked = true;
+    this.replace(entry, null, stream);
+    entry.attempt = attempt;
+    this.changed(ticketId);
+    await this.followNow(entry, { attempt, stream });
   }
 
-  /** One read of the current window, aborted if the window moves on. */
-  private read(
-    ticketId: string,
-    attempt: number,
-    offset: number,
-    end: number | undefined,
-    stream: boolean,
-  ): Promise<LogChunk> {
-    return this.fetchChunk(ticketId, attempt, offset, end, stream, this.windowAbort.signal);
-  }
-
-  /** A failed fetch marks the pane, but only while it is still selected. */
-  private fail(
-    ticketId: string,
-    attempt: number,
-    stream: boolean,
-    token: number,
-  ): void {
-    if (this.isCurrent(ticketId, attempt, stream, token)) {
-      this.state.error = `log fetch failed: ${ticketId}:${attempt}`;
-      this.onChange();
-    }
-  }
-
-  /**
-   * The stale-selection guard: an answer lands only while the pane still
-   * shows the same ticket, attempt, and variant and the fetching operation's
-   * token is still the window's generation, so an in-flight log tail never
-   * appends into a view the user has switched away from, or re-opened
-   * underneath it.
-   */
-  private isCurrent(
-    ticketId: string,
-    attempt: number,
-    stream: boolean,
-    token: number,
-  ): boolean {
-    return (
-      this.guard.isCurrent(WINDOW_KEY, token) &&
-      this.state.ticketId === ticketId &&
-      this.state.attempt === attempt &&
-      this.state.stream === stream
+  // A gap in the appends: the same follow again, its window replacing the
+  // pane's.
+  private refollow(entry: HeldLog): Promise<void> {
+    return this.followNow(
+      entry,
+      entry.clicked ? { attempt: entry.attempt, stream: entry.stream } : { attempt: null, stream: entry.stream },
     );
   }
 
-  /** Hold the response's per-attempt listing: the latest one wins, and the
-   *  timeline's stream links re-join from it on every render. */
-  private note(chunk: LogChunk): void {
-    if (chunk.attempts) this.state.attempts = chunk.attempts;
+  private async followNow(entry: HeldLog, follow: LogFollow): Promise<void> {
+    entry.following = true;
+    const generation = entry.generation;
+    try {
+      const window = await this.followSeam(entry.ticketId, follow);
+      if (!this.isCurrent(entry, generation)) return;
+      entry.following = false;
+      // The reply names the attempt and variant the server read, which is
+      // how a follow of the latest attempt learns which one that is.
+      this.replace(entry, { mode: "window", ...window }, window.stream);
+      entry.attempts = window.attempts;
+      this.changed(entry.ticketId);
+    } catch {
+      if (!this.isCurrent(entry, generation)) return;
+      entry.following = false;
+      this.fail(entry, generation);
+    }
   }
 
-  private resetWindow(ticketId: string | null): void {
-    this.windowToken = this.guard.begin(WINDOW_KEY);
-    this.windowAbort.abort();
-    this.windowAbort = new AbortController();
-    this.chunks = [];
-    if (ticketId !== this.state.ticketId) this.state.attempts = [];
-    this.state.ticketId = ticketId;
-    this.state.attempt = null;
-    this.state.clicked = false;
-    this.state.stream = false;
-    this.state.content = "";
-    this.state.firstOffset = 0;
-    this.state.offset = 0;
-    this.state.totalSize = 0;
-    this.state.error = null;
+  // A new window: every read still out for the old one is now stale.
+  private replace(entry: HeldLog, window: LogPush | null, stream: boolean): void {
+    entry.generation += 1;
+    entry.attempt = window?.attempt ?? null;
+    entry.stream = stream;
+    entry.content = window?.content ?? "";
+    entry.firstOffset = window?.offset ?? 0;
+    entry.offset = window?.nextOffset ?? 0;
+    entry.totalSize = window?.totalSize ?? 0;
+    entry.chunks = window ? [{ offset: window.offset, length: window.content.length }] : [];
+    entry.error = null;
   }
+
+  private isCurrent(entry: HeldLog, generation: number): boolean {
+    return this.held.get(entry.ticketId) === entry && entry.generation === generation;
+  }
+
+  /** A failed read marks the pane, but only while its window stands. */
+  private fail(entry: HeldLog, generation: number): void {
+    if (!this.isCurrent(entry, generation)) return;
+    entry.error = `log fetch failed: ${entry.ticketId}:${entry.attempt ?? "?"}`;
+    this.changed(entry.ticketId);
+  }
+
+  // Only the shown card's log is on screen: a prefetched card's change
+  // repaints nothing.
+  private changed(ticketId: string): void {
+    if (ticketId === this.shown) this.onChange();
+  }
+}
+
+/**
+ * Let go of the oldest whole chunks while the pane holds more than the
+ * cap. `firstOffset` moves to the first chunk kept, so "load earlier"
+ * reads exactly what was let go.
+ */
+function trimToCap(entry: HeldLog): void {
+  let drop = 0;
+  while (entry.chunks.length > 1 && entry.content.length - drop > LOG_PANE_MAX_CHARS) {
+    drop += entry.chunks.shift()!.length;
+  }
+  if (drop === 0) return;
+  entry.content = entry.content.slice(drop);
+  entry.firstOffset = entry.chunks[0]!.offset;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,9 +366,10 @@ let anchor: { prevHeight: number; prevTop: number } | null = null;
 
 /**
  * Remember the log pane's current scroll metrics, to be applied by the render
- * that lands a prepend. Called just before the held content changes.
+ * that lands a prepend. Called just before the held content changes, or
+ * before the Detail draws more of what it holds above what it shows.
  */
-function captureLogAnchor(): void {
+export function captureLogAnchor(): void {
   if (typeof document === "undefined") return;
   const pre = document.querySelector<HTMLElement>(".log-pane-content");
   if (pre) anchor = { prevHeight: pre.scrollHeight, prevTop: pre.scrollTop };

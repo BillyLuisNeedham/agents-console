@@ -111,7 +111,14 @@ export interface AppModel {
   phaseLabel: string;
   cards: PoolCardView[];
   edges: TopologyEdge[];
+  /** The pool log lines held: the snapshot's last 500, after any earlier
+   *  ones read back (issue #161). */
   log: string[];
+  /** How long the pool log is in all; more than `log` holds offers
+   *  "load earlier". */
+  logTotal: number;
+  /** The pool log's "load earlier": a read out, or its failure. */
+  logEarlier: { loading: boolean; error: string | null };
   logOpen: boolean;
   /** The State inspector's text; empty while the drawer is closed. */
   inspectorJson: string;
@@ -140,8 +147,11 @@ export interface AppModel {
   detailTabs: DetailTabView[] | null;
   /** The selected ticket's body: undefined while the first fetch is out, null for known-missing. */
   detailBody: string | null | undefined;
-  /** The last body fetch's failure for the selected ticket, if any. */
+  /** Why the selected ticket's body could not be had, if it could not. */
   detailBodyError: string | null;
+  /** A refused answer's reason by ticket id (issue #161), beside the
+   *  interrupt's actions until the next answer. */
+  answerFailures: Record<string, string>;
   timeline: TimelineView | null;
   logPane: LogPaneView | null;
   /** The Needs input tray's rows: every card holding an unresolved interrupt. */
@@ -169,6 +179,11 @@ export interface Handlers {
   onToggleLog: () => void;
   onToggleInspector: () => void;
   onSelectNode: (nodeId: string | null) => void;
+  /** The pointer moved onto a card, or off every card (null): a card it
+   *  rests on is prefetched (issue #161). */
+  onHoverNode: (nodeId: string | null) => void;
+  /** The pool log drawer's "load earlier" (issue #161). */
+  onLoadEarlierPoolLog: () => void;
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
@@ -196,6 +211,10 @@ export interface Handlers {
 
 export type ConsoleViewOptions = NeedsInputOptions &
   ConversationsOptions & {
+    /** Run something in the next frame. Given, the page's first render
+     *  leaves measuring the canvas's cards and drawing its edges to the frame
+     *  after it, so it forces no layout of its own (issue #161). */
+    settleLater?: (run: () => void) => void;
     /** "Open in herdr": focus a ticket's or a Conversation's pane; both are
      *  the same server-side seam, keyed by id. Resolves false on failure. */
     onFocusTerminal: (id: string) => Promise<boolean>;
@@ -209,11 +228,12 @@ export type ConsoleViewOptions = NeedsInputOptions &
     onGetSettings: GetSettingsHandler;
     onSavePoolSettings: SavePoolHandler;
     onSaveMachineDefaults: SaveMachineHandler;
-    /** The Reassign write (issue #126). It answers with a fresh snapshot,
-     *  which the bootstrap pushes through setSnapshot. */
+    /** The Reassign write (issue #126). The delta carrying the new
+     *  Assignment is ahead of its reply on the socket. */
     onReassign: ReassignHandler;
     /** A Held spawn's Adopt and Discard (issue #149, ADR-0029). The engine
-     *  pushes the snapshot that shows either, so neither answers with one. */
+     *  pushes the snapshot that shows either, so neither answers with one;
+     *  both are optimistic (issue #161). */
     onAdoptHeldSpawn: HeldSpawnHandler;
     onDiscardHeldSpawn: HeldSpawnHandler;
     /** A Pending spawn's Hold and Discard (issue #150), the same way. */
@@ -243,6 +263,7 @@ export class ConsoleView {
   private readonly detail = new Detail({
     onClose: () => this.closeDetail(),
     drafts: this.drafts,
+    onChange: () => this.onChange(),
   });
   private readonly drawers = new Drawers();
   private readonly needsInput: NeedsInputTray;
@@ -265,6 +286,7 @@ export class ConsoleView {
   // selection does.
   private headerHandlers: Pick<
     Handlers,
+    | "onHoverNode"
     | "onArmStop"
     | "onCancelStop"
     | "onConfirmStop"
@@ -304,6 +326,8 @@ export class ConsoleView {
     this.canvas = new Canvas({
       onChange: options.onChange,
       onCardTap: (nodeId) => this.selectNode(nodeId),
+      onCardHover: (nodeId) => this.headerHandlers?.onHoverNode(nodeId),
+      settleLater: options.settleLater,
       onFocusTerminal: options.onFocusTerminal,
       onNewConversation: () => this.conversationsTray.openForm(),
       onStartSteward: () => this.conversationsTray.openStewardForm(),

@@ -233,6 +233,34 @@ describe("Canvas across a morphing render", () => {
     ],
   });
 
+  it("rebuilds only the cards whose view moved, keeping every other node untouched (#161)", () => {
+    const two = model({
+      cards: [
+        { kind: "utility", id: "u-1", label: "grader", interrupt: null, x: 100, y: 100 },
+        { kind: "utility", id: "u-2", label: "reviewer", interrupt: null, x: 400, y: 100 },
+      ],
+    });
+    const { root, commit } = mountCanvas(two);
+    commit();
+    const node = (id: string) => root.querySelector<HTMLElement>(`[data-node-id="${id}"]`)!;
+    const [first, second] = [node("u-1"), node("u-2")];
+    // A mark no render draws: a card the morph walks loses it, one it keeps does not.
+    first.setAttribute("data-mark", "");
+    second.setAttribute("data-mark", "");
+    two.cards = [two.cards[0]!, { ...two.cards[1]!, label: "reviewer 2" } as never];
+    commit();
+    expect(node("u-1")).toBe(first);
+    expect(first.hasAttribute("data-mark")).toBe(true);
+    expect(node("u-2")).toBe(second);
+    expect(second.hasAttribute("data-mark")).toBe(false);
+    expect(second.textContent).toContain("reviewer 2");
+    // Once drawn, the changed card is kept too while nothing about it moves.
+    second.setAttribute("data-mark", "");
+    commit();
+    expect(first.hasAttribute("data-mark")).toBe(true);
+    expect(second.hasAttribute("data-mark")).toBe(true);
+  });
+
   it("keeps the Assignment badge expanded across the renders after the click", () => {
     const { root, commit } = mountCanvas(withTicket);
     commit();
@@ -333,6 +361,31 @@ describe("the canvas's edges across renders (#157)", () => {
     expect(root.querySelector("text.canvas-edge-label")).toBe(label);
     // The arrowhead's defs stay too: the morph leaves the layer's children be.
     expect(root.querySelector("svg.canvas-edges marker")).not.toBeNull();
+  });
+
+  it("leaves a fresh page's measuring and edges to the next frame, unless a render comes first (#161)", () => {
+    const queued: (() => void)[] = [];
+    const edges = { current: [{ source: "u-1", target: "u-2" }] as TopologyEdge[] };
+    const { root, commit } = mountCanvas(twoCards, { settleLater: (run) => queued.push(run) }, edges);
+    commit();
+    // The first render drew the cards and nothing that needs their layout.
+    expect(root.querySelectorAll(".node-card")).toHaveLength(3);
+    expect(root.querySelector("path.canvas-edge")).toBeNull();
+    // The pan is seeded from the window the fresh page's canvas spans.
+    expect(root.querySelector<HTMLElement>(".canvas-world")!.style.transform).toContain(
+      `translate(${Math.max(8, (window.innerWidth - 960) / 2)}px, 8px)`,
+    );
+    expect(queued).toHaveLength(1);
+    queued[0]!();
+    expect(root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    // A render before the frame measures as every render does, and the frame then has nothing left.
+    const again = mountCanvas(twoCards, { settleLater: (run) => queued.push(run) }, edges);
+    again.commit();
+    again.commit();
+    expect(again.root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    const path = again.root.querySelector("path.canvas-edge");
+    queued[1]!();
+    expect(again.root.querySelector("path.canvas-edge")).toBe(path);
   });
 
   it("adds, drops and restyles edges in place as the model's edges change", () => {

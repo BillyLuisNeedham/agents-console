@@ -19,7 +19,7 @@
  * key among siblings is a renderer bug, warned about and matched by
  * position. Text nodes get their data rewritten only when it changed. An
  * element built from unchanged `html`, or marked `KEEP_CHILDREN`, keeps the
- * children it has. `to`
+ * children it has, and a stand-in `keep` made keeps its node whole. `to`
  * is consumed: its nodes may be moved into `from`. Properties are applied
  * before children, so a `<select>` whose `<option>`s change in the same
  * render would take its `value` against the old options; nothing renders one
@@ -39,15 +39,63 @@ import { isProperty, propsOf, rememberProps } from "./dom";
 export function commit(root: Element, build: () => Element): void {
   const shell = root.firstElementChild;
   if (!shell) {
-    root.replaceChildren(build());
+    root.replaceChildren(resolveKept(build()));
     return;
   }
   try {
     morph(shell, build());
   } catch (error) {
     console.error("morph failed; replacing the tree", error);
-    root.replaceChildren(build());
+    root.replaceChildren(resolveKept(build()));
   }
+}
+
+// Each stand-in `keep` made, to the node on the page it stands for.
+const kept = new WeakMap<Element, Element>();
+
+// Each keyed node a render built that the morph patched a page node to
+// match, to that page node: what `placed` reads.
+const patched = new WeakMap<Element, Element>();
+
+/**
+ * Where a keyed node a render built stands after its commit: itself when
+ * the morph moved it onto the page, the page node the morph patched to
+ * match it otherwise, or null when neither is on the page any more. A
+ * renderer that keeps what it drew (issue #161) holds the node it built and
+ * asks this for the node to `keep` on the next render.
+ */
+export function placed(node: Element): Element | null {
+  const live = patched.get(node) ?? node;
+  return live.isConnected ? live : null;
+}
+
+/**
+ * A stand-in for an element already on the page that this render would
+ * draw exactly as it stands (issue #161): the morph keeps that node,
+ * attributes, properties, children and all, and only moves it into place.
+ * The stand-in carries the node's `data-key`, so it is matched the way the
+ * node itself would be. The canvas hands one back for every card whose view
+ * has not changed since it was drawn, so a delta that moved one ticket
+ * rebuilds and walks one card, not all of them.
+ */
+export function keep(node: Element): Element {
+  const standIn = node.ownerDocument.createElementNS(node.namespaceURI, node.localName);
+  const key = node.getAttribute("data-key");
+  if (key !== null) standIn.setAttribute("data-key", key);
+  kept.set(standIn, node);
+  return standIn;
+}
+
+// A tree mounted whole rather than morphed: every stand-in in it gives way
+// to the node it stands for.
+function resolveKept(tree: Element): Element {
+  const node = kept.get(tree);
+  if (node) return node;
+  for (const standIn of Array.from(tree.querySelectorAll("*"))) {
+    const live = kept.get(standIn);
+    if (live) standIn.replaceWith(live);
+  }
+  return tree;
 }
 
 /**
@@ -60,6 +108,12 @@ export function commit(root: Element, build: () => Element): void {
 export const KEEP_CHILDREN = "data-keep-children";
 
 export function morph(from: Element, to: Element): Element {
+  const keptNode = kept.get(to);
+  if (keptNode) {
+    if (keptNode === from) return from;
+    from.replaceWith(keptNode);
+    return keptNode;
+  }
   if (!sameKind(from, to)) {
     from.replaceWith(to);
     return to;
@@ -71,6 +125,7 @@ export function morph(from: Element, to: Element): Element {
   morphAttributes(from, to);
   morphProperties(from, to);
   if (!sameHtml && !to.hasAttribute(KEEP_CHILDREN)) morphChildren(from, to);
+  if (from !== to && to.hasAttribute("data-key")) patched.set(to, from);
   return from;
 }
 
@@ -145,7 +200,8 @@ function morphChildren(from: Element, to: Element): void {
       }
     }
     if (!match) {
-      from.insertBefore(want, cursor);
+      // A stand-in with nothing here to match is its node, moved in.
+      from.insertBefore((want instanceof Element && kept.get(want)) || want, cursor);
     } else if (match === cursor) {
       cursor = cursor.nextSibling;
       patchNode(match, want);

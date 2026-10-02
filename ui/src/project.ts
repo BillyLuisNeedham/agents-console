@@ -244,10 +244,26 @@ interface TimelineEventView {
   steward: string | null;
 }
 
+// The formatters the timeline and the delivery warning print times with,
+// made once (issue #161): `toLocaleTimeString` builds a formatter on every
+// call, tens of microseconds each, which made a long timeline's projection
+// cost a frame. These print exactly what it printed.
+const EVENT_TIME = new Intl.DateTimeFormat([], {
+  hour: "numeric",
+  minute: "numeric",
+  second: "numeric",
+  hour12: false,
+});
+const CLOCK_TIME = new Intl.DateTimeFormat([], {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 function formatEventTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour12: false });
+  return EVENT_TIME.format(date);
 }
 
 /** The graded event's payload as a grade, or null when a field is missing or
@@ -477,7 +493,17 @@ export function resolverFiles(timeline: TimelineView | null, attempt: number): s
 
 interface TimelineAttemptView {
   number: number;
-  events: TimelineEventView[];
+  /**
+   * The attempt's events as timeline rows, decoded the first time they are
+   * read (issue #161): a closed attempt's are never needed, and a busy
+   * ticket's run to thousands. `timelineEvent` decodes one alone.
+   */
+  readonly events: TimelineEventView[];
+  /** How many events the attempt holds, known without decoding them. */
+  count: number;
+  /** What a closed attempt's line says it came to: its last grade, else
+   *  its last event's kind; null with no events. */
+  outcome: string | null;
   reconstructed: boolean;
   running: boolean;
   logFile: string | null;
@@ -504,37 +530,114 @@ export interface TimelineView {
 export function projectTimeline(
   response: TicketEventsResponse,
   status: TicketStatus,
+  previous: { response: TicketEventsResponse; view: TimelineView } | null = null,
 ): TimelineView {
   if (response.events.length > 0) {
-    const byAttempt = new Map<number, TimelineEventView[]>();
+    // The events file only grows, so a new response usually continues the
+    // last one (issue #161): an attempt with nothing new is the same object
+    // it was, so the Detail keeps its rows, and one that grew carries over
+    // the rows already decoded and decodes only what is new, when read.
+    const carried = previous && continues(previous.response.events, response.events) ? previous : null;
+    const before = new Map(carried?.view.attempts.map((a) => [a.number, a]) ?? []);
+    const byAttempt = new Map<number, TicketEvent[]>();
     for (const event of response.events) {
-      const list = byAttempt.get(event.attempt) ?? [];
-      list.push(decodeTimelineEvent(event));
-      byAttempt.set(event.attempt, list);
+      const list = byAttempt.get(event.attempt);
+      if (list) list.push(event);
+      else byAttempt.set(event.attempt, [event]);
     }
     const numbers = [...byAttempt.keys()].sort((a, b) => a - b);
     const running = runningAttempt(numbers, byAttempt, status);
-    return {
-      attempts: numbers.map((number) => ({
-        number,
-        events: byAttempt.get(number)!,
-        reconstructed: false,
-        running: number === running,
-        logFile: null,
-        streamFile: null,
-      })),
-      reconstructed: false,
-    };
+    let same = carried !== null && numbers.length === carried.view.attempts.length;
+    const attempts = numbers.map((number) => {
+      const raw = byAttempt.get(number)!;
+      const held = before.get(number);
+      if (held && held.count === raw.length && held.running === (number === running)) return held;
+      same = false;
+      return attemptView(number, raw, number === running, held);
+    });
+    return same && carried ? carried.view : { attempts, reconstructed: false };
   }
-  const attempts = response.attempts.map((row, index) => ({
-    number: row.attempt,
-    events: [] as TimelineEventView[],
-    reconstructed: true,
-    running: status === "in-progress" && index === response.attempts.length - 1,
-    logFile: row.logFile,
-    streamFile: null,
-  }));
+  const attempts = response.attempts.map(
+    (row, index): TimelineAttemptView => ({
+      number: row.attempt,
+      events: [],
+      count: 0,
+      outcome: null,
+      reconstructed: true,
+      running: status === "in-progress" && index === response.attempts.length - 1,
+      logFile: row.logFile,
+      streamFile: null,
+    }),
+  );
   return { attempts, reconstructed: response.reconstructed };
+}
+
+// Each attempt view's raw events and the rows decoded from them so far.
+const attemptEvents = new WeakMap<
+  TimelineAttemptView,
+  { raw: TicketEvent[]; rows: (TimelineEventView | undefined)[] }
+>();
+
+/**
+ * One attempt's row in the timeline, its events decoded only as they are
+ * read. An attempt carried over from the last response (`held`) hands on
+ * the rows it already decoded, which are those of the same events.
+ */
+function attemptView(
+  number: number,
+  raw: TicketEvent[],
+  running: boolean,
+  held: TimelineAttemptView | undefined,
+): TimelineAttemptView {
+  let outcome: string | null = null;
+  for (let i = raw.length - 1; i >= 0 && outcome === null; i--) {
+    if (raw[i]!.kind !== "graded") continue;
+    const grade = gradeFromPayload(raw[i]!.payload);
+    if (grade) outcome = `${grade.score}/10 ${grade.verdict}`;
+  }
+  outcome ??= raw[raw.length - 1]?.kind ?? null;
+  let events: TimelineEventView[] | null = null;
+  const view: TimelineAttemptView = {
+    number,
+    get events(): TimelineEventView[] {
+      events ??= raw.map((_, i) => timelineEvent(view, i));
+      return events;
+    },
+    count: raw.length,
+    outcome,
+    reconstructed: false,
+    running,
+    logFile: null,
+    streamFile: null,
+  };
+  const rows = held ? (attemptEvents.get(held)?.rows.slice(0, raw.length) ?? []) : [];
+  attemptEvents.set(view, { raw, rows });
+  return view;
+}
+
+/** One of an attempt's events as its timeline row, decoded once. */
+export function timelineEvent(attempt: TimelineAttemptView, index: number): TimelineEventView {
+  const held = attemptEvents.get(attempt);
+  if (!held) return attempt.events[index]!;
+  return (held.rows[index] ??= decodeTimelineEvent(held.raw[index]!));
+}
+
+// Whether `next` is `prev` with events appended: the same first and last
+// event where `prev` ends. Two lines checked, not every one: the file is
+// append-only, and a false "continues" would only reuse rows already drawn.
+function continues(prev: TicketEvent[], next: TicketEvent[]): boolean {
+  if (prev.length === 0 || prev.length > next.length) return false;
+  const last = prev.length - 1;
+  return sameEvent(prev[0]!, next[0]!) && sameEvent(prev[last]!, next[last]!);
+}
+
+function sameEvent(a: TicketEvent, b: TicketEvent): boolean {
+  return (
+    a.at === b.at &&
+    a.attempt === b.attempt &&
+    a.kind === b.kind &&
+    JSON.stringify(a.payload) === JSON.stringify(b.payload)
+  );
 }
 
 /**
@@ -555,13 +658,25 @@ export function joinStreamFiles(
   const streamByAttempt = new Map(
     listing.map((row) => [row.attempt, row.streamFile] as const),
   );
-  return {
-    ...timeline,
-    attempts: timeline.attempts.map((row) => ({
-      ...row,
-      streamFile: streamByAttempt.get(row.number) ?? null,
-    })),
-  };
+  // A row whose Stream file is already right is the same row, so the
+  // Detail can keep what it drew for it (issue #161).
+  let joined = false;
+  const attempts = timeline.attempts.map((row) => {
+    const streamFile = streamByAttempt.get(row.number) ?? null;
+    if (row.streamFile === streamFile) return row;
+    joined = true;
+    // A copy that still decodes its events only when read, from the same
+    // rows the original decodes into.
+    const copy = Object.defineProperties(
+      {},
+      Object.getOwnPropertyDescriptors(row),
+    ) as TimelineAttemptView;
+    copy.streamFile = streamFile;
+    const events = attemptEvents.get(row);
+    if (events) attemptEvents.set(copy, events);
+    return copy;
+  });
+  return joined ? { ...timeline, attempts } : timeline;
 }
 
 // An attempt is live only while its last recorded event has not yet ended
@@ -572,7 +687,7 @@ const LIVE_LAST_KINDS = new Set(["scheduled", "spawned", "resolver"]);
 
 function runningAttempt(
   numbers: number[],
-  byAttempt: Map<number, TimelineEventView[]>,
+  byAttempt: Map<number, { kind: string }[]>,
   status: TicketStatus,
 ): number | null {
   if (status !== "in-progress") return null;
@@ -994,9 +1109,12 @@ export interface TerminalSurfaceView {
   text: string;
   /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
   justFocused: boolean;
-  /** True while an "Open in herdr" is out (issue #157): the button reads
-   *  as opening until the server answers. */
+  /** True while an "Open in herdr" is out: the button stands disabled, so
+   *  a double click never sends twice. */
   focusing?: boolean;
+  /** A refused "Open in herdr"'s reason (issue #161), shown beside the
+   *  button until the next press. */
+  focusFailure?: string | null;
 }
 
 export interface UtilityCardView {
@@ -2007,7 +2125,7 @@ function projectDelivery(delivery: NoticeDelivery | undefined): DeliveryWarningV
   const at = new Date(delivery.failingSince);
   const since = Number.isNaN(at.getTime())
     ? ""
-    : ` since ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+    : ` since ${CLOCK_TIME.format(at)}`;
   return {
     text: `Notices not reaching this pane${since}: something in the pane is in the way`,
     lastError: delivery.lastError,
