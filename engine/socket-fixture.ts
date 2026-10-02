@@ -24,6 +24,8 @@ import {
 export interface SocketClient {
   /** Every frame so far, in arrival order. */
   frames: ServerMessage[];
+  /** When each frame arrived (Date.now()), beside `frames`. */
+  times: number[];
   /** The snapshot the frames so far build; null before the pool started. */
   pushed: PushedSnapshot | null;
   /** The revision the frames so far build. */
@@ -57,6 +59,7 @@ export async function openSocket(
   let resolveClosed: (value: { code: number; reason: string }) => void = () => {};
   const client: SocketClient = {
     frames: [],
+    times: [],
     pushed: null,
     rev: 0,
     seqs: [],
@@ -115,6 +118,7 @@ export async function openSocket(
       client.seqs.push(client.pushed.snapshot.seq);
     }
     client.frames.push(frame);
+    client.times.push(Date.now());
     for (const look of [...waiters]) look();
   };
   ws.onclose = (event) => resolveClosed({ code: event.code, reason: event.reason });

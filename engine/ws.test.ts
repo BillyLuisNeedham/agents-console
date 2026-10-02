@@ -37,15 +37,18 @@ import {
   registerTempDir,
   stubHarness,
 } from "./pool-fixture.ts";
+import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "./herdr-executing-fake.ts";
 import { framesOf, openSocket, type SocketClient } from "./socket-fixture.ts";
 import { makeTempDir } from "./tmp.ts";
 
 const servers: PoolServer[] = [];
 const sockets: SocketClient[] = [];
+const fakes: ExecutingFakeHerdr[] = [];
 
 afterEach(async () => {
   while (sockets.length > 0) sockets.pop()!.close();
   await cleanupPools(servers);
+  while (fakes.length > 0) await fakes.pop()!.close();
 });
 
 const ready = (id: string, blockedBy = "none"): string =>
@@ -477,6 +480,57 @@ describe("the live check", () => {
       { from, what: "the live cache on showing" },
     );
     expect(whole.activity?.["01"]).toEqual(live.activity!["01"]!);
+
+    writeFileSync(release, "go");
+    await server.settled();
+  }, 20_000);
+
+  it("peeks a new pane at once, and pushes its text again only when it moves", async () => {
+    const poolDir = makePool({
+      tickets: [{ file: "01-a.md", marker: ready("01") }],
+      config: { ...STUB_DEFAULTS, terminal: "herdr" },
+    });
+    const release = join(poolDir, "release");
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const server = startServer(
+      poolDir,
+      stubHarness(poolDir, { "01": { waitFor: release } }).harnesses,
+      { herdrSocket: fake.socketPath },
+    );
+    const client = await socket(server);
+    await client.sync();
+
+    await server.start();
+    const added = await client.waitFor(
+      () => typeof client.pushed?.snapshot.state.tickets[0]?.liveAttempt?.paneId === "string",
+      { what: "01's pane on the socket" },
+    );
+    const paneId = client.pushed!.snapshot.state.tickets[0]!.liveAttempt!.paneId!;
+    const from = client.frames.indexOf(added);
+    const first = await client.waitFor<Extract<ServerMessage, { type: "live" }>>(
+      (frame) => frame.type === "live" && frame.peeks?.["01"] !== undefined,
+      { from, what: "01's first peek" },
+    );
+    expect(first.peeks?.["01"]).toMatchObject({ ticket: "01", paneId });
+    // A push that adds a pane runs the check at once, not on the 2 s timer.
+    const waited = client.times[client.frames.indexOf(first)]! - client.times[from]!;
+    expect(waited).toBeLessThan(1_000);
+
+    // The pane's text moves: the next check pushes it, and only it.
+    const movedFrom = client.frames.length;
+    fake.setPaneContent(paneId, "working");
+    const moved = await client.waitFor<Extract<ServerMessage, { type: "live" }>>(
+      (frame) => frame.type === "live" && frame.peeks?.["01"] !== undefined,
+      { from: movedFrom, what: "01's moved peek", ms: 5_000 },
+    );
+    expect(moved.peeks?.["01"]).toEqual({ ticket: "01", paneId, text: "working" });
+    await Bun.sleep(2_200);
+    expect(
+      framesOf(client, "live")
+        .slice(framesOf(client, "live").indexOf(moved) + 1)
+        .filter((frame) => frame.peeks?.["01"] !== undefined),
+    ).toEqual([]);
 
     writeFileSync(release, "go");
     await server.settled();

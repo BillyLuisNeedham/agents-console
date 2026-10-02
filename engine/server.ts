@@ -78,7 +78,6 @@ import {
   HEARTBEAT_MS,
   POOL_LOG_WINDOW,
   WS_PATH,
-  embedBoot,
   type PoolLogRange,
   type TerminalFocusResponse,
 } from "./protocol.ts";
@@ -2252,31 +2251,6 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       poolLogRequest(numeric(p, "before") ?? Number.NaN, numeric(p, "limit")),
   };
 
-  // The page with the first snapshot in it (issue #161): the Console paints
-  // from it before any script runs or the socket opens. The file is read
-  // once per build (its mtime) and the page made once per revision; the
-  // browser never caches it, since the snapshot in it is of this moment.
-  // Every other static file is served as it always was.
-  let indexHtml: { mtimeMs: number; html: string } | null = null;
-  let indexPage: { mtimeMs: number; rev: number; text: string } | null = null;
-  function serveIndex(): Response | null {
-    const file = join(distDir, "index.html");
-    let mtimeMs: number;
-    try {
-      mtimeMs = statSync(file).mtimeMs;
-    } catch {
-      return null;
-    }
-    if (indexHtml?.mtimeMs !== mtimeMs) indexHtml = { mtimeMs, html: readFileSync(file, "utf8") };
-    const boot = hub.boot();
-    if (indexPage?.mtimeMs !== mtimeMs || indexPage.rev !== boot.rev) {
-      indexPage = { mtimeMs, rev: boot.rev, text: embedBoot(indexHtml.html, boot) };
-    }
-    return new Response(indexPage.text, {
-      headers: { "content-type": "text/html", "cache-control": "no-store" },
-    });
-  }
-
   try {
     server = bindPoolServer(
       resolution,
@@ -2590,8 +2564,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           return Response.json(ticket);
         }
 
+        // The page, with the first snapshot in it (issue #161, ws.ts).
         if (pathname === "/" || pathname === "/index.html") {
-          const page = serveIndex();
+          const page = hub.page(join(distDir, "index.html"));
           if (page) return page;
         }
 

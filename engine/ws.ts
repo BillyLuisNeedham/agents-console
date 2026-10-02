@@ -13,14 +13,16 @@
  * cards' data: body, events and log window on subscribe, then what changed,
  * found by fs.watch on runs/ and issues/ with the live check's stat of the
  * same files as the backstop for an event the watch missed. And the replies
- * to requests, each one after the delta that carries its effect.
+ * to requests, each one after the delta that carries its effect. Ahead of
+ * all of it, the served page carries the version a socket would open with,
+ * so the Console paints before it connects.
  *
  * Everything that reads the pool comes in through PushSources, which
  * server.ts builds from the functions its HTTP routes run, so a request on
  * the socket and its HTTP twin cannot answer differently.
  */
 
-import { type FSWatcher, type Stats, statSync, watch } from "node:fs";
+import { type FSWatcher, type Stats, readFileSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import {
   ACTION_KINDS,
@@ -30,6 +32,7 @@ import {
   PROTOCOL_VERSION,
   decodeClientMessage,
   diffSnapshot,
+  embedBoot,
   encodeMessage,
   toPushed,
   type CardSubscription,
@@ -216,8 +219,13 @@ export interface PushHub {
   schedule(): void;
   /** Push whatever is waiting, now. */
   flush(): void;
-  /** What the served index.html embeds, after a flush. */
-  boot(): EmbeddedBoot;
+  /**
+   * The served index.html with the first snapshot in it, after a flush, so
+   * the Console paints before any script runs or the socket opens; null
+   * when there is no such file. Never cached by the browser: the snapshot
+   * in it is of this moment.
+   */
+  page(indexFile: string): Response | null;
   /** The stop's farewell: flush, so the `stopped` delta goes, then close
    *  every socket with CLOSE_STOPPED. */
   closeSockets(): void;
@@ -1098,6 +1106,34 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     }
   }
 
+  // The page is read once per build (its mtime) and made once per
+  // revision, so a reload costs a stat while nothing moved.
+  let html: { mtimeMs: number; text: string } | null = null;
+  let made: { mtimeMs: number; rev: number; text: string } | null = null;
+  function page(indexFile: string): Response | null {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(indexFile).mtimeMs;
+    } catch {
+      return null;
+    }
+    if (html?.mtimeMs !== mtimeMs) html = { mtimeMs, text: readFileSync(indexFile, "utf8") };
+    flushQuietly();
+    if (made?.mtimeMs !== mtimeMs || made.rev !== rev()) {
+      const boot: EmbeddedBoot = {
+        protocol: PROTOCOL_VERSION,
+        epoch,
+        rev: rev(),
+        logTotal: lastPushed?.logTotal ?? 0,
+        snapshot: lastPushed?.snapshot ?? null,
+      };
+      made = { mtimeMs, rev: boot.rev, text: embedBoot(html.text, boot) };
+    }
+    return new Response(made.text, {
+      headers: { "content-type": "text/html", "cache-control": "no-store" },
+    });
+  }
+
   function dispose(): void {
     closed = true;
     for (const timer of [sendTimer, liveSoon, cardTimer, gradesSoon]) {
@@ -1124,16 +1160,7 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     socketState: () => ({ visible: true, cards: new Map(), open: true }),
     schedule,
     flush,
-    boot() {
-      flushQuietly();
-      return {
-        protocol: PROTOCOL_VERSION,
-        epoch,
-        rev: rev(),
-        logTotal: lastPushed?.logTotal ?? 0,
-        snapshot: lastPushed?.snapshot ?? null,
-      };
-    },
+    page,
     closeSockets() {
       flushQuietly();
       dispose();
