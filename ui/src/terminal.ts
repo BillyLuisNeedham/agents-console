@@ -4,8 +4,9 @@
  * whose enriched snapshot entry carries a pane (`ticketPaneId`: a live
  * attempt's while a terminal-backed attempt runs, or a Held pane's while
  * the ticket waits at a checkpoint, issue #139), every 2s and
- * once per pool snapshot (throttled, so a burst asks once, issue #157), and holds the peek text and focus confirmations
- * the cards' surfaces project from. A ticket whose pane leaves the snapshot (the
+ * once per pool snapshot (throttled, so a burst asks once, issue #157), and
+ * holds the peek text and focus confirmations the cards' surfaces project
+ * from. A ticket whose pane leaves the snapshot (the
  * attempt ended, the checkpoint was answered or its pane closed, or the
  * ticket left the pool) is pruned, so its polling
  * stops with its surface; a re-spawned attempt's new pane id resets the

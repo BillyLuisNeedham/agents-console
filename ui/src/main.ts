@@ -60,16 +60,17 @@ function requestRender(): void {
   renders.request();
 }
 
-// The Vitals store: polls the activity endpoint per live-attempt ticket and
-// holds the payloads and sparkline samples the cards' footers project from.
-// Its onChange fires on poll responses and on the 2s wall-clock tick that
-// keeps staleness copy honest while the snapshot stream is silent.
 // The background polls (Vitals, peeks, grades) share a small cap on requests
 // out at once (issue #157): the browser gives the pool server six
 // connections and the snapshot stream keeps one, so an uncapped round of
 // polls could leave a click's request queued behind them.
 const background = new RequestLimiter(BACKGROUND_REQUESTS);
 
+// The Vitals store: polls the activity endpoint per live-attempt ticket and
+// holds the payloads and sparkline samples the cards' footers project from.
+// Its onChange fires on poll responses that moved something and on the 2s
+// wall-clock tick when the staleness copy moved, which keeps it honest while
+// the snapshot stream is silent.
 const vitals = new Vitals({
   fetch: (ticketId) => background.run(() => client.getActivity(ticketId)),
   onChange: requestRender,
