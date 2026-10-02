@@ -63,8 +63,10 @@ export interface ConsoleOptions {
   render?: (app: ConsoleApp) => void;
   /** The render loop's frame; defaults to the next animation frame. */
   frame?: FrameRequest;
-  /** Where the operator's presses bubble out, to render a press's own
-   *  change before the next frame; defaults to `window` where there is one. */
+  /** The page's window, as far as the Console listens to it: where the
+   *  operator's presses bubble out, to render a press's own change before
+   *  the next frame, and where `online` fires, to replace a socket a network
+   *  change left half open. Defaults to `window` where there is one. */
   pressTarget?: EventTarget | null;
 }
 
@@ -254,6 +256,13 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
         }
       }
       if (options.visibility) cleanups.push(followVisibility(options.visibility, socket));
+      // Back online after a network change: a socket that went quiet across
+      // it is replaced at once, not when the silence watchdog fires.
+      if (pressTarget) {
+        const wake = (): void => socket.wake();
+        pressTarget.addEventListener("online", wake);
+        cleanups.push(() => pressTarget.removeEventListener("online", wake));
+      }
       // The embedded snapshot paints now, in this task, before the socket
       // is even asked for.
       const boot = options.boot;

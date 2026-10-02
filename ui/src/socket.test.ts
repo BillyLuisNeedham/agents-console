@@ -24,6 +24,7 @@ import {
   RequestRefused,
   VERSION_RELOAD_GUARD_MS,
   VERSION_RELOAD_KEY,
+  windowNameStore,
   type CardMessage,
   type ConnectionChange,
   type LiveMessage,
@@ -134,7 +135,7 @@ function wait(ms: number): Promise<void> {
 }
 
 /** A socket over fakes, with every callback recorded. */
-function rig(options: { reconnectDelaysMs?: number[]; visible?: boolean } = {}) {
+function rig(options: { reconnectDelaysMs?: number[]; visible?: boolean; stableMs?: number } = {}) {
   const sockets: FakeSocket[] = [];
   const snapshots: { pushed: PushedSnapshot | null; delta: SnapshotDelta | null }[] = [];
   const connections: ConnectionChange[] = [];
@@ -156,6 +157,7 @@ function rig(options: { reconnectDelaysMs?: number[]; visible?: boolean } = {}) 
     },
     reconnectDelaysMs: options.reconnectDelaysMs ?? [1],
     visible: options.visible,
+    stableMs: options.stableMs ?? 1,
   });
   return {
     socket,
@@ -231,6 +233,9 @@ describe("ConsoleSocket: the snapshot", () => {
     const old = r.last();
     old.push({ type: "delta", delta: stale });
     expect(old.closedWith).toEqual({ code: CLOSE_RESYNC.code, reason: CLOSE_RESYNC.reason });
+    // The reopen waits out the reconnect delay, as a close's does.
+    expect(r.sockets).toHaveLength(1);
+    await wait(5);
     expect(r.sockets).toHaveLength(2);
     expect(r.socket.snapshot?.rev).toBe(1);
     r.last().greet(toPushed(snapshot([ticket("A", { status: "done" })]), 8));
@@ -333,14 +338,31 @@ describe("ConsoleSocket: requests", () => {
     r.socket.dispose();
   });
 
-  it("sends a request asked for while connecting right behind the hello", () => {
+  it("sends a request asked for while connecting right behind our hello", () => {
     const r = rig();
     r.socket.start();
     void r.socket.request("panes.list", {}).catch(() => {});
+    expect(r.last().sent).toHaveLength(0);
     r.last().open();
-    expect(r.last().requests()).toHaveLength(0);
-    r.last().push({ type: "hello", protocol: PROTOCOL_VERSION, epoch: "e1", heartbeatMs: HEARTBEAT_MS });
-    expect(r.last().requests().map((m) => m.kind)).toEqual(["panes.list"]);
+    expect(r.last().sent.map((m) => m.type)).toEqual(["hello", "request"]);
+    r.socket.dispose();
+  });
+
+  it("sends frames asked for between the open and the server's hello, never dropping them (#161)", () => {
+    const r = rig();
+    r.socket.start();
+    r.last().open();
+    r.socket.subscribe({ id: "07" });
+    r.socket.unsubscribe("07");
+    r.socket.setVisible(false);
+    void r.socket.request("stop", {}).catch(() => {});
+    expect(r.last().sent.map((m) => m.type)).toEqual([
+      "hello",
+      "subscribe",
+      "unsubscribe",
+      "visibility",
+      "request",
+    ]);
     r.socket.dispose();
   });
 
@@ -483,7 +505,7 @@ describe("ConsoleSocket: liveness and reconnect", () => {
     r.socket.dispose();
   });
 
-  it("reconnects after a close on the delays, starting over once a socket says hello", async () => {
+  it("reconnects after a close on the delays, starting over once a socket stays up", async () => {
     const r = rig({ reconnectDelaysMs: [5, 60_000] });
     r.socket.start();
     r.last().serverClose(1006);
@@ -495,15 +517,72 @@ describe("ConsoleSocket: liveness and reconnect", () => {
     expect(r.sockets).toHaveLength(2);
     r.socket.dispose();
 
-    const reset = rig({ reconnectDelaysMs: [5, 60_000] });
-    reset.socket.start();
-    reset.last().serverClose(1006);
+    // A hello alone does not start the delays over: the socket must stay up.
+    const brief = rig({ reconnectDelaysMs: [5, 60_000], stableMs: 1_000 });
+    brief.socket.start();
+    brief.last().serverClose(1006);
     await wait(15);
-    reset.last().greet(toPushed(snapshot([]), 1));
-    reset.last().serverClose(1006);
+    brief.last().greet(toPushed(snapshot([]), 1));
+    brief.last().serverClose(1006);
     await wait(15);
-    expect(reset.sockets).toHaveLength(3);
-    reset.socket.dispose();
+    expect(brief.sockets).toHaveLength(2);
+    brief.socket.dispose();
+
+    const steady = rig({ reconnectDelaysMs: [5, 60_000], stableMs: 5 });
+    steady.socket.start();
+    steady.last().serverClose(1006);
+    await wait(15);
+    steady.last().greet(toPushed(snapshot([]), 1));
+    await wait(15);
+    steady.last().serverClose(1006);
+    await wait(15);
+    expect(steady.sockets).toHaveLength(3);
+    steady.socket.dispose();
+  });
+
+  it("backs off resyncs too: five deltas that do not fit open nothing like six sockets (#161)", async () => {
+    const r = rig({ reconnectDelaysMs: [5, 60_000], stableMs: 1_000 });
+    r.socket.start();
+    const stale = diffSnapshot(
+      toPushed(snapshot([ticket("A")]), 7),
+      toPushed(snapshot([ticket("A", { status: "done" })]), 8),
+    )!;
+    for (let i = 0; i < 5; i++) {
+      r.last().greet(toPushed(snapshot([ticket("A")]), 1));
+      r.last().push({ type: "delta", delta: stale });
+      await wait(10);
+    }
+    expect(r.sockets).toHaveLength(2);
+    r.socket.dispose();
+  });
+
+  it("replaces a socket gone quiet when the page is shown again, and keeps a lively one (#161)", async () => {
+    const r = rig();
+    r.socket.start();
+    r.last().greet(toPushed(snapshot([]), 1), "e1", 20);
+    const quiet = r.last();
+    r.socket.setVisible(false);
+    await wait(35);
+    // More than 1.5 heartbeats silent, short of the 3 the watchdog waits for.
+    expect(r.sockets).toHaveLength(1);
+    r.socket.setVisible(true);
+    expect(quiet.closedWith).not.toBeNull();
+    expect(r.sockets).toHaveLength(2);
+    r.last().greet(toPushed(snapshot([]), 1), "e1", 20);
+    r.socket.setVisible(false);
+    r.socket.setVisible(true);
+    expect(r.sockets).toHaveLength(2);
+    r.socket.dispose();
+  });
+
+  it("reopens at once on a wake while it waits out a reconnect delay (#161)", () => {
+    const r = rig({ reconnectDelaysMs: [60_000] });
+    r.socket.start();
+    r.last().serverClose(1006);
+    expect(r.sockets).toHaveLength(1);
+    r.socket.wake();
+    expect(r.sockets).toHaveLength(2);
+    r.socket.dispose();
   });
 
   it("reports the stopped farewell close as stopped, and keeps retrying for a relaunch", async () => {
@@ -580,18 +659,29 @@ describe("reloadForVersion", () => {
     expect(reloads).toBe(2);
   });
 
-  it("reloads unguarded when there is no storage, or it throws", () => {
-    let reloads = 0;
-    expect(reloadForVersion(null, 1, () => reloads++)).toBe(true);
+  it("guards with the window's name where storage is missing or throws (#161)", () => {
     const throwing = {
-      getItem: () => {
+      getItem: (): string | null => {
         throw new Error("denied");
       },
       setItem: () => {
         throw new Error("denied");
       },
     };
-    expect(reloadForVersion(throwing, 1, () => reloads++)).toBe(true);
-    expect(reloads).toBe(2);
+    for (const storage of [null, throwing]) {
+      const win = { name: "" };
+      let reloads = 0;
+      expect(reloadForVersion(storage, 1_000, () => reloads++, windowNameStore(win))).toBe(true);
+      expect(win.name).toBe(`${VERSION_RELOAD_KEY}=1000`);
+      // The reloaded page finds the stamp in the name and does not loop.
+      expect(reloadForVersion(storage, 2_000, () => reloads++, windowNameStore(win))).toBe(false);
+      expect(reloads).toBe(1);
+    }
+  });
+
+  it("does not reload when it can stamp nowhere, since nothing would stop a loop", () => {
+    let reloads = 0;
+    expect(reloadForVersion(null, 1, () => reloads++)).toBe(false);
+    expect(reloads).toBe(0);
   });
 });
