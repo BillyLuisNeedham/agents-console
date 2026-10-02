@@ -70,8 +70,6 @@ export interface PoolDraft {
   terminal: boolean;
   /** Empty means auto: the server picks a free port at boot. */
   port: string;
-  roster: string;
-  agents: string;
   reviewer: string;
   checkpoint: string;
   /** The Spawn caps (issue #149): empty means the engine's default. */
@@ -113,8 +111,6 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   selection: "",
   terminal: false,
   port: "",
-  roster: "",
-  agents: "",
   reviewer: "",
   checkpoint: "",
   spawnsPerAttempt: "",
@@ -169,8 +165,6 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     selection: config.selection ?? "",
     terminal: config.terminal === "herdr",
     port: typeof config.port === "number" ? String(config.port) : "",
-    roster: config.roster ?? "",
-    agents: config.agents ?? "",
     reviewer: config.reviewer ?? "",
     checkpoint: config.checkpoint ?? "",
     spawnsPerAttempt: capField(config.spawnCaps?.perAttempt),
@@ -202,10 +196,9 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
 /**
  * What is wrong with a draft, or null when it is sendable. Only the fields
  * with a shape the operator can get wrong are checked here: a port that is
- * not a port, a Spawn cap that is not a whole number of 0 or more, a Steward
- * budget that is not a whole number of 1 or more, and an agents roster that
- * is not JSON. Everything else is free text the engine validates
- * on its own terms.
+ * not a port, a Spawn cap that is not a whole number of 0 or more, and a
+ * Steward budget that is not a whole number of 1 or more. Everything else is
+ * free text the engine validates on its own terms.
  */
 export function validatePoolDraft(draft: PoolDraft): string | null {
   const port = draft.port.trim();
@@ -230,14 +223,6 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
   const budget = draft.stewardBudget.trim();
   if (budget && (!/^\d+$/.test(budget) || Number(budget) < 1)) {
     return "Steward budget must be a whole number of 1 or more, or empty for the default";
-  }
-  const agents = draft.agents.trim();
-  if (agents) {
-    try {
-      JSON.parse(agents);
-    } catch {
-      return "agents must be valid JSON";
-    }
   }
   return null;
 }
@@ -283,8 +268,6 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     terminal: draft.terminal ? "herdr" : null,
     port: port ? Number(port) : null,
     selection: selection === "auto" || selection === "human" ? selection : null,
-    roster: orNull(draft.roster),
-    agents: orNull(draft.agents),
     reviewer: orNull(draft.reviewer),
     checkpoint: orNull(draft.checkpoint),
     title: orNull(draft.title),
@@ -795,12 +778,6 @@ export class SettingsStore {
         "counted since this Console boot; 0 holds every proposal for you",
       ),
       ...this.renderStewardFields(data),
-      text("roster", "roster", { badge: "roster", area: true }),
-      text("agents", "agents", {
-        badge: "agents",
-        area: true,
-        hint: "JSON",
-      }),
       text("reviewer", "reviewer", { area: true }),
       text("checkpoint", "checkpoint", { area: true }),
       this.renderSaveRow(

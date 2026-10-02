@@ -162,7 +162,6 @@ export interface AttemptEnv {
    */
   liveAttempts: LiveAttempts;
   terminalBacked: boolean;
-  agents?: string;
   /**
    * The launch half's timings (pane-session.ts), for a test that drives a
    * botched launch in milliseconds; the engine leaves it unset.
@@ -481,7 +480,6 @@ export async function launchAttempt<R extends { ok: true }>(
     harness: spec.harness,
     model: spec.model,
     ...(spec.effort ? { effort: spec.effort } : {}),
-    agents: env.agents,
     logPath,
     streamPath: attemptStreamPath(
       env.runsDir,

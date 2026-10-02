@@ -379,7 +379,7 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
   // machine or from a Setup has to land in this pool's file rather than
   // being looked up again at every boot. Effort is only ever carried this
   // way: the interview never asks it, the Settings pane edits it.
-  for (const key of ["harness", "model", "effort", "drivers", "reviewer", "checkpoint", "roster", "agents"] as const) {
+  for (const key of ["harness", "model", "effort", "drivers", "reviewer", "checkpoint"] as const) {
     const value = settled[key];
     if (value !== undefined) answers[key] = value;
   }
@@ -427,23 +427,6 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
       prefill.checkpoint ?? CHECKPOINT_EXAMPLE,
     );
     if (checkpoint !== "") answers.checkpoint = checkpoint;
-  }
-  if (settled.roster === undefined) {
-    const roster = await put("subagent roster (blank for none)", prefill.roster ?? "");
-    if (roster !== "") answers.roster = roster;
-  }
-  if (settled.agents === undefined) {
-    for (;;) {
-      const agents = await put("agents JSON for claude's --agents (blank for none)", prefill.agents ?? "");
-      if (agents === "") break;
-      if (!parsesAsObject(agents)) {
-        io.warn("that is not a JSON object; agents must parse as one");
-        if (input.unattended) break;
-        continue;
-      }
-      answers.agents = agents;
-      break;
-    }
   }
   if (settled.port === undefined) {
     for (;;) {
@@ -780,15 +763,6 @@ function resolverText(value: ResolverValue | undefined): string {
 
 function portText(port: number | undefined): string {
   return port === undefined ? "auto" : String(port);
-}
-
-function parsesAsObject(text: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-  } catch {
-    return false;
-  }
 }
 
 if (import.meta.main) {

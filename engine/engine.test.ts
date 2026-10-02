@@ -3568,7 +3568,7 @@ describe("channels", () => {
   it("exposes console.json as the static config channel", async () => {
     const config: PoolConfig = {
       defaults: { harness: "stub", model: "stub-model" },
-      roster: "- deepseek: general-purpose subagent",
+      reviewer: "acceptance criteria only",
     };
     const poolDir = makePool({
       tickets: [
@@ -3819,13 +3819,13 @@ describe("config reload (ADR-0018)", () => {
     ).toBe(false);
   });
 
-  it("never lets port, terminal, or roster move under a live run, even when console.json changes them", async () => {
+  it("never lets port, terminal, or selection move under a live run, even when console.json changes them", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01"), readyTicket("02", "01")],
       config: {
         defaults: { harness: "stub", model: "model-a" },
         port: 4100,
-        roster: "- deepseek: general-purpose subagent",
+        selection: "auto",
       },
     });
     const rig = stubHarness(poolDir, {});
@@ -3838,7 +3838,7 @@ describe("config reload (ADR-0018)", () => {
               defaults: { harness: "stub", model: "model-b" },
               port: 9999,
               terminal: "herdr",
-              roster: "- someone else",
+              selection: "human",
             }),
           );
         }
@@ -3851,14 +3851,12 @@ describe("config reload (ADR-0018)", () => {
     expect(run.phase).toBe("done");
     // The reassignable slice moved...
     expect(rig.spawned["02"].model).toBe("model-b");
-    // ...but port/terminal/roster stayed exactly as booted: had terminal
+    // ...but port/terminal/selection stayed exactly as booted: had terminal
     // actually flipped to herdr with no fake daemon configured, this run
     // could not have completed headless.
     expect(run.final.config.port).toBe(4100);
     expect(run.final.config.terminal).toBeUndefined();
-    expect(run.final.config.roster).toBe(
-      "- deepseek: general-purpose subagent",
-    );
+    expect(run.final.config.selection).toBe("auto");
   });
 
   it("treats an unchanged console.json as a no-op: no log line, no reassigned events", async () => {
@@ -3990,7 +3988,7 @@ describe("config reload (ADR-0018)", () => {
 });
 
 describe("glued prompt", () => {
-  it("glues AGENT.md, chain, and roster in run.sh's shape, without a driver line", async () => {
+  it("glues AGENT.md and the chain in run.sh's shape, without a driver line", async () => {
     const poolDir = makePool({
       tickets: [
         {
@@ -4001,7 +3999,8 @@ describe("glued prompt", () => {
       config: {
         defaults: { harness: "stub", model: "stub-model" },
         assign: { "01": { drivers: "implement code-review" } },
-        roster: "- deepseek: general-purpose subagent",
+        // A roster left over from before ADR-0031 is read past.
+        ...({ roster: "- deepseek: general-purpose subagent" } as Partial<PoolConfig>),
       },
       agentMd: "# Runner agent instructions\n\nDo the thing.",
     });
@@ -4012,10 +4011,13 @@ describe("glued prompt", () => {
     const body = rig.spawned["01"].body;
     expect(body).toContain("Standing instructions for this job:");
     expect(body).toContain("Do the thing.");
-    expect(body).toContain("dispatch these subagents in this order");
-    expect(body).toContain("code-review");
-    expect(body).toContain("The subagent roster for this job");
-    expect(body).toContain("deepseek: general-purpose subagent");
+    expect(body).toContain(
+      "Skills for this Issue. When the driver skill's work is done, also use " +
+        "these skills, in this order: code-review.",
+    );
+    // ADR-0031: what to build and which skills, never how to work.
+    expect(body).not.toMatch(/subagent|dispatch|roster/i);
+    expect(body).not.toContain("deepseek");
     expect(body).toContain("outcome.json");
     // The outcome instruction teaches the new contract: a required status,
     // and the engine, not the agent, owning the Issue's status write.
@@ -4379,9 +4381,10 @@ describe("harness CLIs", () => {
   });
 
   it("spawns the console.json-assigned claude CLI with stdin closed and the unattended permission mode", async () => {
+    // An `agents` value left over from before ADR-0031 never reaches claude.
     const agents =
       '{"deepseek":{"description":"General-purpose subagent","prompt":"Do the reading.","model":"deepseek"}}';
-    const poolDir = oneTicketPool("claude", "claude-test", { agents });
+    const poolDir = oneTicketPool("claude", "claude-test", { agents } as Partial<PoolConfig>);
     const fake = fakeCli(poolDir, "claude");
 
     let run: Awaited<ReturnType<typeof runPool>>;
@@ -4403,8 +4406,6 @@ describe("harness CLIs", () => {
       "claude-test",
       "--permission-mode",
       "auto",
-      "--agents",
-      agents,
       "--output-format",
       "stream-json",
       "--verbose",

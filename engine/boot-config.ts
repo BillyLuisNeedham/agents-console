@@ -30,8 +30,6 @@ export interface Prefill {
   resolver?: ResolverValue;
   reviewer?: string;
   checkpoint?: string;
-  roster?: string;
-  agents?: string;
   /** A concrete pin; absent means the engine picks 8787 or the next free port. */
   port?: number;
   terminal?: "herdr";
@@ -52,8 +50,6 @@ export interface BootAnswers {
   resolver?: ResolverValue;
   reviewer?: string;
   checkpoint?: string;
-  roster?: string;
-  agents?: string;
   /** A number pins the port; "auto" removes the pin. */
   port?: number | "auto";
   /** "herdr" backs attempts with tabs; "none" removes the key. */
@@ -62,11 +58,13 @@ export interface BootAnswers {
   title?: string;
 }
 
-/** The seven behavioural keys a Setup carries, and nothing pool-specific. */
+/**
+ * The behavioural keys a Setup carries, and nothing pool-specific. A Setup
+ * saved before ADR-0031 may still hold `roster` or `agents`: nothing reads
+ * them, and a Setup written from a config never carries them again.
+ */
 export const SETUP_KEYS = [
   "defaults",
-  "roster",
-  "agents",
   "resolver",
   "terminal",
   "reviewer",
@@ -102,7 +100,7 @@ export function prefillFromConfig(config: Record<string, unknown>): Prefill {
   if (typeof config.resolver === "string" || isResolverObject(config.resolver)) {
     out.resolver = config.resolver as ResolverValue;
   }
-  for (const key of ["reviewer", "checkpoint", "roster", "agents"] as const) {
+  for (const key of ["reviewer", "checkpoint"] as const) {
     const value = config[key];
     if (typeof value === "string") out[key] = value;
   }
@@ -154,6 +152,10 @@ export function mergeConsoleConfig(
   answers: BootAnswers,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...existing };
+  // Keys the engine retired (ADR-0031, RETIRED_CONFIG_KEYS in engine.ts):
+  // a pool that still carries them loses them here, silently.
+  delete out.roster;
+  delete out.agents;
   const defaults: Record<string, unknown> = {
     ...((existing.defaults ?? {}) as Record<string, unknown>),
   };
@@ -165,7 +167,7 @@ export function mergeConsoleConfig(
   if (answers.resolver !== undefined && answers.resolver !== "") {
     out.resolver = answers.resolver;
   }
-  for (const key of ["reviewer", "checkpoint", "roster", "agents"] as const) {
+  for (const key of ["reviewer", "checkpoint"] as const) {
     const value = answers[key];
     if (value !== undefined && value !== "") out[key] = value;
   }

@@ -56,6 +56,22 @@ describe("machine defaults", () => {
     expect(JSON.parse(readFileSync(paths.file, "utf8"))).toEqual(written);
   });
 
+  // ADR-0031: a defaults file that carries a roster or agents (hand edited,
+  // or copied from a pool config) reads past them, and the next write drops
+  // them, without a word.
+  it("reads past a retired roster and agents and drops them on write", () => {
+    const h = home();
+    const paths = defaultMachineDefaultsPaths(h);
+    writeMachineDefaults({ harness: "claude" }, paths.file);
+    writeFileSync(
+      paths.file,
+      JSON.stringify({ harness: "claude", roster: "- deepseek", agents: '{"deepseek":{}}' }),
+    );
+    expect(readMachineDefaults(paths)).toEqual({ harness: "claude" });
+    writeMachineDefaults({ ...readMachineDefaults(paths), model: "opus" }, paths.file);
+    expect(JSON.parse(readFileSync(paths.file, "utf8"))).toEqual({ harness: "claude", model: "opus" });
+  });
+
   it("treats a malformed file as absent", () => {
     const h = home();
     const paths = defaultMachineDefaultsPaths(h);

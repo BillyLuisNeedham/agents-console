@@ -41,8 +41,6 @@ export const POOL_SETTINGS_KEYS = [
   "terminal",
   "port",
   "selection",
-  "roster",
-  "agents",
   "reviewer",
   "checkpoint",
   "title",
@@ -54,13 +52,11 @@ export type PoolSettingsKey = (typeof POOL_SETTINGS_KEYS)[number];
 
 /**
  * The settings a saved edit does not reach until the next Restart. ADR-0018
- * reloads only the assignment slice at a boundary; roster, agents, selection,
- * terminal and port stay as this process read them at boot, and terminal and
- * port in particular must never move under a live run.
+ * reloads only the assignment slice at a boundary; selection, terminal and
+ * port stay as this process read them at boot, and terminal and port in
+ * particular must never move under a live run.
  */
 export const BOOT_ONLY_KEYS = [
-  "roster",
-  "agents",
   "selection",
   "terminal",
   "port",
@@ -106,9 +102,12 @@ export interface WritePoolSettingsOptions {
  * instruction, not an omission.
  *
  * Validation is readConfig's, plus the checks readConfig has no table for:
- * a port in range, a harness the pool actually knows, an `agents` string that
- * really is a JSON object. Every failure is a plain Error naming the field,
- * which the route turns into a 400.
+ * a port in range and a harness the pool actually knows. Every failure is a
+ * plain Error naming the field, which the route turns into a 400.
+ *
+ * The existing config comes through readConfig, which leaves out the keys
+ * the engine retired (ADR-0031), so a save drops a stale `roster` or
+ * `agents` without a word.
  */
 export function writePoolSettings(
   poolDir: string,
@@ -167,9 +166,6 @@ function normaliseKey(
       return normaliseTerminal(value);
     case "selection":
       return normaliseSelection(value);
-    case "agents":
-      return normaliseAgents(value);
-    case "roster":
     case "reviewer":
     case "checkpoint":
       return normaliseProse(key, value);
@@ -371,29 +367,6 @@ function normaliseSelection(value: unknown): "auto" | "human" | undefined {
     );
   }
   return value;
-}
-
-// `agents` is the roster as a JSON string, handed to claude's --agents flag
-// verbatim. A string that is not a JSON object reaches the harness as a flag
-// value it rejects at launch, hours after the save, so it is refused here.
-function normaliseAgents(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    throw new Error("pool settings: agents must be a string");
-  }
-  const trimmed = value.trim();
-  if (trimmed === "") return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch (err) {
-    throw new Error(
-      `pool settings: agents must be a JSON object (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("pool settings: agents must be a JSON object");
-  }
-  return trimmed;
 }
 
 /**

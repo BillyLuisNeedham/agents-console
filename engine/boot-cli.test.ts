@@ -42,7 +42,12 @@ import {
   tailOf,
   waitForPidRelease,
 } from "./boot-launch.ts";
-import { interview, nameNewPool, parseBootArgs, type BootIo } from "./boot-cli.ts";
+import {
+  interview,
+  nameNewPool,
+  parseBootArgs,
+  type BootIo,
+} from "./boot-cli.ts";
 
 function temp(prefix = "boot-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -347,6 +352,24 @@ describe("console.json", () => {
     expect("terminal" in merged).toBe(false);
   });
 
+  // ADR-0031: roster and agents are retired. A pool that still has them
+  // boots as if it did not, and Boot's own write drops them, saying nothing.
+  it("drops a retired roster and agents on write, and never prefills them", () => {
+    const existing = {
+      defaults: { harness: "claude", model: "m" },
+      roster: "- deepseek",
+      agents: '{"deepseek":{}}',
+      reviewer: "r",
+    };
+    const merged = mergeConsoleConfig(existing, {});
+    expect("roster" in merged).toBe(false);
+    expect("agents" in merged).toBe(false);
+    expect(merged.reviewer).toBe("r");
+    const prefill = prefillFromConfig(existing) as Record<string, unknown>;
+    expect(prefill.roster).toBeUndefined();
+    expect(prefill.agents).toBeUndefined();
+  });
+
   it("refuses a config that is there but does not parse", () => {
     const pool = temp();
     writeFileSync(join(pool, "console.json"), "{ not json");
@@ -392,7 +415,7 @@ describe("AGENT.md", () => {
 });
 
 describe("Setups", () => {
-  it("saves the seven behavioural keys and never the pool-specific ones", () => {
+  it("saves the behavioural keys and never the pool-specific or retired ones", () => {
     const home = temp("setup-home-");
     const config = {
       defaults: { harness: "claude", model: "m" },
@@ -409,12 +432,10 @@ describe("Setups", () => {
     expect(file).toBe(join(home, ".agent-graphs", "setups", "my-build-setup.json"));
     const saved = readSetup("my-build-setup", home);
     expect(Object.keys(saved ?? {}).sort()).toEqual([
-      "agents",
       "checkpoint",
       "defaults",
       "resolver",
       "reviewer",
-      "roster",
       "terminal",
     ]);
   });
@@ -546,12 +567,12 @@ describe("interview", () => {
     expect(result.answers.drivers).toBe("implement");
     expect(result.answers.terminal).toBe("herdr");
     expect(result.missing).toEqual([]);
-    expect(pen.asked).toContain("subagent roster (blank for none)");
+    expect(pen.asked.some((question) => /roster|agents/.test(question))).toBe(false);
   });
 
   it("asks nothing for a field a prefill already settled", async () => {
     const pen = io({});
-    const settled = { harness: "opencode", model: "m", effort: "high", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 9001, terminal: "herdr" as const };
+    const settled = { harness: "opencode", model: "m", effort: "high", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", port: 9001, terminal: "herdr" as const };
     const result = await interview({
       io: pen,
       prefill: { ...settled },
@@ -588,7 +609,7 @@ describe("interview", () => {
     await interview({
       io: pen,
       prefill: { seeded: true },
-      settled: { harness: "claude", model: "m", drivers: "d", resolver: "claude", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 1, terminal: "herdr" },
+      settled: { harness: "claude", model: "m", drivers: "d", resolver: "claude", reviewer: "r", checkpoint: "c", port: 1, terminal: "herdr" },
       detection: { ...detection, conversations: true },
       unattended: false,
     });

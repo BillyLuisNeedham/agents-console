@@ -14,13 +14,35 @@ function prompt(): string {
   return buildPrompt({
     chain: [],
     agentMd: "Do the thing.",
-    roster: "",
     upstream: [],
     outcomePath: "/tmp/pool/runs/01.outcome.json",
     spawnCaps: DEFAULT_SPAWN_CAPS,
     ledgerPath: LEDGER,
   });
 }
+
+describe("buildPrompt chain", () => {
+  // ADR-0031: the prompt names the skills and their order, never the method.
+  it("names the chain as skills to use in order, and says nothing of how", () => {
+    const body = buildPrompt({
+      chain: ["tdd", "code-review"],
+      agentMd: "Do the thing.",
+      upstream: [],
+      outcomePath: "/tmp/pool/runs/01.outcome.json",
+      spawnCaps: DEFAULT_SPAWN_CAPS,
+      ledgerPath: LEDGER,
+    });
+    expect(body).toContain(
+      "Skills for this Issue. When the driver skill's work is done, also use " +
+        "these skills, in this order: tdd, code-review.",
+    );
+    expect(body).not.toMatch(/subagent|dispatch|orchestrat|delegat/i);
+  });
+
+  it("has no chain section when there is no chain", () => {
+    expect(prompt()).not.toContain("Skills for this Issue");
+  });
+});
 
 describe("buildPrompt outcome instruction", () => {
   it("documents the full outcome schema, with the required status field", () => {
@@ -73,7 +95,6 @@ describe("buildPrompt spawn teaching", () => {
     const body = buildPrompt({
       chain: [],
       agentMd: "",
-      roster: "",
       upstream: [],
       outcomePath: "/tmp/pool/runs/01.outcome.json",
       spawnCaps: { perAttempt: 1, perRun: 12 },
@@ -100,7 +121,6 @@ describe("buildPrompt spawn teaching", () => {
     const body = buildPrompt({
       chain: [],
       agentMd: "",
-      roster: "",
       upstream: [],
       outcomePath: "/tmp/pool/runs/01.outcome.json",
       spawnCaps: { perAttempt: 0, perRun: 20 },
@@ -131,7 +151,6 @@ describe("buildPrompt spawn teaching", () => {
     const spawned = buildPrompt({
       chain: [],
       agentMd: "Do the thing.",
-      roster: "",
       upstream: [],
       outcomePath: "/tmp/pool/runs/01-spawn-1.outcome.json",
       spawnCaps: DEFAULT_SPAWN_CAPS,

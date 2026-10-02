@@ -5,7 +5,7 @@ For the human. Written in Simplified Technical English.
 ## What you get
 
 Three files in your pool directory. `console.json` holds your interview answers as data: the default
-harness and model, per-ticket overrides, the subagent roster, the merge resolver, the pool port,
+harness and model, per-ticket overrides, the merge resolver, the pool port,
 the reviewer and what counts as a checkpoint. `AGENT.md` tells each agent what the job is. `verify.md`
 holds the grading instructions a grader agent follows when a ticket opts into verification. The
 Console server reads the first two when it starts.
@@ -34,7 +34,7 @@ teaches it the protocol by typing into the pane.
 
 If you have saved Setups, the interview opens with Q0: it lists them by name, with a
 "none" option, and asks which one to start from. Choosing a Setup prefills the
-behavioural answers (drivers, harness and model, roster, resolver, reviewer, checkpoint)
+behavioural answers (drivers, harness and model, resolver, reviewer, checkpoint)
 and you still confirm each one. A Setup is a starting point, never a silent override.
 Choose "none", or have no saved Setups, and the interview runs as before. The port, the
 per-ticket assignments, the expected stops and the AGENT.md prose are always asked fresh;
@@ -42,7 +42,7 @@ no Setup carries them. A Setup file that is malformed is reported by name and sk
 the interview carries on.
 
 After it writes the two files it asks "Save this Setup as...?" Give it a name and the
-behavioural answers (harness, model, drivers, roster, resolver, reviewer, checkpoint) are saved
+behavioural answers (harness, model, drivers, resolver, reviewer, checkpoint) are saved
 as a Setup: one JSON file under `~/.agent-graphs/setups/`, named for you to recognise later.
 The port and the per-ticket assignments are never saved; they belong to the one pool. Decline,
 or give an empty name, and nothing is saved. Saving over a name that already exists asks for

@@ -589,7 +589,7 @@ describe("PoolClient settings and restart (ADR-0026)", () => {
     pool: {
       path: "/tmp/pool/console.json",
       config: { defaults: { harness: "claude" }, port: 4300 },
-      bootOnly: ["roster", "agents", "selection", "terminal", "port"],
+      bootOnly: ["selection", "terminal", "port"],
       effective: { port: 4300, terminal: null, stale: [] },
     },
     machine: {
