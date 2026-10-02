@@ -400,6 +400,13 @@ export interface LogFollowRequest extends LogFollow {
   id: string;
 }
 
+/** `log.follow`'s reply: the new tail window, naming the attempt and variant
+ *  it is for, since a follow of `attempt: null` resolves on the server. */
+export interface LogFollowResult extends TicketLogResponse {
+  attempt: number;
+  stream: boolean;
+}
+
 /** GET /api/pool-log's query: up to `limit` pool log lines ending before
  *  line `before` (0-based, of the full log). */
 export interface PoolLogReadRequest {
@@ -445,7 +452,7 @@ export interface Requests {
   "settings.machine.put": { payload: MachineDefaultsRequest; result: SettingsResponse };
   "panes.list": { payload: Empty; result: PanesResponse };
   "log.read": { payload: LogReadRequest; result: TicketLogResponse };
-  "log.follow": { payload: LogFollowRequest; result: TicketLogResponse };
+  "log.follow": { payload: LogFollowRequest; result: LogFollowResult };
   "poolLog.read": { payload: PoolLogReadRequest; result: PoolLogRange };
 }
 
