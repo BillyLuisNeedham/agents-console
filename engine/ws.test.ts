@@ -11,7 +11,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPoolServer, type PoolServer, type PoolServerOptions } from "./server.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
@@ -163,6 +163,30 @@ describe("opening a socket", () => {
     const res = await fetch(`${server.url}/api/ws`);
     expect(res.status).toBe(400);
   });
+
+  // A page on any other site the operator has open could otherwise open the
+  // socket and drive the pool: browsers hold a socket to no same-origin rule.
+  it("refuses a socket opened from another site's page, and opens one from its own page or none", async () => {
+    const poolDir = makePool({ tickets: [{ file: "01-a.md", marker: ready("01") }], config: STUB_DEFAULTS });
+    const server = startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+
+    for (const origin of ["http://evil.example", "null", `http://localhost:1${new URL(server.url).port}`]) {
+      const res = await fetch(`${server.url}/api/ws`, { headers: { origin } });
+      expect([origin, res.status]).toEqual([origin, 403]);
+    }
+    await expect(
+      openSocket(server.url, undefined, { Origin: "http://evil.example" }),
+    ).rejects.toThrow(/failed to open/);
+
+    // The Console's own page, and a client that names no page at all.
+    for (const headers of [{ Origin: server.url }, undefined]) {
+      const client = await openSocket(server.url, undefined, headers);
+      sockets.push(client);
+      const hello = await client.waitFor((frame) => frame.type === "hello");
+      expect(hello.type).toBe("hello");
+      expect(await client.request("settings.get", {})).toMatchObject({ ok: true });
+    }
+  });
 });
 
 describe("the snapshot push", () => {
@@ -249,6 +273,58 @@ describe("requests", () => {
     expect(held?.rev).toBe(reply.rev);
     expect(held?.snapshot.state.interrupts.some((i) => i.ticketId === "01")).toBe(false);
     await server.settled();
+  });
+
+  // The writes that change the snapshot without the engine emitting (a
+  // Settings save renaming the pool, a Reassign) put their delta ahead of
+  // the reply too, through the reply's own flush.
+  it("replies to a settings save and a Reassign after their deltas, with none behind", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: ready("01") },
+        { file: "02-a.md", marker: ready("02", "01") },
+      ],
+      config: STUB_DEFAULTS,
+    });
+    const server = startServer(
+      poolDir,
+      stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses,
+      { snapshotCoalesceMs: 60_000 },
+    );
+    await server.start();
+    await server.settled();
+    const client = await socket(server);
+    await client.sync();
+
+    const ask = async <K extends RequestKind>(kind: K, payload: RequestPayload<K>) => {
+      const from = client.frames.length;
+      const reply = await client.request(kind, payload);
+      expect([kind, reply.ok]).toEqual([kind, true]);
+      const at = client.frames.indexOf(reply);
+      const ahead = client.frames.slice(from, at).filter((frame) => frame.type === "delta");
+      await Bun.sleep(150);
+      const behind = client.frames.slice(at + 1).filter((frame) => frame.type === "delta");
+      return { reply, ahead, behind, held: heldBefore(client.frames, at) };
+    };
+
+    const renamed = await ask("settings.pool.put", { config: { title: "Renamed" } });
+    expect(renamed.ahead).toHaveLength(1);
+    expect(renamed.behind).toEqual([]);
+    expect(renamed.held?.snapshot.poolTitle).toBe("Renamed");
+    expect(renamed.reply.rev).toBe(renamed.held!.rev);
+
+    const reassigned = await ask("reassign", { tickets: ["02"], fields: { model: "x-model" } });
+    expect(reassigned.ahead).toHaveLength(1);
+    expect(reassigned.behind).toEqual([]);
+    expect(
+      reassigned.held?.snapshot.state.tickets.find((t) => t.id === "02")?.assignment.model,
+    ).toBe("x-model");
+
+    // A write the snapshot does not show moves nothing, and says so by
+    // naming the revision the socket already holds.
+    const machine = await ask("settings.machine.put", { defaults: {} });
+    expect(machine.ahead).toEqual([]);
+    expect(machine.reply.rev).toBe(reassigned.reply.rev);
   });
 
   it("refuses with the HTTP twin's status, for every status class", async () => {
@@ -374,6 +450,155 @@ describe("cards", () => {
     client.send({ type: "subscribe", card: { id: "99" } });
     const card = await client.waitFor(isCard("99"));
     expect(card).toEqual({ type: "card", id: "99", error: "unknown ticket 99" });
+  });
+
+  it("holds 32 cards a socket at most, and turns away unknown ids without reading the disk", async () => {
+    // Done already, so nothing runs and the pool settles at once.
+    const ids = Array.from({ length: 34 }, (_, i) => String(i + 1).padStart(2, "0"));
+    const poolDir = makePool({
+      tickets: ids.map((id) => ({
+        file: `${id}-a.md`,
+        marker: `<!-- state: id=${id} blocked-by=none status=done -->`,
+      })),
+      config: STUB_DEFAULTS,
+    });
+    const server = startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    await server.start();
+    await server.settled();
+    const client = await socket(server);
+    await client.sync();
+
+    // A hello past the cap holds the first 32 and drops the rest unread.
+    let from = client.frames.length;
+    client.send({ type: "hello", protocol: PROTOCOL_VERSION, visible: true, cards: ids.map((id) => ({ id })) });
+    await client.sync();
+    const held = client.frames.slice(from).filter((frame) => frame.type === "card");
+    expect(held.map((frame) => (frame as { id: string }).id)).toEqual(ids.slice(0, 32));
+    expect(held.every((frame) => (frame as { error?: string }).error === undefined)).toBe(true);
+    from = client.frames.length;
+    client.send({ type: "subscribe", card: { id: "34" } });
+    expect(await client.waitFor(isCard("34"), { from })).toEqual({
+      type: "card",
+      id: "34",
+      error: "a socket holds at most 32 cards",
+    });
+
+    // Two thousand ids the pool does not know: answered from the pushed
+    // snapshot alone, at no cost a tab could feel.
+    from = client.frames.length;
+    const bogus = Array.from({ length: 2000 }, (_, i) => ({ id: `x${i}` }));
+    const started = performance.now();
+    client.send({ type: "hello", protocol: PROTOCOL_VERSION, visible: true, cards: bogus });
+    await client.sync();
+    expect(performance.now() - started).toBeLessThan(150);
+    const refused = client.frames.slice(from).filter((frame) => frame.type === "card");
+    expect(refused).toHaveLength(32);
+    expect(refused[0]).toEqual({ type: "card", id: "x0", error: "unknown ticket x0" });
+
+    // A frame past 64 KiB is not read at all: the socket is cut (Bun drops
+    // the connection rather than sending 1009).
+    client.send({
+      type: "hello",
+      protocol: PROTOCOL_VERSION,
+      visible: true,
+      cards: [{ id: "x".repeat(70 * 1024) }],
+    });
+    expect([1006, 1009]).toContain((await client.closed).code);
+  });
+
+  // A card whose Issue file cannot be read is refused, holds nothing, and
+  // leaves the hello's other cards held; once the file reads again, the
+  // next subscribe gets it whole.
+  it("refuses a card it cannot read without holding it, and reads it afresh once it can", async () => {
+    if (process.getuid?.() === 0) return; // root reads a file chmod 000 anyway
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: ready("01") },
+        { file: "02-b.md", marker: ready("02") },
+      ],
+      config: STUB_DEFAULTS,
+    });
+    const server = startServer(poolDir, stubHarness(poolDir, {}).harnesses);
+    await server.start();
+    await server.settled();
+    const issue = join(poolDir, "issues", "02-b.md");
+    const quiet = console.error;
+    console.error = () => {};
+    chmodSync(issue, 0o000);
+    try {
+      const first = await socket(server, { visible: true, cards: [{ id: "02" }, { id: "01" }] });
+      const refusal = await first.waitFor(isCard("02"));
+      expect((refusal as { error?: string }).error).toContain("could not be read");
+      const whole = await first.waitFor<Extract<ServerMessage, { type: "card" }>>(isCard("01"));
+      expect(whole.body).toEqual({ id: "01", body: "# body\n" });
+      expect(whole.events).not.toBeNull();
+    } finally {
+      chmodSync(issue, 0o644);
+      console.error = quiet;
+    }
+
+    const later = await socket(server, { visible: true, cards: [{ id: "02" }] });
+    const card = await later.waitFor<Extract<ServerMessage, { type: "card" }>>(isCard("02"));
+    expect(card.body).toEqual({ id: "02", body: "# body\n" });
+    expect(card.events?.events.map((event) => event.kind)).toContain("spawned");
+  });
+
+  // An exited event carries the attempt's last log lines, which over a run
+  // grows the events file to megabytes; the card's own log already shows
+  // them, so a card's events leave them out, and the HTTP read keeps them.
+  it("leaves each event's logTail out of a card, and keeps it in GET /api/events", async () => {
+    const { server } = await finishedPool();
+    const http = (await (await fetch(`${server.url}/api/events?ticket=01`)).json()) as {
+      events: { kind: string; payload: Record<string, unknown> }[];
+    };
+    expect(http.events.some((event) => "logTail" in event.payload)).toBe(true);
+
+    const client = await socket(server, { visible: true, cards: [{ id: "01" }] });
+    const card = await client.waitFor<Extract<ServerMessage, { type: "card" }>>(isCard("01"));
+    const events = card.events!.events;
+    expect(events.some((event) => "logTail" in event.payload)).toBe(false);
+    expect(events).toEqual(
+      http.events.map(({ payload: { logTail: _logTail, ...payload }, ...event }) => ({
+        ...event,
+        payload,
+      })) as never,
+    );
+  });
+
+  // The stripping is per read, so a sequence split between two reads would
+  // show its second half as text: an append stops short of a sequence still
+  // arriving, and the next one brings it whole.
+  it("never splits an escape sequence across two appends", async () => {
+    const { poolDir, server } = await finishedPool();
+    const client = await socket(server, { visible: true, cards: [{ id: "01" }] });
+    const card = await client.waitFor<Extract<ServerMessage, { type: "card" }>>(isCard("01"));
+    const window = card.log as LogPush;
+    const logFile = join(poolDir, "runs", window.attempts![0]!.logFile);
+    const appended = (from: number) =>
+      client.waitFor<Extract<ServerMessage, { type: "card" }>>(
+        isCard("01", (frame) => frame.log?.mode === "append"),
+        { from, what: "an append" },
+      );
+
+    let from = client.frames.length;
+    appendFileSync(logFile, "red \x1b[38;5");
+    const first = await appended(from);
+    expect(first.log).toMatchObject({ content: "red ", nextOffset: window.nextOffset + 4 });
+    // GET /api/log's forward read stops at the same place.
+    const http = (await (
+      await fetch(`${server.url}/api/log?ticket=01&offset=${window.nextOffset}`)
+    ).json()) as TicketLogResponse;
+    expect([http.content, http.nextOffset]).toEqual(["red ", window.nextOffset + 4]);
+
+    from = client.frames.length;
+    appendFileSync(logFile, ";196mtext\x1b[0m done\n");
+    const second = await appended(from);
+    expect(second.log).toMatchObject({ content: "text done\n", offset: window.nextOffset + 4 });
+    const shown = framesOf(client, "card")
+      .filter((frame) => frame.log?.mode === "append")
+      .map((frame) => frame.log!.content)
+      .join("");
+    expect(shown).toBe("red text done\n");
   });
 
   it("holds a hidden socket's appends, and catches it up when it shows", async () => {

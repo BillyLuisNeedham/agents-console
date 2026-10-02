@@ -590,8 +590,10 @@ export type ServerMessage =
       grades?: Record<string, TicketGradeSummary>;
     }
   /** A subscribed card's data: the fields present replace (or, for an
-   *  `append` log, continue) what the Console holds. `error` for an id the
-   *  pool does not know. */
+   *  `append` log, continue) what the Console holds. Its events leave out
+   *  each event payload's `logTail`, which GET /api/events still serves.
+   *  `error` for an id the pool does not know, or a card whose files could
+   *  not be read; the card is then not held. */
   | {
       type: "card";
       id: string;
