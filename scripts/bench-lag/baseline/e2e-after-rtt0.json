@@ -1,15 +1,15 @@
 {
-  "at": "2026-10-02T16:03:07.525Z",
-  "repo": "/home/billy/repos/agent-console/.claude/worktrees/agent-acc0109b98a6a7897",
-  "revision": "worktree-agent-acc0109b98a6a7897@77a44f6",
+  "at": "2026-10-02T16:12:36.934Z",
+  "repo": "/home/billy/repos/agent-console",
+  "revision": "fix/157-lag@7cd80e9",
   "machine": {
     "bun": "1.3.14",
     "platform": "linux",
     "cpus": 12,
     "loadavgAtStart": [
-      4.29,
-      3.09,
-      2.69
+      1.98,
+      2.59,
+      2.66
     ]
   },
   "server": null,
@@ -32,146 +32,146 @@
       },
       "shellMs": {
         "n": 19,
-        "mean": 26.7,
-        "p50": 27,
-        "p95": 36,
-        "max": 36
+        "mean": 18.5,
+        "p50": 18.1,
+        "p95": 23.4,
+        "max": 23.4
       },
       "dataMs": {
         "n": 11,
-        "mean": 51.4,
-        "p50": 55.9,
-        "p95": 82.9,
-        "max": 82.9
+        "mean": 38.3,
+        "p50": 42.8,
+        "p95": 55.9,
+        "max": 55.9
       },
       "progressDataMs": {
         "n": 7,
-        "mean": 56.6,
-        "p50": 56.8,
-        "p95": 63.9,
-        "max": 63.9
+        "mean": 44.1,
+        "p50": 43.6,
+        "p95": 49,
+        "max": 49
       },
       "inputDelayMs": {
         "n": 19,
-        "mean": 0.5,
-        "p50": 0.5,
-        "p95": 0.7,
-        "max": 0.7
+        "mean": 0.6,
+        "p50": 0.6,
+        "p95": 0.9,
+        "max": 0.9
       },
       "each": [
         {
           "id": "14",
           "tab": "progress",
-          "shell": 29.3,
-          "data": 56.8
+          "shell": 18.2,
+          "data": 38.9
         },
         {
           "id": "03",
           "tab": "outcome",
-          "shell": 24.8,
-          "data": 24.8
+          "shell": 17.9,
+          "data": 17.9
         },
         {
           "id": "11",
           "tab": "outcome",
-          "shell": 23,
-          "data": 23
+          "shell": 17.9,
+          "data": 17.9
         },
         {
           "id": "17",
           "tab": "spec",
-          "shell": 36,
-          "data": 82.9
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 25,
-          "data": 55.1
-        },
-        {
-          "id": "14",
-          "tab": "progress",
-          "shell": 22.5,
-          "data": 49.1
-        },
-        {
-          "id": "03",
-          "tab": "outcome",
-          "shell": 27.8,
-          "data": 27.8
-        },
-        {
-          "id": "11",
-          "tab": "outcome",
-          "shell": 22.1,
-          "data": 22.1
-        },
-        {
-          "id": "17",
-          "tab": "spec",
-          "shell": 28,
-          "data": 28
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 27.7,
-          "data": 57.2
-        },
-        {
-          "id": "14",
-          "tab": "progress",
-          "shell": 29.3,
-          "data": 58.4
-        },
-        {
-          "id": "03",
-          "tab": "outcome",
-          "shell": 27,
-          "data": 27
-        },
-        {
-          "id": "11",
-          "tab": "outcome",
-          "shell": 22.2,
-          "data": 22.2
-        },
-        {
-          "id": "17",
-          "tab": "spec",
-          "shell": 26.3,
-          "data": 26.3
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 29,
-          "data": 63.9
-        },
-        {
-          "id": "14",
-          "tab": "progress",
-          "shell": 28.2,
+          "shell": 23.4,
           "data": 55.9
         },
         {
+          "id": "13",
+          "tab": "progress",
+          "shell": 18.7,
+          "data": 43.6
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 18,
+          "data": 46.5
+        },
+        {
           "id": "03",
           "tab": "outcome",
-          "shell": 22.7,
-          "data": 22.7
+          "shell": 18,
+          "data": 18
         },
         {
           "id": "11",
           "tab": "outcome",
-          "shell": 24.6,
-          "data": 24.6
+          "shell": 18.3,
+          "data": 18.3
         },
         {
           "id": "17",
           "tab": "spec",
-          "shell": 31.5,
-          "data": 31.5
+          "shell": 19.8,
+          "data": 19.8
+        },
+        {
+          "id": "13",
+          "tab": "progress",
+          "shell": 17.5,
+          "data": 42.8
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 18.1,
+          "data": 46.4
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 17.8,
+          "data": 17.8
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 18.5,
+          "data": 18.5
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 18.1,
+          "data": 18.1
+        },
+        {
+          "id": "13",
+          "tab": "progress",
+          "shell": 19,
+          "data": 49
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 18.5,
+          "data": 41.3
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 17.9,
+          "data": 17.9
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 16.3,
+          "data": 16.3
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 18.9,
+          "data": 18.9
         }
       ]
     },
@@ -182,52 +182,52 @@
       "unconfirmed": 0,
       "toFetchMs": {
         "n": 19,
-        "mean": 2.6,
+        "mean": 1.9,
         "p50": 1.8,
-        "p95": 14.3,
-        "max": 14.3
+        "p95": 2.7,
+        "max": 2.7
       },
       "toRequestMs": {
         "n": 19,
-        "mean": 3.3,
-        "p50": 2.5,
-        "p95": 15.1,
-        "max": 15.1
+        "mean": 2.5,
+        "p50": 2.6,
+        "p95": 3.3,
+        "max": 3.3
       },
       "toResponseMs": {
         "n": 19,
-        "mean": 5.3,
+        "mean": 4.5,
         "p50": 4.6,
-        "p95": 16.9,
-        "max": 16.9
+        "p95": 5.9,
+        "max": 5.9
       },
       "confirmedMs": {
         "n": 19,
-        "mean": 41.8,
-        "p50": 42,
-        "p95": 44.7,
-        "max": 44.7
+        "mean": 41.4,
+        "p50": 41.1,
+        "p95": 44.1,
+        "max": 44.1
       },
       "inputDelayMs": {
         "n": 19,
-        "mean": 1.1,
+        "mean": 0.6,
         "p50": 0.5,
-        "p95": 11.7,
-        "max": 11.7
+        "p95": 1.5,
+        "max": 1.5
       }
     },
     "renders": {
-      "batchesPerSec": 5.53,
-      "framesWithMutationsPerSec": 5.53,
-      "recordsPerSec": 36.63
+      "batchesPerSec": 5.5,
+      "framesWithMutationsPerSec": 5.19,
+      "recordsPerSec": 36.32
     },
     "frames": {
-      "perSec": 59.99,
+      "perSec": 60.01,
       "gapMs": {
-        "n": 3720,
+        "n": 3721,
         "mean": 16.7,
         "p50": 16.7,
-        "p95": 16.7,
+        "p95": 16.8,
         "max": 16.8
       },
       "over50ms": 0
@@ -246,25 +246,21 @@
     },
     "mainThread": {
       "busyPct": 7.8,
-      "scriptMs": 2579,
-      "layoutMs": 188,
-      "styleMs": 25,
-      "layouts": 371,
-      "styleRecalcs": 237
+      "scriptMs": 2592,
+      "layoutMs": 172,
+      "styleMs": 23,
+      "layouts": 365,
+      "styleRecalcs": 216
     },
     "requests": {
       "perSec": 27.23,
       "inFlight": {
         "max": 4,
-        "mean": 0.1,
+        "mean": 0.11,
         "perSecondMax": [
           4,
           4,
           4,
-          2,
-          4,
-          4,
-          4,
           4,
           4,
           2,
@@ -318,6 +314,10 @@
           2,
           4,
           4,
+          4,
+          4,
+          4,
+          2,
           4,
           4,
           0
@@ -331,18 +331,18 @@
         "n": 1689,
         "mean": 1.1,
         "p50": 0.9,
-        "p95": 1.9,
-        "max": 7.7
+        "p95": 1.8,
+        "max": 8.7
       },
       "byKind": {
         "/api/activity": {
           "perSec": 8,
           "totalMs": {
             "n": 496,
-            "mean": 4.2,
-            "p50": 3.1,
-            "p95": 8.6,
-            "max": 11.2
+            "mean": 4.3,
+            "p50": 3.2,
+            "p95": 8.5,
+            "max": 12.8
           },
           "waitMeanMs": 0.9
         },
@@ -350,31 +350,31 @@
           "perSec": 2.34,
           "totalMs": {
             "n": 145,
-            "mean": 4.9,
-            "p50": 5,
-            "p95": 6.6,
-            "max": 7.6
+            "mean": 5.1,
+            "p50": 5.2,
+            "p95": 6.9,
+            "max": 8.5
           },
-          "waitMeanMs": 1.2
+          "waitMeanMs": 1.3
         },
         "/api/grades": {
           "perSec": 2.03,
           "totalMs": {
             "n": 126,
-            "mean": 6.1,
-            "p50": 6.1,
-            "p95": 8.7,
-            "max": 10.3
+            "mean": 6.4,
+            "p50": 6.7,
+            "p95": 9,
+            "max": 11.6
           },
-          "waitMeanMs": 3.2
+          "waitMeanMs": 3.5
         },
         "/api/log": {
           "perSec": 0.48,
           "totalMs": {
             "n": 30,
-            "mean": 3.2,
-            "p50": 3.1,
-            "p95": 4.5,
+            "mean": 3.1,
+            "p50": 3,
+            "p95": 4,
             "max": 4.6
           },
           "waitMeanMs": 0.7
@@ -383,45 +383,45 @@
           "perSec": 0.02,
           "totalMs": {
             "n": 1,
-            "mean": 2.6,
-            "p50": 2.6,
-            "p95": 2.6,
-            "max": 2.6
+            "mean": 3.8,
+            "p50": 3.8,
+            "p95": 3.8,
+            "max": 3.8
           },
-          "waitMeanMs": 0.5
+          "waitMeanMs": 1.3
         },
         "/api/terminal/focus": {
           "perSec": 0.31,
           "totalMs": {
             "n": 19,
-            "mean": 2.7,
-            "p50": 2.5,
-            "p95": 6.2,
-            "max": 6.2
+            "mean": 2.6,
+            "p50": 2.4,
+            "p95": 4.2,
+            "max": 4.2
           },
           "waitMeanMs": 0.6
         },
         "/api/terminal/peek": {
-          "perSec": 14,
+          "perSec": 13.99,
           "totalMs": {
             "n": 868,
             "mean": 3.2,
             "p50": 3.2,
-            "p95": 4.5,
-            "max": 7.8
+            "p95": 4.6,
+            "max": 9.4
           },
-          "waitMeanMs": 0.9
+          "waitMeanMs": 0.8
         },
         "/api/ticket": {
           "perSec": 0.06,
           "totalMs": {
             "n": 4,
-            "mean": 2.8,
-            "p50": 3,
-            "p95": 3.1,
-            "max": 3.1
+            "mean": 3.3,
+            "p50": 3.3,
+            "p95": 3.6,
+            "max": 3.6
           },
-          "waitMeanMs": 0.8
+          "waitMeanMs": 1.1
         }
       }
     },
@@ -431,33 +431,33 @@
     },
     "server": {
       "pingMs": {
-        "n": 2299,
+        "n": 2298,
         "mean": 0.5,
         "p50": 0.4,
         "p95": 0.9,
         "p99": 1.9,
-        "max": 4.7
+        "max": 5.9
       },
       "pingFailures": 0,
-      "cpuPercent": 14.9,
+      "cpuPercent": 15.1,
       "loopLagMs": {
-        "samples": 5950,
+        "samples": 5948,
         "p50": 0.2,
         "p95": 1.2,
         "p99": 1.8,
-        "max": 4.1,
+        "max": 4.4,
         "over50ms": 0
       },
       "syncSpawnBlockedPercent": 0
     },
     "herdrRequests": {
       "workspace.create": 1,
-      "pane.list": 27,
+      "pane.list": 28,
       "tab.create": 19,
-      "pane.read": 722,
+      "pane.read": 723,
       "pane.send_input": 25,
       "pane.report_agent": 19,
-      "events.subscribe": 12,
+      "events.subscribe": 9,
       "pane.release_agent": 12,
       "pane.focus": 19
     }
