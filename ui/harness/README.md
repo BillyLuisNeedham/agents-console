@@ -6,9 +6,10 @@ capture, which the DOM-less bun suite cannot give.
 
 ## What it proves
 
-The page mounts the real `ConsoleView` over the real `ConsoleSession` with fake
-seams (a fixture pool of tickets, interrupts, Conversations, a long log, a long
-spec), then does what an operator does:
+The page mounts the real `ConsoleView` over the real `ConsoleSession` with a
+fake socket seam (a fixture pool of tickets, interrupts, Conversations, a long
+log, a long spec; a selected card's frame lands a task after its subscribe),
+then does what an operator does:
 
 - scrolls every `overflow: auto` region styles.css declares and a live module
   renders (`.detail-open`, `.log-pane-content`, `.log-lines`,
@@ -19,8 +20,8 @@ spec), then does what an operator does:
 - pans the canvas with a pointer drag
 - records the identity of a few nodes (cards, the Detail, the trays)
 
-then renders five times with the same model (a poll tick), once more from a
-changed snapshot (a live SSE snapshot), and once for a burst (ten snapshots
+then renders five times with the same model (a live frame), once more from a
+changed snapshot (a pushed delta), and once for a burst (ten snapshots
 and the log drawer shut and opened again inside one frame), and after each
 render asserts that scroll positions, focus, caret, canvas pan and node
 identity are unchanged. The stores ask for renders through the app's render
