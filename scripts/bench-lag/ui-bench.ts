@@ -1,9 +1,13 @@
 #!/usr/bin/env bun
 /**
- * The lag bench's UI half (issue #157): build the bench page against a
- * checkout's real ConsoleView and ConsoleSession, open it in headless
- * Chromium at real speed (no virtual time, which would hide exactly the
- * main-thread cost being measured), and collect the report it POSTs back.
+ * The lag bench's UI half (issues #157, #161): build the bench page against
+ * a checkout's real Console, open it in headless Chromium at real speed (no
+ * virtual time, which would hide exactly the main-thread cost being
+ * measured), and collect the report it POSTs back. For a checkout that
+ * speaks the push protocol the page is ui/bench.ts, the Console composed by
+ * its createConsole over a fake socket playing the server's frames; for one
+ * from before it, ui/bench-sse.ts, over the old fetch and stream seams. Both
+ * churn the same pool (ui/fixture.ts) and report the same numbers.
  *
  *   bun run scripts/bench-lag/ui-bench.ts                     # this checkout, a table
  *   bun run scripts/bench-lag/ui-bench.ts --repo ../other     # another checkout
@@ -13,13 +17,14 @@
  * The page lives here, not in the checkout under test; only its `@console`
  * imports reach the checkout (ui/vite.config.ts), and the build runs that
  * checkout's own Vite so its dependencies resolve from its own ui/. Env:
- * CHROMIUM (default /usr/bin/chromium).
+ * CHROMIUM (default: the Chromium or Chrome chromium.ts finds).
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireChromium } from "./chromium.ts";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const pageDir = join(here, "ui");
@@ -75,7 +80,8 @@ export interface UiBenchOptions {
   repo: string;
   /** How long the measured churn runs, after a 2.5 s warm-up. Default 30 s. */
   durationMs?: number;
-  /** Snapshots pushed down the fake stream per second. Default 1. */
+  /** Snapshot versions pushed per second (deltas on the socket, whole
+   *  snapshots down the old stream). Default 1. */
   snapshotsPerSec?: number;
   chromium?: string;
 }
@@ -101,7 +107,7 @@ export async function runUiBench(opts: UiBenchOptions): Promise<UiBenchResult> {
   const repo = resolve(opts.repo);
   const durationMs = opts.durationMs ?? 30_000;
   const sps = opts.snapshotsPerSec ?? 1;
-  const chromium = opts.chromium ?? process.env.CHROMIUM ?? "/usr/bin/chromium";
+  const chromium = opts.chromium ?? requireChromium();
   const work = mkdtempSync(join(tmpdir(), "bench-lag-ui-"));
   const dist = join(work, "dist");
   try {

@@ -20,12 +20,25 @@
      accent and the outflow highlight's purple, so its mark never reads as
      either. */
   --steward: #db61a2;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
-    "Liberation Mono", monospace;
+  /* The system's monospace (SF Mono on a Mac), Liberation Mono on Linux,
+     and the browser's own monospace (Menlo, Consolas) everywhere else. Each
+     name the machine lacks costs the first layout a font lookup per weight
+     in use, a few milliseconds apiece on Linux, so the list names no face a
+     generic already finds (issue #161). */
+  --mono: ui-monospace, "Liberation Mono", monospace;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Controls take the page's face rather than the browser's control font,
+   which would be one more family for the first layout to look up. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
 }
 
 html,
@@ -1286,6 +1299,16 @@ body {
   white-space: pre-wrap;
 }
 
+.log-earlier {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
 .inspector-channels,
 .inspector-empty {
   overflow: auto;
@@ -1494,6 +1517,37 @@ body {
   font-size: 11px;
 }
 
+/* One event and what it carries beneath (a grade, a Reassign, a spawn, a
+   Steward act), kept or rebuilt as one (issue #161). */
+.timeline-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* An attempt's open or closed toggle, and a closed attempt's one line. */
+.timeline-attempt-toggle {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.timeline-attempt-toggle:hover {
+  color: var(--accent);
+}
+
+.timeline-attempt-summary {
+  font-size: 11px;
+}
+
+.timeline-earlier {
+  align-self: flex-start;
+  font-size: 11px;
+}
+
 .timeline-event-kind {
   color: var(--text);
 }
@@ -1633,6 +1687,11 @@ body {
   color: var(--text-dim);
   max-height: 60vh;
   overflow: auto;
+}
+
+/* One slice of the log's text, whole lines, laid out on its own (issue #161). */
+.log-slice {
+  display: block;
 }
 
 .log-pane-more {

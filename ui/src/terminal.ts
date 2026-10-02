@@ -1,19 +1,19 @@
 /**
- * Terminal surface: the client side of the card's terminal-backed attempt
- * surface (ADR-0014). The store polls the peek endpoint for every ticket
- * whose enriched snapshot entry carries a pane (`ticketPaneId`: a live
- * attempt's while a terminal-backed attempt runs, or a Held pane's while
- * the ticket waits at a checkpoint, issue #139), every 2s and
- * once per pool snapshot (throttled, so a burst asks once, issue #157), and
- * holds the peek text and focus confirmations the cards' surfaces project
- * from. A ticket whose pane leaves the snapshot (the
- * attempt ended, the checkpoint was answered or its pane closed, or the
- * ticket left the pool) is pruned, so its polling
- * stops with its surface; a re-spawned attempt's new pane id resets the
- * entry to pending. Module scope in the bootstrap, so no render drops the
- * entries. The renderer shapes the surface: a dim,
- * pointer-events-none peek viewport (typing happens in herdr, never here),
- * the "Open in herdr" jump, and the copyable attach-command chip.
+ * Terminal surface: the Console's side of the card's terminal-backed
+ * attempt surface (ADR-0014), fed by the socket (issue #161). The store
+ * holds a surface for every ticket whose enriched snapshot entry carries a
+ * pane (`ticketPaneId`: a live attempt's while a terminal-backed attempt
+ * runs, or a Held pane's while the ticket waits at a checkpoint, issue
+ * #139) and for every live Conversation with one, and takes the peek text
+ * the server reads for all of them, once for every tab, from the `live`
+ * frames that carry the reads that moved. A surface whose pane leaves the
+ * snapshot (the attempt ended, the checkpoint was answered or its pane
+ * closed, or the ticket left the pool) is pruned, and a re-spawned
+ * attempt's new pane id resets the entry to pending. Module scope in the
+ * bootstrap, so no render drops the entries. The renderer shapes the
+ * surface: a dim, pointer-events-none peek viewport (typing happens in
+ * herdr, never here), the "Open in herdr" jump, and the copyable
+ * attach-command chip.
  */
 
 import {
@@ -23,70 +23,52 @@ import {
   type TerminalPeekResponse,
   type TerminalSurfaceView,
 } from "./project";
+import type { PeekFailure } from "../../engine/protocol.ts";
 import { h } from "./dom";
-import { TargetPoller } from "./poll";
 
-/** The peek poll cadence: one request per terminal-backed ticket per interval. */
-export const TERMINAL_POLL_MS = 2_000;
-
-/** How long the card confirms a successful "Open in herdr". */
+/** How long the card confirms an "Open in herdr". */
 export const TERMINAL_CONFIRM_MS = 2_500;
 
-export type TerminalPeekFetch = (ticketId: string) => Promise<TerminalPeekResponse>;
-export type TerminalFocusFetch = (ticketId: string) => Promise<void>;
+/** The focus request: resolves once the server focused the pane, rejects
+ *  with the refusal's reason as the Error's message. */
+export type TerminalFocusFetch = (ticketId: string) => Promise<unknown>;
 
 export interface TerminalSurfaceOptions {
-  peek: TerminalPeekFetch;
   focus: TerminalFocusFetch;
   /** Called after every state change the view should repaint. */
   onChange: () => void;
-  /** The poll cadence; tests shorten or lengthen it. */
-  pollMs?: number;
   /** The focus confirmation window; tests shorten or lengthen it. */
   confirmMs?: number;
 }
 
 export class TerminalSurface {
-  private readonly peekFetch: TerminalPeekFetch;
   private readonly focusFetch: TerminalFocusFetch;
   private readonly notify: () => void;
-  private readonly pollMs: number;
   private readonly confirmMs: number;
-  /** Ticket id -> current attempt's pane id, the poll candidate set. */
+  /** Ticket id -> current attempt's pane id: the surfaces there are. */
   private candidates = new Map<string, string>();
   /** Ticket id -> the surface state the projection renders from. */
   private readonly entries = new Map<string, TerminalSurfaceView>();
-  /** The per-pane cadence: one peek out per pane, so a slow answer never
-   *  stacks or delays the others, and the snapshot's peek throttled. */
-  private readonly poller: TargetPoller;
   /** Focus calls already out; a double click never fires twice. */
   private readonly focusing = new Set<string>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  /** A refused focus's reason, beside the button until the next press. */
+  private readonly focusFailures = new Map<string, string>();
+  private readonly confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(options: TerminalSurfaceOptions) {
-    this.peekFetch = options.peek;
     this.focusFetch = options.focus;
     this.notify = options.onChange;
-    this.pollMs = options.pollMs ?? TERMINAL_POLL_MS;
     this.confirmMs = options.confirmMs ?? TERMINAL_CONFIRM_MS;
-    this.poller = new TargetPoller({
-      run: (ticketId) => this.peek(ticketId),
-      gapMs: this.pollMs / 2,
-    });
-    if (typeof setInterval !== "undefined") {
-      this.timer = setInterval(() => this.tick(), this.pollMs);
-    }
   }
 
   /**
    * The snapshot cadence: prune to the tickets and Conversations that have
    * a pane to show (a live attempt's or a Held pane's on the enriched
-   * snapshot),
-   * reset entries whose attempt re-spawned under a new pane id, and peek
-   * each once, so a freshly spawned attempt's surface fills as soon as its
-   * snapshot lands rather than after up to 2s. A live Conversation carries
-   * its pane the same way a running ticket attempt does, keyed by its own
-   * id: the server accepts `?ticket=<conv-id>` for peek/focus unchanged.
+   * snapshot), reset entries whose attempt re-spawned under a new pane id,
+   * and seed a pending entry for a new one, so its surface shell renders
+   * while the server's first read of it is on the way. A live Conversation
+   * carries its pane the same way a running ticket attempt does, keyed by
+   * its own id.
    */
   update(snapshot: EnrichedSnapshot | null): void {
     const paneOf = new Map<string, string>();
@@ -103,134 +85,117 @@ export class TerminalSurface {
     }
     for (const [id, entry] of [...this.entries]) {
       const paneId = paneOf.get(id);
-      // The attempt ended or the ticket left the pool: the surface and its
-      // polling stop together.
+      // The attempt ended or the ticket left the pool: the surface goes.
       if (paneId === undefined) {
         this.entries.delete(id);
-        this.poller.forget(id);
+        this.focusFailures.delete(id);
       } else if (paneId !== entry.paneId) {
-        this.entries.set(id, {
-          paneId,
-          status: "pending",
-          text: "",
-          justFocused: false,
-        });
-        // A new pane is owed its first peek now, not after the throttle.
-        this.poller.forget(id);
+        this.entries.set(id, { paneId, status: "pending", text: "", justFocused: false });
+        this.focusFailures.delete(id);
       }
     }
     this.candidates = paneOf;
     for (const [id, paneId] of paneOf) {
-      // First sight of this candidate: seed a pending entry so the card
-      // renders the surface shell while the first peek is out.
       if (!this.entries.has(id)) {
-        this.entries.set(id, {
-          paneId,
-          status: "pending",
-          text: "",
-          justFocused: false,
-        });
+        this.entries.set(id, { paneId, status: "pending", text: "", justFocused: false });
       }
-      this.poller.pollSoon(id);
     }
+  }
+
+  /**
+   * A `live` frame's peeks, by ticket or Conversation id: the reads that
+   * moved. A failure renders "pane unavailable" and disables the focus
+   * button until a read succeeds again. Repaints once for the whole frame,
+   * and only when a surface moved: before the morph, a render per unchanged
+   * peek tore focus out of the operator's hands every 2s (issue #122).
+   */
+  apply(peeks: Record<string, TerminalPeekResponse | PeekFailure>): void {
+    let changed = false;
+    for (const [id, peek] of Object.entries(peeks)) {
+      const previous = this.entries.get(id);
+      // A pane the snapshot does not show (yet, or any more), or a read of
+      // a pane the attempt has re-spawned away from, revives nothing.
+      if (!previous) continue;
+      if ("paneId" in peek && peek.paneId !== previous.paneId) continue;
+      const text = "text" in peek && typeof peek.text === "string" ? peek.text : "";
+      // An empty read (a background tab still warming up, per the
+      // prototype's herdr findings) is "waiting", never an error.
+      const status: TerminalSurfaceView["status"] =
+        "error" in peek ? "unavailable" : text === "" ? "waiting" : "live";
+      if (previous.status === status && previous.text === text) continue;
+      this.entries.set(id, { ...previous, status, text });
+      changed = true;
+    }
+    if (changed) this.notify();
   }
 
   /** The per-ticket surface input the projection renders from. */
   state(): Record<string, TerminalSurfaceView> {
     const state: Record<string, TerminalSurfaceView> = {};
     for (const [id, entry] of this.entries) {
-      state[id] = this.focusing.has(id) ? { ...entry, focusing: true } : { ...entry };
+      const failure = this.focusFailures.get(id) ?? null;
+      const focusing = this.focusing.has(id);
+      state[id] = focusing || failure ? { ...entry, focusing, focusFailure: failure } : entry;
     }
     return state;
   }
 
   /**
-   * "Open in herdr": focus the attempt's pane. The request goes out before
-   * anything else happens, and the button reads as opening from the next
-   * frame until the server answers (issue #157), so a slow focus never looks
-   * like a click that missed. Resolves true when the server accepted the
-   * focus (the card shows its transient confirmation); false on any failure
-   * or when the ticket no longer holds a live pane, leaving the card as it
-   * was.
+   * "Open in herdr": focus the attempt's pane. Optimistic (issue #161):
+   * the card says "focused in herdr" in the press's own frame and the
+   * request goes out with it; a refusal takes that back and puts the reason
+   * beside the button until the next press. Resolves true when the server
+   * focused the pane, false on a refusal or when the ticket no longer holds
+   * a live pane.
    */
   async focus(ticketId: string): Promise<boolean> {
     if (!this.candidates.has(ticketId) || this.focusing.has(ticketId)) return false;
     this.focusing.add(ticketId);
+    this.focusFailures.delete(ticketId);
+    this.confirm(ticketId, true);
     const request = this.focusFetch(ticketId);
     this.notify();
-    let accepted = true;
+    let failure: string | null = null;
     try {
       await request;
-    } catch {
-      accepted = false;
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
     }
     this.focusing.delete(ticketId);
-    if (!accepted) {
-      this.notify();
-      return false;
+    if (failure !== null) {
+      this.confirm(ticketId, false);
+      if (this.entries.has(ticketId)) this.focusFailures.set(ticketId, failure);
     }
-    const entry = this.entries.get(ticketId);
-    if (entry) this.entries.set(ticketId, { ...entry, justFocused: true });
     this.notify();
-    setTimeout(() => {
-      const current = this.entries.get(ticketId);
-      if (current?.justFocused) {
-        this.entries.set(ticketId, { ...current, justFocused: false });
-        this.notify();
-      }
-    }, this.confirmMs);
-    return true;
+    return failure === null;
   }
 
-  /** Stop the poll timer (session teardown). */
+  /** Drop the confirmation timers (session teardown). */
   dispose(): void {
-    if (this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    this.poller.dispose();
+    for (const timer of this.confirmTimers.values()) clearTimeout(timer);
+    this.confirmTimers.clear();
   }
 
-  private tick(): void {
-    for (const id of this.candidates.keys()) this.poller.poll(id);
-  }
-
-  private async peek(ticketId: string): Promise<void> {
-    const paneId = this.candidates.get(ticketId);
-    if (paneId === undefined) return;
-    try {
-      const response = await this.peekFetch(ticketId);
-      const text = typeof response.text === "string" ? response.text : "";
-      // An empty read (a background tab still warming up, per the
-      // prototype's herdr findings) is "waiting", never an error.
-      this.settle(ticketId, paneId, text === "" ? "waiting" : "live", text);
-    } catch {
-      // A missing or unreadable pane renders "pane unavailable" and
-      // disables the focus button; polling continues so a transient
-      // daemon failure recovers, and the snapshot drops the entry for
-      // good once the attempt truly ends.
-      this.settle(ticketId, paneId, "unavailable", "");
-    }
-  }
-
-  // A peek's outcome lands on the entry, and the view repaints only when
-  // the surface it projects (status or text) actually moved: a render on
-  // every poll response for a pane that printed nothing new is work for
-  // nothing, and before the morph it tore focus out of the operator's hands
-  // every 2s (issue #122).
-  private settle(
-    ticketId: string,
-    paneId: string,
-    status: TerminalSurfaceView["status"],
-    text: string,
-  ): void {
-    const previous = this.entries.get(ticketId);
-    // The entry left (the attempt ended) or re-spawned under another pane
-    // while this read was out: a stale answer never revives or overwrites it.
-    if (!previous || previous.paneId !== paneId) return;
-    if (previous.status === status && previous.text === text) return;
-    this.entries.set(ticketId, { ...previous, status, text });
-    this.notify();
+  // Show, or take back, the card's "focused in herdr", which goes on its
+  // own once the confirmation window is up.
+  private confirm(ticketId: string, on: boolean): void {
+    const timer = this.confirmTimers.get(ticketId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.confirmTimers.delete(ticketId);
+    const entry = this.entries.get(ticketId);
+    if (entry && entry.justFocused !== on) this.entries.set(ticketId, { ...entry, justFocused: on });
+    if (!on) return;
+    this.confirmTimers.set(
+      ticketId,
+      setTimeout(() => {
+        this.confirmTimers.delete(ticketId);
+        const current = this.entries.get(ticketId);
+        if (current?.justFocused) {
+          this.entries.set(ticketId, { ...current, justFocused: false });
+          this.notify();
+        }
+      }, this.confirmMs),
+    );
   }
 }
 
@@ -252,7 +217,8 @@ export interface TerminalSurfaceActions {
  * `herdr agent attach <pane_id>` chip. The peek is a viewport, not a
  * terminal: pointer-events none, no cursor, no input path; typing happens
  * in herdr. Both controls are <button>s, which the canvas drag logic
- * already excludes from card drag.
+ * already excludes from card drag. A refused focus's reason sits under the
+ * row until the next press.
  */
 export function renderTerminalSurface(
   view: TerminalSurfaceView,
@@ -292,7 +258,7 @@ export function renderTerminalSurface(
             void actions.onFocus();
           },
         },
-        view.focusing ? "opening..." : (actions.focusLabel ?? "Open in herdr"),
+        actions.focusLabel ?? "Open in herdr",
       ),
       h(
         "button",
@@ -316,6 +282,9 @@ export function renderTerminalSurface(
         ? h("span", { class: "terminal-note" }, "focused in herdr")
         : null,
     ),
+    view.focusFailure
+      ? h("div", { class: "error-inline terminal-focus-failure" }, view.focusFailure)
+      : null,
   );
 }
 
@@ -325,11 +294,11 @@ export function renderTerminalSurface(
  * the Needs input tray so both say the same thing. It lives with the
  * terminal surface because that is what it continues: the checkpointed
  * Attempt's own herdr pane, conversation and all, as a Continued attempt,
- * where Resume would start a fresh Attempt from the Issue. Disabled while
- * the request is out and after the engine accepts, until the snapshot moves
- * the ticket off checkpoint. An answer already queued withdraws the offer
- * (the projection's `keepTalking` goes null), so a waiting row never shows
- * it. A refusal's reason renders beside the form through
+ * where Resume would start a fresh Attempt from the Issue. Disabled from
+ * the press, in its own frame, until the snapshot moves the ticket off
+ * checkpoint. An answer already queued withdraws the offer (the
+ * projection's `keepTalking` goes null), so a waiting row never shows it. A
+ * refusal's reason renders beside the form through
  * `renderKeepTalkingFailure`, never on the global banner.
  */
 export function renderKeepTalkingButton(

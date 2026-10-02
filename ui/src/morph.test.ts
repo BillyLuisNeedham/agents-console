@@ -2,7 +2,7 @@
 
 import { describe, expect, it, spyOn } from "bun:test";
 import { h } from "./dom";
-import { commit, KEEP_CHILDREN, morph } from "./morph";
+import { commit, keep, KEEP_CHILDREN, morph } from "./morph";
 import { useDom } from "./test-dom";
 
 useDom();
@@ -271,5 +271,36 @@ describe("morph", () => {
     expect(tree.firstElementChild).toBe(layer);
     expect(layer.className).toBe("layer moved");
     expect(layer.firstChild).toBe(drawn);
+  });
+});
+
+describe("keep (#161)", () => {
+  it("keeps a node whole where its stand-in is wanted, and moves it into place", () => {
+    const { tree } = mounted(
+      h("div", {}, h("div", { key: "a", class: "card" }, "A"), h("div", { key: "b" }, "B")),
+    );
+    const [a, b] = [tree.children[0]!, tree.children[1]!];
+    a.setAttribute("data-seen", "yes");
+    morph(tree, h("div", {}, h("div", { key: "b" }, "B2"), keep(a)));
+    expect([...tree.children]).toEqual([b, a]);
+    expect(a.getAttribute("data-seen")).toBe("yes");
+    expect(a.className).toBe("card");
+    expect(b.textContent).toBe("B2");
+  });
+
+  it("moves the node in when nothing here matches its stand-in", () => {
+    const elsewhere = h("div", { key: "x" }, "X");
+    mounted(h("section", {}, elsewhere));
+    const { tree } = mounted(h("div", {}, h("div", { key: "y" }, "Y")));
+    morph(tree, h("div", {}, keep(elsewhere)));
+    expect([...tree.children]).toEqual([elsewhere]);
+  });
+
+  it("puts the nodes in place of their stand-ins when a tree mounts whole", () => {
+    const live = h("div", { key: "a" }, "A");
+    mounted(h("div", {}, live));
+    const root = document.createElement("div");
+    commit(root, () => h("div", { class: "shell" }, keep(live)));
+    expect(root.querySelector(".shell")!.firstElementChild).toBe(live);
   });
 });

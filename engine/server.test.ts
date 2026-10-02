@@ -34,6 +34,8 @@ import {
   type ExecutingFakeHerdrOptions,
 } from "./herdr-executing-fake.ts";
 import { makeTempDir } from "./tmp.ts";
+import { CLOSE_STOPPED, PROTOCOL_VERSION } from "./protocol.ts";
+import { openSocket, type SocketClient } from "./socket-fixture.ts";
 import {
   STUB_DEFAULTS,
   cleanupPools,
@@ -44,10 +46,19 @@ import {
 } from "./pool-fixture.ts";
 
 const servers: PoolServer[] = [];
+const sockets: SocketClient[] = [];
 
 afterEach(async () => {
+  while (sockets.length > 0) sockets.pop()!.close();
   await cleanupPools(servers);
 });
+
+/** A socket on the server, the way a Console tab holds one (issue #161). */
+async function socket(server: PoolServer): Promise<SocketClient> {
+  const client = await openSocket(server.url);
+  sockets.push(client);
+  return client;
+}
 
 /** This suite's pools always carry a console.json with the stub defaults;
  *  the fixture's makePool writes one only when handed a config. */
@@ -523,7 +534,7 @@ describe("pool server", () => {
     await server.settled();
   });
 
-  it("carries queued answers in the 202, /api/state, and SSE while a super-step is in flight", async () => {
+  it("carries queued answers in the 202, /api/state, and the socket while a super-step is in flight", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
       { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
@@ -571,20 +582,11 @@ describe("pool server", () => {
     const stateBody = (await stateRes.json()) as { snapshot: Snap };
     expect(stateBody.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
 
-    // An SSE client connecting now replays the latest snapshot, queue included.
-    const res = await fetch(`${server.url}/api/stream`);
-    const reader = res.body?.getReader();
-    expect(reader).toBeTruthy();
-    const decoder = new TextDecoder();
-    let data = "";
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && !data.includes('"queuedAnswers"')) {
-      const { value, done } = await reader!.read();
-      if (done) break;
-      data += decoder.decode(value, { stream: true });
-    }
-    await reader!.cancel();
-    expect(data).toContain('"ticketId":"01"');
+    // A socket opening now starts from the latest snapshot, queue included.
+    const client = await socket(server);
+    await client.waitFor((frame) => frame.type === "snapshot");
+    expect(client.pushed?.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
+    client.close();
 
     // Processing at the boundary clears the waiting state on the snapshot
     // that follows, with no re-poll.
@@ -598,7 +600,7 @@ describe("pool server", () => {
     ).toBe(false);
   }, 15000);
 
-  it("streams the latest snapshot to an SSE client on connect", async () => {
+  it("sends the latest snapshot to a socket on connect", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
@@ -608,76 +610,49 @@ describe("pool server", () => {
     await server.answer(REVIEW_TICKET_ID, "approve");
     await server.settled();
 
-    const res = await fetch(`${server.url}/api/stream`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/event-stream");
-
-    const reader = res.body?.getReader();
-    expect(reader).toBeTruthy();
-    const decoder = new TextDecoder();
-    let data = "";
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && !data.includes('"phase"')) {
-      const { value, done } = await reader!.read();
-      if (done) break;
-      data += decoder.decode(value, { stream: true });
-    }
-    expect(data).toContain("event: snapshot");
-    expect(data).toContain('"phase":"done"');
-    await reader!.cancel();
+    const client = await socket(server);
+    const opening = await client.waitFor((frame) => frame.type === "snapshot");
+    expect(client.frames[0]?.type).toBe("hello");
+    expect(opening).toMatchObject({ type: "snapshot", snapshot: { phase: "done" } });
   });
 
-  it("keeps the stream open through more than ten seconds of a quiet pool", async () => {
+  it("keeps the socket open through more than ten seconds of a quiet pool", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
     const server = await startServer(poolDir, stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses);
     await server.start();
-    // The pool now waits at the checkpoint interrupt: the stream goes silent.
+    await server.settled();
+    // The pool now waits at the checkpoint interrupt: nothing more is pushed.
 
-    const res = await fetch(`${server.url}/api/stream`);
-    expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-
-    let data = "";
-    while (!data.includes('"phase"')) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("stream closed before the replayed snapshot");
-      data += decoder.decode(value, { stream: true });
-    }
-
-    // A dropped stream rejects the pending read rather than ending cleanly.
+    const client = await socket(server);
+    await client.waitFor((frame) => frame.type === "snapshot" && frame.snapshot !== null);
     let closed = false;
-    const nextFrame = reader.read().then(
-      ({ done }) => {
-        if (done) closed = true;
-      },
-      () => {
-        closed = true;
-      },
-    );
-    // The default ten-second timeout's close reaches the client a couple of
-    // seconds late, so wait well past both.
+    void client.closed.then(() => {
+      closed = true;
+    });
+    // HTTP's default ten-second idle timeout would have cut a request by
+    // now, its close reaching the client a couple of seconds late, so wait
+    // well past both.
     await Bun.sleep(14_000);
     expect(closed).toBe(false);
 
-    // The same connection still delivers the next broadcast after the silence.
+    // The same socket still delivers the next change after the silence.
+    const from = client.frames.length;
     await server.answer("01", "resume");
-    const arrived = await Promise.race([
-      nextFrame.then(() => true),
-      Bun.sleep(3000).then(() => false),
-    ]);
-    expect(arrived).toBe(true);
+    await client.waitFor((frame) => frame.type === "delta", {
+      from,
+      ms: 3000,
+      what: "the delta after the silence",
+    });
     expect(closed).toBe(false);
-    await reader.cancel();
     // The resume re-ran the ticket: let that drive settle before afterEach
     // removes the pool dir, or its mid-run reads fail an unrelated test with
     // the unhandled ENOENT.
     await server.settled();
   }, 25_000);
 
-  it("pushes an SSE heartbeat comment frame on the snapshot stream", async () => {
+  it("sends a heartbeat frame on the socket", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
@@ -687,27 +662,15 @@ describe("pool server", () => {
     await server.start();
     await server.settled();
 
-    const res = await fetch(`${server.url}/api/stream`);
-    expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-
-    let data = "";
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && !data.includes(": heartbeat")) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("stream closed before a heartbeat frame");
-      data += decoder.decode(value, { stream: true });
-    }
-    await reader.cancel();
-    // The heartbeat is a comment frame: nothing but the comment line, so a
-    // browser EventSource dispatches no event for it.
-    const frames = data.split("\n\n");
-    const heartbeat = frames.find((f) => f.includes(": heartbeat"));
-    expect(heartbeat).toBe(": heartbeat");
+    const client = await socket(server);
+    const beat = await client.waitFor((frame) => frame.type === "heartbeat", {
+      ms: 3000,
+      what: "a heartbeat",
+    });
+    expect(beat).toEqual({ type: "heartbeat" });
   });
 
-  it("opens the snapshot stream with a frame publishing the heartbeat interval", async () => {
+  it("opens the socket with a hello publishing the heartbeat interval", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
     ]);
@@ -717,71 +680,42 @@ describe("pool server", () => {
     await server.start();
     await server.settled();
 
-    const res = await fetch(`${server.url}/api/stream`);
-    expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const { value } = await reader.read();
-    await reader.cancel();
-    // The opening frame carries the configured interval, ahead of the
-    // replayed snapshot, so the client's silence window derives from it.
-    const firstFrame = new TextDecoder().decode(value).split("\n\n")[0];
-    expect(firstFrame).toBe('event: stream-config\ndata: {"heartbeatMs":40}');
+    const client = await socket(server);
+    const hello = await client.waitFor((frame) => frame.type === "hello");
+    // The first frame, ahead of the snapshot, so the client's silence
+    // window derives from the served interval.
+    expect(client.frames[0]).toBe(hello);
+    expect(hello).toMatchObject({ protocol: PROTOCOL_VERSION, heartbeatMs: 40 });
   });
 });
 
-// The stream gathers the engine's emits for a short window and sends the
-// latest of them (issue #157): a burst is one frame, nothing is lost at the
-// end of a run, and a zero window keeps the old one-frame-per-emit stream.
-describe("snapshot stream coalescing", () => {
+// The socket gathers the engine's emits for a short window and pushes the
+// latest of them (issue #157): a burst is one delta, nothing is lost at the
+// end of a run, and a zero window keeps one push per emit.
+describe("snapshot push coalescing", () => {
   const ready = "<!-- state: id=01 blocked-by=none status=ready -->";
 
-  /** The seqs of the snapshot frames a stream carries until one reaches `seq`. */
-  async function seqsUntil(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    seq: () => number | undefined,
-  ): Promise<number[]> {
-    const decoder = new TextDecoder();
-    let text = "";
-    const deadline = Date.now() + 10_000;
-    // One read in flight at a time: a read that loses the race to the sleep
-    // still owns the next chunk.
-    let pending: ReturnType<typeof reader.read> | null = null;
-    for (;;) {
-      const seqs = snapshotFrames(text).map((f) => (f as unknown as { seq: number }).seq);
-      const want = seq();
-      if (want !== undefined && seqs.at(-1) === want) return seqs;
-      if (Date.now() > deadline) throw new Error(`stream never reached seq ${want}: ${seqs}`);
-      pending ??= reader.read();
-      const step = await Promise.race([pending, Bun.sleep(200).then(() => null)]);
-      if (step === null) continue;
-      pending = null;
-      if (step.done) throw new Error("stream ended early");
-      text += decoder.decode(step.value, { stream: true });
-    }
-  }
-
-  it("sends every emit as its own frame with a zero window", async () => {
+  it("pushes every emit as its own frame with a zero window", async () => {
     const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
     const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       snapshotCoalesceMs: 0,
     });
-    const res = await fetch(`${server.url}/api/stream`);
-    const reader = res.body!.getReader();
+    const client = await socket(server);
+    await client.sync();
     await server.start();
     await server.settled();
-    const seqs = await seqsUntil(reader, () => server.latest?.seq);
-    await reader.cancel();
-    expect(seqs).toEqual(seqs.map((_, i) => i));
-    expect(seqs.length).toBeGreaterThan(2);
+    await waitFor(() => client.seqs.at(-1) === server.latest?.seq, "the socket to reach the last emit");
+    expect(client.seqs).toEqual(client.seqs.map((_, i) => i));
+    expect(client.seqs.length).toBeGreaterThan(2);
   });
 
-  it("sends a burst of emits as one frame carrying the latest", async () => {
+  it("pushes a burst of emits as one frame carrying the latest", async () => {
     const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
     const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       snapshotCoalesceMs: 500,
     });
-    const res = await fetch(`${server.url}/api/stream`);
-    const reader = res.body!.getReader();
+    const client = await socket(server);
+    await client.sync();
     await server.start();
     await server.settled();
     // A route reads the engine's last emit at once, inside the window.
@@ -790,15 +724,15 @@ describe("snapshot stream coalescing", () => {
       snapshot: { seq: number };
     };
     expect(state.snapshot.seq).toBe(final);
-    const seqs = await seqsUntil(reader, () => final);
-    await reader.cancel();
+    await waitFor(() => client.seqs.at(-1) === final, "the socket to reach the last emit");
     // Fewer frames than emits, in order, and the last is the run's last emit.
+    const seqs = client.seqs;
     expect(seqs.length).toBeLessThan(final + 1);
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
     expect(seqs.at(-1)).toBe(final);
   }, 15_000);
 
-  it("sends a waiting snapshot before the streams close", async () => {
+  it("pushes a waiting snapshot before the sockets close", async () => {
     const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
     const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
       snapshotCoalesceMs: 60_000,
@@ -807,14 +741,12 @@ describe("snapshot stream coalescing", () => {
     await server.settled();
     await server.answer(REVIEW_TICKET_ID, "approve");
     await server.settled();
-    const res = await fetch(`${server.url}/api/stream`);
-    const reader = res.body!.getReader();
-    await readOpeningFrames(reader);
+    const client = await socket(server);
+    await client.sync();
     const stop = await fetch(`${server.url}/api/stop`, { method: "POST" });
     expect(stop.status).toBe(202);
-    const { text, ended } = await drainStream(reader);
-    expect(ended).toBe("clean");
-    expect(snapshotFrames(text).at(-1)?.phase).toBe("stopped");
+    expect(await client.closed).toEqual({ ...CLOSE_STOPPED });
+    expect(client.pushed?.snapshot.phase).toBe("stopped");
     await server.shutdown();
   });
 });
@@ -3211,66 +3143,6 @@ describe("terminalRuntimeRefusal", () => {
 // is how a tab tells an orderly stop from a dropped connection.
 // ---------------------------------------------------------------------------
 
-/** Read the snapshot stream until its replayed snapshot has arrived. */
-async function readOpeningFrames(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): Promise<string> {
-  const decoder = new TextDecoder();
-  let text = "";
-  while (!text.includes('"phase"')) {
-    const { value, done } = await reader.read();
-    if (done) throw new Error("stream ended before its replayed snapshot");
-    text += decoder.decode(value, { stream: true });
-  }
-  return text;
-}
-
-/** Read a snapshot stream to its end, reporting how it ended: `clean` is the
- *  orderly end-of-stream a Console stop owes its clients, `error` the thrown
- *  read of a socket cut from under them. */
-async function drainStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  ms = 10_000,
-): Promise<{ text: string; ended: "clean" | "error" | "timeout" }> {
-  const decoder = new TextDecoder();
-  let text = "";
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const left = deadline - Date.now();
-    if (left <= 0) return { text, ended: "timeout" };
-    const step = await Promise.race([
-      reader.read().then(
-        (r) =>
-          r.done
-            ? ({ kind: "clean" } as const)
-            : ({ kind: "chunk", value: r.value } as const),
-        () => ({ kind: "error" }) as const,
-      ),
-      Bun.sleep(left).then(() => ({ kind: "timeout" }) as const),
-    ]);
-    if (step.kind === "chunk") {
-      text += decoder.decode(step.value, { stream: true });
-      continue;
-    }
-    return { text, ended: step.kind };
-  }
-}
-
-/** Every complete snapshot frame in a stream's raw text. */
-function snapshotFrames(text: string): { phase: string; poolDir: string }[] {
-  const prefix = "event: snapshot\ndata: ";
-  const frames: { phase: string; poolDir: string }[] = [];
-  for (const frame of text.split("\n\n")) {
-    if (!frame.startsWith(prefix)) continue;
-    try {
-      frames.push(JSON.parse(frame.slice(prefix.length)));
-    } catch {
-      // A frame the read boundary cut in half; the rest arrives next read.
-    }
-  }
-  return frames;
-}
-
 describe("stop from the Console (#97)", () => {
   const ready = "<!-- state: id=01 blocked-by=none status=ready -->";
 
@@ -3343,37 +3215,34 @@ describe("stop from the Console (#97)", () => {
     expect(settled.state.tickets.map((t) => t.status)).toEqual(["done"]);
   }, 20_000);
 
-  // The whole orderly stop, end to end: the 202, the farewell frame, the
-  // clean end of stream, the closed port, the released lock.
-  it("stops a finished pool: 202, a `stopped` farewell, then a closed stream and port", async () => {
+  // The whole orderly stop, end to end: the 202, the farewell delta, the
+  // clean close, the closed port, the released lock.
+  it("stops a finished pool: 202, a `stopped` farewell, then a closed socket and port", async () => {
     const { poolDir, server } = await finishedServer();
     expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
 
-    const res = await fetch(`${server.url}/api/stream`);
-    expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const opening = await readOpeningFrames(reader);
-    expect(opening).toContain('"phase":"done"');
+    const client = await socket(server);
+    const opening = await client.waitFor((frame) => frame.type === "snapshot");
+    expect(opening).toMatchObject({ snapshot: { phase: "done" } });
 
     const stop = await fetch(`${server.url}/api/stop`, { method: "POST" });
     expect(stop.status).toBe(202);
     expect(await stop.json()).toEqual({ stopping: true });
 
-    // The farewell arrives on the open stream, and the stream then ends of
-    // its own accord: a tab learns the server left on purpose.
-    const { text, ended } = await drainStream(reader);
-    expect(text).toContain('"phase":"stopped"');
-    expect(ended).toBe("clean");
+    // The farewell arrives on the open socket, and the server then closes
+    // it cleanly: a tab learns the server left on purpose.
+    expect(await client.closed).toEqual({ ...CLOSE_STOPPED });
+    const farewell = client.frames.at(-1);
+    expect(farewell?.type).toBe("delta");
+    expect(client.pushed?.snapshot.phase).toBe("stopped");
 
     // The farewell names the pool dir a relaunch would pass to --pool.
-    const farewell = snapshotFrames(text).at(-1);
-    expect(farewell?.phase).toBe("stopped");
-    expect(farewell?.poolDir).toBe(poolDir);
+    expect(client.pushed?.snapshot.poolDir).toBe(poolDir);
 
-    // The end of the stream is not the end of the stop: the streams are
-    // closed first and serving stops behind a short drain, so joining the
-    // in-flight stop (shutdown is latched, so this starts no second one) is
-    // what makes the two assertions below exact rather than racy.
+    // The close is not the end of the stop: the sockets are closed first and
+    // serving stops behind a short drain, so joining the in-flight stop
+    // (shutdown is latched, so this starts no second one) is what makes the
+    // two assertions below exact rather than racy.
     await server.shutdown();
 
     // Serving has stopped and the pool lock is released, so a relaunch on
@@ -3521,12 +3390,11 @@ describe("server shutdown on signal", () => {
       expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(true);
 
       // A Console tab watching this pool when the signal lands (issue #97):
-      // the stream it holds must end with the farewell, not with a reset
-      // socket, so the tab can say the server left on purpose.
+      // the socket it holds must end with the farewell, not with a reset
+      // connection, so the tab can say the server left on purpose.
       const port = await waitForCliPort(join(poolDir, "fleet.json"), server.pid);
-      const stream = await fetch(`http://localhost:${port}/api/stream`);
-      const reader = stream.body!.getReader();
-      await readOpeningFrames(reader);
+      const tab = await openSocket(`http://localhost:${port}`);
+      await tab.waitFor((frame) => frame.type === "snapshot" && frame.snapshot !== null);
 
       server.kill("SIGTERM");
       const code = await server.exited;
@@ -3535,9 +3403,8 @@ describe("server shutdown on signal", () => {
       expect(live(pid)).toBe(false);
       expect(live(grandchild)).toBe(false);
       expect(existsSync(join(poolDir, "runs", "server.pid"))).toBe(false);
-      const farewell = await drainStream(reader);
-      expect(farewell.text).toContain('"phase":"stopped"');
-      expect(farewell.ended).toBe("clean");
+      expect(await tab.closed).toEqual({ ...CLOSE_STOPPED });
+      expect(tab.pushed?.snapshot.phase).toBe("stopped");
       const stdout = await new Response(server.stdout).text();
       expect(stdout).toContain("SIGTERM: stopping attempts, then exiting");
       const recorded = readFileSync(events, "utf8");
@@ -3615,17 +3482,15 @@ describe("server shutdown on signal", () => {
         "the pool to finish",
       );
 
-      const stream = await fetch(`${url}/api/stream`);
-      const reader = stream.body!.getReader();
-      await readOpeningFrames(reader);
+      const tab = await openSocket(url);
+      await tab.waitFor((frame) => frame.type === "snapshot" && frame.snapshot !== null);
 
       const stop = await fetch(`${url}/api/stop`, { method: "POST" });
       expect(stop.status).toBe(202);
       expect(await stop.json()).toEqual({ stopping: true });
 
-      const farewell = await drainStream(reader);
-      expect(farewell.text).toContain('"phase":"stopped"');
-      expect(farewell.ended).toBe("clean");
+      expect(await tab.closed).toEqual({ ...CLOSE_STOPPED });
+      expect(tab.pushed?.snapshot.phase).toBe("stopped");
 
       // The process is the thing that had to go: it exits 0, says why, and
       // leaves the pool unlocked for a relaunch.

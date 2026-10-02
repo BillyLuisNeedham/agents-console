@@ -23,6 +23,8 @@ import {
   stubHarness,
 } from "./pool-fixture.ts";
 import { makeTempDir } from "./tmp.ts";
+import { CLOSE_STOPPED } from "./protocol.ts";
+import { openSocket } from "./socket-fixture.ts";
 import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "./herdr-executing-fake.ts";
 
 const servers: PoolServer[] = [];
@@ -110,29 +112,6 @@ async function waitFor(cond: () => boolean, what: string): Promise<void> {
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await Bun.sleep(10);
-  }
-}
-
-/** Read a snapshot stream to its end, or until the deadline. */
-async function drainStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  ms = 10_000,
-): Promise<string> {
-  const decoder = new TextDecoder();
-  let text = "";
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const left = deadline - Date.now();
-    if (left <= 0) return text;
-    const step = await Promise.race([
-      reader.read().then(
-        (r) => (r.done ? ({ kind: "end" } as const) : ({ kind: "chunk", value: r.value } as const)),
-        () => ({ kind: "end" }) as const,
-      ),
-      Bun.sleep(left).then(() => ({ kind: "end" }) as const),
-    ]);
-    if (step.kind !== "chunk") return text;
-    text += decoder.decode(step.value, { stream: true });
   }
 }
 
@@ -584,17 +563,17 @@ describe("POST /api/restart (#121)", () => {
   // ADR-0019's farewell is owed to a Restart exactly as to a Stop: the tab
   // that asked knows it was a restart, and every other tab sees the same
   // orderly goodbye rather than a dropped connection.
-  it("sends the farewell `stopped` snapshot and ends the stream", async () => {
+  it("sends the farewell `stopped` snapshot and closes the socket", async () => {
     const { server } = await startRig();
 
-    const stream = await fetch(`${server.url}/api/stream`);
-    const reader = stream.body!.getReader();
+    const tab = await openSocket(server.url);
+    await tab.sync();
 
     const res = await fetch(`${server.url}/api/restart`, { method: "POST" });
     expect(res.status).toBe(202);
 
-    const text = await drainStream(reader);
-    expect(text).toContain('"phase":"stopped"');
+    expect(await tab.closed).toEqual({ ...CLOSE_STOPPED });
+    expect(tab.pushed?.snapshot.phase).toBe("stopped");
 
     // Joining the in-flight stop (shutdown is latched) makes the port
     // assertion exact rather than racy.

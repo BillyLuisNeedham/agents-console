@@ -47,8 +47,10 @@ import {
   projectPendingSpawns,
   projectPool,
   projectTimeline,
+  timelineEvent,
   selectLogAttempt,
   statusLabel,
+  safeMarkdownUrl,
   ticketBodyHtml,
   projectVitals,
   pushVitalsSample,
@@ -1182,6 +1184,108 @@ describe("ticketBodyHtml", () => {
   });
 });
 
+describe("ticketBodyHtml on hostile bodies (an agent's prose is untrusted)", () => {
+  // An attribute's value as the browser reads it: entities decoded.
+  const decode = (value: string) =>
+    value
+      .replace(/&#x([0-9a-f]+);?/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);?/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+  // Every tag the HTML holds, every URL it would follow, and whether any tag
+  // carries an event handler.
+  function inspect(html: string) {
+    const tags = [...html.matchAll(/<([a-z][a-z0-9]*)\b/gi)].map((m) => m[1]!.toLowerCase());
+    const urls = [...html.matchAll(/\s(?:href|src)="([^"]*)"/gi)].map((m) => decode(m[1]!));
+    const handlers = /<[^>]*\son[a-z]+\s*=/i.test(html);
+    return { tags, urls, handlers };
+  }
+  const HOSTILE = [
+    "<img src=x onerror=alert(1)>",
+    "before <img src=x onerror=alert(1)> after",
+    "<svg onload=alert(1)>",
+    "inline <svg/onload=alert(1)> too",
+    '<iframe src="javascript:alert(1)"></iframe>',
+    "<script>alert(1)</script>",
+    "[x](javascript:alert(1))",
+    "[x](JaVaScRiPt:alert(1))",
+    "[x](  javascript:alert(1))",
+    "[x](<java\tscript:alert(1)>)",
+    "[x](javascript&#58;alert(1))",
+    "[x](&#106;avascript:alert(1))",
+    "[x](vbscript:msgbox(1))",
+    "[x](data:text/html,<script>alert(1)</script>)",
+    "![x](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+)",
+    "![x](javascript:alert(1))",
+    "<javascript:alert(1)>",
+    "[x][ref]\n\n[ref]: javascript:alert(1)",
+  ];
+
+  for (const body of HOSTILE) {
+    it(`renders ${JSON.stringify(body)} inert`, () => {
+      const { tags, urls, handlers } = inspect(ticketBodyHtml(body));
+      expect(handlers).toBe(false);
+      for (const tag of ["script", "svg", "iframe", "img", "object", "embed"]) {
+        expect(tags).not.toContain(tag);
+      }
+      for (const url of urls) expect(safeMarkdownUrl(url)).toBe(true);
+    });
+  }
+
+  it("shows raw HTML as the text it is", () => {
+    const html = ticketBodyHtml("before <img src=x onerror=alert(1)> after");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  it("keeps a refused link's text and a refused image's alt text", () => {
+    expect(ticketBodyHtml("[click me](javascript:alert(1))")).toContain("click me");
+    expect(ticketBodyHtml("![a diagram](data:image/png;base64,AAAA)")).toContain("a diagram");
+  });
+
+  it("keeps http, https, mailto and relative links and images", () => {
+    const { tags, urls } = inspect(
+      ticketBodyHtml(
+        "[a](https://example.com/x?y=1&z=2) [b](http://example.com) [c](mailto:a@b.c) " +
+          "[d](./docs/spec.md) [e](#section) ![f](https://example.com/f.png \"the title\")",
+      ),
+    );
+    expect(tags.filter((tag) => tag === "a")).toHaveLength(5);
+    expect(tags).toContain("img");
+    expect(urls).toEqual([
+      "https://example.com/x?y=1&z=2",
+      "http://example.com",
+      "mailto:a@b.c",
+      "./docs/spec.md",
+      "#section",
+      "https://example.com/f.png",
+    ]);
+  });
+});
+
+describe("safeMarkdownUrl", () => {
+  it("reads the scheme the way a browser does", () => {
+    for (const url of [
+      "javascript:alert(1)",
+      "JAVASCRIPT:alert(1)",
+      " javascript:alert(1)",
+      "\u0001javascript:alert(1)",
+      "java\tscript:alert(1)",
+      "java\nscript:alert(1)",
+      "vbscript:x",
+      "data:text/html,x",
+      "file:///etc/passwd",
+    ]) {
+      expect(safeMarkdownUrl(url)).toBe(false);
+    }
+    for (const url of ["https://x", "HTTP://x", "mailto:a@b.c", "/rel", "rel/path", "#frag", "?q=1", ""]) {
+      expect(safeMarkdownUrl(url)).toBe(true);
+    }
+  });
+});
+
 describe("phaseLabel", () => {
   it("labels the phases", () => {
     expect(phaseLabel("running")).toBe("running");
@@ -1750,6 +1854,8 @@ describe("projectTimeline", () => {
     expect(view.attempts[0]).toEqual({
       number: 1,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: true,
       running: false,
       logFile: "01.log",
@@ -1848,6 +1954,8 @@ describe("joinStreamFiles", () => {
     expect(joined.attempts[0]).toEqual({
       number: 1,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: true,
       running: false,
       logFile: "01.log",
@@ -1856,11 +1964,88 @@ describe("joinStreamFiles", () => {
   });
 });
 
+describe("projectTimeline across frames (issue #161)", () => {
+  function eventRow(attempt: number, i: number, kind: TicketEvent["kind"] = "checkpoint"): TicketEvent {
+    return { at: `2026-01-01T00:00:${String(i).padStart(2, "0")}.000Z`, attempt, kind, payload: {} };
+  }
+  function response(events: TicketEvent[]) {
+    return { events, attempts: [], reconstructed: false, spec: "s" };
+  }
+  // A frame is parsed afresh: equal events, never the same objects.
+  const parsed = (events: TicketEvent[]) => events.map((e) => ({ ...e, payload: { ...e.payload } }));
+
+  it("counts each attempt and names its outcome without decoding its events", () => {
+    const view = projectTimeline(
+      response([
+        eventRow(1, 0, "spawned"),
+        { ...eventRow(1, 1, "graded"), payload: { score: 6, verdict: "flag", reasons: "r" } },
+        eventRow(1, 2, "exited"),
+        eventRow(2, 3, "spawned"),
+      ]),
+      "in-progress",
+    );
+    expect(view.attempts.map((a) => [a.count, a.outcome])).toEqual([
+      [3, "6/10 flag"],
+      [1, "spawned"],
+    ]);
+    expect(timelineEvent(view.attempts[1]!, 0)).toBe(timelineEvent(view.attempts[1]!, 0));
+    expect(view.attempts[1]!.events[0]).toBe(timelineEvent(view.attempts[1]!, 0));
+  });
+
+  it("keeps an attempt with nothing new, and carries a grown one's decoded rows over", () => {
+    const first = [eventRow(1, 0), eventRow(1, 1), eventRow(2, 2)];
+    const before = projectTimeline(response(first), "in-progress");
+    const decoded = timelineEvent(before.attempts[1]!, 0);
+    const after = projectTimeline(response(parsed([...first, eventRow(2, 3)])), "in-progress", {
+      response: response(first),
+      view: before,
+    });
+    expect(after.attempts[0]).toBe(before.attempts[0]!);
+    expect(after.attempts[1]).not.toBe(before.attempts[1]!);
+    expect(after.attempts[1]!.count).toBe(2);
+    expect(timelineEvent(after.attempts[1]!, 0)).toBe(decoded);
+  });
+
+  it("hands back the same timeline for a frame with nothing new", () => {
+    const events = [eventRow(1, 0), eventRow(2, 1)];
+    const before = projectTimeline(response(events), "in-progress");
+    const again = projectTimeline(response(parsed(events)), "in-progress", {
+      response: response(events),
+      view: before,
+    });
+    expect(again).toBe(before);
+  });
+
+  it("starts over on a frame that does not continue the last one", () => {
+    const before = projectTimeline(response([eventRow(1, 0)]), "done");
+    const other = projectTimeline(response([eventRow(1, 9, "exited")]), "done", {
+      response: response([eventRow(1, 0)]),
+      view: before,
+    });
+    expect(other.attempts[0]).not.toBe(before.attempts[0]!);
+    expect(other.attempts[0]!.events[0]!.kind).toBe("exited");
+  });
+
+  it("joins Stream files keeping every row already right, and the rest still decode lazily", () => {
+    const view = projectTimeline(response([eventRow(1, 0), eventRow(2, 1)]), "done");
+    const joined = joinStreamFiles(view, [
+      { attempt: 1, streamFile: null },
+      { attempt: 2, streamFile: "02.stream.jsonl" },
+    ]);
+    expect(joined.attempts[0]).toBe(view.attempts[0]!);
+    expect(joined.attempts[1]!.streamFile).toBe("02.stream.jsonl");
+    expect(timelineEvent(joined.attempts[1]!, 0)).toBe(timelineEvent(view.attempts[1]!, 0));
+    expect(joinStreamFiles(view, [{ attempt: 1, streamFile: null }])).toBe(view);
+  });
+});
+
 function timelineView(attempts: { number: number; running: boolean }[]): TimelineView {
   return {
     attempts: attempts.map(({ number, running }) => ({
       number,
       events: [],
+      count: 0,
+      outcome: null,
       reconstructed: false,
       running,
       logFile: null,
