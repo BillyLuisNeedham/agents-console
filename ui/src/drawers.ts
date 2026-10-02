@@ -16,6 +16,8 @@ import { h } from "./dom";
 /** The slice of the app model the drawers render from. */
 export interface DrawersModel {
   log: string[];
+  logTotal: number;
+  logEarlier: { loading: boolean; error: string | null };
   logOpen: boolean;
   inspectorJson: string;
   inspectorOpen: boolean;
@@ -25,6 +27,7 @@ export interface DrawersModel {
 export interface DrawersHandlers {
   onToggleLog: () => void;
   onToggleInspector: () => void;
+  onLoadEarlierPoolLog: () => void;
 }
 
 export class Drawers {
@@ -68,18 +71,49 @@ export class Drawers {
     return h("div", { class: "drawers" }, handle, row);
   }
 
+  // The pool log: the lines held, the snapshot's last 500 after any read
+  // back, with "load earlier" above them while the log is longer than that
+  // (issue #161).
   private renderLogDrawer(model: DrawersModel, handlers: DrawersHandlers): HTMLElement {
     const lines = model.log.length > 0 ? model.log.join("\n") : "- no log lines yet -";
+    const more = model.log.length < model.logTotal;
     return h(
       "div",
       { class: "log-drawer" + (model.logOpen ? " log-open" : "") },
       h(
         "button",
         { class: "drawer-bar", onclick: () => handlers.onToggleLog() },
-        `log (${model.log.length}) ${model.logOpen ? "▾" : "▴"}`,
+        `log (${model.logTotal}) ${model.logOpen ? "▾" : "▴"}`,
       ),
+      model.logOpen && (more || model.logEarlier.error)
+        ? h(
+            "div",
+            { class: "log-earlier", key: "log-earlier" },
+            more
+              ? h(
+                  "button",
+                  {
+                    class: "btn log-earlier-load",
+                    type: "button",
+                    disabled: model.logEarlier.loading,
+                    onclick: () => handlers.onLoadEarlierPoolLog(),
+                  },
+                  model.logEarlier.loading
+                    ? "loading…"
+                    : `load earlier (${model.logTotal - model.log.length} more)`,
+                )
+              : null,
+            model.logEarlier.error
+              ? h("span", { class: "error-inline" }, model.logEarlier.error)
+              : null,
+          )
+        : null,
       model.logOpen
-        ? h("pre", { class: "log-lines", style: `height:${this.height}vh` }, lines)
+        ? h(
+            "pre",
+            { class: "log-lines", key: "log-lines", style: `height:${this.height}vh` },
+            lines,
+          )
         : null,
     );
   }

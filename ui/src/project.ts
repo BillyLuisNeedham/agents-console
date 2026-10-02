@@ -244,10 +244,26 @@ interface TimelineEventView {
   steward: string | null;
 }
 
+// The formatters the timeline and the delivery warning print times with,
+// made once (issue #161): `toLocaleTimeString` builds a formatter on every
+// call, tens of microseconds each, which made a long timeline's projection
+// cost a frame. These print exactly what it printed.
+const EVENT_TIME = new Intl.DateTimeFormat([], {
+  hour: "numeric",
+  minute: "numeric",
+  second: "numeric",
+  hour12: false,
+});
+const CLOCK_TIME = new Intl.DateTimeFormat([], {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 function formatEventTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour12: false });
+  return EVENT_TIME.format(date);
 }
 
 /** The graded event's payload as a grade, or null when a field is missing or
@@ -994,9 +1010,12 @@ export interface TerminalSurfaceView {
   text: string;
   /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
   justFocused: boolean;
-  /** True while an "Open in herdr" is out (issue #157): the button reads
-   *  as opening until the server answers. */
+  /** True while an "Open in herdr" is out: the button stands disabled, so
+   *  a double click never sends twice. */
   focusing?: boolean;
+  /** A refused "Open in herdr"'s reason (issue #161), shown beside the
+   *  button until the next press. */
+  focusFailure?: string | null;
 }
 
 export interface UtilityCardView {
@@ -2007,7 +2026,7 @@ function projectDelivery(delivery: NoticeDelivery | undefined): DeliveryWarningV
   const at = new Date(delivery.failingSince);
   const since = Number.isNaN(at.getTime())
     ? ""
-    : ` since ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+    : ` since ${CLOCK_TIME.format(at)}`;
   return {
     text: `Notices not reaching this pane${since}: something in the pane is in the way`,
     lastError: delivery.lastError,

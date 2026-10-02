@@ -233,6 +233,34 @@ describe("Canvas across a morphing render", () => {
     ],
   });
 
+  it("rebuilds only the cards whose view moved, keeping every other node untouched (#161)", () => {
+    const two = model({
+      cards: [
+        { kind: "utility", id: "u-1", label: "grader", interrupt: null, x: 100, y: 100 },
+        { kind: "utility", id: "u-2", label: "reviewer", interrupt: null, x: 400, y: 100 },
+      ],
+    });
+    const { root, commit } = mountCanvas(two);
+    commit();
+    const node = (id: string) => root.querySelector<HTMLElement>(`[data-node-id="${id}"]`)!;
+    const [first, second] = [node("u-1"), node("u-2")];
+    // A mark no render draws: a card the morph walks loses it, one it keeps does not.
+    first.setAttribute("data-mark", "");
+    second.setAttribute("data-mark", "");
+    two.cards = [two.cards[0]!, { ...two.cards[1]!, label: "reviewer 2" } as never];
+    commit();
+    expect(node("u-1")).toBe(first);
+    expect(first.hasAttribute("data-mark")).toBe(true);
+    expect(node("u-2")).toBe(second);
+    expect(second.hasAttribute("data-mark")).toBe(false);
+    expect(second.textContent).toContain("reviewer 2");
+    // Once drawn, the changed card is kept too while nothing about it moves.
+    second.setAttribute("data-mark", "");
+    commit();
+    expect(first.hasAttribute("data-mark")).toBe(true);
+    expect(second.hasAttribute("data-mark")).toBe(true);
+  });
+
   it("keeps the Assignment badge expanded across the renders after the click", () => {
     const { root, commit } = mountCanvas(withTicket);
     commit();
