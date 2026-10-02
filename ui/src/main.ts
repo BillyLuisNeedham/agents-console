@@ -17,7 +17,7 @@ import {
 import { createConsole } from "./console";
 import { POOL_TAB_COLORS, poolTabTitle } from "./project";
 import type { ConsoleSession } from "./session";
-import { reloadForVersion } from "./socket";
+import { reloadForVersion, windowNameStore } from "./socket";
 
 const appRoot = document.getElementById("app");
 if (!appRoot) throw new Error("#app not found");
@@ -128,7 +128,13 @@ const app = createConsole({
   // A page built for another protocol version reloads for the UI the server
   // now serves, once: a second mismatch inside the guard window shows the
   // banner instead of looping.
-  onVersionMismatch: () => reloadForVersion(sessionStore(), Date.now(), () => location.reload()),
+  onVersionMismatch: () =>
+    reloadForVersion(
+      sessionStore(),
+      Date.now(),
+      () => location.reload(),
+      windowNameStore(window),
+    ),
   onSessionChange: updateTab,
 });
 

@@ -102,7 +102,18 @@ export interface ConsoleSocketOptions {
   visible?: boolean;
   /** The reconnect delays, the last one repeating; tests shorten them. */
   reconnectDelaysMs?: readonly number[];
+  /** How long a socket must stay up before the delays start over; tests
+   *  shorten it. */
+  stableMs?: number;
 }
+
+/** How long a socket must stay up before the reconnect delays start over:
+ *  a server that greets and then drops every socket still backs off. */
+export const STABLE_SOCKET_MS = 5_000;
+
+/** A socket silent this many heartbeats when the page wakes (shown again,
+ *  or back online) is taken for half open and replaced at once. */
+export const WAKE_SILENCE_FACTOR = 1.5;
 
 interface Outstanding {
   resolve: (result: never) => void;
@@ -114,13 +125,15 @@ type Timer = ReturnType<typeof setTimeout>;
 export class ConsoleSocket {
   private readonly options: ConsoleSocketOptions;
   private readonly delays: readonly number[];
+  private readonly stableMs: number;
   private socket: SocketLike | null = null;
-  // The socket's own state: its `onopen` came (frames can go out), its
-  // `hello` came (it is a server of our version, and the reconnect delays
-  // start over once it goes), and the epoch that hello named.
+  // The socket's own state: its `onopen` came (our hello went, and frames
+  // may follow it), its `hello` came (a server of our version), the epoch
+  // that hello named, and when its last frame landed.
   private opened = false;
   private greeted = false;
   private socketEpoch: string | null = null;
+  private lastFrameAt = 0;
   // The snapshot held and the server epoch it came from: the embedded one,
   // then whatever the sockets pushed. A rev means something only within
   // its epoch.
@@ -138,6 +151,8 @@ export class ConsoleSocket {
   private retries = 0;
   private silence: Timer | null = null;
   private retry: Timer | null = null;
+  // Starts the delays over once a greeted socket has stayed up long enough.
+  private stable: Timer | null = null;
   // Set once the socket is done for good: disposed, or a server of another
   // protocol version.
   private finished = false;
@@ -145,6 +160,7 @@ export class ConsoleSocket {
   constructor(options: ConsoleSocketOptions) {
     this.options = options;
     this.delays = options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS;
+    this.stableMs = options.stableMs ?? STABLE_SOCKET_MS;
     this.visible = options.visible ?? true;
   }
 
@@ -186,9 +202,10 @@ export class ConsoleSocket {
   /**
    * Send a request and resolve with its result, or reject with a
    * RequestRefused carrying the refusal. A request asked for while the
-   * socket is connecting goes out behind its hello; one asked for with no
-   * socket at all (between a close and the reopen) is refused at once,
-   * never held for a later socket, since an action may not be idempotent.
+   * socket is connecting goes out right behind our hello; one asked for
+   * with no socket at all (between a close and the reopen) is refused at
+   * once, never held for a later socket, since an action may not be
+   * idempotent.
    */
   request<K extends RequestKind>(kind: K, payload: RequestPayload<K>): Promise<RequestResult<K>> {
     if (this.finished || !this.socket) {
@@ -198,24 +215,26 @@ export class ConsoleSocket {
     const message = { type: "request", id, kind, payload } as ClientMessage;
     return new Promise<RequestResult<K>>((resolve, reject) => {
       this.outstanding.set(id, { resolve: resolve as (result: never) => void, reject });
-      if (this.connected) this.send(message);
+      if (this.opened) this.send(message);
       else this.waiting.push({ id, message });
     });
   }
 
   /**
    * Subscribe a card, or change its follow: kept in the set every hello
-   * carries, and sent now when the socket is up.
+   * carries, and sent now when the socket is open. The server reads frames
+   * in order behind our hello, so one sent before its own hello lands is
+   * as good as one sent after.
    */
   subscribe(card: CardSubscription): void {
     this.cards.set(card.id, card);
-    if (this.connected) this.send({ type: "subscribe", card });
+    if (this.opened) this.send({ type: "subscribe", card });
   }
 
   /** Stop a card's pushes. An id not subscribed sends nothing. */
   unsubscribe(id: string): void {
     if (!this.cards.delete(id)) return;
-    if (this.connected) this.send({ type: "unsubscribe", id });
+    if (this.opened) this.send({ type: "unsubscribe", id });
   }
 
   /**
@@ -228,11 +247,35 @@ export class ConsoleSocket {
     return this.request("log.follow", { id, ...follow });
   }
 
-  /** The page was shown or hidden: a hidden page gets no live values. */
+  /** The page was shown or hidden: a hidden page gets no live values. A
+   *  page shown again checks its socket is still alive (`wake`). */
   setVisible(visible: boolean): void {
     if (visible === this.visible) return;
     this.visible = visible;
-    if (this.connected) this.send({ type: "visibility", visible });
+    if (visible) this.wake();
+    if (this.opened) this.send({ type: "visibility", visible });
+  }
+
+  /**
+   * The page woke: shown again, or back online. After a sleep or a network
+   * change the socket may be half open, with nothing arriving and presses
+   * hanging until the silence watchdog fires up to a minute later; one that
+   * has heard nothing for WAKE_SILENCE_FACTOR heartbeats is replaced now.
+   * With no socket (waiting out a reconnect delay), the reopen happens now.
+   */
+  wake(): void {
+    if (this.finished) return;
+    if (!this.socket) {
+      if (this.retry !== null) {
+        clearTimeout(this.retry);
+        this.connect();
+      }
+      return;
+    }
+    if (!this.opened) return;
+    if (Date.now() - this.lastFrameAt <= WAKE_SILENCE_FACTOR * this.heartbeatMs) return;
+    this.drop(4000, "silent");
+    this.connect();
   }
 
   // -------------------------------------------------------------------------
@@ -261,15 +304,20 @@ export class ConsoleSocket {
     socket.onopen = () => {
       if (this.socket !== socket) return;
       this.opened = true;
+      this.lastFrameAt = Date.now();
       this.send({
         type: "hello",
         protocol: PROTOCOL_VERSION,
         visible: this.visible,
         cards: [...this.cards.values()],
       });
+      // What was asked for while the socket connected goes right behind.
+      for (const { message: waiting } of this.waiting) this.send(waiting);
+      this.waiting = [];
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
+      this.lastFrameAt = Date.now();
       this.armSilence();
       if (typeof event.data !== "string") return;
       let message: ServerMessage;
@@ -302,12 +350,16 @@ export class ConsoleSocket {
           return;
         }
         this.greeted = true;
-        this.retries = 0;
         this.socketEpoch = message.epoch;
         this.heartbeatMs = message.heartbeatMs;
         this.armSilence();
-        for (const { message: waiting } of this.waiting) this.send(waiting);
-        this.waiting = [];
+        // The delays start over only once this socket has stayed up: a
+        // server that greets and then drops every socket still backs off.
+        if (this.stable !== null) clearTimeout(this.stable);
+        this.stable = setTimeout(() => {
+          this.stable = null;
+          this.retries = 0;
+        }, this.stableMs);
         return;
       case "snapshot": {
         const same =
@@ -389,10 +441,12 @@ export class ConsoleSocket {
   }
 
   // The held snapshot no longer fits the deltas: close with the resync
-  // code (the server logs why) and reopen for a fresh snapshot.
+  // code (the server logs why) and reopen for a fresh snapshot, after the
+  // same delays a close waits out, so a server that keeps sending deltas
+  // that do not fit is not hammered with sockets.
   private resync(): void {
     this.drop(CLOSE_RESYNC.code, CLOSE_RESYNC.reason);
-    this.connect();
+    this.reconnectLater();
   }
 
   /** Let go of the current socket, refusing whatever is still out on it. */
@@ -401,6 +455,9 @@ export class ConsoleSocket {
     this.socket = null;
     this.opened = false;
     this.greeted = false;
+    for (const timer of [this.silence, this.stable]) if (timer !== null) clearTimeout(timer);
+    this.silence = null;
+    this.stable = null;
     if (socket) {
       socket.onopen = null;
       socket.onmessage = null;
@@ -419,13 +476,18 @@ export class ConsoleSocket {
   private lost(reason: string, stopped: boolean): void {
     this.opened = false;
     this.greeted = false;
-    if (this.silence !== null) {
-      clearTimeout(this.silence);
-      this.silence = null;
-    }
+    for (const timer of [this.silence, this.stable]) if (timer !== null) clearTimeout(timer);
+    this.silence = null;
+    this.stable = null;
     this.refuseOutstanding();
     if (this.finished) return;
     this.guard(() => this.options.onConnection({ up: false, reason, stopped }));
+    this.reconnectLater();
+  }
+
+  /** Reopen after the next of the reconnect delays. */
+  private reconnectLater(): void {
+    if (this.finished) return;
     const delay = this.delays[Math.min(this.retries, this.delays.length - 1)] ?? 0;
     this.retries += 1;
     this.retry = setTimeout(() => this.connect(), delay);
@@ -439,10 +501,12 @@ export class ConsoleSocket {
   }
 
   private clearTimers(): void {
-    if (this.silence !== null) clearTimeout(this.silence);
-    if (this.retry !== null) clearTimeout(this.retry);
+    for (const timer of [this.silence, this.retry, this.stable]) {
+      if (timer !== null) clearTimeout(timer);
+    }
     this.silence = null;
     this.retry = null;
+    this.stable = null;
   }
 }
 
@@ -470,31 +534,62 @@ export interface StampStore {
  * the UI built for it, unless this tab already reloaded for that reason in
  * the last 10 s, when reloading again would only loop (a server still
  * serving old bytes). Returns whether it reloaded; false means the caller
- * shows VERSION_BANNER. A storage that throws (a private window) never
- * blocks the reload.
+ * shows VERSION_BANNER. The stamp goes in sessionStorage, or, where that is
+ * missing or throws (a private window, blocked site data), in the fallback
+ * (the window's name, which survives a reload too); a page that can stamp
+ * neither does not reload, since nothing would stop it looping.
  */
 export function reloadForVersion(
   storage: StampStore | null,
   now: number,
   reload: () => void,
+  fallback: StampStore | null = null,
 ): boolean {
   let last = Number.NaN;
-  try {
-    const stamp = storage?.getItem(VERSION_RELOAD_KEY);
-    if (stamp) last = Number(stamp);
-  } catch {
-    // no storage: nothing to guard with
+  for (const store of [storage, fallback]) {
+    try {
+      const stamp = store?.getItem(VERSION_RELOAD_KEY);
+      if (stamp) {
+        last = Number(stamp);
+        break;
+      }
+    } catch {
+      // this store cannot be read: try the next
+    }
   }
   if (Number.isFinite(last) && now - last >= 0 && now - last < VERSION_RELOAD_GUARD_MS) {
     return false;
   }
-  try {
-    storage?.setItem(VERSION_RELOAD_KEY, String(now));
-  } catch {
-    // no storage: reload unguarded
+  let stamped = false;
+  for (const store of [storage, fallback]) {
+    if (!store || stamped) continue;
+    try {
+      store.setItem(VERSION_RELOAD_KEY, String(now));
+      stamped = true;
+    } catch {
+      // this store cannot be written: try the next
+    }
   }
+  if (!stamped) return false;
   reload();
   return true;
+}
+
+/**
+ * A stamp store over a window's name: the version reload's guard where
+ * sessionStorage is out of reach. A window's name outlives a reload of the
+ * page in it, and the Console uses it for nothing else.
+ */
+export function windowNameStore(win: { name: string }): StampStore {
+  return {
+    getItem: (key) => {
+      const prefix = `${key}=`;
+      return win.name.startsWith(prefix) ? win.name.slice(prefix.length) : null;
+    },
+    setItem: (key, value) => {
+      win.name = `${key}=${value}`;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ import {
   timelineEvent,
   selectLogAttempt,
   statusLabel,
+  safeMarkdownUrl,
   ticketBodyHtml,
   projectVitals,
   pushVitalsSample,
@@ -1180,6 +1181,108 @@ describe("ticketBodyHtml", () => {
     const html = ticketBodyHtml("some prose with `code` inside");
     expect(html).toContain("<p>");
     expect(html).toContain("<code>code</code>");
+  });
+});
+
+describe("ticketBodyHtml on hostile bodies (an agent's prose is untrusted)", () => {
+  // An attribute's value as the browser reads it: entities decoded.
+  const decode = (value: string) =>
+    value
+      .replace(/&#x([0-9a-f]+);?/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);?/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&");
+  // Every tag the HTML holds, every URL it would follow, and whether any tag
+  // carries an event handler.
+  function inspect(html: string) {
+    const tags = [...html.matchAll(/<([a-z][a-z0-9]*)\b/gi)].map((m) => m[1]!.toLowerCase());
+    const urls = [...html.matchAll(/\s(?:href|src)="([^"]*)"/gi)].map((m) => decode(m[1]!));
+    const handlers = /<[^>]*\son[a-z]+\s*=/i.test(html);
+    return { tags, urls, handlers };
+  }
+  const HOSTILE = [
+    "<img src=x onerror=alert(1)>",
+    "before <img src=x onerror=alert(1)> after",
+    "<svg onload=alert(1)>",
+    "inline <svg/onload=alert(1)> too",
+    '<iframe src="javascript:alert(1)"></iframe>',
+    "<script>alert(1)</script>",
+    "[x](javascript:alert(1))",
+    "[x](JaVaScRiPt:alert(1))",
+    "[x](  javascript:alert(1))",
+    "[x](<java\tscript:alert(1)>)",
+    "[x](javascript&#58;alert(1))",
+    "[x](&#106;avascript:alert(1))",
+    "[x](vbscript:msgbox(1))",
+    "[x](data:text/html,<script>alert(1)</script>)",
+    "![x](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+)",
+    "![x](javascript:alert(1))",
+    "<javascript:alert(1)>",
+    "[x][ref]\n\n[ref]: javascript:alert(1)",
+  ];
+
+  for (const body of HOSTILE) {
+    it(`renders ${JSON.stringify(body)} inert`, () => {
+      const { tags, urls, handlers } = inspect(ticketBodyHtml(body));
+      expect(handlers).toBe(false);
+      for (const tag of ["script", "svg", "iframe", "img", "object", "embed"]) {
+        expect(tags).not.toContain(tag);
+      }
+      for (const url of urls) expect(safeMarkdownUrl(url)).toBe(true);
+    });
+  }
+
+  it("shows raw HTML as the text it is", () => {
+    const html = ticketBodyHtml("before <img src=x onerror=alert(1)> after");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  it("keeps a refused link's text and a refused image's alt text", () => {
+    expect(ticketBodyHtml("[click me](javascript:alert(1))")).toContain("click me");
+    expect(ticketBodyHtml("![a diagram](data:image/png;base64,AAAA)")).toContain("a diagram");
+  });
+
+  it("keeps http, https, mailto and relative links and images", () => {
+    const { tags, urls } = inspect(
+      ticketBodyHtml(
+        "[a](https://example.com/x?y=1&z=2) [b](http://example.com) [c](mailto:a@b.c) " +
+          "[d](./docs/spec.md) [e](#section) ![f](https://example.com/f.png \"the title\")",
+      ),
+    );
+    expect(tags.filter((tag) => tag === "a")).toHaveLength(5);
+    expect(tags).toContain("img");
+    expect(urls).toEqual([
+      "https://example.com/x?y=1&z=2",
+      "http://example.com",
+      "mailto:a@b.c",
+      "./docs/spec.md",
+      "#section",
+      "https://example.com/f.png",
+    ]);
+  });
+});
+
+describe("safeMarkdownUrl", () => {
+  it("reads the scheme the way a browser does", () => {
+    for (const url of [
+      "javascript:alert(1)",
+      "JAVASCRIPT:alert(1)",
+      " javascript:alert(1)",
+      "\u0001javascript:alert(1)",
+      "java\tscript:alert(1)",
+      "java\nscript:alert(1)",
+      "vbscript:x",
+      "data:text/html,x",
+      "file:///etc/passwd",
+    ]) {
+      expect(safeMarkdownUrl(url)).toBe(false);
+    }
+    for (const url of ["https://x", "HTTP://x", "mailto:a@b.c", "/rel", "rel/path", "#frag", "?q=1", ""]) {
+      expect(safeMarkdownUrl(url)).toBe(true);
+    }
   });
 });
 

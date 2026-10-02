@@ -960,7 +960,7 @@ describe("Detail: a long timeline (issue #161)", () => {
     const q = <T extends Element = HTMLElement>(selector: string) =>
       root.querySelector<T>(selector);
     const all = (selector: string) => [...root.querySelectorAll<HTMLElement>(selector)];
-    return { paint, q, all, changes: () => changes };
+    return { pane, paint, q, all, changes: () => changes };
   }
 
   it("opens the latest attempt and closes each earlier one to a line with its outcome and count", () => {
@@ -987,6 +987,26 @@ describe("Detail: a long timeline (issue #161)", () => {
     r.paint(timeline);
     r.paint(projectTimeline(events(3, 4), "done"));
     expect(r.all(".timeline-attempt")[0]!.querySelectorAll(".timeline-entry")).toHaveLength(4);
+  });
+
+  it("lets a closed attempt's event rows go, nodes and all", () => {
+    const r = mount();
+    const timeline = projectTimeline(events(3, 4), "done");
+    r.paint(timeline);
+    const toggle = () =>
+      r.all(".timeline-attempt")[0]!
+        .querySelector<HTMLButtonElement>(".timeline-attempt-toggle")!
+        .click();
+    const held = () =>
+      [...(r.pane as unknown as { timelineRows: Map<string, unknown> }).timelineRows.keys()].filter(
+        (key) => key.startsWith("1:"),
+      );
+    toggle();
+    r.paint(timeline);
+    expect(held()).toHaveLength(4);
+    toggle();
+    r.paint(timeline);
+    expect(held()).toHaveLength(0);
   });
 
   it("shows a huge attempt's newest events, and the earlier ones a window at a time", () => {

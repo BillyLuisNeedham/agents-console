@@ -1,7 +1,7 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { Canvas, canvasStatusText, type CanvasModel } from "./canvas";
+import { Canvas, canvasStatusText, sameView, type CanvasModel } from "./canvas";
 import { commit as commitTree } from "./morph";
 import { useDom } from "./test-dom";
 import { projectPool, type EnrichedSnapshot } from "./project";
@@ -259,6 +259,16 @@ describe("Canvas across a morphing render", () => {
     commit();
     expect(first.hasAttribute("data-mark")).toBe(true);
     expect(second.hasAttribute("data-mark")).toBe(true);
+  });
+
+  it("compares projected views by value, taking a shared part as equal at once (#161)", () => {
+    const peek = { paneId: "p1", status: "live", text: "x".repeat(10_000), justFocused: false };
+    expect(sameView({ id: "a", terminal: peek, list: [1, 2] }, { id: "a", terminal: peek, list: [1, 2] })).toBe(true);
+    expect(sameView({ id: "a", terminal: { ...peek } }, { id: "a", terminal: { ...peek } })).toBe(true);
+    expect(sameView({ id: "a", list: [1, 2] }, { id: "a", list: [1, 3] })).toBe(false);
+    expect(sameView({ id: "a" }, { id: "a", extra: null })).toBe(false);
+    expect(sameView({ id: "a", x: null }, { id: "a", x: {} })).toBe(false);
+    expect(sameView([1], { 0: 1 })).toBe(false);
   });
 
   it("keeps the Assignment badge expanded across the renders after the click", () => {
