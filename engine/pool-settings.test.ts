@@ -70,10 +70,10 @@ describe("pool settings", () => {
   });
 
   it("leaves a key the patch never mentions exactly as it was", () => {
-    const dir = pool({ roster: "- deepseek", terminal: "herdr" });
+    const dir = pool({ checkpoint: "a device", terminal: "herdr" });
     writePoolSettings(dir, { reviewer: "acceptance criteria only" }, { harnesses: [] });
     expect(onDisk(dir)).toEqual({
-      roster: "- deepseek",
+      checkpoint: "a device",
       terminal: "herdr",
       reviewer: "acceptance criteria only",
     });
@@ -85,14 +85,14 @@ describe("pool settings", () => {
     const dir = pool({
       port: 8787,
       terminal: "herdr",
-      roster: "- deepseek",
+      reviewer: "- deepseek",
       selection: "human",
       assign: { "01": {} },
     });
 
     const written = writePoolSettings(
       dir,
-      { port: null, terminal: "", roster: "   ", selection: undefined },
+      { port: null, terminal: "", reviewer: "   ", selection: undefined },
       { harnesses: HARNESSES },
     );
 
@@ -241,17 +241,24 @@ describe("pool settings", () => {
     ).toEqual({ harness: "gpt" });
   });
 
-  // `agents` reaches claude's --agents flag verbatim, so a string that is not
-  // a JSON object fails at launch hours later unless it fails here.
-  it("rejects an agents string that is not a JSON object", () => {
+  // ADR-0031: roster and agents are retired. A file that still carries them
+  // reads as if it did not, and the next save drops them without a word.
+  it("reads past a retired roster and agents, and drops them on the next save", () => {
+    const dir = pool({ roster: "- deepseek", agents: '{"deepseek":{}}', port: 8787 });
+    expect(readPoolSettings(dir).config).toEqual({ port: 8787 });
+    writePoolSettings(dir, { reviewer: "r" }, { harnesses: [] });
+    expect(onDisk(dir)).toEqual({ port: 8787, reviewer: "r" });
+  });
+
+  it("ignores a retired key a stale tab still sends, valid or not", () => {
     const dir = pool({});
-    expect(() => writePoolSettings(dir, { agents: "{not json" }, { harnesses: [] })).toThrow(
-      /agents/,
+    const written = writePoolSettings(
+      dir,
+      { roster: "- deepseek", agents: "{not json" },
+      { harnesses: [] },
     );
-    expect(() => writePoolSettings(dir, { agents: '["a"]' }, { harnesses: [] })).toThrow(/agents/);
-    expect(
-      writePoolSettings(dir, { agents: '{"deepseek": {"model": "x"}}' }, { harnesses: [] }).agents,
-    ).toBe('{"deepseek": {"model": "x"}}');
+    expect(written).toEqual({});
+    expect(onDisk(dir)).toEqual({});
   });
 
   it("ignores a key outside the pane's own, so a stale tab cannot write assign", () => {
@@ -269,7 +276,7 @@ describe("pool settings", () => {
   // of the write may be left behind for the next boundary to trip over.
   it("writes through a rename, leaving no temporary file behind", () => {
     const dir = pool({ port: 8787 });
-    writePoolSettings(dir, { roster: "- deepseek" }, { harnesses: [] });
+    writePoolSettings(dir, { reviewer: "- deepseek" }, { harnesses: [] });
     expect(readdirSync(dir)).toEqual(["console.json"]);
   });
 
@@ -288,8 +295,6 @@ describe("pool settings", () => {
     // The Spawn caps reload at the boundary (issue #149), so no Restart badge.
     expect(POOL_SETTINGS_KEYS).toContain("spawnCaps");
     expect([...BOOT_ONLY_KEYS]).toEqual([
-      "roster",
-      "agents",
       "selection",
       "terminal",
       "port",

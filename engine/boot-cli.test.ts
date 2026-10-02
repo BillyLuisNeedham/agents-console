@@ -33,6 +33,7 @@ import {
   prefillFromSetup,
   readConsoleConfig,
   readSetup,
+  refreshAgentHead,
   setupFromConfig,
   writeSetup,
 } from "./boot-config.ts";
@@ -42,7 +43,13 @@ import {
   tailOf,
   waitForPidRelease,
 } from "./boot-launch.ts";
-import { interview, nameNewPool, parseBootArgs, type BootIo } from "./boot-cli.ts";
+import {
+  interview,
+  nameNewPool,
+  parseBootArgs,
+  refreshAgentMd,
+  type BootIo,
+} from "./boot-cli.ts";
 
 function temp(prefix = "boot-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -347,6 +354,24 @@ describe("console.json", () => {
     expect("terminal" in merged).toBe(false);
   });
 
+  // ADR-0031: roster and agents are retired. A pool that still has them
+  // boots as if it did not, and Boot's own write drops them, saying nothing.
+  it("drops a retired roster and agents on write, and never prefills them", () => {
+    const existing = {
+      defaults: { harness: "claude", model: "m" },
+      roster: "- deepseek",
+      agents: '{"deepseek":{}}',
+      reviewer: "r",
+    };
+    const merged = mergeConsoleConfig(existing, {});
+    expect("roster" in merged).toBe(false);
+    expect("agents" in merged).toBe(false);
+    expect(merged.reviewer).toBe("r");
+    const prefill = prefillFromConfig(existing) as Record<string, unknown>;
+    expect(prefill.roster).toBeUndefined();
+    expect(prefill.agents).toBeUndefined();
+  });
+
   it("refuses a config that is there but does not parse", () => {
     const pool = temp();
     writeFileSync(join(pool, "console.json"), "{ not json");
@@ -391,8 +416,97 @@ describe("AGENT.md", () => {
   });
 });
 
+// Issue #155: the engine's half of a pool's AGENT.md follows the template on
+// every Boot, so a pool booted before the template changed stops teaching the
+// old prose; the pool's half below the marker is never touched.
+describe("AGENT.md refresh", () => {
+  const OLD_HEAD = [
+    "# Runner agent instructions",
+    "",
+    "## Your role",
+    "",
+    "You are an **orchestrator**. Delegate to the subagents in your roster.",
+    "",
+  ].join("\n");
+  const NEW_HEAD = ["# Runner agent instructions", "", "## Your job", "", "You work one ticket.", ""].join(
+    "\n",
+  );
+  // Odd bytes on purpose: trailing spaces, CRLF, no final newline, and a
+  // non-ASCII character, all of which must come back exactly.
+  const POOL_HALF = "\n\n## Read before you touch anything  \r\n- `SPEC.md`: the spec, café\n\n## Notes";
+  const template = `${NEW_HEAD}${CONFIG_MARKER}\n\nAuthor everything below.\n`;
+
+  it("replaces the old engine half and keeps the pool's half byte for byte", () => {
+    const existing = Buffer.from(`${OLD_HEAD}${CONFIG_MARKER}${POOL_HALF}`, "utf8");
+    const refreshed = refreshAgentHead(existing, template);
+    expect(refreshed?.toString("utf8")).toBe(`${NEW_HEAD}${CONFIG_MARKER}${POOL_HALF}`);
+    const after = refreshed!.subarray(refreshed!.indexOf(CONFIG_MARKER));
+    expect(after.equals(existing.subarray(existing.indexOf(CONFIG_MARKER)))).toBe(true);
+  });
+
+  it("returns nothing to write for a file with no marker", () => {
+    expect(refreshAgentHead(Buffer.from("# Hand written\n\nNo marker here.\n"), template)).toBeNull();
+  });
+
+  it("returns nothing to write when the template itself has no marker", () => {
+    const existing = Buffer.from(`${OLD_HEAD}${CONFIG_MARKER}${POOL_HALF}`);
+    expect(refreshAgentHead(existing, "# no marker\n")).toBeNull();
+  });
+
+  function rig(agentMd: string | null): { pool: string; engine: string; logs: string[] } {
+    const pool = temp("refresh-pool-");
+    const engine = temp("refresh-engine-");
+    mkdirSync(join(engine, "skills", "my-console-runner"), { recursive: true });
+    writeFileSync(join(engine, "skills", "my-console-runner", "AGENT.template.md"), template);
+    if (agentMd !== null) writeFileSync(join(pool, "AGENT.md"), agentMd);
+    return { pool, engine, logs: [] };
+  }
+
+  function quietIo(logs: string[]): BootIo {
+    return { ask: async (_q, fallback) => fallback, log: (line) => logs.push(line), warn: (line) => logs.push(line) };
+  }
+
+  it("rewrites the pool's AGENT.md on Boot and says so", () => {
+    const r = rig(`${OLD_HEAD}${CONFIG_MARKER}${POOL_HALF}`);
+    refreshAgentMd(r.pool, r.engine, quietIo(r.logs));
+    expect(readFileSync(join(r.pool, "AGENT.md"), "utf8")).toBe(`${NEW_HEAD}${CONFIG_MARKER}${POOL_HALF}`);
+    expect(r.logs).toContain("refreshed AGENT.md above the CONFIG marker from the template");
+
+    // A second Boot finds it current and says nothing.
+    r.logs.length = 0;
+    refreshAgentMd(r.pool, r.engine, quietIo(r.logs));
+    expect(r.logs).toEqual([]);
+  });
+
+  it("leaves an AGENT.md with no marker exactly as it was", () => {
+    const handWritten = "# Our own instructions\n\nYou are an orchestrator.\n";
+    const r = rig(handWritten);
+    refreshAgentMd(r.pool, r.engine, quietIo(r.logs));
+    expect(readFileSync(join(r.pool, "AGENT.md"), "utf8")).toBe(handWritten);
+    expect(r.logs).toContain("AGENT.md has no CONFIG marker; left as it is");
+  });
+
+  // ADR-0031: the engine's half says what to build and which skills to use,
+  // never how to work.
+  it("ships a template whose engine half prescribes no method", () => {
+    const real = readFileSync(
+      join(import.meta.dir, "..", "skills", "my-console-runner", "AGENT.template.md"),
+      "utf8",
+    );
+    const head = real.slice(0, real.indexOf(CONFIG_MARKER));
+    expect(real.indexOf(CONFIG_MARKER)).toBeGreaterThan(0);
+    expect(head).not.toMatch(/orchestrat|subagent|delegat|roster|dispatch/i);
+  });
+
+  it("creates nothing when the pool has no AGENT.md", () => {
+    const r = rig(null);
+    refreshAgentMd(r.pool, r.engine, quietIo(r.logs));
+    expect(existsSync(join(r.pool, "AGENT.md"))).toBe(false);
+  });
+});
+
 describe("Setups", () => {
-  it("saves the seven behavioural keys and never the pool-specific ones", () => {
+  it("saves the behavioural keys and never the pool-specific or retired ones", () => {
     const home = temp("setup-home-");
     const config = {
       defaults: { harness: "claude", model: "m" },
@@ -409,12 +523,10 @@ describe("Setups", () => {
     expect(file).toBe(join(home, ".agent-graphs", "setups", "my-build-setup.json"));
     const saved = readSetup("my-build-setup", home);
     expect(Object.keys(saved ?? {}).sort()).toEqual([
-      "agents",
       "checkpoint",
       "defaults",
       "resolver",
       "reviewer",
-      "roster",
       "terminal",
     ]);
   });
@@ -546,12 +658,12 @@ describe("interview", () => {
     expect(result.answers.drivers).toBe("implement");
     expect(result.answers.terminal).toBe("herdr");
     expect(result.missing).toEqual([]);
-    expect(pen.asked).toContain("subagent roster (blank for none)");
+    expect(pen.asked.some((question) => /roster|agents/.test(question))).toBe(false);
   });
 
   it("asks nothing for a field a prefill already settled", async () => {
     const pen = io({});
-    const settled = { harness: "opencode", model: "m", effort: "high", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 9001, terminal: "herdr" as const };
+    const settled = { harness: "opencode", model: "m", effort: "high", drivers: "implement", resolver: "opencode", reviewer: "r", checkpoint: "c", port: 9001, terminal: "herdr" as const };
     const result = await interview({
       io: pen,
       prefill: { ...settled },
@@ -588,7 +700,7 @@ describe("interview", () => {
     await interview({
       io: pen,
       prefill: { seeded: true },
-      settled: { harness: "claude", model: "m", drivers: "d", resolver: "claude", reviewer: "r", checkpoint: "c", roster: "x", agents: "{}", port: 1, terminal: "herdr" },
+      settled: { harness: "claude", model: "m", drivers: "d", resolver: "claude", reviewer: "r", checkpoint: "c", port: 1, terminal: "herdr" },
       detection: { ...detection, conversations: true },
       unattended: false,
     });

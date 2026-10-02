@@ -266,7 +266,7 @@ const SETTINGS: SettingsResponse = {
   pool: {
     path: "/tmp/harness-pool/console.json",
     config: { defaults: { harness: "claude", model: "opus" }, port: 4300 },
-    bootOnly: ["roster", "agents", "selection", "terminal", "port"],
+    bootOnly: ["selection", "terminal", "port"],
     effective: { port: 4300, terminal: "herdr", stale: [] },
   },
   machine: {

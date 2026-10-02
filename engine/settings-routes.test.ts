@@ -154,8 +154,6 @@ describe("GET /api/settings", () => {
       assign: { "01": { harness: "stub", verify: 2 } },
     });
     expect(settings.pool.bootOnly).toEqual([
-      "roster",
-      "agents",
       "selection",
       "terminal",
       "port",
@@ -201,15 +199,16 @@ describe("GET /api/settings", () => {
 
     // Edited by hand, which no save in this tab could have told the Console
     // about. Dropping terminal is stale even though the run is still
-    // terminal-backed: that is precisely what a Restart would change.
+    // terminal-backed: that is precisely what a Restart would change. A
+    // retired roster (ADR-0031) is read past, so it is neither served nor
+    // stale.
     writeFileSync(
       join(poolDir, "console.json"),
       JSON.stringify({ ...STUB_DEFAULTS, roster: "- deepseek" }, null, 2),
     );
-    expect((await getSettings(server)).pool.effective.stale).toEqual([
-      "roster",
-      "terminal",
-    ]);
+    const handEdited = await getSettings(server);
+    expect(handEdited.pool.effective.stale).toEqual(["terminal"]);
+    expect("roster" in handEdited.pool.config).toBe(false);
 
     // Putting it back is not stale, so the badge clears rather than latching.
     writeFileSync(
@@ -254,7 +253,7 @@ describe("PUT /api/settings/pool", () => {
     });
 
     const res = await putJson(server, "/api/settings/pool", {
-      config: { defaults: { harness: "stub", model: "m2" }, roster: "- deepseek" },
+      config: { defaults: { harness: "stub", model: "m2" }, reviewer: "- deepseek" },
     });
     expect(res.status).toBe(200);
     const settings = (await res.json()) as SettingsResponse;
@@ -262,7 +261,7 @@ describe("PUT /api/settings/pool", () => {
     expect(settings.pool.config).toEqual({
       defaults: { harness: "stub", model: "m2" },
       assign: { "01": { harness: "stub", verify: 2 } },
-      roster: "- deepseek",
+      reviewer: "- deepseek",
     });
     expect(onDisk(poolDir)).toEqual(settings.pool.config as never);
   });
@@ -274,7 +273,6 @@ describe("PUT /api/settings/pool", () => {
     const { poolDir, server } = await startRig({
       port: 8790,
       terminal: "herdr",
-      roster: "- deepseek",
       selection: "human",
       assign: { "01": { harness: "stub", verify: 2 } },
     });
@@ -286,8 +284,6 @@ describe("PUT /api/settings/pool", () => {
         terminal: null,
         port: null,
         selection: null,
-        roster: null,
-        agents: null,
         reviewer: "acceptance criteria only",
         checkpoint: null,
       },

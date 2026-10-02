@@ -14,7 +14,6 @@ export interface SpawnContext {
   // harness on its own default. Each argv builder whose mode takes an effort
   // (HarnessDescriptor.takesEffort) passes it; the rest ignore it.
   effort?: string;
-  agents?: string;
   logPath: string;
   outcomePath: string;
   // The attempt's exit-code file (ADR-0014): a terminal-backed attempt's pane
@@ -165,9 +164,6 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       ...effortArgs("--effort", ctx),
       "--permission-mode",
       "auto",
-      // The roster JSON the glued prompt promises claude. opencode and cursor
-      // get the roster as prose only, same as run.sh.
-      ...(ctx.agents ? ["--agents", ctx.agents] : []),
       // The structured stream the pump tees to the attempt's Stream file and
       // derives the log from, live (ADR-0012). --verbose is required by the
       // real CLI for stream-json in print mode.
@@ -182,7 +178,6 @@ export const defaultHarnessDescriptors: Record<string, HarnessDescriptor> = {
       ...effortArgs("--effort", ctx),
       "--permission-mode",
       "auto",
-      ...(ctx.agents ? ["--agents", ctx.agents] : []),
     ],
     readyPattern: "Claude Code v",
     // claude's ready-frame header (prototype/tui-prompt-paste/FINDINGS.md

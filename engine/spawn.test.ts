@@ -46,10 +46,11 @@ describe("defaultHarnesses", () => {
     ]);
   });
 
-  it("passes the roster JSON to claude through --agents", () => {
-    const agents = '{"deepseek":{"description":"General-purpose subagent"}}';
-    const argv = defaultHarnesses.claude(context({ agents }));
-    expect(argv[argv.indexOf("--agents") + 1]).toBe(agents);
+  // ADR-0031: the Console names skills, never a subagent roster, so claude
+  // launches with whatever agents the user's own harness config defines.
+  it("never passes --agents to claude", () => {
+    expect(defaultHarnesses.claude(context())).not.toContain("--agents");
+    expect(defaultHarnessDescriptors.claude.interactiveArgv(context())).not.toContain("--agents");
   });
 
   it("builds the opencode argv from the fields without the driver line in the message", () => {
@@ -174,15 +175,12 @@ describe("defaultHarnessDescriptors", () => {
   });
 
   it("builds the interactive argv from the batch argv minus the batch-only flags", () => {
-    const agents = '{"deepseek":{"description":"General-purpose subagent"}}';
-    expect(defaultHarnessDescriptors.claude.interactiveArgv(context({ agents }))).toEqual([
+    expect(defaultHarnessDescriptors.claude.interactiveArgv(context())).toEqual([
       "claude",
       "--model",
       "claude-test",
       "--permission-mode",
       "auto",
-      "--agents",
-      agents,
     ]);
     expect(
       defaultHarnessDescriptors.claude.interactiveArgv(context()),

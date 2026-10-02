@@ -307,8 +307,6 @@ interface TicketAssignment {
 export interface PoolConfig {
   defaults?: AssignmentDefaults;
   assign?: Record<string, TicketAssignment>;
-  roster?: string;
-  agents?: string;
   // The merge resolver: a harness name (the model is inherited from
   // defaults), "none" to opt out, or { harness, model, effort } when the
   // resolver runs on a harness other than the defaults', whose model names
@@ -6522,7 +6520,7 @@ function resolveUnseenAssignments(
 
 // The keys the reload touches: the assignment slice, and the Spawn caps
 // (ADR-0029) and the Steward entry (ADR-0030) beside it. Everything else on
-// PoolConfig (roster, agents, selection, terminal, port) stays exactly as it
+// PoolConfig (selection, terminal, port) stays exactly as it
 // was at boot, whatever the file says, for the life of the run.
 const CONFIG_SLICE_KEYS = ["defaults", "assign", "resolver", "spawnCaps", "steward"] as const;
 
@@ -8587,7 +8585,6 @@ function attemptEnvFrom(
     children,
     liveAttempts,
     terminalBacked: config.terminal === "herdr",
-    agents: config.agents,
     ...(launchCadence ? { launchCadence } : {}),
   };
 }
@@ -11039,7 +11036,6 @@ async function runTicket(
   const prompt = buildPrompt({
     chain,
     agentMd,
-    roster: snapshot.config.roster ?? "",
     upstream,
     outcomePath,
     spawnCaps: spawnCapsOf(snapshot.config),
@@ -11197,8 +11193,18 @@ export function parseConfig(raw: string | null, poolDir: string): PoolConfig {
   }
   checkSpawnCaps(parsed.spawnCaps);
   checkStewardConfig(parsed.steward);
+  for (const key of RETIRED_CONFIG_KEYS) delete parsed[key];
   return parsed as PoolConfig;
 }
+
+/**
+ * Keys a pool config once held and the engine no longer reads (ADR-0031):
+ * the subagent `roster` prose and the `agents` JSON once handed to claude's
+ * `--agents`. A file that still carries them reads as if it did not, with no
+ * warning, and every writer that starts from a read drops them on its next
+ * write. Boot's own read-modify-write (boot-config.ts) drops the same pair.
+ */
+export const RETIRED_CONFIG_KEYS = ["roster", "agents"] as const;
 
 // The Steward's harness, when its entry names one, must be one the pool
 // knows (ADR-0030): checked where the harness table is, the reload's dry run,

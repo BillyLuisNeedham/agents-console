@@ -53,6 +53,7 @@ import {
   prefillFromSetup,
   readConsoleConfig,
   readSetup,
+  refreshAgentHead,
   setupFromConfig,
   setupPath,
   writeConsoleConfig,
@@ -379,7 +380,7 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
   // machine or from a Setup has to land in this pool's file rather than
   // being looked up again at every boot. Effort is only ever carried this
   // way: the interview never asks it, the Settings pane edits it.
-  for (const key of ["harness", "model", "effort", "drivers", "reviewer", "checkpoint", "roster", "agents"] as const) {
+  for (const key of ["harness", "model", "effort", "drivers", "reviewer", "checkpoint"] as const) {
     const value = settled[key];
     if (value !== undefined) answers[key] = value;
   }
@@ -428,23 +429,6 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
     );
     if (checkpoint !== "") answers.checkpoint = checkpoint;
   }
-  if (settled.roster === undefined) {
-    const roster = await put("subagent roster (blank for none)", prefill.roster ?? "");
-    if (roster !== "") answers.roster = roster;
-  }
-  if (settled.agents === undefined) {
-    for (;;) {
-      const agents = await put("agents JSON for claude's --agents (blank for none)", prefill.agents ?? "");
-      if (agents === "") break;
-      if (!parsesAsObject(agents)) {
-        io.warn("that is not a JSON object; agents must parse as one");
-        if (input.unattended) break;
-        continue;
-      }
-      answers.agents = agents;
-      break;
-    }
-  }
   if (settled.port === undefined) {
     for (;;) {
       const port = await put("port to pin (auto for 8787 or next free)", portText(prefill.port));
@@ -484,7 +468,11 @@ export async function interview(input: InterviewInput): Promise<InterviewResult>
   return { answers, seeded, asked, missing };
 }
 
-/** The pool's prose files, written once and never overwritten afterwards. */
+/**
+ * The pool's prose files, written when they are missing. The pool's own half
+ * of an `AGENT.md` that is already there is never overwritten; the engine's
+ * half is refreshAgentMd's, which runs on every Boot.
+ */
 function writeProseFiles(
   poolDir: string,
   engineDir: string,
@@ -493,9 +481,7 @@ function writeProseFiles(
 ): void {
   const templates = join(engineDir, "skills", "my-console-runner");
   const agentPath = join(poolDir, "AGENT.md");
-  if (existsSync(agentPath)) {
-    io.log("AGENT.md is already there; left as it is");
-  } else {
+  if (!existsSync(agentPath)) {
     const template = join(templates, "AGENT.template.md");
     if (existsSync(template)) {
       writeFileSync(
@@ -519,6 +505,29 @@ function writeProseFiles(
       copyFileSync(template, verifyPath);
       io.log("wrote verify.md from the template");
     }
+  }
+}
+
+/**
+ * The engine's half of the pool's `AGENT.md`, brought up to the current
+ * template on every Boot, a Restart's included (issue #155): a pool booted
+ * before the template changed would otherwise teach its agents the old
+ * engine prose for as long as it lives. The pool's half, below the CONFIG
+ * marker, is kept byte for byte. A missing file is writeProseFiles' job, and
+ * a file with no marker is left alone, because nothing says where its
+ * engine half ends.
+ */
+export function refreshAgentMd(poolDir: string, engineDir: string, io: BootIo): void {
+  const agentPath = join(poolDir, "AGENT.md");
+  const templatePath = join(engineDir, "skills", "my-console-runner", "AGENT.template.md");
+  if (!existsSync(agentPath) || !existsSync(templatePath)) return;
+  const current = readFileSync(agentPath);
+  const refreshed = refreshAgentHead(current, readFileSync(templatePath, "utf8"));
+  if (refreshed === null) {
+    io.log("AGENT.md has no CONFIG marker; left as it is");
+  } else if (!refreshed.equals(current)) {
+    writeFileSync(agentPath, refreshed);
+    io.log("refreshed AGENT.md above the CONFIG marker from the template");
   }
 }
 
@@ -663,6 +672,7 @@ export async function runBoot(options: RunOptions): Promise<number> {
       engine: engineDir,
     });
   }
+  refreshAgentMd(poolDir, engineDir, io);
 
   if (needsRebuild(distMtime(engineDir), uiSourceCommitMs(engineDir))) {
     io.log("the Console build is missing or stale; rebuilding");
@@ -780,15 +790,6 @@ function resolverText(value: ResolverValue | undefined): string {
 
 function portText(port: number | undefined): string {
   return port === undefined ? "auto" : String(port);
-}
-
-function parsesAsObject(text: string): boolean {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-  } catch {
-    return false;
-  }
 }
 
 if (import.meta.main) {

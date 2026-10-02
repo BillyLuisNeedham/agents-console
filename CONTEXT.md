@@ -91,7 +91,7 @@ _Avoid_: session (ambiguous with the harness's), view model (too generic)
 The set of live Consoles on this machine, recorded in a registry file so any of them can be found.
 
 **Setup**:
-A named, machine-local bundle of a pool's behavioural config — harness, model, effort, drivers, roster, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
+A named, machine-local bundle of a pool's behavioural config — harness, model, effort, drivers, resolver, reviewer/checkpoint — saved under `~/.agent-graphs/setups/` and offered when a new pool is configured. Pool-specific values (port, assign, AGENT.md prose) are never part of a Setup.
 _Avoid_: profile, template
 
 **Assignment**:
@@ -107,7 +107,7 @@ The Interrupt the engine raises on a Ticket about to schedule with no harness or
 _Avoid_: dead drive (that was the old outcome), pool config error (the log line, not the pause)
 
 **Pool settings**:
-The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, Spawn caps, terminal, port, selection, roster and agents. The Pool title shows as soon as it is saved; editing the assignment slice or the Spawn caps takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
+The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, Spawn caps, terminal, port and selection. The Pool title shows as soon as it is saved; editing the assignment slice or the Spawn caps takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
 _Avoid_: config (that's the raw file), preferences, options
 
 **Machine defaults**:
@@ -127,7 +127,7 @@ The operator changing a Ticket's Assignment from the Console, one Ticket from it
 _Avoid_: change setup, switch runner, override (the file's word is assign)
 
 **Config reload**:
-The engine's re-read of the Pool config file at a super-step boundary, or at once when a Pool settings save finds no drive in flight. Only the assignment slice (defaults, assign, resolver) and the Spawn caps reload; roster, agents, selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
+The engine's re-read of the Pool config file at a super-step boundary, or at once when a Pool settings save finds no drive in flight. Only the assignment slice (defaults, assign, resolver) and the Spawn caps reload; selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
 _Avoid_: hot reload (implies a watcher; there is none), restart
 
 **Detail**:

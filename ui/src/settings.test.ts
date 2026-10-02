@@ -46,9 +46,9 @@ function settings(overrides: Partial<SettingsResponse> = {}): SettingsResponse {
         resolver: "claude",
         port: 4300,
         selection: "auto",
-        roster: "two engineers",
+        reviewer: "two engineers",
       },
-      bootOnly: ["roster", "agents", "selection", "terminal", "port"],
+      bootOnly: ["selection", "terminal", "port"],
       effective: { port: 4300, terminal: null, stale: [] },
       ...overrides.pool,
     },
@@ -133,7 +133,7 @@ describe("poolDraftFrom", () => {
     expect(draft.port).toBe("4300");
     expect(draft.selection).toBe("auto");
     expect(draft.terminal).toBe(false);
-    expect(draft.agents).toBe("");
+    expect(draft.checkpoint).toBe("");
   });
 
   it("splits the resolver's object form across its fields", () => {
@@ -171,7 +171,7 @@ describe("poolPatchFrom", () => {
     expect(patch.port).toBeNull();
     expect(patch.terminal).toBeNull();
     expect(patch.selection).toBeNull();
-    expect(patch.roster).toBeNull();
+    expect(patch.reviewer).toBeNull();
     expect(patch.resolver).toBeNull();
     expect(patch.defaults).toEqual({ harness: "", model: "", effort: "", drivers: "" });
   });
@@ -237,13 +237,6 @@ describe("validatePoolDraft", () => {
     expect(validatePoolDraft({ ...EMPTY, port: "99999" })).toMatch(/port must be/);
   });
 
-  it("refuses an agents roster that is not JSON", () => {
-    expect(validatePoolDraft({ ...EMPTY, agents: "{oops" })).toBe(
-      "agents must be valid JSON",
-    );
-    expect(validatePoolDraft({ ...EMPTY, agents: '{"a":1}' })).toBeNull();
-  });
-
   it("refuses a Spawn cap that is not a whole number of 0 or more (issue #149, #150)", () => {
     for (const bad of ["2.5", "-1", "lots"]) {
       expect(validatePoolDraft({ ...EMPTY, spawnsPerAttempt: bad })).toMatch(
@@ -303,16 +296,16 @@ describe("projectRestartBadges", () => {
   });
 
   it("badges every boot-only key the engine names", () => {
-    expect([...projectRestartBadges(["port", "roster"])].sort()).toEqual([
+    expect([...projectRestartBadges(["port", "selection"])].sort()).toEqual([
       "port",
-      "roster",
+      "selection",
     ]);
   });
 
   it("drops a key outside the badge vocabulary rather than trusting the wire", () => {
     // `stale` is a list of plain strings; a key the pane has no field for
     // would badge nothing anyway, so it never reaches the lookup.
-    expect([...projectRestartBadges(["port", "assign", "defaults"])]).toEqual(["port"]);
+    expect([...projectRestartBadges(["port", "assign", "defaults", "roster"])]).toEqual(["port"]);
   });
 });
 
@@ -398,7 +391,7 @@ describe("SettingsStore", () => {
     const rig = await opened();
     rig.store.setPoolField("model", " opus  ");
     expect(rig.store.poolDirty).toBe(false);
-    rig.store.setPoolField("roster", "two engineers ");
+    rig.store.setPoolField("reviewer", "two engineers ");
     expect(rig.store.poolDirty).toBe(false);
     rig.store.setMachineField("harness", "claude ");
     expect(rig.store.machineDirty).toBe(false);
@@ -479,14 +472,14 @@ describe("SettingsStore", () => {
   it("badges what the engine reports stale after a save", async () => {
     const rig = await opened();
     expect([...rig.store.badges()]).toEqual([]);
-    rig.store.setPoolField("roster", "three engineers");
+    rig.store.setPoolField("selection", "human");
     const save = rig.store.savePool();
     const saved = settings();
-    saved.pool.config.roster = "three engineers";
-    saved.pool.effective.stale = ["roster"];
+    saved.pool.config.selection = "human";
+    saved.pool.effective.stale = ["selection"];
     rig.poolSaves[0]!.deferred.resolve(saved);
     await save;
-    expect(rig.store.badges().has("roster")).toBe(true);
+    expect(rig.store.badges().has("selection")).toBe(true);
   });
 
   it("badges a key a save never touched, so a hand edit or another tab shows", async () => {
@@ -494,9 +487,9 @@ describe("SettingsStore", () => {
     // so a pool whose config was edited outside this page badges on the very
     // first read, with no save in this session to have noticed it.
     const edited = settings();
-    edited.pool.effective.stale = ["agents", "terminal"];
+    edited.pool.effective.stale = ["selection", "terminal"];
     const rig = await opened(edited);
-    expect([...rig.store.badges()].sort()).toEqual(["agents", "terminal"]);
+    expect([...rig.store.badges()].sort()).toEqual(["selection", "terminal"]);
   });
 
   it("clears a badge when a save puts the value back", async () => {

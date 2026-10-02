@@ -2112,7 +2112,7 @@ export function stewardBudgetText(line: StewardBudgetLine): string {
  * spelled again here so the pane's badge lookups are checked against a closed
  * set rather than against whatever the wire happened to send.
  */
-export type BootOnlyKey = "roster" | "agents" | "selection" | "terminal" | "port";
+export type BootOnlyKey = "selection" | "terminal" | "port";
 
 /**
  * The PUT /api/settings/pool body's `config`. The engine takes any subset of
@@ -2127,8 +2127,6 @@ export interface PoolConfigPatch {
   terminal?: "herdr" | null;
   port?: number | null;
   selection?: "auto" | "human" | null;
-  roster?: string | null;
-  agents?: string | null;
   reviewer?: string | null;
   checkpoint?: string | null;
   /** The Pool title (issue #100); null clears it back to the directory name. */
@@ -2163,8 +2161,6 @@ export function projectRestartBadges(stale: readonly string[]): Set<BootOnlyKey>
   const badges = new Set<BootOnlyKey>();
   for (const key of stale) {
     if (
-      key === "roster" ||
-      key === "agents" ||
       key === "selection" ||
       key === "terminal" ||
       key === "port"

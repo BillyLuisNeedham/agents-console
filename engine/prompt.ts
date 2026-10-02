@@ -297,7 +297,7 @@ export function buildContinuedTeaching(parts: {
  * The teaching conversations.ts appends to a Conversation's opening Turn (or
  * types alone when there is none, so the mechanism is learned either way):
  * how to propose Spawns mid-conversation (the Conversations ADR). A
- * Conversation has no driver, no chain, no roster and no Outcome file the
+ * Conversation has no driver, no chain and no Outcome file the
  * ordinary buildPrompt assembles around, so this is deliberately
  * self-contained rather than a section spliced into that prompt. The floor
  * on a proposal's body (SPAWN_BODY_MIN_CHARS, engine.ts) is named literally
@@ -498,7 +498,6 @@ export function buildStewardTeaching(parts: {
 interface PromptParts {
   chain: string[];
   agentMd: string;
-  roster: string;
   upstream: { id: string; outcome: Outcome }[];
   outcomePath: string;
   // The pool's Spawn caps as this attempt's boundary left them (ADR-0029).
@@ -527,7 +526,7 @@ function spawnCapsTeaching({ perAttempt, perRun }: SpawnCaps): string {
   );
 }
 
-// The prompt body: the standing instructions, chain, roster, upstream
+// The prompt body: the standing instructions, chain, upstream
 // outcomes, and the outcome-writing instruction. The driver invocation line is
 // no longer part of this string; each harness adapter assembles its own from
 // the structured driver and issue-reference fields it receives.
@@ -542,21 +541,8 @@ export function buildPrompt(parts: PromptParts): string {
       "",
       "---",
       "",
-      "Chain for this Issue. When the driver skill's work is done, dispatch " +
-        "these subagents in this order, one at a time, and act on what each " +
-        `returns: ${parts.chain.join(", ")}.`,
-    );
-  }
-  if (parts.roster.trim()) {
-    sections.push(
-      "",
-      "---",
-      "",
-      "The subagent roster for this job. Dispatch them by name. Each harness " +
-        "defines its own agents; on claude they come from the runner's " +
-        "config, on opencode and cursor from your own setup:",
-      "",
-      parts.roster.trim(),
+      "Skills for this Issue. When the driver skill's work is done, also " +
+        `use these skills, in this order: ${parts.chain.join(", ")}.`,
     );
   }
   if (parts.upstream.length > 0) {
