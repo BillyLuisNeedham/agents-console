@@ -15,7 +15,8 @@ import { h } from "./dom";
 
 /** The slice of the app model the drawers render from. */
 export interface DrawersModel {
-  log: string[];
+  logText: string;
+  logHeld: number;
   logTotal: number;
   logEarlier: { loading: boolean; error: string | null };
   logOpen: boolean;
@@ -73,10 +74,10 @@ export class Drawers {
 
   // The pool log: the lines held, the snapshot's last 500 after any read
   // back, with "load earlier" above them while the log is longer than that
-  // (issue #161).
+  // (issue #161). The text is the session's, joined only while it shows.
   private renderLogDrawer(model: DrawersModel, handlers: DrawersHandlers): HTMLElement {
-    const lines = model.log.length > 0 ? model.log.join("\n") : "- no log lines yet -";
-    const more = model.log.length < model.logTotal;
+    const lines = model.logHeld > 0 ? model.logText : "- no log lines yet -";
+    const more = model.logHeld < model.logTotal;
     return h(
       "div",
       { class: "log-drawer" + (model.logOpen ? " log-open" : "") },
@@ -100,7 +101,7 @@ export class Drawers {
                   },
                   model.logEarlier.loading
                     ? "loading…"
-                    : `load earlier (${model.logTotal - model.log.length} more)`,
+                    : `load earlier (${model.logTotal - model.logHeld} more)`,
                 )
               : null,
             model.logEarlier.error

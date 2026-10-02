@@ -280,6 +280,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     },
     dispose() {
       socket.dispose();
+      session.dispose();
       vitals.dispose();
       terminal.dispose();
       for (const cleanup of cleanups.splice(0)) cleanup();

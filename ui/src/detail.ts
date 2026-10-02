@@ -662,6 +662,13 @@ export class Detail {
     const opened = this.attemptsOpen.get(cardId) ?? new Map<number, boolean>();
     opened.set(attempt, open);
     this.attemptsOpen.set(cardId, opened);
+    if (!open && this.timelineCard === cardId) {
+      // A closed attempt's event rows leave the page: let their nodes go.
+      const prefix = `${attempt}:`;
+      for (const key of [...this.timelineRows.keys()]) {
+        if (key.startsWith(prefix)) this.timelineRows.delete(key);
+      }
+    }
     this.onChange();
   }
 

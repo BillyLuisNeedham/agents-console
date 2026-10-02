@@ -441,8 +441,8 @@ export class Canvas {
    * render in progress draws. A card whose next draw would be the same is
    * not rebuilt; the morph keeps its node as it stands.
    */
-  private drawn = new Map<string, string>();
-  private drawing = new Map<string, string>();
+  private drawn = new Map<string, DrawnCard>();
+  private drawing = new Map<string, DrawnCard>();
   private readonly onChange: () => void;
   private readonly onCardTap: (nodeId: string) => void;
   private readonly onCardHover: (nodeId: string | null) => void;
@@ -956,12 +956,27 @@ export class Canvas {
    */
   private drawCard(card: PoolCardView, selection: CanvasSelection): Element {
     const pos = this.posOf(card);
-    const from =
-      `${this.flowClass(card.id, selection)}|${pos.x},${pos.y}|` +
-      `${this.expandedBadges.has(card.id)}|${JSON.stringify(card)}`;
+    const from: DrawnCard = {
+      card,
+      x: pos.x,
+      y: pos.y,
+      flow: this.flowClass(card.id, selection),
+      badge: this.expandedBadges.has(card.id),
+    };
     this.drawing.set(card.id, from);
+    const held = this.drawn.get(card.id);
     const node = this.canvas?.nodesById.get(card.id);
-    if (node?.isConnected && this.drawn.get(card.id) === from) return keep(node);
+    if (
+      node?.isConnected &&
+      held !== undefined &&
+      held.x === from.x &&
+      held.y === from.y &&
+      held.flow === from.flow &&
+      held.badge === from.badge &&
+      sameView(held.card, card)
+    ) {
+      return keep(node);
+    }
     return this.renderCard(card, selection);
   }
 
@@ -1636,6 +1651,41 @@ export class Canvas {
     }
     this.paintStrokeScale();
   }
+}
+
+/** What a card on the page was drawn from (issue #161). */
+interface DrawnCard {
+  card: PoolCardView;
+  x: number;
+  y: number;
+  flow: string;
+  badge: boolean;
+}
+
+/**
+ * Whether two projected views hold the same values: plain data compared
+ * part by part, a part that is the very same object (a ticket's Assignment
+ * carried over by a delta, a pane's peek the terminal store kept) taken as
+ * equal at once, with no string built for either. A card's view is
+ * projected afresh on every render, so its own identity says nothing.
+ */
+export function sameView(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameView(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  for (const key of keys) {
+    if (!(key in right) || !sameView(left[key], right[key])) return false;
+  }
+  return true;
 }
 
 /** The world's size around a set of card boxes: room for each and a margin,

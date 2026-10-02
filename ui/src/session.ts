@@ -106,6 +106,9 @@ export interface ConsoleSessionOptions {
   /** How long the pointer rests on a card before it is prefetched;
    *  injectable so tests need not wait. */
   hoverDwellMs?: number;
+  /** How long a card the server could not read waits before it is asked
+   *  for again; injectable so tests need not wait. */
+  cardRetryMs?: number;
   vitals: SessionVitals;
   terminal: SessionTerminal;
   /** The derivation, injectable so tests can count it. Defaults to the real
@@ -134,6 +137,13 @@ const CONNECTION_GRACE_MS = 4000;
 const RESTART_POLL_MS = 1000;
 const RESTART_WAIT_MS = 60_000;
 
+/** The most pool log lines the window's appends keep above it once
+ *  "load earlier" has run: past it the oldest go, and it reads them back. */
+const POOL_LOG_EARLIER_KEPT = 5_000;
+
+/** How long a card the server could not read waits to be asked for again. */
+const CARD_RETRY_MS = 2_000;
+
 /** The banner a tab shows when the server speaks another protocol version
  *  and reloading would only loop. */
 const VERSION_BANNER = "Console was updated: reload the page";
@@ -153,6 +163,7 @@ export class ConsoleSession {
   private readonly restartPollMs: number;
   private readonly restartWaitMs: number;
   private readonly hoverDwellMs: number;
+  private readonly cardRetryMs: number;
   private readonly vitals: SessionVitals;
   private readonly terminal: SessionTerminal;
   private readonly derivePool: typeof projectPool;
@@ -176,14 +187,20 @@ export class ConsoleSession {
   // its full length. "Load earlier" reads the lines before those into
   // `earlier`, and while it holds any (or a read is out), the lines an
   // append pushes out of the window move onto its end, so the drawer's text
-  // stays one contiguous run. A new log, or a whole snapshot, starts over;
-  // the generation drops a read that answers after.
+  // stays one contiguous run. `earlier` grows in place, its version counting
+  // the changes, and is let go of from its oldest end past its cap, which
+  // "load earlier" can read back. A new log, or a whole snapshot, starts
+  // over; the generation drops a read that answers after. The drawer's text
+  // is joined only while it is open, once per change to either part.
   private logTotal = 0;
   private earlier: string[] = [];
+  private earlierVersion = 0;
+  private earlierCap = POOL_LOG_EARLIER_KEPT;
   private earlierLoading = false;
   private earlierError: string | null = null;
   private earlierGeneration = 0;
-  private heldLog: { earlier: string[]; window: string[]; lines: string[] } | null = null;
+  private earlierText: { version: number; text: string } | null = null;
+  private logText: { version: number; window: string[]; text: string } | null = null;
 
   // The Stop control's state (issue #97). The confirmation is inline on the
   // button, so it is one small state machine, not a modal: `armed` is the
@@ -253,6 +270,8 @@ export class ConsoleSession {
   private dwell: ReturnType<typeof setTimeout> | null = null;
   private readonly subscribed = new Set<string>();
   private readonly cards = new Map<string, CardData>();
+  // A card the server could not read waits here to be asked for again.
+  private readonly cardRetries = new Map<string, ReturnType<typeof setTimeout>>();
   // The selected card's timeline, projected once per events frame and
   // status, a frame that continues the last one carrying its rows over; and
   // the same joined with the log pane's Stream files, once per either.
@@ -290,6 +309,7 @@ export class ConsoleSession {
     this.restartPollMs = options.restartPollMs ?? RESTART_POLL_MS;
     this.restartWaitMs = options.restartWaitMs ?? RESTART_WAIT_MS;
     this.hoverDwellMs = options.hoverDwellMs ?? HOVER_DWELL_MS;
+    this.cardRetryMs = options.cardRetryMs ?? CARD_RETRY_MS;
     this.vitals = options.vitals;
     this.terminal = options.terminal;
     this.derivePool = options.projectPool ?? projectPool;
@@ -402,11 +422,32 @@ export class ConsoleSession {
     if (card.body !== undefined) next.body = card.body;
     if (card.events !== undefined) next.events = card.events;
     if (card.error !== undefined) next.error = card.error;
+    else if (card.body !== undefined || card.events !== undefined) delete next.error;
     this.cards.set(card.id, next);
     if (card.log !== undefined) this.logs.push(card.id, card.log);
     const moved =
       card.body !== undefined || card.events !== undefined || card.error !== undefined;
     if (moved && card.id === this.selectedCardId) this.onChange();
+    if (card.error !== undefined) this.retryCard(card.id);
+  }
+
+  /**
+   * A card the server could not read (an id it does not know yet, a file
+   * it failed on) is let go of, its error shown, and asked for again after
+   * CARD_RETRY_MS while the selection or the hover still holds it, so a
+   * passing failure does not stand until the card is picked again.
+   */
+  private retryCard(id: string): void {
+    if (this.subscribed.delete(id)) this.socket.unsubscribe(id);
+    if (this.cardRetries.has(id)) return;
+    this.cardRetries.set(
+      id,
+      setTimeout(() => {
+        this.cardRetries.delete(id);
+        if (id === this.selectedCardId || this.hovered.includes(id)) this.hold(id);
+        else this.release(id);
+      }, this.cardRetryMs),
+    );
   }
 
   /**
@@ -533,8 +574,10 @@ export class ConsoleSession {
   // pushes stop and its held data goes with them.
   private release(id: string): void {
     if (id === this.selectedCardId || this.hovered.includes(id)) return;
-    if (!this.subscribed.delete(id)) return;
-    this.socket.unsubscribe(id);
+    if (this.subscribed.delete(id)) this.socket.unsubscribe(id);
+    const retry = this.cardRetries.get(id);
+    if (retry !== undefined) clearTimeout(retry);
+    this.cardRetries.delete(id);
     this.cards.delete(id);
     this.logs.forget(id);
   }
@@ -840,6 +883,10 @@ export class ConsoleSession {
       const range = await this.socket.request("poolLog.read", { before });
       if (generation !== this.earlierGeneration) return;
       this.earlier = [...range.lines, ...this.earlier];
+      this.earlierVersion += 1;
+      // What the operator asked to read is never let go of by the cap; the
+      // lines the window lets go of later are, past it.
+      this.earlierCap = Math.max(POOL_LOG_EARLIER_KEPT, this.earlier.length);
     } catch (err) {
       if (generation !== this.earlierGeneration) return;
       this.earlierError = `load earlier failed: ${messageOf(err)}`;
@@ -860,6 +907,8 @@ export class ConsoleSession {
     if (delta === null || !("append" in log!) || !this.snapshot) {
       if (this.earlier.length > 0 || this.earlierLoading || this.earlierError !== null) {
         this.earlier = [];
+        this.earlierVersion += 1;
+        this.earlierCap = POOL_LOG_EARLIER_KEPT;
         this.earlierLoading = false;
         this.earlierError = null;
         this.earlierGeneration += 1;
@@ -871,11 +920,13 @@ export class ConsoleSession {
     const appended = log.append;
     const slid = old.length + appended.length - pushed.snapshot.state.log.length;
     if (slid <= 0) return;
-    this.earlier = [
-      ...this.earlier,
-      ...old.slice(0, slid),
-      ...appended.slice(0, Math.max(0, slid - old.length)),
-    ];
+    // In place: an append costs the lines it pushes out, not the whole run.
+    for (let i = 0; i < Math.min(slid, old.length); i++) this.earlier.push(old[i]!);
+    for (let i = 0; i < slid - old.length; i++) this.earlier.push(appended[i]!);
+    if (this.earlier.length > this.earlierCap) {
+      this.earlier.splice(0, this.earlier.length - this.earlierCap);
+    }
+    this.earlierVersion += 1;
   }
 
   /** Surface a failure on the global banner (the fire-and-forget paths). */
@@ -937,15 +988,16 @@ export class ConsoleSession {
     const timeline = timelineView
       ? this.joinedOf(timelineView, logIsCurrent ? this.logs.state.attempts : null)
       : null;
-    const log = this.poolLogLines();
+    const logHeld = this.earlier.length + (this.snapshot?.state.log.length ?? 0);
     return {
       poolName: this.poolName,
       phase: this.view?.phase ?? null,
       phaseLabel: this.view ? phaseLabel(this.view.phase) : "connecting",
       cards,
       edges: this.view?.edges ?? [],
-      log,
-      logTotal: Math.max(this.logTotal, log.length),
+      logText: this.logOpen ? this.poolLogText() : "",
+      logHeld,
+      logTotal: Math.max(this.logTotal, logHeld),
       logEarlier: {
         loading: this.earlierLoading,
         error: this.earlierError,
@@ -1049,14 +1101,24 @@ export class ConsoleSession {
     return this.shown.snapshot;
   }
 
-  /** The pool log lines held: the earlier ones read back, then the window. */
-  private poolLogLines(): string[] {
+  /** The pool log drawer's text: the earlier lines read back, then the
+   *  window, joined once per change to either. */
+  private poolLogText(): string {
     const window = this.snapshot?.state.log ?? [];
-    if (this.earlier.length === 0) return window;
-    if (this.heldLog?.earlier !== this.earlier || this.heldLog.window !== window) {
-      this.heldLog = { earlier: this.earlier, window, lines: [...this.earlier, ...window] };
+    if (this.logText?.version !== this.earlierVersion || this.logText.window !== window) {
+      if (this.earlierText?.version !== this.earlierVersion) {
+        this.earlierText = { version: this.earlierVersion, text: this.earlier.join("\n") };
+      }
+      const tail = window.join("\n");
+      const text =
+        this.earlier.length === 0
+          ? tail
+          : window.length === 0
+            ? this.earlierText.text
+            : `${this.earlierText.text}\n${tail}`;
+      this.logText = { version: this.earlierVersion, window, text };
     }
-    return this.heldLog.lines;
+    return this.logText.text;
   }
 
   private timelineOf(
@@ -1107,6 +1169,18 @@ export class ConsoleSession {
       clearTimeout(this.graceTimer);
       this.graceTimer = null;
     }
+  }
+
+  /** Stop every timer the session holds (teardown): the connection's
+   *  grace, the hover's dwell, the relaunch poll and the card retries. */
+  dispose(): void {
+    this.cancelGrace();
+    if (this.dwell !== null) clearTimeout(this.dwell);
+    this.dwell = null;
+    this.restartWaiting = false;
+    this.cancelRelaunchPoll();
+    for (const timer of this.cardRetries.values()) clearTimeout(timer);
+    this.cardRetries.clear();
   }
 }
 

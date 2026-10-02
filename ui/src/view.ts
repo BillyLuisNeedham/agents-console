@@ -111,10 +111,13 @@ export interface AppModel {
   phaseLabel: string;
   cards: PoolCardView[];
   edges: TopologyEdge[];
-  /** The pool log lines held: the snapshot's last 500, after any earlier
-   *  ones read back (issue #161). */
-  log: string[];
-  /** How long the pool log is in all; more than `log` holds offers
+  /** The pool log drawer's text: the lines held, the snapshot's last 500
+   *  after any earlier ones read back (issue #161). Empty while the drawer
+   *  is shut, which shows none of it. */
+  logText: string;
+  /** How many pool log lines are held. */
+  logHeld: number;
+  /** How long the pool log is in all; more than is held offers
    *  "load earlier". */
   logTotal: number;
   /** The pool log's "load earlier": a read out, or its failure. */

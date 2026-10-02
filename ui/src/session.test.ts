@@ -242,6 +242,7 @@ function rig() {
     restartPollMs: 1,
     restartWaitMs: 40,
     hoverDwellMs: 1,
+    cardRetryMs: 5,
     vitals: {
       update: () => {},
       apply: (a) => {
@@ -441,6 +442,29 @@ describe("selection and card subscriptions (issue #161)", () => {
     expect(session.model({}).timeline?.attempts.map((a) => a.number)).toEqual([2]);
     session.applyCard({ type: "card", id: "A", error: "unknown ticket A" });
     expect(session.model({}).detailBodyError).toContain("unknown ticket A");
+    session.dispose();
+  });
+
+  it("asks again for a card the server could not read while it stays selected (#161)", async () => {
+    const { r, session } = sessionOver(
+      snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }),
+    );
+    session.select("ticket:A");
+    session.applyCard({ type: "card", id: "A", error: "events file unreadable" });
+    expect(r.subscriptions).toEqual(["+A", "-A"]);
+    expect(session.model({}).detailBodyError).toContain("events file unreadable");
+    await wait(15);
+    expect(r.subscriptions).toEqual(["+A", "-A", "+A"]);
+    // A frame that reads clears the error.
+    session.applyCard({ type: "card", id: "A", body: { id: "A", body: "the spec" } });
+    expect(session.model({}).detailBodyError).toBeNull();
+    expect(session.model({}).detailBody).toBe("the spec");
+    // A card let go of before the retry is not asked for again.
+    session.select("ticket:B");
+    session.applyCard({ type: "card", id: "B", error: "boom" });
+    session.select(null);
+    await wait(15);
+    expect(r.subscriptions.filter((s) => s.endsWith("B"))).toEqual(["+B", "-B"]);
   });
 
   it("subscribes a Conversation by its own id, with a timeline and no log pane", () => {
@@ -562,6 +586,14 @@ describe("hover prefetch (issue #161)", () => {
     expect(model.logPane?.content).toBe("B's tail\n");
     // Already subscribed: the click sends nothing.
     expect(r.subscriptions).toEqual(["+B"]);
+  });
+
+  it("stops its timers when disposed: a dwell under way subscribes nothing", async () => {
+    const { r, session } = sessionOver(four());
+    session.hover("ticket:A");
+    session.dispose();
+    await wait(10);
+    expect(r.subscriptions).toEqual([]);
   });
 
   it("drops a card's held data once it is let go", async () => {
@@ -692,10 +724,18 @@ describe("“…ing” presses (issue #161)", () => {
 describe("the pool log (issue #161)", () => {
   const lines = (from: number, to: number) =>
     Array.from({ length: to - from }, (_, i) => `line ${from + i}`);
+  /** The drawer's lines, the drawer open. */
+  const held = (session: ConsoleSession) => session.model({}).logText.split("\n");
+  /** A session over the rig with its pool log drawer open. */
+  const opened = (r: ReturnType<typeof rig>) => {
+    const session = new ConsoleSession(r.options);
+    session.toggleLog();
+    return session;
+  };
 
   it("offers the lines before the window and prepends them", async () => {
     const r = rig();
-    const session = new ConsoleSession(r.options);
+    const session = opened(r);
     session.setPushed(
       { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
       null,
@@ -707,13 +747,47 @@ describe("the pool log (issue #161)", () => {
     r.last("poolLog.read").deferred.resolve({ start: 0, lines: lines(0, 300), total: 800 });
     await flush();
     const model = session.model({});
-    expect(model.log).toEqual(lines(0, 800));
+    expect(held(session)).toEqual(lines(0, 800));
+    expect(model.logHeld).toBe(800);
     expect(model.logEarlier.loading).toBe(false);
+  });
+
+  it("joins no text while the drawer is shut", () => {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.setSnapshot(snapshot({ state: { log: lines(0, 10) } }));
+    expect(session.model({}).logText).toBe("");
+    expect(session.model({}).logHeld).toBe(10);
+    session.toggleLog();
+    expect(held(session)).toEqual(lines(0, 10));
+  });
+
+  it("lets the oldest earlier lines go past its cap, and reads them back on asking", async () => {
+    const r = rig();
+    const session = opened(r);
+    session.setPushed(
+      { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
+      null,
+    );
+    void session.loadEarlierPoolLog();
+    r.last("poolLog.read").deferred.resolve({ start: 0, lines: lines(0, 300), total: 800 });
+    await flush();
+    // A burst pushes 6,000 lines past the window: 300 + 6,000 above it now.
+    session.setPushed(
+      { rev: 2, logTotal: 6_800, snapshot: snapshot({ state: { log: lines(6_300, 6_800) } }) },
+      { base: 1, rev: 2, log: { append: lines(800, 6_800), total: 6_800 } },
+    );
+    const model = session.model({});
+    expect(model.logHeld).toBe(5_000 + 500);
+    expect(held(session)[0]).toBe("line 1300");
+    expect(held(session).at(-1)).toBe("line 6799");
+    void session.loadEarlierPoolLog();
+    expect(r.last("poolLog.read").payload).toEqual({ before: 1_300 });
   });
 
   it("keeps the drawer contiguous as appends push lines out of the window", async () => {
     const r = rig();
-    const session = new ConsoleSession(r.options);
+    const session = opened(r);
     const first = { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) };
     session.setPushed(first, null);
     void session.loadEarlierPoolLog();
@@ -726,20 +800,20 @@ describe("the pool log (issue #161)", () => {
     session.setPushed(grown, { base: 1, rev: 2, log: { append: lines(800, 802), total: 802 } });
     r.last("poolLog.read").deferred.resolve({ start: 100, lines: lines(100, 300), total: 802 });
     await flush();
-    expect(session.model({}).log).toEqual(lines(100, 802));
+    expect(held(session)).toEqual(lines(100, 802));
     // And again once the earlier lines are held.
     session.setPushed(
       { rev: 3, logTotal: 803, snapshot: snapshot({ state: { log: lines(303, 803) } }) },
       { base: 2, rev: 3, log: { append: lines(802, 803), total: 803 } },
     );
-    expect(session.model({}).log).toEqual(lines(100, 803));
+    expect(held(session)).toEqual(lines(100, 803));
     void session.loadEarlierPoolLog();
     expect(r.last("poolLog.read").payload).toEqual({ before: 100 });
   });
 
   it("starts over on a new log", async () => {
     const r = rig();
-    const session = new ConsoleSession(r.options);
+    const session = opened(r);
     session.setPushed(
       { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
       null,
@@ -751,7 +825,7 @@ describe("the pool log (issue #161)", () => {
       { rev: 2, logTotal: 2, snapshot: snapshot({ state: { log: ["new", "run"] } }) },
       { base: 1, rev: 2, log: { replace: ["new", "run"], total: 2 } },
     );
-    expect(session.model({}).log).toEqual(["new", "run"]);
+    expect(held(session)).toEqual(["new", "run"]);
   });
 
   it("never asks for lines before the first", () => {
