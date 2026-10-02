@@ -48,12 +48,19 @@ export interface SocketClient {
 }
 
 /** Opens a socket on a pool server, once it is open. With `hello`, the
- *  client's hello goes first, as the Console's does. */
+ *  client's hello goes first, as the Console's does. `headers` go on the
+ *  upgrade request (Bun's client sends no Origin unless given one). */
 export async function openSocket(
   base: string,
   hello?: { visible: boolean; cards?: CardSubscription[] },
+  headers?: Record<string, string>,
 ): Promise<SocketClient> {
-  const ws = new WebSocket(`${base.replace(/^http/, "ws")}${WS_PATH}`);
+  const url = `${base.replace(/^http/, "ws")}${WS_PATH}`;
+  // Bun's client takes `{headers}` where a browser's takes protocols; the
+  // DOM's constructor type is the one in scope here.
+  const ws = headers
+    ? new WebSocket(url, { headers } as unknown as string[])
+    : new WebSocket(url);
   const waiters = new Set<() => void>();
   let nextId = 0;
   let resolveClosed: (value: { code: number; reason: string }) => void = () => {};

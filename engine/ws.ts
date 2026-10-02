@@ -143,8 +143,6 @@ export interface LogRange {
 export interface PushSources {
   /** The enriched snapshot as of the engine's last emit. */
   current(): EnrichedSnapshot | null;
-  /** Whether the pool owns this ticket or Conversation id, read afresh. */
-  knows(id: string): boolean;
   runsDir: string;
   issuesDir: string;
   /** The ticket's Issue file, or null (a Conversation has none). */
@@ -188,15 +186,15 @@ interface CardSub {
 }
 
 /** What every subscriber of one card shares: its body and events as they
- *  were last sent, read once for all of them. */
+ *  were last sent, read and serialised once for all of them. A signature
+ *  is null until its file has been read without an error. */
 interface CardWatch {
   id: string;
   subscribers: Set<Socket>;
   bodySig: string | null;
-  body: TicketBodyResponse | null;
   bodyJson: string;
   eventsSig: string | null;
-  events: TicketEventsResponse | null;
+  /** As card frames carry them (cardEvents). */
   eventsJson: string;
 }
 
@@ -249,6 +247,14 @@ const APPENDS_PER_CHECK = 8;
  *  flight at once. */
 const LIVE_READS = 4;
 
+/** The most cards one socket holds. The Console holds the selected one and
+ *  two hovered; the rest of a hello past this is dropped unread. */
+const CARDS_PER_SOCKET = 32;
+
+/** The largest frame a client may send: a hello with every card it may
+ *  hold is a few kilobytes. */
+const CLIENT_FRAME_MAX_BYTES = 64 * 1024;
+
 /** The events file's name (events.ts's eventsFile). */
 const EVENTS_SUFFIX = ".events.jsonl";
 
@@ -273,6 +279,25 @@ function statOf(path: string): Stats | null {
 function sigOf(path: string): string {
   const stat = statOf(path);
   return stat ? `${stat.ino}:${stat.size}:${stat.mtimeMs}` : "absent";
+}
+
+/**
+ * A card's events as its frames carry them: each event's `logTail` left
+ * out. It is the attempt's last log lines, which the card's own log
+ * already shows and the Console never reads, and over a run it grows an
+ * events file to megabytes. GET /api/events serves it as ever.
+ */
+function cardEvents(events: TicketEventsResponse): TicketEventsResponse {
+  return {
+    ...events,
+    events: events.events.map((event) => {
+      if (event.payload === null || typeof event.payload !== "object" || !("logTail" in event.payload)) {
+        return event;
+      }
+      const { logTail: _logTail, ...payload } = event.payload;
+      return { ...event, payload };
+    }),
+  };
 }
 
 function followOf(value: unknown): LogFollow {
@@ -513,7 +538,7 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     if (closed || visibleCount === 0) return;
     // The backstop for a watch event that never came (FSEvents coalesces):
     // a missed one costs at most this check's interval.
-    for (const card of watches.values()) checkCard(card);
+    for (const card of watches.values()) checkCardQuietly(card);
 
     const { candidates, panes } = liveTargets(lastPushed?.snapshot ?? null);
     const due = [...candidates].filter(([id, key]) => parked.get(id) !== key).map(([id]) => id);
@@ -613,59 +638,55 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   let cardTimer: ReturnType<typeof setTimeout> | null = null;
   let watchers: FSWatcher[] = [];
 
-  // Whether the pool knows the id: the pushed snapshot first, since that is
-  // where the Console found the card, then the disk.
+  // The ids the pushed snapshot holds, gathered once per version. A card is
+  // one the Console found there, so that is the whole check: an id the pool
+  // does not know costs a lookup, never a read of the disk.
+  let knownIds: { of: PushedSnapshot | null; ids: Set<string> } | null = null;
   function known(id: string): boolean {
-    const snapshot = lastPushed?.snapshot;
-    if (
-      snapshot?.state.tickets.some((t) => t.id === id) ||
-      snapshot?.state.conversations.some((c) => c.id === id)
-    ) {
-      return true;
+    if (knownIds?.of !== lastPushed) {
+      const state = lastPushed?.snapshot.state;
+      knownIds = {
+        of: lastPushed,
+        ids: new Set([
+          ...(state?.tickets ?? []).map((ticket) => ticket.id),
+          ...(state?.conversations ?? []).map((conversation) => conversation.id),
+        ]),
+      };
     }
-    return sources.knows(id);
+    return knownIds.ids.has(id);
   }
 
   // Re-reads a card's body and events when their files moved, and sends
   // every subscriber what changed in one frame. The events carry the
   // ticket's spec, which is the Issue file's, so a body that moved re-reads
-  // them too.
+  // them too. Both are read before either is kept, so a read that throws
+  // leaves the card as it was and the next check reads it again.
   function refreshCard(card: CardWatch): void {
-    const message: Extract<ServerMessage, { type: "card" }> = { type: "card", id: card.id };
     const bodyFile = sources.bodyFile(card.id);
     const bodySig = bodyFile === null ? "none" : `${bodyFile}:${sigOf(bodyFile)}`;
-    const bodyMoved = bodySig !== card.bodySig;
-    if (bodyMoved) {
-      card.bodySig = bodySig;
-      const body = sources.body(card.id);
-      const json = JSON.stringify(body);
-      if (json !== card.bodyJson) {
-        card.body = body;
-        card.bodyJson = json;
-        message.body = body;
-      }
-    }
     const eventsSig = sigOf(join(sources.runsDir, `${card.id}${EVENTS_SUFFIX}`));
-    if (bodyMoved || eventsSig !== card.eventsSig) {
-      card.eventsSig = eventsSig;
-      const events = sources.events(card.id);
-      const json = JSON.stringify(events);
-      if (json !== card.eventsJson) {
-        card.events = events;
-        card.eventsJson = json;
-        message.events = events;
-      }
-    }
-    if (message.body !== undefined || message.events !== undefined) {
-      const text = encodeMessage(message);
+    const bodyMoved = bodySig !== card.bodySig;
+    if (!bodyMoved && eventsSig === card.eventsSig) return;
+    const bodyJson = bodyMoved ? JSON.stringify(sources.body(card.id)) : card.bodyJson;
+    const eventsJson = JSON.stringify(cardEvents(sources.events(card.id)));
+    const fields: string[] = [];
+    if (bodyJson !== card.bodyJson) fields.push(`"body":${bodyJson}`);
+    if (eventsJson !== card.eventsJson) fields.push(`"events":${eventsJson}`);
+    Object.assign(card, { bodySig, bodyJson, eventsSig, eventsJson });
+    if (fields.length > 0 && card.subscribers.size > 0) {
+      const text = `{"type":"card","id":${JSON.stringify(card.id)},${fields.join(",")}}`;
       for (const ws of card.subscribers) send(ws, text);
     }
   }
 
   type Attempts = { list: LogAttemptInfo[]; json: string };
-  // The frames one check made, by what they were made from, so subscribers
-  // that sit at the same place in the same file share one read.
-  type LogMemo = Map<string, { texts: string[]; ino: number; next: number }>;
+  // What one check read, by path: subscribers that follow the same file
+  // share one stat, and those at the same place in it share one read.
+  interface CheckMemo {
+    stats: Map<string, Stats | null>;
+    frames: Map<string, { texts: string[]; ino: number; next: number }>;
+  }
+  const newMemo = (): CheckMemo => ({ stats: new Map(), frames: new Map() });
 
   function attemptsOf(id: string): Attempts {
     const list = sources.attempts(id);
@@ -675,33 +696,27 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   // A log window: the last LOG_CHUNK_BYTES of the followed file, which is
   // what the log pane's open read before (an absent file is an empty one).
   function windowOf(
-    id: string,
     target: NonNullable<ReturnType<typeof targetOf>>,
     attempts: Attempts,
-  ): { push: LogPush; ino: number } {
-    const path = join(sources.runsDir, target.file);
-    const ino = statOf(path)?.ino ?? 0;
-    const range = sources.readLog(path, "tail");
+  ): LogPush {
     return {
-      push: {
-        mode: "window",
-        attempt: target.attempt,
-        stream: target.stream,
-        ...range,
-        attempts: attempts.list,
-      },
-      ino,
+      mode: "window",
+      attempt: target.attempt,
+      stream: target.stream,
+      ...sources.readLog(join(sources.runsDir, target.file), "tail"),
+      attempts: attempts.list,
     };
   }
 
   // Brings one socket's log for one card up to date: appends from where it
   // is, or a window when it follows another attempt now, the file was
   // replaced or shrank, or more was missed than the pane would keep.
-  function pushLog(ws: Socket, id: string, sub: CardSub, attempts: Attempts, memo: LogMemo): void {
+  function pushLog(ws: Socket, id: string, sub: CardSub, attempts: Attempts, memo: CheckMemo): void {
     const target = targetOf(sub.follow, attempts.list);
     if (target === null) return;
     const path = join(sources.runsDir, target.file);
-    const stat = statOf(path);
+    if (!memo.stats.has(path)) memo.stats.set(path, statOf(path));
+    const stat = memo.stats.get(path) ?? null;
     const ino = stat?.ino ?? 0;
     const size = stat?.size ?? 0;
     const held = sub.log;
@@ -714,15 +729,11 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
       size - held.offset <= LOG_PANE_MAX_BYTES;
     if (!continues) {
       const key = `window:${path}`;
-      let made = memo.get(key);
+      let made = memo.frames.get(key);
       if (!made) {
-        const { push, ino: windowIno } = windowOf(id, target, attempts);
-        made = {
-          texts: [encodeMessage({ type: "card", id, log: push })],
-          ino: windowIno,
-          next: push.nextOffset,
-        };
-        memo.set(key, made);
+        const push = windowOf(target, attempts);
+        made = { texts: [encodeMessage({ type: "card", id, log: push })], ino, next: push.nextOffset };
+        memo.frames.set(key, made);
       }
       for (const text of made.texts) send(ws, text);
       sub.log = { attempt: target.attempt, stream: target.stream, ino: made.ino, offset: made.next };
@@ -733,10 +744,10 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     const withAttempts = sub.attempts !== attempts.json;
     if (size === held.offset && !withAttempts) return;
     const key = `append:${path}:${held.offset}:${withAttempts}`;
-    let made = memo.get(key);
+    let made = memo.frames.get(key);
     if (!made) {
       made = { ...appendsOf(id, target, path, held.offset, withAttempts ? attempts.list : undefined), ino };
-      memo.set(key, made);
+      memo.frames.set(key, made);
     }
     for (const text of made.texts) send(ws, text);
     held.offset = made.next;
@@ -769,8 +780,8 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
       };
       texts.push(encodeMessage({ type: "card", id, log }));
       carry = undefined;
-      // A last char still arriving whole stops the read short of the end;
-      // the next check brings it.
+      // A char or an escape sequence still arriving whole stops the read
+      // short of the end; the next check brings it.
       if (!moved) break;
       offset = range.nextOffset;
       if (offset >= range.totalSize) break;
@@ -784,13 +795,23 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   function checkCard(card: CardWatch): void {
     refreshCard(card);
     let attempts: Attempts | null = null;
-    const memo: LogMemo = new Map();
+    const memo = newMemo();
     for (const ws of card.subscribers) {
       if (!ws.data.visible) continue;
       const sub = ws.data.cards.get(card.id);
       if (!sub) continue;
       attempts ??= attemptsOf(card.id);
       pushLog(ws, card.id, sub, attempts, memo);
+    }
+  }
+
+  // A check that cannot read a card's files is reported, and the next one
+  // tries again: one card's trouble never stops the others' checks.
+  function checkCardQuietly(card: CardWatch): void {
+    try {
+      checkCard(card);
+    } catch (err) {
+      console.error(`card ${card.id}: ${errorText(err)}`);
     }
   }
 
@@ -804,59 +825,67 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
       dirty.clear();
       for (const id of ids) {
         const card = watches.get(id);
-        if (!card) continue;
-        try {
-          checkCard(card);
-        } catch (err) {
-          console.error(`card ${id}: ${errorText(err)}`);
-        }
+        if (card) checkCardQuietly(card);
       }
     }, options.checkMs);
+  }
+
+  function refuseCard(ws: Socket, id: string, error: string): void {
+    send(ws, encodeMessage({ type: "card", id, error }));
   }
 
   function subscribe(ws: Socket, subscription: CardSubscription): void {
     const id = subscription.id;
     if (!known(id)) {
       unsubscribe(ws, id);
-      send(ws, encodeMessage({ type: "card", id, error: `unknown ticket ${id}` }));
+      refuseCard(ws, id, `unknown ticket ${id}`);
       return;
     }
-    let card = watches.get(id);
-    if (!card) {
-      card = {
-        id,
-        subscribers: new Set(),
-        bodySig: null,
-        body: null,
-        bodyJson: "",
-        eventsSig: null,
-        events: null,
-        eventsJson: "",
-      };
-      watches.set(id, card);
+    if (!ws.data.cards.has(id) && ws.data.cards.size >= CARDS_PER_SOCKET) {
+      refuseCard(ws, id, `a socket holds at most ${CARDS_PER_SOCKET} cards`);
+      return;
     }
-    // Anything that moved since the card was last read goes to the sockets
-    // already holding it, before this one joins them.
-    refreshCard(card);
+    const held = watches.get(id);
+    const card: CardWatch = held ?? {
+      id,
+      subscribers: new Set(),
+      bodySig: null,
+      bodyJson: "",
+      eventsSig: null,
+      eventsJson: "",
+    };
     const sub: CardSub = { follow: followOf(subscription.follow), log: null, attempts: null };
+    let log: LogPush | null = null;
+    try {
+      // Anything that moved since the card was last read goes to the
+      // sockets already holding it, before this one joins them.
+      refreshCard(card);
+      const attempts = attemptsOf(id);
+      const target = targetOf(sub.follow, attempts.list);
+      if (target !== null) {
+        const ino = statOf(join(sources.runsDir, target.file))?.ino ?? 0;
+        log = windowOf(target, attempts);
+        sub.log = { attempt: target.attempt, stream: target.stream, ino, offset: log.nextOffset };
+        sub.attempts = attempts.json;
+      }
+    } catch (err) {
+      // Nothing is kept of a card whose files could not be read: the tab
+      // is told, and its next subscribe reads the card afresh.
+      unsubscribe(ws, id);
+      refuseCard(ws, id, `card ${id} could not be read: ${errorText(err)}`);
+      return;
+    }
+    if (!held) watches.set(id, card);
     ws.data.cards.set(id, sub);
     card.subscribers.add(ws);
-    const attempts = attemptsOf(id);
-    const target = targetOf(sub.follow, attempts.list);
-    let log: LogPush | null = null;
-    if (target !== null) {
-      const window = windowOf(id, target, attempts);
-      log = window.push;
-      sub.log = {
-        attempt: target.attempt,
-        stream: target.stream,
-        ino: window.ino,
-        offset: window.push.nextOffset,
-      };
-      sub.attempts = attempts.json;
-    }
-    // The three in one frame, so they paint in one render.
-    send(ws, encodeMessage({ type: "card", id, body: card.body, events: card.events!, log }));
+    // The three in one frame, so they paint in one render. Spliced from the
+    // JSON already made, in encodeMessage's own key order, so a large
+    // events list is serialised once per change, not once per subscribe.
+    send(
+      ws,
+      `{"type":"card","id":${JSON.stringify(id)},"body":${card.bodyJson},` +
+        `"events":${card.eventsJson},"log":${JSON.stringify(log)}}`,
+    );
   }
 
   function unsubscribe(ws: Socket, id: string): void {
@@ -969,17 +998,30 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     const whole = wholeLiveFrame();
     if (whole !== null) send(ws, whole);
     for (const [id, sub] of ws.data.cards) {
-      if (watches.has(id)) pushLog(ws, id, sub, attemptsOf(id), new Map());
+      if (!watches.has(id)) continue;
+      try {
+        pushLog(ws, id, sub, attemptsOf(id), newMemo());
+      } catch (err) {
+        console.error(`card ${id}: ${errorText(err)}`);
+      }
     }
     checkLiveSoon();
   }
 
   function hello(ws: Socket, visible: boolean, cards: CardSubscription[]): void {
-    // The hello's cards are the whole of what the tab holds.
-    const wanted = new Set(cards.map((card) => card.id));
+    // The hello's cards are the whole of what the tab holds, up to the cap.
+    const held = cards.slice(0, CARDS_PER_SOCKET);
+    const wanted = new Set(held.map((card) => card.id));
     for (const id of [...ws.data.cards.keys()]) if (!wanted.has(id)) unsubscribe(ws, id);
     setVisible(ws, visible);
-    for (const card of cards) subscribe(ws, card);
+    // Each card on its own: one that cannot be read leaves the rest held.
+    for (const card of held) {
+      try {
+        subscribe(ws, card);
+      } catch (err) {
+        console.error(`socket: card ${card.id}: ${errorText(err)}`);
+      }
+    }
   }
 
   function reply(ws: Socket, id: number, kind: RequestKind, answer: RequestAnswer<unknown>): void {
@@ -1164,6 +1206,11 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
       // every browser answers without the page's help.
       idleTimeout: 120,
       sendPings: true,
+      maxPayloadLength: CLIENT_FRAME_MAX_BYTES,
+      // A tab too far behind to take more is closed rather than sent a
+      // stream with frames missing: the reconnect brings it a fresh
+      // snapshot, where a dropped frame would leave a press waiting.
+      closeOnBackpressureLimit: true,
       open,
       message,
       close: socketClosed,

@@ -547,6 +547,51 @@ function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
   return cut - start;
 }
 
+const ESC = 0x1b;
+
+// The longest escape sequence a read holds back waiting for its end (an OSC
+// hyperlink carries a whole URL); past it the bytes go as they are, so a
+// stray ESC can never hold a log back for good.
+const ESCAPE_MAX_BYTES = 4096;
+
+// Whether the escape sequence starting at `esc` has ended by `end`. A CSI
+// (ESC [) ends at its final byte, an OSC (ESC ]) at BEL (one ended by ST
+// leaves ST's own ESC as the last), a charset designator a byte after its
+// introducer, and every other escape at its second byte. A byte a sequence
+// cannot hold ends it too: a malformed sequence is not one still arriving.
+function escapeEnded(bytes: Uint8Array, esc: number, end: number): boolean {
+  if (esc + 1 >= end) return false;
+  const kind = bytes[esc + 1]!;
+  if (kind === 0x5b) {
+    for (let i = esc + 2; i < end; i++) {
+      const byte = bytes[i]!;
+      if (byte < 0x20 || byte >= 0x40) return true;
+    }
+    return false;
+  }
+  if (kind === 0x5d) {
+    for (let i = esc + 2; i < end; i++) if (bytes[i] === 0x07) return true;
+    return false;
+  }
+  if (kind === 0x28 || kind === 0x29 || kind === 0x23) return esc + 2 < end;
+  return true;
+}
+
+/**
+ * Trim a raw byte slice so no ANSI escape sequence straddles its tail (issue
+ * #161): the stripping is per read, so a sequence split across two reads
+ * would leave its second half in the pane as text. A tail that is still
+ * inside a sequence is cut at its ESC, so the next read (from the cut) brings
+ * the sequence whole, the way utf8End does for a split char.
+ */
+function escapeEnd(bytes: Uint8Array, start: number, end: number): number {
+  const from = Math.max(start, end - ESCAPE_MAX_BYTES);
+  for (let i = end - 1; i >= from; i--) {
+    if (bytes[i] === ESC) return escapeEnded(bytes, i, end) ? end : i;
+  }
+  return end;
+}
+
 /**
  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
@@ -589,7 +634,14 @@ function readLogRange(logPath: string, offset: number, end?: number): LogRange {
     closeSync(fd);
   }
   const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
-  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
+  let decodeEnd = utf8End(bytes, headTrim, bytes.length);
+  // A forward read (a tail, or a page on from the last one) is continued
+  // from its nextOffset, so it stops short of an escape still arriving. A
+  // read bounded by `end` meets bytes the reader already holds, and keeps
+  // every byte up to them.
+  if (end === undefined || !Number.isFinite(end)) {
+    decodeEnd = escapeEnd(bytes, headTrim, decodeEnd);
+  }
   return {
     content: stripAnsi(
       new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
@@ -606,6 +658,16 @@ function logTailOffset(logPath: string): number {
     return Math.max(0, statSync(logPath).size - LOG_CHUNK_BYTES);
   } catch {
     return 0;
+  }
+}
+
+/** Whether an Origin header names the host the request came to. One that
+ *  does not parse (a sandboxed page's "null") names no host of ours. */
+function sameOrigin(origin: string, host: string | null): boolean {
+  try {
+    return host !== null && new URL(origin).host === host;
+  } catch {
+    return false;
   }
 }
 
@@ -1331,10 +1393,6 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const hub = createPushHub(
     {
       current,
-      knows: (id) => {
-        refreshMeta();
-        return ticketIds.has(id) || conversationIds.has(id);
-      },
       runsDir,
       issuesDir: join(poolDir, "issues"),
       bodyFile: (id) => ticketBodyFile(poolDir, id),
@@ -2262,8 +2320,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         const url = new URL(req.url);
         const pathname = url.pathname;
 
-        // The Console's one socket (issue #161, ws.ts).
+        // The Console's one socket (issue #161, ws.ts). A browser names the
+        // page that opens it, and only the Console's own page may: a page
+        // on any other site could otherwise drive the pool from a tab the
+        // operator has open (a socket is not held to the same-origin rule
+        // a fetch is). A client that names no page (a script, the bench)
+        // is let through, as the HTTP routes let it through.
         if (pathname === WS_PATH) {
+          const origin = req.headers.get("origin");
+          if (origin !== null && !sameOrigin(origin, req.headers.get("host"))) {
+            return new Response("cross-origin socket refused", { status: 403 });
+          }
           if (bunServer.upgrade(req, { data: hub.socketState() })) return undefined;
           return new Response("expected a WebSocket upgrade", { status: 400 });
         }

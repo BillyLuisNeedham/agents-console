@@ -118,6 +118,8 @@ Three things are deliberately not on the socket:
    - The window is what the log pane's open does today: the last `LOG_CHUNK_BYTES` (64 KiB) of the followed file.
    - `log` is null when the card has no attempt.
    - The three come in one frame, so they paint in one render.
+   - A card's `events` leave out each event payload's `logTail` (the attempt's last log lines on `exited` and `crash`). The Console never reads it, and over a run it grows an events file to megabytes. `GET /api/events` still serves it.
+   - A socket holds at most 32 cards. A subscribe past that, an id that is not in the pushed snapshot, and a card whose files cannot be read are each answered with a `card` frame carrying `error`, and nothing is held.
 2. **After that**, the server sends `card` frames with only what changed:
    - `events` (the whole `TicketEventsResponse`) when the events file stamp moves;
    - `body` when the Issue file changes;
