@@ -4,7 +4,7 @@
  * renders. No network calls, no DOM: fixtures in, view model out.
  */
 
-import { marked } from "marked";
+import { Marked } from "marked";
 import type { Point, TopologyEdge } from "./geometry";
 import type {
   AssignmentSources,
@@ -2924,16 +2924,21 @@ export function projectDetailTabs(
 }
 
 /**
- * The Spec tab's body: the ticket's markdown rendered to HTML. The DOM layer
- * assigns it as innerHTML; the ticket files are the pool's own prose, served
- * same-origin, so no sanitiser sits between. Parsed once per body (issue
- * #157): the Spec tab renders on every render while it is open, and a body
- * only changes when its file does, so the last few bodies' HTML is kept.
+ * The Spec tab's body: the ticket's markdown rendered to HTML, which the DOM
+ * layer assigns as innerHTML. Agents write ticket bodies (a spawn proposal
+ * lands as one), so a body is untrusted input: an injected agent's markup
+ * must never run in the Console, which holds the controls for the whole
+ * pool. Raw HTML in the markdown, block or inline, renders as the text it
+ * is, and a link or image keeps its URL only when it is http, https, mailto
+ * or relative; any other (javascript:, data:, vbscript:) leaves the link's
+ * text and the image's alt text alone. Parsed once per body (issue #157):
+ * the Spec tab renders on every render while it is open, and a body only
+ * changes when its file does, so the last few bodies' HTML is kept.
  */
 export function ticketBodyHtml(body: string): string {
   const held = ticketBodyHtmlCache.get(body);
   if (held !== undefined) return held;
-  const html = marked(body, { async: false });
+  const html = ticketMarkdown.parse(body, { async: false });
   if (ticketBodyHtmlCache.size >= TICKET_BODY_HTML_KEPT) {
     const oldest = ticketBodyHtmlCache.keys().next().value;
     if (oldest !== undefined) ticketBodyHtmlCache.delete(oldest);
@@ -2944,6 +2949,52 @@ export function ticketBodyHtml(body: string): string {
 
 const TICKET_BODY_HTML_KEPT = 32;
 const ticketBodyHtmlCache = new Map<string, string>();
+
+/** Text made safe to sit in HTML, as an element's text or an attribute's value. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Whether a link's or image's URL may stand: http, https, mailto, or one
+ * with no scheme at all (relative, or a fragment). The scheme is read the
+ * way a browser reads it: past leading spaces and control characters, with
+ * tabs and newlines anywhere ignored, and in any case. The URL is written
+ * into the attribute escaped, so an entity in it stays literal text and
+ * cannot spell a scheme this check did not see.
+ */
+export function safeMarkdownUrl(url: string): boolean {
+  const seen = url.replace(/[\t\n\r]/g, "").replace(/^[\u0000- ]+/, "");
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(seen)?.[1]?.toLowerCase();
+  return scheme === undefined || scheme === "http" || scheme === "https" || scheme === "mailto";
+}
+
+/** The markdown renderer for ticket bodies: marked, with raw HTML shown as
+ *  text and only safe URLs kept (see `ticketBodyHtml`). */
+const ticketMarkdown = new Marked({
+  async: false,
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text);
+    },
+    link({ href, title, tokens }) {
+      const text = this.parser.parseInline(tokens);
+      if (!safeMarkdownUrl(href)) return text;
+      const titled = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<a href="${escapeHtml(href)}"${titled}>${text}</a>`;
+    },
+    image({ href, title, text }) {
+      if (!safeMarkdownUrl(href)) return escapeHtml(text);
+      const titled = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titled}>`;
+    },
+  },
+});
 
 /**
  * The next Detail selection after a card press-release. Clicking the selected
