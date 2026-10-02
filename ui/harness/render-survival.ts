@@ -12,6 +12,7 @@
  */
 
 import "../src/styles.css";
+import { RenderLoop } from "../src/frame";
 import { ConsoleSession } from "../src/session";
 import { ConsoleView, type Handlers } from "../src/view";
 import type {
@@ -305,12 +306,12 @@ const session = new ConsoleSession({
   stream: () => () => {},
   vitals: { update() {}, state: () => ({}) },
   terminal: { update() {}, state: () => ({}) },
-  onChange: () => render(),
+  onChange: () => loop.request(),
 });
 
 const view = new ConsoleView({
   onAnswer: () => Promise.resolve(),
-  onChange: () => render(),
+  onChange: () => loop.request(),
   onFocusTerminal: () => Promise.resolve(true),
   onListPanes: () =>
     Promise.resolve({
@@ -362,6 +363,14 @@ function render(): void {
   view.render(root, session.model(view.conversationEndState()), handlers);
 }
 
+// The stores ask for renders the way the app's do (issue #157): through a
+// loop that folds every ask before the next frame into one. The frame is a
+// timer here, since under Chromium's --virtual-time-budget a
+// requestAnimationFrame may never fire; what is under test is that renders
+// are deferred and folded, not which clock defers them. The harness's own
+// render() calls stand for a poll tick's render and run at once.
+const loop = new RenderLoop(() => render(), (frame) => setTimeout(frame, 0));
+
 // ---------------------------------------------------------------------------
 // Survival checks
 // ---------------------------------------------------------------------------
@@ -401,9 +410,11 @@ interface Check {
 const report: Check[] = [];
 
 function settle(): Promise<void> {
-  // Let the session's fetch continuations run. Timers only: under Chromium's
-  // --virtual-time-budget a requestAnimationFrame may never fire.
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  // Let the session's fetch continuations run, then the render they asked
+  // for: a second timer, so a frame asked for by a continuation comes first.
+  // Timers only: under Chromium's --virtual-time-budget a
+  // requestAnimationFrame may never fire.
+  return new Promise((resolve) => setTimeout(() => setTimeout(resolve, 0), 0));
 }
 
 async function settleAll(): Promise<void> {
@@ -531,15 +542,29 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     if (!failures.has(key)) failures.set(key, detail);
   };
   const before = renders;
-  for (let pass = 1; pass <= 6; pass++) {
+  let burst: number | null = null;
+  for (let pass = 1; pass <= 7; pass++) {
     if (pass === 6) {
       current = snapshot(1, "ticket t-1 (changed)");
       session.setSnapshot(current); // onChange renders, as a live snapshot does
       await settle();
+    } else if (pass === 7) {
+      // A burst, the way a busy pool lands one (issue #157): ten snapshots
+      // inside one frame, and a drawer shut and opened again among them,
+      // painted by one render. Rendered one ask at a time, the shut drawer
+      // would lose its node and its scroll.
+      const atBurst = renders;
+      for (let i = 0; i < 10; i++) {
+        session.setSnapshot(current);
+        if (i === 4) session.toggleLog();
+        if (i === 5) session.toggleLog();
+      }
+      await settle();
+      burst = renders - atBurst;
     } else {
       render();
     }
-    const tag = pass === 6 ? "changed-model render" : `render ${pass}`;
+    const tag = pass === 6 ? "changed-model render" : pass === 7 ? "burst render" : `render ${pass}`;
     for (const s of scrolled) {
       const now = q<HTMLElement>(s.selector);
       const top = now?.scrollTop ?? -1;
@@ -570,6 +595,12 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     }
   }
   const total = renders - before;
+  report.push({
+    scenario: name,
+    assertion: "a burst of asks renders once",
+    pass: burst === 1,
+    detail: `${burst} render(s) for 10 snapshots and a drawer toggled twice in one frame`,
+  });
 
   stage = `${name}: gestures after renders`;
   // (f) gestures after the renders. A handler bound to the viewport per

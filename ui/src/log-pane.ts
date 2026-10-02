@@ -46,7 +46,8 @@ export interface LogChunk {
  * The one wire call the pane needs: a byte range of a ticket's attempt log,
  * or of its Stream file when `stream` is set, optionally bounded by `end`
  * (how "load earlier" reads exactly the prefix before the bytes the pane
- * already holds).
+ * already holds). `signal` aborts it when the pane moves to another window,
+ * so clicking across cards never leaves reads for the old one queued.
  */
 export type LogFetch = (
   ticketId: string,
@@ -54,7 +55,17 @@ export type LogFetch = (
   offset: number,
   end?: number,
   stream?: boolean,
+  signal?: AbortSignal,
 ) => Promise<LogChunk>;
+
+/**
+ * The most text the pane holds while it follows the tail: four of the
+ * server's 64 KiB windows. Past it the oldest whole chunks are let go, and
+ * "load earlier" reads them back, so an attempt that runs for hours costs a
+ * bounded string and a bounded rewrite of the pane's one text node, not one
+ * that grows with the run (issue #157).
+ */
+export const LOG_PANE_MAX_CHARS = 256 * 1024;
 
 // The pane has one window at a time, so its stale-answer guard lives under
 // a single key.
@@ -102,6 +113,13 @@ export class LogPane {
   // showing (a re-open of the same attempt would otherwise double-append).
   private readonly guard = new StaleGuard();
   private windowToken = 0;
+  // Aborts the window's reads still out when the next window begins: the
+  // guard already drops their answers, and this frees their connections.
+  private windowAbort = new AbortController();
+  // Where each held chunk starts in the log and how much of `content` it
+  // is, oldest first, so the cap can let go of whole chunks and leave
+  // `firstOffset` on a byte the server can page back from.
+  private chunks: { offset: number; length: number }[] = [];
   private tailInFlight = false;
   private earlierInFlight = false;
 
@@ -137,15 +155,9 @@ export class LogPane {
     this.onChange();
     if (attempt === null) return;
     try {
-      const probe = await this.fetchChunk(
-        ticketId,
-        attempt,
-        Number.MAX_SAFE_INTEGER,
-        undefined,
-        stream,
-      );
+      const probe = await this.read(ticketId, attempt, Number.MAX_SAFE_INTEGER, undefined, stream);
       if (!this.isCurrent(ticketId, attempt, stream, token)) return;
-      const chunk = await this.fetchChunk(
+      const chunk = await this.read(
         ticketId,
         attempt,
         initialLogWindow(probe.totalSize),
@@ -155,6 +167,7 @@ export class LogPane {
       if (!this.isCurrent(ticketId, attempt, stream, token)) return;
       this.note(chunk);
       this.state.content = chunk.content;
+      this.chunks = [{ offset: chunk.offset, length: chunk.content.length }];
       this.state.firstOffset = chunk.offset;
       this.state.offset = chunk.nextOffset;
       this.state.totalSize = chunk.totalSize;
@@ -246,7 +259,7 @@ export class LogPane {
     if (from === null) return;
     this.earlierInFlight = true;
     try {
-      const chunk = await this.fetchChunk(
+      const chunk = await this.read(
         ticketId,
         attempt,
         from,
@@ -257,6 +270,7 @@ export class LogPane {
       this.note(chunk);
       captureLogAnchor();
       this.state.content = chunk.content + this.state.content;
+      this.chunks.unshift({ offset: chunk.offset, length: chunk.content.length });
       this.state.firstOffset = chunk.offset;
       this.onChange();
     } catch {
@@ -269,7 +283,11 @@ export class LogPane {
   /**
    * Append whatever bytes the selected attempt's file has grown since the
    * last read: the live tail, driven by the snapshot cadence. Fetches only
-   * bytes past the last offset read; a no-op once caught up.
+   * bytes past the last offset read; a no-op once caught up. The pane
+   * repaints once for the whole catch-up, not once per chunk (issue #157).
+   * While it follows the tail, the oldest chunks past the cap are let go,
+   * and a backlog past the cap skips ahead to the last window instead of
+   * reading every byte the cap would let go of anyway.
    */
   private async tail(
     ticketId: string,
@@ -280,29 +298,66 @@ export class LogPane {
     if (this.tailInFlight) return;
     if (!this.isCurrent(ticketId, attempt, stream, token)) return;
     this.tailInFlight = true;
+    let grew = false;
     try {
       while (logTailOffset(this.state.offset, this.state.totalSize) !== null) {
+        if (pinned && this.state.totalSize - this.state.offset > LOG_PANE_MAX_CHARS) {
+          // Everything held is older than what the cap would keep.
+          this.state.offset = initialLogWindow(this.state.totalSize);
+          this.state.firstOffset = this.state.offset;
+          this.state.content = "";
+          this.chunks = [];
+          grew = true;
+        }
         const from = this.state.offset;
-        const chunk = await this.fetchChunk(
-          ticketId,
-          attempt,
-          from,
-          undefined,
-          stream,
-        );
+        const chunk = await this.read(ticketId, attempt, from, undefined, stream);
         if (!this.isCurrent(ticketId, attempt, stream, token)) return;
         this.note(chunk);
         this.state.content += chunk.content;
+        this.chunks.push({ offset: chunk.offset, length: chunk.content.length });
         this.state.offset = chunk.nextOffset;
         this.state.totalSize = chunk.totalSize;
-        this.onChange();
+        grew = true;
         if (chunk.nextOffset <= from) break;
       }
     } catch {
       this.fail(ticketId, attempt, stream, token);
     } finally {
       this.tailInFlight = false;
+      if (grew && this.isCurrent(ticketId, attempt, stream, token)) {
+        if (pinned) this.trimToCap();
+        this.onChange();
+      }
     }
+  }
+
+  /**
+   * Let go of the oldest whole chunks while the pane holds more than the
+   * cap. `firstOffset` moves to the first chunk kept, so "load earlier"
+   * reads exactly what was let go.
+   */
+  private trimToCap(): void {
+    let drop = 0;
+    while (
+      this.chunks.length > 1 &&
+      this.state.content.length - drop > LOG_PANE_MAX_CHARS
+    ) {
+      drop += this.chunks.shift()!.length;
+    }
+    if (drop === 0) return;
+    this.state.content = this.state.content.slice(drop);
+    this.state.firstOffset = this.chunks[0]!.offset;
+  }
+
+  /** One read of the current window, aborted if the window moves on. */
+  private read(
+    ticketId: string,
+    attempt: number,
+    offset: number,
+    end: number | undefined,
+    stream: boolean,
+  ): Promise<LogChunk> {
+    return this.fetchChunk(ticketId, attempt, offset, end, stream, this.windowAbort.signal);
   }
 
   /** A failed fetch marks the pane, but only while it is still selected. */
@@ -347,6 +402,9 @@ export class LogPane {
 
   private resetWindow(ticketId: string | null): void {
     this.windowToken = this.guard.begin(WINDOW_KEY);
+    this.windowAbort.abort();
+    this.windowAbort = new AbortController();
+    this.chunks = [];
     if (ticketId !== this.state.ticketId) this.state.attempts = [];
     this.state.ticketId = ticketId;
     this.state.attempt = null;

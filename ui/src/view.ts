@@ -113,6 +113,7 @@ export interface AppModel {
   edges: TopologyEdge[];
   log: string[];
   logOpen: boolean;
+  /** The State inspector's text; empty while the drawer is closed. */
   inspectorJson: string;
   inspectorOpen: boolean;
   connected: boolean;

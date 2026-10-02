@@ -2,7 +2,7 @@
 
 import { describe, expect, it, spyOn } from "bun:test";
 import { h } from "./dom";
-import { commit, morph } from "./morph";
+import { commit, KEEP_CHILDREN, morph } from "./morph";
 import { useDom } from "./test-dom";
 
 useDom();
@@ -245,5 +245,31 @@ describe("morph", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("leaves markup built from unchanged html alone, and patches it when the html moves (#157)", () => {
+    const { tree } = mounted(h("div", { html: "<p>one</p><pre>code</pre>" }));
+    const pre = tree.querySelector("pre")!;
+    // Something only the live page holds: a walk of the subtree would see
+    // it differs from the fresh build and undo it.
+    pre.setAttribute("data-seen", "yes");
+    morph(tree, h("div", { html: "<p>one</p><pre>code</pre>" }));
+    expect(tree.querySelector("pre")).toBe(pre);
+    expect(pre.getAttribute("data-seen")).toBe("yes");
+    morph(tree, h("div", { html: "<p>two</p><pre>code</pre>" }));
+    expect(tree.querySelector("p")!.textContent).toBe("two");
+    expect(tree.querySelector("pre")).toBe(pre);
+    expect(pre.hasAttribute("data-seen")).toBe(false);
+  });
+
+  it("keeps the children of an element marked as owning them, and patches the element itself (#157)", () => {
+    const { tree } = mounted(h("div", {}, h("div", { class: "layer", [KEEP_CHILDREN]: "" })));
+    const layer = tree.firstElementChild!;
+    const drawn = document.createElement("span");
+    layer.appendChild(drawn);
+    morph(tree, h("div", {}, h("div", { class: "layer moved", [KEEP_CHILDREN]: "" })));
+    expect(tree.firstElementChild).toBe(layer);
+    expect(layer.className).toBe("layer moved");
+    expect(layer.firstChild).toBe(drawn);
   });
 });
