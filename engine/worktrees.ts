@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileStamp } from "./stat-cache.ts";
 
 export interface WorktreeInfo {
   path: string;
@@ -95,6 +96,62 @@ export function gitCommonDir(repoRoot: string): string {
   const dir = probe.ok && probe.out ? probe.out : join(repoRoot, ".git");
   commonDirCache.set(repoRoot, dir);
   return dir;
+}
+
+// The checkout's own git dir, where its HEAD lives: the common dir for the
+// main checkout, `<common>/worktrees/<name>` for a linked one.
+const gitDirCache = new Map<string, string>();
+
+function gitDirOf(repoRoot: string): string {
+  const cached = gitDirCache.get(repoRoot);
+  if (cached) return cached;
+  const probe = git(repoRoot, ["rev-parse", "--absolute-git-dir"]);
+  const dir = probe.ok && probe.out ? probe.out : join(repoRoot, ".git");
+  gitDirCache.set(repoRoot, dir);
+  return dir;
+}
+
+/**
+ * A stamp of the git state that decides, for these branches, whether each
+ * exists and whether it has landed in the checkout's current branch (issue
+ * #157): the text of the checkout's HEAD, which names that branch, and the
+ * file stamp of every place a ref by each name could live (the paths `git
+ * rev-parse` tries, loose and packed, and a reftable's table list). Commits
+ * never change, so while no ref moves the answers cannot move either, and
+ * git moves a ref by writing a lock file and renaming it over the old one,
+ * which always changes the stamp. Null when it cannot vouch: a ref file
+ * written within the racy window, or a HEAD it cannot read.
+ */
+export function refStamp(repoRoot: string, branches: readonly string[]): string | null {
+  const gitDir = gitDirOf(repoRoot);
+  const common = gitCommonDir(repoRoot);
+  let head: string;
+  try {
+    head = readFileSync(join(gitDir, "HEAD"), "utf8");
+  } catch {
+    return null;
+  }
+  const target = /^ref: refs\/heads\/(.+)$/m.exec(head)?.[1]?.trim();
+  const paths = [join(common, "packed-refs"), join(common, "reftable", "tables.list")];
+  for (const name of target ? [...branches, target] : branches) {
+    paths.push(
+      join(gitDir, name),
+      join(common, name),
+      join(common, "refs", name),
+      join(common, "refs", "tags", name),
+      join(common, "refs", "heads", name),
+      join(common, "refs", "remotes", name),
+      join(common, "refs", "remotes", name, "HEAD"),
+    );
+  }
+  const now = Date.now();
+  const stamps: string[] = [];
+  for (const path of paths) {
+    const stamp = fileStamp(path, now);
+    if (stamp === null) return null;
+    stamps.push(stamp);
+  }
+  return [head, ...stamps].join("\n");
 }
 
 // Two pools can share one repo: two checkouts of it (a plain clone and a

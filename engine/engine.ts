@@ -181,12 +181,12 @@ import {
   createMergeHoldWatch,
   MERGE_HOLD_POLL_MS,
   createMergeLine,
-  deriveMergeHold,
   gitMergeHoldProbe,
   type HoldHost,
   type MergeHoldWatch,
   type MergeLine,
   type MergeQueueEntry,
+  memoizedMergeHold,
   throughMergeHold,
 } from "./merge-hold.ts";
 import {
@@ -720,7 +720,8 @@ function mergeHold(session: Session): string[] {
   // `enlistedWork`. The hold must read that branch, or an as-found done ticket
   // would look already-landed and the pool would schedule its blocked tickets
   // before its merge.
-  return deriveMergeHold(
+  const target = session.mergeTarget;
+  return session.deriveHold(
     session.state.tickets,
     (id) => engineTicketBuildId(id) !== null,
     {
@@ -729,8 +730,14 @@ function mergeHold(session: Session): string[] {
       // read: an enlist that moved the pool's own checkout onto its created
       // pool branch would otherwise make that branch the target and read the
       // done ticket as already landed.
-      currentBranch: () => session.mergeTarget ?? base.currentBranch(),
+      currentBranch: () => target ?? base.currentBranch(),
       branchFor: (id) => session.enlistedWork.get(id)?.branch ?? base.branchFor(id),
+      // The memo's stamp names the captured target and covers its refs, so
+      // a target captured after the last derivation is a new key.
+      stamp: (branches) => {
+        const refs = base.stamp?.(target === null ? branches : [...branches, target]) ?? null;
+        return refs === null ? null : `${target ?? ""}\n${refs}`;
+      },
     },
   );
 }
@@ -947,6 +954,10 @@ interface Session {
   // The Merge hold watch (merge-hold.ts): re-derives the hold while the last
   // emitted set is non-empty, so a merge done by hand reaches the snapshot.
   holdWatch: MergeHoldWatch;
+  // The Merge hold's derivation behind its memo (issue #157): every emit,
+  // wait tick and watch tick derives the hold, and git runs only once a ref
+  // the derivation reads has moved.
+  deriveHold: ReturnType<typeof memoizedMergeHold>;
   // Enlisted attempts (issue #101, engine/enlisted.ts): the runtime behind
   // every pane the operator enlisted, owning its Turn state and the Turns the
   // engine types into it. Built once at startPool, reached through the
@@ -1323,6 +1334,7 @@ export function startPool(options: RunOptions): PoolRun {
     paneSurvey: null,
     openedTabs: [],
     enlistedTerminals: { panes: new Set(), tabs: new Set() },
+    deriveHold: memoizedMergeHold(),
     holdWatch: createMergeHoldWatch({
       derive: () => mergeHold(session),
       onChange: () => emitSnapshot(session, session.settledPhase ?? "running"),
