@@ -27,6 +27,25 @@ export function git(repoRoot: string, args: string[]): GitProbe {
   };
 }
 
+/**
+ * `git` without blocking the engine's one thread: for a read a request
+ * handler makes on demand (issue #157), where the answer can wait for git
+ * and every other request should not.
+ */
+export async function gitAsync(repoRoot: string, args: string[]): Promise<GitProbe> {
+  const probe = Bun.spawn({
+    cmd: ["git", "-C", repoRoot, ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [out, err, exitCode] = await Promise.all([
+    new Response(probe.stdout).text(),
+    new Response(probe.stderr).text(),
+    probe.exited,
+  ]);
+  return { ok: exitCode === 0, out: out.trim(), err: err.trim() };
+}
+
 function refExists(repoRoot: string, ref: string): boolean {
   return git(repoRoot, ["rev-parse", "--verify", ref]).ok;
 }

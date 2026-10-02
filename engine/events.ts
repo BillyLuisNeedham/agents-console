@@ -24,7 +24,7 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { stampOf } from "./stat-cache.ts";
+import { fileStamp, stampOf } from "./stat-cache.ts";
 
 const EVENT_KINDS = [
   "scheduled",
@@ -283,6 +283,11 @@ function eventsFile(runsDir: string, ticketId: string): string {
   return join(runsDir, `${ticketId}.events.jsonl`);
 }
 
+/** The events file's stamp (stat-cache.ts), for a reader caching what it derives from the events. */
+export function eventsStamp(runsDir: string, ticketId: string): string | null {
+  return fileStamp(eventsFile(runsDir, ticketId));
+}
+
 export function appendEvent(
   runsDir: string,
   ticketId: string,
@@ -341,7 +346,7 @@ export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   const fresh = readFrom(path, entry.settled);
   const lastNewline = fresh.lastIndexOf(NEWLINE);
   if (lastNewline >= 0) {
-    entry.events.push(...parseLines(fresh.subarray(0, lastNewline + 1)));
+    for (const event of parseLines(fresh.subarray(0, lastNewline + 1))) entry.events.push(event);
     entry.settled += lastNewline + 1;
     entry.tail = fresh.slice(Math.max(0, lastNewline + 1 - SETTLED_TAIL_BYTES), lastNewline + 1);
   }

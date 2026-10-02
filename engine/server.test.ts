@@ -148,6 +148,7 @@ async function startServer(
     conversationPollMs?: number;
     enlistTeachingWaitMs?: number;
     paneSurveyMs?: number;
+    snapshotCoalesceMs?: number;
   } = {},
 ): Promise<PoolServer> {
   const server = createPoolServer({
@@ -725,6 +726,96 @@ describe("pool server", () => {
     // replayed snapshot, so the client's silence window derives from it.
     const firstFrame = new TextDecoder().decode(value).split("\n\n")[0];
     expect(firstFrame).toBe('event: stream-config\ndata: {"heartbeatMs":40}');
+  });
+});
+
+// The stream gathers the engine's emits for a short window and sends the
+// latest of them (issue #157): a burst is one frame, nothing is lost at the
+// end of a run, and a zero window keeps the old one-frame-per-emit stream.
+describe("snapshot stream coalescing", () => {
+  const ready = "<!-- state: id=01 blocked-by=none status=ready -->";
+
+  /** The seqs of the snapshot frames a stream carries until one reaches `seq`. */
+  async function seqsUntil(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    seq: () => number | undefined,
+  ): Promise<number[]> {
+    const decoder = new TextDecoder();
+    let text = "";
+    const deadline = Date.now() + 10_000;
+    // One read in flight at a time: a read that loses the race to the sleep
+    // still owns the next chunk.
+    let pending: ReturnType<typeof reader.read> | null = null;
+    for (;;) {
+      const seqs = snapshotFrames(text).map((f) => (f as unknown as { seq: number }).seq);
+      const want = seq();
+      if (want !== undefined && seqs.at(-1) === want) return seqs;
+      if (Date.now() > deadline) throw new Error(`stream never reached seq ${want}: ${seqs}`);
+      pending ??= reader.read();
+      const step = await Promise.race([pending, Bun.sleep(200).then(() => null)]);
+      if (step === null) continue;
+      pending = null;
+      if (step.done) throw new Error("stream ended early");
+      text += decoder.decode(step.value, { stream: true });
+    }
+  }
+
+  it("sends every emit as its own frame with a zero window", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      snapshotCoalesceMs: 0,
+    });
+    const res = await fetch(`${server.url}/api/stream`);
+    const reader = res.body!.getReader();
+    await server.start();
+    await server.settled();
+    const seqs = await seqsUntil(reader, () => server.latest?.seq);
+    await reader.cancel();
+    expect(seqs).toEqual(seqs.map((_, i) => i));
+    expect(seqs.length).toBeGreaterThan(2);
+  });
+
+  it("sends a burst of emits as one frame carrying the latest", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      snapshotCoalesceMs: 500,
+    });
+    const res = await fetch(`${server.url}/api/stream`);
+    const reader = res.body!.getReader();
+    await server.start();
+    await server.settled();
+    // A route reads the engine's last emit at once, inside the window.
+    const final = server.latest!.seq;
+    const state = (await (await fetch(`${server.url}/api/state`)).json()) as {
+      snapshot: { seq: number };
+    };
+    expect(state.snapshot.seq).toBe(final);
+    const seqs = await seqsUntil(reader, () => final);
+    await reader.cancel();
+    // Fewer frames than emits, in order, and the last is the run's last emit.
+    expect(seqs.length).toBeLessThan(final + 1);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(seqs.at(-1)).toBe(final);
+  }, 15_000);
+
+  it("sends a waiting snapshot before the streams close", async () => {
+    const poolDir = makeServerPool([{ file: "01-a.md", marker: ready }]);
+    const server = await startServer(poolDir, stubHarness(poolDir, {}).harnesses, {
+      snapshotCoalesceMs: 60_000,
+    });
+    await server.start();
+    await server.settled();
+    await server.answer(REVIEW_TICKET_ID, "approve");
+    await server.settled();
+    const res = await fetch(`${server.url}/api/stream`);
+    const reader = res.body!.getReader();
+    await readOpeningFrames(reader);
+    const stop = await fetch(`${server.url}/api/stop`, { method: "POST" });
+    expect(stop.status).toBe(202);
+    const { text, ended } = await drainStream(reader);
+    expect(ended).toBe("clean");
+    expect(snapshotFrames(text).at(-1)?.phase).toBe("stopped");
+    await server.shutdown();
   });
 });
 
