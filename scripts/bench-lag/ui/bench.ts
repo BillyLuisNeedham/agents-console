@@ -17,8 +17,12 @@
  *
  * The page imports the target checkout through the `@console` alias
  * (vite.config.ts), so the same file measures any checkout whose ConsoleView
- * and ConsoleSession keep the constructor seams main.ts uses. It POSTs its
- * report to `/report` on its own origin; ui-bench.ts serves both.
+ * and ConsoleSession keep the constructor seams main.ts uses. The stores ask
+ * for renders and send their background polls through `@bench/frame` and
+ * `@bench/poll`: the checkout's own render loop and request cap where it has
+ * them (issue #157), else a render per ask and no cap, as its main.ts does.
+ * It POSTs its report to `/report` on its own origin; ui-bench.ts serves
+ * both.
  */
 
 import "@console/styles.css";
@@ -26,6 +30,8 @@ import { ConsoleSession } from "@console/session";
 import { ConsoleView, type Handlers } from "@console/view";
 import { Vitals } from "@console/vitals";
 import { TerminalSurface } from "@console/terminal";
+import { RenderLoop } from "@bench/frame";
+import { BACKGROUND_REQUESTS, RequestLimiter } from "@bench/poll";
 import type {
   ConversationView,
   EnrichedSnapshot,
@@ -288,26 +294,49 @@ let current = snapshot(seq);
 let streamTimer: ReturnType<typeof setInterval> | null = null;
 let focusCalls = 0;
 
+// Whether the page is inside an animation frame's callbacks, where a render
+// loop renders: what it changes there is painted at the end of this frame,
+// where a render in a handler waits for the next (clickCard below).
+let inAnimationFrame = false;
+const nativeFrame = window.requestAnimationFrame.bind(window);
+window.requestAnimationFrame = (callback: FrameRequestCallback): number =>
+  nativeFrame((at) => {
+    inAnimationFrame = true;
+    try {
+      callback(at);
+    } finally {
+      inAnimationFrame = false;
+    }
+  });
+
+// main.ts's render loop and background cap, or the unbatched wiring of a
+// checkout without them.
+const loop = new RenderLoop(() => render());
+const requestRender = (): void => loop.request();
+const background = new RequestLimiter(BACKGROUND_REQUESTS);
+
 const vitals = new Vitals({
-  fetch: (ticketId) => polled(() => activity(ticketId)),
-  onChange: () => render(),
+  fetch: (ticketId) => background.run(() => polled(() => activity(ticketId))),
+  onChange: requestRender,
 });
 
 const terminal = new TerminalSurface({
   peek: (ticketId) =>
-    polled(() => ({ ticket: ticketId, paneId: `pane-${ticketId}`, text: peekText(ticketId) })),
+    background.run(() =>
+      polled(() => ({ ticket: ticketId, paneId: `pane-${ticketId}`, text: peekText(ticketId) })),
+    ),
   focus: () =>
     soon(() => {
       focusCalls += 1;
     }),
-  onChange: () => render(),
+  onChange: requestRender,
 });
 
 const session = new ConsoleSession({
   getState: () => soon(() => current),
   getEvents: (id) => soon(() => eventsFor(id)),
   getTicket: (id) => soon(() => ({ id, body: `# ${id}\n\n${lines("spec paragraph", 60)}` })),
-  getGrades: () => polled(() => grades()),
+  getGrades: () => background.run(() => polled(() => grades())),
   getLog: (_ticketId, _attempt, offset, end) => soon(() => logChunk(offset, end)),
   answer: () => soon(() => current),
   stop: () => soon(() => undefined),
@@ -329,12 +358,12 @@ const session = new ConsoleSession({
   },
   vitals,
   terminal,
-  onChange: () => render(),
+  onChange: requestRender,
 });
 
 const consoleView = new ConsoleView({
   onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
-  onChange: () => render(),
+  onChange: requestRender,
   onFocusTerminal: (ticketId) => terminal.focus(ticketId),
   onListPanes: () => soon(() => ({ panes: [] })),
   onEnlist: () => soon(() => ({ ok: true }) as never),
@@ -386,6 +415,10 @@ const modelMs: number[] = [];
  *  the work the next frame would otherwise do. */
 const renderLayoutMs: number[] = [];
 
+/** A click waiting for the Detail to name its card, told whether the render
+ *  that did ran inside an animation frame. */
+let titleWatch: { id: string; shown: (inFrame: boolean) => void } | null = null;
+
 function render(): void {
   const t0 = performance.now();
   const model = session.model(consoleView.conversationEndState());
@@ -394,6 +427,11 @@ function render(): void {
   const t1 = performance.now();
   void document.body.offsetHeight;
   const t2 = performance.now();
+  if (titleWatch && detailTitle() === titleWatch.id) {
+    const watch = titleWatch;
+    titleWatch = null;
+    watch.shown(inAnimationFrame);
+  }
   if (!measuring) return;
   renders += 1;
   modelMs.push(tm - t0);
@@ -472,10 +510,28 @@ function detailTitle(): string | null {
 }
 
 /**
+ * The end of the rendering step of the frame that carries a change: a
+ * message posted during that frame's animation callbacks lands just after.
+ * A change made inside them is in this frame; one made in a handler, the
+ * next.
+ */
+function frameRendered(inFrame: boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const post = () => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => resolve();
+      channel.port2.postMessage(null);
+    };
+    if (inFrame) post();
+    else nativeFrame(post);
+  });
+}
+
+/**
  * One card click, the way the canvas reads a tap: pointerdown and pointerup
- * on the card with no move between. Timed from the press to the second
- * frame after the Detail names the card, the first frame being the one that
- * paints it and the second proving that paint finished.
+ * on the card with no move between. Timed from the press to the end of the
+ * frame that paints the Detail naming the card, whether the checkout renders
+ * in the handler or in the next animation frame.
  */
 async function clickCard(ticketId: string): Promise<{ total: number; sync: number; renders: number } | null> {
   const el = cardEl(ticketId);
@@ -484,17 +540,17 @@ async function clickCard(ticketId: string): Promise<{ total: number; sync: numbe
   const x = box.left + 20;
   const y = box.top + 12;
   const rendersBefore = renders;
+  const shown = new Promise<boolean>((resolve) => (titleWatch = { id: ticketId, shown: resolve }));
   const t0 = performance.now();
   pointer("pointerdown", el, x, y);
   pointer("pointerup", el, x, y);
   const sync = performance.now() - t0;
-  const deadline = t0 + 5_000;
-  while (detailTitle() !== ticketId) {
-    if (performance.now() > deadline) return null;
-    await nextFrame();
+  const inFrame = await Promise.race([shown, sleep(5_000).then(() => null)]);
+  if (inFrame === null) {
+    titleWatch = null;
+    return null;
   }
-  await nextFrame();
-  await nextFrame();
+  await frameRendered(inFrame);
   return { total: performance.now() - t0, sync, renders: renders - rendersBefore };
 }
 

@@ -13,7 +13,11 @@
     "useDefineForClassFields": true,
     "typeRoots": ["../../../node_modules/@types"],
     "types": ["bun"],
-    "paths": { "@console/*": ["../../../ui/src/*"] }
+    "paths": {
+      "@console/*": ["../../../ui/src/*"],
+      "@bench/frame": ["../../../ui/src/frame.ts"],
+      "@bench/poll": ["../../../ui/src/poll.ts"]
+    }
   },
-  "include": ["./bench.ts", "./env.d.ts"]
+  "include": ["./bench.ts", "./probe.ts", "./unbatched.ts", "./env.d.ts"]
 }

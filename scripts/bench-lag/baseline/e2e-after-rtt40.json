@@ -1,0 +1,465 @@
+{
+  "at": "2026-10-02T16:05:33.419Z",
+  "repo": "/home/billy/repos/agent-console/.claude/worktrees/agent-acc0109b98a6a7897",
+  "revision": "worktree-agent-acc0109b98a6a7897@77a44f6",
+  "machine": {
+    "bun": "1.3.14",
+    "platform": "linux",
+    "cpus": 12,
+    "loadavgAtStart": [
+      3.14,
+      3.29,
+      2.84
+    ]
+  },
+  "server": null,
+  "ui": null,
+  "e2e": {
+    "durationS": 62,
+    "tabs": 2,
+    "rttMs": 40,
+    "cards": 25,
+    "domNodes": 512,
+    "click": {
+      "n": 19,
+      "unreachable": 0,
+      "missed": 0,
+      "unfilled": 0,
+      "tabs": {
+        "progress": 7,
+        "outcome": 8,
+        "spec": 4
+      },
+      "shellMs": {
+        "n": 19,
+        "mean": 25.5,
+        "p50": 26,
+        "p95": 34.9,
+        "max": 34.9
+      },
+      "dataMs": {
+        "n": 11,
+        "mean": 107.9,
+        "p50": 140.5,
+        "p95": 161.3,
+        "max": 161.3
+      },
+      "progressDataMs": {
+        "n": 7,
+        "mean": 147.1,
+        "p50": 143.2,
+        "p95": 161.3,
+        "max": 161.3
+      },
+      "inputDelayMs": {
+        "n": 19,
+        "mean": 0.4,
+        "p50": 0.3,
+        "p95": 1.1,
+        "max": 1.1
+      },
+      "each": [
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 27.9,
+          "data": 157.2
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 22.3,
+          "data": 22.3
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 24.5,
+          "data": 24.5
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 34.9,
+          "data": 74.8
+        },
+        {
+          "id": "13",
+          "tab": "progress",
+          "shell": 21.9,
+          "data": 139.9
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 27.4,
+          "data": 161.3
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 21.8,
+          "data": 21.8
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 26,
+          "data": 26
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 28.6,
+          "data": 28.6
+        },
+        {
+          "id": "13",
+          "tab": "progress",
+          "shell": 22.1,
+          "data": 146.3
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 23.6,
+          "data": 141.4
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 27,
+          "data": 27
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 22.4,
+          "data": 22.4
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 27.4,
+          "data": 27.4
+        },
+        {
+          "id": "13",
+          "tab": "progress",
+          "shell": 27.2,
+          "data": 143.2
+        },
+        {
+          "id": "14",
+          "tab": "progress",
+          "shell": 27.8,
+          "data": 140.5
+        },
+        {
+          "id": "03",
+          "tab": "outcome",
+          "shell": 22.5,
+          "data": 22.5
+        },
+        {
+          "id": "11",
+          "tab": "outcome",
+          "shell": 23.3,
+          "data": 23.3
+        },
+        {
+          "id": "17",
+          "tab": "spec",
+          "shell": 26.2,
+          "data": 26.2
+        }
+      ]
+    },
+    "focus": {
+      "n": 19,
+      "unreachable": 0,
+      "missed": 0,
+      "unconfirmed": 0,
+      "toFetchMs": {
+        "n": 19,
+        "mean": 3.3,
+        "p50": 2.1,
+        "p95": 10.6,
+        "max": 10.6
+      },
+      "toRequestMs": {
+        "n": 19,
+        "mean": 5.6,
+        "p50": 2.9,
+        "p95": 19.5,
+        "max": 19.5
+      },
+      "toResponseMs": {
+        "n": 19,
+        "mean": 47.9,
+        "p50": 45.2,
+        "p95": 61.5,
+        "max": 61.5
+      },
+      "confirmedMs": {
+        "n": 19,
+        "mean": 62.4,
+        "p50": 58.6,
+        "p95": 78.2,
+        "max": 78.2
+      },
+      "inputDelayMs": {
+        "n": 19,
+        "mean": 1.8,
+        "p50": 0.6,
+        "p95": 8.9,
+        "max": 8.9
+      }
+    },
+    "renders": {
+      "batchesPerSec": 7.71,
+      "framesWithMutationsPerSec": 7.71,
+      "recordsPerSec": 37.51
+    },
+    "frames": {
+      "perSec": 60.01,
+      "gapMs": {
+        "n": 3720,
+        "mean": 16.7,
+        "p50": 16.7,
+        "p95": 16.8,
+        "max": 16.8
+      },
+      "over50ms": 0
+    },
+    "longTasks": {
+      "api": true,
+      "count": 0,
+      "longestMs": 0,
+      "totalMs": 0,
+      "over100ms": 0
+    },
+    "longFrames": {
+      "count": 0,
+      "longestMs": 0,
+      "blockingMs": 0
+    },
+    "mainThread": {
+      "busyPct": 9.7,
+      "scriptMs": 3555,
+      "layoutMs": 208,
+      "styleMs": 24,
+      "layouts": 493,
+      "styleRecalcs": 241
+    },
+    "requests": {
+      "perSec": 27.24,
+      "inFlight": {
+        "max": 5,
+        "mean": 1.25,
+        "perSecondMax": [
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          5,
+          4,
+          4,
+          5,
+          4,
+          5,
+          5,
+          4,
+          4,
+          5,
+          4,
+          5,
+          5,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          4,
+          5,
+          4,
+          4,
+          4,
+          5,
+          0
+        ]
+      },
+      "onWire": {
+        "max": 4,
+        "mean": 1.17
+      },
+      "waitForConnectionMs": {
+        "n": 1689,
+        "mean": 2.7,
+        "p50": 0.8,
+        "p95": 10.4,
+        "max": 48.4
+      },
+      "byKind": {
+        "/api/activity": {
+          "perSec": 8,
+          "totalMs": {
+            "n": 496,
+            "mean": 44.5,
+            "p50": 43.4,
+            "p95": 48.8,
+            "max": 69.8
+          },
+          "waitMeanMs": 1
+        },
+        "/api/events": {
+          "perSec": 2.34,
+          "totalMs": {
+            "n": 145,
+            "mean": 45.1,
+            "p50": 45.1,
+            "p95": 47.1,
+            "max": 57.8
+          },
+          "waitMeanMs": 1.4
+        },
+        "/api/grades": {
+          "perSec": 2.03,
+          "totalMs": {
+            "n": 126,
+            "mean": 66,
+            "p50": 63.7,
+            "p95": 89.5,
+            "max": 91
+          },
+          "waitMeanMs": 23
+        },
+        "/api/log": {
+          "perSec": 0.48,
+          "totalMs": {
+            "n": 30,
+            "mean": 43,
+            "p50": 42.9,
+            "p95": 45,
+            "max": 45.2
+          },
+          "waitMeanMs": 0.6
+        },
+        "/api/settings": {
+          "perSec": 0.02,
+          "totalMs": {
+            "n": 1,
+            "mean": 42.9,
+            "p50": 42.9,
+            "p95": 42.9,
+            "max": 42.9
+          },
+          "waitMeanMs": 0.6
+        },
+        "/api/terminal/focus": {
+          "perSec": 0.31,
+          "totalMs": {
+            "n": 19,
+            "mean": 44.6,
+            "p50": 42.8,
+            "p95": 59.3,
+            "max": 59.3
+          },
+          "waitMeanMs": 2.3
+        },
+        "/api/terminal/peek": {
+          "perSec": 14,
+          "totalMs": {
+            "n": 868,
+            "mean": 43.8,
+            "p50": 43.4,
+            "p95": 45.3,
+            "max": 84.4
+          },
+          "waitMeanMs": 1.1
+        },
+        "/api/ticket": {
+          "perSec": 0.06,
+          "totalMs": {
+            "n": 4,
+            "mean": 43.2,
+            "p50": 43.4,
+            "p95": 43.9,
+            "max": 43.9
+          },
+          "waitMeanMs": 0.8
+        }
+      }
+    },
+    "snapshots": {
+      "perSec": 1.03,
+      "meanBytes": 10957
+    },
+    "server": {
+      "pingMs": {
+        "n": 2299,
+        "mean": 0.5,
+        "p50": 0.4,
+        "p95": 1,
+        "p99": 1.7,
+        "max": 4.6
+      },
+      "pingFailures": 0,
+      "cpuPercent": 15.1,
+      "loopLagMs": {
+        "samples": 5945,
+        "p50": 0.1,
+        "p95": 1.2,
+        "p99": 1.8,
+        "max": 4.9,
+        "over50ms": 0
+      },
+      "syncSpawnBlockedPercent": 0
+    },
+    "herdrRequests": {
+      "workspace.create": 1,
+      "pane.list": 28,
+      "tab.create": 19,
+      "pane.read": 721,
+      "pane.send_input": 25,
+      "pane.report_agent": 19,
+      "events.subscribe": 9,
+      "pane.release_agent": 12,
+      "pane.focus": 19
+    }
+  }
+}

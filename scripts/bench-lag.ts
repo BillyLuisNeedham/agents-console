@@ -5,6 +5,7 @@
  *
  *   bun run scripts/bench-lag.ts [--repo <checkout>] [--out <file.json>]
  *       [--duration <s>] [--tabs <n>] [--rtt <ms>] [--ui-duration <s>] [--skip-ui] [--skip-server]
+ *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>] [--out <file.json>]
  *
  * `--repo` points it at any checkout of this repository (default: the one
  * this script lives in) whose root and ui/ have had `bun install`: the
@@ -32,6 +33,18 @@
  * responsiveness probe), for a browser on another machine; the default is
  * loopback.
  *
+ * Both halves model the client: the server half replays a fixed request
+ * pattern, and the UI half fakes the network. `--e2e` models nothing and runs
+ * instead of both: it builds the checkout's own UI, serves it from the same
+ * pool and server, and opens it in N real headless Chromium windows
+ * (scripts/bench-lag/e2e.ts) through a TCP proxy that holds every chunk for
+ * half the `--rtt` each way (scripts/bench-lag/proxy.ts), so the browser's
+ * own connection limit, keep-alive and polling apply. On the first window it
+ * makes the server half's clicks and Open in herdrs as real mouse input, and
+ * a probe injected into the page (scripts/bench-lag/ui/probe.ts) times them
+ * and counts renders, long tasks, frames and requests in flight, through web
+ * APIs alone, so it measures any checkout's Console.
+ *
  * Bun must be on PATH for the child processes (`PATH=$HOME/.bun/bin:$PATH`).
  * Not a test: nothing here is named *.test.ts, and `bun test` never runs it.
  */
@@ -49,6 +62,13 @@ import {
   type Timing,
 } from "./bench-lag/load.ts";
 import type { UiBenchResult } from "./bench-lag/ui-bench.ts";
+import {
+  ConsoleBrowser,
+  summarizeE2e,
+  type BrowserTab,
+  type E2eResult,
+  type ProbeReport,
+} from "./bench-lag/e2e.ts";
 
 // --- arguments ---------------------------------------------------------------
 
@@ -62,8 +82,9 @@ const outPath = flag("out");
 const durationS = Number(flag("duration") ?? 60);
 const tabCount = Number(flag("tabs") ?? 2);
 const uiDurationS = Number(flag("ui-duration") ?? 30);
-const skipUi = argv.includes("--skip-ui");
-const skipServer = argv.includes("--skip-server");
+const e2e = argv.includes("--e2e");
+const skipUi = e2e || argv.includes("--skip-ui");
+const skipServer = e2e || argv.includes("--skip-server");
 const rttMs = Number(flag("rtt") ?? 0);
 setSimulatedRtt(rttMs);
 
@@ -206,7 +227,26 @@ interface ServerResult {
   herdrRequests: Record<string, number>;
 }
 
-async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
+type Snap = {
+  phase: string;
+  state: {
+    mergeQueue?: unknown[];
+    tickets: { id: string; status: string; liveAttempt?: { paneId: string | null } | null }[];
+    conversations?: { id: string; paneId: string | null }[];
+    interrupts?: unknown[];
+  };
+};
+
+/** The checkout's pool server and fake herdr, the pool worked into its realistic state. */
+interface RunningPool {
+  base: string;
+  serve: Awaited<ReturnType<typeof child>>;
+  herdr: Awaited<ReturnType<typeof child>>;
+  state: () => Promise<Snap>;
+  kill: () => Promise<void>;
+}
+
+async function startPool(pool: BenchPool): Promise<RunningPool> {
   const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr");
   const modes = Object.fromEntries(
     [...pool.quick, ...pool.conflicting, ...pool.live, ...pool.blocked].map((id) => [id, modeFor(pool, id)]),
@@ -225,25 +265,20 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
     "pool server",
   );
   const base = serve.ready;
-  const kill = () => {
+  const killNow = () => {
     writeFileSync(pool.releaseFile, "");
     serve.proc.kill("SIGKILL");
     herdr.proc.kill("SIGKILL");
   };
-  process.on("exit", kill);
+  process.on("exit", killNow);
+  const kill = async () => {
+    killNow();
+    process.off("exit", killNow);
+    await Promise.allSettled([serve.proc.exited, herdr.proc.exited]);
+  };
+  const state = async (): Promise<Snap> => ((await (await fetch(`${base}/api/state`)).json()) as { snapshot: Snap }).snapshot;
 
   try {
-    type Snap = {
-      phase: string;
-      state: {
-        mergeQueue?: unknown[];
-        tickets: { id: string; status: string; liveAttempt?: { paneId: string | null } | null }[];
-        conversations?: { id: string; paneId: string | null }[];
-        interrupts?: unknown[];
-      };
-    };
-    const state = async (): Promise<Snap> => ((await (await fetch(`${base}/api/state`)).json()) as { snapshot: Snap }).snapshot;
-
     // 1. Let the engine work the pool: every fast Ticket done (three of them
     //    held on conflicts), the live four running in panes.
     console.error("warming up: letting the engine run the fast Tickets and merge them…");
@@ -277,7 +312,33 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
         ...(ready.state.conversations ?? []).map((c) => ({ paneId: c.paneId!, kind: "conversation" })),
       ],
     });
+    return { base, serve, herdr, state, kill };
+  } catch (err) {
+    await kill();
+    throw err;
+  }
+}
 
+/**
+ * The responsiveness probe: a trivial GET every 25 ms straight to the
+ * server (never through a tab's connections or the proxy), whose latency is
+ * the server's event loop and nothing else.
+ */
+async function pingUntil(base: string, end: number): Promise<{ pings: number[]; failures: number }> {
+  const pings: number[] = [];
+  let failures = 0;
+  while (performance.now() < end) {
+    const t = await timedFetch(null, `${base}/ping.txt`);
+    if (t.status === 200) pings.push(t.totalMs);
+    else failures++;
+    await Bun.sleep(25);
+  }
+  return { pings, failures };
+}
+
+async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
+  const { base, serve, herdr, state, kill } = await startPool(pool);
+  try {
     // 3. The tabs: the first has a live Ticket open in the Detail, the
     //    second a done one, as an operator's two windows would, sharing
     //    the browser's connections to the server.
@@ -298,16 +359,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
     const t0 = performance.now();
     const end = t0 + durationS * 1000;
 
-    const pings: number[] = [];
-    let pingFailures = 0;
-    const pinger = (async () => {
-      while (performance.now() < end) {
-        const t = await timedFetch(null, `${base}/ping.txt`);
-        if (t.status === 200) pings.push(t.totalMs);
-        else pingFailures++;
-        await Bun.sleep(25);
-      }
-    })();
+    const pinger = pingUntil(base, end);
 
     // A click every 3 s on the first tab, round the cards an operator moves
     // between: a live Ticket, a done one, a held one, a blocked one.
@@ -332,7 +384,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
       }
     })();
 
-    await Promise.all([pinger, clicker, focuser]);
+    const [{ pings, failures: pingFailures }] = await Promise.all([pinger, clicker, focuser]);
     const elapsedS = (performance.now() - t0) / 1000;
     for (const tab of tabs) tab.record(false);
     const report = (await serve.ask("report", "report")) as ServerResult["server"] & { rssBytes: number };
@@ -408,9 +460,169 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
       herdrRequests: herdrCounts,
     };
   } finally {
-    kill();
-    process.off("exit", kill);
-    await Promise.allSettled([serve.proc.exited, herdr.proc.exited]);
+    await kill();
+  }
+}
+
+// --- the end-to-end half ---------------------------------------------------------
+
+interface E2eHalfResult extends E2eResult {
+  snapshots: { perSec: number; meanBytes: number };
+  server: {
+    pingMs: Summary;
+    pingFailures: number;
+    cpuPercent: number;
+    loopLagMs: { p50: number; p95: number; p99: number; max: number; over50ms: number };
+    syncSpawnBlockedPercent: number;
+  };
+  herdrRequests: Record<string, number>;
+}
+
+/**
+ * The snapshot stream's rate, read on a connection of the bench's own
+ * straight to the server, so the numbers say how often the engine pushed
+ * (its rate decides how much rendering the page has to do).
+ */
+function countSnapshots(base: string): { stop: () => { count: number; bytes: number } } {
+  const abort = new AbortController();
+  let count = 0;
+  let bytes = 0;
+  void (async () => {
+    const res = await fetch(`${base}/api/stream`, { signal: abort.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      let at: number;
+      while ((at = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, at);
+        buffer = buffer.slice(at + 2);
+        if (!frame.startsWith("event: snapshot")) continue;
+        count++;
+        bytes += frame.length;
+      }
+    }
+  })().catch(() => {});
+  return {
+    stop: () => {
+      abort.abort();
+      return { count, bytes };
+    },
+  };
+}
+
+async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
+  // 1. The checkout's own UI, built by its own build script into the
+  //    directory the server serves (serve.ts adds the ping file after).
+  console.error("building the checkout's UI…");
+  const build = Bun.spawnSync(["bun", "run", "build", "--outDir", join(root, "home", "dist"), "--emptyOutDir"], {
+    cwd: join(repo, "ui"),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (build.exitCode !== 0) throw new Error(`building ${repo}/ui failed:\n${build.stdout}\n${build.stderr}`);
+
+  const { base, serve, herdr, kill } = await startPool(pool);
+  const proxy = await child([join(here, "proxy.ts"), "--target", base, "--rtt", String(rttMs)], "proxy");
+  const browser = await ConsoleBrowser.launch({ profileDir: join(root, "chromium") });
+  try {
+    // 2. The tabs: real windows on the real page, through the proxy. The
+    //    first has a live Ticket open in the Detail, the second a done one,
+    //    as in the server half.
+    const tabs: BrowserTab[] = [];
+    for (let i = 0; i < tabCount; i++) tabs.push(await browser.open(`${proxy.ready}/`));
+    const ticketCount = pool.quick.length + pool.conflicting.length + pool.live.length + pool.blocked.length;
+    for (const tab of tabs) {
+      await waitFor("the Console's first render", 30_000, async () =>
+        (await browser.evaluate<number>(tab, "window.__lagProbe ? window.__lagProbe.cards() : 0")) >= ticketCount ? true : null,
+      );
+    }
+    // The cards each tab will press, the server half's targets: the first
+    // tab clicks round a live Ticket, a done one, a held one, a blocked one,
+    // and opens the live ones in herdr.
+    const clickTargets = [pool.live[1]!, pool.quick[2]!, pool.conflicting[2]!, pool.blocked[0]!, pool.live[0]!];
+    const framed = [[...new Set([...clickTargets, ...pool.live])], [pool.quick[0]!]];
+    for (const [i, tab] of tabs.entries()) {
+      if (!(await browser.frame(tab, framed[Math.min(i, 1)]!))) console.error(`tab ${i + 1}: not every card it presses fits in view`);
+    }
+    // One press at a time: the probe times the next press it was armed for.
+    let pressing: Promise<unknown> = Promise.resolve();
+    const press = (tab: BrowserTab, kind: "Click" | "Focus", id: string): Promise<boolean> => {
+      const run = pressing.then(async () => {
+        const at = await browser.evaluate<{ x: number; y: number } | null>(
+          tab,
+          `window.__lagProbe.arm${kind}(${JSON.stringify(id)})`,
+        );
+        if (!at) return false;
+        await browser.click(tab, at);
+        return true;
+      });
+      pressing = run.catch(() => {});
+      return run;
+    };
+    for (const [i, tab] of tabs.entries()) await press(tab, "Click", i === 0 ? pool.live[0]! : pool.quick[0]!);
+    console.error(`settling with ${tabCount} browser tabs open, RTT ${rttMs} ms…`);
+    await Bun.sleep(5_000);
+
+    // 3. The window: the server half's schedule, made by hand on the first tab.
+    console.error(`measuring for ${durationS}s…`);
+    await serve.ask("begin", "begun");
+    const before = await browser.metrics(tabs[0]!);
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.begin()");
+    const stream = countSnapshots(base);
+    const t0 = performance.now();
+    const end = t0 + durationS * 1000;
+    const pinger = pingUntil(base, end);
+    const unreachable = { click: 0, focus: 0 };
+    const clicker = (async () => {
+      let k = 0;
+      while (performance.now() < end - 3_000) {
+        if (!(await press(tabs[0]!, "Click", clickTargets[k++ % clickTargets.length]!))) unreachable.click++;
+        await Bun.sleep(3_000);
+      }
+    })();
+    const focuser = (async () => {
+      await Bun.sleep(1_500);
+      let k = 0;
+      while (performance.now() < end - 3_000) {
+        if (!(await press(tabs[0]!, "Focus", pool.live[k++ % pool.live.length]!))) unreachable.focus++;
+        await Bun.sleep(3_000);
+      }
+    })();
+    const [{ pings, failures }] = await Promise.all([pinger, clicker, focuser]);
+    // The last press's answers land before the window shuts.
+    await Bun.sleep(2_000);
+    for (const tab of tabs) await browser.evaluate(tab, "window.__lagProbe.end()");
+    const elapsedS = (performance.now() - t0) / 1000;
+    const streamed = stream.stop();
+    const after = await browser.metrics(tabs[0]!);
+    const report = (await serve.ask("report", "report")) as ServerResult["server"];
+    const herdrCounts = ((await herdr.ask({ requests: true }, "requests")) as { counts: Record<string, number> }).counts;
+    const reports: ProbeReport[] = [];
+    for (const tab of tabs) reports.push(await browser.evaluate<ProbeReport>(tab, "window.__lagProbe.report()"));
+
+    return {
+      ...summarizeE2e(reports, { before, after }, rttMs, unreachable),
+      snapshots: {
+        perSec: Math.round((streamed.count / elapsedS) * 100) / 100,
+        meanBytes: Math.round(streamed.bytes / (streamed.count || 1)),
+      },
+      server: {
+        pingMs: summarize(pings),
+        pingFailures: failures,
+        cpuPercent: Math.round(report.cpuPercent * 10) / 10,
+        loopLagMs: report.loopLagMs,
+        syncSpawnBlockedPercent: Math.round(report.syncSpawn.blockedPercent * 10) / 10,
+      },
+      herdrRequests: herdrCounts,
+    };
+  } finally {
+    await browser.close();
+    proxy.proc.kill("SIGKILL");
+    await kill();
   }
 }
 
@@ -424,7 +636,9 @@ function gitHead(dir: string): string {
 
 let serverResult: ServerResult | null = null;
 let uiResult: UiBenchResult | null = null;
+let e2eResult: E2eHalfResult | null = null;
 try {
+  if (e2e) e2eResult = await runE2eHalf(buildPool(root));
   if (!skipServer) {
     const pool = buildPool(root);
     serverResult = await runServerHalf(pool);
@@ -452,6 +666,7 @@ const result = {
   machine: { bun: Bun.version, platform: process.platform, cpus: navigator.hardwareConcurrency, loadavgAtStart },
   server: serverResult,
   ui: uiResult,
+  e2e: e2eResult,
 };
 
 // --- the table -------------------------------------------------------------------
@@ -487,6 +702,31 @@ if (uiResult) {
     ["ui drag (per pointermove)", `mean ${u.dragMoveMs.mean}  p95 ${u.dragMoveMs.p95}  max ${u.dragMoveMs.max} ms`],
     ["ui sanity", `Detail ${u.sanity.detailOpened ? "opened" : "MISSED"}, drag ${u.sanity.dragMoved ? "moved" : "DID NOT MOVE"}, ${u.sanity.snapshotsPushed} snapshots pushed`],
   );
+}
+if (e2eResult) {
+  const e = e2eResult;
+  const kinds = Object.entries(e.click.tabs).map(([tab, n]) => `${n} ${tab}`).join(", ");
+  rows.push(
+    ["e2e load", `${e.tabs} Chromium tabs on the built Console through a ${e.rttMs} ms RTT proxy, ${e.durationS} s, ${e.cards} cards, ${e.domNodes} DOM nodes`],
+    ["e2e snapshots", `${e.snapshots.perSec}/s  mean ${Math.round(e.snapshots.meanBytes / 1024)} KiB`],
+    ["e2e card click -> shell", `${ms(e.click.shellMs)}  n=${e.click.n} (${kinds})  input delay p95 ${e.click.inputDelayMs.p95} ms`],
+    ["e2e card click -> data", `${ms(e.click.dataMs)}  n=${e.click.dataMs.n}  unfilled ${e.click.unfilled}  missed ${e.click.missed}  unreachable ${e.click.unreachable}`],
+    ["e2e   of which Progress", `${ms(e.click.progressDataMs)}  n=${e.click.progressDataMs.n} (timeline and log tail)`],
+    ["e2e Open in herdr -> fetch", ms(e.focus.toFetchMs)],
+    ["e2e Open in herdr -> request", ms(e.focus.toRequestMs)],
+    ["e2e Open in herdr -> response", `${ms(e.focus.toResponseMs)}  n=${e.focus.toResponseMs.n}`],
+    ["e2e Open in herdr -> confirmed", `${ms(e.focus.confirmedMs)}  unconfirmed ${e.focus.unconfirmed}  missed ${e.focus.missed}  unreachable ${e.focus.unreachable}`],
+    ["e2e renders (mutation batches)", `${e.renders.batchesPerSec}/s  frames with mutations ${e.renders.framesWithMutationsPerSec}/s  records ${e.renders.recordsPerSec}/s`],
+    ["e2e main thread", `busy ${e.mainThread.busyPct}%  script ${e.mainThread.scriptMs} ms  layout ${e.mainThread.layoutMs} ms (${e.mainThread.layouts}x)  style ${e.mainThread.styleMs} ms (${e.mainThread.styleRecalcs}x)`],
+    ["e2e long tasks", `${e.longTasks.count} (longest ${e.longTasks.longestMs} ms, total ${e.longTasks.totalMs} ms, >100ms ${e.longTasks.over100ms}x); long frames ${e.longFrames.count}, longest ${e.longFrames.longestMs} ms`],
+    ["e2e frames", `${e.frames.perSec}/s  gap p50 ${e.frames.gapMs.p50}  p95 ${e.frames.gapMs.p95}  max ${e.frames.gapMs.max} ms, ${e.frames.over50ms} over 50 ms`],
+    ["e2e requests in flight", `max ${e.requests.inFlight.max}  mean ${e.requests.inFlight.mean}; on the wire max ${e.requests.onWire.max}  mean ${e.requests.onWire.mean} (+1 stream per tab)`],
+    ["e2e wait for a connection", `${ms(e.requests.waitForConnectionMs)}  ${e.requests.perSec} requests/s`],
+    ["e2e server", `ping ${ms(e.server.pingMs)}  CPU ${e.server.cpuPercent}%  loop lag p95 ${e.server.loopLagMs.p95} ms  sync spawns ${e.server.syncSpawnBlockedPercent}% of the window`],
+  );
+  for (const [kind, r] of Object.entries(e.requests.byKind)) {
+    rows.push([`  ${kind}`, `${r.perSec}/s  ${ms(r.totalMs)}  wait mean ${r.waitMeanMs} ms`]);
+  }
 }
 const width = Math.max(...rows.map(([k]) => k.length));
 console.log(`\nlag bench: ${result.revision} (${repo}), load average at start ${loadavgAtStart.join(" ")}`);
