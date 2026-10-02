@@ -15,8 +15,16 @@
  * as a selected event on the build ticket's file.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
+import { stampOf } from "./stat-cache.ts";
 
 const EVENT_KINDS = [
   "scheduled",
@@ -290,12 +298,117 @@ export function appendEvent(
  * rest of the timeline stays readable. A line whose kind is not in the
  * module's known kind list is skipped the same way, so the reader validates
  * against the one list that also drives the kind type.
+ *
+ * Every snapshot, request and survey reads these files (issue #157), so the
+ * parse is kept per file and only what was appended since is parsed: the
+ * lines up to the last newline are settled and kept, a final line with no
+ * newline yet is parsed on each read and never kept, since the rest of it
+ * may still be on its way. A file that shrank, moved to another inode, or
+ * no longer ends its settled part with the bytes it did (removed and
+ * written again) is parsed whole, as a new file. Callers get their own
+ * array; the events in it are shared and are not edited by anyone.
  */
 export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   const path = eventsFile(runsDir, ticketId);
-  if (!existsSync(path)) return [];
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch {
+    parsedEvents.delete(path);
+    return [];
+  }
+  const stamp = stampOf(stat);
+  let entry = parsedEvents.get(path);
+  if (stamp !== null && entry?.stamp === stamp) return [...entry.events, ...entry.unsettled];
+  if (
+    entry === undefined ||
+    entry.dev !== stat.dev ||
+    entry.ino !== stat.ino ||
+    stat.size < entry.settled ||
+    !endsSettledWith(path, entry)
+  ) {
+    entry = {
+      dev: stat.dev,
+      ino: stat.ino,
+      stamp: null,
+      settled: 0,
+      tail: new Uint8Array(0),
+      events: [],
+      unsettled: [],
+    };
+    parsedEvents.set(path, entry);
+  }
+  const fresh = readFrom(path, entry.settled);
+  const lastNewline = fresh.lastIndexOf(NEWLINE);
+  if (lastNewline >= 0) {
+    entry.events.push(...parseLines(fresh.subarray(0, lastNewline + 1)));
+    entry.settled += lastNewline + 1;
+    entry.tail = fresh.slice(Math.max(0, lastNewline + 1 - SETTLED_TAIL_BYTES), lastNewline + 1);
+  }
+  entry.unsettled = parseLines(fresh.subarray(lastNewline + 1));
+  entry.stamp = stamp;
+  return [...entry.events, ...entry.unsettled];
+}
+
+const NEWLINE = 0x0a;
+
+// How many of the settled bytes' last bytes are kept to recognise the file
+// on the next read: enough to cover the last event line, which carries its
+// own timestamp, so a file written afresh at the same inode does not match.
+const SETTLED_TAIL_BYTES = 4096;
+
+interface ParsedEvents {
+  dev: number;
+  ino: number;
+  /** The file's stamp when last read to its end: an unmoved stamp means nothing was appended. */
+  stamp: string | null;
+  /** The byte offset just past the last newline parsed. */
+  settled: number;
+  /** The last bytes before `settled`, as they were read. */
+  tail: Uint8Array;
+  events: TicketEvent[];
+  /** The final line with no newline yet, as last read: parsed, never kept past a change. */
+  unsettled: TicketEvent[];
+}
+
+const parsedEvents = new Map<string, ParsedEvents>();
+
+function readFrom(path: string, offset: number): Uint8Array {
+  const fd = openSync(path, "r");
+  try {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = new Uint8Array(64 * 1024);
+      const read = readSync(fd, chunk, 0, chunk.length, offset + total);
+      if (read === 0) break;
+      chunks.push(chunk.subarray(0, read));
+      total += read;
+    }
+    return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function endsSettledWith(path: string, entry: ParsedEvents): boolean {
+  if (entry.settled === 0) return true;
+  const fd = openSync(path, "r");
+  try {
+    const bytes = new Uint8Array(entry.tail.length);
+    const read = readSync(fd, bytes, 0, bytes.length, entry.settled - entry.tail.length);
+    return read === bytes.length && Buffer.compare(bytes, entry.tail) === 0;
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseLines(bytes: Uint8Array): TicketEvent[] {
   const events: TicketEvent[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  if (bytes.length === 0) return events;
+  for (const line of new TextDecoder().decode(bytes).split("\n")) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as TicketEvent;
