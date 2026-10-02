@@ -17,7 +17,9 @@
  * carries one, else by position among the unkeyed siblings and by tag, so
  * keyed and unkeyed children may interleave and reorder freely; a duplicate
  * key among siblings is a renderer bug, warned about and matched by
- * position. Text nodes get their data rewritten only when it changed. `to`
+ * position. Text nodes get their data rewritten only when it changed. An
+ * element built from unchanged `html`, or marked `KEEP_CHILDREN`, keeps the
+ * children it has. `to`
  * is consumed: its nodes may be moved into `from`. Properties are applied
  * before children, so a `<select>` whose `<option>`s change in the same
  * render would take its `value` against the old options; nothing renders one
@@ -48,14 +50,27 @@ export function commit(root: Element, build: () => Element): void {
   }
 }
 
+/**
+ * The mark of an element whose children belong to its owner, not to the
+ * render: the morph patches the element itself and leaves what is inside it
+ * alone. The canvas's edge layer carries it, since its paths are drawn after
+ * the commit from the cards' laid-out boxes and kept from one render to the
+ * next (issue #157).
+ */
+export const KEEP_CHILDREN = "data-keep-children";
+
 export function morph(from: Element, to: Element): Element {
   if (!sameKind(from, to)) {
     from.replaceWith(to);
     return to;
   }
+  // Markup `h` parsed from `html` that has not changed is the same subtree;
+  // walking it would only confirm that, node by node.
+  const html = propsOf(to).html;
+  const sameHtml = html !== undefined && propsOf(from).html === html;
   morphAttributes(from, to);
   morphProperties(from, to);
-  morphChildren(from, to);
+  if (!sameHtml && !to.hasAttribute(KEEP_CHILDREN)) morphChildren(from, to);
   return from;
 }
 

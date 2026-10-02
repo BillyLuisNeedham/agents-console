@@ -2808,11 +2808,24 @@ export function projectDetailTabs(
 /**
  * The Spec tab's body: the ticket's markdown rendered to HTML. The DOM layer
  * assigns it as innerHTML; the ticket files are the pool's own prose, served
- * same-origin, so no sanitiser sits between.
+ * same-origin, so no sanitiser sits between. Parsed once per body (issue
+ * #157): the Spec tab renders on every render while it is open, and a body
+ * only changes when its file does, so the last few bodies' HTML is kept.
  */
 export function ticketBodyHtml(body: string): string {
-  return marked(body, { async: false });
+  const held = ticketBodyHtmlCache.get(body);
+  if (held !== undefined) return held;
+  const html = marked(body, { async: false });
+  if (ticketBodyHtmlCache.size >= TICKET_BODY_HTML_KEPT) {
+    const oldest = ticketBodyHtmlCache.keys().next().value;
+    if (oldest !== undefined) ticketBodyHtmlCache.delete(oldest);
+  }
+  ticketBodyHtmlCache.set(body, html);
+  return html;
 }
+
+const TICKET_BODY_HTML_KEPT = 32;
+const ticketBodyHtmlCache = new Map<string, string>();
 
 /**
  * The next Detail selection after a card press-release. Clicking the selected
