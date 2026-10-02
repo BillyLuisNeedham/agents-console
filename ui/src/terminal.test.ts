@@ -1,17 +1,15 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { TerminalSurface } from "./terminal";
-import type {
-  EnrichedSnapshot,
-  TerminalPeekResponse,
-} from "./project";
+import { renderTerminalSurface, TerminalSurface } from "./terminal";
+import type { EnrichedSnapshot, TerminalPeekResponse, TerminalSurfaceView } from "./project";
+import { useDom } from "./test-dom";
 
-// The store's cadence logic drives through update() and a short poll
-// interval; the peek and focus fetches are injected, so no server and no
-// real 2s wait exists.
+// The store is fed by hand: update() with a snapshot, apply() with a live
+// frame's peeks. The focus request is injected and parks until the test
+// settles it, so nothing here fetches and no real 2s wait exists (issue
+// #161).
 
-const POLL_MS = 5;
 const CONFIRM_MS = 5;
 
 function snap(
@@ -77,332 +75,239 @@ function snap(
   };
 }
 
-function peekResponse(text: string): TerminalPeekResponse {
-  return { ticket: "x", paneId: "pane-x", text };
+function peek(ticket: string, paneId: string, text: string): TerminalPeekResponse {
+  return { ticket, paneId, text };
+}
+
+interface Deferred {
+  promise: Promise<unknown>;
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
+function deferred(): Deferred {
+  let resolve!: () => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<unknown>((res, rej) => {
+    resolve = () => res({ ok: true, paneId: "p" });
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 interface Harness {
   store: TerminalSurface;
-  peeked: string[];
   focused: string[];
-  failPeek: Set<string>;
+  /** The focus requests still out, oldest first, for the test to settle. */
+  focuses: Deferred[];
+  changes: () => number;
 }
 
 function makeStore(
   panes: Record<string, string | undefined>,
-  options: { failPeek?: Set<string> } = {},
+  conversationPanes: Record<string, string | undefined> = {},
 ): Harness {
-  const peeked: string[] = [];
   const focused: string[] = [];
-  const failPeek = options.failPeek ?? new Set<string>();
+  const focuses: Deferred[] = [];
+  let changes = 0;
   const store = new TerminalSurface({
-    peek: (ticketId) => {
-      peeked.push(ticketId);
-      if (failPeek.has(ticketId)) {
-        return Promise.reject(new Error("peek failed"));
-      }
-      return Promise.resolve(peekResponse(`output for ${ticketId}`));
-    },
     focus: (ticketId) => {
       focused.push(ticketId);
-      return Promise.resolve();
+      const d = deferred();
+      focuses.push(d);
+      return d.promise;
     },
-    onChange: () => {},
-    pollMs: POLL_MS,
+    onChange: () => {
+      changes += 1;
+    },
     confirmMs: CONFIRM_MS,
   });
-  store.update(snap(panes));
-  return { store, peeked, focused, failPeek };
-}
-
-async function ticks(n = 4): Promise<void> {
-  await Bun.sleep(POLL_MS * n);
+  store.update(snap(panes, conversationPanes));
+  return { store, focused, focuses, changes: () => changes };
 }
 
 describe("TerminalSurface store", () => {
-  it("peeks terminal-backed tickets immediately and stays off headless ones", async () => {
-    const h = makeStore({ "01": "pane-7", "02": undefined });
-    // The first peek fires on the snapshot, before any poll tick.
-    expect(h.peeked).toEqual(["01"]);
-    await ticks();
+  it("seeds a pending entry per terminal-backed ticket and stays off headless ones", () => {
+    const h = makeStore({ "01": "pane-1", "02": undefined });
+    const state = h.store.state();
     h.store.dispose();
-    expect(h.peeked.every((id) => id === "01")).toBe(true);
-    expect(h.store.state()["02"]).toBeUndefined();
-  });
-
-  it("seeds a pending entry so the surface renders before the first peek lands", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    // Synchronous state, straight after update: the shell is already there.
-    expect(h.store.state()["01"]).toEqual({
-      paneId: "pane-7",
+    expect(Object.keys(state)).toEqual(["01"]);
+    expect(state["01"]).toEqual({
+      paneId: "pane-1",
       status: "pending",
       text: "",
       justFocused: false,
     });
-    await ticks();
+  });
+
+  it("seeds a live Conversation's pane, keyed by its own id, alongside ticket panes", () => {
+    const h = makeStore({ "01": "pane-1" }, { "conv-1": "pane-c", "conv-2": undefined });
+    const state = h.store.state();
     h.store.dispose();
+    expect(Object.keys(state).sort()).toEqual(["01", "conv-1"]);
+    expect(state["conv-1"]).toMatchObject({ paneId: "pane-c", status: "pending" });
   });
 
-  it("keeps polling a live ticket on the cadence", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    await ticks();
+  it("drops a surface the moment its pane leaves the snapshot", () => {
+    const h = makeStore({ "01": "pane-1", "02": "pane-2" }, { "conv-1": "pane-c" });
+    h.store.update(snap({ "01": "pane-1", "02": undefined }));
+    const state = h.store.state();
     h.store.dispose();
-    expect(h.peeked.filter((id) => id === "01").length).toBeGreaterThanOrEqual(2);
-    expect(h.store.state()["01"]?.status).toBe("live");
-    expect(h.store.state()["01"]?.text).toBe("output for 01");
+    expect(Object.keys(state)).toEqual(["01"]);
   });
 
-  it("stops polling the moment the pane leaves the snapshot (attempt ended)", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    await ticks();
-    h.store.update(snap({ "01": undefined }));
-    const pollsAtEnd = h.peeked.length;
-    expect(h.store.state()["01"]).toBeUndefined();
-    await ticks();
+  it("resets the surface to pending when the attempt re-spawns under a new pane id", () => {
+    const h = makeStore({ "01": "pane-1" });
+    h.store.apply({ "01": peek("01", "pane-1", "old output") });
+    expect(h.store.state()["01"]).toMatchObject({ status: "live", text: "old output" });
+    h.store.update(snap({ "01": "pane-9" }));
+    const state = h.store.state();
     h.store.dispose();
-    expect(h.peeked.length).toBe(pollsAtEnd);
-  });
-
-  it("treats an empty read as waiting, not an error", async () => {
-    const peeked: string[] = [];
-    const store = new TerminalSurface({
-      peek: () => {
-        peeked.push("x");
-        return Promise.resolve(peekResponse(""));
-      },
-      focus: () => Promise.resolve(),
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-7" }));
-    await ticks();
-    store.dispose();
-    expect(store.state()["01"]?.status).toBe("waiting");
-    expect(store.state()["01"]?.text).toBe("");
-  });
-
-  it("notifies only when a peek's text or status changed, not on every response", async () => {
-    let text = "first";
-    let changes = 0;
-    const store = new TerminalSurface({
-      peek: () => Promise.resolve(peekResponse(text)),
-      focus: () => Promise.resolve(),
-      onChange: () => {
-        changes += 1;
-      },
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-7" }));
-    await ticks();
-    // Several polls, one landing: pending -> live "first" once, then the same
-    // text again and again with no repaint (issue #122: each repaint rebuilds
-    // the page under the operator's caret).
-    expect(changes).toBe(1);
-    text = "second";
-    await ticks();
-    expect(changes).toBe(2);
-    expect(store.state()["01"]?.text).toBe("second");
-    store.dispose();
-  });
-
-  it("notifies once on a failure, then once more when the pane recovers", async () => {
-    let changes = 0;
-    const failPeek = new Set(["01"]);
-    const store = new TerminalSurface({
-      peek: (id) =>
-        failPeek.has(id)
-          ? Promise.reject(new Error("peek failed"))
-          : Promise.resolve(peekResponse("back")),
-      focus: () => Promise.resolve(),
-      onChange: () => {
-        changes += 1;
-      },
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-7" }));
-    await ticks();
-    expect(store.state()["01"]?.status).toBe("unavailable");
-    expect(changes).toBe(1);
-    failPeek.clear();
-    await ticks();
-    store.dispose();
-    expect(store.state()["01"]?.status).toBe("live");
-    expect(changes).toBe(2);
-  });
-
-  it("drops a read that lands after the pane re-spawned or left", async () => {
-    let settle!: (value: TerminalPeekResponse) => void;
-    const store = new TerminalSurface({
-      peek: () =>
-        new Promise<TerminalPeekResponse>((resolve) => {
-          settle = resolve;
-        }),
-      focus: () => Promise.resolve(),
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-7" }));
-    // The attempt re-spawns while pane-7's read is still out; the stale
-    // answer must not overwrite pane-8's fresh pending entry.
-    store.update(snap({ "01": "pane-8" }));
-    settle(peekResponse("old pane's last words"));
-    await Bun.sleep(1);
-    expect(store.state()["01"]).toMatchObject({ paneId: "pane-8", status: "pending", text: "" });
-    store.dispose();
-  });
-
-  it("marks a failed peek unavailable and keeps polling, recovering on the next success", async () => {
-    const h = makeStore({ "01": "pane-7" }, { failPeek: new Set(["01"]) });
-    await ticks();
-    expect(h.store.state()["01"]?.status).toBe("unavailable");
-    h.failPeek.clear();
-    await ticks();
-    h.store.dispose();
-    expect(h.peeked.filter((id) => id === "01").length).toBeGreaterThanOrEqual(2);
-    expect(h.store.state()["01"]?.status).toBe("live");
-  });
-
-  it("resets the surface to pending when the attempt re-spawns under a new pane id", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    await ticks();
-    expect(h.store.state()["01"]?.status).toBe("live");
-    h.store.update(snap({ "01": "pane-8" }));
-    expect(h.store.state()["01"]).toEqual({
-      paneId: "pane-8",
+    expect(state["01"]).toEqual({
+      paneId: "pane-9",
       status: "pending",
       text: "",
       justFocused: false,
     });
-    await ticks();
-    h.store.dispose();
-    expect(h.store.state()["01"]).toMatchObject({ paneId: "pane-8", status: "live" });
   });
 
-  it("confirms a successful focus transiently", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    await ticks();
-    expect(await h.store.focus("01")).toBe(true);
-    expect(h.store.state()["01"]?.justFocused).toBe(true);
+  it("shows a pushed peek live, an empty one waiting, and a failure unavailable", () => {
+    const h = makeStore({ "01": "pane-1", "02": "pane-2", "03": "pane-3" });
+    h.store.apply({
+      "01": peek("01", "pane-1", "building..."),
+      // An empty read (a background tab still warming up) is waiting,
+      // never an error.
+      "02": peek("02", "pane-2", ""),
+      "03": { ticket: "03", error: "pane gone" },
+    });
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({ status: "live", text: "building..." });
+    expect(state["02"]).toMatchObject({ status: "waiting", text: "" });
+    expect(state["03"]).toMatchObject({ status: "unavailable", text: "" });
+  });
+
+  it("recovers an unavailable pane on the next read that succeeds", () => {
+    const h = makeStore({ "01": "pane-1" });
+    h.store.apply({ "01": { ticket: "01", error: "daemon down" } });
+    expect(h.store.state()["01"]!.status).toBe("unavailable");
+    h.store.apply({ "01": peek("01", "pane-1", "back") });
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({ status: "live", text: "back" });
+  });
+
+  it("ignores a peek for an id it holds no surface for", () => {
+    const h = makeStore({ "01": "pane-1" });
+    h.store.apply({ "99": peek("99", "pane-9", "stray") });
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["99"]).toBeUndefined();
+    expect(h.changes()).toBe(0);
+  });
+
+  it("drops a read of a pane the attempt re-spawned away from", () => {
+    const h = makeStore({ "01": "pane-new" });
+    h.store.apply({ "01": peek("01", "pane-old", "stale output") });
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({ paneId: "pane-new", status: "pending", text: "" });
+    expect(h.changes()).toBe(0);
+  });
+
+  it("repaints once per live frame, and only when a surface's status or text moved (#122)", () => {
+    const h = makeStore({ "01": "pane-1", "02": "pane-2" });
+    h.store.apply({ "01": peek("01", "pane-1", "a"), "02": peek("02", "pane-2", "b") });
+    expect(h.changes()).toBe(1);
+    // The same reads again: nothing moved, nothing repaints.
+    h.store.apply({ "01": peek("01", "pane-1", "a"), "02": peek("02", "pane-2", "b") });
+    expect(h.changes()).toBe(1);
+    h.store.apply({ "02": peek("02", "pane-2", "c") });
+    expect(h.changes()).toBe(2);
+    // A failure is a move; the same failure again is not.
+    h.store.apply({ "01": { ticket: "01", error: "gone" } });
+    h.store.apply({ "01": { ticket: "01", error: "still gone" } });
+    h.store.dispose();
+    expect(h.changes()).toBe(3);
+  });
+});
+
+describe("TerminalSurface focus, optimistic (issue #161)", () => {
+  it("confirms and sends in the press's own turn, and holds the button while it is out", () => {
+    const h = makeStore({ "01": "pane-1" });
+    void h.store.focus("01");
+    // Nothing awaited yet: the request is out and the card already says so.
+    expect(h.focused).toEqual(["01"]);
+    expect(h.changes()).toBe(1);
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({ justFocused: true, focusing: true, focusFailure: null });
+  });
+
+  it("resolves true on the accept and keeps the confirmation for its window", async () => {
+    const h = makeStore({ "01": "pane-1" });
+    const result = h.store.focus("01");
+    h.focuses[0]!.resolve();
+    expect(await result).toBe(true);
+    const state = h.store.state();
+    expect(state["01"]).toMatchObject({ justFocused: true });
+    expect(state["01"]!.focusing).toBeFalsy();
     await Bun.sleep(CONFIRM_MS * 4);
+    const after = h.store.state();
     h.store.dispose();
-    expect(h.store.state()["01"]?.justFocused).toBe(false);
+    expect(after["01"]!.justFocused).toBe(false);
   });
 
-  it("sends the focus at once and shows it opening until the server answers (#157)", async () => {
-    const order: string[] = [];
-    const gate: { answer: (() => void) | null } = { answer: null };
-    const store = new TerminalSurface({
-      peek: () => Promise.resolve(peekResponse("output")),
-      focus: () => {
-        order.push("focus sent");
-        return new Promise<void>((resolve) => {
-          gate.answer = resolve;
-        });
-      },
-      onChange: () => {
-        order.push("repaint");
-      },
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
+  it("takes the confirmation back on a refusal and puts the reason beside the button", async () => {
+    const h = makeStore({ "01": "pane-1" });
+    const result = h.store.focus("01");
+    h.focuses[0]!.reject(new Error("pane p1 is not this pool's"));
+    expect(await result).toBe(false);
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({
+      justFocused: false,
+      focusing: false,
+      focusFailure: "pane p1 is not this pool's",
     });
-    store.update(snap({ "01": "pane-7" }));
-    await ticks();
-    order.length = 0;
-    const focused = store.focus("01");
-    // Out before anything else, and the button already reads as opening.
-    expect(order).toEqual(["focus sent", "repaint"]);
-    expect(store.state()["01"]?.focusing).toBe(true);
-    gate.answer?.();
-    expect(await focused).toBe(true);
-    store.dispose();
-    expect(store.state()["01"]?.focusing).toBeUndefined();
-    expect(store.state()["01"]?.justFocused).toBe(true);
   });
 
-  it("focus failure leaves the card untouched and resolves false", async () => {
-    const peeked: string[] = [];
-    const store = new TerminalSurface({
-      peek: (ticketId) => {
-        peeked.push(ticketId);
-        return Promise.resolve(peekResponse("output"));
-      },
-      focus: () => Promise.reject(new Error("daemon gone")),
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-7" }));
-    await ticks();
-    expect(await store.focus("01")).toBe(false);
-    store.dispose();
-    expect(store.state()["01"]?.justFocused).toBe(false);
-    expect(store.state()["01"]?.focusing).toBeUndefined();
-    expect(store.state()["01"]?.status).toBe("live");
+  it("a new press clears the last refusal's reason", async () => {
+    const h = makeStore({ "01": "pane-1" });
+    const first = h.store.focus("01");
+    h.focuses[0]!.reject(new Error("refused"));
+    await first;
+    expect(h.store.state()["01"]!.focusFailure).toBe("refused");
+    void h.store.focus("01");
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]).toMatchObject({ justFocused: true, focusFailure: null });
   });
 
-  it("refuses to focus a ticket that no longer holds a live pane", async () => {
-    const h = makeStore({ "01": "pane-7" });
-    await ticks();
-    h.store.update(snap({ "01": undefined }));
+  it("sends nothing for a second press while the first is out", async () => {
+    const h = makeStore({ "01": "pane-1" });
+    const first = h.store.focus("01");
+    expect(await h.store.focus("01")).toBe(false);
+    expect(h.focused).toEqual(["01"]);
+    h.focuses[0]!.resolve();
+    await first;
+    h.store.dispose();
+  });
+
+  it("refuses to focus a ticket that holds no live pane", async () => {
+    const h = makeStore({ "01": undefined });
     expect(await h.store.focus("01")).toBe(false);
     h.store.dispose();
     expect(h.focused).toEqual([]);
   });
 
-  it("polls a live Conversation's pane, keyed by conversation id, alongside ticket panes", async () => {
-    const peeked: string[] = [];
-    const store = new TerminalSurface({
-      peek: (id) => {
-        peeked.push(id);
-        return Promise.resolve(peekResponse(`output for ${id}`));
-      },
-      focus: () => Promise.resolve(),
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({ "01": "pane-ticket" }, { "conv-1": "pane-conv" }));
-    expect(peeked).toEqual(["01", "conv-1"]);
-    await ticks();
-    store.dispose();
-    expect(store.state()["conv-1"]).toMatchObject({ paneId: "pane-conv", status: "live" });
-  });
-
-  it("stops polling a Conversation the moment it leaves the snapshot (ended or crashed)", async () => {
-    const store = new TerminalSurface({
-      peek: (id) => Promise.resolve(peekResponse(`output for ${id}`)),
-      focus: () => Promise.resolve(),
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({}, { "conv-1": "pane-conv" }));
-    await ticks();
-    store.update(snap({}, { "conv-1": undefined }));
-    expect(store.state()["conv-1"]).toBeUndefined();
-    store.dispose();
-  });
-
   it("focuses a Conversation's pane by its own id", async () => {
-    const focused: string[] = [];
-    const store = new TerminalSurface({
-      peek: (id) => Promise.resolve(peekResponse(`output for ${id}`)),
-      focus: (id) => {
-        focused.push(id);
-        return Promise.resolve();
-      },
-      onChange: () => {},
-      pollMs: POLL_MS,
-      confirmMs: CONFIRM_MS,
-    });
-    store.update(snap({}, { "conv-1": "pane-conv" }));
-    expect(await store.focus("conv-1")).toBe(true);
-    store.dispose();
-    expect(focused).toEqual(["conv-1"]);
+    const h = makeStore({}, { "conv-1": "pane-conv" });
+    const result = h.store.focus("conv-1");
+    h.focuses[0]!.resolve();
+    expect(await result).toBe(true);
+    h.store.dispose();
+    expect(h.focused).toEqual(["conv-1"]);
   });
 });
 
@@ -421,38 +326,71 @@ function held(snapshot: EnrichedSnapshot, ticketId: string, paneId: string): Enr
 }
 
 describe("TerminalSurface store over a Held pane (issue #139)", () => {
-  it("peeks and focuses a checkpointed ticket's Held pane by ticket id", async () => {
+  it("shows and focuses a checkpointed ticket's Held pane by ticket id", async () => {
     const h = makeStore({});
     h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
-    expect(h.peeked).toEqual(["01"]);
-    await ticks();
+    h.store.apply({ "01": peek("01", "pane-7", "held output") });
     expect(h.store.state()["01"]).toMatchObject({ paneId: "pane-7", status: "live" });
-    expect(await h.store.focus("01")).toBe(true);
+    const result = h.store.focus("01");
+    h.focuses[0]!.resolve();
+    expect(await result).toBe(true);
     h.store.dispose();
     expect(h.focused).toEqual(["01"]);
   });
 
-  it("keeps the surface when the Held pane continues as a Live attempt in the same pane", async () => {
+  it("keeps the surface when the Held pane continues as a Live attempt in the same pane", () => {
     const h = makeStore({});
     h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
-    await ticks();
+    h.store.apply({ "01": peek("01", "pane-7", "held output") });
     // Keep talking: the Continued attempt runs in the pane the checkpoint
     // held, so the surface carries on rather than flashing back to pending.
     h.store.update(snap({ "01": "pane-7" }));
+    const state = h.store.state();
     h.store.dispose();
-    expect(h.store.state()["01"]).toMatchObject({ paneId: "pane-7", status: "live" });
+    expect(state["01"]).toMatchObject({ paneId: "pane-7", status: "live" });
   });
 
-  it("stops polling once the ticket has neither a Live attempt nor a Held pane", async () => {
+  it("drops the surface once the ticket has neither a Live attempt nor a Held pane", () => {
     const h = makeStore({});
     h.store.update(held(snap({ "01": "pane-7" }), "01", "pane-7"));
-    await ticks();
     // Resume answered the checkpoint (or the pane closed): nothing to show.
     h.store.update(snap({ "01": undefined }));
-    const pollsAtEnd = h.peeked.length;
-    expect(h.store.state()["01"]).toBeUndefined();
-    await ticks();
+    h.store.apply({ "01": peek("01", "pane-7", "late read") });
+    const state = h.store.state();
     h.store.dispose();
-    expect(h.peeked.length).toBe(pollsAtEnd);
+    expect(state["01"]).toBeUndefined();
+  });
+});
+
+describe("renderTerminalSurface", () => {
+  useDom();
+
+  const view: TerminalSurfaceView = {
+    paneId: "pane-1",
+    status: "live",
+    text: "output",
+    justFocused: false,
+  };
+
+  it("labels the focus button Open in herdr, with no in-flight wording", () => {
+    const el = renderTerminalSurface({ ...view, focusing: true }, { onFocus: async () => true });
+    const button = el.querySelector<HTMLButtonElement>(".terminal-focus")!;
+    expect(button.textContent).toBe("Open in herdr");
+    expect(button.disabled).toBe(true);
+    expect(el.querySelector(".terminal-focus-failure")).toBeNull();
+  });
+
+  it("shows the confirmation the moment the press lands", () => {
+    const el = renderTerminalSurface({ ...view, justFocused: true }, { onFocus: async () => true });
+    expect(el.querySelector(".terminal-note")?.textContent).toBe("focused in herdr");
+  });
+
+  it("puts a refused focus's reason beside the button", () => {
+    const el = renderTerminalSurface(
+      { ...view, focusFailure: "pane gone" },
+      { onFocus: async () => false },
+    );
+    expect(el.querySelector(".terminal-focus")!.textContent).toBe("Open in herdr");
+    expect(el.querySelector(".terminal-focus-failure")?.textContent).toBe("pane gone");
   });
 });

@@ -1,19 +1,30 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
+import {
+  diffSnapshot,
+  encodeMessage,
+  PROTOCOL_VERSION,
+  toPushed,
+  type CardSubscription,
+  type LogFollow,
+  type LogFollowResult,
+  type LogPush,
+  type RequestKind,
+  type ServerMessage,
+  type SocketLike,
+} from "../../engine/protocol.ts";
+import { createConsole } from "./console";
 import { ConsoleSession, type ConsoleSessionOptions } from "./session";
+import { RequestRefused } from "./socket";
 import {
   projectPool,
   type ConversationView,
   type EnrichedSnapshot,
   type EnrichedTicketState,
-  type TicketBodyResponse,
+  type HeldSpawnView,
   type TicketEventKind,
   type TicketEventsResponse,
-  type RestartResponse,
-  type TicketGradeSummary,
-  type KeepTalkingResponse,
-  type CloseFinishedTerminalsResponse,
 } from "./project";
 
 /** The Reassign view the wire carries per ticket (issue #126), derived so a
@@ -104,6 +115,24 @@ function snapshot(
   };
 }
 
+function heldSpawnView(id: string): HeldSpawnView {
+  return {
+    id,
+    parentId: "A",
+    origin: "ticket",
+    kind: "ticket",
+    title: `proposal ${id}`,
+    body: "",
+    blockedBy: [],
+    blocks: null,
+    overlaps: [],
+    unknownOverlaps: [],
+    reason: "per-run",
+    at: "2026-09-29T10:00:00Z",
+    adopting: false,
+  };
+}
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -120,92 +149,88 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-/** Let the session's settled-fetch continuations run. */
+/** Let the session's settled-request continuations run. */
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function eventsResponse(kind: TicketEventKind): TicketEventsResponse {
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function eventsResponse(kind: TicketEventKind, attempt = 1): TicketEventsResponse {
   return {
-    events: [{ at: "2026-09-12T10:00:00Z", attempt: 1, kind, payload: {} }],
+    events: [{ at: "2026-09-12T10:00:00Z", attempt, kind, payload: {} }],
     attempts: [],
     reconstructed: false,
     spec: "",
   };
 }
 
+function window(content: string, attempt = 1): LogPush {
+  return {
+    mode: "window",
+    attempt,
+    stream: false,
+    content,
+    offset: 0,
+    nextOffset: content.length,
+    totalSize: content.length,
+    attempts: [
+      { attempt, kind: "implement", logFile: `runs/A/${attempt}.log`, streamFile: null, current: true },
+    ],
+  };
+}
+
+/** A refusal as the socket hands one over. */
+function refused(reason: string, status = 409): RequestRefused {
+  return new RequestRefused({ reason, status });
+}
+
+interface SentRequest {
+  kind: RequestKind;
+  payload: unknown;
+  deferred: Deferred<unknown>;
+}
+
 /**
- * A rig of hand-settled fake seams: every fetch parks on a per-id deferred
- * the test settles when it chooses, the projection is spy-counted, and
- * onChange calls are counted, so a test pins dispatch order and repaint
- * cadence before any outcome lands.
+ * A rig of a hand-settled fake socket: every request parks on a deferred
+ * the test settles when it chooses, subscriptions are logged as `+id` and
+ * `-id`, the projection is spy-counted, and onChange calls are counted, so
+ * a test pins what was sent and the repaint cadence before any reply lands.
  */
 function rig() {
-  const events = new Map<string, Deferred<TicketEventsResponse>[]>();
-  const bodies = new Map<string, Deferred<TicketBodyResponse | null>[]>();
-  const logCalls: string[] = [];
-  const stops: Deferred<void>[] = [];
-  const restarts: Deferred<RestartResponse>[] = [];
-  const keepTalks: { ticketId: string; deferred: Deferred<KeepTalkingResponse> }[] = [];
-  const closes: Deferred<CloseFinishedTerminalsResponse>[] = [];
+  const requests: SentRequest[] = [];
+  const subscriptions: string[] = [];
+  const follows: { id: string; follow: LogFollow; deferred: Deferred<LogFollowResult> }[] = [];
   const probes: number[] = [];
   const relaunched: number[] = [];
-  const streamHandlers: {
-    onSnapshot: (snapshot: EnrichedSnapshot) => void;
-    onError: (message: string) => void;
-  }[] = [];
+  const activity: unknown[] = [];
+  const peeks: unknown[] = [];
+  const grades: unknown[] = [];
   let projectCalls = 0;
   let changes = 0;
   // What the relaunch probe answers; a test flips it to stand the new server
   // up part way through the poll.
   let probeAnswer = false;
   const options: ConsoleSessionOptions = {
-    getState: () => Promise.resolve(null),
-    getEvents: (id) => {
-      const d = deferred<TicketEventsResponse>();
-      const list = events.get(id) ?? [];
-      list.push(d);
-      events.set(id, list);
-      return d.promise;
-    },
-    getTicket: (id) => {
-      const d = deferred<TicketBodyResponse | null>();
-      const list = bodies.get(id) ?? [];
-      list.push(d);
-      bodies.set(id, list);
-      return d.promise;
-    },
-    getGrades: () => Promise.resolve({} as Record<string, TicketGradeSummary>),
-    getLog: (ticketId) => {
-      logCalls.push(ticketId);
-      return new Promise(() => {});
-    },
-    answer: () => Promise.resolve(snapshot()),
-    // The stop seam parks like the rest, so a test can watch the control sit
-    // on "stopping..." before the 202 lands (issue #97).
-    stop: () => {
-      const d = deferred<void>();
-      stops.push(d);
-      return d.promise;
-    },
-    // The restart seam parks the same way, so a test can watch the control
-    // sit on "restarting..." before the 202 lands (ADR-0026).
-    restart: () => {
-      const d = deferred<RestartResponse>();
-      restarts.push(d);
-      return d.promise;
-    },
-    // Keep talking and the bulk close park the same way (issue #139), so a
-    // test can watch a button sit disabled before the engine answers.
-    keepTalking: (ticketId) => {
-      const d = deferred<KeepTalkingResponse>();
-      keepTalks.push({ ticketId, deferred: d });
-      return d.promise;
-    },
-    closeFinishedTerminals: () => {
-      const d = deferred<CloseFinishedTerminalsResponse>();
-      closes.push(d);
-      return d.promise;
+    socket: {
+      request: (kind, payload) => {
+        const d = deferred<unknown>();
+        requests.push({ kind, payload, deferred: d });
+        return d.promise as never;
+      },
+      subscribe: (card: CardSubscription) => {
+        subscriptions.push(`+${card.id}`);
+      },
+      unsubscribe: (id) => {
+        subscriptions.push(`-${id}`);
+      },
+      follow: (id, follow) => {
+        const d = deferred<LogFollowResult>();
+        follows.push({ id, follow, deferred: d });
+        return d.promise;
+      },
     },
     probeServer: (port) => {
       probes.push(port);
@@ -216,38 +241,64 @@ function rig() {
     },
     restartPollMs: 1,
     restartWaitMs: 40,
-    stream: (handlers) => {
-      streamHandlers.push(handlers);
-      return () => {};
+    hoverDwellMs: 1,
+    cardRetryMs: 5,
+    vitals: {
+      update: () => {},
+      apply: (a) => {
+        activity.push(a);
+      },
+      state: () => ({}),
     },
-    vitals: { update: () => {}, state: () => ({}) },
-    terminal: { update: () => {}, state: () => ({}) },
+    terminal: {
+      update: () => {},
+      apply: (p) => {
+        peeks.push(p);
+      },
+      state: () => ({}),
+    },
     projectPool: (...args) => {
       projectCalls += 1;
+      grades.push(args[1]);
       return projectPool(...args);
     },
     onChange: () => {
       changes += 1;
     },
   };
+  /** The latest request of a kind, which a test settles. */
+  const last = (kind: RequestKind): SentRequest => {
+    const found = requests.filter((r) => r.kind === kind).at(-1);
+    if (!found) throw new Error(`no ${kind} request was sent`);
+    return found;
+  };
   return {
     options,
-    events,
-    bodies,
-    logCalls,
-    stops,
-    restarts,
-    keepTalks,
-    closes,
+    requests,
+    subscriptions,
+    follows,
     probes,
     relaunched,
+    activity,
+    peeks,
+    grades,
+    last,
+    kinds: () => requests.map((r) => r.kind),
     setProbeAnswer: (value: boolean) => {
       probeAnswer = value;
     },
-    streamHandlers,
     projectCalls: () => projectCalls,
     changes: () => changes,
   };
+}
+
+/** A session over the rig, holding a snapshot and one derivation of it,
+ *  as a rendered page would. */
+function sessionOver(snap: EnrichedSnapshot, r = rig()) {
+  const session = new ConsoleSession(r.options);
+  session.setSnapshot(snap);
+  session.model({});
+  return { r, session };
 }
 
 describe("one derivation per cycle", () => {
@@ -278,128 +329,184 @@ describe("the pool's name (issue #100)", () => {
   });
 });
 
-describe("selection", () => {
-  it("fetches the selected ticket's events and body", () => {
+describe("pushed snapshots (issue #161)", () => {
+  it("applies a delta's version, keeping every unchanged ticket's identity for the projection", () => {
     const r = rig();
     const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
+    const first = toPushed(snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }), 1);
+    session.setPushed(first, null);
     session.model({});
-    session.select("ticket:A");
-    expect(r.events.get("A")).toHaveLength(1);
-    expect(r.bodies.get("A")).toHaveLength(1);
-  });
-
-  it("fetches a Conversation's events through the same path, without a log pane or a body", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(
-      snapshot({ state: { conversations: [conversation("c1")] } }),
+    const next = toPushed(
+      snapshot({ state: { tickets: [ticket("A"), ticket("B", { status: "in-progress" })] } }),
+      2,
     );
-    session.model({});
-    session.select("conversation:c1");
-    expect(r.events.get("c1")).toHaveLength(1);
-    expect(r.bodies.has("c1")).toBe(false);
-    r.events.get("c1")![0].resolve(eventsResponse("spawned"));
-    await flush();
+    const delta = diffSnapshot(first, next)!;
+    // What the socket hands the session: the delta applied to what it held.
+    const applied = {
+      ...next,
+      snapshot: {
+        ...next.snapshot,
+        state: {
+          ...next.snapshot.state,
+          tickets: [first.snapshot.state.tickets[0]!, next.snapshot.state.tickets[1]!],
+        },
+      },
+    };
+    session.setPushed(applied, delta);
     const model = session.model({});
-    expect(model.timeline?.attempts[0]?.running).toBe(true);
-    expect(session.logs.state.ticketId).toBe(null);
-    expect(r.logCalls).toHaveLength(0);
+    const b = model.cards.find((c) => c.id === "ticket:B");
+    expect(b?.kind === "ticket" && b.status).toBe("in-progress");
   });
 
-  it("clears the timeline and the log pane when the selection clears", async () => {
+  it("feeds a live frame's activity and peeks to their stores and holds the grades whole", () => {
+    const { r, session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
+    const before = r.changes();
+    const grade = { attempt: 1, score: 0.8, verdict: "pass" } as never;
+    session.applyLive({
+      type: "live",
+      activity: { A: { ticketId: "A", running: true, diff: null, log: null, lastEventAt: null } },
+      peeks: { A: { ticket: "A", error: "pane gone" } },
+      grades: { A: grade },
+    });
+    expect(r.activity).toHaveLength(1);
+    expect(r.peeks).toHaveLength(1);
+    expect(r.changes()).toBe(before + 1);
+    session.model({});
+    expect(r.grades.at(-1)).toEqual({ A: grade });
+  });
+
+  it("asks the server to start a pool it has not started, and banners a refusal", async () => {
     const r = rig();
     const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    session.model({});
-    session.select("ticket:A");
-    r.events.get("A")![0].resolve(eventsResponse("spawned"));
+    session.start();
+    expect(r.kinds()).toEqual(["start"]);
+    r.last("start").deferred.reject(refused("no tickets", 400));
     await flush();
-    session.select(null);
-    expect(session.model({}).timeline).toBeNull();
-    expect(session.logs.state.ticketId).toBe(null);
+    expect(session.model({}).error).toBe("failed to start the pool: no tickets");
   });
 });
 
-describe("stale-answer guards", () => {
-  it("drops a timeline answer that lands after the selection moved on", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(
+describe("selection and card subscriptions (issue #161)", () => {
+  it("subscribes the selected card and lets the one it replaced go", () => {
+    const { r, session } = sessionOver(
       snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }),
     );
-    session.model({});
     session.select("ticket:A");
     session.select("ticket:B");
-    // A's fetch is still out when B's selection supersedes it; its late
-    // answer must not clobber B's timeline.
-    r.events.get("A")![0].resolve(eventsResponse("spawned"));
-    await flush();
-    expect(session.model({}).timeline).toBeNull();
-    r.events.get("B")![0].resolve(eventsResponse("exited"));
-    await flush();
-    expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("exited");
+    session.select(null);
+    expect(r.subscriptions).toEqual(["+A", "+B", "-A", "-B"]);
   });
 
-  it("owes one refetch when snapshots outpace the events fetch, never a second alongside (#157)", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    session.model({});
+  it("draws the body, the timeline and the log from the card's one frame", () => {
+    const { r, session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
     session.select("ticket:A");
-    // Snapshots land on the same selection while its fetch is out: nothing
-    // more goes out until it answers, then exactly one refetch does.
-    for (let i = 0; i < 3; i++) {
-      session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    }
-    expect(r.events.get("A")).toHaveLength(1);
-    r.events.get("A")![0].resolve(eventsResponse("spawned"));
-    await flush();
-    expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("spawned");
-    expect(r.events.get("A")).toHaveLength(2);
-    r.events.get("A")![1].resolve(eventsResponse("exited"));
-    await flush();
-    expect(session.model({}).timeline?.attempts[0]?.events[0]?.kind).toBe("exited");
-    expect(r.events.get("A")).toHaveLength(2);
-  });
-
-  it("aborts what is still out for a card the operator clicked away from (#157)", async () => {
-    const signals = new Map<string, AbortSignal[]>();
-    const r = rig();
-    const keep = (id: string, signal?: AbortSignal) => {
-      const list = signals.get(id) ?? [];
-      if (signal) list.push(signal);
-      signals.set(id, list);
-    };
-    const getEvents = r.options.getEvents;
-    const getTicket = r.options.getTicket;
-    const session = new ConsoleSession({
-      ...r.options,
-      getEvents: (id, signal) => {
-        keep(`events:${id}`, signal);
-        return getEvents(id, signal);
-      },
-      getTicket: (id, signal) => {
-        keep(`body:${id}`, signal);
-        return getTicket(id, signal);
-      },
+    const shell = session.model({});
+    expect(shell.detail?.kind).toBe("ticket");
+    expect(shell.detailBody).toBeUndefined();
+    expect(shell.timeline).toBeNull();
+    const before = r.changes();
+    session.applyCard({
+      type: "card",
+      id: "A",
+      body: { id: "A", body: "# A\n\nthe spec" },
+      events: eventsResponse("spawned"),
+      log: window("[tool] Edit\n"),
     });
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }));
-    session.model({});
+    expect(r.changes()).toBeGreaterThan(before);
+    const model = session.model({});
+    expect(model.detailBody).toBe("# A\n\nthe spec");
+    expect(model.timeline?.attempts[0]?.number).toBe(1);
+    expect(model.logPane?.content).toBe("[tool] Edit\n");
+    expect(model.timeline?.attempts[0]?.streamFile).toBeNull();
+  });
+
+  it("hands the Detail the same timeline rows across deltas and repeated events frames", () => {
+    const { session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
     session.select("ticket:A");
-    const changes = r.changes();
+    session.applyCard({ type: "card", id: "A", events: eventsResponse("spawned") });
+    const first = session.model({}).timeline!;
+    // A delta that leaves the ticket alone draws the very same timeline.
+    session.setSnapshot(snapshot({ seq: 2, state: { tickets: [ticket("A")] } }));
+    expect(session.model({}).timeline).toBe(first);
+    // An events frame that repeats what is held keeps every attempt row.
+    session.applyCard({ type: "card", id: "A", events: eventsResponse("spawned") });
+    expect(session.model({}).timeline!.attempts[0]).toBe(first.attempts[0]!);
+  });
+
+  it("follows an events frame, a missing body and an unknown id", () => {
+    const { session } = sessionOver(snapshot({ state: { tickets: [ticket("A")] } }));
+    session.select("ticket:A");
+    session.applyCard({ type: "card", id: "A", body: null, events: eventsResponse("spawned") });
+    expect(session.model({}).detailBody).toBeNull();
+    session.applyCard({ type: "card", id: "A", events: eventsResponse("spawned", 2) });
+    expect(session.model({}).timeline?.attempts.map((a) => a.number)).toEqual([2]);
+    session.applyCard({ type: "card", id: "A", error: "unknown ticket A" });
+    expect(session.model({}).detailBodyError).toContain("unknown ticket A");
+    session.dispose();
+  });
+
+  it("asks again for a card the server could not read while it stays selected (#161)", async () => {
+    const { r, session } = sessionOver(
+      snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }),
+    );
+    session.select("ticket:A");
+    session.applyCard({ type: "card", id: "A", error: "events file unreadable" });
+    expect(r.subscriptions).toEqual(["+A", "-A"]);
+    expect(session.model({}).detailBodyError).toContain("events file unreadable");
+    await wait(15);
+    expect(r.subscriptions).toEqual(["+A", "-A", "+A"]);
+    // A frame that reads clears the error.
+    session.applyCard({ type: "card", id: "A", body: { id: "A", body: "the spec" } });
+    expect(session.model({}).detailBodyError).toBeNull();
+    expect(session.model({}).detailBody).toBe("the spec");
+    // A card let go of before the retry is not asked for again.
     session.select("ticket:B");
-    // The selection repaints at once, before any of B's fetches answer.
-    expect(r.changes()).toBe(changes + 1);
-    expect(signals.get("events:A")![0]!.aborted).toBe(true);
-    expect(signals.get("body:A")![0]!.aborted).toBe(true);
-    expect(signals.get("events:B")![0]!.aborted).toBe(false);
-    expect(signals.get("body:B")![0]!.aborted).toBe(false);
-    // A's body was dropped, not cached: coming back asks for it again.
-    r.bodies.get("A")![0].resolve({ id: "A", body: "body A" });
-    await flush();
+    session.applyCard({ type: "card", id: "B", error: "boom" });
+    session.select(null);
+    await wait(15);
+    expect(r.subscriptions.filter((s) => s.endsWith("B"))).toEqual(["+B", "-B"]);
+  });
+
+  it("subscribes a Conversation by its own id, with a timeline and no log pane", () => {
+    const { r, session } = sessionOver(
+      snapshot({ state: { conversations: [conversation("c1")] } }),
+    );
+    session.select("conversation:c1");
+    expect(r.subscriptions).toEqual(["+c1"]);
+    session.applyCard({
+      type: "card",
+      id: "c1",
+      body: null,
+      events: eventsResponse("spawned"),
+      log: null,
+    });
+    const model = session.model({});
+    expect(model.timeline?.attempts[0]?.running).toBe(true);
+    expect(model.logPane).toBeNull();
+    expect(session.logs.state.ticketId).toBeNull();
+  });
+
+  it("drops a frame for a card it has let go of", () => {
+    const { r, session } = sessionOver(
+      snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }),
+    );
     session.select("ticket:A");
-    expect(r.bodies.get("A")).toHaveLength(2);
+    session.select("ticket:B");
+    const before = r.changes();
+    session.applyCard({ type: "card", id: "A", body: { id: "A", body: "late" } });
+    expect(r.changes()).toBe(before);
+    session.select("ticket:A");
+    expect(session.model({}).detailBody).toBeUndefined();
+  });
+
+  it("subscribes nothing for a spawn's card", () => {
+    const { r, session } = sessionOver(
+      snapshot({ heldSpawns: [heldSpawnView("held-1")], state: { tickets: [ticket("A")] } }),
+    );
+    const spawn = session.model({}).cards.find((c) => c.kind === "spawn");
+    expect(spawn).toBeDefined();
+    session.select(spawn!.id);
+    expect(r.subscriptions).toEqual([]);
   });
 
   it("prints the State inspector only while it is open, once per snapshot (#157)", () => {
@@ -416,103 +523,324 @@ describe("stale-answer guards", () => {
     session.setSnapshot(snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }));
     expect(session.model({}).inspectorJson).not.toBe(printed);
   });
+});
 
-  it("fetches the grades one at a time however fast snapshots land (#157)", async () => {
-    const r = rig();
-    const grades: Deferred<Record<string, TicketGradeSummary>>[] = [];
-    const session = new ConsoleSession({
-      ...r.options,
-      getGrades: () => {
-        const d = deferred<Record<string, TicketGradeSummary>>();
-        grades.push(d);
-        return d.promise;
+describe("hover prefetch (issue #161)", () => {
+  const four = () =>
+    snapshot({ state: { tickets: [ticket("A"), ticket("B"), ticket("C"), ticket("D")] } });
+
+  it("subscribes a card the pointer rests on, and nothing for a pass-over", async () => {
+    const { r, session } = sessionOver(four());
+    session.hover("ticket:A");
+    session.hover("ticket:B");
+    session.hover(null);
+    await wait(10);
+    expect(r.subscriptions).toEqual([]);
+    session.hover("ticket:C");
+    await wait(10);
+    expect(r.subscriptions).toEqual(["+C"]);
+  });
+
+  it("holds two hovered cards, letting the least recently hovered go first", async () => {
+    const { r, session } = sessionOver(four());
+    for (const id of ["A", "B", "C"]) {
+      session.hover(`ticket:${id}`);
+      await wait(10);
+    }
+    expect(r.subscriptions).toEqual(["+A", "+B", "+C", "-A"]);
+    // Coming back to B makes it the most recent, so D lets C go, not B.
+    session.hover("ticket:B");
+    session.hover("ticket:D");
+    await wait(10);
+    expect(r.subscriptions).toEqual(["+A", "+B", "+C", "-A", "+D", "-C"]);
+  });
+
+  it("never counts the selected card against the two", async () => {
+    const { r, session } = sessionOver(four());
+    session.select("ticket:A");
+    session.hover("ticket:A");
+    for (const id of ["B", "C"]) {
+      session.hover(`ticket:${id}`);
+      await wait(10);
+    }
+    expect(r.subscriptions).toEqual(["+A", "+B", "+C"]);
+  });
+
+  it("holds a hovered card's frames without a repaint, and draws them whole on the click", async () => {
+    const { r, session } = sessionOver(four());
+    session.hover("ticket:B");
+    await wait(10);
+    const before = r.changes();
+    session.applyCard({
+      type: "card",
+      id: "B",
+      body: { id: "B", body: "B's spec" },
+      events: eventsResponse("spawned"),
+      log: window("B's tail\n"),
+    });
+    expect(r.changes()).toBe(before);
+    session.select("ticket:B");
+    const model = session.model({});
+    expect(model.detailBody).toBe("B's spec");
+    expect(model.timeline).not.toBeNull();
+    expect(model.logPane?.content).toBe("B's tail\n");
+    // Already subscribed: the click sends nothing.
+    expect(r.subscriptions).toEqual(["+B"]);
+  });
+
+  it("stops its timers when disposed: a dwell under way subscribes nothing", async () => {
+    const { r, session } = sessionOver(four());
+    session.hover("ticket:A");
+    session.dispose();
+    await wait(10);
+    expect(r.subscriptions).toEqual([]);
+  });
+
+  it("drops a card's held data once it is let go", async () => {
+    const { session } = sessionOver(four());
+    session.hover("ticket:A");
+    await wait(10);
+    session.applyCard({ type: "card", id: "A", body: { id: "A", body: "A's spec" } });
+    for (const id of ["B", "C"]) {
+      session.hover(`ticket:${id}`);
+      await wait(10);
+    }
+    session.select("ticket:A");
+    expect(session.model({}).detailBody).toBeUndefined();
+  });
+});
+
+describe("optimistic presses (issue #161)", () => {
+  const waiting = () =>
+    snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "checkpoint" })],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
       },
     });
-    for (let i = 0; i < 5; i++) session.setSnapshot(snapshot());
-    expect(grades).toHaveLength(1);
-    grades[0]!.resolve({});
-    await flush();
-    expect(grades).toHaveLength(2);
-    grades[1]!.resolve({});
-    await flush();
-    expect(grades).toHaveLength(2);
+  const queuedOf = (session: ConsoleSession) =>
+    session.model({}).needsInput.find((row) => row.ticketId === "A")?.interrupt.queued;
+
+  it("draws an answer as queued in the press's frame and sends it", async () => {
+    const { r, session } = sessionOver(waiting());
+    const before = r.changes();
+    const settled = session.answer("A", "resume", "go on");
+    expect(r.changes()).toBeGreaterThan(before);
+    expect(queuedOf(session)).toBe(true);
+    expect(r.last("resume").payload).toEqual({ ticketId: "A", action: "resume", note: "go on" });
+    // The confirming delta lands ahead of the reply; the reply drops the
+    // overlay and nothing on screen moves.
+    session.setSnapshot({
+      ...waiting(),
+      state: {
+        ...waiting().state,
+        queuedAnswers: [
+          { seq: 1, ticketId: "A", kind: "checkpoint", note: "go on", at: "now", processedAt: null },
+        ],
+      },
+    });
+    r.last("resume").deferred.resolve({});
+    await settled;
+    expect(queuedOf(session)).toBe(true);
+    expect(session.model({}).answerFailures).toEqual({});
   });
 
-  it("drops a body answer that lands after the selection moved on", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(
-      snapshot({ state: { tickets: [ticket("A"), ticket("B")] } }),
-    );
-    session.model({});
-    session.select("ticket:A");
-    session.select("ticket:B");
-    const changesAtSelect = r.changes();
-    r.bodies.get("A")![0].resolve({ id: "A", body: "body A" });
-    await flush();
-    // A's late body belongs to an aborted fetch: no repaint while B is showing.
-    expect(r.changes()).toBe(changesAtSelect);
-    expect(session.model({}).detailBody).toBeUndefined();
-    r.bodies.get("B")![0].resolve({ id: "B", body: "body B" });
-    await flush();
-    expect(session.model({}).detailBody).toBe("body B");
+  it("rolls a refused answer back and puts the reason beside it until the next answer", async () => {
+    const { r, session } = sessionOver(waiting());
+    const settled = session.answer("A", "resume").catch((err: unknown) => err);
+    expect(queuedOf(session)).toBe(true);
+    r.last("resume").deferred.reject(refused("the interrupt was already answered"));
+    expect(await settled).toBeInstanceOf(RequestRefused);
+    expect(queuedOf(session)).toBe(false);
+    expect(session.model({}).answerFailures).toEqual({ A: "the interrupt was already answered" });
+    expect(session.model({}).error).toBeNull();
+    void session.answer("A", "resume").catch(() => {});
+    expect(session.model({}).answerFailures).toEqual({});
+  });
+
+  it("drops a refused answer's reason once the interrupt resolves", async () => {
+    const { r, session } = sessionOver(waiting());
+    const settled = session.answer("A", "resume").catch(() => {});
+    r.last("resume").deferred.reject(refused("no"));
+    await settled;
+    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
+    expect(session.model({}).answerFailures).toEqual({});
+  });
+
+  it("draws any overlay until its reply and rolls it back on a refusal", async () => {
+    const { r, session } = sessionOver(snapshot({ heldSpawns: [heldSpawnView("held-1")] }));
+    const settled = session
+      .optimistic("spawns.held.discard", { id: "held-1" }, (s) => ({ ...s, heldSpawns: [] }))
+      .catch((err: unknown) => err);
+    expect(session.model({}).heldSpawns).toHaveLength(0);
+    expect(r.last("spawns.held.discard").payload).toEqual({ id: "held-1" });
+    r.last("spawns.held.discard").deferred.reject(refused("no such spawn"));
+    expect(((await settled) as Error).message).toBe("no such spawn");
+    expect(session.model({}).heldSpawns).toHaveLength(1);
+  });
+
+  it("leaves the snapshot it draws over untouched", () => {
+    const base = snapshot({ heldSpawns: [heldSpawnView("held-1")] });
+    const { session } = sessionOver(base);
+    void session
+      .optimistic("spawns.held.discard", { id: "held-1" }, (s) => ({ ...s, heldSpawns: [] }))
+      .catch(() => {});
+    session.toggleInspector();
+    expect(JSON.parse(session.model({}).inspectorJson)).toEqual(base.state);
+    expect(base.heldSpawns).toHaveLength(1);
   });
 });
 
-describe("ticket body cache", () => {
-  it("caches a missing body and never refetches it", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    session.model({});
-    session.select("ticket:A");
-    r.bodies.get("A")![0].resolve(null);
-    await flush();
-    expect(session.model({}).detailBody).toBe(null);
-    session.select("ticket:B");
-    session.select("ticket:A");
-    await flush();
-    expect(r.bodies.get("A")).toHaveLength(1);
-    expect(session.model({}).detailBody).toBe(null);
+describe("“…ing” presses (issue #161)", () => {
+  it("shows Stop, Restart and the bulk close in flight in the press's frame", () => {
+    const { r, session } = sessionOver(snapshot({ phase: "done", finishedTerminals: 2 }));
+    session.connection({ up: true });
+    void session.confirmStop();
+    void session.confirmRestart();
+    void session.confirmCloseTerminals();
+    const model = session.model({});
+    expect(model.stop.state).toBe("requesting");
+    expect(model.restart.state).toBe("requesting");
+    expect(model.closeTerminals.state).toBe("requesting");
+    expect(r.kinds()).toEqual(["stop", "restart", "terminals.closeFinished"]);
   });
 
-  it("dedups a body fetch already in flight", () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A")] } }));
-    session.model({});
-    session.select("ticket:A");
-    session.select("ticket:A");
-    expect(r.bodies.get("A")).toHaveLength(1);
-  });
-});
-
-describe("tab override", () => {
-  it("activates a manually chosen tab for its own ticket only", () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(
+  it("disables Keep talking in the press's frame", () => {
+    const { session } = sessionOver(
       snapshot({
-        state: { tickets: [ticket("A", { status: "done" }), ticket("B")] },
+        state: {
+          tickets: [ticket("A", { status: "checkpoint", heldPane: { attempt: 2, paneId: "w3:p1" } })],
+          interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief" }],
+        },
       }),
     );
-    session.model({});
-    session.select("ticket:A");
-    // A done ticket defaults to Outcome.
-    expect(session.model({}).detailTabs?.find((t) => t.active)?.id).toBe("outcome");
-    session.selectTab("A", "spec");
-    expect(session.model({}).detailTabs?.find((t) => t.active)?.id).toBe("spec");
-    // A choice made for another ticket replaces it and does not apply: the
-    // selected ticket's default reasserts itself.
-    session.selectTab("B", "progress");
-    expect(session.model({}).detailTabs?.find((t) => t.active)?.id).toBe("outcome");
+    void session.keepTalking("A");
+    const card = session.model({}).cards.find((c) => c.id === "ticket:A");
+    expect(card?.kind === "ticket" && card.interrupt?.keepTalking?.requesting).toBe(true);
+  });
+});
+
+describe("the pool log (issue #161)", () => {
+  const lines = (from: number, to: number) =>
+    Array.from({ length: to - from }, (_, i) => `line ${from + i}`);
+  /** The drawer's lines, the drawer open. */
+  const held = (session: ConsoleSession) => session.model({}).logText.split("\n");
+  /** A session over the rig with its pool log drawer open. */
+  const opened = (r: ReturnType<typeof rig>) => {
+    const session = new ConsoleSession(r.options);
+    session.toggleLog();
+    return session;
+  };
+
+  it("offers the lines before the window and prepends them", async () => {
+    const r = rig();
+    const session = opened(r);
+    session.setPushed(
+      { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
+      null,
+    );
+    expect(session.model({}).logTotal).toBe(800);
+    void session.loadEarlierPoolLog();
+    expect(session.model({}).logEarlier.loading).toBe(true);
+    expect(r.last("poolLog.read").payload).toEqual({ before: 300 });
+    r.last("poolLog.read").deferred.resolve({ start: 0, lines: lines(0, 300), total: 800 });
+    await flush();
+    const model = session.model({});
+    expect(held(session)).toEqual(lines(0, 800));
+    expect(model.logHeld).toBe(800);
+    expect(model.logEarlier.loading).toBe(false);
+  });
+
+  it("joins no text while the drawer is shut", () => {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.setSnapshot(snapshot({ state: { log: lines(0, 10) } }));
+    expect(session.model({}).logText).toBe("");
+    expect(session.model({}).logHeld).toBe(10);
+    session.toggleLog();
+    expect(held(session)).toEqual(lines(0, 10));
+  });
+
+  it("lets the oldest earlier lines go past its cap, and reads them back on asking", async () => {
+    const r = rig();
+    const session = opened(r);
+    session.setPushed(
+      { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
+      null,
+    );
+    void session.loadEarlierPoolLog();
+    r.last("poolLog.read").deferred.resolve({ start: 0, lines: lines(0, 300), total: 800 });
+    await flush();
+    // A burst pushes 6,000 lines past the window: 300 + 6,000 above it now.
+    session.setPushed(
+      { rev: 2, logTotal: 6_800, snapshot: snapshot({ state: { log: lines(6_300, 6_800) } }) },
+      { base: 1, rev: 2, log: { append: lines(800, 6_800), total: 6_800 } },
+    );
+    const model = session.model({});
+    expect(model.logHeld).toBe(5_000 + 500);
+    expect(held(session)[0]).toBe("line 1300");
+    expect(held(session).at(-1)).toBe("line 6799");
+    void session.loadEarlierPoolLog();
+    expect(r.last("poolLog.read").payload).toEqual({ before: 1_300 });
+  });
+
+  it("keeps the drawer contiguous as appends push lines out of the window", async () => {
+    const r = rig();
+    const session = opened(r);
+    const first = { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) };
+    session.setPushed(first, null);
+    void session.loadEarlierPoolLog();
+    // Two lines land while the read is out: the window lets 300 and 301 go.
+    const grown = {
+      rev: 2,
+      logTotal: 802,
+      snapshot: snapshot({ state: { log: lines(302, 802) } }),
+    };
+    session.setPushed(grown, { base: 1, rev: 2, log: { append: lines(800, 802), total: 802 } });
+    r.last("poolLog.read").deferred.resolve({ start: 100, lines: lines(100, 300), total: 802 });
+    await flush();
+    expect(held(session)).toEqual(lines(100, 802));
+    // And again once the earlier lines are held.
+    session.setPushed(
+      { rev: 3, logTotal: 803, snapshot: snapshot({ state: { log: lines(303, 803) } }) },
+      { base: 2, rev: 3, log: { append: lines(802, 803), total: 803 } },
+    );
+    expect(held(session)).toEqual(lines(100, 803));
+    void session.loadEarlierPoolLog();
+    expect(r.last("poolLog.read").payload).toEqual({ before: 100 });
+  });
+
+  it("starts over on a new log", async () => {
+    const r = rig();
+    const session = opened(r);
+    session.setPushed(
+      { rev: 1, logTotal: 800, snapshot: snapshot({ state: { log: lines(300, 800) } }) },
+      null,
+    );
+    void session.loadEarlierPoolLog();
+    r.last("poolLog.read").deferred.resolve({ start: 0, lines: lines(0, 300), total: 800 });
+    await flush();
+    session.setPushed(
+      { rev: 2, logTotal: 2, snapshot: snapshot({ state: { log: ["new", "run"] } }) },
+      { base: 1, rev: 2, log: { replace: ["new", "run"], total: 2 } },
+    );
+    expect(held(session)).toEqual(["new", "run"]);
+  });
+
+  it("never asks for lines before the first", () => {
+    const r = rig();
+    const session = new ConsoleSession(r.options);
+    session.setSnapshot(snapshot({ state: { log: ["only"] } }));
+    void session.loadEarlierPoolLog();
+    expect(r.requests).toHaveLength(0);
   });
 });
 
 /**
  * Capture the timers the session arms instead of running them, so a test can
- * fire the stream's grace timer without waiting it out, and can assert that
- * a path arms no timer at all.
+ * fire the connection's grace timer without waiting it out, and can assert
+ * that a path arms no timer at all.
  */
 function captureTimers() {
   const realSetTimeout = globalThis.setTimeout;
@@ -535,27 +863,62 @@ function captureTimers() {
   };
 }
 
+const DOWN = { up: false, reason: "pool socket closed (1006)", stopped: false } as const;
+
+describe("the connection banner", () => {
+  it("banners an ordinary close only after the grace, and a reconnect clears it", () => {
+    const timers = captureTimers();
+    try {
+      const { session } = sessionOver(snapshot({ phase: "done" }));
+      session.connection(DOWN);
+      expect(session.model({}).connected).toBe(false);
+      expect(session.model({}).error).toBeNull();
+      expect(timers.pending).toHaveLength(1);
+      // A dead server closes every retry: the grace arms once per outage.
+      session.connection(DOWN);
+      expect(timers.pending).toHaveLength(1);
+      timers.runAll();
+      expect(session.model({}).error).toBe("pool socket closed (1006)");
+      session.connection({ up: true });
+      expect(session.model({}).error).toBeNull();
+      expect(session.model({}).connected).toBe(true);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it("says the Console was updated when it would not reload again", () => {
+    const { session } = sessionOver(snapshot());
+    session.versionChanged();
+    session.setSnapshot(snapshot());
+    expect(session.model({}).error).toBe("Console was updated: reload the page");
+  });
+});
+
 describe("stop control (issue #97)", () => {
   /** A connected session sitting on a done pool: the one state that offers Stop. */
   function doneSession() {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.connect();
-    session.setSnapshot(snapshot({ phase: "done" }));
+    const { r, session } = sessionOver(snapshot({ phase: "done" }));
+    session.connection({ up: true });
     return { r, session };
   }
 
-  it("offers Stop only while the pool is done and the stream is connected", () => {
-    const { r, session } = doneSession();
-    expect(session.model({}).stop.offered).toBe(true);
-    session.setSnapshot(snapshot({ phase: "running" }));
-    expect(session.model({}).stop.offered).toBe(false);
-    session.setSnapshot(snapshot({ phase: "done" }));
-    expect(session.model({}).stop.offered).toBe(true);
-    // A dropped stream takes the offer with it: a POST down a dead
-    // connection would go nowhere.
-    r.streamHandlers[0]!.onError("pool stream disconnected");
-    expect(session.model({}).stop.offered).toBe(false);
+  it("offers Stop only while the pool is done and the socket is connected", () => {
+    const timers = captureTimers();
+    try {
+      const { session } = doneSession();
+      expect(session.model({}).stop.offered).toBe(true);
+      session.setSnapshot(snapshot({ phase: "running" }));
+      expect(session.model({}).stop.offered).toBe(false);
+      session.setSnapshot(snapshot({ phase: "done" }));
+      expect(session.model({}).stop.offered).toBe(true);
+      // A dropped socket takes the offer with it: a request down a dead
+      // connection would go nowhere.
+      session.connection(DOWN);
+      expect(session.model({}).stop.offered).toBe(false);
+    } finally {
+      timers.restore();
+    }
   });
 
   it("arms and cancels the inline confirmation without sending anything", () => {
@@ -565,7 +928,7 @@ describe("stop control (issue #97)", () => {
     expect(session.model({}).stop.state).toBe("armed");
     session.cancelStop();
     expect(session.model({}).stop.state).toBe("idle");
-    expect(r.stops).toHaveLength(0);
+    expect(r.requests).toHaveLength(0);
   });
 
   it("disarms when a snapshot moves the pool off done", () => {
@@ -576,15 +939,15 @@ describe("stop control (issue #97)", () => {
     expect(session.model({}).stop.offered).toBe(false);
   });
 
-  it("holds 'stopping...' until the 202, then marks the stop as this page's", async () => {
+  it("holds 'stopping...' until the accept, then marks the stop as this page's", async () => {
     const { r, session } = doneSession();
     session.armStop();
     const settled = session.confirmStop();
     // The request is out: the button stays disabled on its in-flight label,
-    // because a 202 only means the server accepted the stop.
+    // because an accept only means the server took the stop.
     expect(session.model({}).stop.state).toBe("requesting");
-    expect(r.stops).toHaveLength(1);
-    r.stops[0]!.resolve();
+    expect(r.kinds()).toEqual(["stop"]);
+    r.last("stop").deferred.resolve({ stopping: true });
     await settled;
     expect(session.model({}).stop.stoppedFromHere).toBe(true);
     // The farewell snapshot withdraws the control and carries the pool
@@ -608,7 +971,7 @@ describe("stop control (issue #97)", () => {
     const { r, session } = doneSession();
     session.armStop();
     const settled = session.confirmStop();
-    r.stops[0]!.reject(new Error("pool is running, not done: stop refused"));
+    r.last("stop").deferred.reject(refused("pool is running, not done: stop refused"));
     await settled;
     const model = session.model({});
     expect(model.stop.state).toBe("idle");
@@ -617,24 +980,22 @@ describe("stop control (issue #97)", () => {
     expect(model.error).toBeNull();
   });
 
-  it("raises no banner for the disconnect that follows a stopped snapshot, and recovers on relaunch", () => {
+  it("raises no banner for the farewell close, and recovers on relaunch", () => {
     const timers = captureTimers();
     try {
-      const r = rig();
-      const session = new ConsoleSession(r.options);
-      session.connect();
-      session.setSnapshot(snapshot({ phase: "stopped", poolDir: "/repos/demo/.pool" }));
-      r.streamHandlers[0]!.onError("pool stream disconnected");
-      // The stop is the reason the stream ended, so no grace timer is armed
+      const { session } = sessionOver(snapshot({ phase: "stopped", poolDir: "/repos/demo/.pool" }));
+      session.connection({ up: false, reason: "stopped", stopped: true });
+      // The stop is the reason the socket closed, so no grace timer is armed
       // at all; running every timer there is proves it.
       expect(timers.pending).toHaveLength(0);
       timers.runAll();
       const stopped = session.model({});
       expect(stopped.error).toBeNull();
       expect(stopped.connected).toBe(false);
-      // The client keeps retrying; a relaunched server's first snapshot puts
+      // The socket keeps retrying; a relaunched server's first snapshot puts
       // the page back to live, with the stop control's state cleared.
       session.setSnapshot(snapshot({ phase: "done" }));
+      session.connection({ up: true });
       const relaunched = session.model({});
       expect(relaunched.error).toBeNull();
       expect(relaunched.connected).toBe(true);
@@ -645,17 +1006,14 @@ describe("stop control (issue #97)", () => {
     }
   });
 
-  it("still banners an ordinary disconnect, so the stopped case is a real exception", () => {
+  it("still banners an ordinary close after a stopped snapshot's relaunch", () => {
     const timers = captureTimers();
     try {
-      const r = rig();
-      const session = new ConsoleSession(r.options);
-      session.connect();
-      session.setSnapshot(snapshot({ phase: "done" }));
-      r.streamHandlers[0]!.onError("pool stream disconnected");
+      const { session } = doneSession();
+      session.connection(DOWN);
       expect(timers.pending).toHaveLength(1);
       timers.runAll();
-      expect(session.model({}).error).toBe("pool stream disconnected");
+      expect(session.model({}).error).toBe("pool socket closed (1006)");
     } finally {
       timers.restore();
     }
@@ -669,10 +1027,8 @@ describe("restart control (ADR-0026)", () => {
   }
 
   function connected(phase: "running" | "done" = "running") {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.connect();
-    session.setSnapshot(snapshot({ phase }));
+    const { r, session } = sessionOver(snapshot({ phase }));
+    session.connection({ up: true });
     return { r, session };
   }
 
@@ -684,11 +1040,11 @@ describe("restart control (ADR-0026)", () => {
     expect(session.model({}).restart.offered).toBe(true);
   });
 
-  it("withdraws the offer on a dead stream, the way Stop does", () => {
+  it("withdraws the offer on a dead socket, the way Stop does", () => {
     const timers = captureTimers();
     try {
-      const { r, session } = connected();
-      r.streamHandlers[0]!.onError("pool stream disconnected");
+      const { session } = connected();
+      session.connection(DOWN);
       expect(session.model({}).restart.offered).toBe(false);
     } finally {
       timers.restore();
@@ -701,7 +1057,7 @@ describe("restart control (ADR-0026)", () => {
     expect(session.model({}).restart.state).toBe("armed");
     session.cancelRestart();
     expect(session.model({}).restart.state).toBe("idle");
-    expect(r.restarts).toHaveLength(0);
+    expect(r.requests).toHaveLength(0);
   });
 
   it("keeps an armed confirmation across a phase change, since Restart is offered throughout", () => {
@@ -715,7 +1071,7 @@ describe("restart control (ADR-0026)", () => {
     const { r, session } = connected();
     const settled = session.confirmRestart();
     expect(session.model({}).restart.state).toBe("requesting");
-    r.restarts[0]!.reject(new Error("no boot script on this pool"));
+    r.last("restart").deferred.reject(refused("no boot script on this pool"));
     await settled;
     const model = session.model({});
     expect(model.restart.state).toBe("idle");
@@ -730,14 +1086,15 @@ describe("restart control (ADR-0026)", () => {
     try {
       const { r, session } = connected();
       const settled = session.confirmRestart();
-      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      r.last("restart").deferred.resolve({ ok: true, port: 4311 });
       await settled;
       expect(session.model({}).restart.waiting).toBe(true);
       session.setSnapshot(snapshot({ phase: "stopped" }));
+      session.connection({ up: false, reason: "stopped", stopped: true });
       const model = session.model({});
       expect(model.phase).toBe("stopped");
       expect(model.restart.waiting).toBe(true);
-      // The control survives the stream going down with the old server, so
+      // The control survives the socket going down with the old server, so
       // it can keep saying "restarting...".
       expect(model.restart.offered).toBe(true);
       expect(model.restart.state).toBe("requesting");
@@ -751,7 +1108,7 @@ describe("restart control (ADR-0026)", () => {
     try {
       const { r, session } = connected();
       const settled = session.confirmRestart();
-      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      r.last("restart").deferred.resolve({ ok: true, port: 4311 });
       await settled;
       session.setSnapshot(snapshot({ phase: "stopped" }));
       // Nothing is listening yet: the poll keeps its place.
@@ -769,15 +1126,33 @@ describe("restart control (ADR-0026)", () => {
     }
   });
 
+  it("hands the page over when its own socket finds the relaunched server first", async () => {
+    const timers = captureTimers();
+    try {
+      const { r, session } = connected();
+      const settled = session.confirmRestart();
+      r.last("restart").deferred.resolve({ ok: true, port: 4311 });
+      await settled;
+      session.setSnapshot(snapshot({ phase: "stopped" }));
+      session.setSnapshot(snapshot({ phase: "running" }));
+      expect(r.relaunched).toEqual([4311]);
+      const model = session.model({});
+      expect(model.restart.waiting).toBe(false);
+      expect(model.restart.state).toBe("idle");
+      expect(model.stop.stoppedFromHere).toBe(false);
+    } finally {
+      timers.restore();
+    }
+  });
+
   it("gives up after the wait, so the ordinary stopped notice takes over", async () => {
     const timers = captureTimers();
     try {
       const r = rig();
       const session = new ConsoleSession({ ...r.options, restartWaitMs: -1 });
-      session.connect();
       session.setSnapshot(snapshot({ phase: "running" }));
       const settled = session.confirmRestart();
-      r.restarts[0]!.resolve({ ok: true, port: 4311 });
+      r.last("restart").deferred.resolve({ ok: true, port: 4311 });
       await settled;
       timers.runAll();
       await settle();
@@ -789,29 +1164,11 @@ describe("restart control (ADR-0026)", () => {
       timers.restore();
     }
   });
-
-  it("starts over when a live snapshot lands, the way the stop control does", async () => {
-    const timers = captureTimers();
-    try {
-      const { r, session } = connected();
-      const settled = session.confirmRestart();
-      r.restarts[0]!.resolve({ ok: true, port: 4311 });
-      await settled;
-      session.setSnapshot(snapshot({ phase: "stopped" }));
-      session.setSnapshot(snapshot({ phase: "running" }));
-      const model = session.model({});
-      expect(model.restart.waiting).toBe(false);
-      expect(model.restart.state).toBe("idle");
-      expect(model.stop.stoppedFromHere).toBe(false);
-    } finally {
-      timers.restore();
-    }
-  });
 });
 
 describe("Keep talking (issue #139)", () => {
-  /** A connected session whose ticket A waits at a checkpoint over a live
-   *  Held pane of attempt `attempt`. */
+  /** A session whose ticket A waits at a checkpoint over a live Held pane
+   *  of attempt `attempt`. */
   function heldSnapshot(attempt = 2): EnrichedSnapshot {
     return snapshot({
       phase: "quiescent",
@@ -822,28 +1179,20 @@ describe("Keep talking (issue #139)", () => {
     });
   }
 
-  function heldSession() {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.connect();
-    session.setSnapshot(heldSnapshot());
-    return { r, session };
-  }
-
   const offerOf = (session: ConsoleSession) => {
     const card = session.model({}).cards.find((c) => c.id === "ticket:A");
     return card?.kind === "ticket" ? card.interrupt?.keepTalking : undefined;
   };
 
   it("asks the engine by ticket id and stays disabled after the accept, until the snapshot moves on", async () => {
-    const { r, session } = heldSession();
+    const { r, session } = sessionOver(heldSnapshot());
     const settled = session.keepTalking("A");
-    expect(r.keepTalks.map((call) => call.ticketId)).toEqual(["A"]);
+    expect(r.last("keepTalking").payload).toEqual({ ticketId: "A" });
     expect(offerOf(session)).toEqual({ requesting: true, failure: null });
     // A second click while it is out sends nothing.
     void session.keepTalking("A");
-    expect(r.keepTalks).toHaveLength(1);
-    r.keepTalks[0]!.deferred.resolve({ ticketId: "A", attempt: 3 });
+    expect(r.kinds()).toEqual(["keepTalking"]);
+    r.last("keepTalking").deferred.resolve({ ticketId: "A", attempt: 3 });
     await settled;
     // Accepted, but the snapshot still shows the checkpoint: the pane is
     // already claimed, so the button must not invite a second ask.
@@ -868,42 +1217,45 @@ describe("Keep talking (issue #139)", () => {
   });
 
   it("puts a refusal's reason beside the button, never on the global banner, and lets it retry", async () => {
-    const { r, session } = heldSession();
+    const { r, session } = sessionOver(heldSnapshot());
     const settled = session.keepTalking("A");
-    r.keepTalks[0]!.deferred.reject(new Error("the pane is gone"));
+    r.last("keepTalking").deferred.reject(refused("the pane is gone"));
     await settled;
     expect(offerOf(session)).toEqual({ requesting: false, failure: "the pane is gone" });
     expect(session.model({}).error).toBeNull();
     void session.keepTalking("A");
-    expect(r.keepTalks).toHaveLength(2);
+    expect(r.kinds()).toEqual(["keepTalking", "keepTalking"]);
     expect(offerOf(session)).toEqual({ requesting: true, failure: null });
   });
 
   it("sends nothing for a ticket with no Held pane", async () => {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.setSnapshot(snapshot({ state: { tickets: [ticket("A", { status: "checkpoint" })] } }));
+    const { r, session } = sessionOver(
+      snapshot({ state: { tickets: [ticket("A", { status: "checkpoint" })] } }),
+    );
     await session.keepTalking("A");
-    expect(r.keepTalks).toHaveLength(0);
+    expect(r.requests).toHaveLength(0);
   });
 });
 
 describe("close finished terminals (issue #139)", () => {
   function sessionWith(finishedTerminals: number) {
-    const r = rig();
-    const session = new ConsoleSession(r.options);
-    session.connect();
-    session.setSnapshot(snapshot({ finishedTerminals }));
+    const { r, session } = sessionOver(snapshot({ finishedTerminals }));
+    session.connection({ up: true });
     return { r, session };
   }
 
-  it("offers the control only while the snapshot counts a Finished terminal over a live stream", () => {
-    const { r, session } = sessionWith(0);
-    expect(session.model({}).closeTerminals).toMatchObject({ offered: false, count: 0 });
-    session.setSnapshot(snapshot({ finishedTerminals: 2 }));
-    expect(session.model({}).closeTerminals).toMatchObject({ offered: true, count: 2 });
-    r.streamHandlers[0]!.onError("pool stream disconnected");
-    expect(session.model({}).closeTerminals.offered).toBe(false);
+  it("offers the control only while the snapshot counts a Finished terminal over a live socket", () => {
+    const timers = captureTimers();
+    try {
+      const { session } = sessionWith(0);
+      expect(session.model({}).closeTerminals).toMatchObject({ offered: false, count: 0 });
+      session.setSnapshot(snapshot({ finishedTerminals: 2 }));
+      expect(session.model({}).closeTerminals).toMatchObject({ offered: true, count: 2 });
+      session.connection(DOWN);
+      expect(session.model({}).closeTerminals.offered).toBe(false);
+    } finally {
+      timers.restore();
+    }
   });
 
   it("arms and cancels without sending anything, and disarms when the count drops to zero", () => {
@@ -915,16 +1267,16 @@ describe("close finished terminals (issue #139)", () => {
     session.armCloseTerminals();
     session.setSnapshot(snapshot({ finishedTerminals: 0 }));
     expect(session.model({}).closeTerminals.state).toBe("idle");
-    expect(r.closes).toHaveLength(0);
+    expect(r.requests).toHaveLength(0);
   });
 
-  it("holds 'requesting' while the POST is out, then returns to idle for the snapshot to hide it", async () => {
+  it("holds 'requesting' while the request is out, then returns to idle for the snapshot to hide it", async () => {
     const { r, session } = sessionWith(2);
     session.armCloseTerminals();
     const settled = session.confirmCloseTerminals();
     expect(session.model({}).closeTerminals.state).toBe("requesting");
-    expect(r.closes).toHaveLength(1);
-    r.closes[0]!.resolve({ closed: 2 });
+    expect(r.kinds()).toEqual(["terminals.closeFinished"]);
+    r.last("terminals.closeFinished").deferred.resolve({ closed: 2 });
     await settled;
     expect(session.model({}).closeTerminals).toMatchObject({ state: "idle", failure: null });
   });
@@ -933,7 +1285,7 @@ describe("close finished terminals (issue #139)", () => {
     const { r, session } = sessionWith(2);
     session.armCloseTerminals();
     const settled = session.confirmCloseTerminals();
-    r.closes[0]!.reject(new Error("pool is not terminal-backed"));
+    r.last("terminals.closeFinished").deferred.reject(refused("pool is not terminal-backed"));
     await settled;
     const model = session.model({});
     expect(model.closeTerminals).toMatchObject({
@@ -941,5 +1293,151 @@ describe("close finished terminals (issue #139)", () => {
       failure: "pool is not terminal-backed",
     });
     expect(model.error).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Console composed (console.ts): the boot from the embedded snapshot
+// ---------------------------------------------------------------------------
+
+/** A socket whose server side the test plays, as in socket.test.ts. */
+class FakeSocket implements SocketLike {
+  readyState = 0;
+  readonly sent: { type: string; kind?: string }[] = [];
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close(): void {
+    this.readyState = 3;
+  }
+
+  push(message: ServerMessage): void {
+    this.onmessage?.({ data: encodeMessage(message) });
+  }
+
+  greet(epoch: string, rev: number, snap: EnrichedSnapshot | null): void {
+    this.readyState = 1;
+    this.onopen?.({});
+    this.push({ type: "hello", protocol: PROTOCOL_VERSION, epoch, heartbeatMs: 20_000 });
+    this.push({ type: "snapshot", rev, logTotal: snap?.state.log.length ?? 0, snapshot: snap });
+  }
+}
+
+/** The ticket cards a model draws, by card id. */
+function ticketCards(model: ReturnType<ConsoleSession["model"]>): string[] {
+  return model.cards.filter((c) => c.kind === "ticket").map((c) => c.id);
+}
+
+/** The Console over a fake socket, its renders counted and its models kept
+ *  instead of drawn (no DOM here). */
+function mount(boot: Parameters<typeof createConsole>[0]["boot"]) {
+  const sockets: FakeSocket[] = [];
+  const models: ReturnType<ConsoleSession["model"]>[] = [];
+  const app = createConsole({
+    root: {} as HTMLElement,
+    openSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    boot,
+    render: (a) => {
+      models.push(a.session.model(a.view.conversationEndState()));
+    },
+    frame: () => {},
+    pressTarget: null,
+  });
+  return { app, sockets, models };
+}
+
+describe("boot from the embedded snapshot (issue #161)", () => {
+  const embedded = snapshot({ state: { tickets: [ticket("A"), ticket("B")] } });
+
+  it("renders the embedded snapshot before the socket is even opened", () => {
+    let socketsAtRender = -1;
+    const sockets: FakeSocket[] = [];
+    const app = createConsole({
+      root: {} as HTMLElement,
+      openSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      boot: { protocol: PROTOCOL_VERSION, epoch: "e1", rev: 7, logTotal: 0, snapshot: embedded },
+      render: (a) => {
+        socketsAtRender = sockets.length;
+        expect(ticketCards(a.session.model({}))).toEqual(["ticket:A", "ticket:B"]);
+      },
+      frame: () => {},
+      pressTarget: null,
+    });
+    app.start();
+    expect(socketsAtRender).toBe(0);
+    expect(sockets).toHaveLength(1);
+    app.dispose();
+  });
+
+  it("does not render again for a socket snapshot of the same epoch and revision", () => {
+    const { app, sockets, models } = mount({
+      protocol: PROTOCOL_VERSION,
+      epoch: "e1",
+      rev: 7,
+      logTotal: 0,
+      snapshot: embedded,
+    });
+    app.start();
+    expect(models).toHaveLength(1);
+    sockets[0]!.greet("e1", 7, JSON.parse(JSON.stringify(embedded)) as EnrichedSnapshot);
+    app.renders.flush();
+    expect(models).toHaveLength(1);
+    // Another revision is news, and renders.
+    sockets[0]!.push({
+      type: "delta",
+      delta: diffSnapshot(
+        toPushed(embedded, 7),
+        toPushed(snapshot({ state: { tickets: [ticket("A"), ticket("B", { status: "done" })] } }), 8),
+      )!,
+    });
+    app.renders.flush();
+    expect(models).toHaveLength(2);
+    app.dispose();
+  });
+
+  it("asks the server to start a pool it has not started", () => {
+    const { app, sockets, models } = mount({
+      protocol: PROTOCOL_VERSION,
+      epoch: "e1",
+      rev: 0,
+      logTotal: 0,
+      snapshot: null,
+    });
+    app.start();
+    expect(models).toHaveLength(0);
+    sockets[0]!.greet("e1", 0, null);
+    expect(sockets[0]!.sent.filter((m) => m.type === "request").map((m) => m.kind)).toEqual([
+      "start",
+    ]);
+    sockets[0]!.greet("e1", 1, embedded);
+    app.renders.flush();
+    expect(ticketCards(models.at(-1)!)).toEqual(["ticket:A", "ticket:B"]);
+    app.dispose();
+  });
+
+  it("shows connecting with no embedded snapshot until the socket's first", () => {
+    const { app, sockets, models } = mount(null);
+    app.start();
+    app.renders.request();
+    app.renders.flush();
+    expect(models.at(-1)!.phaseLabel).toBe("connecting");
+    sockets[0]!.greet("e1", 1, embedded);
+    app.renders.flush();
+    expect(ticketCards(models.at(-1)!)).toEqual(["ticket:A", "ticket:B"]);
+    app.dispose();
   });
 });

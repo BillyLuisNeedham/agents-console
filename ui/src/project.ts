@@ -4,7 +4,7 @@
  * renders. No network calls, no DOM: fixtures in, view model out.
  */
 
-import { marked } from "marked";
+import { Marked } from "marked";
 import type { Point, TopologyEdge } from "./geometry";
 import type {
   AssignmentSources,
@@ -244,10 +244,26 @@ interface TimelineEventView {
   steward: string | null;
 }
 
+// The formatters the timeline and the delivery warning print times with,
+// made once (issue #161): `toLocaleTimeString` builds a formatter on every
+// call, tens of microseconds each, which made a long timeline's projection
+// cost a frame. These print exactly what it printed.
+const EVENT_TIME = new Intl.DateTimeFormat([], {
+  hour: "numeric",
+  minute: "numeric",
+  second: "numeric",
+  hour12: false,
+});
+const CLOCK_TIME = new Intl.DateTimeFormat([], {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 function formatEventTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour12: false });
+  return EVENT_TIME.format(date);
 }
 
 /** The graded event's payload as a grade, or null when a field is missing or
@@ -477,7 +493,17 @@ export function resolverFiles(timeline: TimelineView | null, attempt: number): s
 
 interface TimelineAttemptView {
   number: number;
-  events: TimelineEventView[];
+  /**
+   * The attempt's events as timeline rows, decoded the first time they are
+   * read (issue #161): a closed attempt's are never needed, and a busy
+   * ticket's run to thousands. `timelineEvent` decodes one alone.
+   */
+  readonly events: TimelineEventView[];
+  /** How many events the attempt holds, known without decoding them. */
+  count: number;
+  /** What a closed attempt's line says it came to: its last grade, else
+   *  its last event's kind; null with no events. */
+  outcome: string | null;
   reconstructed: boolean;
   running: boolean;
   logFile: string | null;
@@ -504,37 +530,114 @@ export interface TimelineView {
 export function projectTimeline(
   response: TicketEventsResponse,
   status: TicketStatus,
+  previous: { response: TicketEventsResponse; view: TimelineView } | null = null,
 ): TimelineView {
   if (response.events.length > 0) {
-    const byAttempt = new Map<number, TimelineEventView[]>();
+    // The events file only grows, so a new response usually continues the
+    // last one (issue #161): an attempt with nothing new is the same object
+    // it was, so the Detail keeps its rows, and one that grew carries over
+    // the rows already decoded and decodes only what is new, when read.
+    const carried = previous && continues(previous.response.events, response.events) ? previous : null;
+    const before = new Map(carried?.view.attempts.map((a) => [a.number, a]) ?? []);
+    const byAttempt = new Map<number, TicketEvent[]>();
     for (const event of response.events) {
-      const list = byAttempt.get(event.attempt) ?? [];
-      list.push(decodeTimelineEvent(event));
-      byAttempt.set(event.attempt, list);
+      const list = byAttempt.get(event.attempt);
+      if (list) list.push(event);
+      else byAttempt.set(event.attempt, [event]);
     }
     const numbers = [...byAttempt.keys()].sort((a, b) => a - b);
     const running = runningAttempt(numbers, byAttempt, status);
-    return {
-      attempts: numbers.map((number) => ({
-        number,
-        events: byAttempt.get(number)!,
-        reconstructed: false,
-        running: number === running,
-        logFile: null,
-        streamFile: null,
-      })),
-      reconstructed: false,
-    };
+    let same = carried !== null && numbers.length === carried.view.attempts.length;
+    const attempts = numbers.map((number) => {
+      const raw = byAttempt.get(number)!;
+      const held = before.get(number);
+      if (held && held.count === raw.length && held.running === (number === running)) return held;
+      same = false;
+      return attemptView(number, raw, number === running, held);
+    });
+    return same && carried ? carried.view : { attempts, reconstructed: false };
   }
-  const attempts = response.attempts.map((row, index) => ({
-    number: row.attempt,
-    events: [] as TimelineEventView[],
-    reconstructed: true,
-    running: status === "in-progress" && index === response.attempts.length - 1,
-    logFile: row.logFile,
-    streamFile: null,
-  }));
+  const attempts = response.attempts.map(
+    (row, index): TimelineAttemptView => ({
+      number: row.attempt,
+      events: [],
+      count: 0,
+      outcome: null,
+      reconstructed: true,
+      running: status === "in-progress" && index === response.attempts.length - 1,
+      logFile: row.logFile,
+      streamFile: null,
+    }),
+  );
   return { attempts, reconstructed: response.reconstructed };
+}
+
+// Each attempt view's raw events and the rows decoded from them so far.
+const attemptEvents = new WeakMap<
+  TimelineAttemptView,
+  { raw: TicketEvent[]; rows: (TimelineEventView | undefined)[] }
+>();
+
+/**
+ * One attempt's row in the timeline, its events decoded only as they are
+ * read. An attempt carried over from the last response (`held`) hands on
+ * the rows it already decoded, which are those of the same events.
+ */
+function attemptView(
+  number: number,
+  raw: TicketEvent[],
+  running: boolean,
+  held: TimelineAttemptView | undefined,
+): TimelineAttemptView {
+  let outcome: string | null = null;
+  for (let i = raw.length - 1; i >= 0 && outcome === null; i--) {
+    if (raw[i]!.kind !== "graded") continue;
+    const grade = gradeFromPayload(raw[i]!.payload);
+    if (grade) outcome = `${grade.score}/10 ${grade.verdict}`;
+  }
+  outcome ??= raw[raw.length - 1]?.kind ?? null;
+  let events: TimelineEventView[] | null = null;
+  const view: TimelineAttemptView = {
+    number,
+    get events(): TimelineEventView[] {
+      events ??= raw.map((_, i) => timelineEvent(view, i));
+      return events;
+    },
+    count: raw.length,
+    outcome,
+    reconstructed: false,
+    running,
+    logFile: null,
+    streamFile: null,
+  };
+  const rows = held ? (attemptEvents.get(held)?.rows.slice(0, raw.length) ?? []) : [];
+  attemptEvents.set(view, { raw, rows });
+  return view;
+}
+
+/** One of an attempt's events as its timeline row, decoded once. */
+export function timelineEvent(attempt: TimelineAttemptView, index: number): TimelineEventView {
+  const held = attemptEvents.get(attempt);
+  if (!held) return attempt.events[index]!;
+  return (held.rows[index] ??= decodeTimelineEvent(held.raw[index]!));
+}
+
+// Whether `next` is `prev` with events appended: the same first and last
+// event where `prev` ends. Two lines checked, not every one: the file is
+// append-only, and a false "continues" would only reuse rows already drawn.
+function continues(prev: TicketEvent[], next: TicketEvent[]): boolean {
+  if (prev.length === 0 || prev.length > next.length) return false;
+  const last = prev.length - 1;
+  return sameEvent(prev[0]!, next[0]!) && sameEvent(prev[last]!, next[last]!);
+}
+
+function sameEvent(a: TicketEvent, b: TicketEvent): boolean {
+  return (
+    a.at === b.at &&
+    a.attempt === b.attempt &&
+    a.kind === b.kind &&
+    JSON.stringify(a.payload) === JSON.stringify(b.payload)
+  );
 }
 
 /**
@@ -555,13 +658,25 @@ export function joinStreamFiles(
   const streamByAttempt = new Map(
     listing.map((row) => [row.attempt, row.streamFile] as const),
   );
-  return {
-    ...timeline,
-    attempts: timeline.attempts.map((row) => ({
-      ...row,
-      streamFile: streamByAttempt.get(row.number) ?? null,
-    })),
-  };
+  // A row whose Stream file is already right is the same row, so the
+  // Detail can keep what it drew for it (issue #161).
+  let joined = false;
+  const attempts = timeline.attempts.map((row) => {
+    const streamFile = streamByAttempt.get(row.number) ?? null;
+    if (row.streamFile === streamFile) return row;
+    joined = true;
+    // A copy that still decodes its events only when read, from the same
+    // rows the original decodes into.
+    const copy = Object.defineProperties(
+      {},
+      Object.getOwnPropertyDescriptors(row),
+    ) as TimelineAttemptView;
+    copy.streamFile = streamFile;
+    const events = attemptEvents.get(row);
+    if (events) attemptEvents.set(copy, events);
+    return copy;
+  });
+  return joined ? { ...timeline, attempts } : timeline;
 }
 
 // An attempt is live only while its last recorded event has not yet ended
@@ -572,7 +687,7 @@ const LIVE_LAST_KINDS = new Set(["scheduled", "spawned", "resolver"]);
 
 function runningAttempt(
   numbers: number[],
-  byAttempt: Map<number, TimelineEventView[]>,
+  byAttempt: Map<number, { kind: string }[]>,
   status: TicketStatus,
 ): number | null {
   if (status !== "in-progress") return null;
@@ -994,9 +1109,12 @@ export interface TerminalSurfaceView {
   text: string;
   /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
   justFocused: boolean;
-  /** True while an "Open in herdr" is out (issue #157): the button reads
-   *  as opening until the server answers. */
+  /** True while an "Open in herdr" is out: the button stands disabled, so
+   *  a double click never sends twice. */
   focusing?: boolean;
+  /** A refused "Open in herdr"'s reason (issue #161), shown beside the
+   *  button until the next press. */
+  focusFailure?: string | null;
 }
 
 export interface UtilityCardView {
@@ -2007,7 +2125,7 @@ function projectDelivery(delivery: NoticeDelivery | undefined): DeliveryWarningV
   const at = new Date(delivery.failingSince);
   const since = Number.isNaN(at.getTime())
     ? ""
-    : ` since ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+    : ` since ${CLOCK_TIME.format(at)}`;
   return {
     text: `Notices not reaching this pane${since}: something in the pane is in the way`,
     lastError: delivery.lastError,
@@ -2806,16 +2924,21 @@ export function projectDetailTabs(
 }
 
 /**
- * The Spec tab's body: the ticket's markdown rendered to HTML. The DOM layer
- * assigns it as innerHTML; the ticket files are the pool's own prose, served
- * same-origin, so no sanitiser sits between. Parsed once per body (issue
- * #157): the Spec tab renders on every render while it is open, and a body
- * only changes when its file does, so the last few bodies' HTML is kept.
+ * The Spec tab's body: the ticket's markdown rendered to HTML, which the DOM
+ * layer assigns as innerHTML. Agents write ticket bodies (a spawn proposal
+ * lands as one), so a body is untrusted input: an injected agent's markup
+ * must never run in the Console, which holds the controls for the whole
+ * pool. Raw HTML in the markdown, block or inline, renders as the text it
+ * is, and a link or image keeps its URL only when it is http, https, mailto
+ * or relative; any other (javascript:, data:, vbscript:) leaves the link's
+ * text and the image's alt text alone. Parsed once per body (issue #157):
+ * the Spec tab renders on every render while it is open, and a body only
+ * changes when its file does, so the last few bodies' HTML is kept.
  */
 export function ticketBodyHtml(body: string): string {
   const held = ticketBodyHtmlCache.get(body);
   if (held !== undefined) return held;
-  const html = marked(body, { async: false });
+  const html = ticketMarkdown.parse(body, { async: false });
   if (ticketBodyHtmlCache.size >= TICKET_BODY_HTML_KEPT) {
     const oldest = ticketBodyHtmlCache.keys().next().value;
     if (oldest !== undefined) ticketBodyHtmlCache.delete(oldest);
@@ -2826,6 +2949,52 @@ export function ticketBodyHtml(body: string): string {
 
 const TICKET_BODY_HTML_KEPT = 32;
 const ticketBodyHtmlCache = new Map<string, string>();
+
+/** Text made safe to sit in HTML, as an element's text or an attribute's value. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Whether a link's or image's URL may stand: http, https, mailto, or one
+ * with no scheme at all (relative, or a fragment). The scheme is read the
+ * way a browser reads it: past leading spaces and control characters, with
+ * tabs and newlines anywhere ignored, and in any case. The URL is written
+ * into the attribute escaped, so an entity in it stays literal text and
+ * cannot spell a scheme this check did not see.
+ */
+export function safeMarkdownUrl(url: string): boolean {
+  const seen = url.replace(/[\t\n\r]/g, "").replace(/^[\u0000- ]+/, "");
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(seen)?.[1]?.toLowerCase();
+  return scheme === undefined || scheme === "http" || scheme === "https" || scheme === "mailto";
+}
+
+/** The markdown renderer for ticket bodies: marked, with raw HTML shown as
+ *  text and only safe URLs kept (see `ticketBodyHtml`). */
+const ticketMarkdown = new Marked({
+  async: false,
+  renderer: {
+    html({ text }) {
+      return escapeHtml(text);
+    },
+    link({ href, title, tokens }) {
+      const text = this.parser.parseInline(tokens);
+      if (!safeMarkdownUrl(href)) return text;
+      const titled = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<a href="${escapeHtml(href)}"${titled}>${text}</a>`;
+    },
+    image({ href, title, text }) {
+      if (!safeMarkdownUrl(href)) return escapeHtml(text);
+      const titled = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titled}>`;
+    },
+  },
+});
 
 /**
  * The next Detail selection after a card press-release. Clicking the selected

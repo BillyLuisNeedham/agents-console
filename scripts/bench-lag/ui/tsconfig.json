@@ -15,9 +15,13 @@
     "types": ["bun"],
     "paths": {
       "@console/*": ["../../../ui/src/*"],
-      "@bench/frame": ["../../../ui/src/frame.ts"],
-      "@bench/poll": ["../../../ui/src/poll.ts"]
+      "@engine/*": ["../../../engine/*"],
+      "@bench/page": ["./bench.ts"],
+      "@bench/frame": ["../../../ui/src/frame.ts"]
     }
   },
-  "include": ["./bench.ts", "./probe.ts", "./unbatched.ts", "./env.d.ts"]
+  // bench-sse.ts is typed against the seams of the checkouts from before
+  // issue #161, which this tree's ui/src no longer has; it is only ever
+  // built against such a checkout.
+  "include": ["./bench.ts", "./page.ts", "./fixture.ts", "./probe.ts", "./unbatched.ts", "./env.d.ts"]
 }
