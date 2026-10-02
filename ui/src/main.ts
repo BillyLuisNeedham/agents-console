@@ -55,6 +55,15 @@ setFavicon(POOL_TAB_COLORS.idle);
 // watches the pool's status.
 const renders = new RenderLoop(() => render());
 
+// A render the operator's own press asked for is not left for the frame: it
+// runs as the press bubbles out of the page, after the handlers that asked
+// for it, so a clicked card's Detail is built before the next frame instead
+// of inside it. (A timer would lose: the browser runs the frame after an
+// input ahead of it.) Background asks still wait for the frame.
+for (const type of ["pointerup", "click", "keydown"] as const) {
+  window.addEventListener(type, () => renders.flush());
+}
+
 function requestRender(): void {
   updateTab();
   renders.request();
