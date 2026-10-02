@@ -164,9 +164,12 @@ export interface ReassignViewsInput {
 }
 
 /**
- * The tickets the engine's next reload will NOT re-resolve, seeded with what
- * it holds for them now, exactly as reloadConfigAtBoundary seeds its own dry
- * run. In-flight is the server's view of the engine's adopted set; an
+ * What the engine's next reload will NOT re-resolve, seeded with what it
+ * holds for them now, exactly as reloadConfigAtBoundary seeds its own dry
+ * run: every Conversation's Assignment, which a ticket it spawned inherits
+ * (issue #156), and the frozen tickets. The snapshot's assignments carry the
+ * Conversations under their own ids, so every id there that is not a ticket
+ * is one. In-flight is the server's view of the engine's adopted set; an
  * enlisted ticket is frozen for as long as the engine holds the pane it came
  * from, which the server cannot see the end of, so it is treated as frozen
  * throughout.
@@ -178,22 +181,30 @@ function frozenSeed(
   options: { enlisted: boolean },
 ): Map<string, Assignment> {
   const seed = new Map<string, Assignment>();
+  const ticketIds = new Set(markers.map((m) => m.id));
+  for (const [id, view] of Object.entries(engineAssignments)) {
+    if (!ticketIds.has(id)) seed.set(id, assignmentOf(view));
+  }
   for (const marker of markers) {
     const frozen = liveAttempts.has(marker.id) ||
       (options.enlisted && marker.enlistedFrom !== undefined);
     if (!frozen) continue;
     const view = engineAssignments[marker.id];
     if (!view) continue;
-    // The wire renders an unassigned field as null; the resolver's own
-    // record spells it as the empty string.
-    seed.set(marker.id, {
-      harness: view.harness ?? "",
-      model: view.model ?? "",
-      ...(view.effort ? { effort: view.effort } : {}),
-      drivers: view.drivers,
-    });
+    seed.set(marker.id, assignmentOf(view));
   }
   return seed;
+}
+
+// The wire renders an unassigned field as null; the resolver's own record
+// spells it as the empty string.
+function assignmentOf(view: AssignmentView): Assignment {
+  return {
+    harness: view.harness ?? "",
+    model: view.model ?? "",
+    ...(view.effort ? { effort: view.effort } : {}),
+    drivers: view.drivers,
+  };
 }
 
 /**
@@ -202,37 +213,43 @@ function frozenSeed(
  * the next boundary. Pure, so the eligibility rules table-test without a
  * server.
  *
- * A config that will not parse or will not resolve makes every ticket
- * ineligible with that error as the reason. The engine rejects a Config
- * reload whole for the same failures (ADR-0018), so the pool is already
- * running on the last good config; offering a Reassign on top of a file in
- * that state would write into something the engine is refusing.
+ * A config that will not parse makes every ticket ineligible with that error
+ * as the reason: there is no file to write into. A ticket the file does not
+ * resolve (an unknown harness, a parent with no Assignment) is ineligible on
+ * its own, with its own reason, and every other ticket stays offered (issue
+ * #159). The engine still rejects the whole reload while any ticket fails
+ * (ADR-0018), so the failing ticket's reason says that too: it is the one
+ * thing standing between the others' writes and the run.
  */
 export function reassignViews(
   input: ReassignViewsInput,
 ): Map<string, TicketReassignEntry> {
   const { markers, config, liveAttempts, statuses } = input;
   let resolved: ReturnType<typeof resolvePoolAssignments> | null = null;
-  let failure = input.configError;
+  const failure = input.configError;
   if (config && failure === null) {
-    try {
-      resolved = resolvePoolAssignments(
-        markers,
-        config,
-        input.harnesses,
-        frozenSeed(markers, liveAttempts, input.engineAssignments, { enlisted: true }),
-      );
-    } catch (err) {
-      failure = err instanceof Error ? err.message : String(err);
-    }
+    resolved = resolvePoolAssignments(
+      markers,
+      config,
+      input.harnesses,
+      frozenSeed(markers, liveAttempts, input.engineAssignments, { enlisted: true }),
+    );
   }
 
   const views = new Map<string, TicketReassignEntry>();
   for (const marker of markers) {
     const sources = resolved?.sources.get(marker.id) ?? NO_SOURCES;
+    const own = resolved?.failures.get(marker.id);
     const judgement = failure
       ? { eligible: false, reason: `the pool config does not resolve: ${failure}` }
-      : eligibilityOf(marker, liveAttempts, statuses[marker.id] ?? "ready");
+      : own
+        ? {
+            eligible: false,
+            reason:
+              `the pool config does not resolve: ${own} ` +
+              "(the engine keeps the whole pool on its last good config until this resolves)",
+          }
+        : eligibilityOf(marker, liveAttempts, statuses[marker.id] ?? "ready");
     // An enlisted ticket's verify is stripped by the engine (issue #101), so
     // whatever the file says it is not this ticket's verify count and the
     // Detail must not offer it as one.
@@ -376,7 +393,7 @@ export function writeReassign(
   if (applied.length === 0) return { applied, skipped };
 
   const next = mergedConfig(config, applied, fields);
-  dryRun(next, applied, context);
+  dryRun(config, next, applied, context);
   writeConfigAtomically(poolDir, next);
   return { applied, skipped };
 }
@@ -495,23 +512,43 @@ function mergedConfig(
 
 // The proposed file, resolved before it is written: the engine rejects a
 // Config reload whole when any ticket fails to resolve (ADR-0018), so a
-// write that would not resolve does not fail this one ticket, it stops every
-// ticket in the pool from being reassigned until someone hand-edits the file.
-// Cheaper to refuse it here, naming the ticket.
-function dryRun(config: PoolConfig, ids: string[], context: ReassignContext): void {
-  // Seeded with the in-flight records the engine will hold onto, so a child
-  // of a frozen parent is checked against what it will actually inherit. The
-  // enlisted are deliberately left out of this seed: a named enlisted ticket
-  // is exactly the one whose new harness has to be checked against how the
-  // engine will resolve it once it lets the ticket go.
-  const resolved = resolvePoolAssignments(
-    context.markers,
-    config,
-    context.harnesses,
-    frozenSeed(context.markers, context.liveAttempts, context.engineAssignments, {
-      enlisted: false,
-    }),
-  );
+// write that would not resolve does not fail this one ticket, it holds every
+// ticket in the pool on the last good config until someone hand-edits the
+// file. Cheaper to refuse it here, naming the ticket.
+//
+// Only a failure the write itself brings is refused. A ticket the file on
+// disk already fails to resolve is that ticket's own trouble, shown as its
+// own reason (issue #159), and holding every other write hostage to it is
+// the pool-wide refusal this replaced.
+function dryRun(
+  current: PoolConfig,
+  config: PoolConfig,
+  ids: string[],
+  context: ReassignContext,
+): void {
+  // Seeded with the Conversations and the in-flight records the engine will
+  // hold onto, so a child of either is checked against what it will
+  // actually inherit. The enlisted are deliberately left out of this seed: a
+  // named enlisted ticket is exactly the one whose new harness has to be
+  // checked against how the engine will resolve it once it lets the ticket
+  // go.
+  const resolve = (file: PoolConfig) =>
+    resolvePoolAssignments(
+      context.markers,
+      file,
+      context.harnesses,
+      frozenSeed(context.markers, context.liveAttempts, context.engineAssignments, {
+        enlisted: false,
+      }),
+    );
+  const resolved = resolve(config);
+  if (resolved.failures.size > 0) {
+    const before = resolve(current).failures;
+    for (const [id, reason] of resolved.failures) {
+      if (before.has(id)) continue;
+      throw new ReassignRefusal(`reassign: ticket '${id}' would not resolve: ${reason}`);
+    }
+  }
   const enlisted = new Set(
     context.markers.filter((m) => m.enlistedFrom !== undefined).map((m) => m.id),
   );
