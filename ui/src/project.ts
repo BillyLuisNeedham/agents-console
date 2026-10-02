@@ -994,6 +994,9 @@ export interface TerminalSurfaceView {
   text: string;
   /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
   justFocused: boolean;
+  /** True while an "Open in herdr" is out (issue #157): the button reads
+   *  as opening until the server answers. */
+  focusing?: boolean;
 }
 
 export interface UtilityCardView {

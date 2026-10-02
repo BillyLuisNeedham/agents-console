@@ -196,6 +196,85 @@ describe("Vitals store", () => {
     expect(h.store.state()["01"]?.activity.running).toBe(true);
   });
 
+  it("a burst of snapshots never stacks fetches: one out, one more after it (#157)", async () => {
+    const gate: { release: (() => void) | null } = { release: null };
+    const fetched: string[] = [];
+    const store = new Vitals({
+      fetch: (ticketId) => {
+        fetched.push(ticketId);
+        return fetched.length === 1
+          ? new Promise<TicketActivityResponse>((resolve) => {
+              gate.release = () => resolve(response(false));
+            })
+          : Promise.resolve(response(false));
+      },
+      onChange: () => {},
+      pollMs: 1_000,
+    });
+    for (let i = 0; i < 5; i++) store.update(snap({ "01": "checkpoint" }));
+    expect(fetched).toEqual(["01"]);
+    gate.release?.();
+    // The owed refetch waits out half the interval from the first fetch's start.
+    await Bun.sleep(600);
+    store.dispose();
+    expect(fetched).toEqual(["01", "01"]);
+  });
+
+  it("repaints on an answer only when it moved what the card shows (#157)", async () => {
+    // One payload, byte for byte, every time.
+    const fixed: TicketActivityResponse = {
+      ticketId: "x",
+      running: false,
+      diff: null,
+      log: { size: 8, mtime: "2026-09-01T10:00:00.000Z" },
+      lastEventAt: "2026-09-01T10:00:00.000Z",
+    };
+    let changes = 0;
+    const fetched: string[] = [];
+    const store = new Vitals({
+      fetch: (ticketId) => {
+        fetched.push(ticketId);
+        return Promise.resolve(fixed);
+      },
+      onChange: () => {
+        changes += 1;
+      },
+      pollMs: 20,
+    });
+    // No staleness tick in this test: only the snapshot refetches run.
+    store.dispose();
+    store.update(snap({ "01": "checkpoint" }));
+    await Bun.sleep(1);
+    expect(changes).toBe(1);
+    // Past the throttle's gap, the next snapshot refetches; the same answer
+    // again moves nothing on the card.
+    await Bun.sleep(15);
+    store.update(snap({ "01": "checkpoint" }));
+    await Bun.sleep(1);
+    expect(fetched).toEqual(["01", "01"]);
+    expect(changes).toBe(1);
+  });
+
+  it("the staleness tick repaints only when the copy it would show moves (#157)", async () => {
+    let changes = 0;
+    const store = new Vitals({
+      fetch: () => Promise.resolve(response(false)),
+      onChange: () => {
+        changes += 1;
+      },
+      pollMs: POLL_MS,
+    });
+    store.update(snap({ "01": "checkpoint" }));
+    await Bun.sleep(1);
+    const afterAnswer = changes;
+    // Ten ticks inside one wall-clock second: the "Ns ago" copy moves at most
+    // once, so at most two of them repaint (the first, and one crossing).
+    await ticks(10);
+    store.dispose();
+    expect(changes - afterAnswer).toBeGreaterThanOrEqual(1);
+    expect(changes - afterAnswer).toBeLessThanOrEqual(2);
+  });
+
   it("prunes payloads and samples when a ticket leaves the pool", async () => {
     const h = makeStore(
       { "01": "in-progress", "02": "checkpoint" },

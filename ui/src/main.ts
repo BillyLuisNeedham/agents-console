@@ -9,6 +9,7 @@ import "./styles.css";
 import { PoolClient } from "./client";
 import { POOL_TAB_COLORS, poolTabTitle, type EnrichedSnapshot } from "./project";
 import { RenderLoop } from "./frame";
+import { BACKGROUND_REQUESTS, RequestLimiter } from "./poll";
 import { ConsoleSession } from "./session";
 import { TerminalSurface } from "./terminal";
 import { ConsoleView } from "./view";
@@ -63,8 +64,14 @@ function requestRender(): void {
 // holds the payloads and sparkline samples the cards' footers project from.
 // Its onChange fires on poll responses and on the 2s wall-clock tick that
 // keeps staleness copy honest while the snapshot stream is silent.
+// The background polls (Vitals, peeks, grades) share a small cap on requests
+// out at once (issue #157): the browser gives the pool server six
+// connections and the snapshot stream keeps one, so an uncapped round of
+// polls could leave a click's request queued behind them.
+const background = new RequestLimiter(BACKGROUND_REQUESTS);
+
 const vitals = new Vitals({
-  fetch: (ticketId) => client.getActivity(ticketId),
+  fetch: (ticketId) => background.run(() => client.getActivity(ticketId)),
   onChange: requestRender,
 });
 
@@ -72,7 +79,7 @@ const vitals = new Vitals({
 // running attempt and holds the peek text and focus confirmations the cards'
 // surfaces project from.
 const terminal = new TerminalSurface({
-  peek: (ticketId) => client.peekTerminal(ticketId),
+  peek: (ticketId) => background.run(() => client.peekTerminal(ticketId)),
   focus: (ticketId) => client.focusTerminal(ticketId),
   onChange: requestRender,
 });
@@ -85,7 +92,7 @@ const session = new ConsoleSession({
   getState: () => client.getState(),
   getEvents: (id) => client.getEvents(id),
   getTicket: (id) => client.getTicket(id),
-  getGrades: () => client.getGrades(),
+  getGrades: () => background.run(() => client.getGrades()),
   getLog: (ticketId, attempt, offset, end, stream) =>
     client.getLog(ticketId, attempt, offset, end, stream),
   answer: (ticketId, action, note) => client.answer(ticketId, action, note),
