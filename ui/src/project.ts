@@ -994,9 +994,12 @@ export interface TerminalSurfaceView {
   text: string;
   /** True briefly after "Open in herdr" succeeded: the card's confirmation. */
   justFocused: boolean;
-  /** True while an "Open in herdr" is out (issue #157): the button reads
-   *  as opening until the server answers. */
+  /** True while an "Open in herdr" is out: the button stands disabled, so
+   *  a double click never sends twice. */
   focusing?: boolean;
+  /** A refused "Open in herdr"'s reason (issue #161), shown beside the
+   *  button until the next press. */
+  focusFailure?: string | null;
 }
 
 export interface UtilityCardView {

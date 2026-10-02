@@ -433,6 +433,9 @@ export class Canvas {
   private readonly expandedBadges = new Set<string>();
   private readonly onChange: () => void;
   private readonly onCardTap: (nodeId: string) => void;
+  private readonly onCardHover: (nodeId: string | null) => void;
+  /** The card the pointer is over, so a move inside it reports nothing. */
+  private hoveredCard: string | null = null;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
   private readonly onStartSteward: () => void;
@@ -453,6 +456,9 @@ export class Canvas {
     /** Canvas-held view state changed (a badge toggled): render again. */
     onChange: () => void;
     onCardTap: (nodeId: string) => void;
+    /** The pointer moved onto a card, or off every card (null), for the
+     *  hover prefetch (issue #161). */
+    onCardHover?: (nodeId: string | null) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
     onNewConversation: () => void;
@@ -489,6 +495,7 @@ export class Canvas {
   }) {
     this.onChange = options.onChange;
     this.onCardTap = options.onCardTap;
+    this.onCardHover = options.onCardHover ?? (() => {});
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
     this.onStartSteward = options.onStartSteward;
@@ -571,6 +578,8 @@ export class Canvas {
         onpointermove: (event: PointerEvent) => this.pointerMove(event),
         onpointerup: (event: PointerEvent) => this.endDrag(event),
         onpointercancel: (event: PointerEvent) => this.endDrag(event),
+        onpointerover: (event: PointerEvent) => this.hoverCard(event.target),
+        onpointerout: (event: PointerEvent) => this.hoverCard(event.relatedTarget),
         onwheel: (event: WheelEvent) => this.wheel(event),
       },
       world,
@@ -1233,6 +1242,17 @@ export class Canvas {
   // A press on a card starts a node drag, a press on blank space a pan;
   // either captures the pointer on the viewport, which keeps its node across
   // the renders that land while the pointer is down.
+  // The card under the pointer, as the pointer crosses into an element (or
+  // out of one, to wherever it went): reported only when it changes, so a
+  // move inside one card says nothing.
+  private hoverCard(target: EventTarget | null): void {
+    const card = target instanceof Element ? target.closest(".node-card") : null;
+    const id = card instanceof HTMLElement ? (card.dataset.nodeId ?? null) : null;
+    if (id === this.hoveredCard) return;
+    this.hoveredCard = id;
+    this.onCardHover(id);
+  }
+
   private pointerDown(event: PointerEvent): void {
     if (this.drag) return;
     const target = event.target instanceof Element ? event.target : null;

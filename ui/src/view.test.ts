@@ -56,7 +56,7 @@ const SNAPSHOT: EnrichedSnapshot = {
 };
 
 /** The composition root over the real session, the bootstrap's wiring minus
- *  the network: every seam that would fetch parks or answers at once. */
+ *  the network: every request parks, and subscriptions go nowhere. */
 function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
   const answers: { ticketId: string; action: ResumeAction; note?: string }[] = [];
   const adopted: string[] = [];
@@ -67,19 +67,14 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
   const root = document.createElement("div");
   document.body.appendChild(root);
   const session = new ConsoleSession({
-    getState: () => Promise.resolve(snapshot),
-    getEvents: () => new Promise(() => {}),
-    getTicket: () => new Promise(() => {}),
-    getGrades: () => Promise.resolve({}),
-    getLog: () => new Promise(() => {}),
-    answer: () => new Promise(() => {}),
-    stop: () => new Promise(() => {}),
-    restart: () => new Promise(() => {}),
-    keepTalking: () => new Promise(() => {}),
-    closeFinishedTerminals: () => new Promise(() => {}),
-    stream: () => () => {},
-    vitals: { update: () => {}, state: () => ({}) },
-    terminal: { update: () => {}, state: () => ({}) },
+    socket: {
+      request: () => new Promise(() => {}),
+      subscribe: () => {},
+      unsubscribe: () => {},
+      follow: () => new Promise(() => {}),
+    },
+    vitals: { update: () => {}, apply: () => {}, state: () => ({}) },
+    terminal: { update: () => {}, apply: () => {}, state: () => ({}) },
     onChange: () => render(),
   });
   const view = new ConsoleView({
@@ -112,6 +107,8 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     onToggleLog: () => session.toggleLog(),
     onToggleInspector: () => session.toggleInspector(),
     onSelectNode: (nodeId) => session.select(nodeId),
+    onHoverNode: () => {},
+    onLoadEarlierPoolLog: () => {},
     onSelectAttempt: () => {},
     onSelectStream: () => {},
     onLoadEarlier: () => {},

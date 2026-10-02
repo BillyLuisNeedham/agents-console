@@ -1,17 +1,30 @@
 /**
  * Console session: the one module that owns the Console's session state.
- * The snapshot, the selection, the ticket-body caches, the grades, the tab
- * override, and the stale-answer guards live here, behind injected fetch
- * seams, the LogPane way: async IO plus change notification belong to the
- * module, not the render pass. `model()` is the single derivation point:
- * one `projectPool` per render, stored so the selection, the timeline
- * coordination, and the Detail all read the same cards. No DOM references;
- * the bootstrap constructs it, drives it, and renders when it changes.
+ * The snapshot, the selection, the subscribed cards' data, the grades, the
+ * tab override, the optimistic overlays and the pool log's earlier lines
+ * live here, fed by the socket (issue #161): the snapshot as the socket
+ * pushes and applies it, the live values and the cards' frames as they
+ * come, and every action and read as a request on the socket seam. Async
+ * IO plus change notification belong to the module, not the render pass.
+ * `model()` is the single derivation point: one `projectPool` per render,
+ * stored so the selection, the timeline and the Detail all read the same
+ * cards. No DOM references; the bootstrap constructs it, drives it, and
+ * renders when it changes.
  */
 
-import { refetchStateOnVisible, type VisibilitySource } from "./client";
-import { StaleGuard } from "./guard";
-import { LogPane, type LogFetch } from "./log-pane";
+import {
+  HOVER_DWELL_MS,
+  HOVER_SUBSCRIPTIONS,
+  type CardSubscription,
+  type LogFollow,
+  type PushedSnapshot,
+  type RequestKind,
+  type RequestPayload,
+  type RequestResult,
+  type SnapshotDelta,
+} from "../../engine/protocol.ts";
+import { LogPane } from "./log-pane";
+import { answered, applyOverlays, type Overlay } from "./optimistic";
 import {
   isTerminalBacked,
   joinStreamFiles,
@@ -30,69 +43,54 @@ import {
   projectNeedsInput,
   projectPool,
   projectTimeline,
-  selectLogAttempt,
-  type CloseFinishedTerminalsResponse,
   type ConversationEndView,
   type DetailTab,
   type EnrichedSnapshot,
-  type KeepTalkingResponse,
   type KeepTalkingState,
   type PoolCardView,
   type PoolTabStatus,
   type PoolView,
-  type RestartResponse,
   type ResumeAction,
   type TabOverride,
+  type TerminalPeekResponse,
   type TerminalSurfaceView,
+  type TicketActivityResponse,
   type TicketBodyResponse,
   type TicketEventsResponse,
   type TicketGradeSummary,
+  type TicketLogResponse,
+  type TicketStatus,
   type TimelineView,
   type VitalsState,
 } from "./project";
+import type { CardMessage, ConnectionChange, LiveMessage } from "./socket";
+import type { PeekFailure } from "../../engine/protocol.ts";
 import type { AppModel, StopState } from "./view";
 
 /** The vitals store, as the session consumes it. */
 export interface SessionVitals {
   update(snapshot: EnrichedSnapshot): void;
+  apply(activity: Record<string, TicketActivityResponse>): void;
   state(): Record<string, VitalsState>;
 }
 
 /** The terminal surface store, as the session consumes it. */
 export interface SessionTerminal {
   update(snapshot: EnrichedSnapshot): void;
+  apply(peeks: Record<string, TerminalPeekResponse | PeekFailure>): void;
   state(): Record<string, TerminalSurfaceView>;
 }
 
+/** The socket, as the session asks things of it. */
+export interface SessionSocket {
+  request<K extends RequestKind>(kind: K, payload: RequestPayload<K>): Promise<RequestResult<K>>;
+  subscribe(card: CardSubscription): void;
+  unsubscribe(id: string): void;
+  follow(id: string, follow: LogFollow): Promise<TicketLogResponse>;
+}
+
 export interface ConsoleSessionOptions {
-  getState: () => Promise<EnrichedSnapshot | null>;
-  /** The selected card's events; the signal aborts it once the selection
-   *  moves on. */
-  getEvents: (id: string, signal?: AbortSignal) => Promise<TicketEventsResponse>;
-  /** The selected ticket's body, aborted the same way. */
-  getTicket: (id: string, signal?: AbortSignal) => Promise<TicketBodyResponse | null>;
-  getGrades: () => Promise<Record<string, TicketGradeSummary>>;
-  /** The log pane's byte-range fetch, handed to the LogPane the session owns. */
-  getLog: LogFetch;
-  /** Answer an interrupt; resolves with the resumed pool's snapshot. */
-  answer: (
-    ticketId: string,
-    action: ResumeAction,
-    note?: string,
-  ) => Promise<EnrichedSnapshot>;
-  /** Stop this pool's server (issue #97). Resolves when the server has
-   *  accepted the stop, rejects with the refusal's reason. */
-  stop: () => Promise<void>;
-  /** Restart this pool's server (ADR-0026). Resolves with the port the
-   *  relaunched server will use; rejects with the refusal's reason. */
-  restart: () => Promise<RestartResponse>;
-  /** Keep talking (issue #139): continue a checkpointed ticket's Attempt in
-   *  its Held pane. Resolves once the engine claims the pane; rejects with
-   *  the refusal's reason. */
-  keepTalking: (ticketId: string) => Promise<KeepTalkingResponse>;
-  /** Close the pool's Finished terminals (issue #139). Resolves with how
-   *  many closed; rejects with the refusal's reason. */
-  closeFinishedTerminals: () => Promise<CloseFinishedTerminalsResponse>;
+  socket: SessionSocket;
   /** Whether a server is answering on a port. Resolving false (or throwing)
    *  means nothing is there yet; the bootstrap owns the fetch, since the
    *  probe crosses an origin and the session holds no DOM or location. */
@@ -105,27 +103,30 @@ export interface ConsoleSessionOptions {
   /** How long the poll keeps trying before it gives up and lets the
    *  ordinary stopped notice print the relaunch command. */
   restartWaitMs?: number;
-  /** Open the snapshot stream; returns a function that closes it. */
-  stream: (handlers: {
-    onSnapshot: (snapshot: EnrichedSnapshot) => void;
-    onError: (message: string) => void;
-  }) => () => void;
+  /** How long the pointer rests on a card before it is prefetched;
+   *  injectable so tests need not wait. */
+  hoverDwellMs?: number;
   vitals: SessionVitals;
   terminal: SessionTerminal;
   /** The derivation, injectable so tests can count it. Defaults to the real
    *  projection. */
   projectPool?: typeof projectPool;
-  /** A page's visibility lifecycle, for the refetch-on-visible wiring; the
-   *  bootstrap passes `document`, tests omit it. */
-  visibility?: VisibilitySource;
   /** Called after every state change the view should repaint. */
   onChange: () => void;
 }
 
-// A stream error marks the connection down at once, but the banner waits out
-// a grace delay: a snapshot inside the window (the server replays the latest
-// on reconnect) cancels it, and reconnect clears one already showing.
-const STREAM_GRACE_MS = 4000;
+/** A subscribed card's data as its frames brought it. Absent fields have
+ *  not arrived yet. */
+interface CardData {
+  body?: TicketBodyResponse | null;
+  events?: TicketEventsResponse;
+  error?: string;
+}
+
+// A socket close marks the connection down at once, but the banner waits
+// out a grace delay: a reconnect inside the window cancels it, and the next
+// reconnect clears one already showing.
+const CONNECTION_GRACE_MS = 4000;
 
 // The relaunch poll after a Restart (ADR-0026): a Boot that has to rebuild a
 // stale UI takes tens of seconds, so the window is generous, and the cadence
@@ -133,31 +134,25 @@ const STREAM_GRACE_MS = 4000;
 const RESTART_POLL_MS = 1000;
 const RESTART_WAIT_MS = 60_000;
 
-// The stale-answer guard's keys: one for the selected card's timeline loads,
-// one for the ticket-body loads.
-const TIMELINE_KEY = "timeline";
-const BODY_KEY = "body";
+/** The banner a tab shows when the server speaks another protocol version
+ *  and reloading would only loop. */
+const VERSION_BANNER = "Console was updated: reload the page";
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export class ConsoleSession {
-  /** The selected ticket's raw log pane: the byte-window state machine,
-   *  opened, followed, and reset by the session's timeline coordination and
-   *  driven by the view's attempt and stream handlers. */
+  /** The selected ticket's raw log pane, fed by its card's log frames and
+   *  driven by the view's attempt, stream and "load earlier" handlers. */
   readonly logs: LogPane;
 
-  private readonly getState: ConsoleSessionOptions["getState"];
-  private readonly getEvents: ConsoleSessionOptions["getEvents"];
-  private readonly getTicket: ConsoleSessionOptions["getTicket"];
-  private readonly getGrades: ConsoleSessionOptions["getGrades"];
-  private readonly answerSeam: ConsoleSessionOptions["answer"];
-  private readonly stopSeam: ConsoleSessionOptions["stop"];
-  private readonly restartSeam: ConsoleSessionOptions["restart"];
-  private readonly keepTalkingSeam: ConsoleSessionOptions["keepTalking"];
-  private readonly closeTerminalsSeam: ConsoleSessionOptions["closeFinishedTerminals"];
+  private readonly socket: SessionSocket;
   private readonly probeServer: ConsoleSessionOptions["probeServer"];
   private readonly onRelaunched: ConsoleSessionOptions["onRelaunched"];
   private readonly restartPollMs: number;
   private readonly restartWaitMs: number;
-  private readonly streamSeam: ConsoleSessionOptions["stream"];
+  private readonly hoverDwellMs: number;
   private readonly vitals: SessionVitals;
   private readonly terminal: SessionTerminal;
   private readonly derivePool: typeof projectPool;
@@ -171,10 +166,28 @@ export class ConsoleSession {
   private inspector: { snapshot: EnrichedSnapshot; json: string } | null = null;
   private error: string | null = null;
   private connected = false;
+  private graceTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastConnectionError = "";
+  // The server speaks another protocol version and the page did not reload
+  // (it already had, moments ago): the banner says to, and stays.
+  private versionStale = false;
+
+  // The pool log (issue #161): the snapshot carries its last 500 lines and
+  // its full length. "Load earlier" reads the lines before those into
+  // `earlier`, and while it holds any (or a read is out), the lines an
+  // append pushes out of the window move onto its end, so the drawer's text
+  // stays one contiguous run. A new log, or a whole snapshot, starts over;
+  // the generation drops a read that answers after.
+  private logTotal = 0;
+  private earlier: string[] = [];
+  private earlierLoading = false;
+  private earlierError: string | null = null;
+  private earlierGeneration = 0;
+  private heldLog: { earlier: string[]; window: string[]; lines: string[] } | null = null;
 
   // The Stop control's state (issue #97). The confirmation is inline on the
   // button, so it is one small state machine, not a modal: `armed` is the
-  // "Really stop?" prompt, `requesting` the POST in flight. It lives in
+  // "Really stop?" prompt, `requesting` the request in flight. It lives in
   // memory only, so a refresh disarms. `stoppedFromHere` marks the tab whose
   // Stop request was accepted, which is the only tab that can honestly say
   // the stop came from this page.
@@ -186,8 +199,8 @@ export class ConsoleSession {
   // confirm as Stop, but offered in any phase: a boot-only key takes effect
   // no other way, and a pool that is running is exactly when the operator
   // notices the key is wrong. `restartWaiting` marks the tab that asked and
-  // is now polling for the server Boot brings back; every other tab sees an
-  // ordinary stop and its usual retry finds the same server.
+  // is now waiting for the server Boot brings back; every other tab sees an
+  // ordinary stop and its socket's retry finds the same server.
   private restartState: StopState = "idle";
   private restartFailure: string | null = null;
   private restartWaiting = false;
@@ -211,36 +224,41 @@ export class ConsoleSession {
   private closeTerminalsState: StopState = "idle";
   private closeTerminalsFailure: string | null = null;
 
-  // The selected card's timeline: the events fetch answers on its own
-  // cadence, and a slow answer answering after a newer selection (or a newer
-  // refetch) is dropped by the guard, never clobbering the newer rows.
-  private timelineState: { ticketId: string | null; view: TimelineView | null } = {
-    ticketId: null,
-    view: null,
-  };
-  // The events fetch out for the selected card, one at a time (issue #157):
-  // a snapshot landing while it is out owes one refetch after it, never a
-  // second alongside, and a new selection aborts it, so clicking across
-  // cards never queues fetches for cards already left behind.
-  private timelineFetch: { id: string; abort: AbortController; owed: boolean } | null =
+  // Optimistic presses (issue #161): one overlay per request out, keyed by
+  // the session's own count, drawn over the snapshot until the reply lands.
+  // The confirming delta is ahead of the reply on the socket, so dropping
+  // the overlay then changes nothing on screen; a refusal drops it too.
+  private readonly overlays = new Map<number, Overlay>();
+  private overlayCount = 0;
+  // Moves on every overlay added or dropped, so the drawn snapshot is
+  // remade only when the set changed.
+  private overlayVersion = 0;
+  private shown: { base: EnrichedSnapshot; overlays: number; snapshot: EnrichedSnapshot } | null =
     null;
+  // A refused answer's reason per ticket, beside the interrupt's actions on
+  // both surfaces until the next answer, or until the interrupt resolves.
+  private readonly answerFailures = new Map<string, string>();
 
-  // The latest grade per ticket, for the card summaries; refetched on the
-  // snapshot cadence. Absent until the first fetch lands: the cards render
-  // no grade UI until then, which is the no-grade state anyway.
+  // The latest grade per ticket, for the card summaries, pushed whole when
+  // it moves. Empty until the first live frame: the cards render no grade
+  // UI until then, which is the no-grade state anyway.
   private grades: Record<string, TicketGradeSummary> = {};
-  private gradesInFlight = false;
-  private gradesOwed = false;
 
-  // Ticket bodies for the Spec tab: fetched once per ticket on first
-  // selection and held for the session; a 404 caches null so a known-missing
-  // body is never refetched. A failed fetch surfaces on the Spec tab, and
-  // the next selection retries because nothing was cached. A fetch still out
-  // when the selection leaves its ticket is aborted and caches nothing, so
-  // the next selection of that ticket asks again.
-  private readonly ticketBodies = new Map<string, string | null>();
-  private readonly ticketBodyFetches = new Map<string, AbortController>();
-  private readonly ticketBodyErrors = new Map<string, string>();
+  // The subscribed cards (issue #161): the selected one, and up to
+  // HOVER_SUBSCRIPTIONS cards the pointer rested on, least recently hovered
+  // first. Their frames' data is held while they stay subscribed, so a click
+  // on a hovered card draws its Detail whole in the click's own render.
+  private selectedCardId: string | null = null;
+  private hovered: string[] = [];
+  private dwell: ReturnType<typeof setTimeout> | null = null;
+  private readonly subscribed = new Set<string>();
+  private readonly cards = new Map<string, CardData>();
+  // The selected card's timeline, projected once per events frame and status.
+  private timeline: {
+    events: TicketEventsResponse;
+    status: TicketStatus;
+    view: TimelineView;
+  } | null = null;
 
   // The manually chosen Detail tab, carrying its ticket id: the projection
   // ignores it for any other ticket, so changing the selection reasserts the
@@ -248,10 +266,8 @@ export class ConsoleSession {
   private tabOverride: TabOverride | null = null;
 
   // The latest derivation, refreshed by `model()` on every render and read
-  // by the selection and timeline coordination between renders.
+  // by the selection between renders.
   private view: PoolView | null = null;
-
-  private readonly guard = new StaleGuard();
 
   // The browser tab's status, recomputed on every applied snapshot; the
   // bootstrap renders them into the title and favicon (DOM is its own).
@@ -260,54 +276,57 @@ export class ConsoleSession {
   poolName: string | null = null;
 
   constructor(options: ConsoleSessionOptions) {
-    this.getState = options.getState;
-    this.getEvents = options.getEvents;
-    this.getTicket = options.getTicket;
-    this.getGrades = options.getGrades;
-    this.answerSeam = options.answer;
-    this.stopSeam = options.stop;
-    this.restartSeam = options.restart;
-    this.keepTalkingSeam = options.keepTalking;
-    this.closeTerminalsSeam = options.closeFinishedTerminals;
+    this.socket = options.socket;
     this.probeServer = options.probeServer;
     this.onRelaunched = options.onRelaunched;
     this.restartPollMs = options.restartPollMs ?? RESTART_POLL_MS;
     this.restartWaitMs = options.restartWaitMs ?? RESTART_WAIT_MS;
-    this.streamSeam = options.stream;
+    this.hoverDwellMs = options.hoverDwellMs ?? HOVER_DWELL_MS;
     this.vitals = options.vitals;
     this.terminal = options.terminal;
     this.derivePool = options.projectPool ?? projectPool;
     this.onChange = options.onChange;
     this.logs = new LogPane({
-      fetch: options.getLog,
+      follow: (id, follow) => this.socket.follow(id, follow),
+      read: (request) => this.socket.request("log.read", request),
       onChange: () => this.onChange(),
     });
-    if (options.visibility) {
-      // Belt and braces over the stream's self-healing: a tab that returns
-      // to visible (after the machine slept, or hours buried) refetches the
-      // latest snapshot, so a stale page catches up even before the stream's
-      // silence watchdog reopens it.
-      refetchStateOnVisible(options.visibility, this.getState, (snapshot) =>
-        this.setSnapshot(snapshot),
-      );
-    }
+  }
+
+  // -------------------------------------------------------------------------
+  // What the socket pushes
+  // -------------------------------------------------------------------------
+
+  /**
+   * Apply a snapshot whole: the embedded one at boot, or a test's. The
+   * socket's pushes go through `setPushed`, which this is the whole-snapshot
+   * case of.
+   */
+  setSnapshot(snapshot: EnrichedSnapshot): void {
+    this.setPushed({ rev: 0, logTotal: snapshot.state.log.length, snapshot }, null);
   }
 
   /**
-   * Apply a snapshot, from the boot fetch, the stream, an answer, or the
-   * visibility refetch: hold it, refresh the vitals and terminal stores and
-   * the tab status, refetch the selected card's timeline (a new snapshot can
-   * move the selected ticket; the events file is append-only and small, so a
-   * refetch is cheap), refetch the grades, and repaint.
+   * Apply a pushed version of the snapshot, whole or made by `delta`: hold
+   * it, keep the pool log's earlier lines contiguous with it, refresh the
+   * vitals and terminal stores and the tab status, and repaint. Unchanged
+   * tickets and Conversations arrive as the same objects they were, so the
+   * projection and the morph see that nothing about them moved.
    */
-  setSnapshot(snapshot: EnrichedSnapshot): void {
+  setPushed(pushed: PushedSnapshot, delta: SnapshotDelta | null): void {
+    this.followPoolLog(pushed, delta);
+    this.logTotal = pushed.logTotal;
+    const snapshot = pushed.snapshot;
     const wasStopped = this.snapshot?.phase === "stopped";
     this.snapshot = snapshot;
     this.connected = true;
     if (wasStopped && snapshot.phase !== "stopped") {
       // A fresh snapshot after a `stopped` one is the relaunched server the
-      // client's retry found on its own (issue #97): the page is live again,
-      // so the stop control and the "from this page" marker start over.
+      // socket's retry found on its own (issue #97): the page is live again,
+      // so the stop control and the "from this page" marker start over. The
+      // tab that asked for a Restart hands itself over, since the relaunch
+      // may have rebuilt the UI it is running.
+      const handOver = this.restartWaiting ? this.restartPort : null;
       this.stoppedFromHere = false;
       this.stopState = "idle";
       this.stopFailure = null;
@@ -315,6 +334,7 @@ export class ConsoleSession {
       this.restartWaiting = false;
       this.restartState = "idle";
       this.restartFailure = null;
+      if (handOver !== null) this.onRelaunched?.(handOver);
     } else if (this.stopState === "armed" && snapshot.phase !== "done") {
       // Stop is offered only on a done pool, so a phase that moved off done
       // withdraws the offer and the armed confirmation goes with it. A
@@ -328,6 +348,11 @@ export class ConsoleSession {
       this.closeTerminalsState = "idle";
     }
     this.pruneKeepTalking(snapshot);
+    for (const ticketId of [...this.answerFailures.keys()]) {
+      if (!snapshot.state.interrupts.some((i) => i.ticketId === ticketId)) {
+        this.answerFailures.delete(ticketId);
+      }
+    }
     this.error = null;
     this.vitals.update(snapshot);
     this.terminal.update(snapshot);
@@ -336,81 +361,174 @@ export class ConsoleSession {
     if (snapshot.phase === "stopped" && this.restartWaiting && this.restartPort !== null) {
       // The farewell of the restart this tab asked for: from here the old
       // server is gone and only the new one can answer, so start watching
-      // for it. Idempotent, since a replayed `stopped` snapshot would
+      // for it. Idempotent, since a repeated `stopped` snapshot would
       // otherwise start a second poll.
       this.awaitRelaunch(this.restartPort);
     }
-    if (this.selectedId) this.refetchTimeline();
-    this.refreshGrades();
     this.onChange();
   }
 
   /**
-   * Open the snapshot stream and keep the connection banner honest. A
-   * stream error marks the connection down at once, but the banner waits
-   * out the grace delay, and the timer arms only on the first error of an
-   * outage: a dead connection re-fires onError on every retry, and
-   * re-arming each time would push the banner past the grace window forever.
-   * A `stopped` snapshot is the exception (issue #97): the server closes
-   * every stream and stops serving right after that farewell, so the
-   * disconnect that follows is the expected end of an orderly shutdown, not
-   * a fault. The connection still goes down, but no banner is raised; the
-   * canvas says the pool stopped, and the client's retry picks a relaunched
-   * server back up on its own.
+   * A `live` frame: the activity and peeks that moved, each store
+   * repainting once for its part, and the grades whole.
    */
-  connect(): void {
-    let graceTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastStreamError = "";
-    const cancelGrace = () => {
-      if (graceTimer !== null) {
-        clearTimeout(graceTimer);
-        graceTimer = null;
-      }
-    };
-    this.streamSeam({
-      onSnapshot: (snapshot) => {
-        cancelGrace();
-        this.setSnapshot(snapshot);
-      },
-      onError: (message) => {
-        this.connected = false;
-        lastStreamError = message;
-        if (this.stoppedPhase()) {
-          this.onChange();
-          return;
-        }
-        if (graceTimer === null) {
-          graceTimer = setTimeout(() => {
-            graceTimer = null;
-            if (!this.connected && !this.stoppedPhase()) {
-              this.error = lastStreamError;
-              this.onChange();
-            }
-          }, STREAM_GRACE_MS);
-        }
+  applyLive(live: LiveMessage): void {
+    if (live.activity) this.vitals.apply(live.activity);
+    if (live.peeks) this.terminal.apply(live.peeks);
+    if (live.grades) {
+      this.grades = live.grades;
+      this.onChange();
+    }
+  }
+
+  /**
+   * A `card` frame for a subscribed card: its fields replace what is held
+   * (a log append continues it). Only the selected card is on screen, so a
+   * hovered card's frames are held without a repaint. A frame for a card
+   * let go of, already on the wire when it was, is dropped.
+   */
+  applyCard(card: CardMessage): void {
+    if (!this.subscribed.has(card.id)) return;
+    const held = this.cards.get(card.id) ?? {};
+    const next: CardData = { ...held };
+    if (card.body !== undefined) next.body = card.body;
+    if (card.events !== undefined) next.events = card.events;
+    if (card.error !== undefined) next.error = card.error;
+    this.cards.set(card.id, next);
+    if (card.log !== undefined) this.logs.push(card.id, card.log);
+    const moved =
+      card.body !== undefined || card.events !== undefined || card.error !== undefined;
+    if (moved && card.id === this.selectedCardId) this.onChange();
+  }
+
+  /**
+   * The socket came up or went down, and keeps the connection banner
+   * honest. A close marks the connection down at once, but the banner
+   * waits out the grace delay, armed only on the first close of an outage:
+   * a dead server closes every retry, and re-arming each time would push
+   * the banner past the window forever. A `stopped` close is the exception
+   * (issue #97): the server closes every socket right after its farewell,
+   * so it is the expected end of an orderly shutdown, not a fault. The
+   * connection still goes down, but no banner is raised; the canvas says
+   * the pool stopped, and the socket's retry picks a relaunched server back
+   * up on its own.
+   */
+  connection(change: ConnectionChange): void {
+    if (change.up) {
+      this.cancelGrace();
+      if (!this.connected || this.error !== null) {
+        this.connected = true;
+        this.error = null;
         this.onChange();
-      },
+      }
+      return;
+    }
+    this.connected = false;
+    this.lastConnectionError = change.reason;
+    if (change.stopped || this.stoppedPhase()) {
+      this.onChange();
+      return;
+    }
+    if (this.graceTimer === null) {
+      this.graceTimer = setTimeout(() => {
+        this.graceTimer = null;
+        if (!this.connected && !this.stoppedPhase()) {
+          this.error = this.lastConnectionError;
+          this.onChange();
+        }
+      }, CONNECTION_GRACE_MS);
+    }
+    this.onChange();
+  }
+
+  /** The server speaks another protocol version, and the page already
+   *  reloaded for that moments ago: say so, and stop claiming a connection. */
+  versionChanged(): void {
+    this.versionStale = true;
+    this.connected = false;
+    this.onChange();
+  }
+
+  /**
+   * The socket's snapshot is null: the server has not started the pool.
+   * Start it; the snapshot that start produces renders it.
+   */
+  start(): void {
+    this.socket.request("start", {}).catch((err) => {
+      this.reportError(`failed to start the pool: ${messageOf(err)}`);
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Selection and hover prefetch
+  // -------------------------------------------------------------------------
+
   /**
-   * The selection, reported by the view: hold it, fetch the newly selected
-   * ticket's body once, reload the timeline, and repaint. The repaint waits
-   * on none of the fetches: the selection and the Detail's shell show at
-   * once, and the rows fill in as their answers land. What is still out for
-   * a card the operator has left is aborted.
+   * The selection, reported by the view: hold it, subscribe its card (the
+   * server answers with its body, events and log in one frame), let the
+   * card it replaced go, and repaint. The repaint waits on nothing: the
+   * selection and the Detail's shell show at once, whole when the card was
+   * prefetched, and fill in as the frame lands otherwise.
    */
   select(nodeId: string | null): void {
     this.selectedId = nodeId;
-    const ticketId = nodeId ? this.selectedTicketId() : null;
-    for (const [id, abort] of [...this.ticketBodyFetches]) {
-      if (id === ticketId) continue;
-      abort.abort();
-      this.ticketBodyFetches.delete(id);
+    const card = nodeId ? this.cardOf(nodeId) : undefined;
+    const next = card ? subscriptionId(card) : null;
+    const previous = this.selectedCardId;
+    this.selectedCardId = next;
+    if (next !== null) {
+      // The selection holds it now, outside the hovered few.
+      this.hovered = this.hovered.filter((id) => id !== next);
+      this.hold(next);
     }
-    if (ticketId) this.ensureTicketBody(ticketId);
-    void this.loadTimeline();
+    if (previous !== null && previous !== next) this.release(previous);
+    this.logs.show(card?.kind === "ticket" ? card.ticketId : null);
     this.onChange();
+  }
+
+  /**
+   * The pointer moved onto a card (or off every card, null). A card the
+   * pointer rests on for the dwell is subscribed as a prefetch, so a click
+   * that follows finds its data in hand; a pass-over sends nothing. At most
+   * HOVER_SUBSCRIPTIONS hovered cards are held, the least recently hovered
+   * let go first. Nothing here repaints.
+   */
+  hover(nodeId: string | null): void {
+    if (this.dwell !== null) {
+      clearTimeout(this.dwell);
+      this.dwell = null;
+    }
+    if (nodeId === null) return;
+    const card = this.cardOf(nodeId);
+    const id = card ? subscriptionId(card) : null;
+    if (id === null || id === this.selectedCardId) return;
+    if (this.hovered.includes(id)) {
+      this.hovered = [...this.hovered.filter((held) => held !== id), id];
+      return;
+    }
+    this.dwell = setTimeout(() => {
+      this.dwell = null;
+      if (id === this.selectedCardId || this.hovered.includes(id)) return;
+      this.hovered.push(id);
+      this.hold(id);
+      while (this.hovered.length > HOVER_SUBSCRIPTIONS) this.release(this.hovered.shift()!);
+    }, this.hoverDwellMs);
+  }
+
+  private hold(id: string): void {
+    if (this.subscribed.has(id)) return;
+    this.subscribed.add(id);
+    this.socket.subscribe({ id });
+  }
+
+  // Let a card go once neither the selection nor the hover holds it: its
+  // pushes stop and its held data goes with them.
+  private release(id: string): void {
+    if (id === this.selectedCardId || this.hovered.includes(id)) return;
+    if (!this.subscribed.delete(id)) return;
+    this.socket.unsubscribe(id);
+    this.cards.delete(id);
+    this.logs.forget(id);
   }
 
   /** A manually chosen Detail tab for a ticket. */
@@ -429,19 +547,54 @@ export class ConsoleSession {
     this.onChange();
   }
 
+  // -------------------------------------------------------------------------
+  // Presses
+  // -------------------------------------------------------------------------
+
   /**
-   * Answer an interrupt: one answer, one action, and the response snapshot
-   * applies like any other. Rejects on failure so the Needs input tray can
-   * mark its own row; the Detail's fire-and-forget path catches and reports
-   * through `reportError`.
+   * Send an action optimistically: the overlay draws what the action will
+   * do in the press's own frame, and stands until the reply. Resolves with
+   * the result, or rejects with the refusal for the control to show beside
+   * itself; either way the overlay is gone and the snapshot as pushed is
+   * what shows.
    */
-  async answer(
-    ticketId: string,
-    action: ResumeAction,
-    note?: string,
-  ): Promise<void> {
-    const snapshot = await this.answerSeam(ticketId, action, note);
-    this.setSnapshot(snapshot);
+  async optimistic<K extends RequestKind>(
+    kind: K,
+    payload: RequestPayload<K>,
+    overlay: Overlay,
+  ): Promise<RequestResult<K>> {
+    const key = ++this.overlayCount;
+    this.overlays.set(key, overlay);
+    this.overlayVersion += 1;
+    this.onChange();
+    try {
+      return await this.socket.request(kind, payload);
+    } finally {
+      this.overlays.delete(key);
+      this.overlayVersion += 1;
+      this.onChange();
+    }
+  }
+
+  /**
+   * Answer an interrupt, optimistically: both surfaces show it answered and
+   * waiting in the press's frame. Rejects with the refusal's reason so the
+   * Needs input tray can mark its own row; the reason also stands beside
+   * the Detail's actions until the next answer.
+   */
+  async answer(ticketId: string, action: ResumeAction, note?: string): Promise<void> {
+    if (this.answerFailures.delete(ticketId)) this.onChange();
+    try {
+      await this.optimistic(
+        "resume",
+        note ? { ticketId, action, note } : { ticketId, action },
+        answered(ticketId, action, note),
+      );
+    } catch (err) {
+      this.answerFailures.set(ticketId, messageOf(err));
+      this.onChange();
+      throw err;
+    }
   }
 
   /** True once the latest snapshot is the farewell of an orderly shutdown. */
@@ -464,24 +617,24 @@ export class ConsoleSession {
   }
 
   /**
-   * Send the stop. The button stays on "stopping..." after the 202, because
-   * the request only means the server accepted: the stop itself is done when
-   * the farewell `stopped` snapshot lands, and that snapshot withdraws the
-   * control. A refusal (the pool started running again, or was never
-   * started) or a network failure disarms and shows its reason inline next
-   * to the button, never on the global banner: nothing about the pool is
-   * broken, the request simply did not apply.
+   * Send the stop. The button stays on "stopping..." after the accept,
+   * because the reply only means the server accepted: the stop itself is
+   * done when the farewell `stopped` snapshot lands, and that snapshot
+   * withdraws the control. A refusal (the pool started running again, or
+   * was never started) or a lost socket disarms and shows its reason inline
+   * next to the button, never on the global banner: nothing about the pool
+   * is broken, the request simply did not apply.
    */
   async confirmStop(): Promise<void> {
     this.stopState = "requesting";
     this.stopFailure = null;
     this.onChange();
     try {
-      await this.stopSeam();
+      await this.socket.request("stop", {});
       this.stoppedFromHere = true;
     } catch (err) {
       this.stopState = "idle";
-      this.stopFailure = err instanceof Error ? err.message : String(err);
+      this.stopFailure = messageOf(err);
     }
     this.onChange();
   }
@@ -501,29 +654,29 @@ export class ConsoleSession {
   }
 
   /**
-   * Send the restart. The 202 carries the port the relaunched server will
-   * use, which is the port this tab then watches: a restart that changed the
-   * port moves the page to the new origin, and one that did not still needs
-   * the page to wait, because the server it is talking to is about to exit.
-   * The control stays on "restarting..." from here until the new server
-   * answers or the wait runs out; a refusal disarms and shows its reason
-   * beside the button, never on the global banner.
+   * Send the restart. The reply carries the port the relaunched server will
+   * use, which is the port this tab then watches: a restart that changed
+   * the port moves the page to the new origin, and one that did not still
+   * needs the page to wait, because the server it is talking to is about to
+   * exit. The control stays on "restarting..." from here until the new
+   * server answers or the wait runs out; a refusal disarms and shows its
+   * reason beside the button, never on the global banner.
    */
   async confirmRestart(): Promise<void> {
     this.restartState = "requesting";
     this.restartFailure = null;
     this.onChange();
     try {
-      const response = await this.restartSeam();
+      const response = await this.socket.request("restart", {});
       this.restartWaiting = true;
       this.restartPort = response.port;
       // The farewell usually lands first and starts the poll; a server that
-      // exits without one (or a stream already down) would leave nothing to
+      // exits without one (or a socket already down) would leave nothing to
       // start it, so the accept starts it too. `awaitRelaunch` is idempotent.
       this.awaitRelaunch(response.port);
     } catch (err) {
       this.restartState = "idle";
-      this.restartFailure = err instanceof Error ? err.message : String(err);
+      this.restartFailure = messageOf(err);
     }
     this.onChange();
   }
@@ -583,13 +736,13 @@ export class ConsoleSession {
 
   /**
    * Keep talking (issue #139): ask the engine to continue the ticket's
-   * checkpointed Attempt in its Held pane. The mark stays `requesting` after
-   * the engine accepts, since the ticket leaves checkpoint only when the
-   * snapshot says so and the pane is already claimed; that snapshot drops
-   * the mark. A refusal clears the in-flight flag and keeps its reason on
-   * the mark, shown beside the button on both surfaces, never on the global
-   * banner: the pool is fine, the request simply did not apply. A click
-   * with no Held pane, or one already out for it, sends nothing.
+   * checkpointed Attempt in its Held pane. The mark disables the button on
+   * both surfaces in the press's own frame and stays after the engine
+   * accepts, since the ticket leaves checkpoint only when the snapshot says
+   * so; that snapshot drops the mark. A refusal clears the in-flight flag
+   * and keeps its reason on the mark, shown beside the button on both
+   * surfaces, never on the global banner. A click with no Held pane, or one
+   * already out for it, sends nothing.
    */
   async keepTalking(ticketId: string): Promise<void> {
     const held = this.snapshot?.state.tickets.find((t) => t.id === ticketId)?.heldPane;
@@ -603,7 +756,7 @@ export class ConsoleSession {
     });
     this.onChange();
     try {
-      await this.keepTalkingSeam(ticketId);
+      await this.socket.request("keepTalking", { ticketId });
     } catch (err) {
       // The snapshot may have dropped the mark while the request was out;
       // a refusal for a pane that is already gone has nothing left to mark.
@@ -612,7 +765,7 @@ export class ConsoleSession {
         this.keepTalkingMarks.set(ticketId, {
           ...current,
           requesting: false,
-          failure: err instanceof Error ? err.message : String(err),
+          failure: messageOf(err),
         });
         this.onChange();
       }
@@ -644,22 +797,77 @@ export class ConsoleSession {
 
   /**
    * Close the Finished terminals. The count on the button comes from the
-   * snapshot, and the engine publishes a fresh one once the tabs are gone,
-   * so the 200 only returns the control to idle; the snapshot hides it. A
-   * refusal (a pool that is not Terminal-backed) or a network failure
-   * disarms and shows its reason beside the button, the way Stop does.
+   * snapshot, and the delta that drops it is ahead of the reply, so the
+   * reply only returns the control to idle. A refusal (a pool that is not
+   * Terminal-backed) or a lost socket disarms and shows its reason beside
+   * the button, the way Stop does.
    */
   async confirmCloseTerminals(): Promise<void> {
     this.closeTerminalsState = "requesting";
     this.closeTerminalsFailure = null;
     this.onChange();
     try {
-      await this.closeTerminalsSeam();
+      await this.socket.request("terminals.closeFinished", {});
     } catch (err) {
-      this.closeTerminalsFailure = err instanceof Error ? err.message : String(err);
+      this.closeTerminalsFailure = messageOf(err);
     }
     this.closeTerminalsState = "idle";
     this.onChange();
+  }
+
+  /**
+   * "Load earlier" in the pool log drawer: the lines before the ones held,
+   * read once at a time and prepended. From the moment it is asked, lines
+   * the window lets go are kept, so the read's lines meet them with no gap.
+   */
+  async loadEarlierPoolLog(): Promise<void> {
+    if (!this.snapshot || this.earlierLoading) return;
+    const before = this.logTotal - this.earlier.length - this.snapshot.state.log.length;
+    if (before <= 0) return;
+    const generation = this.earlierGeneration;
+    this.earlierLoading = true;
+    this.earlierError = null;
+    this.onChange();
+    try {
+      const range = await this.socket.request("poolLog.read", { before });
+      if (generation !== this.earlierGeneration) return;
+      this.earlier = [...range.lines, ...this.earlier];
+    } catch (err) {
+      if (generation !== this.earlierGeneration) return;
+      this.earlierError = `load earlier failed: ${messageOf(err)}`;
+    } finally {
+      if (generation === this.earlierGeneration) {
+        this.earlierLoading = false;
+        this.onChange();
+      }
+    }
+  }
+
+  // Keep `earlier` contiguous with the window: an append that pushes lines
+  // out of the window moves them onto its end while it holds any or a read
+  // is out; a new log or a whole snapshot starts over.
+  private followPoolLog(pushed: PushedSnapshot, delta: SnapshotDelta | null): void {
+    const log = delta?.log;
+    if (delta !== null && log === undefined) return;
+    if (delta === null || !("append" in log!) || !this.snapshot) {
+      if (this.earlier.length > 0 || this.earlierLoading || this.earlierError !== null) {
+        this.earlier = [];
+        this.earlierLoading = false;
+        this.earlierError = null;
+        this.earlierGeneration += 1;
+      }
+      return;
+    }
+    if (this.earlier.length === 0 && !this.earlierLoading) return;
+    const old = this.snapshot.state.log;
+    const appended = log.append;
+    const slid = old.length + appended.length - pushed.snapshot.state.log.length;
+    if (slid <= 0) return;
+    this.earlier = [
+      ...this.earlier,
+      ...old.slice(0, slid),
+      ...appended.slice(0, Math.max(0, slid - old.length)),
+    ];
   }
 
   /** Surface a failure on the global banner (the fire-and-forget paths). */
@@ -668,15 +876,20 @@ export class ConsoleSession {
     this.onChange();
   }
 
+  // -------------------------------------------------------------------------
+  // The render model
+  // -------------------------------------------------------------------------
+
   /**
    * The render model: the single derivation point. One `projectPool` per
-   * render, stored so the Detail, the timeline join, and the next selection
-   * or snapshot's coordination all read the same cards.
+   * render, over the snapshot with any optimistic overlays drawn on it, and
+   * stored so the Detail and the next selection read the same cards.
    */
   model(endings: Record<string, ConversationEndView>): AppModel {
-    this.view = this.snapshot
+    const snapshot = this.shownSnapshot();
+    this.view = snapshot
       ? this.derivePool(
-          this.snapshot,
+          snapshot,
           this.grades,
           this.vitals.state(),
           this.terminal.state(),
@@ -693,46 +906,48 @@ export class ConsoleSession {
         })
       : null;
     const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
-    // The events fetch (and so the timeline) covers a selected Conversation
-    // too, reusing /api/events?ticket=<id>; the raw log pane below it stays
-    // ticket-only.
-    const detailEventsId =
+    // The selected card's frames: a ticket's body, events and log, a
+    // Conversation's events (its log pane is not part of this surface).
+    const detailCardId =
       detail?.kind === "ticket"
         ? detail.ticketId
         : detail?.kind === "conversation"
           ? detail.conversationId
           : null;
-    const isCurrent =
-      detailEventsId !== null && this.timelineState.ticketId === detailEventsId;
+    const data = detailCardId !== null ? this.cards.get(detailCardId) : undefined;
+    const card = this.view?.cards.find((c) => c.id === this.selectedId);
+    const timelineView = data?.events ? this.timelineOf(data.events, timelineStatus(card)) : null;
     const logIsCurrent =
       detailTicketId !== null && this.logs.state.ticketId === detailTicketId;
-    // The timeline joins the log pane's attempt listing (the /api/log
-    // response's per-attempt Stream file resolution), so each attempt row
-    // knows its Stream file. A pane for another ticket (or no pane yet, or a
+    // The timeline joins the log pane's attempt listing (the log frames'
+    // per-attempt Stream file resolution), so each attempt row knows its
+    // Stream file. A pane for another ticket (or no pane yet, or a
     // Conversation, which has no log pane) contributes no listing.
-    const timeline =
-      isCurrent && this.timelineState.view
-        ? joinStreamFiles(
-            this.timelineState.view,
-            logIsCurrent ? this.logs.state.attempts : null,
-          )
-        : null;
+    const timeline = timelineView
+      ? joinStreamFiles(timelineView, logIsCurrent ? this.logs.state.attempts : null)
+      : null;
+    const log = this.poolLogLines();
     return {
       poolName: this.poolName,
       phase: this.view?.phase ?? null,
       phaseLabel: this.view ? phaseLabel(this.view.phase) : "connecting",
       cards,
       edges: this.view?.edges ?? [],
-      log: this.view ? this.view.log : [],
+      log,
+      logTotal: Math.max(this.logTotal, log.length),
+      logEarlier: {
+        loading: this.earlierLoading,
+        error: this.earlierError,
+      },
       logOpen: this.logOpen,
       inspectorJson: this.inspectorText(),
       inspectorOpen: this.inspectorOpen,
       connected: this.connected,
       seq: this.snapshot?.seq ?? 0,
-      error: this.error,
+      error: this.versionStale ? VERSION_BANNER : this.error,
       stop: {
-        // Offered only on a done pool over a live stream (issue #97): there
-        // is nothing to interrupt, and a POST down a dead stream would go
+        // Offered only on a done pool over a live socket (issue #97): there
+        // is nothing to interrupt, and a request down a dead socket would go
         // nowhere. The relaunch command is the pool directory verbatim, as
         // the snapshot carries it.
         offered: this.view?.phase === "done" && this.connected,
@@ -744,26 +959,24 @@ export class ConsoleSession {
           : null,
       },
       restart: {
-        // Offered on a live stream in any phase, and kept while this tab
+        // Offered on a live socket in any phase, and kept while this tab
         // waits for the relaunch, so the control can say "restarting..."
-        // after the stream has gone with the old server.
+        // after the socket has gone with the old server.
         offered: this.connected || this.restartWaiting,
         state: this.restartState,
         failure: this.restartFailure,
         waiting: this.restartWaiting,
       },
       closeTerminals: {
-        // Offered while any Finished terminal is open, over a live stream
-        // for the same reason Stop is: a POST down a dead stream goes
+        // Offered while any Finished terminal is open, over a live socket
+        // for the same reason Stop is: a request down a dead socket goes
         // nowhere, and the count it would show could be stale.
         offered: (this.snapshot?.finishedTerminals ?? 0) > 0 && this.connected,
         count: this.snapshot?.finishedTerminals ?? 0,
         state: this.closeTerminalsState,
         failure: this.closeTerminalsFailure,
       },
-      terminalBacked: this.snapshot
-        ? isTerminalBacked(this.snapshot.state.config)
-        : false,
+      terminalBacked: snapshot ? isTerminalBacked(snapshot.state.config) : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
       pendingSpawns: this.view?.pendingSpawns ?? [],
@@ -772,17 +985,18 @@ export class ConsoleSession {
       detailTabs:
         detail?.kind === "ticket" ? projectDetailTabs(detail, this.tabOverride) : null,
       detailBody:
-        detailTicketId !== null && this.ticketBodies.has(detailTicketId)
-          ? (this.ticketBodies.get(detailTicketId) ?? null)
+        detailTicketId !== null && data?.body !== undefined
+          ? (data.body?.body ?? null)
           : undefined,
       detailBodyError:
-        detailTicketId !== null
-          ? (this.ticketBodyErrors.get(detailTicketId) ?? null)
+        detailTicketId !== null && data?.error !== undefined
+          ? `ticket body unavailable: ${data.error}`
           : null,
+      answerFailures: Object.fromEntries(this.answerFailures),
       timeline,
       logPane: detailTicketId
         ? projectLogPane(
-            isCurrent ? this.timelineState.view : null,
+            timelineView,
             logIsCurrent ? this.logs.state.attempt : null,
             logIsCurrent
               ? {
@@ -797,26 +1011,48 @@ export class ConsoleSession {
           )
         : null,
       needsInput: projectNeedsInput(cards),
-      conversationsNeedsInput: this.snapshot
-        ? projectConversationsNeedsInput(this.snapshot)
+      conversationsNeedsInput: snapshot ? projectConversationsNeedsInput(snapshot) : [],
+      conversationsTray: snapshot
+        ? projectConversationsTray(snapshot.state.conversations)
         : [],
-      conversationsTray: this.snapshot
-        ? projectConversationsTray(this.snapshot.state.conversations)
-        : [],
-      conversationDefaults: this.snapshot
-        ? poolAssignmentDefaults(this.snapshot.state.config)
-        : {},
+      conversationDefaults: snapshot ? poolAssignmentDefaults(snapshot.state.config) : {},
       steward: this.view?.steward ?? null,
-      stewardDefaults: this.snapshot
-        ? stewardAssignmentDefaults(this.snapshot.state.config)
-        : {},
-      enlistBlocks: this.snapshot
-        ? projectEnlistBlocks(this.snapshot.state.tickets)
-        : [],
-      reassignTickets: this.snapshot
-        ? projectReassignTickets(this.snapshot.state.tickets)
-        : [],
+      stewardDefaults: snapshot ? stewardAssignmentDefaults(snapshot.state.config) : {},
+      enlistBlocks: snapshot ? projectEnlistBlocks(snapshot.state.tickets) : [],
+      reassignTickets: snapshot ? projectReassignTickets(snapshot.state.tickets) : [],
     };
+  }
+
+  /** The snapshot with every optimistic overlay drawn on it, kept until
+   *  the snapshot or the overlays change. */
+  private shownSnapshot(): EnrichedSnapshot | null {
+    if (!this.snapshot) return null;
+    if (this.overlays.size === 0) return this.snapshot;
+    if (this.shown?.base !== this.snapshot || this.shown.overlays !== this.overlayVersion) {
+      this.shown = {
+        base: this.snapshot,
+        overlays: this.overlayVersion,
+        snapshot: applyOverlays(this.snapshot, this.overlays.values()),
+      };
+    }
+    return this.shown.snapshot;
+  }
+
+  /** The pool log lines held: the earlier ones read back, then the window. */
+  private poolLogLines(): string[] {
+    const window = this.snapshot?.state.log ?? [];
+    if (this.earlier.length === 0) return window;
+    if (this.heldLog?.earlier !== this.earlier || this.heldLog.window !== window) {
+      this.heldLog = { earlier: this.earlier, window, lines: [...this.earlier, ...window] };
+    }
+    return this.heldLog.lines;
+  }
+
+  private timelineOf(events: TicketEventsResponse, status: TicketStatus): TimelineView {
+    if (this.timeline?.events !== events || this.timeline.status !== status) {
+      this.timeline = { events, status, view: projectTimeline(events, status) };
+    }
+    return this.timeline.view;
   }
 
   /**
@@ -837,200 +1073,34 @@ export class ConsoleSession {
     return this.inspector.json;
   }
 
-  // -------------------------------------------------------------------------
-  // Timeline and body loads
-  // -------------------------------------------------------------------------
-
-  /** The selected card, off the latest derivation. */
-  private selectedCard(): PoolCardView | undefined {
-    if (!this.selectedId) return undefined;
-    return this.view?.cards.find((card) => card.id === this.selectedId);
+  /** A card, off the latest derivation. */
+  private cardOf(nodeId: string): PoolCardView | undefined {
+    return this.view?.cards.find((card) => card.id === nodeId);
   }
 
-  /** The selected card's ticket id, when it is a ticket card. */
-  private selectedTicketId(): string | null {
-    const card = this.selectedCard();
-    return card?.kind === "ticket" ? card.ticketId : null;
-  }
-
-  /**
-   * The id the events endpoint is fetched for: a ticket's or a
-   * Conversation's, since /api/events?ticket=<id> accepts either (a
-   * Conversation's timeline reuses the same path). Null when the selection
-   * is neither, or nothing is selected.
-   */
-  private selectedEventsId(): string | null {
-    const card = this.selectedCard();
-    if (card?.kind === "ticket") return card.ticketId;
-    if (card?.kind === "conversation") return card.conversationId;
-    return null;
-  }
-
-  /**
-   * The snapshot cadence's refetch of the selected card's timeline: owed
-   * after the fetch already out for the same card, else started now.
-   */
-  private refetchTimeline(): void {
-    const id = this.selectedEventsId();
-    if (id !== null && this.timelineFetch?.id === id) {
-      this.timelineFetch.owed = true;
-      return;
-    }
-    void this.loadTimeline();
-  }
-
-  private async loadTimeline(): Promise<void> {
-    const id = this.selectedEventsId();
-    const token = this.guard.begin(TIMELINE_KEY);
-    this.timelineFetch?.abort.abort();
-    this.timelineFetch = null;
-    if (!id) {
-      this.timelineState.ticketId = null;
-      this.timelineState.view = null;
-      this.logs.reset();
-      this.onChange();
-      return;
-    }
-    // The raw log pane tails a ticket attempt's log file; a Conversation's
-    // timeline reuses the same events fetch, but not the log pane (its own
-    // log-tailing story is not part of this surface yet).
-    const isTicket = this.selectedTicketId() === id;
-    this.timelineState.ticketId = id;
-    const request = { id, abort: new AbortController(), owed: false };
-    this.timelineFetch = request;
-    try {
-      const response = await this.getEvents(id, request.abort.signal);
-      // A newer selection or refetch may have begun while the fetch was out.
-      if (!this.guard.isCurrent(TIMELINE_KEY, token)) return;
-      this.applyTimeline(id, response);
-      if (!isTicket) {
-        this.logs.reset();
-        this.onChange();
-        return;
-      }
-      // The snapshot cadence doubles as the liveness signal: a newly
-      // selected ticket opens its pane, and an already-open pane follows
-      // the tail.
-      if (this.logs.state.ticketId !== id) {
-        this.openLogPane(id);
-      } else {
-        void this.logs.follow(id, this.timelineState.view);
-        this.onChange();
-      }
-    } catch {
-      if (this.guard.isCurrent(TIMELINE_KEY, token)) {
-        this.timelineState.view = null;
-        this.onChange();
-      }
-    } finally {
-      if (this.timelineFetch === request) {
-        this.timelineFetch = null;
-        if (request.owed) void this.loadTimeline();
-      }
+  private cancelGrace(): void {
+    if (this.graceTimer !== null) {
+      clearTimeout(this.graceTimer);
+      this.graceTimer = null;
     }
   }
+}
 
-  private applyTimeline(id: string, response: TicketEventsResponse): void {
-    const card = this.view?.cards.find(
-      (c) =>
-        (c.kind === "ticket" && c.ticketId === id) ||
-        (c.kind === "conversation" && c.conversationId === id),
-    );
-    this.timelineState.ticketId = id;
-    // A Conversation's status has no direct TicketStatus equivalent; `live`
-    // reads as `in-progress` for the timeline's running-attempt marker,
-    // anything else as `done` (nothing left running).
-    const status =
-      card?.kind === "ticket"
-        ? card.status
-        : card?.kind === "conversation"
-          ? card.status === "live"
-            ? "in-progress"
-            : "done"
-          : "ready";
-    this.timelineState.view = projectTimeline(response, status);
-  }
+/** The id a card subscribes under: a ticket's or a Conversation's own id.
+ *  Spawn and utility cards have no frames to subscribe to. */
+function subscriptionId(card: PoolCardView): string | null {
+  if (card.kind === "ticket") return card.ticketId;
+  if (card.kind === "conversation") return card.conversationId;
+  return null;
+}
 
-  /**
-   * Open the log pane for a newly selected ticket: the default attempt (the
-   * running one, else the latest), unclicked so the pane follows the live
-   * attempt as new attempts start. A ticket with no attempts holds an empty
-   * pane.
-   */
-  private openLogPane(ticketId: string): void {
-    const timeline =
-      this.timelineState.ticketId === ticketId ? this.timelineState.view : null;
-    const attempt = timeline ? selectLogAttempt(timeline, null) : null;
-    void this.logs.open(ticketId, attempt, false);
-  }
-
-  /**
-   * Fetch the selected ticket's body once, on first selection. The cache
-   * write is keyed by ticket id so a slow answer cannot clobber a newer
-   * selection's body; the repaint after it lands fires only while the body
-   * load is still the current one and the ticket is still selected.
-   */
-  private ensureTicketBody(ticketId: string): void {
-    if (this.ticketBodies.has(ticketId) || this.ticketBodyFetches.has(ticketId)) return;
-    const abort = new AbortController();
-    this.ticketBodyFetches.set(ticketId, abort);
-    const token = this.guard.begin(BODY_KEY);
-    this.getTicket(ticketId, abort.signal)
-      .then((ticket) => {
-        if (abort.signal.aborted) return;
-        this.ticketBodies.set(ticketId, ticket?.body ?? null);
-        this.ticketBodyErrors.delete(ticketId);
-      })
-      .catch((err) => {
-        // An abort is the selection moving on, not a failure to show.
-        if (abort.signal.aborted) return;
-        this.ticketBodyErrors.set(
-          ticketId,
-          `ticket body fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      })
-      .finally(() => {
-        if (this.ticketBodyFetches.get(ticketId) === abort) {
-          this.ticketBodyFetches.delete(ticketId);
-        }
-        if (
-          !abort.signal.aborted &&
-          this.guard.isCurrent(BODY_KEY, token) &&
-          this.selectedTicketId() === ticketId
-        ) {
-          this.onChange();
-        }
-      });
-  }
-
-  /**
-   * Refetch the grades on the snapshot cadence, one fetch out at a time: a
-   * snapshot landing while one is out asks for one more after it, never a
-   * second alongside, so a burst of snapshots costs two fetches, not one
-   * each (issue #157).
-   */
-  private refreshGrades(): void {
-    if (this.gradesInFlight) {
-      this.gradesOwed = true;
-      return;
-    }
-    this.gradesInFlight = true;
-    this.getGrades()
-      .then((next) => {
-        if (JSON.stringify(next) === JSON.stringify(this.grades)) return;
-        this.grades = next;
-        this.onChange();
-      })
-      .catch(() => {
-        // A failed grades fetch leaves the last good summaries in place;
-        // the next snapshot's cadence retries.
-      })
-      .finally(() => {
-        this.gradesInFlight = false;
-        if (this.gradesOwed) {
-          this.gradesOwed = false;
-          this.refreshGrades();
-        }
-      });
-  }
+/**
+ * The status the selected card's timeline reads its running attempt from.
+ * A Conversation's has no direct TicketStatus equivalent: `live` reads as
+ * `in-progress`, anything else as `done` (nothing left running).
+ */
+function timelineStatus(card: PoolCardView | undefined): TicketStatus {
+  if (card?.kind === "ticket") return card.status;
+  if (card?.kind === "conversation") return card.status === "live" ? "in-progress" : "done";
+  return "ready";
 }

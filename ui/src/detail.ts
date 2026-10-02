@@ -62,6 +62,9 @@ export interface DetailModel {
   /** The ticket's markdown body: undefined while the fetch is out, null when the pool has none. */
   detailBody: string | null | undefined;
   detailBodyError: string | null;
+  /** A refused answer's reason by ticket id (issue #161), beside the
+   *  interrupt's actions until the next answer. */
+  answerFailures?: Record<string, string>;
 }
 
 /** The handlers the Detail's interactive elements report through. */
@@ -128,6 +131,8 @@ export class Detail {
   // ticket ids on every render and would otherwise wipe this on the next
   // snapshot.
   private readonly conversationEndDrafts = new Map<string, string>();
+  // The render's refused answers, read by the interrupt form it draws.
+  private answerFailures: Record<string, string> = {};
   private readonly onClose: () => void;
 
   constructor(options: { onClose: () => void; drafts: DraftAnswers }) {
@@ -188,6 +193,7 @@ export class Detail {
   }
 
   render(model: DetailModel, handlers: DetailHandlers): HTMLElement {
+    this.answerFailures = model.answerFailures ?? {};
     const detail = h("div", { class: "detail" });
     const view = model.detail;
     if (!view) return detail;
@@ -355,6 +361,10 @@ export class Detail {
           : null,
       ),
     );
+    const answerFailure = this.answerFailures[interrupt.ticketId];
+    if (answerFailure) {
+      box.append(h("div", { class: "error-inline interrupt-answer-failure" }, answerFailure));
+    }
     const refusal = interrupt.keepTalking
       ? renderKeepTalkingFailure(interrupt.keepTalking)
       : null;
