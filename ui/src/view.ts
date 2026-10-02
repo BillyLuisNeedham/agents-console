@@ -211,6 +211,10 @@ export interface Handlers {
 
 export type ConsoleViewOptions = NeedsInputOptions &
   ConversationsOptions & {
+    /** Run something in the next frame. Given, the page's first render
+     *  leaves measuring the canvas's cards and drawing its edges to the frame
+     *  after it, so it forces no layout of its own (issue #161). */
+    settleLater?: (run: () => void) => void;
     /** "Open in herdr": focus a ticket's or a Conversation's pane; both are
      *  the same server-side seam, keyed by id. Resolves false on failure. */
     onFocusTerminal: (id: string) => Promise<boolean>;
@@ -323,6 +327,7 @@ export class ConsoleView {
       onChange: options.onChange,
       onCardTap: (nodeId) => this.selectNode(nodeId),
       onCardHover: (nodeId) => this.headerHandlers?.onHoverNode(nodeId),
+      settleLater: options.settleLater,
       onFocusTerminal: options.onFocusTerminal,
       onNewConversation: () => this.conversationsTray.openForm(),
       onStartSteward: () => this.conversationsTray.openStewardForm(),

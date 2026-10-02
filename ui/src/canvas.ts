@@ -431,6 +431,10 @@ export class Canvas {
   private stored: Record<string, Point> | null = null;
   /** Cards whose Assignment badge the operator has clicked open. */
   private readonly expandedBadges = new Set<string>();
+  /** Where the first bind leaves its measuring, when it may (issue #161),
+   *  and the edges it owes until then. */
+  private readonly settleLater: ((run: () => void) => void) | null;
+  private unsettled: { edges: TopologyEdge[]; selectedId: string | null } | null = null;
   /**
    * What each card on the page was drawn from (issue #161): its view, place,
    * selection and badge, as of the last committed render, and those the
@@ -467,6 +471,10 @@ export class Canvas {
     /** The pointer moved onto a card, or off every card (null), for the
      *  hover prefetch (issue #161). */
     onCardHover?: (nodeId: string | null) => void;
+    /** Run something in the next frame: given, the first bind measures the
+     *  cards and draws the edges there, after the first paint, rather than
+     *  forcing the page's first layout inside the render (issue #161). */
+    settleLater?: (run: () => void) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
     onNewConversation: () => void;
@@ -504,6 +512,7 @@ export class Canvas {
     this.onChange = options.onChange;
     this.onCardTap = options.onCardTap;
     this.onCardHover = options.onCardHover ?? (() => {});
+    this.settleLater = options.settleLater ?? null;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
     this.onStartSteward = options.onStartSteward;
@@ -629,12 +638,37 @@ export class Canvas {
     this.canvas = { viewport, world, svg, nodesById, edges: kept, boxes: new Map() };
     // The render is on the page: its cards are what the next one compares.
     this.drawn = this.drawing;
+    if (!this.view.seeded && this.settleLater) {
+      // A fresh page (issue #161): the canvas spans the window, so the pan
+      // is seeded from the window's width rather than the viewport's, and
+      // the cards are measured and the edges drawn in the next frame, so
+      // the first render forces no layout and the first paint waits on no
+      // edge. A render before that frame measures as every render does.
+      this.view.seeded = true;
+      this.view.x = Math.max(8, (window.innerWidth - WORLD_MIN_WIDTH) / 2);
+      this.view.y = 8;
+      this.applyTransform();
+      this.unsettled = { edges, selectedId };
+      this.settleLater(() => {
+        const owed = this.unsettled;
+        this.unsettled = null;
+        if (owed) this.settle(owed.edges, owed.selectedId);
+      });
+      return;
+    }
     if (!this.view.seeded && viewport.clientWidth > 0) {
       this.view.seeded = true;
       this.view.x = Math.max(8, (viewport.clientWidth - WORLD_MIN_WIDTH) / 2);
       this.view.y = 8;
       this.applyTransform();
     }
+    this.unsettled = null;
+    this.settle(edges, selectedId);
+  }
+
+  // Measure the cards, fit the world to them, and draw the edges: the
+  // reads first, in one pass, then only writes.
+  private settle(edges: TopologyEdge[], selectedId: string | null): void {
     this.measure();
     this.fitWorld();
     this.drawEdges(edges, selectedId);

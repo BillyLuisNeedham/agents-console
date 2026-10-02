@@ -363,6 +363,31 @@ describe("the canvas's edges across renders (#157)", () => {
     expect(root.querySelector("svg.canvas-edges marker")).not.toBeNull();
   });
 
+  it("leaves a fresh page's measuring and edges to the next frame, unless a render comes first (#161)", () => {
+    const queued: (() => void)[] = [];
+    const edges = { current: [{ source: "u-1", target: "u-2" }] as TopologyEdge[] };
+    const { root, commit } = mountCanvas(twoCards, { settleLater: (run) => queued.push(run) }, edges);
+    commit();
+    // The first render drew the cards and nothing that needs their layout.
+    expect(root.querySelectorAll(".node-card")).toHaveLength(3);
+    expect(root.querySelector("path.canvas-edge")).toBeNull();
+    // The pan is seeded from the window the fresh page's canvas spans.
+    expect(root.querySelector<HTMLElement>(".canvas-world")!.style.transform).toContain(
+      `translate(${Math.max(8, (window.innerWidth - 960) / 2)}px, 8px)`,
+    );
+    expect(queued).toHaveLength(1);
+    queued[0]!();
+    expect(root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    // A render before the frame measures as every render does, and the frame then has nothing left.
+    const again = mountCanvas(twoCards, { settleLater: (run) => queued.push(run) }, edges);
+    again.commit();
+    again.commit();
+    expect(again.root.querySelectorAll("path.canvas-edge")).toHaveLength(1);
+    const path = again.root.querySelector("path.canvas-edge");
+    queued[1]!();
+    expect(again.root.querySelector("path.canvas-edge")).toBe(path);
+  });
+
   it("adds, drops and restyles edges in place as the model's edges change", () => {
     const edges = { current: [{ source: "u-1", target: "u-2" }] as TopologyEdge[] };
     const { root, commit } = mountCanvas(twoCards, {}, edges);

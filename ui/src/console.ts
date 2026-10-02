@@ -13,7 +13,7 @@
  */
 
 import type { EmbeddedBoot, SocketLike } from "../../engine/protocol.ts";
-import { RenderLoop, type FrameRequest } from "./frame";
+import { nextFrame, RenderLoop, type FrameRequest } from "./frame";
 import {
   adoptingSpawn,
   discardedSpawn,
@@ -142,6 +142,9 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
   // optimistic ones through the session's overlays, the rest showing
   // their own "…ing" until the reply.
   const view = new ConsoleView({
+    // The first render paints the embedded snapshot's cards; their measuring
+    // and the edges between them follow in the next frame.
+    settleLater: options.frame ?? nextFrame,
     onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
     onChange: requestRender,
     onFocusTerminal: (id) => terminal.focus(id),
