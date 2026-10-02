@@ -42,6 +42,7 @@ import {
   toPushed,
   type CardSubscription,
   type ClientMessage,
+  type LogFollowResult,
   type LogPush,
   type PushedSnapshot,
   type ServerMessage,
@@ -250,6 +251,8 @@ class FakeSocket implements SocketLike {
         });
       }
       case "log.follow": {
+        // The window, naming the attempt and variant it is for, which a
+        // follow of `attempt: null` leaves to the server.
         const attempt = request.payload.attempt ?? latestAttempt(request.payload.id) ?? 1;
         const latest = tail(request.payload.id, attempt);
         const card = this.cards.get(request.payload.id);
@@ -257,7 +260,8 @@ class FakeSocket implements SocketLike {
           card.attempt = attempt;
           card.sent = latest.nextOffset;
         }
-        return ok(latest);
+        const result: LogFollowResult = { ...latest, attempt, stream: request.payload.stream };
+        return ok(result);
       }
       case "poolLog.read": {
         const before = Math.min(request.payload.before, poolLog.length);
