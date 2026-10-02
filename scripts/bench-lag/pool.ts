@@ -107,7 +107,9 @@ case "$mode" in
   live)
     mkdir -p src/live
     n=0
-    while [ ! -e "$release" ]; do
+    # The bench removes its whole root when it ends, release file and all,
+    # so a vanished root releases too.
+    while [ ! -e "$release" ] && [ -d "$(dirname "$release")" ]; do
       n=$((n + 1))
       # A tracked file that keeps changing, and untracked notes piling up:
       # what git status and diff --numstat see in a working agent's tree.

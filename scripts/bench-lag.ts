@@ -653,6 +653,9 @@ try {
     });
   }
 } finally {
+  // Anything the fake herdr's panes started outlives the herdr process, so
+  // reap whatever still runs from inside the root before removing it.
+  Bun.spawnSync(["pkill", "-f", root]);
   rmSync(root, { recursive: true, force: true });
 }
 
