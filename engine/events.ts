@@ -311,7 +311,7 @@ export function appendEvent(
  * may still be on its way. A file that shrank, moved to another inode, or
  * no longer ends its settled part with the bytes it did (removed and
  * written again) is parsed whole, as a new file. Callers get their own
- * array; the events in it are shared and are not edited by anyone.
+ * array; the events in it are shared, so they are frozen.
  */
 export function readEvents(runsDir: string, ticketId: string): TicketEvent[] {
   const path = eventsFile(runsDir, ticketId);
@@ -424,12 +424,23 @@ function parseLines(bytes: Uint8Array): TicketEvent[] {
       ) {
         continue;
       }
-      events.push(parsed);
+      events.push(deepFreeze(parsed));
     } catch {
       // torn line: skip it
     }
   }
   return events;
+}
+
+// The parse is shared by every reader (issue #157), so a caller that edited
+// an event would change it for all of them. Frozen, such an edit throws where
+// it is made instead.
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /** The highest recorded attempt, optionally only across events of one kind. */
