@@ -166,8 +166,8 @@ export interface AppModel {
   conversationsTray: ConversationTrayRow[];
   /** The pool's default Assignment, shown as the New Conversation form's placeholders. */
   conversationDefaults: { harness?: string; model?: string; drivers?: string };
-  /** The Steward on duty (ADR-0030); null when none is. The header names it,
-   *  and Start Steward and Enlist as Steward stand disabled while it is. */
+  /** The Steward on duty (ADR-0030); null when none is. The Conversations
+   *  tray's Steward box names it, and Start Steward and Enlist as Steward stand disabled while it is. */
   steward: StewardOnDutyView | null;
   /** The Steward's Assignment (its Pool settings entry over the pool
    *  defaults), shown as the Start Steward form's placeholders. */
@@ -333,9 +333,6 @@ export class ConsoleView {
       onCardHover: (nodeId) => this.headerHandlers?.onHoverNode(nodeId),
       settleLater: options.settleLater,
       onFocusTerminal: options.onFocusTerminal,
-      onNewConversation: () => this.conversationsTray.openForm(),
-      onStartSteward: () => this.conversationsTray.openStewardForm(),
-      onFocusSteward: (cardId) => this.focusCard(cardId),
       onEnlist: () => {
         void this.enlist.openPicker();
       },
@@ -424,7 +421,10 @@ export class ConsoleView {
       this.conversationsTray.render(
         model.conversationsTray,
         model.conversationDefaults,
-        { onSelect: (cardId) => this.selectNode(cardId) },
+        {
+          onSelect: (cardId) => this.selectNode(cardId),
+          onFocusSteward: (cardId) => this.focusCard(cardId),
+        },
         { onDuty: model.steward, defaults: model.stewardDefaults },
       ),
       this.enlist.render(model.enlistBlocks, model.steward),
@@ -469,7 +469,7 @@ export class ConsoleView {
     this.onSelectNode?.(this.selectedNodeId);
   }
 
-  // The header's Steward line (ADR-0030): its card selected, its Detail
+  // The Conversations tray's Steward box (ADR-0030): its card selected, its Detail
   // open, and the canvas panned to it. A select rather than a toggle, so a
   // second click never closes what the first opened; and out of fullscreen,
   // which would cover the card it brings into view.

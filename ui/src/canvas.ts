@@ -15,8 +15,6 @@ import {
   checkpointNotice,
   conversationTurnLabel,
   statusLabel,
-  stewardLiveReason,
-  stewardOnDutyLine,
   UNASSIGNED_LABEL,
   VITALS_MAX_SAMPLES,
   type AssignmentView,
@@ -26,7 +24,6 @@ import {
   type SpawnCardView,
   type RunPhase,
   type SpawnLineView,
-  type StewardOnDutyView,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -370,9 +367,6 @@ export interface CanvasModel {
   spawnLine: SpawnLineView | null;
   /** The header's "Close N finished terminals" control (issue #139). */
   closeTerminals: CloseTerminalsView;
-  /** The Steward on duty (ADR-0030): the header says so, a click focusing
-   *  its card, and Start Steward stands disabled. Null when none is. */
-  steward: StewardOnDutyView | null;
 }
 
 /**
@@ -449,9 +443,6 @@ export class Canvas {
   /** The card the pointer is over, so a move inside it reports nothing. */
   private hoveredCard: string | null = null;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
-  private readonly onNewConversation: () => void;
-  private readonly onStartSteward: () => void;
-  private readonly onFocusSteward: (cardId: string) => void;
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
   private readonly onOpenHeldSpawns: () => void;
@@ -476,13 +467,6 @@ export class Canvas {
      *  forcing the page's first layout inside the render (issue #161). */
     settleLater?: (run: () => void) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
-    /** The header's "New Conversation" button: opens the Conversations tray's form. */
-    onNewConversation: () => void;
-    /** The header's "Start Steward" button (ADR-0030): opens the
-     *  Conversations tray's Start Steward form. */
-    onStartSteward: () => void;
-    /** The header's "Steward on duty" line: select and reveal its card. */
-    onFocusSteward: (cardId: string) => void;
     /** The header's "Enlist terminal" button (issue #101): opens the pane
      *  picker. Offered only on a Terminal-backed pool. */
     onEnlist: () => void;
@@ -514,9 +498,6 @@ export class Canvas {
     this.onCardHover = options.onCardHover ?? (() => {});
     this.settleLater = options.settleLater ?? null;
     this.onFocusTerminal = options.onFocusTerminal;
-    this.onNewConversation = options.onNewConversation;
-    this.onStartSteward = options.onStartSteward;
-    this.onFocusSteward = options.onFocusSteward;
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
@@ -1000,6 +981,12 @@ export class Canvas {
     );
   }
 
+  /**
+   * The canvas header: the status lines, which ellipsise rather than push
+   * the tools off the edge, then the view tools and the pool tools, which
+   * wrap at a narrow width. The Steward and New Conversation live in the
+   * Conversations tray, not here.
+   */
   private renderCanvasHeader(model: CanvasModel): HTMLElement {
     const edgeToggle = h("input", {
       type: "checkbox",
@@ -1012,25 +999,28 @@ export class Canvas {
     return h(
       "div",
       { class: "canvas-header" },
-      h("span", { class: "dim" }, canvasStatusText(model)),
-      model.steward ? this.renderStewardOnDuty(model.steward) : null,
-      model.mergeQueueLine
-        ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
-        : null,
-      model.spawnLine
-        ? h(
-            "button",
-            {
-              class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
-              type: "button",
-              // The line ellipsises in a narrow header, so the hover says it whole.
-              title: `${model.spawnLine.text} (open the pending and held spawns)`,
-              onclick: () => this.onOpenHeldSpawns(),
-            },
-            model.spawnLine.text,
-          )
-        : null,
-      model.error ? h("span", { class: "error-inline" }, model.error) : null,
+      h(
+        "div",
+        { class: "canvas-lines" },
+        h("span", { class: "dim canvas-status" }, canvasStatusText(model)),
+        model.mergeQueueLine
+          ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
+          : null,
+        model.spawnLine
+          ? h(
+              "button",
+              {
+                class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
+                type: "button",
+                // The line ellipsises in a narrow header, so the hover says it whole.
+                title: `${model.spawnLine.text} (open the pending and held spawns)`,
+                onclick: () => this.onOpenHeldSpawns(),
+              },
+              model.spawnLine.text,
+            )
+          : null,
+        model.error ? h("span", { class: "error-inline" }, model.error) : null,
+      ),
       h(
         "div",
         { class: "canvas-tools" },
@@ -1055,6 +1045,22 @@ export class Canvas {
           { class: "btn", title: "reset pan and zoom", onclick: () => this.resetView() },
           "reset",
         ),
+        h(
+          "button",
+          {
+            class: "btn canvas-reset-layout",
+            title: "restore default card positions and the needs input tray's width",
+            onclick: () => {
+              this.resetLayout(model.cards);
+              this.applyPositions();
+              this.fitWorld();
+              this.routeEdges();
+              this.onResetLayout();
+            },
+          },
+          "reset layout",
+        ),
+        h("span", { class: "canvas-tools-sep" }),
         model.terminalBacked
           ? h(
               "button",
@@ -1075,74 +1081,16 @@ export class Canvas {
           },
           "Settings",
         ),
-        h(
-          "button",
-          {
-            class: "btn btn-primary canvas-new-conversation",
-            title: "start a new Conversation",
-            onclick: () => this.onNewConversation(),
-          },
-          "New Conversation",
-        ),
-        h(
-          "button",
-          {
-            class: "btn canvas-start-steward",
-            disabled: model.steward !== null,
-            title: model.steward
-              ? stewardLiveReason(model.steward)
-              : "start a Steward to answer Interrupts while you are away",
-            onclick: () => this.onStartSteward(),
-          },
-          "Start Steward",
-        ),
         this.renderCloseTerminalsControl(model.closeTerminals),
         this.renderStopControl(model.stop),
-        h(
-          "button",
-          {
-            class: "btn",
-            title: "restore default card positions and the needs input tray's width",
-            onclick: () => {
-              this.resetLayout(model.cards);
-              this.applyPositions();
-              this.fitWorld();
-              this.routeEdges();
-              this.onResetLayout();
-            },
-          },
-          "reset layout",
-        ),
       ),
     );
   }
 
   /**
-   * The header's word that a Steward is on duty (ADR-0030), first after the
-   * status line because it says who is answering while the operator is
-   * away. A click selects the Steward's card and brings it into view. While
-   * its Notices keep failing it is on duty but blind to every Interrupt, so
-   * the line warns and the hover says why.
-   */
-  private renderStewardOnDuty(steward: StewardOnDutyView): HTMLElement {
-    return h(
-      "button",
-      {
-        class: "canvas-steward" + (steward.delivery ? " canvas-steward-warn" : ""),
-        type: "button",
-        title: steward.delivery
-          ? `${steward.delivery.text} (${steward.delivery.lastError}); show its card`
-          : `${steward.title} is on duty (show its card)`,
-        onclick: () => this.onFocusSteward(steward.cardId),
-      },
-      stewardOnDutyLine(steward),
-    );
-  }
-
-  /**
    * Pan the canvas so a card stands in view, its middle across and a third
-   * of the way down, at the current zoom: the header's Steward line uses it
-   * to take the operator to a card that may be far off screen.
+   * of the way down, at the current zoom: the Conversations tray's Steward
+   * box uses it to take the operator to a card that may be far off screen.
    */
   reveal(nodeId: string): void {
     const pos = this.nodePos.get(nodeId);

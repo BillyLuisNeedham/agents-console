@@ -41,7 +41,6 @@ import {
   stewardBudgetText,
   stewardLiveReason,
   stewardOnDuty,
-  stewardOnDutyLine,
   projectLogPane,
   projectNeedsInput,
   projectHeldSpawns,
@@ -3913,9 +3912,8 @@ describe("the Steward (ADR-0030)", () => {
     expect(stewardOnDuty([steward({ ending: true })])?.conversationId).toBe("conv-3");
   });
 
-  it("names the Steward on duty in the header and in the reason Start Steward is disabled", () => {
+  it("names the Steward on duty in the reason Start Steward is disabled", () => {
     const onDuty = stewardOnDuty([steward()])!;
-    expect(stewardOnDutyLine(onDuty)).toBe("Steward on duty · conv-3");
     expect(stewardLiveReason(onDuty)).toContain("conv-3");
   });
 
@@ -4192,11 +4190,10 @@ describe("a Conversation whose Notices are not landing", () => {
     );
   });
 
-  it("makes the Steward on duty read as blind in the header", () => {
+  it("makes the Steward on duty read as blind while its Notices fail", () => {
     const blind = stewardOnDuty([conversation("conv-3", { role: "steward", delivery })])!;
     expect(blind.delivery?.lastError).toBe(delivery.lastError);
-    expect(stewardOnDutyLine(blind)).toBe("Steward on duty · conv-3 · Notices not landing");
     const fine = stewardOnDuty([conversation("conv-3", { role: "steward" })])!;
-    expect(stewardOnDutyLine(fine)).toBe("Steward on duty · conv-3");
+    expect(fine.delivery).toBeNull();
   });
 });

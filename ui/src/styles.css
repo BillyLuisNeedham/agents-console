@@ -320,14 +320,35 @@ body {
 
 /* ------------------------------------------------------------- graph canvas */
 
+/* The header never runs off the right edge: the status lines take what is
+   left and ellipsise, and at a narrow width the tools wrap, first among
+   themselves, then onto a row of their own. */
 .canvas-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   flex-shrink: 0;
+}
+
+.canvas-lines {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.canvas-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The Merge queue line (issue #129): present only while the hold stands. */
@@ -367,9 +388,25 @@ body {
 
 .canvas-tools {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 4px;
   margin-left: auto;
+}
+
+/* A tool never squeezes its label onto two lines; the row wraps instead. */
+.canvas-tools > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Between the view tools and the pool tools. */
+.canvas-tools-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border);
 }
 
 /* The Stop control and the stopped-server notice (issue #97). The control
@@ -2234,8 +2271,12 @@ textarea.conversations-field {
   font-size: 11px;
 }
 
+/* A row wraps rather than clip: the Steward's badge would push its idle age
+   out of the tray. */
 .conversations-row {
   display: flex;
+  flex-wrap: wrap;
+  row-gap: 2px;
   align-items: center;
   gap: 8px;
   padding: 6px 4px;
@@ -3170,29 +3211,66 @@ textarea.conversations-field {
   border-left: 3px solid var(--steward);
 }
 
-/* The header's "Steward on duty" line: a bare button, the Spawn caps line's
-   shape, that selects the Steward's card and brings it into view. */
-.canvas-steward {
-  flex-shrink: 0;
+/* The Conversations tray's Steward box: pinned at the top of the tray as it
+   scrolls, in the Steward's hue while one is on duty, dashed while none is. */
+.steward-box {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--steward);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--steward) 8%, transparent);
+}
+
+.steward-box-off {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  border-style: dashed;
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.steward-box-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.steward-box-name {
+  max-width: 100%;
   padding: 0;
-  background: none;
   border: none;
+  background: none;
+  text-align: left;
+  overflow-wrap: anywhere;
   color: var(--steward);
   font-family: var(--mono);
   font-size: 12px;
-  white-space: nowrap;
   cursor: pointer;
 }
 
-.canvas-steward:hover {
+.steward-box-name:hover {
   text-decoration: underline;
 }
 
-/* The Conversations tray's head carries both form toggles. */
-.conversations-head-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* The Steward on duty but blind: its Notices are not landing. */
+.steward-box-warn {
+  border-color: var(--status-running);
+}
+
+.steward-box-warn-text {
+  color: var(--status-running);
+  font-size: 11px;
 }
 
 .conversations-steward-toggle {
@@ -3304,17 +3382,8 @@ textarea.steward-orders {
   white-space: pre-wrap;
 }
 
-/* The tray row wraps so its warning takes a line of its own. */
-.conversations-row-blocked {
-  flex-wrap: wrap;
-}
-
+/* The tray row's warning takes a line of its own. */
 .conversations-row-blocked .conversation-delivery-warn {
   flex-basis: 100%;
   margin: 0;
-}
-
-/* The Steward on duty but blind: its Notices are not landing. */
-.canvas-steward-warn {
-  color: var(--status-running);
 }
