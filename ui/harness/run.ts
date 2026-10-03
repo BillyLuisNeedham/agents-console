@@ -65,36 +65,48 @@ const server = Bun.serve({
 });
 const url = `http://127.0.0.1:${server.port}/`;
 
-// 3. Drive Chromium and take the DOM once the page has written its report
-const chrome = await run(
-  [
-    chromium,
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
-    "--hide-scrollbars",
-    "--window-size=1600,1000",
-    "--virtual-time-budget=15000",
-    "--dump-dom",
-    url,
-  ],
-  ui,
-  90_000,
-);
+// 3. Drive Chromium and take the DOM once the page has written its report:
+// the full run at a wide window, then the layout checks alone at a narrow
+// one, where the canvas header and the Conversations tray are tightest.
+type Report = { renders?: number; error?: string; checks: Check[] };
+async function drive(size: string, query: string, dump: string): Promise<Report> {
+  const chrome = await run(
+    [
+      chromium,
+      "--headless=new",
+      "--disable-gpu",
+      "--no-sandbox",
+      "--hide-scrollbars",
+      `--window-size=${size}`,
+      "--virtual-time-budget=15000",
+      "--dump-dom",
+      url + query,
+    ],
+    ui,
+    90_000,
+  );
+  // The dumped page, for a look at what rendered when a check surprises you.
+  await Bun.write(join(dist, dump), chrome.out);
+  if (chrome.code !== 0) {
+    console.error(chrome.err);
+    process.exit(chrome.code);
+  }
+  const match = chrome.out.match(/<pre id="report" hidden(?:="")?>([^<]*)<\/pre>/);
+  if (!match || !match[1]) {
+    console.error(`no report in the ${size} page; Chromium stderr follows\n` + chrome.err);
+    process.exit(2);
+  }
+  const json = new TextDecoder().decode(Uint8Array.from(atob(match[1]), (c) => c.charCodeAt(0)));
+  return JSON.parse(json) as Report;
+}
+const wide = await drive("1600,1000", "", "page.html");
+const narrow = await drive("1024,800", "?layout", "page-narrow.html");
 server.stop(true);
-// The dumped page, for a look at what rendered when a check surprises you.
-await Bun.write(join(dist, "page.html"), chrome.out);
-if (chrome.code !== 0) {
-  console.error(chrome.err);
-  process.exit(chrome.code);
-}
-const match = chrome.out.match(/<pre id="report" hidden(?:="")?>([^<]*)<\/pre>/);
-if (!match || !match[1]) {
-  console.error("no report in the page; Chromium stderr follows\n" + chrome.err);
-  process.exit(2);
-}
-const json = new TextDecoder().decode(Uint8Array.from(atob(match[1]), (c) => c.charCodeAt(0)));
-const report = JSON.parse(json) as { renders?: number; error?: string; checks: Check[] };
+const report: Report = {
+  renders: wide.renders,
+  error: [wide.error, narrow.error && `narrow: ${narrow.error}`].filter(Boolean).join("; ") || undefined,
+  checks: [...wide.checks, ...narrow.checks],
+};
 
 if (wantJson) {
   console.log(JSON.stringify(report, null, 2));
