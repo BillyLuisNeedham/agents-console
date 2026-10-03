@@ -44,6 +44,9 @@ export function answered(ticketId: string, action: ResumeAction, note?: string):
       ticketId,
       kind: interrupt.kind,
       ...(action === "approve" ? { approve: true } : action === "reject" ? { approve: false } : {}),
+      // A Close (issue #154) shows as closing from the press, as the
+      // engine's queued answer will.
+      ...(action === "close" ? { action: "close" as const } : {}),
       ...(note ? { note } : {}),
       at,
       processedAt: null,

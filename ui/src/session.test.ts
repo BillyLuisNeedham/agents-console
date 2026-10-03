@@ -646,6 +646,15 @@ describe("optimistic presses (issue #161)", () => {
     expect(session.model({}).answerFailures).toEqual({});
   });
 
+  it("draws a Close as closing in the press's frame and sends it as close (issue #154)", () => {
+    const { r, session } = sessionOver(waiting());
+    void session.answer("A", "close", "not needed").catch(() => {});
+    const row = session.model({}).needsInput.find((x) => x.ticketId === "A");
+    expect(row?.interrupt.queued).toBe(true);
+    expect(row?.interrupt.closing).toBe(true);
+    expect(r.last("resume").payload).toEqual({ ticketId: "A", action: "close", note: "not needed" });
+  });
+
   it("rolls a refused answer back and puts the reason beside it until the next answer", async () => {
     const { r, session } = sessionOver(waiting());
     const settled = session.answer("A", "resume").catch((err: unknown) => err);
