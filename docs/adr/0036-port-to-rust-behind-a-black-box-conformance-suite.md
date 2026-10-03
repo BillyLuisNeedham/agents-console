@@ -18,7 +18,7 @@ We decided that **the whole Console moves to Rust in one go, proved by a black-b
   - M4: the HTTP and socket server and the subcommands.
   - M5: the bench gates, the render-survival harness, real pools and the flip.
   - Each milestone ends by merging main into the branch and porting whatever engine behaviour landed on main in the meantime.
-- **Unattended.** The run happens while the operator is away. Port tickets run at effort max with no verify, because the conformance pass share in each ticket's acceptance is the bar. The Conversation that planned the port proposes each wave from the results of the last. The Steward answers Interrupts with this ADR and #162 as its authority.
+- **Unattended.** The run happens while the operator is away. Port tickets run at high effort with no verify, because the conformance pass share in each ticket's acceptance is the bar. The Conversation that planned the port proposes each wave from the results of the last. The Steward answers Interrupts with this ADR and #162 as its authority.
 - **The flip.** All work lands on `feature/162-rust-migration`, and the run ends there fully switched: Rust is the engine and the TypeScript engine is deleted. Before handing over, the conformance suite, all 9 bench gates and the render-survival harness pass on Linux, and 2 real throwaway pools have run end to end. The operator then runs the gates and one pool on the Mac, reviews the one PR, and merges it. The merge is the flip, and git is the rollback. No engine setting chooses between Bun and Rust.
 
 **Considered options**:
