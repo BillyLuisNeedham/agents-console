@@ -2,12 +2,18 @@
  * The Jev wire fake, in the herdr-fake.ts spirit: not a test file, so
  * importing it never drags another suite's cases in.
  *
- * `startFakeJev` is a scripted `fetch` handed to the real SDK client,
- * speaking the real request and response shape of `POST /v1/systemone`, so
- * jev.test.ts exercises the SDK's retries, error classes and body parsing
- * for real without a network. Scripted by options (an answer per question
- * id, a failure to serve, a garbage body, a delay); assertions read
- * `requests` afterwards.
+ * It speaks the real request and response shape of `POST /v1/systemone`,
+ * scripted by options (an answer per question id, a failure to serve, a
+ * garbage body, a delay); assertions read `requests` afterwards. It comes
+ * in two forms over one handler:
+ *
+ * - `startFakeJev` is a scripted `fetch` handed to the real SDK client, so
+ *   jev.test.ts exercises the SDK's retries, error classes and body parsing
+ *   for real without a network.
+ * - `serveFakeJev` is the same fake as an HTTP server on a free local port,
+ *   for a server under test running as its own process: the CLI boundary
+ *   reads `JEV_BASE_URL` beside `TYPESAFE_API_KEY`, so a conformance case
+ *   points the server at `url` and scripts what Jev answers (ADR-0036).
  *
  * It sits in conformance/fixtures (ADR-0036), where nothing may import the
  * engine but the wire's types, so it speaks only the API's own shapes. The
@@ -43,6 +49,12 @@ export interface FakeJevRequest {
 export interface FakeJevOptions {
   /** Answers by question id; an unscripted question gets a uniform answer of its type. */
   answers?: Record<string, ScriptedAnswer>;
+  /**
+   * Answers by question id for one request, from the Evidence it carries
+   * as `state`; laid over `answers`. How a case answers each Attempt of a
+   * verify round differently, whatever order the asks arrive in.
+   */
+  answersFor?: (state: unknown) => Record<string, ScriptedAnswer>;
   /** Serve this HTTP status instead of answers, for the first `times` requests (every request when unset). */
   fail?: { status: number; body?: unknown; times?: number };
   /** Serve a 200 whose body is not JSON. */
@@ -67,42 +79,104 @@ export function stopFakeJevs(): void {
 }
 
 export function startFakeJev(options: FakeJevOptions = {}): FakeJev {
+  const fake = fakeJevHandler(options);
+  const fetch: Fetch = async (input, init) => {
+    const response = await fake.respond(input, new Headers(init?.headers), String(init?.body ?? "{}"), init?.signal);
+    if (response === "disconnect") throw new TypeError("fetch failed: connection refused");
+    return response;
+  };
+  return { fetch, requests: fake.requests };
+}
+
+/** The served fake: `disconnect` has no meaning over a socket, so a case wanting a dead network points the server at a port nobody listens on. */
+export type ServedFakeJevOptions = Omit<FakeJevOptions, "disconnect">;
+
+export interface ServedFakeJev {
+  /** The API root to hand a server as `JEV_BASE_URL`, `http://127.0.0.1:<port>`. */
+  url: string;
+  requests: FakeJevRequest[];
+  stop(): Promise<void>;
+}
+
+/** The fake as an HTTP server on a free local port. Every request is recorded; any path but `POST /v1/systemone` answers 404. */
+export function serveFakeJev(options: ServedFakeJevOptions = {}): ServedFakeJev {
+  const fake = fakeJevHandler(options);
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const body = await request.text();
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/systemone") {
+        fake.requests.push({ url: request.url, authorization: request.headers.get("authorization"), body: parseBody(body) });
+        return json(404, { error: `no route ${request.method} ${new URL(request.url).pathname}` });
+      }
+      const response = await fake.respond(request.url, request.headers, body, request.signal);
+      if (response === "disconnect") throw new Error("unreachable: the served fake takes no disconnect");
+      return response;
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    requests: fake.requests,
+    async stop() {
+      await server.stop(true);
+    },
+  };
+}
+
+function parseBody(text: string): FakeJevRequest["body"] {
+  try {
+    return JSON.parse(text) as FakeJevRequest["body"];
+  } catch {
+    return { state: text, questions: {} };
+  }
+}
+
+/** The one reading of the options both forms share: record the request, then serve what was scripted. */
+function fakeJevHandler(options: FakeJevOptions): {
+  requests: FakeJevRequest[];
+  respond(
+    url: string,
+    headers: Headers,
+    rawBody: string,
+    signal: AbortSignal | null | undefined,
+  ): Promise<Response | "disconnect">;
+} {
   const requests: FakeJevRequest[] = [];
   let failuresServed = 0;
+  return {
+    requests,
+    async respond(url, headers, rawBody, signal) {
+      const body = JSON.parse(rawBody) as FakeJevRequest["body"];
+      requests.push({ url, authorization: headers.get("authorization"), body });
 
-  const fetch: Fetch = async (input, init) => {
-    const url = input;
-    const headers = new Headers(init?.headers);
-    const body = JSON.parse(String(init?.body ?? "{}")) as FakeJevRequest["body"];
-    requests.push({ url, authorization: headers.get("authorization"), body });
-
-    if (options.delayMs !== undefined) await hold(options.delayMs, init?.signal);
-    if (options.disconnect) throw new TypeError("fetch failed: connection refused");
-    if (options.fail && (options.fail.times === undefined || failuresServed < options.fail.times)) {
-      failuresServed += 1;
-      return json(options.fail.status, options.fail.body ?? { error: `status ${options.fail.status}` });
-    }
-    if (options.garbage) {
-      return new Response("<html>not json</html>", {
-        status: 200,
-        headers: { "content-type": "application/json" },
+      if (options.delayMs !== undefined) await hold(options.delayMs, signal);
+      if (options.disconnect) return "disconnect";
+      if (options.fail && (options.fail.times === undefined || failuresServed < options.fail.times)) {
+        failuresServed += 1;
+        return json(options.fail.status, options.fail.body ?? { error: `status ${options.fail.status}` });
+      }
+      if (options.garbage) {
+        return new Response("<html>not json</html>", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const scripted = { ...options.answers, ...options.answersFor?.(body.state) };
+      const answers: Record<string, unknown> = {};
+      for (const [id, question] of Object.entries(body.questions)) {
+        answers[id] = answerFor(question, scripted[id]);
+      }
+      return json(200, {
+        model: body.model ?? DEFAULT_MODEL,
+        answers,
+        usage: {
+          input_tokens: Math.ceil(rawBody.length / CHARS_PER_TOKEN),
+          output_tokens: 0,
+        },
       });
-    }
-    const answers: Record<string, unknown> = {};
-    for (const [id, question] of Object.entries(body.questions)) {
-      answers[id] = answerFor(question, options.answers?.[id]);
-    }
-    return json(200, {
-      model: body.model ?? DEFAULT_MODEL,
-      answers,
-      usage: {
-        input_tokens: Math.ceil(String(init?.body ?? "").length / CHARS_PER_TOKEN),
-        output_tokens: 0,
-      },
-    });
+    },
   };
-
-  return { fetch, requests };
 }
 
 function json(status: number, body: unknown): Response {

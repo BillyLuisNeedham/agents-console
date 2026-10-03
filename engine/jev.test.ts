@@ -76,10 +76,13 @@ describe("createJev: answers", () => {
     const saved = {
       key: process.env.TYPESAFE_API_KEY,
       url: process.env.TYPESAFE_BASE_URL,
+      jevUrl: process.env.JEV_BASE_URL,
       model: process.env.TYPESAFE_DEFAULT_MODEL,
     };
     process.env.TYPESAFE_API_KEY = "from-env";
     process.env.TYPESAFE_BASE_URL = "http://127.0.0.1:1";
+    // The boundary's own variable too: only server.ts reads it.
+    process.env.JEV_BASE_URL = "http://127.0.0.1:2";
     process.env.TYPESAFE_DEFAULT_MODEL = "jev-from-env";
     try {
       const fake = startFakeJev();
@@ -98,8 +101,19 @@ describe("createJev: answers", () => {
     } finally {
       restore("TYPESAFE_API_KEY", saved.key);
       restore("TYPESAFE_BASE_URL", saved.url);
+      restore("JEV_BASE_URL", saved.jevUrl);
       restore("TYPESAFE_DEFAULT_MODEL", saved.model);
     }
+  });
+
+  it("sends to the base URL the boundary passes in, and to the pinned root without one", async () => {
+    const fake = startFakeJev();
+    await configured(fake, { baseURL: "http://127.0.0.1:4141" }).ask(EVIDENCE, QUESTIONS);
+    await configured(fake).ask(EVIDENCE, QUESTIONS);
+    expect(fake.requests.map((req) => req.url)).toEqual([
+      "http://127.0.0.1:4141/v1/systemone",
+      `${JEV_BASE_URL}/v1/systemone`,
+    ]);
   });
 });
 

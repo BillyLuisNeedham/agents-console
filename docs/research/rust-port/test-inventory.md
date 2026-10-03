@@ -359,7 +359,7 @@ take.
 
 **Decided** (2026-10-03, by the planning Conversation conv-1, within ADR-0036):
 
-1. Jev: (a). The CLI boundary in `server.ts` reads a Jev base URL beside `TYPESAFE_API_KEY` and passes it in explicitly, and the Rust server does the same. A ticket makes this change to the reference server, and C22 waits on it.
+1. Jev: (a). The CLI boundary in `server.ts` reads a Jev base URL beside `TYPESAFE_API_KEY` and passes it in explicitly, and the Rust server does the same. A ticket makes this change to the reference server, and C22 waits on it. Done by conv-1-spawn-9: the variable is `JEV_BASE_URL` (unset, the pinned `https://api.typesafe.ai`; the SDK's `TYPESAFE_BASE_URL` still changes nothing), and a case scripts Jev with `t.jev({ answers, answersFor, fail, garbage, delayMs })` and `t.start(world, { jev })`, which sets the key and the URL (`conformance/fixtures/jev-fake.ts`, `serveFakeJev`). A dead network is a `JEV_BASE_URL` naming a port nobody listens on. `conformance/cases/jev.test.ts` holds the first case, `engine.test.ts:2428`'s row.
 2. Timings: (a). Real waits behind a slow tag, and no knobs. Revisit if the suite gets too slow to run for each ticket.
 3. Client code in `protocol.ts`: as recommended. A ticket moves the client half out of `engine/` now, so the generated file only has to carry types and constants.
 4. Prompts, teaching Turns and Notices are pinned byte for byte. The tickets for those areas add a whole-text comparison.

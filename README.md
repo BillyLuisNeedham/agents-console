@@ -72,6 +72,12 @@ boot. Without the key, or whenever Jev cannot answer, every decision takes
 the heuristic path it always had (see
 `docs/adr/0020-jev-gates-paths-engine-writes-status.md`).
 
+`JEV_BASE_URL` sends Jev's requests to another API root instead of
+`https://api.typesafe.ai`. Leave it unset in everyday use: it exists so the
+conformance suite can point the server at a fake TypeSafe endpoint and script
+what Jev answers (`docs/adr/0036-port-to-rust-behind-a-black-box-conformance-suite.md`).
+The SDK's own `TYPESAFE_BASE_URL` changes nothing.
+
 ## Run
 
 Runtime is bun.

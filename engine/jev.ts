@@ -14,10 +14,12 @@
  * one per call.
  *
  * The API key never enters this module from the environment: the CLI
- * boundary (server.ts) reads `TYPESAFE_API_KEY` and passes it in. Every
- * option the SDK would otherwise read from `process.env` (base URL, model,
- * log level) is passed explicitly here, so nothing below the boundary
- * consults the environment (the rule at engine.ts, RunOptions).
+ * boundary (server.ts) reads `TYPESAFE_API_KEY` and passes it in, and with
+ * it `JEV_BASE_URL` when set, so a conformance run can point the server at a
+ * fake TypeSafe endpoint (ADR-0036). Every option the SDK would otherwise
+ * read from `process.env` (base URL, model, log level) is passed explicitly
+ * here, so nothing below the boundary consults the environment (the rule at
+ * engine.ts, RunOptions).
  */
 
 import {
@@ -59,7 +61,7 @@ export type {
 
 /** The model every request names; the SDK's own default, pinned here so a `TYPESAFE_DEFAULT_MODEL` in the environment changes nothing. */
 export const JEV_MODEL = "jev-latest";
-/** The API root, pinned for the same reason as the model. */
+/** The API root when the boundary passes none, pinned for the same reason as the model. */
 export const JEV_BASE_URL = "https://api.typesafe.ai";
 
 /**
@@ -138,6 +140,8 @@ export interface Jev {
 export interface JevOptions {
   /** The key the CLI boundary read. Absent, the port is unconfigured. */
   apiKey?: string;
+  /** The API root the boundary read from the `JEV_BASE_URL` variable; the pinned root when unset. */
+  baseURL?: string;
   /** Transport override; the wire fake hands one in. Defaults to global fetch. */
   fetch?: Fetch;
   /** Per-attempt timeout in ms; the SDK's default (10s) when unset. */
@@ -198,7 +202,7 @@ export function createJev(options: JevOptions = {}): Jev {
   const client = configured
     ? new TypeSafeClient({
         apiKey: options.apiKey,
-        baseURL: JEV_BASE_URL,
+        baseURL: options.baseURL ?? JEV_BASE_URL,
         defaultModel: JEV_MODEL,
         logLevel: "error",
         logger: silentLogger,
