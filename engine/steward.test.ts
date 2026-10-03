@@ -174,6 +174,19 @@ describe("what the Steward is told about", () => {
     expect(approval.text).toContain("Steward budget on 03 is spent (5 of 5)");
   });
 
+  // ADR-0035: Adopt is the operator's alone, so the Steward is never offered
+  // it, not even on a paused verify round's checkpoint that names Candidates.
+  it("never offers adopt, even on a checkpoint naming candidates with Close on", () => {
+    const [checkpoint] = stewardItems(
+      view({
+        interrupts: [{ ticketId: "01", kind: "checkpoint", body: "a round paused", candidates: [2, 3] }],
+        mayClose: true,
+      }),
+    );
+    expect(checkpoint.text).toContain("Answers: answer 01 resume [note], or close 01 <note>;");
+    expect(checkpoint.text).not.toContain("adopt");
+  });
+
   it("offers close on a checkpoint and a merge conflict only while the pool lets the Steward Close", () => {
     const interrupts = [
       { ticketId: "01", kind: "checkpoint", body: "ask me" },
@@ -323,6 +336,8 @@ describe("the Steward's command", () => {
       body: { conversation: "conv-1", ticketId: "01", action: "close", note: "superseded by 02" },
     });
     expect(stewardCall("conv-1", "close", ["01", "-"], stdin).body).toMatchObject({ note: "from stdin" });
+    // Adopt is the operator's (ADR-0035): the command has no word for it.
+    expect(() => stewardCall("conv-1", "answer", ["01", "adopt", "2"], stdin)).toThrow("answer <ticket>");
     // A close always says why; answer keeps its own three actions.
     expect(() => stewardCall("conv-1", "close", ["01"], stdin)).toThrow("close <ticket> <note>");
     expect(() => stewardCall("conv-1", "answer", ["01", "close", "x"], stdin)).toThrow("answer <ticket>");
@@ -740,6 +755,19 @@ describe("the Steward's answers", () => {
 
   // Issue #154: Close is the operator's unless the pool lets the Steward
   // Close, read when the answer arrives.
+  // ADR-0035: an Adopt that reaches the engine on the Steward's path is
+  // refused there too, whatever the pool lets the Steward Close.
+  it("refuses an adopt from the Steward and records nothing", async () => {
+    const pool = await stewardPool({});
+    await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run);
+    expect(() => pool.run.steward.answer(id, "01", "adopt" as never, "take 2")).toThrow(
+      "steward: adopting a candidate is the operator's: leave 01 with a note naming the one you recommend",
+    );
+    expect(readEvents(join(pool.poolDir, "runs"), "01").some((e) => e.kind === "answered")).toBe(false);
+    expect(pool.run.steward.state(id).interrupts.find((i) => i.ticketId === "01")?.used).toBe(0);
+  }, 60_000);
+
   it("refuses a close while Steward may Close is off, and closes once the setting is on and reloaded", async () => {
     const pool = await stewardPool({});
     await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));

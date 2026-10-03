@@ -1049,3 +1049,80 @@ describe("Keep talking review fixes (issue #139)", () => {
     expect(latest(run).finishedTerminals).toBe(0);
   }, 30_000);
 });
+
+describe("Adopt over a paused verify round (ADR-0035)", () => {
+  it("lets the paused candidate's Held pane go and closes its tab when a finished candidate is adopted", async () => {
+    const { run, poolDir, fake } = await checkpointed({
+      git: true,
+      verify: 2,
+      outcomes: {
+        "01": [
+          { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" },
+          { status: "done", summary: "finished", commitSha: null },
+        ],
+      },
+    });
+    expect(latest(run).heldPanes["01"].attempt).toBe(1);
+    expect(run.interrupts.map((i) => [i.kind, i.candidates])).toEqual([["checkpoint", [2]]]);
+    const pausedTab = spawnedPanes(poolDir).find((s) => s.attempt === 1)!.tab;
+
+    await run.adopt("01", 2);
+    await until("the paused candidate's tab close", () =>
+      readEvents(join(poolDir, "runs"), "01").some(
+        (e) => e.kind === "tab-closed" && e.payload.tab_id === pausedTab,
+      ),
+    );
+
+    expect(run.final.tickets["01"]).toBe("done");
+    expect(latest(run).heldPanes["01"]).toBeUndefined();
+    expect(fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id)).toContain(pausedTab);
+    // Nothing relaunched: the question went unanswered with the Interrupt.
+    expect(spawnedPanes(poolDir).map((s) => s.attempt)).toEqual([1, 2]);
+  }, 40_000);
+
+  it("holds a queued Adopt while a Continued attempt works in the pool checkout, and merges it after", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { file: "01.md", marker: READY, body: "# Fan out\n\nbody" },
+        { file: "03.md", marker: "<!-- state: id=03 blocked-by= status=ready -->", body: "# Third\n\nbody" },
+        { file: "02.md", marker: "<!-- state: id=02 blocked-by=03 status=ready -->", body: "# Second\n\nbody" },
+      ],
+      config: { ...config, assign: { "01": { verify: 2 } } },
+    });
+    const { harnesses } = tuiHarness(poolDir, {
+      "01": [
+        { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" },
+        { status: "done", summary: "finished", commitSha: null },
+      ],
+      "03": [{ status: "done", summary: "done", commitSha: null }],
+      "02": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me too" }],
+    });
+    const fake = await startExecutingFakeHerdr();
+    fakes.push(fake);
+    const run = startPool({ poolDir, harnesses, herdrSocket: fake.socketPath, enlistPollMs: 50, paneSurveyMs: 50 });
+    runs.push(run);
+    // 02 runs alone after 03, so in the pool checkout, and checkpoints there.
+    await until("02's Held pane", () => latest(run).heldPanes["02"] !== undefined, 20_000);
+    expect(run.interrupts.find((i) => i.ticketId === "01")?.candidates).toEqual([2]);
+    expect(
+      readEvents(join(poolDir, "runs"), "02").find((e) => e.kind === "spawned")!.payload.cwd,
+    ).toBe(poolDir);
+    await run.keepTalking("02");
+
+    run.accept("01", "the finished one", "adopt", 2);
+    await Bun.sleep(500);
+    // Adopt merges, so it waits, still queued, while the checkout is held.
+    expect(run.final.tickets["01"]).toBe("checkpoint");
+    expect(latest(run).queuedAnswers.map((a) => [a.ticketId, a.action, a.attempt])).toEqual([
+      ["01", "adopt", 2],
+    ]);
+    expect(readEvents(join(poolDir, "runs"), "01").some((e) => e.kind === "merged")).toBe(false);
+
+    writeFileSync(
+      join(poolDir, "runs", "02.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await until("the adopted merge", () => run.final.tickets["01"] === "done", 20_000);
+    expect(readEvents(join(poolDir, "runs"), "01").filter((e) => e.kind === "merged").map((e) => e.attempt)).toEqual([2]);
+  }, 60_000);
+});

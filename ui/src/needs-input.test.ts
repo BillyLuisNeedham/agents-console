@@ -67,6 +67,7 @@ function row(ticketId: string, kind: InterruptKind, queued = false): NeedsInputR
       body: "",
       queued,
       closing: false,
+      adopt: [],
       form: form(kind),
       keepTalking: null,
     },
@@ -94,13 +95,15 @@ function deferred(): Deferred {
 // dispatch order before any outcome lands.
 function fakeAnswer(): {
   answer: AnswerHandler;
-  calls: { ticketId: string; action: ResumeAction; note?: string }[];
+  calls: { ticketId: string; action: ResumeAction; note?: string; attempt?: number }[];
   deferreds: Map<string, Deferred>;
 } {
-  const calls: { ticketId: string; action: ResumeAction; note?: string }[] = [];
+  const calls: { ticketId: string; action: ResumeAction; note?: string; attempt?: number }[] = [];
   const deferreds = new Map<string, Deferred>();
-  const answer: AnswerHandler = (ticketId, action, note) => {
-    calls.push({ ticketId, action, note });
+  const answer: AnswerHandler = (ticketId, action, note, attempt) => {
+    // The attempt is recorded only when given, so every answer that names
+    // none reads as it always did.
+    calls.push({ ticketId, action, note, ...(attempt !== undefined ? { attempt } : {}) });
     const d = deferred();
     deferreds.set(ticketId, d);
     return d.promise;
@@ -533,6 +536,100 @@ describe("NeedsInputTray close selected (issue #154)", () => {
     expect(tickIn(root, "ticket:02")).toBe(box);
     expect(box.checked).toBe(true);
     expect(tickIn(root, "ticket:01")!.checked).toBe(false);
+  });
+});
+
+describe("NeedsInputTray Adopt (ADR-0035)", () => {
+  function paint(tray: NeedsInputTray, rows: NeedsInputRow[]): HTMLElement {
+    return tray.render(rows, [], trayHandlers())!;
+  }
+  // A paused verify round's checkpoint row naming its finished Candidates.
+  function pausedRound(
+    ticketId: string,
+    adopt: { attempt: number; score: number | null }[],
+    queued = false,
+  ): NeedsInputRow {
+    const base = row(ticketId, "checkpoint", queued);
+    return {
+      ...base,
+      interrupt: { ...base.interrupt, candidates: adopt.map((a) => a.attempt), adopt },
+    };
+  }
+  const adoptButtons = (el: Element, cardId: string) =>
+    [...el.querySelectorAll<HTMLButtonElement>(`[data-key="${cardId}"] .needs-input-adopt`)];
+
+  it("draws one Adopt per Candidate, scored when the view has the grade", () => {
+    const el = paint(stateTray(), [
+      pausedRound("01", [
+        { attempt: 2, score: null },
+        { attempt: 3, score: 8 },
+      ]),
+    ]);
+    expect(adoptButtons(el, "ticket:01").map((b) => b.textContent)).toEqual([
+      "Adopt 2",
+      "Adopt 3 (8/10)",
+    ]);
+    // Resume and Close stay as they are, ahead of the Adopts.
+    const labels = [
+      ...el.querySelectorAll<HTMLButtonElement>('[data-key="ticket:01"] .needs-input-actions button'),
+    ].map((b) => b.textContent);
+    expect(labels).toEqual(["resume", "close", "Adopt 2", "Adopt 3 (8/10)"]);
+  });
+
+  it("draws no Adopt on a checkpoint that names no Candidate", () => {
+    const el = paint(stateTray(), [row("01", "checkpoint")]);
+    expect(adoptButtons(el, "ticket:01")).toEqual([]);
+  });
+
+  it("sends adopt with the Candidate's attempt and the row's note", () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    tray.setNote("01", "attempt 3 read the spec right");
+    const el = paint(tray, [pausedRound("01", [{ attempt: 2, score: 6 }, { attempt: 3, score: 8 }])]);
+    adoptButtons(el, "ticket:01")[1]!.click();
+    expect(fake.calls).toEqual([
+      { ticketId: "01", action: "adopt", note: "attempt 3 read the spec right", attempt: 3 },
+    ]);
+    fake.deferreds.get("01")!.resolve();
+  });
+
+  it("disables the Adopts on a waiting row", () => {
+    const el = paint(stateTray(), [pausedRound("01", [{ attempt: 2, score: null }], true)]);
+    expect(adoptButtons(el, "ticket:01").map((b) => b.disabled)).toEqual([true]);
+  });
+
+  it("retries a failed Adopt with the same Candidate", async () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    const el = paint(tray, [pausedRound("01", [{ attempt: 2, score: null }])]);
+    adoptButtons(el, "ticket:01")[0]!.click();
+    fake.deferreds.get("01")!.reject(new Error("checkout held"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(tray.failure("01")).toEqual({
+      action: "adopt",
+      message: "checkout held",
+      attempt: 2,
+    } satisfies NeedsInputFailure);
+    const retried = tray.retry("01");
+    expect(fake.calls[1]).toEqual({ ticketId: "01", action: "adopt", note: "", attempt: 2 });
+    fake.deferreds.get("01")!.resolve();
+    await retried;
+    expect(tray.failure("01")).toBeNull();
+  });
+
+  it("never fires an Adopt from resume all or close selected", async () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    const rows = [pausedRound("01", [{ attempt: 2, score: null }])];
+    tray.toggleTicked("01");
+    const closing = tray.closeSelected(rows);
+    fake.deferreds.get("01")!.resolve();
+    await closing;
+    const resuming = tray.resumeAll(rows);
+    fake.deferreds.get("01")!.resolve();
+    await resuming;
+    expect(fake.calls.map((c) => c.action)).toEqual(["close", "resume"]);
   });
 });
 

@@ -1169,6 +1169,231 @@ describe("verify fan-out", () => {
     ).toBe(true);
   }, 15000);
 
+  describe("Adopt a finished candidate (ADR-0035)", () => {
+    const paused = (brief: string, extra: GitStubBehaviour = {}): GitStubBehaviour => ({
+      status: "checkpoint",
+      outcome: { summary: `paused: ${brief}`, commitSha: null, brief },
+      ...extra,
+    });
+    const spawnOf = (title: string) => [{ title, body: "A body long enough to stand on its own." }];
+    const issuesText = (poolDir: string): string =>
+      readdirSync(join(poolDir, "issues"))
+        .map((name) => readFileSync(join(poolDir, "issues", name), "utf8"))
+        .join("\n");
+
+    it("merges the adopted candidate as a human selection, discards the rest, and takes only its spawns", async () => {
+      const { poolDir, git } = makeGitPool({
+        tickets: [readyTicket("01")],
+        config: verifyConfig(3),
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": [
+          paused("Which port?", { spawn: spawnOf("From the paused candidate") }),
+          { workFile: "cand-2.txt", commitMsg: "cand-2", spawn: spawnOf("From candidate two") },
+          {
+            workFile: "cand-3.txt",
+            commitMsg: "cand-3",
+            outcome: { summary: "the adopted work", commitSha: null },
+            spawn: spawnOf("From the adopted candidate"),
+          },
+        ],
+        "01-grader-2": { grade: { score: 9, verdict: "pass", reasons: "tidy" } },
+        "01-grader-3": { grade: { score: 4, verdict: "flag", reasons: "rough" } },
+      });
+
+      const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+      // The checkpoint names every finished, graded candidate, a flagged one
+      // included, in attempt order; the paused one is not among them.
+      expect(run.interrupts.map((i) => [i.kind, i.candidates])).toEqual([["checkpoint", [2, 3]]]);
+      expect(run.interrupts[0].body).toContain(
+        "The operator may instead adopt a finished candidate (2, 3)",
+      );
+
+      // The note holds a number and is never read for one: attempt 3 merges.
+      const adopted = await run.adopt("01", 3, "2 overfits the fixture");
+
+      expect(adopted.final.tickets["01"]).toBe("done");
+      expect(markerLine(poolDir, "01-t.md")).toContain("status=done");
+      expect(adopted.interrupts.filter((i) => i.ticketId === "01")).toEqual([]);
+      const events = readEventLines(poolDir, "01");
+      expect(events.find((e) => e.kind === "answered")?.payload).toEqual({
+        kind: "checkpoint",
+        action: "adopt",
+        attempt: 3,
+        note: "2 overfits the fixture",
+      });
+      const selected = events.filter((e) => e.kind === "selected");
+      expect(selected.map((e) => [e.attempt, e.payload])).toEqual([
+        [3, { score: 4, margin: null, rule: "human" }],
+      ]);
+      expect(events.filter((e) => e.kind === "merged").map((e) => e.attempt)).toEqual([3]);
+      expect(existsSync(join(poolDir, "cand-3.txt"))).toBe(true);
+      expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+      // Every other attempt branch and worktree is gone, the paused one's too.
+      for (const attempt of [1, 2]) {
+        expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", attempt)]).exitCode).not.toBe(0);
+        expect(existsSync(worktreePathFor(poolDir, "01", attempt))).toBe(false);
+      }
+      expect(adopted.final.outcomes["01"]?.summary).toBe("the adopted work");
+      expect(adopted.final.log).toContain(
+        "ticket 01: the operator adopted attempt 3 from the paused verify round's checkpoint",
+      );
+      expect(adopted.final.log).toContain(
+        "interrupt answered for 01 (checkpoint): attempt 3 adopted from the paused verify round, " +
+          "with the note: 2 overfits the fixture",
+      );
+      // Only the adopted candidate's proposal lands.
+      const issues = issuesText(poolDir);
+      expect(issues).toContain("From the adopted candidate");
+      expect(issues).not.toContain("From the paused candidate");
+      expect(issues).not.toContain("From candidate two");
+    }, 20000);
+
+    it("refuses an Adopt naming a paused or crashed attempt, or malformed, and queues nothing", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [readyTicket("01")],
+        config: verifyConfig(3),
+      });
+      const rig = gitStubHarness(poolDir, {
+        "01": [
+          paused("Which port?"),
+          { workFile: "cand-2.txt", commitMsg: "cand-2" },
+          { status: "keep", exitCode: 3 },
+        ],
+      });
+      const run = await runPool({ poolDir, harnesses: rig.harnesses });
+      expect(run.interrupts.map((i) => [i.kind, i.candidates])).toEqual([["checkpoint", [2]]]);
+
+      await expect(run.adopt("01", 1)).rejects.toThrow(
+        "answer: adopt must name one of the finished candidates (2); got attempt 1 for 01",
+      );
+      await expect(run.adopt("01", 3)).rejects.toThrow("got attempt 3 for 01");
+      expect(() => run.accept("01", undefined, "adopt")).toThrow(
+        "answer: adopt needs the attempt number of the candidate to take for 01",
+      );
+      expect(() => run.accept("01", undefined, "resume", 2)).toThrow(
+        "answer: an attempt only goes with adopt, not resume, for 01",
+      );
+      expect(() => run.accept("01", "why", "close", 2)).toThrow(
+        "answer: an attempt only goes with adopt, not close, for 01",
+      );
+      expect(readEventLines(poolDir, "01").some((e) => e.kind === "answered")).toBe(false);
+      expect(run.final.tickets["01"]).toBe("checkpoint");
+
+      // Nothing was queued by the refusals, so the valid Adopt goes through.
+      const adopted = await run.adopt("01", 2);
+      expect(adopted.final.tickets["01"]).toBe("done");
+      expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+    }, 20000);
+
+    it("refuses an Adopt on a checkpoint naming no candidate and on any other Interrupt kind", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03")],
+        config: { ...stubConfig, assign: { "01": { verify: 2 } } },
+      });
+      const rig = gitStubHarness(poolDir, {
+        // Every candidate paused: nothing finished to adopt.
+        "01": [paused("one"), paused("two")],
+        // A lone checkpoint, as every pool before ADR-0035 has.
+        "02": { status: "checkpoint" },
+        "03": { status: "keep", exitCode: 3 },
+      });
+      const run = await runPool({ poolDir, harnesses: rig.harnesses });
+      expect(
+        run.interrupts
+          .map((i) => [i.ticketId, i.kind, i.candidates])
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      ).toEqual([
+        ["01", "checkpoint", undefined],
+        ["02", "checkpoint", undefined],
+        ["03", "crash", undefined],
+      ]);
+
+      await expect(run.adopt("01", 1)).rejects.toThrow(
+        "answer: 01's checkpoint names no finished candidate to adopt; resume or close it",
+      );
+      await expect(run.adopt("02", 1)).rejects.toThrow(
+        "answer: 02's checkpoint names no finished candidate to adopt",
+      );
+      await expect(run.adopt("03", 1)).rejects.toThrow(
+        "answer: adopt takes a paused verify round's checkpoint interrupt, got crash for 03",
+      );
+      for (const id of ["01", "02", "03"]) {
+        expect(readEventLines(poolDir, id).some((e) => e.kind === "answered")).toBe(false);
+      }
+    }, 20000);
+
+    it("keeps the candidates across a restart and adopts with the grade read back from the log", async () => {
+      const { poolDir } = makeGitPool({
+        tickets: [readyTicket("01")],
+        config: verifyConfig(2),
+      });
+      const firstRig = gitStubHarness(poolDir, {
+        "01": [paused("Which port?"), { workFile: "cand-2.txt", commitMsg: "cand-2" }],
+        "01-grader-2": { grade: { score: 7, verdict: "pass", reasons: "fine" } },
+      });
+      const first = await runPool({ poolDir, harnesses: firstRig.harnesses });
+      expect(first.interrupts.map((i) => i.candidates)).toEqual([[2]]);
+      first.close();
+
+      const rig = gitStubHarness(poolDir, {});
+      const second = await runPool({ poolDir, harnesses: rig.harnesses });
+      expect(second.interrupts.map((i) => [i.kind, i.candidates])).toEqual([["checkpoint", [2]]]);
+      expect(rig.spawnOrder).toEqual([]);
+
+      const adopted = await second.adopt("01", 2);
+      expect(adopted.final.tickets["01"]).toBe("done");
+      expect(
+        readEventLines(poolDir, "01")
+          .filter((e) => e.kind === "selected")
+          .map((e) => [e.attempt, e.payload]),
+      ).toEqual([[2, { score: 7, margin: null, rule: "human" }]]);
+      expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(true);
+      expect(rig.spawnOrder).toEqual([]);
+      expect((await approveReview(adopted)).phase).toBe("done");
+    }, 20000);
+
+    it("reads a queued Adopt back with its attempt, and a queue file from before Adopt unchanged", async () => {
+      const runsDir = join(makeTempDir("adopt-queue-"), "runs");
+      mkdirSync(runsDir, { recursive: true });
+      const old = {
+        seq: 1,
+        ticketId: "01",
+        kind: "checkpoint",
+        note: "carry on",
+        at: "2026-10-01T00:00:00.000Z",
+        processedAt: null,
+      };
+      writeFileSync(
+        join(runsDir, "queued-answers.json"),
+        JSON.stringify({ nextSeq: 2, answers: [old] }),
+      );
+      const store = new QueuedAnswerStore(runsDir);
+      expect(store.pending()).toEqual([old as never]);
+      expect(store.latestFor("01", undefined)).toEqual(old as never);
+      expect(store.latestFor("01", undefined, "adopt", 2)).toBeNull();
+
+      store.enqueue({
+        ticketId: "02",
+        kind: "checkpoint",
+        action: "adopt",
+        attempt: 2,
+        note: "the tidy one",
+        at: "2026-10-01T00:00:01.000Z",
+      });
+      const reread = new QueuedAnswerStore(runsDir);
+      expect(reread.pending().map((a) => [a.ticketId, a.action, a.attempt])).toEqual([
+        ["01", undefined, undefined],
+        ["02", "adopt", 2],
+      ]);
+      expect(reread.latestFor("02", undefined, "adopt", 2)?.seq).toBe(2);
+      // An Adopt of another Candidate is a different answer.
+      expect(reread.latestFor("02", undefined, "adopt", 3)).toBeNull();
+      expect(reread.latestFor("02", undefined)).toBeNull();
+    });
+  });
+
   it("rotates a pre-verify solo attempt's well-known log before the fan-out", async () => {
     const { poolDir } = makeGitPool({
       tickets: [readyTicket("01")],

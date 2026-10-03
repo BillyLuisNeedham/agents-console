@@ -633,13 +633,25 @@ export class ConsoleSession {
    * Needs input tray can mark its own row; the reason also stands beside
    * the Detail's actions until the next answer.
    */
-  async answer(ticketId: string, action: ResumeAction, note?: string): Promise<void> {
+  async answer(
+    ticketId: string,
+    action: ResumeAction,
+    note?: string,
+    attempt?: number,
+  ): Promise<void> {
     if (this.answerFailures.delete(ticketId)) this.onChange();
     try {
+      // `attempt` names the Candidate an Adopt takes (ADR-0035), and rides
+      // only when given.
       await this.optimistic(
         "resume",
-        note ? { ticketId, action, note } : { ticketId, action },
-        answered(ticketId, action, note),
+        {
+          ticketId,
+          action,
+          ...(note ? { note } : {}),
+          ...(attempt !== undefined ? { attempt } : {}),
+        },
+        answered(ticketId, action, note, attempt),
       );
     } catch (err) {
       this.answerFailures.set(ticketId, messageOf(err));

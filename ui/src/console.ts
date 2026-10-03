@@ -147,7 +147,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     // The first render paints the embedded snapshot's cards; their measuring
     // and the edges between them follow in the next frame.
     settleLater: options.frame ?? nextFrame,
-    onAnswer: (ticketId, action, note) => session.answer(ticketId, action, note),
+    onAnswer: (ticketId, action, note, attempt) => session.answer(ticketId, action, note, attempt),
     onChange: requestRender,
     onFocusTerminal: (id) => terminal.focus(id),
     onListPanes: () => socket.request("panes.list", {}),
@@ -190,8 +190,8 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     },
     // The answer draws as queued in the press's frame, and a refusal's
     // reason stands beside the interrupt's actions: nothing to report here.
-    onAnswer: (ticketId, action, note) => {
-      session.answer(ticketId, action, note).catch(() => {});
+    onAnswer: (ticketId, action, note, attempt) => {
+      session.answer(ticketId, action, note, attempt).catch(() => {});
     },
     // Keep talking (issue #139): the session catches its own refusal into
     // the reason beside the button, so there is nothing to report here.
