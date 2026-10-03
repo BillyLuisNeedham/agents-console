@@ -149,6 +149,41 @@ describe("reassignViews: who may be reassigned", () => {
     });
   });
 
+  // Issue #116: the proposal's own assign, persisted on the child's marker,
+  // ranks under the operator's entry and over the parent, field by field.
+  it("names a field the Spawn proposal requested as requested, under a pinned one", () => {
+    const rows = views(
+      [
+        marker("01"),
+        marker("01-spawn-1", {
+          spawnedBy: "01",
+          spawnAssign: { model: "sonnet", effort: "max" },
+        }),
+      ],
+      {
+        defaults: DEFAULTS,
+        assign: {
+          "01": { harness: "claude", model: "opus" },
+          "01-spawn-1": { effort: "low" },
+        },
+      },
+    );
+
+    expect(rows.get("01-spawn-1")!.reassign.sources).toEqual({
+      harness: "inherited",
+      model: "requested",
+      effort: "pinned",
+      drivers: "inherited",
+    });
+    expect(rows.get("01-spawn-1")!.assignment).toEqual({
+      harness: "claude",
+      model: "sonnet",
+      effort: "low",
+      effortApplied: false,
+      drivers: "implement",
+    });
+  });
+
   it("reads an unassigned field as unset, with no defaults to fall back on", () => {
     const rows = views([marker("01")], {});
     expect(rows.get("01")!.reassign.sources).toEqual({

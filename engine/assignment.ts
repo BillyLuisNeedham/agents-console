@@ -4,7 +4,8 @@
  * One resolver serves every caller: an ordinary Ticket, a spawned Ticket, an
  * engine-run judge (grader, head-to-head) and a Conversation each supply
  * their own overrides and the resolver applies them field-wise in one order,
- * request first, then what the unit inherits from its parent or build
+ * request first, then a spawned Ticket's own requested Assignment (its
+ * proposal's `assign`), then what the unit inherits from its parent or build
  * ticket, then the pool defaults. A named harness must be in the harness
  * table; whether an empty harness or model is an error is the caller's
  * call (a Ticket renders as unassigned, a Conversation refuses to start).
@@ -95,11 +96,22 @@ export interface AssignmentRequest {
   verify?: unknown;
 }
 
+/**
+ * A Spawn proposal's Assignment request (issue #116): the fields a proposal's
+ * `assign` may set, persisted on the spawned Ticket's marker. Never verify:
+ * whether a Ticket is graded stays the operator's call.
+ */
+export type SpawnAssignRequest = Pick<AssignmentRequest, "harness" | "model" | "effort" | "drivers">;
+
 export interface ResolveAssignmentParams {
   // The prefix every error names the subject by: "pool config: ticket 01"
   // for a Ticket, "conversation start:" for a Conversation.
   subject: string;
   request: AssignmentRequest | undefined;
+  // A spawned Ticket's proposal `assign`, persisted on its marker (issue
+  // #116): ranked under the request (the operator's assign entry wins field
+  // by field) and over what the unit inherits. Never carries verify.
+  requested?: SpawnAssignRequest;
   // What the unit inherits when the request is silent: the parent Ticket
   // or Conversation of a spawned unit, the build ticket of a judge.
   inherited?: Pick<Assignment, "harness" | "model" | "effort" | "drivers">;
@@ -120,12 +132,13 @@ export interface ResolveAssignmentParams {
 /**
  * Where one resolved field came from (Reassign, issue #126): the unit's own
  * request layer (a Ticket's `assign` entry, so the Console calls it pinned),
- * what it inherits from its parent or build ticket, the pool defaults, or
- * nowhere at all. Declared here rather than beside the Console's Reassign
+ * a spawned Ticket's requested Assignment (its proposal's `assign`, issue
+ * #116), what it inherits from its parent or build ticket, the pool
+ * defaults, or nowhere at all. Declared here rather than beside the Console's Reassign
  * types because it names the layers of the resolver below, and reassign.ts
  * re-exports it to the wire.
  */
-export type AssignmentSource = "pinned" | "inherited" | "default" | "unset";
+export type AssignmentSource = "pinned" | "requested" | "inherited" | "default" | "unset";
 
 export interface AssignmentSources {
   harness: AssignmentSource;
@@ -138,7 +151,12 @@ export interface AssignmentSources {
 // layer without anyone comparing values. An inherited value that happens to
 // equal the default is a real distinction here and would be lost by any
 // after-the-fact string comparison.
-const LAYERS = ["pinned", "inherited", "default"] as const satisfies readonly AssignmentSource[];
+const LAYERS = [
+  "pinned",
+  "requested",
+  "inherited",
+  "default",
+] as const satisfies readonly AssignmentSource[];
 
 function firstSetIndex(values: (string | undefined)[]): number {
   return values.findIndex((value) => value !== undefined && value !== "");
@@ -156,7 +174,7 @@ function sourceOf(...values: (string | undefined)[]): AssignmentSource {
 
 /**
  * Which layer supplied each field of the Assignment resolveAssignment would
- * return for the same three layers, so the Console can say "pinned" or
+ * return for the same four layers, so the Console can say "pinned" or
  * "inherited" beside a value rather than re-deriving the rule (issue #126).
  * One ordering serves both: this reads the same firstSet the resolver does.
  *
@@ -167,30 +185,44 @@ function sourceOf(...values: (string | undefined)[]): AssignmentSource {
  */
 export function resolveAssignmentSources(params: {
   request: AssignmentRequest | undefined;
+  requested?: SpawnAssignRequest;
   inherited?: Pick<Assignment, "harness" | "model" | "effort" | "drivers">;
   defaults?: AssignmentDefaults;
 }): AssignmentSources {
   const request = params.request ?? {};
-  const { inherited, defaults } = params;
-  const drivers = sourceOf(request.drivers, inherited?.drivers, defaults?.drivers);
+  const { requested, inherited, defaults } = params;
+  const drivers = sourceOf(
+    request.drivers,
+    requested?.drivers,
+    inherited?.drivers,
+    defaults?.drivers,
+  );
   return {
-    harness: sourceOf(request.harness, inherited?.harness, defaults?.harness),
-    model: sourceOf(request.model, inherited?.model, defaults?.model),
-    effort: sourceOf(request.effort, inherited?.effort, defaults?.effort),
+    harness: sourceOf(request.harness, requested?.harness, inherited?.harness, defaults?.harness),
+    model: sourceOf(request.model, requested?.model, inherited?.model, defaults?.model),
+    effort: sourceOf(request.effort, requested?.effort, inherited?.effort, defaults?.effort),
     drivers: drivers === "unset" ? "default" : drivers,
   };
 }
 
 export function resolveAssignment(params: ResolveAssignmentParams): Assignment {
-  const { subject, inherited, defaults, harnesses } = params;
+  const { subject, requested, inherited, defaults, harnesses } = params;
   const request = params.request ?? {};
   // An empty string is no value: an enlisted Conversation records model ""
   // (as found), and that field must fall through, not stop the chain.
-  const harness = firstSet(request.harness, inherited?.harness, defaults?.harness) ?? "";
-  const model = firstSet(request.model, inherited?.model, defaults?.model) ?? "";
-  const effort = firstSet(request.effort, inherited?.effort, defaults?.effort)?.trim();
+  const harness =
+    firstSet(request.harness, requested?.harness, inherited?.harness, defaults?.harness) ?? "";
+  const model =
+    firstSet(request.model, requested?.model, inherited?.model, defaults?.model) ?? "";
+  const effort = firstSet(
+    request.effort,
+    requested?.effort,
+    inherited?.effort,
+    defaults?.effort,
+  )?.trim();
   const drivers =
-    firstSet(request.drivers, inherited?.drivers, defaults?.drivers) ?? DEFAULT_DRIVERS;
+    firstSet(request.drivers, requested?.drivers, inherited?.drivers, defaults?.drivers) ??
+    DEFAULT_DRIVERS;
   if (params.strict && !harness) {
     throw new Error(
       `${subject} no harness resolved (set assign.harness, inherit ` +

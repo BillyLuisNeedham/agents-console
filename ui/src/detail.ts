@@ -1030,7 +1030,7 @@ export class Detail {
                 type: "button",
                 disabled: held.trim() === "",
                 title:
-                  "clear this field so the ticket follows its parent or the pool defaults again",
+                  "clear this field so the ticket follows its Spawn request, its parent or the pool defaults again",
                 onclick: (event: Event) => {
                   event.preventDefault();
                   store.clearField(detail.ticketId, name, seed);

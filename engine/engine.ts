@@ -35,6 +35,7 @@ import {
 import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   MARKER_RE,
+  encodeSpawnAssign,
   loadPoolMarkers,
   parseEnlistId,
   parseSpawnId,
@@ -138,6 +139,7 @@ import {
   type AssignmentRequest,
   type AssignmentSources,
   type AssignmentView,
+  type SpawnAssignRequest,
 } from "./assignment.ts";
 import {
   createEnlistedAttempts,
@@ -263,7 +265,14 @@ export interface SpawnProposal {
   // An unknown assign.harness drops the whole proposal at adoption time
   // (adoptSpawnProposals), the same disposition an unknown blockedBy id
   // gets, since neither can be checked here where no Session exists yet.
-  assign?: { harness?: string; model?: string; effort?: string; drivers?: string };
+  // A ticket child keeps it on its marker as spawn-assign (writeSpawnTicket,
+  // issue #116), ranked under the operator's assign entry for the child.
+  assign?: SpawnAssignRequest;
+  // Set by validation when the proposal's assign named a verify, which no
+  // proposal may set (grading is the operator's call, issue #116): the
+  // proposal lands without it, and takeSpawnProposals logs that once and
+  // strips this flag before the proposal is stored.
+  verifyIgnored?: true;
   // The tickets the Spawn blocks once adopted (ADR-0029): named ids, or
   // "all" for every ticket not yet started at that moment.
   blocks?: string[] | "all";
@@ -6350,7 +6359,9 @@ function assignmentWireView(session: Session, assignment: Assignment): Assignmen
 // entry for the spawned id overrides field-wise, everything else inherits
 // the parent, so a discovery chain runs on its parent's harness with zero
 // new config; a field the parent leaves empty (an enlisted Conversation
-// names no model, issue #118) falls through to the defaults. verify is
+// names no model, issue #118) falls through to the defaults. A proposal's
+// own assign, persisted on the marker as spawnAssign (issue #116), ranks
+// between the two: under the operator's entry, over the parent. verify is
 // honored like any ordinary ticket's (a spawned ticket is ordinary in every
 // way): an operator may set verify on a spawned id before it schedules.
 function resolveSpawnedTicketAssignment(
@@ -6362,6 +6373,7 @@ function resolveSpawnedTicketAssignment(
   return resolveAssignment({
     subject: `pool config: ticket ${marker.id}`,
     request: config.assign?.[marker.id],
+    ...(marker.spawnAssign ? { requested: marker.spawnAssign } : {}),
     inherited: parent,
     defaults: config.defaults,
     strict: false,
@@ -6446,6 +6458,7 @@ function resolveAssignmentsInto(
           marker.id,
           resolveAssignmentSources({
             request: config.assign?.[marker.id],
+            ...(marker.spawnAssign ? { requested: marker.spawnAssign } : {}),
             inherited: parent,
             ...(config.defaults ? { defaults: config.defaults } : {}),
           }),
@@ -9004,6 +9017,7 @@ function validateSpawnProposals(
     }
     const assignRaw = proposal.assign;
     let assign: SpawnProposal["assign"];
+    let verifyIgnored = false;
     if (assignRaw !== undefined) {
       if (typeof assignRaw !== "object" || assignRaw === null || Array.isArray(assignRaw)) {
         rejections.push({ index, reason: "proposal's assign is not an object" });
@@ -9023,6 +9037,7 @@ function validateSpawnProposals(
         ...(typeof a.effort === "string" ? { effort: a.effort } : {}),
         ...(typeof a.drivers === "string" ? { drivers: a.drivers } : {}),
       };
+      if (a.verify !== undefined) verifyIgnored = true;
     }
     proposals.push({
       title: proposal.title,
@@ -9034,6 +9049,7 @@ function validateSpawnProposals(
       ...(overlaps !== undefined && overlaps.length > 0
         ? { overlaps: overlaps as string[] }
         : {}),
+      ...(verifyIgnored ? { verifyIgnored: true as const } : {}),
     });
   });
   return { proposals, rejections };
@@ -9075,7 +9091,10 @@ export function validateOutcome(parsed: unknown): OutcomeResult {
 // The spawned ticket file: an ordinary ticket with the engine-assigned id,
 // the ordinary blocking edge, and spawned-by naming the ticket whose attempt
 // proposed it. The marker field is what loadPoolMarkers requires for the
-// reserved namespace; the body line is the provenance the Detail shows.
+// reserved namespace; the body line is the provenance the Detail shows. A
+// proposal that carried an `assign` writes it as spawn-assign, the
+// whitespace-free marker token resolveSpawnedTicketAssignment reads, so the
+// child's requested Assignment survives a reload and a restart (issue #116).
 function writeSpawnTicket(
   session: Session,
   parentId: string,
@@ -9086,8 +9105,13 @@ function writeSpawnTicket(
     proposal.blockedBy && proposal.blockedBy.length > 0
       ? proposal.blockedBy.join(",")
       : "none";
+  const assign =
+    proposal.assign && Object.keys(proposal.assign).length > 0
+      ? ` spawn-assign=${encodeSpawnAssign(proposal.assign)}`
+      : "";
   const body =
-    `<!-- state: id=${id} blocked-by=${blockedBy} status=ready spawned-by=${parentId} -->\n\n` +
+    `<!-- state: id=${id} blocked-by=${blockedBy} status=ready ` +
+    `spawned-by=${parentId}${assign} -->\n\n` +
     `# ${id}: ${proposal.title.trim()}\n\n` +
     `**Spawned by** ticket ${parentId} (ADR-0010): the engine wrote this ` +
     "ticket at the super-step boundary from the attempt's Outcome proposal, " +
@@ -10298,7 +10322,13 @@ function takeSpawnProposals(
     origin === "conversation"
       ? Number.POSITIVE_INFINITY
       : Math.max(0, caps.perRun - session.spawnedThisRun - pendingRunReservations(session));
-  for (const proposal of proposals) {
+  for (const { verifyIgnored, ...proposal } of proposals) {
+    if (verifyIgnored) {
+      log.push(
+        `ticket ${parentId}: spawn proposal '${proposal.title}' asked for assign.verify; ` +
+          "ignored, since whether a Ticket is graded is the operator's call",
+      );
+    }
     const reason = spawnProposalProblem(session, proposal, known);
     if (reason !== null) {
       appendEvent(session.runsDir, parentId, {

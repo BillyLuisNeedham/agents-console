@@ -637,6 +637,25 @@ describe("ReassignStore.render", () => {
     );
   });
 
+  // Issue #116: a field the Spawn proposal set is its own layer, under a
+  // pinned one and over what the ticket inherits.
+  it("labels a field the Spawn proposal requested as requested, saying where it came from", () => {
+    const rig = harness();
+    rig.store.openDialog();
+    const { root, paint } = mount(rig.store, [
+      row("C", {
+        assignment: { harness: "claude", model: "opus", effort: "max", drivers: "implement" },
+        sources: { harness: "inherited", model: "pinned", effort: "requested", drivers: "inherited" },
+      }),
+    ]);
+    paint();
+    const pill = root.querySelector('[data-key="C"] .reassign-source-requested');
+    expect(pill?.textContent).toBe("requested");
+    expect(pill?.getAttribute("title")).toBe(
+      "requested by the Spawn proposal that created this ticket",
+    );
+  });
+
   it("ticks every row by default and survives a re-render with the tick kept", () => {
     const rig = harness();
     rig.store.openDialog();

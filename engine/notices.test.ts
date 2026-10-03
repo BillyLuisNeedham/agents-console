@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
-import { startPool, type PoolConfig, type PoolRun } from "./engine.ts";
+import { startPool, type HarnessCommand, type PoolConfig, type PoolRun } from "./engine.ts";
 import { readEvents } from "./events.ts";
 import {
   conversationEndedNoticeText,
@@ -840,6 +840,62 @@ describe("Notice delivery", () => {
       const childNotice = readEvents(join(poolDir, "runs"), childId).find((e) => e.kind === "notice")!;
       expect(childNotice.payload).toMatchObject({ to: view.id, kind: "ticket-ended", delivered: true });
 
+      await run.endConversation(view.id).catch(() => {});
+      await run.shutdown(0);
+    } finally {
+      await fake.close();
+    }
+  }, 25000);
+
+  it("launches a Conversation-proposed ticket on the proposal's assign, persisted on its marker (issue #116)", async () => {
+    // Issue #159 part 1: a Conversation's spawn.json asked for effort max,
+    // and the ticket launched on the Conversation's own effort.
+    const { poolDir } = makeGitPool({
+      tickets: [doneTicket("01")],
+      config: {
+        defaults: { harness: "claude", model: "stub-model", effort: "high" },
+        terminal: "herdr",
+      },
+    });
+    const fake = await startFakeHerdr();
+    try {
+      const rig = stubHarness(poolDir, {});
+      // The stub with the effort flag claude's argv carries; the empty
+      // element fills the stub script's optional wait-for slot first.
+      const stub: HarnessCommand = (ctx) => {
+        const argv = rig.harnesses.stub!(ctx);
+        return ctx.effort ? [...argv, ...(argv.length === 7 ? [""] : []), "--effort", ctx.effort] : argv;
+      };
+      const run: PoolRun = startPool({
+        poolDir,
+        harnesses: { claude: () => ["cat"], stub },
+        herdrSocket: fake.socketPath,
+      });
+      const view = await run.startConversation({ title: "Talk" });
+
+      writeSpawnJson(poolDir, view.id, [
+        { title: "Harder child", body: BODY, assign: { harness: "stub", effort: "max" } },
+      ]);
+      const childId = `${view.id}-spawn-1`;
+      const childFile = join(poolDir, "issues", `${childId}.md`);
+      await waitFor(() => existsSync(childFile));
+      expect(readFileSync(childFile, "utf8").split("\n")[0]).toContain(
+        `spawned-by=${view.id} spawn-assign=${encodeURIComponent(
+          JSON.stringify({ harness: "stub", effort: "max" }),
+        )} -->`,
+      );
+      await waitFor(() =>
+        readEvents(join(poolDir, "runs"), childId).some((e) => e.kind === "spawned"),
+      );
+      const spawned = readEvents(join(poolDir, "runs"), childId).find((e) => e.kind === "spawned")!;
+      const argv = spawned.payload.argv as string[];
+      expect(argv.slice(argv.indexOf("--effort"), argv.indexOf("--effort") + 2)).toEqual([
+        "--effort",
+        "max",
+      ]);
+      expect(rig.spawned[childId]!.model).toBe("stub-model");
+
+      await waitFor(() => readFileSync(childFile, "utf8").includes("status=done"));
       await run.endConversation(view.id).catch(() => {});
       await run.shutdown(0);
     } finally {

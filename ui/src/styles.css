@@ -2654,6 +2654,11 @@ textarea.conversations-field {
   color: var(--accent);
 }
 
+.reassign-source-requested {
+  border-color: var(--status-running);
+  color: var(--status-running);
+}
+
 .reassign-source-inherited {
   border-color: var(--accent-purple);
   color: var(--accent-purple);

@@ -18,6 +18,18 @@ function spawnLedgerTeaching(ledgerPath: string): string {
 // The `blocks` teaching (ADR-0029), one sentence shared by the attempt
 // prompt and the Conversation teaching so the two cannot drift: what a
 // follow-up that must run first adds to its entry.
+// What a proposal's "assign" may set (issue #116): the same four fields the
+// engine's validator keeps, and never verify, which stays the operator's.
+const SPAWN_ASSIGN_FIELDS_TEACHING =
+  '"assign" takes harness, model, effort and drivers only; a verify in it ' +
+  "is ignored, since grading is the operator's call.";
+
+const SPAWN_ASSIGN_TEACHING =
+  'An entry may add "assign": {"harness": "...", "model": "...", ' +
+  '"effort": "...", "drivers": "..."} with only the fields the follow-up ' +
+  "needs different; when absent it inherits your own Assignment. " +
+  SPAWN_ASSIGN_FIELDS_TEACHING;
+
 const SPAWN_BLOCKS_TEACHING =
   'A follow-up that must run before other work may add "blocks": ["id", ' +
   '...] to make those tickets wait for it, or "blocks": "all" to make ' +
@@ -364,6 +376,8 @@ function conversationProtocol(
       'talk instead of a Ticket. "assign" is optional; when absent the ' +
       "follow-up inherits this Conversation's own Assignment, and any field " +
       "that leaves empty falls through to the pool defaults. " +
+      SPAWN_ASSIGN_FIELDS_TEACHING +
+      " " +
       SPAWN_BLOCKS_TEACHING,
     "",
     `This Conversation's Assignment: ${describeAssignment(own)}. ` +
@@ -577,6 +591,8 @@ export function buildPrompt(parts: PromptParts): string {
       '["id", ...]}, the body carrying at least 20 characters of intent ' +
       "for a fresh agent to work from, blockedBy optional and naming the " +
       "ids the follow-up must wait for. " +
+      SPAWN_ASSIGN_TEACHING +
+      " " +
       SPAWN_BLOCKS_TEACHING +
       " The engine assigns the ids " +
       "(<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), " +
