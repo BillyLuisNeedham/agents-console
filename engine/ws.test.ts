@@ -346,6 +346,11 @@ describe("requests", () => {
       reason: "missing ticketId",
       status: 400,
     });
+    // ADR-0035: an attempt is a whole number or nothing, refused as over HTTP.
+    expect(await refusal("resume", { ticketId: "01", action: "adopt", attempt: 1.5 })).toEqual({
+      reason: "attempt must be a whole attempt number, got 1.5",
+      status: 400,
+    });
     expect(await refusal("terminal.focus", { ticketId: "nope" })).toEqual({
       reason: "no terminal-backed pane for ticket nope",
       status: 404,

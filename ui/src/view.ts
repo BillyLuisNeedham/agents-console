@@ -191,7 +191,7 @@ export interface Handlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
-  onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
+  onAnswer: (ticketId: string, action: ResumeAction, note?: string, attempt?: number) => void;
   /** Keep talking on a checkpoint with a Held pane (issue #139), from the
    *  Detail or the Needs input tray; the session holds its state. */
   onKeepTalking: (ticketId: string) => void;

@@ -21,10 +21,13 @@ export interface QueuedAnswer {
   kind: InterruptKind;
   /** The answer payload: true approve, false reject, undefined resume. */
   approve?: boolean;
-  /** A Close (issue #154): the ticket is dropped without merging. Absent on
-   *  every other answer, so a file written before Close existed reads as
-   *  it always did. */
-  action?: "close";
+  /** A Close (issue #154): the ticket is dropped without merging. An Adopt
+   *  (ADR-0035): one finished Candidate of a paused verify round is taken as
+   *  the Winner. Absent on every other answer, so a file written before
+   *  either existed reads as it always did. */
+  action?: "close" | "adopt";
+  /** The Candidate an Adopt takes; present only with `action: "adopt"`. */
+  attempt?: number;
   note?: string;
   /** The Steward gave it (ADR-0030); absent is the operator's. */
   by?: AnswerBy;
@@ -81,22 +84,25 @@ export class QueuedAnswerStore {
 
   /**
    * The most recent accepted answer for a ticket with the same payload shape
-   * (approve and action strict-equal, so a resume never matches a recorded
-   * approval or a Close).
+   * (approve, action and attempt strict-equal, so a resume never matches a
+   * recorded approval, a Close or an Adopt, and an Adopt of one Candidate
+   * never matches an Adopt of another).
    * This is the idempotent-resume lookup: a retried answer finds its
    * acceptance here and is acknowledged again rather than recorded twice.
    */
   latestFor(
     ticketId: string,
     approve: boolean | undefined,
-    action?: "close",
+    action?: "close" | "adopt",
+    attempt?: number,
   ): QueuedAnswer | null {
     for (let i = this.answers.length - 1; i >= 0; i -= 1) {
       const answer = this.answers[i]!;
       if (
         answer.ticketId === ticketId &&
         answer.approve === approve &&
-        answer.action === action
+        answer.action === action &&
+        answer.attempt === attempt
       ) {
         return answer;
       }

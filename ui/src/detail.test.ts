@@ -553,6 +553,7 @@ describe("Detail: Keep talking (issue #139)", () => {
     },
     queued: false,
     closing: false,
+    adopt: [],
     keepTalking,
   });
 
@@ -594,6 +595,122 @@ describe("Detail: Keep talking (issue #139)", () => {
   });
 });
 
+describe("Detail: Adopt (ADR-0035)", () => {
+  // The Detail on Progress over a paused verify round's checkpoint, with
+  // every answer recorded whole and an optional timeline under the form.
+  function paintAdopt(
+    interrupt: TicketDetailView["interrupt"],
+    timeline: DetailModel["timeline"] = null,
+    drafts = new DraftAnswers(),
+  ) {
+    const answers: { ticketId: string; action: string; note?: string; attempt?: number }[] = [];
+    const pane = new Detail({ onClose: () => {}, drafts });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: (ticketId, action, note, attempt) =>
+        answers.push({ ticketId, action, note, ...(attempt !== undefined ? { attempt } : {}) }),
+      onKeepTalking: () => {},
+      onUseStewardNote: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        pane.render(
+          {
+            ...model(detailView({ status: "checkpoint", interrupt })),
+            timeline,
+            detailTabs: [
+              { id: "spec", label: "Spec", active: false, interruptDot: true },
+              { id: "progress", label: "Progress", active: true, interruptDot: true },
+              { id: "outcome", label: "Outcome", active: false, interruptDot: true },
+            ],
+          },
+          handlers,
+        ),
+      );
+      return shell;
+    });
+    return { root, answers };
+  }
+
+  const paused = (
+    adopt: { attempt: number; score: number | null }[],
+  ): TicketDetailView["interrupt"] => ({
+    ticketId: "A",
+    kind: "checkpoint",
+    body: "the round's brief",
+    candidates: adopt.map((a) => a.attempt),
+    form: {
+      title: "checkpoint",
+      actions: [
+        { action: "resume", label: "resume", tone: "primary" },
+        { action: "close", label: "close", tone: "danger" },
+      ],
+    },
+    queued: false,
+    closing: false,
+    adopt,
+    keepTalking: null,
+  });
+
+  const labels = (root: HTMLElement) =>
+    [...root.querySelectorAll<HTMLButtonElement>(".interrupt-actions button")].map(
+      (b) => b.textContent,
+    );
+
+  it("draws one Adopt per Candidate after Resume and Close", () => {
+    const r = paintAdopt(paused([{ attempt: 2, score: null }, { attempt: 3, score: 7 }]));
+    expect(labels(r.root)).toEqual(["resume", "close", "Adopt 2", "Adopt 3 (7/10)"]);
+  });
+
+  it("scores each Candidate from the timeline's graded events", () => {
+    const timeline = projectTimeline(
+      {
+        events: [
+          { at: "2026-10-01T00:00:01Z", attempt: 1, kind: "exited", payload: {} },
+          { at: "2026-10-01T00:00:02Z", attempt: 2, kind: "graded", payload: { score: 6, verdict: "flag", reasons: "thin" } },
+          { at: "2026-10-01T00:00:03Z", attempt: 3, kind: "graded", payload: { score: 9, verdict: "pass", reasons: "solid" } },
+        ],
+        attempts: [],
+        reconstructed: false,
+        spec: "",
+      },
+      "checkpoint",
+    );
+    const r = paintAdopt(paused([{ attempt: 2, score: null }, { attempt: 3, score: null }]), timeline);
+    expect(labels(r.root)).toEqual(["resume", "close", "Adopt 2 (6/10)", "Adopt 3 (9/10)"]);
+  });
+
+  it("draws no Adopt on a checkpoint that names no Candidate", () => {
+    const r = paintAdopt(paused([]));
+    expect(labels(r.root)).toEqual(["resume", "close"]);
+  });
+
+  it("sends adopt with the Candidate's attempt and the note", () => {
+    const drafts = new DraftAnswers();
+    drafts.set("A", "take the passing one");
+    const r = paintAdopt(paused([{ attempt: 2, score: null }, { attempt: 3, score: 7 }]), null, drafts);
+    [...r.root.querySelectorAll<HTMLButtonElement>(".interrupt-actions .interrupt-adopt")][1]!.click();
+    expect(r.answers).toEqual([
+      { ticketId: "A", action: "adopt", note: "take the passing one", attempt: 3 },
+    ]);
+  });
+});
+
 describe("Detail: the shared Draft answer and writing it full size (issue #147)", () => {
   const checkpoint: TicketDetailView["interrupt"] = {
     ticketId: "A",
@@ -605,6 +722,7 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
     },
     queued: false,
     closing: false,
+    adopt: [],
     keepTalking: null,
   };
 
@@ -828,6 +946,7 @@ describe("Detail: the Steward (ADR-0030)", () => {
     form: { title: "checkpoint", actions: [{ action: "resume", label: "resume", tone: "primary" }] },
     queued,
     closing: false,
+    adopt: [],
     keepTalking: null,
     stewardNote: note,
   });

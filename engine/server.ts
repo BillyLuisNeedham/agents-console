@@ -262,7 +262,12 @@ export const SNAPSHOT_COALESCE_MS = 50;
 export interface PoolServer {
   latest: EnrichedSnapshot | null;
   start: () => Promise<EnrichedSnapshot>;
-  answer: (ticketId: string, action: ResumeAction, note?: string) => Promise<EnrichedSnapshot>;
+  answer: (
+    ticketId: string,
+    action: ResumeAction,
+    note?: string,
+    attempt?: number,
+  ) => Promise<EnrichedSnapshot>;
   /** Resolves once the in-flight drive settles, with the settled snapshot. */
   settled: () => Promise<EnrichedSnapshot>;
   url: string;
@@ -302,6 +307,7 @@ const RESUME_ACTIONS = Object.keys({
   approve: true,
   reject: true,
   close: true,
+  adopt: true,
 } satisfies Record<ResumeAction, true>) as ResumeAction[];
 
 // The Reassign row a ticket the module did not answer for falls back to: it
@@ -1480,11 +1486,13 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     ticketId: string,
     action: ResumeAction,
     note?: string,
+    attempt?: number,
   ): Promise<EnrichedSnapshot> {
     const run = currentRun;
     if (!run) throw new Error("pool not started");
     // A Close (issue #154) is the engine's to refuse: it knows which
-    // Interrupts a Close answers and which ids are Tickets.
+    // Interrupts a Close answers and which ids are Tickets. An Adopt
+    // (ADR-0035) is too: it knows which Candidates a checkpoint names.
     if (action === "approve" || action === "reject") {
       // Only the run's review gate (REVIEW_TICKET_ID) and a ticket's
       // merge-approval take approve/reject; anything else is a malformed
@@ -1504,7 +1512,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         );
       }
     }
-    run.accept(ticketId, note, action);
+    run.accept(ticketId, note, action, attempt);
     // The snapshot after acceptance: mid-flight it carries the queued answer
     // (the acceptance emit has already broadcast it), idle it carries the
     // processed state, since the drain and the fresh drive's first emit run
@@ -1904,6 +1912,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         ticketId?: unknown;
         action?: unknown;
         note?: unknown;
+        attempt?: unknown;
       };
       const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
       // An absent action is a plain resume, as it always was; an action
@@ -1916,8 +1925,17 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       }
       const action = (body.action as ResumeAction | undefined) ?? "resume";
       const note = typeof body.note === "string" ? body.note : undefined;
+      // The Candidate an Adopt takes (ADR-0035): a whole attempt number, or
+      // nothing. Whether the action wants one is the engine's to say.
+      if (
+        body.attempt !== undefined &&
+        (typeof body.attempt !== "number" || !Number.isInteger(body.attempt))
+      ) {
+        throw new Error(`attempt must be a whole attempt number, got ${JSON.stringify(body.attempt)}`);
+      }
+      const attempt = body.attempt as number | undefined;
       if (!ticketId) throw new Error("missing ticketId");
-      const snapshot = await answer(ticketId, action, note);
+      const snapshot = await answer(ticketId, action, note, attempt);
       return answered({ snapshot }, 202);
     } catch (err) {
       // A different answer already queued is a conflict with the queue,
@@ -2522,6 +2540,18 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             switch (pathname) {
               case "/api/steward/answer": {
                 const action = text("action") as StewardAnswerRequest["action"];
+                // Adopting a Candidate is the operator's alone (ADR-0035): the
+                // Steward leaves the checkpoint with a note recommending one.
+                if (text("action") === "adopt") {
+                  return Response.json(
+                    {
+                      reason:
+                        `adopting a candidate is the operator's: leave ${ticketId || "the ticket"} ` +
+                        "with a note naming the one you recommend",
+                    },
+                    { status: 400 },
+                  );
+                }
                 if (!ticketId || !["resume", "approve", "reject", "close"].includes(action)) {
                   return Response.json(
                     { reason: "ticketId and an action of resume, approve, reject or close are required" },

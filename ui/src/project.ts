@@ -145,6 +145,50 @@ export interface InterruptView extends Interrupt {
    * never fires it.
    */
   keepTalking: KeepTalkingView | null;
+  /**
+   * Adopt (ADR-0035): one entry per finished Candidate a paused verify
+   * round's checkpoint names, in the engine's order, each a button that
+   * takes that Candidate as the Winner. Empty on every other Interrupt and
+   * on a checkpoint that names none. Not one of the form's actions: each
+   * carries its own attempt, so the tray's "resume all" and "close
+   * selected" never fire it.
+   */
+  adopt: AdoptView[];
+}
+
+/** One Adopt button (ADR-0035): the Candidate's attempt and its grade score
+ *  when the view has it, else null. */
+export interface AdoptView {
+  attempt: number;
+  score: number | null;
+}
+
+/** An Adopt button's label: "Adopt N (S/10)" with a known score, else
+ *  "Adopt N". */
+export function adoptLabel(view: AdoptView): string {
+  return view.score === null ? `Adopt ${view.attempt}` : `Adopt ${view.attempt} (${view.score}/10)`;
+}
+
+/**
+ * The Adopt buttons with each Candidate's score read off the ticket's
+ * timeline, which holds every Attempt's graded events: the Detail's fuller
+ * source than the card's one-grade summary. A Candidate the timeline has no
+ * grade for keeps whatever score it had. Returns the input unchanged when
+ * there is no timeline.
+ */
+export function adoptWithTimelineScores(
+  adopt: AdoptView[],
+  timeline: TimelineView | null,
+): AdoptView[] {
+  if (!timeline || adopt.length === 0) return adopt;
+  return adopt.map((view) => {
+    const attempt = timeline.attempts.find((entry) => entry.number === view.attempt);
+    let score: number | null = null;
+    for (const event of attempt?.events ?? []) {
+      if (event.kind === "graded" && event.grade) score = event.grade.score;
+    }
+    return score === null ? view : { ...view, score };
+  });
 }
 
 /**
@@ -1562,6 +1606,7 @@ function toInterruptView(
   state: PoolState,
   heldPane: HeldPaneRecord | null = null,
   keepTalking: KeepTalkingState | undefined = undefined,
+  grade: TicketGradeSummary | null = null,
 ): InterruptView | null {
   if (!raw) return null;
   const answer = queuedAnswerFor(state.queuedAnswers, raw);
@@ -1572,7 +1617,22 @@ function toInterruptView(
     queued,
     closing: answer?.action === "close",
     keepTalking: queued ? null : projectKeepTalking(raw, heldPane, keepTalking),
+    adopt: projectAdopt(raw, grade),
   };
+}
+
+/**
+ * The Adopt buttons for an Interrupt (ADR-0035): one per Candidate a
+ * checkpoint names, none on any other kind. The card's grade summary holds
+ * only the ticket's latest grade, so it scores the one Candidate it is about
+ * and the rest go without.
+ */
+function projectAdopt(raw: Interrupt, grade: TicketGradeSummary | null): AdoptView[] {
+  if (raw.kind !== "checkpoint" || !raw.candidates) return [];
+  return raw.candidates.map((attempt) => ({
+    attempt,
+    score: grade !== null && grade.attempt === attempt ? grade.score : null,
+  }));
 }
 
 /**
@@ -1655,7 +1715,7 @@ function projectTicket(
     reassign: ticket.reassign,
     hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
-    interrupt: toInterruptView(raw, state, ticket.heldPane, keepTalking),
+    interrupt: toInterruptView(raw, state, ticket.heldPane, keepTalking, grade),
     stewardBudget: projectStewardBudget(stewardBudget, ticket.id),
     grade,
     vitals: projectVitals(
