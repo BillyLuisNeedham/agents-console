@@ -1,11 +1,13 @@
 /**
  * The pool server: one Bun process per pool. It drives the pool engine and
  * serves the built SPA, a small JSON API (get state, start, resume-with-
- * answer, ticket reads, terminal peek/focus), and an SSE stream that pushes
- * a full state snapshot on every change, a burst of changes as one. The UI
- * renders from those snapshots only. The terminal endpoints are the UI's
- * only path to the herdr daemon (ADR-0014): the Console never talks to
- * herdr directly.
+ * answer, ticket reads, terminal peek/focus), and the one WebSocket the
+ * Console talks over (ws.ts, ADR-0032): the snapshot whole and then as
+ * deltas, a burst of changes as one, the live values and the subscribed
+ * cards pushed, and every action and read as a request answered by the
+ * same function as its HTTP twin. The UI renders from those snapshots
+ * only. The terminal endpoints are the UI's only path to the herdr daemon
+ * (ADR-0014): the Console never talks to herdr directly.
  *
  * The engine's snapshot carries `state.tickets` as an id -> status map and
  * `assignments` as the resolved Assignment record per ticket (ADR-0013); the
@@ -24,10 +26,13 @@
  */
 
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync,
@@ -70,6 +75,24 @@ import {
   parseAttemptLogName,
   readEvents,
 } from "./events.ts";
+import {
+  HEARTBEAT_MS,
+  POOL_LOG_WINDOW,
+  WS_PATH,
+  type PoolLogRange,
+  type TerminalFocusResponse,
+} from "./protocol.ts";
+import {
+  answered,
+  createPushHub,
+  refused,
+  withoutSnapshot,
+  type LogQuery,
+  type LogRange,
+  type RequestAnswer,
+  type RequestHandlers,
+  type SocketState,
+} from "./ws.ts";
 import type {
   CloseFinishedTerminalsResponse,
   EnrichedSnapshot,
@@ -102,7 +125,12 @@ import {
   focusPane,
   peekPane,
 } from "./herdr.ts";
-import { listEnlistPanes, type EnlistRequest, type EnlistResponse } from "./enlist.ts";
+import {
+  listEnlistPanes,
+  type EnlistRequest,
+  type EnlistResponse,
+  type PanesResponse,
+} from "./enlist.ts";
 import type {
   StewardActionResponse,
   StewardAnswerRequest,
@@ -159,9 +187,9 @@ export interface PoolServerOptions {
    * a fake.
    */
   jev?: Jev;
-  /** The snapshot stream's heartbeat interval in ms; tests shrink it. Defaults to SNAPSHOT_STREAM_HEARTBEAT_MS. */
+  /** The socket's heartbeat interval in ms; tests shrink it. Defaults to HEARTBEAT_MS. */
   streamHeartbeatMs?: number;
-  /** The snapshot stream's coalescing window in ms (issue #157); 0 sends every emit as it lands. Defaults to SNAPSHOT_COALESCE_MS. */
+  /** The snapshot push's coalescing window in ms (issue #157); 0 sends every emit as it lands. Defaults to SNAPSHOT_COALESCE_MS. */
   snapshotCoalesceMs?: number;
   /** How often an enlisted attempt re-reads its pane for Turn state (issue
    *  #101); tests shrink it so a queued teaching Turn lands without a
@@ -191,7 +219,7 @@ export interface PoolServerOptions {
    * (issue #121). The CLI passes a stop-then-hand-off-to-Boot; absent, the
    * server runs its own `shutdown()` in place and stays in the process,
    * which is what an in-process test wants. A Restart is a Stop plus a
-   * relaunch, so the farewell on the stream is identical and the tab that
+   * relaunch, so the farewell on the socket is identical and the tab that
    * asked is the one that knows the difference. It is handed the port the
    * route promised the tab, so the relaunch and the acknowledgement can
    * never name two different ports.
@@ -206,28 +234,28 @@ export interface PoolServerOptions {
   machineDefaultsPaths?: MachineDefaultsPaths;
 }
 
-/**
- * The snapshot stream's heartbeat interval: the server pushes one SSE comment
- * frame per connection at this cadence, inside common browser and proxy idle
- * timeouts so a healthy stream never idles out into a half-open state. A
- * comment frame is invisible to a browser EventSource, so the Console's client
- * reads the stream with fetch and treats any frame, snapshot or heartbeat, as
- * its liveness signal, reopening a stream that stays silent for a bounded
- * multiple of this interval. The interval is served as the stream's opening
- * frame, so the client's silence window derives from the served value.
- */
-export const SNAPSHOT_STREAM_HEARTBEAT_MS = 20_000;
-
-// How long a shutdown lets the just-closed snapshot streams flush their
-// farewell before every connection is cut. Over loopback a single turn of
-// the event loop is enough; the margin is for a slower link.
+// How long a shutdown lets the just-closed sockets flush their farewell
+// before every connection is cut. Over loopback a single turn of the event
+// loop is enough; the margin is for a slower link.
 const STREAM_DRAIN_MS = 50;
 
+// How long a forced stop is waited on. Bun 1.3 never settles stop(true) once
+// the server has closed a WebSocket itself, as the farewell does: the closed
+// socket stays counted in `pendingWebSockets`. The listener is shut and every
+// connection cut the moment stop(true) is called, so the wait is bounded
+// rather than trusted.
+const SERVE_STOP_WAIT_MS = 100;
+
+function stopServing(server: Bun.Server<SocketState>): Promise<void> {
+  return Promise.race([server.stop(true), Bun.sleep(SERVE_STOP_WAIT_MS)]);
+}
+
 /**
- * How long the snapshot stream gathers the engine's emits before sending
- * the latest of them (issue #157). Short enough that a tab never sees the
- * delay, long enough that a burst of emits (a super-step's boundary, a
- * merge, several panes' Turns at once) goes out as one frame.
+ * How long the socket gathers the engine's emits before pushing the latest
+ * of them (issue #157). Short enough that a tab never sees the delay, long
+ * enough that a burst of emits (a super-step's boundary, a merge, several
+ * panes' Turns at once) goes out as one delta. A card check and an early
+ * live check gather their triggers in the same window.
  */
 export const SNAPSHOT_COALESCE_MS = 50;
 
@@ -241,7 +269,7 @@ export interface PoolServer {
   close: () => Promise<void>;
   /**
    * The orderly stop (ADR-0017): stop the run's headless attempts, send the
-   * stream its `stopped` farewell and close it (issue #97), stop serving,
+   * sockets their `stopped` farewell and close them (issue #97), stop serving,
    * release the pool lock. The CLI's signal handler calls this and exits
    * after it; in-process callers may call it directly. Idempotent: a second
    * call joins the first.
@@ -354,26 +382,6 @@ function enrich(
   };
 }
 
-function encodeSnapshot(snapshot: EnrichedSnapshot): Uint8Array {
-  return new TextEncoder().encode(
-    `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
-  );
-}
-
-// The snapshot stream's liveness pulse: an SSE comment frame, so it carries no
-// event for a browser EventSource to dispatch and is pure keep-alive plus the
-// raw-frame liveness signal the fetch-based client measures.
-const HEARTBEAT_FRAME = new TextEncoder().encode(": heartbeat\n\n");
-
-// The stream's opening frame: the server publishes its heartbeat interval so
-// the client derives its silence window from the served value rather than a
-// hard-coded copy that could drift from the server's interval.
-function encodeStreamConfig(heartbeatMs: number): Uint8Array {
-  return new TextEncoder().encode(
-    `event: stream-config\ndata: ${JSON.stringify({ heartbeatMs })}\n\n`,
-  );
-}
-
 function serveStatic(distDir: string, pathname: string): Response | null {
   const resolved = pathname === "/" ? "/index.html" : pathname;
   const file = join(distDir, resolved);
@@ -402,6 +410,10 @@ function serveStatic(distDir: string, pathname: string): Response | null {
 
 /** The largest byte range a single log response serves. Larger logs page. */
 export const LOG_CHUNK_BYTES = 64 * 1024;
+
+/** The most pool log lines one read of its earlier lines serves (issue
+ *  #161); it serves POOL_LOG_WINDOW when the Console names no limit. */
+export const POOL_LOG_MAX_LINES = 2_000;
 
 // ANSI escape sequences: CSI (colors, cursor movement) and OSC (title, hyperlinks)
 // are stripped server-side so the served log reads as clean text.
@@ -545,32 +557,101 @@ function utf8HeadTrim(bytes: Uint8Array, start: number, end: number): number {
   return cut - start;
 }
 
+const ESC = 0x1b;
+
+// The longest escape sequence a read holds back waiting for its end (an OSC
+// hyperlink carries a whole URL); past it the bytes go as they are, so a
+// stray ESC can never hold a log back for good.
+const ESCAPE_MAX_BYTES = 4096;
+
+// Whether the escape sequence starting at `esc` has ended by `end`. A CSI
+// (ESC [) ends at its final byte, an OSC (ESC ]) at BEL (one ended by ST
+// leaves ST's own ESC as the last), a charset designator a byte after its
+// introducer, and every other escape at its second byte. A byte a sequence
+// cannot hold ends it too: a malformed sequence is not one still arriving.
+function escapeEnded(bytes: Uint8Array, esc: number, end: number): boolean {
+  if (esc + 1 >= end) return false;
+  const kind = bytes[esc + 1]!;
+  if (kind === 0x5b) {
+    for (let i = esc + 2; i < end; i++) {
+      const byte = bytes[i]!;
+      if (byte < 0x20 || byte >= 0x40) return true;
+    }
+    return false;
+  }
+  if (kind === 0x5d) {
+    for (let i = esc + 2; i < end; i++) if (bytes[i] === 0x07) return true;
+    return false;
+  }
+  if (kind === 0x28 || kind === 0x29 || kind === 0x23) return esc + 2 < end;
+  return true;
+}
+
+/**
+ * Trim a raw byte slice so no ANSI escape sequence straddles its tail (issue
+ * #161): the stripping is per read, so a sequence split across two reads
+ * would leave its second half in the pane as text. A tail that is still
+ * inside a sequence is cut at its ESC, so the next read (from the cut) brings
+ * the sequence whole, the way utf8End does for a split char.
+ */
+function escapeEnd(bytes: Uint8Array, start: number, end: number): number {
+  const from = Math.max(start, end - ESCAPE_MAX_BYTES);
+  for (let i = end - 1; i >= from; i--) {
+    if (bytes[i] === ESC) return escapeEnded(bytes, i, end) ? end : i;
+  }
+  return end;
+}
+
 /**
  * Read a byte range of a log file: from `offset` up to `LOG_CHUNK_BYTES` more
  * bytes (or EOF), ANSI-stripped. The client pages by requesting from the
  * returned `nextOffset` until it equals `totalSize`. An optional `end` bounds
  * the range below the chunk size, which is how "load earlier" reads exactly
  * the missing prefix before the bytes the pane already holds.
+ *
+ * Read in place rather than awaited (issue #161): a socket's card check
+ * reads a window or an append and sends it in the same turn, so no other
+ * check can move the card's offset between the read and its frame. One
+ * positioned read of at most a chunk costs microseconds.
  */
-async function readLogRange(
-  logPath: string,
-  offset: number,
-  end?: number,
-): Promise<{ content: string; offset: number; nextOffset: number; totalSize: number }> {
-  if (!existsSync(logPath)) {
+function readLogRange(logPath: string, offset: number, end?: number): LogRange {
+  let fd: number;
+  try {
+    fd = openSync(logPath, "r");
+  } catch {
     return { content: "", offset: 0, nextOffset: 0, totalSize: 0 };
   }
-  const file = Bun.file(logPath);
-  const totalSize = file.size;
-  const start = Math.min(Math.max(0, offset), totalSize);
-  const bound =
-    end !== undefined && Number.isFinite(end)
-      ? Math.max(start, end)
-      : start + LOG_CHUNK_BYTES;
-  const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
-  const bytes = new Uint8Array(await file.slice(start, rangeEnd).arrayBuffer());
+  let totalSize: number;
+  let start: number;
+  let bytes: Uint8Array;
+  try {
+    totalSize = fstatSync(fd).size;
+    start = Math.min(Math.max(0, offset), totalSize);
+    const bound =
+      end !== undefined && Number.isFinite(end)
+        ? Math.max(start, end)
+        : start + LOG_CHUNK_BYTES;
+    const rangeEnd = Math.min(start + LOG_CHUNK_BYTES, bound, totalSize);
+    bytes = new Uint8Array(Math.max(0, rangeEnd - start) || 0);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = readSync(fd, bytes, read, bytes.length - read, start + read);
+      if (n === 0) break;
+      read += n;
+    }
+    bytes = bytes.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
   const headTrim = utf8HeadTrim(bytes, 0, bytes.length);
-  const decodeEnd = utf8End(bytes, headTrim, bytes.length);
+  let decodeEnd = utf8End(bytes, headTrim, bytes.length);
+  // A forward read (a tail, or a page on from the last one) is continued
+  // from its nextOffset, so it stops short of an escape still arriving. A
+  // read bounded by `end` meets bytes the reader already holds, and keeps
+  // every byte up to them.
+  if (end === undefined || !Number.isFinite(end)) {
+    decodeEnd = escapeEnd(bytes, headTrim, decodeEnd);
+  }
   return {
     content: stripAnsi(
       new TextDecoder().decode(bytes.subarray(headTrim, decodeEnd)),
@@ -579,6 +660,32 @@ async function readLogRange(
     nextOffset: start + decodeEnd,
     totalSize,
   };
+}
+
+/** Where a log's last window starts: its last LOG_CHUNK_BYTES. */
+function logTailOffset(logPath: string): number {
+  try {
+    return Math.max(0, statSync(logPath).size - LOG_CHUNK_BYTES);
+  } catch {
+    return 0;
+  }
+}
+
+/** Whether an Origin header names the host the request came to. One that
+ *  does not parse (a sandboxed page's "null") names no host of ours. */
+function sameOrigin(origin: string, host: string | null): boolean {
+  try {
+    return host !== null && new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+/** A request's answer as its HTTP route has always sent it. */
+function httpOf(answer: RequestAnswer<unknown>): Response {
+  return answer.ok
+    ? Response.json(answer.result, { status: answer.status })
+    : Response.json({ [answer.field]: answer.reason }, { status: answer.status });
 }
 
 // Attempt logs are the four names the events module's naming contract
@@ -641,15 +748,16 @@ function countLines(text: string): number {
 }
 
 // The worktree's diff summary, read with git off the engine's thread (issue
-// #157): the UI asks for it every ~2 s per live ticket per tab, and a
-// synchronous read stalled every other request and the snapshot stream
-// while git and the untracked-file reads ran.
+// #157): the live check asks for it every ~2 s per live ticket, and a
+// synchronous read stalled every other request and the snapshot push while
+// git and the untracked-file reads ran. The two run one after the other
+// (issue #161): Bun starts a child on the event loop's own thread, so two
+// started together are one longer stall, where one at a time lets the loop
+// answer whatever arrived between them.
 async function computeActivityDiff(cwd: string): Promise<TicketActivityResponse["diff"]> {
   try {
-    const [numstat, status] = await Promise.all([
-      gitAsync(cwd, ["diff", "--numstat", "HEAD"]),
-      gitAsync(cwd, ["status", "--porcelain"]),
-    ]);
+    const numstat = await gitAsync(cwd, ["diff", "--numstat", "HEAD"]);
+    const status = await gitAsync(cwd, ["status", "--porcelain"]);
     if (!numstat.ok || !status.ok) return null;
     const lines = new Map<string, { added: number; removed: number }>();
     const order: string[] = [];
@@ -752,8 +860,9 @@ async function readTicketActivity(
 
 /**
  * How long one worktree diff answers every request for its ticket. Just
- * under the UI's ~2 s poll, so one tab still sees each poll's diff fresh,
- * while a second tab, or a burst of requests, shares the read already made.
+ * under the live check's 2 s cadence, so each check still sees the diff
+ * fresh, while an HTTP reader, or a burst of reads, shares the read already
+ * made.
  */
 export const ACTIVITY_CACHE_TTL_MS = 1500;
 
@@ -830,11 +939,9 @@ function stripStateMarker(text: string): string {
 // then any file whose prefix before the first `-` equals the id. The lookup
 // is scoped to the files readdir reports from the pool's issues directory, so
 // an arbitrary id can never walk out of it (plain string equality, no regex
-// on the id).
-function readTicketBody(
-  poolDir: string,
-  ticketId: string,
-): TicketBodyResponse | null {
+// on the id). The socket's card check stats the same file the body comes
+// from (issue #161), so the lookup is its own function.
+function ticketBodyFile(poolDir: string, ticketId: string): string | null {
   const issuesDir = join(poolDir, "issues");
   let files: string[] = [];
   try {
@@ -849,10 +956,18 @@ function readTicketBody(
       const dash = file.indexOf("-");
       return dash > 0 && file.slice(0, dash) === ticketId;
     });
+  return file ? join(issuesDir, file) : null;
+}
+
+function readTicketBody(
+  poolDir: string,
+  ticketId: string,
+): TicketBodyResponse | null {
+  const file = ticketBodyFile(poolDir, ticketId);
   if (!file) return null;
   return {
     id: ticketId,
-    body: stripStateMarker(readFileSync(join(issuesDir, file), "utf8")),
+    body: stripStateMarker(readFileSync(file, "utf8")),
   };
 }
 
@@ -880,9 +995,9 @@ function isAddressInUse(err: unknown): boolean {
  */
 function bindPoolServer(
   resolution: PortResolution,
-  serve: (port: number) => Bun.Server<undefined>,
+  serve: (port: number) => Bun.Server<SocketState>,
   registryPath: string,
-): Bun.Server<undefined> {
+): Bun.Server<SocketState> {
   if (resolution.pinned) {
     try {
       return serve(resolution.port);
@@ -1042,8 +1157,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   const jev = options.jev;
   const machineDefaultsPaths =
     options.machineDefaultsPaths ?? defaultMachineDefaultsPaths();
-  const streamHeartbeatMs =
-    options.streamHeartbeatMs ?? SNAPSHOT_STREAM_HEARTBEAT_MS;
+  const streamHeartbeatMs = options.streamHeartbeatMs ?? HEARTBEAT_MS;
   // The pool's ticket metadata, as the engine parses it from the Issue files —
   // the engine's own load (loadPoolTickets), so the server accepts exactly the
   // pools the engine does: an empty issues/ on a pool with a conversations/
@@ -1066,8 +1180,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   let conversationIds = new Set(conversationRecords.map((c) => c.id));
   const poolName = poolDir.split("/").slice(-2).join("/");
 
-  // A short in-memory cache of each ticket's worktree diff absorbs the
-  // client's repeat polls (ADR 0011): one entry per known ticket id, so it
+  // A short in-memory cache of each ticket's worktree diff absorbs repeat
+  // reads (ADR 0011): one entry per known ticket id, so it
   // never grows past the pool's size. A read in flight is shared by every
   // request that arrives while it runs, and its answer then serves for the
   // TTL from when it landed; a new worktree (the next attempt) reads afresh.
@@ -1162,7 +1276,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   // bursts, a Turn's last line every couple of seconds per live pane among
   // them, and enriching each one re-read the pool's files and serialised the
   // whole snapshot for every emit. Now the enrichment waits until something
-  // reads the snapshot: a request, or the stream's coalesced send below.
+  // reads the snapshot: a request, or the socket's coalesced push (ws.ts).
   let pendingRaw: PoolSnapshot | null = null;
 
   /**
@@ -1279,89 +1393,44 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     return current();
   }
 
-  // Every open snapshot stream, each with the teardown of its own heartbeat
-  // so a shutdown can end the streams cleanly rather than leaving them to be
-  // cut by the socket close, and the snapshot it was last sent, so a send
-  // never repeats one.
-  const clients = new Map<
-    ReadableStreamDefaultController<Uint8Array>,
-    { stopHeartbeat: () => void; sent: EnrichedSnapshot | null }
-  >();
-
-  // The stream's coalescing window (issue #157): an emit starts it, every
-  // emit inside it joins it, and at its end the snapshot as it stands then
-  // goes out once, serialised once for every tab. A burst of emits is one
-  // send, at most this long after its first.
+  // The Console's socket (issue #161): the snapshot push, the live check
+  // and the card watchers live in ws.ts, reading the pool through the same
+  // functions the routes below answer from. The push's coalescing window
+  // (issue #157): an emit starts it, every emit inside it joins it, and at
+  // its end the snapshot as it stands then goes out once, as one delta
+  // serialised once for every tab.
   const coalesceMs = options.snapshotCoalesceMs ?? SNAPSHOT_COALESCE_MS;
-  let sendTimer: ReturnType<typeof setTimeout> | null = null;
-  // The frame of the snapshot last serialised, so a send and a connect
-  // never encode the same snapshot twice.
-  let framed: { snapshot: EnrichedSnapshot; bytes: Uint8Array } | null = null;
-
-  function frameOf(snapshot: EnrichedSnapshot): Uint8Array {
-    if (framed?.snapshot !== snapshot) framed = { snapshot, bytes: encodeSnapshot(snapshot) };
-    return framed.bytes;
-  }
-
-  // Sends one stream the snapshot as it stands, unless it already has it.
-  function sendTo(controller: ReadableStreamDefaultController<Uint8Array>): void {
-    const client = clients.get(controller);
-    const snapshot = current();
-    if (!client || snapshot === null || client.sent === snapshot) return;
-    try {
-      controller.enqueue(frameOf(snapshot));
-      client.sent = snapshot;
-    } catch {
-      client.stopHeartbeat();
-      clients.delete(controller);
-    }
-  }
-
-  // The window's end. The snapshot is brought up to date even with no tab
-  // open, so the ids the ticket routes accept and the Pool title the run
-  // is told follow the engine without waiting for a reader.
-  function sendNow(): void {
-    if (sendTimer !== null) clearTimeout(sendTimer);
-    sendTimer = null;
-    current();
-    for (const controller of [...clients.keys()]) sendTo(controller);
-  }
+  const runsDir = join(poolDir, "runs");
+  const hub = createPushHub(
+    {
+      current,
+      runsDir,
+      issuesDir: join(poolDir, "issues"),
+      bodyFile: (id) => ticketBodyFile(poolDir, id),
+      body: (id) => readTicketBody(poolDir, id),
+      events: (id) => {
+        refreshMeta();
+        return readTicketEvents(poolDir, id, meta);
+      },
+      attempts: (id) => listAttemptLogs(runsDir, id),
+      readLog: (path, from) => readLogRange(path, from === "tail" ? logTailOffset(path) : from),
+      log: (query) => logRequest(query),
+      activity: (id) => readTicketActivityCached(id),
+      peek: (id) => peekRequest(id),
+      grades: () => {
+        refreshMeta();
+        return poolGrades();
+      },
+      request: (kind, payload) => requests[kind](payload),
+    },
+    { heartbeatMs: streamHeartbeatMs, coalesceMs, checkMs: SNAPSHOT_COALESCE_MS },
+  );
 
   // An engine snapshot arrived (or a Reassign write rebuilt the last one):
-  // readers see it at once, the streams at the end of the window.
+  // readers see it at once, the socket at the end of the window.
   function received(snapshot: PoolSnapshot): void {
     pendingRaw = snapshot;
-    if (coalesceMs <= 0) sendNow();
-    else if (sendTimer === null) sendTimer = setTimeout(sendLater, coalesceMs);
-  }
-
-  // The timed send has no caller to throw to: an enrichment that fails is
-  // reported, and the next emit or request tries again.
-  function sendLater(): void {
-    try {
-      sendNow();
-    } catch (err) {
-      console.error(
-        `snapshot stream: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-
-  // End every snapshot stream after its last frame (the farewell, when the
-  // run sent one): the client sees an orderly end-of-stream behind a
-  // `stopped` snapshot, not a reset socket. A send still waiting out its
-  // window goes first, so the farewell is never left behind.
-  function closeStreams(): void {
-    sendNow();
-    for (const [controller, { stopHeartbeat }] of [...clients]) {
-      stopHeartbeat();
-      clients.delete(controller);
-      try {
-        controller.close();
-      } catch {
-        // Already gone; nothing to end.
-      }
-    }
+    hub.schedule();
   }
 
   // The engine handle exists from the first super-step: startPool returns it
@@ -1440,8 +1509,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     // (the acceptance emit has already broadcast it), idle it carries the
     // processed state, since the drain and the fresh drive's first emit run
     // synchronously inside accept. Returning the pre-accept snapshot instead
-    // would race that SSE frame and could clobber the waiting state in the
-    // UI.
+    // would race that push and could clobber the waiting state in the UI.
     return current()!;
   }
 
@@ -1612,29 +1680,29 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     bootConfig.port,
     options.defaultPort ?? DEFAULT_PORT,
   );
-  let server: Bun.Server<undefined>;
+  let server: Bun.Server<SocketState>;
 
   // The orderly stop, one per server: a signal, a `POST /api/stop`, or an
   // in-process caller all land here, and a second arrival joins the first.
   // The attempts stop first, while the run's own exit handling can still
   // record each stop, and the run's farewell `stopped` snapshot goes out to
-  // every stream as its last frame; the streams end next, then serving
-  // stops so no answer arrives into a closing run; the lock goes last, once
-  // nothing of this process still owns the pool.
+  // every socket as its last delta; the sockets close next (CLOSE_STOPPED),
+  // then serving stops so no answer arrives into a closing run; the lock
+  // goes last, once nothing of this process still owns the pool.
   let stopping: Promise<void> | null = null;
   const shutdown = (graceMs?: number): Promise<void> => {
     if (!stopping) {
       stopping = (async () => {
         if (currentRun) await currentRun.shutdown(graceMs);
-        closeStreams();
-        // A closed stream still has its last frames in flight: a forced stop
-        // on the same turn resets the socket under the farewell and the tab
-        // never sees it. One short pause lets the closed streams flush. (A
-        // graceful stop(false) first is not the answer: a stop(true) after
-        // it no longer closes the idle keep-alive connections, so the port
-        // would go on answering with the lock already released.)
+        hub.closeSockets();
+        // A closed socket still has its last frames in flight: a forced stop
+        // on the same turn resets the connection under the farewell and the
+        // tab never sees it. One short pause lets the closed sockets flush.
+        // (A graceful stop(false) first is not the answer: a stop(true)
+        // after it no longer closes the idle keep-alive connections, so the
+        // port would go on answering with the lock already released.)
         await Bun.sleep(STREAM_DRAIN_MS);
-        await server.stop(true);
+        await stopServing(server);
         releasePoolLock(poolDir);
       })();
     }
@@ -1660,228 +1728,665 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     else void shutdown();
   };
   const stopUnderWay = (): boolean => stopRequested || stopping !== null;
+  const servingPort = (): number => server.port ?? resolution.port;
+
+  // ---------------------------------------------------------------------
+  // Requests (issue #161)
+  // ---------------------------------------------------------------------
+  //
+  // Each route's body, as a function both of its callers run: the HTTP
+  // route, which turns the answer into the response it has always sent
+  // (httpOf), and the socket, which turns it into a reply (ws.ts). A route
+  // that reads a JSON body takes it as a thunk, so a body that fails to
+  // parse is refused at the point, and in the words, it always was; the
+  // socket's payload has parsed already.
+
+  type Body = () => Promise<unknown>;
+
+  async function startRequest(): Promise<RequestAnswer<{ snapshot: EnrichedSnapshot }>> {
+    return answered({ snapshot: await start() });
+  }
+
+  // Stop this server from the Console (issue #97): only a finished pool may
+  // be stopped this way. Any other phase can have an attempt mid-flight (or
+  // an answer the operator is about to give), so a stale tab or a stray
+  // curl gets a 409 rather than a stop. The answer goes out before the stop
+  // begins, the way a resume acknowledges before processing; the farewell
+  // on the socket is how the tab learns the stop landed. A stop already
+  // under way is acknowledged again rather than started twice.
+  function stopRequest(): RequestAnswer<{ stopping: true }> {
+    const phase = current()?.phase ?? null;
+    if (!stopUnderWay() && phase !== "done") {
+      return refused(
+        409,
+        "error",
+        phase === null
+          ? "pool not started: nothing to stop"
+          : `pool is ${phase}, not done: stop refused`,
+      );
+    }
+    if (!stopUnderWay()) {
+      stopRequested = true;
+      // Off the request's own turn, so the answer is on the wire before
+      // serving stops underneath it.
+      setTimeout(requestStop, 0);
+    }
+    return answered({ stopping: true } as const, 202);
+  }
+
+  // Restart this server from the Console (issue #121): stop with the same
+  // farewell a Stop sends, then hand off to Boot for the same Pool, so
+  // boot-only Pool settings and a fresh UI build take effect. Allowed in
+  // any phase, unlike Stop: a Restart is how a live run picks up a new port
+  // or terminal setting, and the operator has already passed the Console's
+  // inline confirm to get here. Headless attempts are killed by the
+  // shutdown and terminal-backed ones stay in their tabs to be re-adopted,
+  // exactly as on any other restart. The answer names the port the
+  // relaunch will listen on, which is the one piece a reconnecting tab
+  // cannot work out for itself.
+  function restartRequest(): RequestAnswer<RestartResponse> {
+    const port = relaunchPort(servingPort());
+    if (!stopUnderWay()) {
+      stopRequested = true;
+      // Off the request's own turn, so the answer is on the wire before
+      // serving stops underneath it.
+      setTimeout(() => requestRestart(port), 0);
+    }
+    return answered({ ok: true, port } satisfies RestartResponse, 202);
+  }
+
+  // The Settings pane's reads and writes (issue #121). The pool's config
+  // file stays the source of truth: this is a second way to edit it, never
+  // a second copy of it.
+  function settingsRequest(): RequestAnswer<SettingsResponse> {
+    try {
+      return answered(settingsPayload(servingPort()));
+    } catch (err) {
+      // Only a console.json hand-edited into a broken state since boot
+      // reaches here: the server parsed it to start at all.
+      return refused(500, "error", err);
+    }
+  }
+
+  // A patch, not a replacement: `assign` and any key this server does not
+  // know survive the write (pool-settings.ts). The assignment slice of what
+  // lands here (defaults, resolver) reaches the run on its own, without a
+  // restart: the engine re-reads console.json from disk at every
+  // super-step boundary and compares it against the text it last
+  // considered (ADR-0018), so nothing between here and there caches the
+  // file in a way that could swallow this write. The boot-only keys need
+  // the Restart, which is what `bootOnly` in the answer is for.
+  async function poolSettingsRequest(read: Body): Promise<RequestAnswer<SettingsResponse>> {
+    try {
+      const body = (await read()) as { config?: unknown };
+      const patch = body?.config;
+      if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+        throw new Error("settings: config must be an object");
+      }
+      writePoolSettings(poolDir, patch as Record<string, unknown>, {
+        harnesses: Object.keys(harnesses),
+      });
+      // A pool with nothing in flight reaches no boundary to reload at, so
+      // the save asks for the reload itself (issue #149): a changed Spawn
+      // cap is on the snapshot before this answers. In flight, the next
+      // boundary reads the file as it would anyway.
+      currentRun?.reloadConfig();
+      // The Pool title (issue #100) is the one setting with no seam to wait
+      // for: every open tab shows it from this push, and the push is what
+      // hands a changed title to the run.
+      reenrich();
+      return answered(settingsPayload(servingPort()));
+    } catch (err) {
+      return refused(400, "error", err);
+    }
+  }
+
+  // Reassign (issue #126). The write is an edit of the same console.json
+  // the Settings pane edits, so it answers in the settings convention: 400
+  // { error } for a refused request, 500 for a file this server can no
+  // longer read. The engine picks the write up at its next Config reload
+  // and emits the `reassigned` events itself (ADR-0018); nothing here
+  // reaches into the run. The answer carries a freshly enriched snapshot
+  // so the cards show the new Assignment without waiting for that
+  // boundary, which a quiescent pool would never reach.
+  async function reassignRequest(read: Body): Promise<RequestAnswer<ReassignResponse>> {
+    try {
+      if (!lastRaw) throw new Error("reassign: pool not started");
+      const body = (await read()) as Partial<ReassignRequest>;
+      if (typeof body !== "object" || body === null || Array.isArray(body)) {
+        throw new Error("reassign: body must be an object");
+      }
+      refreshMeta();
+      const context: ReassignContext = {
+        markers: meta,
+        harnesses,
+        liveAttempts: liveAttemptIds(lastRaw),
+        statuses: lastRaw.state.tickets,
+        engineAssignments: lastRaw.assignments,
+      };
+      const outcome = writeReassign(
+        poolDir,
+        { tickets: body.tickets as string[], fields: body.fields ?? {} },
+        context,
+      );
+      const snapshot = reenrich();
+      if (!snapshot) throw new Error("reassign: pool not started");
+      return answered({ ...outcome, snapshot } satisfies ReassignResponse);
+    } catch (err) {
+      // 400 only for a request this server genuinely refused. A file it
+      // cannot read or write, and a pool that never started, are its own
+      // failures and must not read back as the operator's mistake.
+      return refused(err instanceof ReassignRefusal ? 400 : 500, "error", err);
+    }
+  }
+
+  // The Machine defaults are written whole, the way the file itself is
+  // (machine-defaults.ts): the pane shows every field, so a field left
+  // empty is the operator clearing it. The legacy runner files are never
+  // written, only read behind this one.
+  async function machineSettingsRequest(read: Body): Promise<RequestAnswer<SettingsResponse>> {
+    try {
+      const body = (await read()) as { defaults?: unknown };
+      const defaults = body?.defaults;
+      if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) {
+        throw new Error("settings: defaults must be an object");
+      }
+      writeMachineDefaults(defaults as MachineDefaults, machineDefaultsPaths.file);
+      return answered(settingsPayload(servingPort()));
+    } catch (err) {
+      return refused(400, "error", err);
+    }
+  }
+
+  async function resumeRequest(read: Body): Promise<RequestAnswer<{ snapshot: EnrichedSnapshot }>> {
+    try {
+      const body = (await read()) as {
+        ticketId?: unknown;
+        action?: unknown;
+        note?: unknown;
+      };
+      const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
+      // An absent action is a plain resume, as it always was; an action
+      // the server does not know is a malformed request, never quietly
+      // a resume (a Close read as a Resume would merge the work).
+      if (body.action !== undefined && !RESUME_ACTIONS.includes(body.action as ResumeAction)) {
+        throw new Error(
+          `unknown action ${JSON.stringify(body.action)}: expected one of ${RESUME_ACTIONS.join(", ")}`,
+        );
+      }
+      const action = (body.action as ResumeAction | undefined) ?? "resume";
+      const note = typeof body.note === "string" ? body.note : undefined;
+      if (!ticketId) throw new Error("missing ticketId");
+      const snapshot = await answer(ticketId, action, note);
+      return answered({ snapshot }, 202);
+    } catch (err) {
+      // A different answer already queued is a conflict with the
+      // queue, not a malformed request.
+      return refused(err instanceof AnswerQueuedConflict ? 409 : 400, "error", err);
+    }
+  }
+
+  // Conversations (issue #60): start, end. The Console's client read a
+  // 409's failure reason off a `reason` field, not `error` (the shape the
+  // older routes in this file use), so these answer with `reason`, and so
+  // do the routes after them.
+  async function startConversationRequest(
+    read: Body,
+  ): Promise<RequestAnswer<{ conversation: ConversationView }>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    // A Steward (ADR-0030) is a Conversation in a role: its opening is the
+    // operator's standing orders, and its title may be left blank.
+    if (fields.role !== undefined && fields.role !== "steward") {
+      return refused(400, "reason", 'role must be "steward" when given');
+    }
+    const role = fields.role === "steward" ? ("steward" as const) : undefined;
+    const title =
+      (typeof fields.title === "string" ? fields.title : "").trim() ||
+      (role === "steward" ? "Steward" : "");
+    if (!title) return refused(400, "reason", "title is required");
+    const opening = typeof fields.opening === "string" ? fields.opening : undefined;
+    const rawAssign =
+      fields.assign && typeof fields.assign === "object"
+        ? (fields.assign as Record<string, unknown>)
+        : undefined;
+    const stringField = (value: unknown): string | undefined =>
+      typeof value === "string" ? value : undefined;
+    const assign = rawAssign
+      ? {
+          harness: stringField(rawAssign.harness),
+          model: stringField(rawAssign.model),
+          effort: stringField(rawAssign.effort),
+          drivers: stringField(rawAssign.drivers),
+        }
+      : undefined;
+    try {
+      const conversation = await startConversation({
+        title,
+        opening,
+        assign,
+        ...(role ? { role } : {}),
+      });
+      return answered({ conversation }, 201);
+    } catch (err) {
+      // Every refusal the engine's startConversation throws (not
+      // terminal-backed, no git checkout, unknown harness, no
+      // harness/model resolved, the herdr tab failing to open) reads as a
+      // 409: the request was well-formed, the pool just cannot host a
+      // Conversation right now.
+      return refused(409, "reason", err);
+    }
+  }
+
+  async function endConversationRequest(
+    read: Body,
+  ): Promise<RequestAnswer<{ snapshot: EnrichedSnapshot | null }>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    const id = typeof fields.id === "string" ? fields.id : "";
+    if (!id) return refused(400, "reason", "id is required");
+    const closing = typeof fields.closing === "string" ? fields.closing : undefined;
+    try {
+      await endConversation(id, closing);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The engine's endConversation throws this exact prefix for both an
+      // id it has never heard of and one that already ended: either way
+      // there is no live Conversation to end, which is what a 404 means
+      // everywhere else in this file (an unknown ticket id). Anything else
+      // (a merge-chain failure the engine already logs and recovers from)
+      // is a 409, not a client error.
+      return refused(message.includes("no live conversation") ? 404 : 409, "reason", message);
+    }
+    refreshMeta();
+    return answered({ snapshot: current() }, 202);
+  }
+
+  // Enlist a live herdr pane as a Ticket or a Conversation (issue #101).
+  // The body is the one wire shape engine/enlist.ts declares; `becomes` is
+  // fixed at enlist time and chooses the arm. A well-formed request the
+  // pool refuses (pane gone, already in the pool, branch creation failing,
+  // teaching undeliverable) is the Conversation start's 409 `reason`, so
+  // the Console's form surfaces it inline.
+  async function enlistRequest(read: Body): Promise<RequestAnswer<EnlistResponse>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    const paneId = typeof fields.paneId === "string" ? fields.paneId : "";
+    if (!paneId) return refused(400, "reason", "paneId is required");
+    const title = typeof fields.title === "string" ? fields.title : "";
+    // `becomes` is fixed at enlist time and the wire type is a union, so an
+    // absent or misspelled value is refused rather than defaulted to a
+    // Ticket: enlisting is not undoable, and silently picking the kind that
+    // has an end is the wrong guess to make on the operator's behalf.
+    if (
+      fields.becomes !== "ticket" &&
+      fields.becomes !== "conversation" &&
+      fields.becomes !== "steward"
+    ) {
+      return refused(400, "reason", 'becomes must be "ticket", "conversation" or "steward"');
+    }
+    try {
+      if (fields.becomes === "conversation" || fields.becomes === "steward") {
+        const opening = typeof fields.opening === "string" ? fields.opening : undefined;
+        return answered(
+          await enlist({
+            becomes: fields.becomes,
+            paneId,
+            title,
+            ...(opening !== undefined ? { opening } : {}),
+          }),
+          201,
+        );
+      }
+      const spec = typeof fields.spec === "string" ? fields.spec : "";
+      const blocks = Array.isArray(fields.blocks)
+        ? fields.blocks.filter((id): id is string => typeof id === "string")
+        : undefined;
+      return answered(
+        await enlist({
+          becomes: "ticket",
+          paneId,
+          title,
+          spec,
+          ...(blocks !== undefined ? { blocks } : {}),
+        }),
+        201,
+      );
+    } catch (err) {
+      return refused(409, "reason", err);
+    }
+  }
+
+  // Keep talking (issue #139): continue a ticket's checkpointed Attempt in
+  // its Held pane. Not a resume action, because it is never queued
+  // (ADR-0004's exception, as Enlist is), so it answers once the pane is
+  // claimed: 202 with the Continued attempt's number, or a 409 `reason`
+  // when the engine refuses (no Held pane, not at a checkpoint, an answer
+  // already queued, the pane gone).
+  async function keepTalkingRequest(read: Body): Promise<RequestAnswer<KeepTalkingResponse>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    const ticketId = typeof fields.ticketId === "string" ? fields.ticketId : "";
+    if (!ticketId) return refused(400, "reason", "ticketId is required");
+    try {
+      return answered(await keepTalking(ticketId), 202);
+    } catch (err) {
+      return refused(409, "reason", err);
+    }
+  }
+
+  // Close every Finished terminal (issue #139): the pool header's bulk
+  // close, behind the Console's inline confirm. The engine works out the
+  // set afresh and closes it; nothing else ever closes one.
+  async function closeFinishedRequest(): Promise<RequestAnswer<CloseFinishedTerminalsResponse>> {
+    const run = currentRun;
+    if (!run) return refused(409, "reason", "pool not started");
+    try {
+      const closed = await run.closeFinishedTerminals();
+      return answered({ closed } satisfies CloseFinishedTerminalsResponse);
+    } catch (err) {
+      return refused(409, "reason", err);
+    }
+  }
+
+  // Adopt or Discard a Held spawn (issue #149, ADR-0029): the proposals a
+  // Spawn cap had no room for wait on the snapshot for the operator. Adopt
+  // answers 202 once queued, past both caps (the snapshot shows the ticket
+  // once the boundary, or at once an idle engine, writes it); Discard
+  // answers once the spawn is gone. A refusal is a 409 `reason`.
+  async function heldSpawnRequest(
+    adopt: boolean,
+    read: Body,
+  ): Promise<RequestAnswer<HeldSpawnResponse>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    const id = typeof fields.id === "string" ? fields.id : "";
+    if (!id) return refused(400, "reason", "id is required");
+    const run = currentRun;
+    if (!run) return refused(409, "reason", "pool not started");
+    try {
+      if (adopt) run.adoptHeldSpawn(id);
+      else run.discardHeldSpawn(id);
+      return answered({ id } satisfies HeldSpawnResponse, adopt ? 202 : 200);
+    } catch (err) {
+      return refused(409, "reason", err);
+    }
+  }
+
+  // Hold or Discard a Pending spawn before the boundary lands it (issue
+  // #150), in the Held spawn routes' shape.
+  async function pendingSpawnRequest(
+    hold: boolean,
+    read: Body,
+  ): Promise<RequestAnswer<PendingSpawnResponse>> {
+    let body: unknown;
+    try {
+      body = await read();
+    } catch {
+      return refused(400, "reason", "invalid JSON body");
+    }
+    const fields = (body ?? {}) as Record<string, unknown>;
+    const id = typeof fields.id === "string" ? fields.id : "";
+    if (!id) return refused(400, "reason", "id is required");
+    const run = currentRun;
+    if (!run) return refused(409, "reason", "pool not started");
+    try {
+      if (hold) run.holdPendingSpawn(id);
+      else run.discardPendingSpawn(id);
+      return answered({ id } satisfies PendingSpawnResponse);
+    } catch (err) {
+      return refused(409, "reason", err);
+    }
+  }
+
+  // One byte range of an attempt's log, the derived one or (`stream`) its
+  // Stream file, the raw stream tee, through the same path. A Conversation
+  // id works unchanged: startConversation names its log/Stream files
+  // `<id>.log` / `<id>.stream.jsonl` (attemptLogName/attemptStreamName's
+  // current-attempt name) and records one `spawned` event at attempt 1, so
+  // listAttemptLogs derives the single "implement" row a terminal-backed
+  // ticket attempt gets. The offset is a byte offset into the raw log; the
+  // Console pages by continuing from the returned nextOffset. `attempt`
+  // absent is the latest; `end` bounds a "load earlier" prefix read; a
+  // "tail" offset is the file's last window, what `log.follow` answers.
+  function logRequest(query: LogQuery): RequestAnswer<TicketLogResponse> {
+    refreshMeta();
+    if (!ticketIds.has(query.id) && !conversationIds.has(query.id)) {
+      return refused(404, "error", `unknown ticket ${query.id}`);
+    }
+    const attempts = listAttemptLogs(runsDir, query.id);
+    const attempt = query.attempt ?? attempts[attempts.length - 1]?.attempt ?? 0;
+    const info = attempts.find((row) => row.attempt === attempt);
+    const file = query.stream ? (info?.streamFile ?? null) : (info?.logFile ?? null);
+    if (!file) {
+      return refused(
+        404,
+        "error",
+        info
+          ? `no stream file for attempt ${attempt} of ${query.id}`
+          : `unknown attempt ${attempt} for ${query.id}`,
+      );
+    }
+    const path = join(runsDir, file);
+    const offset = query.offset === "tail" ? logTailOffset(path) : query.offset;
+    return answered({ ...readLogRange(path, offset, query.end), attempts });
+  }
+
+  // A run of the pool log (issue #161): up to `limit` lines ending before
+  // line `before` of the whole log, of which the snapshot carries only the
+  // last POOL_LOG_WINDOW lines. The Console's drawer's "load earlier".
+  function poolLogRequest(before: number, limit: number | undefined): RequestAnswer<PoolLogRange> {
+    if (!Number.isSafeInteger(before) || before < 0) {
+      return refused(400, "error", "before must be a line number");
+    }
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+      return refused(400, "error", "limit must be a positive whole number");
+    }
+    const log = current()?.state.log ?? [];
+    const end = Math.min(before, log.length);
+    const start = Math.max(0, end - Math.min(limit ?? POOL_LOG_WINDOW, POOL_LOG_MAX_LINES));
+    return answered({ start, lines: log.slice(start, end), total: log.length });
+  }
+
+  // The card's Peek: the pane's viewport as plain text (ANSI stripped
+  // herdr-side). A pane an operator sits in is read once per tick and for
+  // one purpose (issue #122): when the engine's own loop watches the pane
+  // (an enlisted Ticket's, a Conversation's) the answer is that loop's last
+  // recorded read and herdr is not asked again. A spawned terminal-backed
+  // attempt has no loop, so it is read live, and of the viewport only: a
+  // scrollback read moves the operator's viewport, which is the bug this
+  // route used to cause twice over. An empty read (a background tab still
+  // warming up) is empty text, not an error; a daemon failure is a clean
+  // 502 the card renders as "pane unavailable". Nothing here reads
+  // pane.read's revision: it is verified stagnant, so freshness is the
+  // live check comparing text.
+  async function peekRequest(ticketId: string): Promise<RequestAnswer<TerminalPeekResponse>> {
+    const resolved = resolveTerminalRequest(ticketId);
+    if (!resolved.ok) return refused(resolved.status, "error", resolved.error);
+    try {
+      const recorded = currentRun?.paneRead(resolved.paneId) ?? null;
+      const text =
+        recorded?.text ?? (await peekPane(herdrSocket, resolved.paneId, { source: "visible" }));
+      return answered({ ticket: ticketId, paneId: resolved.paneId, text });
+    } catch (err) {
+      return refused(502, "error", err);
+    }
+  }
+
+  // "Open in herdr": focus the attempt's pane, jumping the operator's herdr
+  // TUI to the attempt's tab. Same translation and registration guard as
+  // peek; a mutating call, so POST only over HTTP.
+  async function focusRequest(ticketId: string): Promise<RequestAnswer<TerminalFocusResponse>> {
+    const resolved = resolveTerminalRequest(ticketId);
+    if (!resolved.ok) return refused(resolved.status, "error", resolved.error);
+    try {
+      await focusPane(herdrSocket, resolved.paneId);
+      return answered({ ok: true, paneId: resolved.paneId } as const);
+    } catch (err) {
+      return refused(502, "error", err);
+    }
+  }
+
+  // Enlist discovery (issue #101): the live herdr panes, read over the
+  // daemon's socket on request and never through the snapshot (pane lists
+  // are ephemeral). Only a terminal-backed pool has panes to offer, so a
+  // headless one refuses with the Conversation routes' `reason`; the
+  // Console hides the button anyway. Eligibility is the engine's judgement
+  // (engine/enlist.ts); the registered pane ids are the engine's own
+  // record, read from the last snapshot: a ticket's Live attempt pane and a
+  // live Conversation's.
+  async function panesRequest(): Promise<RequestAnswer<PanesResponse>> {
+    if (readConfig(poolDir).terminal !== "herdr") {
+      return refused(
+        409,
+        "reason",
+        "enlist requires a terminal-backed pool " + '(set console.json "terminal": "herdr")',
+      );
+    }
+    const registeredPanes = new Set<string>();
+    for (const ticket of current()?.state.tickets ?? []) {
+      const paneId = ticket.liveAttempt?.paneId ?? ticket.heldPane?.paneId;
+      if (paneId) registeredPanes.add(paneId);
+    }
+    for (const conversation of current()?.state.conversations ?? []) {
+      if (conversation.paneId) registeredPanes.add(conversation.paneId);
+    }
+    try {
+      return answered(await listEnlistPanes({ socketPath: herdrSocket, poolDir, registeredPanes }));
+    } catch (err) {
+      return refused(502, "error", err);
+    }
+  }
+
+  // The socket's side of every request but `log.follow` (ws.ts answers that
+  // one, since it moves the socket's own subscription): the payload is the
+  // HTTP twin's body, or its query as fields, and the reply's result is the
+  // route's response less any snapshot it carries.
+  const field = (payload: Record<string, unknown>, key: string): string =>
+    typeof payload[key] === "string" ? (payload[key] as string) : "";
+  const numeric = (payload: Record<string, unknown>, key: string): number | undefined =>
+    typeof payload[key] === "number" ? (payload[key] as number) : undefined;
+  const bodyOf = (payload: Record<string, unknown>): Body => () => Promise.resolve(payload);
+  const requests: RequestHandlers = {
+    start: () => startRequest().then(withoutSnapshot),
+    resume: (p) => resumeRequest(bodyOf(p)).then(withoutSnapshot),
+    stop: async () => stopRequest(),
+    restart: async () => restartRequest(),
+    keepTalking: (p) => keepTalkingRequest(bodyOf(p)),
+    "terminal.focus": (p) => focusRequest(field(p, "ticketId")),
+    "terminals.closeFinished": () => closeFinishedRequest(),
+    enlist: (p) => enlistRequest(bodyOf(p)),
+    reassign: (p) => reassignRequest(bodyOf(p)).then(withoutSnapshot),
+    "spawns.held.adopt": (p) => heldSpawnRequest(true, bodyOf(p)),
+    "spawns.held.discard": (p) => heldSpawnRequest(false, bodyOf(p)),
+    "spawns.pending.hold": (p) => pendingSpawnRequest(true, bodyOf(p)),
+    "spawns.pending.discard": (p) => pendingSpawnRequest(false, bodyOf(p)),
+    "conversations.start": (p) => startConversationRequest(bodyOf(p)),
+    "conversations.end": (p) => endConversationRequest(bodyOf(p)).then(withoutSnapshot),
+    "settings.get": async () => settingsRequest(),
+    "settings.pool.put": (p) => poolSettingsRequest(bodyOf(p)),
+    "settings.machine.put": (p) => machineSettingsRequest(bodyOf(p)),
+    "panes.list": () => panesRequest(),
+    "log.read": async (p) => {
+      const attempt = numeric(p, "attempt");
+      const end = numeric(p, "end");
+      return logRequest({
+        id: field(p, "id"),
+        ...(attempt !== undefined ? { attempt } : {}),
+        offset: numeric(p, "offset") ?? 0,
+        ...(end !== undefined ? { end } : {}),
+        stream: p.stream === true,
+      });
+    },
+    "poolLog.read": async (p) =>
+      poolLogRequest(numeric(p, "before") ?? Number.NaN, numeric(p, "limit")),
+  };
 
   try {
     server = bindPoolServer(
       resolution,
       (port) =>
-      Bun.serve({
+      Bun.serve<SocketState>({
         port,
+      websocket: hub.websocket,
       async fetch(req, bunServer) {
         const url = new URL(req.url);
         const pathname = url.pathname;
+
+        // The Console's one socket (issue #161, ws.ts). A browser names the
+        // page that opens it, and only the Console's own page may: a page
+        // on any other site could otherwise drive the pool from a tab the
+        // operator has open (a socket is not held to the same-origin rule
+        // a fetch is). A client that names no page (a script, the bench)
+        // is let through, as the HTTP routes let it through.
+        if (pathname === WS_PATH) {
+          const origin = req.headers.get("origin");
+          if (origin !== null && !sameOrigin(origin, req.headers.get("host"))) {
+            return new Response("cross-origin socket refused", { status: 403 });
+          }
+          if (bunServer.upgrade(req, { data: hub.socketState() })) return undefined;
+          return new Response("expected a WebSocket upgrade", { status: 400 });
+        }
 
         if (pathname === "/api/state") {
           return Response.json({ snapshot: current() });
         }
 
         if (pathname === "/api/start" && req.method === "POST") {
-          const snapshot = await start();
-          return Response.json({ snapshot });
+          return httpOf(await startRequest());
         }
 
-        // Stop this server from the Console (issue #97): only a finished
-        // pool may be stopped this way. Any other phase can have an attempt
-        // mid-flight (or an answer the operator is about to give), so a
-        // stale tab or a stray curl gets a 409 rather than a stop. The reply
-        // goes out before the stop begins, the way /api/resume acknowledges
-        // before processing; the farewell on the stream is how the tab
-        // learns the stop landed. A stop already under way is acknowledged
-        // again rather than started twice.
         if (pathname === "/api/stop" && req.method === "POST") {
-          const phase = current()?.phase ?? null;
-          if (!stopUnderWay() && phase !== "done") {
-            return Response.json(
-              {
-                error:
-                  phase === null
-                    ? "pool not started: nothing to stop"
-                    : `pool is ${phase}, not done: stop refused`,
-              },
-              { status: 409 },
-            );
-          }
-          if (!stopUnderWay()) {
-            stopRequested = true;
-            // Off the request's own turn, so the 202 is on the wire before
-            // serving stops underneath it.
-            setTimeout(requestStop, 0);
-          }
-          return Response.json({ stopping: true }, { status: 202 });
+          return httpOf(stopRequest());
         }
 
-        // Restart this server from the Console (issue #121): stop with the
-        // same farewell a Stop sends, then hand off to Boot for the same
-        // Pool, so boot-only Pool settings and a fresh UI build take effect.
-        // Allowed in any phase, unlike Stop: a Restart is how a live run
-        // picks up a new port or terminal setting, and the operator has
-        // already passed the Console's inline confirm to get here. Headless
-        // attempts are killed by the shutdown and terminal-backed ones stay
-        // in their tabs to be re-adopted, exactly as on any other restart.
-        // The 202 names the port the relaunch will listen on, which is the
-        // one piece a reconnecting tab cannot work out for itself.
         if (pathname === "/api/restart" && req.method === "POST") {
-          const port = relaunchPort(bunServer.port ?? resolution.port);
-          if (!stopUnderWay()) {
-            stopRequested = true;
-            // Off the request's own turn, so the 202 is on the wire before
-            // serving stops underneath it.
-            setTimeout(() => requestRestart(port), 0);
-          }
-          return Response.json({ ok: true, port } satisfies RestartResponse, {
-            status: 202,
-          });
+          return httpOf(restartRequest());
         }
 
-        // The Settings pane's reads and writes (issue #121). The pool's
-        // config file stays the source of truth: this is a second way to
-        // edit it, never a second copy of it.
         if (pathname === "/api/settings" && req.method === "GET") {
-          try {
-            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
-          } catch (err) {
-            // Only a console.json hand-edited into a broken state since boot
-            // reaches here: the server parsed it to start at all.
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 500 },
-            );
-          }
+          return httpOf(settingsRequest());
         }
 
-        // A patch, not a replacement: `assign` and any key this server does
-        // not know survive the write (pool-settings.ts). The assignment slice
-        // of what lands here (defaults, resolver) reaches the run on its own,
-        // without a restart: the engine re-reads console.json from disk at
-        // every super-step boundary and compares it against the text it last
-        // considered (ADR-0018), so nothing between here and there caches the
-        // file in a way that could swallow this write. The boot-only keys
-        // need the Restart, which is what `bootOnly` in the reply is for.
         if (pathname === "/api/settings/pool" && req.method === "PUT") {
-          try {
-            const body = (await req.json()) as { config?: unknown };
-            const patch = body?.config;
-            if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
-              throw new Error("settings: config must be an object");
-            }
-            writePoolSettings(poolDir, patch as Record<string, unknown>, {
-              harnesses: Object.keys(harnesses),
-            });
-            // A pool with nothing in flight reaches no boundary to reload
-            // at, so the save asks for the reload itself (issue #149): a
-            // changed Spawn cap is on the snapshot before this answers. In
-            // flight, the next boundary reads the file as it would anyway.
-            currentRun?.reloadConfig();
-            // The Pool title (issue #100) is the one setting with no seam to
-            // wait for: every open tab shows it from this push, and the
-            // push is what hands a changed title to the run.
-            reenrich();
-            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
-          } catch (err) {
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 400 },
-            );
-          }
+          return httpOf(await poolSettingsRequest(() => req.json()));
         }
 
-        // Reassign (issue #126). The write is an edit of the same console.json
-        // the Settings pane edits, so it answers in the settings convention:
-        // 400 { error } for a refused request, 500 for a file this server can
-        // no longer read. The engine picks the write up at its next Config
-        // reload and emits the `reassigned` events itself (ADR-0018); nothing
-        // here reaches into the run. The answer carries a freshly enriched
-        // snapshot so the cards show the new Assignment without waiting for
-        // that boundary, which a quiescent pool would never reach.
         if (pathname === "/api/reassign" && req.method === "PUT") {
-          try {
-            if (!lastRaw) throw new Error("reassign: pool not started");
-            const body = (await req.json()) as Partial<ReassignRequest>;
-            if (typeof body !== "object" || body === null || Array.isArray(body)) {
-              throw new Error("reassign: body must be an object");
-            }
-            refreshMeta();
-            const context: ReassignContext = {
-              markers: meta,
-              harnesses,
-              liveAttempts: liveAttemptIds(lastRaw),
-              statuses: lastRaw.state.tickets,
-              engineAssignments: lastRaw.assignments,
-            };
-            const outcome = writeReassign(
-              poolDir,
-              { tickets: body.tickets as string[], fields: body.fields ?? {} },
-              context,
-            );
-            const snapshot = reenrich();
-            if (!snapshot) throw new Error("reassign: pool not started");
-            const answer: ReassignResponse = { ...outcome, snapshot };
-            return Response.json(answer);
-          } catch (err) {
-            // 400 only for a request this server genuinely refused. A file it
-            // cannot read or write, and a pool that never started, are its own
-            // failures and must not read back as the operator's mistake.
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: err instanceof ReassignRefusal ? 400 : 500 },
-            );
-          }
+          return httpOf(await reassignRequest(() => req.json()));
         }
 
-        // The Machine defaults are written whole, the way the file itself is
-        // (machine-defaults.ts): the pane shows every field, so a field left
-        // empty is the operator clearing it. The legacy runner files are
-        // never written, only read behind this one.
         if (pathname === "/api/settings/machine" && req.method === "PUT") {
-          try {
-            const body = (await req.json()) as { defaults?: unknown };
-            const defaults = body?.defaults;
-            if (
-              typeof defaults !== "object" ||
-              defaults === null ||
-              Array.isArray(defaults)
-            ) {
-              throw new Error("settings: defaults must be an object");
-            }
-            writeMachineDefaults(defaults as MachineDefaults, machineDefaultsPaths.file);
-            return Response.json(settingsPayload(bunServer.port ?? resolution.port));
-          } catch (err) {
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 400 },
-            );
-          }
+          return httpOf(await machineSettingsRequest(() => req.json()));
         }
 
         if (pathname === "/api/resume" && req.method === "POST") {
-          try {
-            const body = (await req.json()) as {
-              ticketId?: unknown;
-              action?: unknown;
-              note?: unknown;
-            };
-            const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
-            // An absent action is a plain resume, as it always was; an action
-            // the server does not know is a malformed request, never quietly
-            // a resume (a Close read as a Resume would merge the work).
-            if (body.action !== undefined && !RESUME_ACTIONS.includes(body.action as ResumeAction)) {
-              throw new Error(
-                `unknown action ${JSON.stringify(body.action)}: expected one of ${RESUME_ACTIONS.join(", ")}`,
-              );
-            }
-            const action = (body.action as ResumeAction | undefined) ?? "resume";
-            const note = typeof body.note === "string" ? body.note : undefined;
-            if (!ticketId) throw new Error("missing ticketId");
-            const snapshot = await answer(ticketId, action, note);
-            return Response.json({ snapshot }, { status: 202 });
-          } catch (err) {
-            // A different answer already queued is a conflict with the
-            // queue, not a malformed request.
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: err instanceof AnswerQueuedConflict ? 409 : 400 },
-            );
-          }
+          return httpOf(await resumeRequest(() => req.json()));
         }
 
         if (pathname === "/api/events") {
@@ -1905,265 +2410,60 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         if (pathname === "/api/log") {
-          const ticketId = url.searchParams.get("ticket") ?? "";
-          refreshMeta();
-          // A Conversation id works unchanged here too: startConversation
-          // names its log/Stream files `<id>.log` / `<id>.stream.jsonl` —
-          // exactly attemptLogName/attemptStreamName's current-attempt
-          // name — and records one `spawned` event at attempt 1, so
-          // listAttemptLogs derives the same single "implement" row a
-          // terminal-backed ticket attempt gets, with the derived
-          // (ANSI-stripped) log or the raw Stream file behind `stream=1`.
-          if (!ticketIds.has(ticketId) && !conversationIds.has(ticketId)) {
-            return Response.json({ error: `unknown ticket ${ticketId}` }, { status: 404 });
-          }
-          const runsDir = join(poolDir, "runs");
-          const attempts = listAttemptLogs(runsDir, ticketId);
-          const rawAttempt = url.searchParams.get("attempt");
-          const rawOffset = url.searchParams.get("offset");
-          const rawEnd = url.searchParams.get("end");
-          // The offset is a byte offset into the raw log; the client pages by
-          // continuing from the returned nextOffset. Default to the current
-          // (latest) attempt and offset 0. The optional end bounds the range
-          // for the log pane's "load earlier" prefix reads. The optional
-          // stream flag serves the attempt's Stream file (the raw stream tee)
-          // through the same byte-range path instead of its derived log.
-          const wantsStream = url.searchParams.get("stream") === "1";
-          const attempt =
-            rawAttempt !== null && rawAttempt !== ""
-              ? Number(rawAttempt)
-              : (attempts[attempts.length - 1]?.attempt ?? 0);
-          const offset = rawOffset !== null && rawOffset !== "" ? Number(rawOffset) : 0;
-          const end = rawEnd !== null && rawEnd !== "" ? Number(rawEnd) : undefined;
-          const info = attempts.find((row) => row.attempt === attempt);
-          const file = wantsStream ? (info?.streamFile ?? null) : (info?.logFile ?? null);
-          if (!file) {
-            return Response.json(
-              {
-                error: info
-                  ? `no stream file for attempt ${attempt} of ${ticketId}`
-                  : `unknown attempt ${attempt} for ${ticketId}`,
-              },
-              { status: 404 },
-            );
-          }
-          const range = await readLogRange(join(runsDir, file), offset, end);
-          return Response.json({ ...range, attempts });
+          // An empty parameter is an absent one.
+          const param = (name: string): string | null => {
+            const raw = url.searchParams.get(name);
+            return raw !== null && raw !== "" ? raw : null;
+          };
+          const attempt = param("attempt");
+          const offset = param("offset");
+          const end = param("end");
+          return httpOf(
+            logRequest({
+              id: url.searchParams.get("ticket") ?? "",
+              ...(attempt !== null ? { attempt: Number(attempt) } : {}),
+              offset: offset !== null ? Number(offset) : 0,
+              ...(end !== null ? { end: Number(end) } : {}),
+              stream: url.searchParams.get("stream") === "1",
+            }),
+          );
         }
 
-        // Conversations (issue #60): start, end. The Console's client
-        // reads a 409's failure reason off a `reason` field (ui/src/client.ts
-        // `startConversation`), not `error` — the shape every other route in
-        // this file uses — so these routes reply with `reason` to
-        // match the shipped UI rather than this file's own convention.
+        // The pool log's earlier lines (issue #161): `poolLog.read`'s twin,
+        // so every request kind has one.
+        if (pathname === "/api/pool-log") {
+          const limit = url.searchParams.get("limit");
+          return httpOf(
+            poolLogRequest(
+              Number(url.searchParams.get("before") ?? Number.NaN),
+              limit !== null ? Number(limit) : undefined,
+            ),
+          );
+        }
+
         if (pathname === "/api/conversations" && req.method === "POST") {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          // A Steward (ADR-0030) is a Conversation in a role: its opening is
-          // the operator's standing orders, and its title may be left blank.
-          if (fields.role !== undefined && fields.role !== "steward") {
-            return Response.json({ reason: 'role must be "steward" when given' }, { status: 400 });
-          }
-          const role = fields.role === "steward" ? ("steward" as const) : undefined;
-          const title =
-            (typeof fields.title === "string" ? fields.title : "").trim() ||
-            (role === "steward" ? "Steward" : "");
-          if (!title) {
-            return Response.json({ reason: "title is required" }, { status: 400 });
-          }
-          const opening = typeof fields.opening === "string" ? fields.opening : undefined;
-          const rawAssign =
-            fields.assign && typeof fields.assign === "object"
-              ? (fields.assign as Record<string, unknown>)
-              : undefined;
-          const stringField = (value: unknown): string | undefined =>
-            typeof value === "string" ? value : undefined;
-          const assign = rawAssign
-            ? {
-                harness: stringField(rawAssign.harness),
-                model: stringField(rawAssign.model),
-                effort: stringField(rawAssign.effort),
-                drivers: stringField(rawAssign.drivers),
-              }
-            : undefined;
-          try {
-            const conversation = await startConversation({
-              title,
-              opening,
-              assign,
-              ...(role ? { role } : {}),
-            });
-            return Response.json({ conversation }, { status: 201 });
-          } catch (err) {
-            // Every refusal the engine's startConversation throws (not
-            // terminal-backed, no git checkout, unknown harness, no
-            // harness/model resolved, the herdr tab failing to open) reads
-            // as a 409: the request was well-formed, the pool just cannot
-            // host a Conversation right now.
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(await startConversationRequest(() => req.json()));
         }
 
-        // Enlist a live herdr pane as a Ticket or a Conversation (issue #101).
-        // The body is the one wire shape engine/enlist.ts declares; `becomes`
-        // is fixed at enlist time and chooses the arm. A well-formed request
-        // the pool refuses (pane gone, already in the pool, branch creation
-        // failing, teaching undeliverable) is the Conversation start route's
-        // 409 `reason` envelope, so the Console's form surfaces it inline.
         if (pathname === "/api/enlist" && req.method === "POST") {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          const paneId = typeof fields.paneId === "string" ? fields.paneId : "";
-          if (!paneId) {
-            return Response.json({ reason: "paneId is required" }, { status: 400 });
-          }
-          const title = typeof fields.title === "string" ? fields.title : "";
-          // `becomes` is fixed at enlist time and the wire type is a two
-          // member union, so an absent or misspelled value is refused rather
-          // than defaulted to a Ticket: enlisting is not undoable, and
-          // silently picking the kind that has an end is the wrong guess to
-          // make on the operator's behalf.
-          if (
-            fields.becomes !== "ticket" &&
-            fields.becomes !== "conversation" &&
-            fields.becomes !== "steward"
-          ) {
-            return Response.json(
-              { reason: 'becomes must be "ticket", "conversation" or "steward"' },
-              { status: 400 },
-            );
-          }
-          try {
-            if (fields.becomes === "conversation" || fields.becomes === "steward") {
-              const opening =
-                typeof fields.opening === "string" ? fields.opening : undefined;
-              const answer = await enlist({
-                becomes: fields.becomes,
-                paneId,
-                title,
-                ...(opening !== undefined ? { opening } : {}),
-              });
-              return Response.json(answer, { status: 201 });
-            }
-            const spec = typeof fields.spec === "string" ? fields.spec : "";
-            const blocks = Array.isArray(fields.blocks)
-              ? fields.blocks.filter((id): id is string => typeof id === "string")
-              : undefined;
-            const answer = await enlist({
-              becomes: "ticket",
-              paneId,
-              title,
-              spec,
-              ...(blocks !== undefined ? { blocks } : {}),
-            });
-            return Response.json(answer, { status: 201 });
-          } catch (err) {
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(await enlistRequest(() => req.json()));
         }
 
-        // Keep talking (issue #139): continue a ticket's checkpointed Attempt
-        // in its Held pane. Not a resume action, because it is never queued
-        // (ADR-0004's exception, as Enlist is), so it answers once the pane is
-        // claimed: 202 with the Continued attempt's number, or the enlist
-        // route's 409 `reason` envelope when the engine refuses (no Held pane,
-        // not at a checkpoint, an answer already queued, the pane gone).
         if (pathname === "/api/keep-talking" && req.method === "POST") {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          const ticketId = typeof fields.ticketId === "string" ? fields.ticketId : "";
-          if (!ticketId) {
-            return Response.json({ reason: "ticketId is required" }, { status: 400 });
-          }
-          try {
-            const answer = await keepTalking(ticketId);
-            return Response.json(answer, { status: 202 });
-          } catch (err) {
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(await keepTalkingRequest(() => req.json()));
         }
 
-        // Close every Finished terminal (issue #139): the pool header's bulk
-        // close, behind the Console's inline confirm. The engine works out
-        // the set afresh and closes it; nothing else ever closes one.
         if (pathname === "/api/terminals/close-finished" && req.method === "POST") {
-          const run = currentRun;
-          if (!run) {
-            return Response.json({ reason: "pool not started" }, { status: 409 });
-          }
-          try {
-            const closed = await run.closeFinishedTerminals();
-            return Response.json({ closed } satisfies CloseFinishedTerminalsResponse);
-          } catch (err) {
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(await closeFinishedRequest());
         }
 
-        // Adopt or Discard a Held spawn (issue #149, ADR-0029): the
-        // proposals a Spawn cap had no room for wait on the snapshot for the
-        // operator. Adopt answers 202 once queued, past both caps (the
-        // snapshot shows the ticket once the boundary, or at once an idle
-        // engine, writes it); Discard answers once the spawn is gone. A
-        // refusal is the keep-talking route's 409 `reason` envelope.
         if (
           (pathname === "/api/spawns/held/adopt" || pathname === "/api/spawns/held/discard") &&
           req.method === "POST"
         ) {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          const id = typeof fields.id === "string" ? fields.id : "";
-          if (!id) {
-            return Response.json({ reason: "id is required" }, { status: 400 });
-          }
-          const run = currentRun;
-          if (!run) {
-            return Response.json({ reason: "pool not started" }, { status: 409 });
-          }
-          const adopt = pathname === "/api/spawns/held/adopt";
-          try {
-            if (adopt) run.adoptHeldSpawn(id);
-            else run.discardHeldSpawn(id);
-            return Response.json({ id } satisfies HeldSpawnResponse, {
-              status: adopt ? 202 : 200,
-            });
-          } catch (err) {
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(
+            await heldSpawnRequest(pathname === "/api/spawns/held/adopt", () => req.json()),
+          );
         }
 
         if (
@@ -2171,31 +2471,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             pathname === "/api/spawns/pending/discard") &&
           req.method === "POST"
         ) {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          const id = typeof fields.id === "string" ? fields.id : "";
-          if (!id) {
-            return Response.json({ reason: "id is required" }, { status: 400 });
-          }
-          const run = currentRun;
-          if (!run) {
-            return Response.json({ reason: "pool not started" }, { status: 409 });
-          }
-          try {
-            if (pathname === "/api/spawns/pending/hold") run.holdPendingSpawn(id);
-            else run.discardPendingSpawn(id);
-            return Response.json({ id } satisfies PendingSpawnResponse);
-          } catch (err) {
-            return Response.json(
-              { reason: err instanceof Error ? err.message : String(err) },
-              { status: 409 },
-            );
-          }
+          return httpOf(
+            await pendingSpawnRequest(pathname === "/api/spawns/pending/hold", () => req.json()),
+          );
         }
 
         // The Steward's command (ADR-0030, steward-cli.ts): its answers,
@@ -2335,33 +2613,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         }
 
         if (pathname === "/api/conversations/end" && req.method === "POST") {
-          let body: unknown;
-          try {
-            body = await req.json();
-          } catch {
-            return Response.json({ reason: "invalid JSON body" }, { status: 400 });
-          }
-          const fields = (body ?? {}) as Record<string, unknown>;
-          const id = typeof fields.id === "string" ? fields.id : "";
-          if (!id) {
-            return Response.json({ reason: "id is required" }, { status: 400 });
-          }
-          const closing = typeof fields.closing === "string" ? fields.closing : undefined;
-          try {
-            await endConversation(id, closing);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            // The engine's endConversation throws this exact prefix for both
-            // an id it has never heard of and one that already ended: either
-            // way there is no live Conversation to end, which is what a 404
-            // means everywhere else in this file (an unknown ticket id).
-            // Anything else (a merge-chain failure the engine already logs
-            // and recovers from) is a 409, not a client error.
-            const status = message.includes("no live conversation") ? 404 : 409;
-            return Response.json({ reason: message }, { status });
-          }
-          refreshMeta();
-          return Response.json({ snapshot: current() }, { status: 202 });
+          return httpOf(await endConversationRequest(() => req.json()));
         }
 
         if (pathname === "/api/activity") {
@@ -2376,110 +2628,16 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           return Response.json(await readTicketActivityCached(ticketId));
         }
 
-        // The card's Peek: the pane's viewport as plain text (ANSI stripped
-        // herdr-side). A pane an operator sits in is read once per tick and
-        // for one purpose (issue #122): when the engine's own loop watches
-        // the pane (an enlisted Ticket's, a Conversation's) the answer is
-        // that loop's last recorded read and herdr is not asked again. A
-        // spawned terminal-backed attempt has no loop, so it is read live,
-        // and of the viewport only: a scrollback read moves the operator's
-        // viewport, which is the bug this route used to cause twice over.
-        // An empty read (a background tab still warming up) is empty text,
-        // not an error; a daemon failure is a clean 502 the card renders as
-        // "pane unavailable". Nothing here reads pane.read's revision: it is
-        // verified stagnant, so freshness is the card re-polling and
-        // comparing text.
         if (pathname === "/api/terminal/peek") {
-          const ticketId = url.searchParams.get("ticket") ?? "";
-          const resolved = resolveTerminalRequest(ticketId);
-          if (!resolved.ok) {
-            return Response.json(
-              { error: resolved.error },
-              { status: resolved.status },
-            );
-          }
-          try {
-            const recorded = currentRun?.paneRead(resolved.paneId) ?? null;
-            const text =
-              recorded?.text ??
-              (await peekPane(herdrSocket, resolved.paneId, { source: "visible" }));
-            const body: TerminalPeekResponse = {
-              ticket: ticketId,
-              paneId: resolved.paneId,
-              text,
-            };
-            return Response.json(body);
-          } catch (err) {
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 502 },
-            );
-          }
+          return httpOf(await peekRequest(url.searchParams.get("ticket") ?? ""));
         }
 
-        // "Open in herdr": focus the attempt's pane, jumping the operator's
-        // herdr TUI to the attempt's tab. Same translation and registration
-        // guard as peek; a mutating call, so POST only.
         if (pathname === "/api/terminal/focus" && req.method === "POST") {
-          const ticketId = url.searchParams.get("ticket") ?? "";
-          const resolved = resolveTerminalRequest(ticketId);
-          if (!resolved.ok) {
-            return Response.json(
-              { error: resolved.error },
-              { status: resolved.status },
-            );
-          }
-          try {
-            await focusPane(herdrSocket, resolved.paneId);
-            return Response.json({ ok: true, paneId: resolved.paneId });
-          } catch (err) {
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 502 },
-            );
-          }
+          return httpOf(await focusRequest(url.searchParams.get("ticket") ?? ""));
         }
 
-        // Enlist discovery (issue #101): the live herdr panes, read over the
-        // socket on request and never through the snapshot (pane lists are
-        // ephemeral). Only a terminal-backed pool has panes to offer, so a
-        // headless one refuses with the same `reason` envelope the
-        // Conversation routes use; the Console hides the button anyway.
-        // Eligibility is the engine's judgement (engine/enlist.ts); the
-        // registered pane ids are the engine's own record, read from the last
-        // snapshot: a ticket's Live attempt pane and a live Conversation's.
         if (pathname === "/api/panes") {
-          if (readConfig(poolDir).terminal !== "herdr") {
-            return Response.json(
-              {
-                reason:
-                  "enlist requires a terminal-backed pool " +
-                  '(set console.json "terminal": "herdr")',
-              },
-              { status: 409 },
-            );
-          }
-          const registeredPanes = new Set<string>();
-          for (const ticket of current()?.state.tickets ?? []) {
-            const paneId = ticket.liveAttempt?.paneId ?? ticket.heldPane?.paneId;
-            if (paneId) registeredPanes.add(paneId);
-          }
-          for (const conversation of current()?.state.conversations ?? []) {
-            if (conversation.paneId) registeredPanes.add(conversation.paneId);
-          }
-          try {
-            const panes = await listEnlistPanes({
-              socketPath: herdrSocket,
-              poolDir,
-              registeredPanes,
-            });
-            return Response.json(panes);
-          } catch (err) {
-            return Response.json(
-              { error: err instanceof Error ? err.message : String(err) },
-              { status: 502 },
-            );
-          }
+          return httpOf(await panesRequest());
         }
 
         if (pathname === "/api/ticket") {
@@ -2491,50 +2649,10 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
           return Response.json(ticket);
         }
 
-        if (pathname === "/api/stream") {
-          // The stream is silent whenever the pool waits at an interrupt, so
-          // it opts out of the default idle timeout; every other route keeps
-          // it. Heartbeat comment frames still flow on their own cadence (the
-          // client's liveness signal, and what keeps proxy idle timeouts from
-          // firing), but a quiet pool emits no snapshot, and the opt-out keeps
-          // the wait from being cut short.
-          bunServer.timeout(req, 0);
-          let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-          let heartbeat: ReturnType<typeof setInterval> | null = null;
-          const stopHeartbeat = (): void => {
-            if (heartbeat !== null) {
-              clearInterval(heartbeat);
-              heartbeat = null;
-            }
-          };
-          const stream = new ReadableStream<Uint8Array>({
-            start(ctrl) {
-              controller = ctrl;
-              ctrl.enqueue(encodeStreamConfig(streamHeartbeatMs));
-              clients.set(ctrl, { stopHeartbeat, sent: null });
-              sendTo(ctrl);
-              heartbeat = setInterval(() => {
-                try {
-                  ctrl.enqueue(HEARTBEAT_FRAME);
-                } catch {
-                  // A dead connection's enqueue throws; drop the client.
-                  stopHeartbeat();
-                  clients.delete(ctrl);
-                }
-              }, streamHeartbeatMs);
-            },
-            cancel() {
-              stopHeartbeat();
-              if (controller) clients.delete(controller);
-            },
-          });
-          return new Response(stream, {
-            headers: {
-              "content-type": "text/event-stream",
-              "cache-control": "no-cache",
-              connection: "keep-alive",
-            },
-          });
+        // The page, with the first snapshot in it (issue #161, ws.ts).
+        if (pathname === "/" || pathname === "/index.html") {
+          const page = hub.page(join(distDir, "index.html"));
+          if (page) return page;
         }
 
         const staticRes = serveStatic(distDir, pathname);
@@ -2588,9 +2706,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
     keepTalking,
     url: `http://localhost:${server.port}`,
     close: async () => {
-      if (sendTimer !== null) clearTimeout(sendTimer);
-      sendTimer = null;
-      await server.stop(true);
+      hub.close();
+      await stopServing(server);
       currentRun?.close();
     },
     shutdown,

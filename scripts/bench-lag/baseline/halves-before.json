@@ -1,0 +1,228 @@
+{
+  "at": "2026-10-02T22:13:03.518Z",
+  "repo": "/tmp/claude-1000/-home-billy-repos-agent-console/771d7701-622b-4293-84d9-673564c9cff4/scratchpad/before-160",
+  "revision": "detached@3a8f779",
+  "machine": {
+    "bun": "1.3.14",
+    "platform": "linux",
+    "cpus": 12,
+    "loadavgAtStart": [
+      2.38,
+      3.51,
+      3.85
+    ]
+  },
+  "server": {
+    "durationS": 60,
+    "tabs": 2,
+    "rttMs": 0,
+    "protocol": "sse",
+    "pool": {
+      "tickets": 20,
+      "done": 12,
+      "inProgress": 4,
+      "ready": 4,
+      "conversations": 3,
+      "mergeHold": 3,
+      "interrupts": 0
+    },
+    "pingMs": {
+      "n": 2295,
+      "mean": 0.5,
+      "p50": 0.4,
+      "p95": 1,
+      "p99": 1.7,
+      "max": 4.4
+    },
+    "pingFailures": 0,
+    "clickMs": {
+      "n": 19,
+      "mean": 2.9,
+      "p50": 2.5,
+      "p95": 5.2,
+      "p99": 5.2,
+      "max": 5.2,
+      "queuedMean": 0
+    },
+    "focusMs": {
+      "n": 19,
+      "mean": 1,
+      "p50": 1,
+      "p95": 1.9,
+      "p99": 1.9,
+      "max": 1.9,
+      "queuedMean": 0,
+      "serverP50": 1
+    },
+    "requestsByKind": {
+      "peek": {
+        "n": 1251,
+        "mean": 4.5,
+        "p50": 3.7,
+        "p95": 10.9,
+        "p99": 14.1,
+        "max": 16.5,
+        "queuedMean": 3.3,
+        "perSec": 20.8,
+        "meanBytes": 1835
+      },
+      "activity": {
+        "n": 715,
+        "mean": 3.9,
+        "p50": 2.6,
+        "p95": 11.9,
+        "p99": 14.2,
+        "max": 16.3,
+        "queuedMean": 2.2,
+        "perSec": 11.9,
+        "meanBytes": 262
+      },
+      "grades": {
+        "n": 120,
+        "mean": 2.3,
+        "p50": 1.8,
+        "p95": 5.4,
+        "p99": 6.5,
+        "max": 6.5,
+        "queuedMean": 1.5,
+        "perSec": 2,
+        "meanBytes": 13
+      },
+      "events": {
+        "n": 120,
+        "mean": 2.6,
+        "p50": 2.1,
+        "p95": 5.6,
+        "p99": 6.9,
+        "max": 7.4,
+        "queuedMean": 1.5,
+        "perSec": 2,
+        "meanBytes": 4341
+      },
+      "log": {
+        "n": 105,
+        "mean": 3.3,
+        "p50": 2.8,
+        "p95": 6.8,
+        "p99": 8.1,
+        "max": 8.9,
+        "queuedMean": 2.2,
+        "perSec": 1.7,
+        "meanBytes": 211
+      }
+    },
+    "frames": {},
+    "unanswered": 0,
+    "snapshots": {
+      "perSec": 1,
+      "meanBytes": 10935,
+      "maxBytes": 10936,
+      "gapP50Ms": 937.1
+    },
+    "server": {
+      "rssStartMb": 95.1,
+      "rssEndMb": 92.9,
+      "cpuPercent": 15,
+      "loopLagMs": {
+        "samples": 5743,
+        "p50": 0.2,
+        "p95": 1.3,
+        "p99": 2,
+        "max": 4.1,
+        "over50ms": 0
+      },
+      "syncSpawn": {
+        "calls": 0,
+        "totalMs": 0,
+        "blockedPercent": 0,
+        "byCommand": []
+      },
+      "asyncSpawns": 240
+    },
+    "herdrRequests": {
+      "workspace.create": 1,
+      "pane.list": 26,
+      "tab.create": 19,
+      "pane.read": 958,
+      "pane.send_input": 25,
+      "pane.report_agent": 19,
+      "events.subscribe": 7,
+      "pane.release_agent": 12,
+      "pane.focus": 19
+    }
+  },
+  "ui": {
+    "durationMs": 30000,
+    "snapshotsPerSec": 1,
+    "cards": 25,
+    "domNodes": 479,
+    "renders": 159,
+    "rendersPerSec": 5.3,
+    "renderMs": {
+      "mean": 8.23,
+      "p50": 6.7,
+      "p95": 28.2,
+      "max": 39.8
+    },
+    "modelMs": {
+      "n": 159,
+      "mean": 0.21,
+      "p50": 0.2,
+      "p95": 0.4,
+      "max": 1.2
+    },
+    "renderLayoutMs": {
+      "n": 159,
+      "mean": 8.25,
+      "p50": 6.7,
+      "p95": 28.2,
+      "max": 39.8
+    },
+    "renderBusyPct": 4.37,
+    "longestTaskMs": 0,
+    "longTasksOver50ms": 0,
+    "frameGapMs": {
+      "p50": 16.7,
+      "p95": 16.7,
+      "max": 33.4
+    },
+    "framesOver50ms": 0,
+    "clickToDetailMs": {
+      "n": 20,
+      "p50": 26.5,
+      "p95": 52.9,
+      "max": 52.9
+    },
+    "clickSyncMs": {
+      "n": 20,
+      "mean": 0.28,
+      "p50": 0.2,
+      "p95": 1.9,
+      "max": 1.9
+    },
+    "rendersDuringClicks": 20,
+    "dragMoveMs": {
+      "n": 120,
+      "mean": 0.05,
+      "p95": 0.1,
+      "max": 0.2
+    },
+    "dragMoveToFrameMs": {
+      "n": 120,
+      "mean": 16.66,
+      "p50": 16.7,
+      "p95": 17,
+      "max": 24.1
+    },
+    "rendersDuringDrags": 7,
+    "sanity": {
+      "detailOpened": true,
+      "clicksMissed": 0,
+      "dragMoved": true,
+      "longTaskApi": true,
+      "snapshotsPushed": 32,
+      "focusCalls": 0
+    }
+  },
+  "e2e": null
+}

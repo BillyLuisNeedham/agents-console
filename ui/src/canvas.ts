@@ -48,7 +48,7 @@ import {
 } from "./geometry";
 import { h } from "./dom";
 import { nextFrame } from "./frame";
-import { KEEP_CHILDREN } from "./morph";
+import { KEEP_CHILDREN, keep } from "./morph";
 import { renderTerminalSurface } from "./terminal";
 import { renderStewardBadge } from "./steward";
 import { renderDeliveryWarning } from "./conversations";
@@ -431,8 +431,23 @@ export class Canvas {
   private stored: Record<string, Point> | null = null;
   /** Cards whose Assignment badge the operator has clicked open. */
   private readonly expandedBadges = new Set<string>();
+  /** Where the first bind leaves its measuring, when it may (issue #161),
+   *  and the edges it owes until then. */
+  private readonly settleLater: ((run: () => void) => void) | null;
+  private unsettled: { edges: TopologyEdge[]; selectedId: string | null } | null = null;
+  /**
+   * What each card on the page was drawn from (issue #161): its view, place,
+   * selection and badge, as of the last committed render, and those the
+   * render in progress draws. A card whose next draw would be the same is
+   * not rebuilt; the morph keeps its node as it stands.
+   */
+  private drawn = new Map<string, DrawnCard>();
+  private drawing = new Map<string, DrawnCard>();
   private readonly onChange: () => void;
   private readonly onCardTap: (nodeId: string) => void;
+  private readonly onCardHover: (nodeId: string | null) => void;
+  /** The card the pointer is over, so a move inside it reports nothing. */
+  private hoveredCard: string | null = null;
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onNewConversation: () => void;
   private readonly onStartSteward: () => void;
@@ -453,6 +468,13 @@ export class Canvas {
     /** Canvas-held view state changed (a badge toggled): render again. */
     onChange: () => void;
     onCardTap: (nodeId: string) => void;
+    /** The pointer moved onto a card, or off every card (null), for the
+     *  hover prefetch (issue #161). */
+    onCardHover?: (nodeId: string | null) => void;
+    /** Run something in the next frame: given, the first bind measures the
+     *  cards and draws the edges there, after the first paint, rather than
+     *  forcing the page's first layout inside the render (issue #161). */
+    settleLater?: (run: () => void) => void;
     onFocusTerminal: (ticketId: string) => Promise<boolean>;
     /** The header's "New Conversation" button: opens the Conversations tray's form. */
     onNewConversation: () => void;
@@ -489,6 +511,8 @@ export class Canvas {
   }) {
     this.onChange = options.onChange;
     this.onCardTap = options.onCardTap;
+    this.onCardHover = options.onCardHover ?? (() => {});
+    this.settleLater = options.settleLater ?? null;
     this.onFocusTerminal = options.onFocusTerminal;
     this.onNewConversation = options.onNewConversation;
     this.onStartSteward = options.onStartSteward;
@@ -541,6 +565,7 @@ export class Canvas {
   /** The canvas is gone from the DOM (error or empty pool): unbind it. */
   unbind(): void {
     this.canvas = null;
+    this.drawn.clear();
   }
 
   render(model: CanvasModel, selection: CanvasSelection): HTMLElement {
@@ -558,9 +583,10 @@ export class Canvas {
       class: "canvas-world",
       style: `width:${size.width}px;height:${size.height}px;transform:${this.transform()}`,
     });
+    this.drawing = new Map();
     world.append(
       this.makeSvg(),
-      ...model.cards.map((card) => this.renderCard(card, selection)),
+      ...model.cards.map((card) => this.drawCard(card, selection)),
     );
     const panning = this.drag?.kind === "pan" && this.drag.moved;
     const viewport = h(
@@ -571,6 +597,8 @@ export class Canvas {
         onpointermove: (event: PointerEvent) => this.pointerMove(event),
         onpointerup: (event: PointerEvent) => this.endDrag(event),
         onpointercancel: (event: PointerEvent) => this.endDrag(event),
+        onpointerover: (event: PointerEvent) => this.hoverCard(event.target),
+        onpointerout: (event: PointerEvent) => this.hoverCard(event.relatedTarget),
         onwheel: (event: WheelEvent) => this.wheel(event),
       },
       world,
@@ -608,12 +636,39 @@ export class Canvas {
     const kept = this.canvas?.svg === svg ? this.canvas.edges : new Map<string, DrawnEdge>();
     if (kept.size === 0) this.strokeZoom = null;
     this.canvas = { viewport, world, svg, nodesById, edges: kept, boxes: new Map() };
+    // The render is on the page: its cards are what the next one compares.
+    this.drawn = this.drawing;
+    if (!this.view.seeded && this.settleLater) {
+      // A fresh page (issue #161): the canvas spans the window, so the pan
+      // is seeded from the window's width rather than the viewport's, and
+      // the cards are measured and the edges drawn in the next frame, so
+      // the first render forces no layout and the first paint waits on no
+      // edge. A render before that frame measures as every render does.
+      this.view.seeded = true;
+      this.view.x = Math.max(8, (window.innerWidth - WORLD_MIN_WIDTH) / 2);
+      this.view.y = 8;
+      this.applyTransform();
+      this.unsettled = { edges, selectedId };
+      this.settleLater(() => {
+        const owed = this.unsettled;
+        this.unsettled = null;
+        if (owed) this.settle(owed.edges, owed.selectedId);
+      });
+      return;
+    }
     if (!this.view.seeded && viewport.clientWidth > 0) {
       this.view.seeded = true;
       this.view.x = Math.max(8, (viewport.clientWidth - WORLD_MIN_WIDTH) / 2);
       this.view.y = 8;
       this.applyTransform();
     }
+    this.unsettled = null;
+    this.settle(edges, selectedId);
+  }
+
+  // Measure the cards, fit the world to them, and draw the edges: the
+  // reads first, in one pass, then only writes.
+  private settle(edges: TopologyEdge[], selectedId: string | null): void {
     this.measure();
     this.fitWorld();
     this.drawEdges(edges, selectedId);
@@ -888,6 +943,41 @@ export class Canvas {
         ),
       ),
     );
+  }
+
+  /**
+   * A card, or a stand-in for its node when nothing it is drawn from moved
+   * since the render that drew it (issue #161). The snapshot's deltas leave
+   * every other ticket as it was, so a busy pool's render rebuilds the few
+   * cards that changed, and the morph walks only those. What a card is drawn
+   * from is its projected view, its place on the canvas, its selection and
+   * drag classes and its Assignment badge's state; its handlers close over
+   * its id alone.
+   */
+  private drawCard(card: PoolCardView, selection: CanvasSelection): Element {
+    const pos = this.posOf(card);
+    const from: DrawnCard = {
+      card,
+      x: pos.x,
+      y: pos.y,
+      flow: this.flowClass(card.id, selection),
+      badge: this.expandedBadges.has(card.id),
+    };
+    this.drawing.set(card.id, from);
+    const held = this.drawn.get(card.id);
+    const node = this.canvas?.nodesById.get(card.id);
+    if (
+      node?.isConnected &&
+      held !== undefined &&
+      held.x === from.x &&
+      held.y === from.y &&
+      held.flow === from.flow &&
+      held.badge === from.badge &&
+      sameView(held.card, card)
+    ) {
+      return keep(node);
+    }
+    return this.renderCard(card, selection);
   }
 
   private renderCard(card: PoolCardView, selection: CanvasSelection): HTMLElement {
@@ -1233,6 +1323,17 @@ export class Canvas {
   // A press on a card starts a node drag, a press on blank space a pan;
   // either captures the pointer on the viewport, which keeps its node across
   // the renders that land while the pointer is down.
+  // The card under the pointer, as the pointer crosses into an element (or
+  // out of one, to wherever it went): reported only when it changes, so a
+  // move inside one card says nothing.
+  private hoverCard(target: EventTarget | null): void {
+    const card = target instanceof Element ? target.closest(".node-card") : null;
+    const id = card instanceof HTMLElement ? (card.dataset.nodeId ?? null) : null;
+    if (id === this.hoveredCard) return;
+    this.hoveredCard = id;
+    this.onCardHover(id);
+  }
+
   private pointerDown(event: PointerEvent): void {
     if (this.drag) return;
     const target = event.target instanceof Element ? event.target : null;
@@ -1550,6 +1651,41 @@ export class Canvas {
     }
     this.paintStrokeScale();
   }
+}
+
+/** What a card on the page was drawn from (issue #161). */
+interface DrawnCard {
+  card: PoolCardView;
+  x: number;
+  y: number;
+  flow: string;
+  badge: boolean;
+}
+
+/**
+ * Whether two projected views hold the same values: plain data compared
+ * part by part, a part that is the very same object (a ticket's Assignment
+ * carried over by a delta, a pane's peek the terminal store kept) taken as
+ * equal at once, with no string built for either. A card's view is
+ * projected afresh on every render, so its own identity says nothing.
+ */
+export function sameView(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameView(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  for (const key of keys) {
+    if (!(key in right) || !sameView(left[key], right[key])) return false;
+  }
+  return true;
 }
 
 /** The world's size around a set of card boxes: room for each and a margin,

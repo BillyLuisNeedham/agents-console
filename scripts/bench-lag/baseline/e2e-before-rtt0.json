@@ -1,15 +1,15 @@
 {
-  "at": "2026-10-02T16:01:55.077Z",
-  "repo": "/tmp/claude-1000/-home-billy-repos-agent-console/771d7701-622b-4293-84d9-673564c9cff4/scratchpad/main-checkout",
-  "revision": "detached@30606d9",
+  "at": "2026-10-02T22:05:11.010Z",
+  "repo": "/tmp/claude-1000/-home-billy-repos-agent-console/771d7701-622b-4293-84d9-673564c9cff4/scratchpad/before-160",
+  "revision": "detached@3a8f779",
   "machine": {
     "bun": "1.3.14",
     "platform": "linux",
     "cpus": 12,
     "loadavgAtStart": [
-      1.68,
-      2.57,
-      2.51
+      3.36,
+      3.31,
+      3.88
     ]
   },
   "server": null,
@@ -19,218 +19,398 @@
     "tabs": 2,
     "rttMs": 0,
     "cards": 25,
-    "domNodes": 512,
+    "domNodes": 477,
+    "protocol": "sse",
+    "start": {
+      "usableMs": {
+        "n": 2,
+        "mean": 255,
+        "p50": 301.9,
+        "p95": 301.9,
+        "max": 301.9
+      },
+      "each": [
+        301.9,
+        208.1
+      ],
+      "breakdown": [
+        {
+          "htmlMs": 3.8,
+          "scriptMs": 29.9,
+          "committedMs": 289.1,
+          "paintedMs": 301.9,
+          "socketAt": null,
+          "blocked": {
+            "scriptMs": 166.6,
+            "forcedLayoutMs": 140.6,
+            "renderMs": 170.2
+          }
+        },
+        {
+          "htmlMs": 3.7,
+          "scriptMs": 21.2,
+          "committedMs": 195.2,
+          "paintedMs": 208.1,
+          "socketAt": null,
+          "blocked": {
+            "scriptMs": 121.5,
+            "forcedLayoutMs": 97.8,
+            "renderMs": 120.3
+          }
+        }
+      ]
+    },
     "click": {
-      "n": 19,
-      "unreachable": 0,
+      "n": 18,
+      "hoverMs": 300,
+      "unreachable": {
+        "cold": 0,
+        "hover": 0
+      },
       "missed": 0,
       "unfilled": 0,
+      "notCold": 0,
       "tabs": {
-        "progress": 7,
-        "outcome": 8,
-        "spec": 4
+        "progress": 8,
+        "outcome": 4,
+        "spec": 6
       },
       "shellMs": {
-        "n": 19,
-        "mean": 19.1,
+        "n": 18,
+        "mean": 18.4,
         "p50": 18.3,
-        "p95": 22.2,
-        "max": 22.2
+        "p95": 21.4,
+        "max": 21.4
       },
-      "dataMs": {
-        "n": 11,
-        "mean": 59.9,
-        "p50": 53,
-        "p95": 193.2,
-        "max": 193.2
+      "shellFrames": {
+        "n": 18,
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "cold": {
+        "n": 5,
+        "dataMs": {
+          "n": 5,
+          "mean": 42.6,
+          "p50": 45.6,
+          "p95": 60.6,
+          "max": 60.6
+        },
+        "networkMs": null,
+        "pageFrames": null,
+        "cardFrameMs": null,
+        "toSubscribeMs": null
+      },
+      "hover": {
+        "n": 9,
+        "dataFrames": {
+          "n": 9,
+          "mean": 1.8,
+          "p50": 2,
+          "p95": 2,
+          "max": 2
+        },
+        "dataMs": {
+          "n": 9,
+          "mean": 44.6,
+          "p50": 49.4,
+          "p95": 59.7,
+          "max": 59.7
+        },
+        "prefetched": null
       },
       "progressDataMs": {
-        "n": 7,
-        "mean": 74.2,
-        "p50": 53.3,
-        "p95": 193.2,
-        "max": 193.2
+        "n": 8,
+        "mean": 50.8,
+        "p50": 54.1,
+        "p95": 60.6,
+        "max": 60.6
       },
       "inputDelayMs": {
-        "n": 19,
-        "mean": 0.4,
-        "p50": 0.3,
-        "p95": 1.4,
-        "max": 1.4
+        "n": 18,
+        "mean": 1.1,
+        "p50": 0.4,
+        "p95": 12.9,
+        "max": 12.9
       },
       "each": [
         {
           "id": "14",
+          "how": "cold",
           "tab": "progress",
+          "shell": 18.3,
+          "shellFrames": 1,
+          "data": 46.9,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "15",
+          "how": "hover",
+          "tab": "progress",
+          "shell": 18.3,
+          "shellFrames": 1,
+          "data": 43.2,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "03",
+          "how": "cold",
+          "tab": "outcome",
+          "shell": 19.7,
+          "shellFrames": 1,
+          "data": 19.7,
+          "dataFrames": 1,
+          "subscribed": null
+        },
+        {
+          "id": "18",
+          "how": "hover",
+          "tab": "spec",
+          "shell": 20.4,
+          "shellFrames": 1,
+          "data": 59.7,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "11",
+          "how": "cold",
+          "tab": "outcome",
           "shell": 17.8,
-          "data": 53
+          "shellFrames": 1,
+          "data": 17.8,
+          "dataFrames": 1,
+          "subscribed": null
         },
         {
-          "id": "03",
-          "tab": "outcome",
-          "shell": 18.3,
-          "data": 18.3
-        },
-        {
-          "id": "11",
-          "tab": "outcome",
-          "shell": 17.2,
-          "data": 17.2
+          "id": "16",
+          "how": "hover",
+          "tab": "progress",
+          "shell": 18.5,
+          "shellFrames": 1,
+          "data": 45.1,
+          "dataFrames": 2,
+          "subscribed": null
         },
         {
           "id": "17",
+          "how": "cold",
           "tab": "spec",
-          "shell": 22.2,
-          "data": 75.7
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 17.9,
-          "data": 45.9
-        },
-        {
-          "id": "14",
-          "tab": "progress",
-          "shell": 17.9,
-          "data": 52.4
-        },
-        {
-          "id": "03",
-          "tab": "outcome",
-          "shell": 19.6,
-          "data": 19.6
-        },
-        {
-          "id": "11",
-          "tab": "outcome",
-          "shell": 18.2,
-          "data": 18.2
-        },
-        {
-          "id": "17",
-          "tab": "spec",
-          "shell": 20.2,
-          "data": 20.2
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 18.3,
-          "data": 53.3
-        },
-        {
-          "id": "14",
-          "tab": "progress",
-          "shell": 19.4,
-          "data": 193.2
-        },
-        {
-          "id": "03",
-          "tab": "outcome",
-          "shell": 18.2,
-          "data": 18.2
-        },
-        {
-          "id": "11",
-          "tab": "outcome",
-          "shell": 21.7,
-          "data": 21.7
-        },
-        {
-          "id": "17",
-          "tab": "spec",
-          "shell": 21.2,
-          "data": 21.2
-        },
-        {
-          "id": "13",
-          "tab": "progress",
-          "shell": 15.7,
-          "data": 57.8
-        },
-        {
-          "id": "14",
-          "tab": "progress",
           "shell": 18.8,
-          "data": 63.8
+          "shellFrames": 1,
+          "data": 42.6,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "19",
+          "how": "hover",
+          "tab": "spec",
+          "shell": 19.1,
+          "shellFrames": 1,
+          "data": 49.4,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "13",
+          "how": "cold",
+          "tab": "progress",
+          "shell": 18.2,
+          "shellFrames": 1,
+          "data": 60.6,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "15",
+          "how": "hover",
+          "tab": "progress",
+          "shell": 17.9,
+          "shellFrames": 1,
+          "data": 55.4,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "14",
+          "how": "cold",
+          "tab": "progress",
+          "shell": 16.9,
+          "shellFrames": 1,
+          "data": 45.6,
+          "dataFrames": 2,
+          "subscribed": null
+        },
+        {
+          "id": "18",
+          "how": "hover",
+          "tab": "spec",
+          "shell": 21.4,
+          "shellFrames": 1,
+          "data": 21.4,
+          "dataFrames": 1,
+          "subscribed": null
         },
         {
           "id": "03",
+          "how": "cold",
           "tab": "outcome",
-          "shell": 18.2,
-          "data": 18.2
+          "shell": 18.4,
+          "shellFrames": 1,
+          "data": 18.4,
+          "dataFrames": 1,
+          "subscribed": null
+        },
+        {
+          "id": "16",
+          "how": "hover",
+          "tab": "progress",
+          "shell": 17.4,
+          "shellFrames": 1,
+          "data": 55.8,
+          "dataFrames": 2,
+          "subscribed": null
         },
         {
           "id": "11",
+          "how": "cold",
           "tab": "outcome",
-          "shell": 19.5,
-          "data": 19.5
+          "shell": 17.8,
+          "shellFrames": 1,
+          "data": 17.8,
+          "dataFrames": 1,
+          "subscribed": null
+        },
+        {
+          "id": "19",
+          "how": "hover",
+          "tab": "spec",
+          "shell": 17.7,
+          "shellFrames": 1,
+          "data": 17.7,
+          "dataFrames": 1,
+          "subscribed": null
         },
         {
           "id": "17",
+          "how": "cold",
           "tab": "spec",
-          "shell": 22,
-          "data": 22
+          "shell": 17.4,
+          "shellFrames": 1,
+          "data": 17.4,
+          "dataFrames": 1,
+          "subscribed": null
+        },
+        {
+          "id": "15",
+          "how": "hover",
+          "tab": "progress",
+          "shell": 17.6,
+          "shellFrames": 1,
+          "data": 54.1,
+          "dataFrames": 2,
+          "subscribed": null
         }
       ]
     },
     "focus": {
-      "n": 19,
+      "n": 18,
       "unreachable": 0,
       "missed": 0,
+      "unanswered": 0,
       "unconfirmed": 0,
+      "answeredVia": {
+        "socket": 0,
+        "http": 18
+      },
+      "feedbackFrames": {
+        "n": 18,
+        "mean": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1
+      },
+      "answeredMs": {
+        "n": 18,
+        "mean": 3.3,
+        "p50": 3.2,
+        "p95": 5.4,
+        "max": 5.4
+      },
+      "handledMs": null,
+      "toRequestFrameMs": null,
       "toFetchMs": {
-        "n": 19,
-        "mean": 2.9,
-        "p50": 1.8,
-        "p95": 17.8,
-        "max": 17.8
+        "n": 18,
+        "mean": 0.7,
+        "p50": 0.7,
+        "p95": 1.3,
+        "max": 1.3
       },
       "toRequestMs": {
-        "n": 19,
-        "mean": 4.8,
-        "p50": 2.3,
-        "p95": 31.8,
-        "max": 31.8
+        "n": 18,
+        "mean": 1.3,
+        "p50": 1.2,
+        "p95": 1.7,
+        "max": 1.7
       },
       "toResponseMs": {
-        "n": 19,
-        "mean": 8.1,
-        "p50": 4.6,
-        "p95": 37.8,
-        "max": 37.8
+        "n": 18,
+        "mean": 3.3,
+        "p50": 3.2,
+        "p95": 5.4,
+        "max": 5.4
       },
       "confirmedMs": {
-        "n": 19,
-        "mean": 37.7,
-        "p50": 34.9,
-        "p95": 74.1,
-        "max": 74.1
+        "n": 18,
+        "mean": 36.4,
+        "p50": 38.4,
+        "p95": 44.6,
+        "max": 44.6
       },
       "inputDelayMs": {
-        "n": 19,
-        "mean": 0.7,
-        "p50": 0.5,
-        "p95": 4.1,
-        "max": 4.1
+        "n": 18,
+        "mean": 3.9,
+        "p50": 0.7,
+        "p95": 17,
+        "max": 17
       }
     },
     "renders": {
-      "batchesPerSec": 13.2,
-      "framesWithMutationsPerSec": 6.98,
-      "recordsPerSec": 2703.93
+      "batchesPerSec": 5.71,
+      "framesWithMutationsPerSec": 5.31,
+      "recordsPerSec": 37.4
     },
     "frames": {
-      "perSec": 58.51,
+      "perSec": 59.99,
       "gapMs": {
-        "n": 3628,
-        "mean": 17.1,
+        "n": 3719,
+        "mean": 16.7,
         "p50": 16.7,
-        "p95": 16.8,
-        "max": 83.3
+        "p95": 16.7,
+        "max": 16.8
       },
-      "over50ms": 11
+      "over50ms": 0,
+      "tabs": [
+        {
+          "frames": 4931,
+          "intervalMs": 16.6,
+          "over": 0,
+          "overAt": [],
+          "longestGapMs": 16.8
+        },
+        {
+          "frames": 4931,
+          "intervalMs": 16.6,
+          "over": 0,
+          "overAt": [],
+          "longestGapMs": 16.8
+        }
+      ]
     },
     "longTasks": {
       "api": true,
@@ -240,226 +420,452 @@
       "over100ms": 0
     },
     "longFrames": {
-      "count": 20,
-      "longestMs": 86.5,
+      "count": 0,
+      "longestMs": 0,
       "blockingMs": 0
     },
     "mainThread": {
-      "busyPct": 17.9,
-      "scriptMs": 767,
-      "layoutMs": 490,
-      "styleMs": 726,
-      "layouts": 2893,
-      "styleRecalcs": 3007
+      "busyPct": 8.4,
+      "scriptMs": 2801,
+      "layoutMs": 201,
+      "styleMs": 25,
+      "layouts": 377,
+      "styleRecalcs": 202
     },
     "requests": {
-      "perSec": 38.58,
+      "perSec": 27.17,
       "inFlight": {
-        "max": 27,
-        "mean": 0.97,
+        "max": 4,
+        "mean": 0.11,
         "perSecondMax": [
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          27,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          27,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
-          26,
-          26,
-          26,
-          7,
-          26,
-          26,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          2,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
+          4,
+          4,
+          4,
+          2,
+          4,
+          4,
           0
         ]
       },
       "onWire": {
-        "max": 5,
-        "mean": 0.23
+        "max": 3,
+        "mean": 0.08
       },
       "waitForConnectionMs": {
-        "n": 2393,
-        "mean": 19.2,
-        "p50": 15.7,
-        "p95": 52.1,
-        "max": 65.5
+        "n": 1685,
+        "mean": 1.1,
+        "p50": 0.9,
+        "p95": 2.2,
+        "max": 7.7
       },
       "byKind": {
         "/api/activity": {
-          "perSec": 12.12,
+          "perSec": 8,
           "totalMs": {
-            "n": 752,
-            "mean": 19.9,
-            "p50": 15.6,
-            "p95": 50.9,
-            "max": 60.4
+            "n": 496,
+            "mean": 4.3,
+            "p50": 3.2,
+            "p95": 9.1,
+            "max": 12.8
           },
-          "waitMeanMs": 12.7
+          "waitMeanMs": 0.9
         },
         "/api/events": {
-          "perSec": 2.34,
+          "perSec": 2.32,
           "totalMs": {
-            "n": 145,
-            "mean": 27.3,
-            "p50": 25.2,
-            "p95": 48.4,
-            "max": 51.4
+            "n": 144,
+            "mean": 5,
+            "p50": 5.1,
+            "p95": 6.9,
+            "max": 8.3
           },
-          "waitMeanMs": 22.1
+          "waitMeanMs": 1.3
         },
         "/api/grades": {
           "perSec": 2.03,
           "totalMs": {
             "n": 126,
-            "mean": 39.4,
-            "p50": 39.3,
-            "p95": 63,
-            "max": 67.9
+            "mean": 6.3,
+            "p50": 6.2,
+            "p95": 9.1,
+            "max": 10.1
           },
-          "waitMeanMs": 35.4
+          "waitMeanMs": 3.4
         },
         "/api/log": {
-          "perSec": 0.48,
+          "perSec": 0.39,
           "totalMs": {
-            "n": 30,
-            "mean": 5.3,
-            "p50": 3.5,
-            "p95": 21,
-            "max": 42.3
+            "n": 24,
+            "mean": 3.4,
+            "p50": 3.2,
+            "p95": 4.9,
+            "max": 5.4
           },
-          "waitMeanMs": 1.9
+          "waitMeanMs": 0.9
         },
         "/api/settings": {
           "perSec": 0.02,
           "totalMs": {
             "n": 1,
-            "mean": 4.6,
-            "p50": 4.6,
-            "p95": 4.6,
-            "max": 4.6
+            "mean": 5,
+            "p50": 5,
+            "p95": 5,
+            "max": 5
           },
-          "waitMeanMs": 1.5
+          "waitMeanMs": 2.6
         },
         "/api/terminal/focus": {
-          "perSec": 0.31,
+          "perSec": 0.29,
           "totalMs": {
-            "n": 19,
-            "mean": 5.2,
-            "p50": 2.5,
-            "p95": 32.4,
-            "max": 32.4
+            "n": 18,
+            "mean": 2.6,
+            "p50": 2.4,
+            "p95": 4.5,
+            "max": 4.5
           },
-          "waitMeanMs": 2
+          "waitMeanMs": 0.5
         },
         "/api/terminal/peek": {
-          "perSec": 21.22,
+          "perSec": 14,
           "totalMs": {
-            "n": 1316,
-            "mean": 27.4,
-            "p50": 26.9,
-            "p95": 57.8,
-            "max": 66.7
+            "n": 868,
+            "mean": 3.3,
+            "p50": 3.2,
+            "p95": 4.9,
+            "max": 7.5
           },
-          "waitMeanMs": 21.8
+          "waitMeanMs": 0.8
         },
         "/api/ticket": {
-          "perSec": 0.06,
+          "perSec": 0.13,
           "totalMs": {
-            "n": 4,
-            "mean": 2.6,
-            "p50": 2.7,
-            "p95": 2.7,
-            "max": 2.7
+            "n": 8,
+            "mean": 3.6,
+            "p50": 3.4,
+            "p95": 5.7,
+            "max": 5.7
           },
-          "waitMeanMs": 0.9
+          "waitMeanMs": 1
         }
       }
     },
+    "ws": null,
+    "idle": {
+      "tabs": [
+        {
+          "ms": 15002.700000047684,
+          "resources": 195,
+          "fetches": 195,
+          "socketFramesSent": 0
+        },
+        {
+          "ms": 15002.799999952316,
+          "resources": 195,
+          "fetches": 195,
+          "socketFramesSent": 0
+        }
+      ],
+      "fromMs": [
+        62016,
+        62016
+      ],
+      "received": {}
+    },
+    "gateInputs": {
+      "rttMs": 0,
+      "feedbackFrames": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "shellFrames": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "coldNetworkMs": null,
+      "coldPageFrames": null,
+      "hoverDataFrames": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        1,
+        2,
+        1,
+        2
+      ],
+      "focusAnsweredMs": [
+        3.5,
+        2.399999976158142,
+        5.399999976158142,
+        3.200000047683716,
+        4.5,
+        3.299999952316284,
+        2.899999976158142,
+        3.3000000715255737,
+        3,
+        3.200000047683716,
+        2.899999976158142,
+        3,
+        2.9000000953674316,
+        3.600000023841858,
+        3.1999999284744263,
+        2.600000023841858,
+        3,
+        3.600000023841858
+      ],
+      "frames": [
+        {
+          "frames": 4931,
+          "intervalMs": 16.6,
+          "over": 0,
+          "overAt": [],
+          "longestGapMs": 16.8
+        },
+        {
+          "frames": 4931,
+          "intervalMs": 16.6,
+          "over": 0,
+          "overAt": [],
+          "longestGapMs": 16.8
+        }
+      ],
+      "idle": [
+        {
+          "ms": 15002.700000047684,
+          "resources": 195,
+          "fetches": 195,
+          "socketFramesSent": 0
+        },
+        {
+          "ms": 15002.799999952316,
+          "resources": 195,
+          "fetches": 195,
+          "socketFramesSent": 0
+        }
+      ],
+      "usableMs": [
+        301.89999997615814,
+        208.10000002384186
+      ]
+    },
+    "serverProtocol": "sse",
     "snapshots": {
-      "perSec": 1.03,
+      "perSec": 1.02,
       "meanBytes": 10957
     },
     "server": {
       "pingMs": {
-        "n": 2236,
-        "mean": 1.2,
+        "n": 2296,
+        "mean": 0.5,
         "p50": 0.4,
-        "p95": 4.2,
-        "p99": 20.9,
-        "max": 29.5
+        "p95": 1,
+        "p99": 2,
+        "max": 4.3
       },
       "pingFailures": 0,
-      "cpuPercent": 14.6,
+      "cpuPercent": 15.6,
       "loopLagMs": {
-        "samples": 5710,
-        "p50": 0.4,
-        "p95": 1.6,
-        "p99": 18.1,
-        "max": 27.1,
+        "samples": 5932,
+        "p50": 0.2,
+        "p95": 1.4,
+        "p99": 2.1,
+        "max": 5.9,
         "over50ms": 0
       },
-      "syncSpawnBlockedPercent": 5.2
+      "syncSpawnBlockedPercent": 0
     },
     "herdrRequests": {
       "workspace.create": 1,
       "pane.list": 27,
       "tab.create": 19,
-      "pane.read": 1015,
+      "pane.read": 721,
       "pane.send_input": 25,
       "pane.report_agent": 19,
       "events.subscribe": 8,
       "pane.release_agent": 12,
-      "pane.focus": 19
-    }
+      "pane.focus": 18
+    },
+    "proxyLatenessMs": {
+      "up": {
+        "n": 0,
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "down": {
+        "n": 0,
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      }
+    },
+    "slowAnswers": [],
+    "gates": [
+      {
+        "name": "Press feedback",
+        "target": "visible change in frame 1",
+        "measured": "worst 1 frame, n=36",
+        "pass": true
+      },
+      {
+        "name": "Click -> Detail",
+        "target": "shell painted in frame 1",
+        "measured": "worst 1 frame, n=18",
+        "pass": true
+      },
+      {
+        "name": "Cold data, network",
+        "target": "card frame back < 5 ms",
+        "measured": "n/a: the page has no socket",
+        "pass": false
+      },
+      {
+        "name": "Cold data, page",
+        "target": "painted in the frame after its card frame",
+        "measured": "n/a: the page has no socket",
+        "pass": false
+      },
+      {
+        "name": "Click -> card data (hovered)",
+        "target": "painted in frame 1",
+        "measured": "worst 2 frames, n=9, 7 over",
+        "pass": false
+      },
+      {
+        "name": "Open in herdr answered",
+        "target": "< 5 ms",
+        "measured": "worst 5.4 ms, n=18, 1 over",
+        "pass": false
+      },
+      {
+        "name": "Frames over budget",
+        "target": "0 (a gap of >= 1.5 display intervals)",
+        "measured": "0 of 9862 frames over, longest gap 16.8 ms, interval 16.6/16.6 ms",
+        "pass": true
+      },
+      {
+        "name": "Background polling",
+        "target": "0 HTTP, 0 sent frames over >= 10 s idle",
+        "measured": "390 resources, 390 fetches, 0 frames sent over 15 s x 2 tabs",
+        "pass": false
+      },
+      {
+        "name": "Start -> usable",
+        "target": "< 300 ms",
+        "measured": "worst 301.9 ms, n=2, 1 over",
+        "pass": false
+      }
+    ]
   }
 }

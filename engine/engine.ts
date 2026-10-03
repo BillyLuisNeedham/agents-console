@@ -6654,10 +6654,17 @@ function resolveSpawnedTicketAssignment(
 // resolution in the pass reads the same `config`, so a build ticket frozen by
 // an in-flight Attempt hands its graders the pre-reload Assignment, exactly
 // as a ticket resolved this pass hands its spawns the post-reload one.
-// loadPoolMarkers guarantees a spawned id's parent exists, so only a forged
-// spawned-by cycle (or every id in a cycle being simultaneously in-flight,
-// which cannot happen) can leave an id unresolved, and that fails here with a
-// clear error instead of an undefined crash later.
+// loadPoolMarkers guarantees a spawned id's parent exists as a ticket or a
+// Conversation, but a Conversation's Assignment is only in the map when the
+// caller seeded it (startPool does; issue #156 was every other caller not
+// doing so), so an id can still be left unresolved: its parent has no
+// Assignment, its parent itself failed, or a forged spawned-by cycle.
+//
+// Without `failures`, the first failure throws, naming what went wrong: the
+// engine's boot and its Config reload are all or nothing (ADR-0018). With it,
+// nothing throws: every ticket that can resolve does, and each one that
+// cannot gets its own reason, so Reassign marks only that ticket ineligible
+// rather than the pool (issue #159).
 function resolveAssignmentsInto(
   markers: TicketMarker[],
   assignments: Map<string, Assignment>,
@@ -6668,103 +6675,158 @@ function resolveAssignmentsInto(
   // the dispatch below (grader, spawned, enlisted, ordinary) is written once
   // and a provenance answer can never disagree with the value beside it.
   sources?: Map<string, AssignmentSources>,
+  failures?: Map<string, string>,
 ): void {
+  // One ticket's resolver error (an unknown harness, a bad verify): thrown
+  // at once on the engine's all-or-nothing path, recorded against the ticket
+  // otherwise, which then stays out of the map like any unresolved id.
+  const failed = (marker: TicketMarker, error: unknown): void => {
+    if (!failures) throw error;
+    failures.set(marker.id, error instanceof Error ? error.message : String(error));
+  };
   let progressed = true;
   while (progressed) {
     progressed = false;
     for (const marker of markers) {
-      if (assignments.has(marker.id)) continue;
-      const graderBuild = engineTicketBuildId(marker.id);
-      if (graderBuild) {
-        const build = assignments.get(graderBuild);
-        // The build not resolved yet is not the build absent: a grader whose
-        // build ticket is in the pool waits for a later sweep and inherits
-        // from it, whatever the file order; only a stale card whose build is
-        // gone from the pool resolves as an ordinary ticket, as before.
-        if (!build && markers.some((m) => m.id === graderBuild)) continue;
-        assignments.set(
-          marker.id,
-          build
-            ? resolveEngineTicketAssignment(config, marker, build, harnesses)
-            : resolveTicketAssignment(marker, config, harnesses),
-        );
-        const assign = config.assign?.[marker.id];
-        sources?.set(
-          marker.id,
-          resolveAssignmentSources({
-            // The same narrowed request the engine resolver takes: a judge
-            // may override harness, model and effort, never the build's
-            // drivers.
-            request: build ? (assign ? engineTicketRequest(assign) : undefined) : assign,
-            ...(build ? { inherited: build } : {}),
-            ...(config.defaults ? { defaults: config.defaults } : {}),
-          }),
-        );
+      if (assignments.has(marker.id) || failures?.has(marker.id)) continue;
+      try {
+        if (resolveOne(marker)) progressed = true;
+      } catch (error) {
+        failed(marker, error);
         progressed = true;
-        continue;
       }
-      if (marker.spawnedBy) {
-        const parent = assignments.get(marker.spawnedBy);
-        if (!parent) continue;
-        assignments.set(
-          marker.id,
-          resolveSpawnedTicketAssignment(config, marker, parent, harnesses),
-        );
-        sources?.set(
-          marker.id,
-          resolveAssignmentSources({
-            request: config.assign?.[marker.id],
-            inherited: parent,
-            ...(config.defaults ? { defaults: config.defaults } : {}),
-          }),
-        );
-        progressed = true;
-        continue;
-      }
-      if (marker.enlistedFrom !== undefined) {
-        // An enlisted ticket's Assignment is as found (issue #101): the
-        // harness comes from the pool config after a restart (the as-found
-        // facts live only in the ticket file's prose), model unknown and
-        // drivers default, and verify is stripped so the ticket still
-        // re-adopts at boot and never fans out.
-        const resolved = resolveTicketAssignment(marker, config, harnesses);
-        assignments.set(marker.id, {
-          harness: resolved.harness,
-          model: "",
-          drivers: DEFAULT_DRIVERS,
-        });
-        // Only the harness came through the config; the other two are the
-        // as-found rule above, so no layer of the file supplied them.
-        sources?.set(marker.id, {
-          harness: resolveAssignmentSources({
-            request: config.assign?.[marker.id],
-            ...(config.defaults ? { defaults: config.defaults } : {}),
-          }).harness,
-          model: "unset",
-          effort: "unset",
-          drivers: "default",
-        });
-        progressed = true;
-        continue;
-      }
-      assignments.set(marker.id, resolveTicketAssignment(marker, config, harnesses));
+    }
+  }
+  const unresolved = markers.filter(
+    (m) => !assignments.has(m.id) && !failures?.has(m.id),
+  );
+  // Every reason first, then recorded: in a cycle each member is in it, not
+  // downstream of whichever member happened to be recorded first.
+  const reasons = unresolved.map(
+    (marker) =>
+      [
+        marker.id,
+        `pool config: ticket ${marker.id}: ` +
+          unresolvedReason(marker, markers, assignments, failures),
+      ] as const,
+  );
+  for (const [id, reason] of reasons) {
+    if (!failures) throw new Error(reason);
+    failures.set(id, reason);
+  }
+
+  // Resolves one marker into the map, or answers false when what it inherits
+  // from is not resolved yet and a later sweep may get to it.
+  function resolveOne(marker: TicketMarker): boolean {
+    const graderBuild = engineTicketBuildId(marker.id);
+    if (graderBuild) {
+      const build = assignments.get(graderBuild);
+      // The build not resolved yet is not the build absent: a grader whose
+      // build ticket is in the pool waits for a later sweep and inherits
+      // from it, whatever the file order; only a stale card whose build is
+      // gone from the pool resolves as an ordinary ticket, as before.
+      if (!build && markers.some((m) => m.id === graderBuild)) return false;
+      assignments.set(
+        marker.id,
+        build
+          ? resolveEngineTicketAssignment(config, marker, build, harnesses)
+          : resolveTicketAssignment(marker, config, harnesses),
+      );
+      const assign = config.assign?.[marker.id];
+      sources?.set(
+        marker.id,
+        resolveAssignmentSources({
+          // The same narrowed request the engine resolver takes: a judge
+          // may override harness, model and effort, never the build's
+          // drivers.
+          request: build ? (assign ? engineTicketRequest(assign) : undefined) : assign,
+          ...(build ? { inherited: build } : {}),
+          ...(config.defaults ? { defaults: config.defaults } : {}),
+        }),
+      );
+      return true;
+    }
+    if (marker.spawnedBy) {
+      const parent = assignments.get(marker.spawnedBy);
+      if (!parent) return false;
+      assignments.set(
+        marker.id,
+        resolveSpawnedTicketAssignment(config, marker, parent, harnesses),
+      );
       sources?.set(
         marker.id,
         resolveAssignmentSources({
           request: config.assign?.[marker.id],
+          inherited: parent,
           ...(config.defaults ? { defaults: config.defaults } : {}),
         }),
       );
-      progressed = true;
+      return true;
     }
-  }
-  const unresolved = markers.filter((m) => !assignments.has(m.id));
-  if (unresolved.length > 0) {
-    throw new Error(
-      `pool config: cannot resolve assignments for ` +
-        `${unresolved.map((m) => m.id).join(", ")} (a spawned-by cycle?)`,
+    if (marker.enlistedFrom !== undefined) {
+      // An enlisted ticket's Assignment is as found (issue #101): the
+      // harness comes from the pool config after a restart (the as-found
+      // facts live only in the ticket file's prose), model unknown and
+      // drivers default, and verify is stripped so the ticket still
+      // re-adopts at boot and never fans out.
+      const resolved = resolveTicketAssignment(marker, config, harnesses);
+      assignments.set(marker.id, {
+        harness: resolved.harness,
+        model: "",
+        drivers: DEFAULT_DRIVERS,
+      });
+      // Only the harness came through the config; the other two are the
+      // as-found rule above, so no layer of the file supplied them.
+      sources?.set(marker.id, {
+        harness: resolveAssignmentSources({
+          request: config.assign?.[marker.id],
+          ...(config.defaults ? { defaults: config.defaults } : {}),
+        }).harness,
+        model: "unset",
+        effort: "unset",
+        drivers: "default",
+      });
+      return true;
+    }
+    assignments.set(marker.id, resolveTicketAssignment(marker, config, harnesses));
+    sources?.set(
+      marker.id,
+      resolveAssignmentSources({
+        request: config.assign?.[marker.id],
+        ...(config.defaults ? { defaults: config.defaults } : {}),
+      }),
     );
+    return true;
   }
+}
+
+// Why a ticket the pass could not resolve did not, in words an operator can
+// act on: it sits on a real spawned-by cycle (walked out in full), its parent
+// (or build ticket) is a ticket that did not resolve itself, or its parent is
+// no ticket and has no Assignment, which is a Conversation nobody seeded.
+function unresolvedReason(
+  marker: TicketMarker,
+  markers: TicketMarker[],
+  assignments: ReadonlyMap<string, Assignment>,
+  failures: ReadonlyMap<string, string> | undefined,
+): string {
+  const byId = new Map(markers.map((m) => [m.id, m]));
+  const upstream = (m: TicketMarker): string | undefined =>
+    engineTicketBuildId(m.id) ?? m.spawnedBy;
+  const unresolved = (id: string) => !assignments.has(id) && !failures?.has(id);
+  const chain = [marker.id];
+  for (let up = upstream(marker); up !== undefined; ) {
+    if (up === marker.id) return `spawned-by cycle: ${[...chain, up].join(" -> ")}`;
+    const next = byId.get(up);
+    if (!next || !unresolved(up) || chain.includes(up)) break;
+    chain.push(up);
+    up = upstream(next);
+  }
+  const parent = upstream(marker)!;
+  const role = engineTicketBuildId(marker.id) ? "build ticket" : "parent";
+  return byId.has(parent)
+    ? `${role} ${parent} did not resolve`
+    : `${role} ${parent} has no Assignment`;
 }
 
 /**
@@ -6780,22 +6842,31 @@ function resolveAssignmentsInto(
  * is left exactly as given and its children inherit from it, so the Console
  * shows what the engine will use rather than what the file alone would say.
  * A seeded id gets no `sources` entry, because no layer of the file supplied
- * it.
+ * it. The seed carries the pool's Conversations too, the way startPool's map
+ * does, since a ticket's spawned-by may name one (issue #156).
  *
- * Throws exactly what the engine's own reload would: an unknown harness or an
- * invalid verify anywhere in the pool rejects the whole resolution, which is
- * the point of dry-running it.
+ * Never throws for a ticket: each one that does not resolve (an unknown
+ * harness, an invalid verify, a parent with no Assignment) is in `failures`
+ * with its own reason, and every other ticket resolves regardless. The
+ * engine's own reload rejects the whole file on any of these (ADR-0018), so a
+ * caller that needs the engine's answer treats any failure as the engine
+ * would.
  */
 export function resolvePoolAssignments(
   markers: TicketMarker[],
   config: PoolConfig,
   harnesses: Record<string, HarnessCommand>,
   seed?: ReadonlyMap<string, Assignment>,
-): { assignments: Map<string, Assignment>; sources: Map<string, AssignmentSources> } {
+): {
+  assignments: Map<string, Assignment>;
+  sources: Map<string, AssignmentSources>;
+  failures: Map<string, string>;
+} {
   const assignments = new Map<string, Assignment>(seed ?? []);
   const sources = new Map<string, AssignmentSources>();
-  resolveAssignmentsInto(markers, assignments, config, harnesses, sources);
-  return { assignments, sources };
+  const failures = new Map<string, string>();
+  resolveAssignmentsInto(markers, assignments, config, harnesses, sources, failures);
+  return { assignments, sources, failures };
 }
 
 // Resolution for marker ids the assignment map does not know yet, run once
@@ -6917,10 +6988,18 @@ function reloadConfigAtBoundary(session: Session): void {
 
   // The dry run: seed every in-flight ticket's frozen Assignment so the pass
   // never recomputes it, then resolve everything else fresh against the
-  // candidate. A throw here (unknown harness, bad verify, a forged
-  // spawned-by cycle) leaves session.assignments and session.state.config
-  // untouched — the candidate map is scratch until this call returns clean.
+  // candidate. A throw here (unknown harness, bad verify, a parent with no
+  // Assignment, a forged spawned-by cycle) leaves session.assignments and
+  // session.state.config untouched — the candidate map is scratch until this
+  // call returns clean. Every id in the map that is not a ticket is a
+  // Conversation's Assignment, carried over as startPool seeded it (and as
+  // recordAssignment added it since): it is not the config's to move, and a
+  // ticket it spawned resolves from it (issue #156).
   const resolved = new Map<string, Assignment>();
+  const ticketIds = new Set(session.markers.map((m) => m.id));
+  for (const [id, assignment] of session.assignments) {
+    if (!ticketIds.has(id)) resolved.set(id, assignment);
+  }
   for (const id of [
     ...session.adopted.keys(),
     ...session.enlistedWork.keys(),

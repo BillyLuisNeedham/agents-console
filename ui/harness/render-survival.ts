@@ -1,11 +1,12 @@
 /**
  * Render-survival harness: mounts the real ConsoleView over the real
- * ConsoleSession with hand-settled fake seams, puts the page into a state an
- * operator would (scrolled regions, a focused note field with a caret, a
- * panned canvas), then re-renders it the way the app does on every poll tick
- * and snapshot, and records what survived. `bun harness/run.ts` builds this
- * page, opens it in headless Chromium, and prints the report the page writes
- * into #report.
+ * ConsoleSession with a fake socket seam (a subscribed card's frame lands a
+ * task later, a log read answers from a fixture), puts the page into a state
+ * an operator would (scrolled regions, a focused note field with a caret, a
+ * panned canvas), then re-renders it the way the app does on every live
+ * frame and pushed snapshot, and records what survived. `bun harness/run.ts`
+ * builds this page, opens it in headless Chromium, and prints the report the
+ * page writes into #report.
  *
  * Nothing here is a bun test: the assertions need a layout engine (scroll
  * metrics, focus, pointer capture), which the DOM-less suite cannot give.
@@ -22,8 +23,10 @@ import type {
   SettingsResponse,
   TicketEvent,
   TicketEventsResponse,
+  TicketLogResponse,
 } from "../src/project";
-import type { LogChunk } from "../src/log-pane";
+import type { LogPush } from "../../engine/protocol.ts";
+import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------
 // Fixture: a pool rich enough to render every scroll region the app has.
@@ -65,6 +68,7 @@ function ticket(id: string, overrides: Partial<EnrichedTicketState> = {}): Enric
     enlisted: false,
     assignment: { harness: "claude", model: "opus", drivers: "implement" },
     liveAttempt: null,
+    heldPane: null,
     ...overrides,
   };
   // The Reassign view the wire carries (issue #126): derived so a done or
@@ -77,7 +81,7 @@ function ticket(id: string, overrides: Partial<EnrichedTicketState> = {}): Enric
       eligible,
       reason: eligible ? null : "an Attempt is in flight",
       verify: null,
-      sources: { harness: "default", model: "pinned", drivers: "default" },
+      sources: { harness: "default", model: "pinned", effort: "unset", drivers: "default" },
     },
   };
 }
@@ -94,8 +98,9 @@ function conversation(id: string, overrides: Partial<ConversationView> = {}): Co
     turn: { state: "working", lastLine: "", idleSince: null },
     children: [],
     enlisted: false,
+    ending: false,
     ...overrides,
-  };
+  } as ConversationView;
 }
 
 function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
@@ -254,7 +259,15 @@ function events(id: string): TicketEventsResponse {
 
 const LOG_TEXT = lines("raw log", 400);
 
-function logChunk(offset: number, end?: number): LogChunk {
+const LOG_ATTEMPTS: TicketLogResponse["attempts"] = [1, 2].map((attempt) => ({
+  attempt,
+  kind: "implement" as const,
+  logFile: `runs/t-3/attempt-${attempt}.log`,
+  streamFile: null,
+  current: attempt === 2,
+}));
+
+function logChunk(offset: number, end?: number): TicketLogResponse {
   const total = LOG_TEXT.length;
   const from = Math.min(offset, total);
   const to = Math.min(end ?? total, total);
@@ -263,10 +276,17 @@ function logChunk(offset: number, end?: number): LogChunk {
     offset: from,
     nextOffset: to,
     totalSize: total,
-    attempts: [
-      { attempt: 1, streamFile: null },
-      { attempt: 2, streamFile: null },
-    ],
+    attempts: LOG_ATTEMPTS,
+  };
+}
+
+/** The log window a subscribe brings: the last 64 KiB of the latest attempt. */
+function logWindow(): LogPush {
+  return {
+    mode: "window",
+    attempt: 2,
+    stream: false,
+    ...logChunk(Math.max(0, LOG_TEXT.length - 64 * 1024)),
   };
 }
 
@@ -303,18 +323,45 @@ const TICKET_BODY =
 const root = document.getElementById("app") as HTMLElement;
 let current = snapshot(0, null);
 
+/**
+ * The socket seam, the server's side faked: a subscribed card's one frame
+ * (body, events and log window) lands a task later, as it would a round
+ * trip later; a log read and a follow answer from the fixture; every other
+ * request answers empty, since the harness presses nothing that sends one.
+ */
+const socket: SessionSocket = {
+  request: (kind, payload) => {
+    if (kind === "log.read") {
+      const read = payload as { offset: number; end?: number };
+      return Promise.resolve(logChunk(read.offset, read.end)) as never;
+    }
+    return Promise.resolve({}) as never;
+  },
+  subscribe: (card) => {
+    const conversation = current.state.conversations.some((c) => c.id === card.id);
+    setTimeout(() =>
+      session.applyCard({
+        type: "card",
+        id: card.id,
+        body: conversation ? null : { id: card.id, body: TICKET_BODY },
+        events: events(card.id),
+        log: conversation ? null : logWindow(),
+      }),
+    );
+  },
+  unsubscribe: () => {},
+  follow: (_id, follow) =>
+    Promise.resolve({
+      ...logChunk(Math.max(0, LOG_TEXT.length - 64 * 1024)),
+      attempt: follow.attempt ?? 2,
+      stream: follow.stream,
+    }),
+};
+
 const session = new ConsoleSession({
-  getState: () => Promise.resolve(current),
-  getEvents: (id) => Promise.resolve(events(id)),
-  getTicket: (id) => Promise.resolve({ id, body: TICKET_BODY }),
-  getGrades: () => Promise.resolve({}),
-  getLog: (_ticketId, _attempt, offset, end) => Promise.resolve(logChunk(offset, end)),
-  answer: () => Promise.resolve(current),
-  stop: () => Promise.resolve(),
-  restart: () => Promise.resolve({ ok: true, port: 4300 }),
-  stream: () => () => {},
-  vitals: { update() {}, state: () => ({}) },
-  terminal: { update() {}, state: () => ({}) },
+  socket,
+  vitals: { update() {}, apply() {}, state: () => ({}) },
+  terminal: { update() {}, apply() {}, state: () => ({}) },
   onChange: () => loop.request(),
 });
 
@@ -343,8 +390,7 @@ const view = new ConsoleView({
   onHoldPendingSpawn: (id) => Promise.resolve({ id }),
   onDiscardPendingSpawn: (id) => Promise.resolve({ id }),
   onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
-  onReassign: () =>
-    Promise.resolve({ applied: [], skipped: [], snapshot: current }),
+  onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
 });
@@ -353,10 +399,13 @@ const handlers: Handlers = {
   onToggleLog: () => session.toggleLog(),
   onToggleInspector: () => session.toggleInspector(),
   onSelectNode: (id) => session.select(id),
+  onHoverNode: (id) => session.hover(id),
+  onLoadEarlierPoolLog: () => void session.loadEarlierPoolLog(),
   onSelectAttempt: (t, a) => session.logs.selectAttempt(t, a),
   onSelectStream: (t, a) => session.logs.selectStream(t, a),
   onLoadEarlier: (t, a) => void session.logs.loadEarlier(t, a),
   onAnswer: () => {},
+  onKeepTalking: () => {},
   onSelectTab: (t, tab) => session.selectTab(t, tab),
   onArmStop: () => {},
   onCancelStop: () => {},
@@ -364,6 +413,9 @@ const handlers: Handlers = {
   onArmRestart: () => {},
   onCancelRestart: () => {},
   onConfirmRestart: () => {},
+  onArmCloseTerminals: () => {},
+  onCancelCloseTerminals: () => {},
+  onConfirmCloseTerminals: () => {},
 };
 
 let renders = 0;
@@ -377,7 +429,7 @@ function render(): void {
 // timer here, since under Chromium's --virtual-time-budget a
 // requestAnimationFrame may never fire; what is under test is that renders
 // are deferred and folded, not which clock defers them. The harness's own
-// render() calls stand for a poll tick's render and run at once.
+// render() calls stand for a live frame's render and run at once.
 const loop = new RenderLoop(() => render(), (frame) => setTimeout(frame, 0));
 
 // ---------------------------------------------------------------------------
@@ -419,7 +471,7 @@ interface Check {
 const report: Check[] = [];
 
 function settle(): Promise<void> {
-  // Let the session's fetch continuations run, then the render they asked
+  // Let the socket seam's frames and replies land, then the render they asked
   // for: a second timer, so a frame asked for by a continuation comes first.
   // Timers only: under Chromium's --virtual-time-budget a
   // requestAnimationFrame may never fire.

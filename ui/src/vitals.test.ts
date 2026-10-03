@@ -4,10 +4,11 @@ import { describe, expect, it } from "bun:test";
 import { Vitals } from "./vitals";
 import type { EnrichedSnapshot, TicketActivityResponse, TicketStatus } from "./project";
 
-// The store's cadence logic drives through update() and a short poll
-// interval; the fetch is injected, so no server and no real 2s wait exists.
+// The store is fed by hand: update() with a snapshot, apply() with a live
+// frame's activity, and tick(now) for the wall-clock tick, whose own timer
+// is pushed out of every test's way. Nothing here fetches (issue #161).
 
-const POLL_MS = 5;
+const NEVER_MS = 60_000;
 
 function snap(
   tickets: Record<string, TicketStatus>,
@@ -64,227 +65,167 @@ function snap(
   };
 }
 
-function response(running: boolean, total = 10): TicketActivityResponse {
+// A fixed moment the payloads are stamped at, so a tick's copy depends only
+// on the `now` a test hands it.
+const AT = Date.parse("2026-10-02T10:00:00.000Z");
+
+function response(running: boolean, total = 10, ticketId = "x"): TicketActivityResponse {
   return {
-    ticketId: "x",
+    ticketId,
     running,
     diff: { added: total, removed: 0, files: ["a"] },
-    log: { size: 8, mtime: new Date().toISOString() },
-    lastEventAt: new Date().toISOString(),
+    log: { size: 8, mtime: new Date(AT).toISOString() },
+    lastEventAt: new Date(AT).toISOString(),
   };
 }
 
 interface Harness {
   store: Vitals;
-  fetched: string[];
+  changes: () => number;
 }
 
-function makeStore(
-  tickets: Record<string, TicketStatus>,
-  respond: (ticketId: string) => Promise<TicketActivityResponse>,
-): Harness {
-  const fetched: string[] = [];
+function makeStore(tickets: Record<string, TicketStatus>, resolvers: string[] = []): Harness {
+  let changes = 0;
   const store = new Vitals({
-    fetch: (ticketId) => {
-      fetched.push(ticketId);
-      return respond(ticketId);
+    onChange: () => {
+      changes += 1;
     },
-    onChange: () => {},
-    pollMs: POLL_MS,
+    tickMs: NEVER_MS,
   });
-  store.update(snap(tickets));
-  return { store, fetched };
-}
-
-async function ticks(n = 4): Promise<void> {
-  await Bun.sleep(POLL_MS * n);
+  store.update(snap(tickets, resolvers));
+  return { store, changes: () => changes };
 }
 
 describe("Vitals store", () => {
-  it("polls only the tickets that can hold a live attempt", async () => {
-    const h = makeStore(
-      { "01": "in-progress", "02": "checkpoint", "03": "done", "04": "ready" },
-      () => Promise.resolve(response(true)),
-    );
-    await ticks();
+  it("holds the payloads a live frame carries and sends nothing of its own", () => {
+    const h = makeStore({ "01": "in-progress" });
+    h.store.apply({ "01": response(true, 4) });
+    const state = h.store.state();
     h.store.dispose();
-    expect(new Set(h.fetched)).toEqual(new Set(["01", "02"]));
+    expect(Object.keys(state)).toEqual(["01"]);
+    expect(state["01"]!.activity.running).toBe(true);
+    // No sample until the tick takes one.
+    expect(state["01"]!.samples).toEqual([]);
   });
 
-  it("polls a done ticket while the engine marks its live attempt a resolver (#129)", async () => {
-    const fetched: string[] = [];
-    const store = new Vitals({
-      fetch: (ticketId) => {
-        fetched.push(ticketId);
-        return Promise.resolve(response(true));
-      },
-      onChange: () => {},
-      pollMs: POLL_MS,
+  it("samples only the tickets that can hold a live attempt", () => {
+    const h = makeStore({ "01": "in-progress", "02": "checkpoint", "03": "ready", "04": "done" });
+    h.store.apply({
+      "01": response(true, 1),
+      "02": response(true, 2),
+      "03": response(true, 3),
+      "04": response(true, 4),
     });
-    store.update(snap({ "02": "done", "04": "done" }, ["02"]));
-    await ticks();
-    store.dispose();
-    expect(new Set(fetched)).toEqual(new Set(["02"]));
-    expect(fetched.length).toBeGreaterThan(1);
-  });
-
-  it("drops a ticket from the cadence once its response says nothing is live", async () => {
-    const h = makeStore(
-      { "01": "checkpoint" },
-      () => Promise.resolve(response(false)),
-    );
-    await ticks();
-    const afterFirst = h.fetched.length;
-    await ticks();
+    h.store.tick(AT + 1_000);
+    const state = h.store.state();
     h.store.dispose();
-    expect(afterFirst).toBe(1);
-    expect(h.fetched.length).toBe(afterFirst);
+    expect(state["01"]!.samples).toEqual([1]);
+    expect(state["02"]!.samples).toEqual([2]);
+    expect(state["03"]!.samples).toEqual([]);
+    expect(state["04"]!.samples).toEqual([]);
   });
 
-  it("keeps polling a live ticket on the cadence, one sample pushed per poll", async () => {
-    const h = makeStore(
-      { "01": "in-progress" },
-      () => Promise.resolve(response(true, 30)),
-    );
-    await ticks();
+  it("samples a done ticket while the engine marks its live attempt a resolver (#129)", () => {
+    const h = makeStore({ "01": "done", "02": "done" }, ["01"]);
+    h.store.apply({ "01": response(true, 6), "02": response(true, 6) });
+    h.store.tick(AT + 1_000);
+    const state = h.store.state();
     h.store.dispose();
-    const polls = h.fetched.filter((id) => id === "01").length;
-    expect(polls).toBeGreaterThanOrEqual(2);
-    expect(h.store.state()["01"]?.samples).toEqual(
-      Array.from({ length: polls }, () => 30),
-    );
+    expect(state["01"]!.samples).toEqual([6]);
+    expect(state["02"]!.samples).toEqual([]);
   });
 
-  it("a slow response for one ticket never delays the others", async () => {
-    const gate: { release: ((value: TicketActivityResponse) => void) | null } = {
-      release: null,
-    };
-    const h = makeStore(
-      { "01": "in-progress", "02": "in-progress" },
-      (ticketId) =>
-        ticketId === "01"
-          ? new Promise<TicketActivityResponse>((resolve) => {
-              gate.release = resolve;
-            })
-          : Promise.resolve(response(true)),
-    );
-    await ticks();
+  it("takes one sample per tick from the held payload, and none while it says nothing runs", () => {
+    const h = makeStore({ "01": "in-progress", "02": "checkpoint" });
+    h.store.apply({ "01": response(true, 3), "02": response(false, 9) });
+    h.store.tick(AT + 1_000);
+    h.store.apply({ "01": response(true, 5) });
+    h.store.tick(AT + 3_000);
+    h.store.tick(AT + 5_000);
+    const state = h.store.state();
     h.store.dispose();
-    // 01 is still in flight, so it was fetched exactly once while 02 kept
-    // polling every tick.
-    expect(h.fetched.filter((id) => id === "01")).toHaveLength(1);
-    expect(h.fetched.filter((id) => id === "02").length).toBeGreaterThanOrEqual(2);
-    expect(gate.release).not.toBeNull();
-    gate.release?.(response(false));
+    expect(state["01"]!.samples).toEqual([3, 5, 5]);
+    expect(state["02"]!.samples).toEqual([]);
   });
 
-  it("refetches every candidate on each snapshot, re-arming stopped tickets", async () => {
-    let running = false;
-    const h = makeStore({ "01": "checkpoint" }, () =>
-      Promise.resolve(response(running)),
-    );
-    await ticks();
-    const stoppedPolls = h.fetched.length;
-    expect(stoppedPolls).toBe(1);
-    // A resolver starts on the checkpointed ticket: its snapshot refetch
-    // reports running, and the ticket rejoins the cadence.
-    running = true;
-    h.store.update(snap({ "01": "checkpoint" }));
-    await ticks();
+  it("repaints once per live frame, and only when a payload actually changed", () => {
+    const h = makeStore({ "01": "in-progress", "02": "in-progress" });
+    h.store.apply({ "01": response(true, 3), "02": response(true, 4) });
+    expect(h.changes()).toBe(1);
+    // The same payloads again: nothing moved, nothing repaints.
+    h.store.apply({ "01": response(true, 3), "02": response(true, 4) });
+    expect(h.changes()).toBe(1);
+    h.store.apply({ "02": response(true, 7) });
     h.store.dispose();
-    expect(h.fetched.length).toBeGreaterThan(stoppedPolls);
-    expect(h.store.state()["01"]?.activity.running).toBe(true);
+    expect(h.changes()).toBe(2);
   });
 
-  it("a burst of snapshots never stacks fetches: one out, one more after it (#157)", async () => {
-    const gate: { release: (() => void) | null } = { release: null };
-    const fetched: string[] = [];
-    const store = new Vitals({
-      fetch: (ticketId) => {
-        fetched.push(ticketId);
-        return fetched.length === 1
-          ? new Promise<TicketActivityResponse>((resolve) => {
-              gate.release = () => resolve(response(false));
-            })
-          : Promise.resolve(response(false));
-      },
-      onChange: () => {},
-      pollMs: 1_000,
-    });
-    for (let i = 0; i < 5; i++) store.update(snap({ "01": "checkpoint" }));
-    expect(fetched).toEqual(["01"]);
-    gate.release?.();
-    // The owed refetch waits out half the interval from the first fetch's start.
-    await Bun.sleep(600);
-    store.dispose();
-    expect(fetched).toEqual(["01", "01"]);
-  });
-
-  it("repaints on an answer only when it moved what the card shows (#157)", async () => {
-    // One payload, byte for byte, every time.
-    const fixed: TicketActivityResponse = {
-      ticketId: "x",
-      running: false,
-      diff: null,
-      log: { size: 8, mtime: "2026-09-01T10:00:00.000Z" },
-      lastEventAt: "2026-09-01T10:00:00.000Z",
-    };
-    let changes = 0;
-    const fetched: string[] = [];
-    const store = new Vitals({
-      fetch: (ticketId) => {
-        fetched.push(ticketId);
-        return Promise.resolve(fixed);
-      },
-      onChange: () => {
-        changes += 1;
-      },
-      pollMs: 20,
-    });
-    // No staleness tick in this test: only the snapshot refetches run.
-    store.dispose();
-    store.update(snap({ "01": "checkpoint" }));
-    await Bun.sleep(1);
-    expect(changes).toBe(1);
-    // Past the throttle's gap, the next snapshot refetches; the same answer
-    // again moves nothing on the card.
-    await Bun.sleep(15);
-    store.update(snap({ "01": "checkpoint" }));
-    await Bun.sleep(1);
-    expect(fetched).toEqual(["01", "01"]);
-    expect(changes).toBe(1);
-  });
-
-  it("the staleness tick repaints only when the copy it would show moves (#157)", async () => {
-    let changes = 0;
-    const store = new Vitals({
-      fetch: () => Promise.resolve(response(false)),
-      onChange: () => {
-        changes += 1;
-      },
-      pollMs: POLL_MS,
-    });
-    store.update(snap({ "01": "checkpoint" }));
-    await Bun.sleep(1);
-    const afterAnswer = changes;
-    // Ten ticks inside one wall-clock second: the "Ns ago" copy moves at most
-    // once, so at most two of them repaint (the first, and one crossing).
-    await ticks(10);
-    store.dispose();
-    expect(changes - afterAnswer).toBeGreaterThanOrEqual(1);
-    expect(changes - afterAnswer).toBeLessThanOrEqual(2);
-  });
-
-  it("prunes payloads and samples when a ticket leaves the pool", async () => {
-    const h = makeStore(
-      { "01": "in-progress", "02": "checkpoint" },
-      () => Promise.resolve(response(true)),
-    );
-    await ticks();
-    h.store.update(snap({ "02": "checkpoint" }));
-    await ticks();
+  it("the tick repaints when a sparkline moved", () => {
+    const h = makeStore({ "01": "in-progress" });
+    h.store.apply({ "01": response(true, 3) });
+    const before = h.changes();
+    // The same moment twice: the copy holds, but the sparkline grows.
+    h.store.tick(AT + 1_000);
+    h.store.tick(AT + 1_000);
     h.store.dispose();
-    expect(h.store.state()["01"]).toBeUndefined();
-    expect(h.store.state()["02"]).toBeDefined();
+    expect(h.changes()).toBe(before + 2);
+  });
+
+  it("the tick repaints when the staleness copy moved, and not when neither moved (#157)", () => {
+    // A frozen checkpoint: no samples, so only the copy can move.
+    const h = makeStore({ "01": "checkpoint" });
+    h.store.apply({ "01": response(false, 3) });
+    const before = h.changes();
+    h.store.tick(AT + 5_000);
+    expect(h.changes()).toBe(before + 1);
+    // The same moment again draws the same words: nothing to repaint.
+    h.store.tick(AT + 5_000);
+    expect(h.changes()).toBe(before + 1);
+    // Minutes later the copy reads differently.
+    h.store.tick(AT + 5 * 60_000);
+    h.store.dispose();
+    expect(h.changes()).toBe(before + 2);
+  });
+
+  it("a full sparkline of one unchanged total stops repainting", () => {
+    const h = makeStore({ "01": "checkpoint" });
+    // A checkpoint whose resolver runs: live, so it samples, and the copy
+    // stays put at one moment.
+    h.store.apply({ "01": response(true, 3) });
+    for (let i = 0; i < 60; i += 1) h.store.tick(AT + 1_000);
+    const before = h.changes();
+    h.store.tick(AT + 1_000);
+    h.store.dispose();
+    expect(h.changes()).toBe(before);
+  });
+
+  it("never repaints on a tick with nothing to show", () => {
+    const h = makeStore({ "01": "ready" });
+    h.store.tick(AT + 1_000);
+    h.store.tick(AT + 60_000);
+    h.store.dispose();
+    expect(h.changes()).toBe(0);
+  });
+
+  it("prunes payloads and samples when a ticket leaves the pool", () => {
+    const h = makeStore({ "01": "in-progress", "02": "in-progress" });
+    h.store.apply({ "01": response(true, 1), "02": response(true, 2) });
+    h.store.tick(AT + 1_000);
+    h.store.update(snap({ "02": "in-progress" }));
+    const state = h.store.state();
+    h.store.dispose();
+    expect(Object.keys(state)).toEqual(["02"]);
+    expect(state["02"]!.samples).toEqual([2]);
+  });
+
+  it("stops sampling a ticket the snapshot moved off the candidates", () => {
+    const h = makeStore({ "01": "in-progress" });
+    h.store.apply({ "01": response(true, 1) });
+    h.store.tick(AT + 1_000);
+    h.store.update(snap({ "01": "done" }));
+    h.store.tick(AT + 3_000);
+    const state = h.store.state();
+    h.store.dispose();
+    expect(state["01"]!.samples).toEqual([1]);
   });
 });

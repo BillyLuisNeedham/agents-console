@@ -18,6 +18,7 @@ import {
   parseStoredDetailWidth,
   resolverFiles,
   statusLabel,
+  timelineEvent,
   stewardBudgetText,
   ticketBodyHtml,
   ticketCloseNote,
@@ -36,7 +37,7 @@ import {
   type TimelineGradeView,
   type TimelineView,
 } from "./project";
-import { noteLogScroll } from "./log-pane";
+import { captureLogAnchor, noteLogScroll } from "./log-pane";
 import {
   renderKeepTalkingButton,
   renderKeepTalkingFailure,
@@ -44,6 +45,7 @@ import {
 } from "./terminal";
 import { harnessSelect, renderSource, type ReassignSeed, type ReassignStore } from "./reassign";
 import { h } from "./dom";
+import { keep, placed } from "./morph";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
 import { renderDeliveryWarning } from "./conversations";
@@ -63,6 +65,9 @@ export interface DetailModel {
   /** The ticket's markdown body: undefined while the fetch is out, null when the pool has none. */
   detailBody: string | null | undefined;
   detailBodyError: string | null;
+  /** A refused answer's reason by ticket id (issue #161), beside the
+   *  interrupt's actions until the next answer. */
+  answerFailures?: Record<string, string>;
 }
 
 /** The handlers the Detail's interactive elements report through. */
@@ -129,10 +134,27 @@ export class Detail {
   // ticket ids on every render and would otherwise wipe this on the next
   // snapshot.
   private readonly conversationEndDrafts = new Map<string, string>();
+  // The render's refused answers, read by the interrupt form it draws.
+  private answerFailures: Record<string, string> = {};
+  // The timeline's state (issue #161), per card: the attempts the operator
+  // opened or closed by hand (one not named is open when it is the latest),
+  // how many of an open attempt's newest events show, and the rows drawn for
+  // the card the timeline last showed, with what each was drawn from.
+  private readonly attemptsOpen = new Map<string, Map<number, boolean>>();
+  private readonly eventsShown = new Map<string, number>();
+  private readonly attemptsShown = new Map<string, number>();
+  private timelineCard: string | null = null;
+  private readonly timelineRows = new Map<string, DrawnRow>();
+  // The log pane's drawn text: which pane, the held text's start, where in
+  // it the pane starts drawing, and the slices drawn.
+  private logShown: { pane: string; firstOffset: number; from: number } | null = null;
+  private readonly logRows = new Map<string, DrawnRow>();
   private readonly onClose: () => void;
+  private readonly onChange: () => void;
 
-  constructor(options: { onClose: () => void; drafts: DraftAnswers }) {
+  constructor(options: { onClose: () => void; drafts: DraftAnswers; onChange?: () => void }) {
     this.onClose = options.onClose;
+    this.onChange = options.onChange ?? (() => {});
     this.drafts = options.drafts;
     if (typeof window !== "undefined") {
       this.width = clampDetailWidth(this.readStoredWidth(), currentMaxPx());
@@ -189,6 +211,7 @@ export class Detail {
   }
 
   render(model: DetailModel, handlers: DetailHandlers): HTMLElement {
+    this.answerFailures = model.answerFailures ?? {};
     const detail = h("div", { class: "detail" });
     const view = model.detail;
     if (!view) return detail;
@@ -357,6 +380,10 @@ export class Detail {
           : null,
       ),
     );
+    const answerFailure = this.answerFailures[interrupt.ticketId];
+    if (answerFailure) {
+      box.append(h("div", { class: "error-inline interrupt-answer-failure" }, answerFailure));
+    }
     const refusal = interrupt.keepTalking
       ? renderKeepTalkingFailure(interrupt.keepTalking)
       : null;
@@ -373,6 +400,14 @@ export class Detail {
   // running attempt is marked; a reconstructed timeline (a pre-feature pool
   // with no events file) notes that its rows came from log files. Clicking an
   // attempt row selects that attempt's raw log in the pane below.
+  //
+  // A busy ticket's events run to thousands, so the timeline draws what a
+  // frame can hold (issue #161). The latest attempt is open and every earlier
+  // one is a single summary line, opened by its toggle; an open attempt shows
+  // its newest TIMELINE_WINDOW events, with "show earlier" for the next
+  // window. What the operator opened stays open while the Detail shows the
+  // card. And a row drawn from what it was drawn from last render is kept
+  // as it stands, so an events frame that adds a line builds that line.
   private renderTimelineSection(
     ticketId: string,
     timeline: TimelineView,
@@ -380,6 +415,10 @@ export class Detail {
     handlers: DetailHandlers,
     winnerAttempt: number | null,
   ): HTMLElement {
+    if (this.timelineCard !== ticketId) {
+      this.timelineCard = ticketId;
+      this.timelineRows.clear();
+    }
     const body = h("div", { class: "timeline" });
     body.append(h("div", { class: "dim" }, "timeline"));
     if (timeline.attempts.length === 0) {
@@ -395,7 +434,30 @@ export class Detail {
         ),
       );
     }
-    for (const attempt of timeline.attempts) {
+    const latest = timeline.attempts[timeline.attempts.length - 1]!.number;
+    // The same window one level up: a ticket retried tens of times lists
+    // its newest TIMELINE_ATTEMPTS attempts, with the rest a press away.
+    const attemptsShown = this.attemptsShown.get(ticketId) ?? TIMELINE_ATTEMPTS;
+    const firstShown = Math.max(0, timeline.attempts.length - attemptsShown);
+    if (firstShown > 0) {
+      body.append(
+        h(
+          "button",
+          {
+            class: "btn timeline-earlier",
+            type: "button",
+            key: "earlier-attempts",
+            title: "list the attempts before these",
+            onclick: () => {
+              this.attemptsShown.set(ticketId, attemptsShown + TIMELINE_ATTEMPTS);
+              this.onChange();
+            },
+          },
+          `show ${Math.min(TIMELINE_ATTEMPTS, firstShown)} earlier attempts (${firstShown} not shown)`,
+        ),
+      );
+    }
+    for (const attempt of timeline.attempts.slice(firstShown)) {
       const selected = logPane?.selectedAttempt === attempt.number;
       // The winner badge reads the grades endpoint's winner, the one
       // derivation both surfaces share: the attempt the selected event named
@@ -406,97 +468,232 @@ export class Detail {
       // the winner's grade. Null means ungraded or unselected: no badge.
       const winner =
         winnerAttempt !== null && attempt.number === winnerAttempt;
-      const row = h(
-        "div",
-        {
-          class:
-            "timeline-attempt" +
-            (attempt.running ? " timeline-attempt-running" : "") +
-            (selected ? " timeline-attempt-selected" : "") +
-            (winner ? " timeline-attempt-winner" : ""),
-          role: "button",
-          title: "show this attempt's raw log",
-          onclick: () => handlers.onSelectAttempt(ticketId, attempt.number),
-        },
-        h(
-          "div",
-          { class: "timeline-attempt-head" },
-          h(
-            "span",
-            { class: "timeline-attempt-number" },
-            `attempt ${attempt.number}`,
-          ),
-          attempt.running
-            ? h("span", { class: "timeline-running" }, "running")
-            : null,
-          selected ? h("span", { class: "timeline-selected" }, "showing") : null,
-          winner ? h("span", { class: "timeline-winner" }, "winner") : null,
-          attempt.reconstructed ? h("span", { class: "dim" }, "reconstructed") : null,
-          // The attempt's Stream file link (ADR-0012): one click from the
-          // timeline to the raw stream tee for deep forensics. Rendered only
-          // when the server's attempt listing resolved one; an attempt with
-          // no Stream file (opencode, pre-streaming) renders no link rather
-          // than a dead one.
-          attempt.streamFile
-            ? h(
-                "button",
-                {
-                  class: "timeline-stream",
-                  title: `view this attempt's stream file (${attempt.streamFile})`,
-                  onclick: (event: Event) => {
-                    event.stopPropagation();
-                    handlers.onSelectStream(ticketId, attempt.number);
-                  },
-                },
-                "stream",
-              )
-            : null,
+      const open =
+        this.attemptsOpen.get(ticketId)?.get(attempt.number) ?? attempt.number === latest;
+      const shown =
+        this.eventsShown.get(`${ticketId}:${attempt.number}`) ?? TIMELINE_WINDOW;
+      body.append(
+        this.drawRow(
+          `${attempt.number}`,
+          [attempt, selected, winner, open, shown, handlers.onSelectAttempt, handlers.onSelectStream],
+          () =>
+            this.renderAttempt(ticketId, attempt, { selected, winner, open, shown }, handlers),
         ),
       );
-      if (attempt.events.length === 0) {
-        row.append(h("div", { class: "dim timeline-event" }, "no events recorded"));
-      } else {
-        for (const event of attempt.events) {
-          row.append(
-            h(
-              "div",
-              { class: "timeline-event" },
-              h("span", { class: "timeline-event-kind" }, event.kind),
-              h("span", { class: "dim timeline-event-at" }, event.timeLabel),
-            ),
-          );
-          if (event.grade) row.append(renderGrade(event.grade));
-          if (event.reassignment) {
-            row.append(h("div", { class: "timeline-reassigned" }, event.reassignment));
-          }
-          if (event.spawn) row.append(h("div", { class: "timeline-spawn" }, event.spawn));
-          if (event.steward) {
-            row.append(h("div", { class: "timeline-steward" }, event.steward));
-          } else if (event.closeNote !== null) {
-            // The operator's Close (issue #154); the Steward's reads on its
-            // own line above.
-            row.append(
-              h(
-                "div",
-                { class: "timeline-closed" },
-                "closed without merging" + (event.closeNote ? ` · ${event.closeNote}` : ""),
-              ),
-            );
-          }
-        }
-      }
-      body.append(row);
     }
     return body;
   }
 
+  // One attempt's row: its head, then, open, the newest `shown` of its
+  // events under a "show earlier" for the rest; closed, the head alone with
+  // the attempt's outcome and how many events it holds.
+  private renderAttempt(
+    ticketId: string,
+    attempt: TimelineView["attempts"][number],
+    state: { selected: boolean; winner: boolean; open: boolean; shown: number },
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const { selected, winner, open, shown } = state;
+    const row = h(
+      "div",
+      {
+        class:
+          "timeline-attempt" +
+          (attempt.running ? " timeline-attempt-running" : "") +
+          (selected ? " timeline-attempt-selected" : "") +
+          (winner ? " timeline-attempt-winner" : ""),
+        key: `attempt-${attempt.number}`,
+        role: "button",
+        title: "show this attempt's raw log",
+        onclick: () => handlers.onSelectAttempt(ticketId, attempt.number),
+      },
+      h(
+        "div",
+        { class: "timeline-attempt-head" },
+        h(
+          "button",
+          {
+            class: "timeline-attempt-toggle",
+            type: "button",
+            title: open ? "hide this attempt's events" : "show this attempt's events",
+            onclick: (event: Event) => {
+              event.stopPropagation();
+              this.openAttempt(ticketId, attempt.number, !open);
+            },
+          },
+          open ? "▾" : "▸",
+        ),
+        h(
+          "span",
+          { class: "timeline-attempt-number" },
+          `attempt ${attempt.number}`,
+        ),
+        attempt.running
+          ? h("span", { class: "timeline-running" }, "running")
+          : null,
+        selected ? h("span", { class: "timeline-selected" }, "showing") : null,
+        winner ? h("span", { class: "timeline-winner" }, "winner") : null,
+        attempt.reconstructed ? h("span", { class: "dim" }, "reconstructed") : null,
+        open
+          ? null
+          : h("span", { class: "dim timeline-attempt-summary" }, attemptSummary(attempt)),
+        // The rest of the row is the attempt's raw log; the toggle and the
+        // stream link are their own presses.
+        // The attempt's Stream file link (ADR-0012): one click from the
+        // timeline to the raw stream tee for deep forensics. Rendered only
+        // when the server's attempt listing resolved one; an attempt with
+        // no Stream file (opencode, pre-streaming) renders no link rather
+        // than a dead one.
+        attempt.streamFile
+          ? h(
+              "button",
+              {
+                class: "timeline-stream",
+                title: `view this attempt's stream file (${attempt.streamFile})`,
+                onclick: (event: Event) => {
+                  event.stopPropagation();
+                  handlers.onSelectStream(ticketId, attempt.number);
+                },
+              },
+              "stream",
+            )
+          : null,
+      ),
+    );
+    if (!open) return row;
+    if (attempt.count === 0) {
+      row.append(h("div", { class: "dim timeline-event" }, "no events recorded"));
+      return row;
+    }
+    const from = Math.max(0, attempt.count - shown);
+    if (from > 0) {
+      row.append(
+        h(
+          "button",
+          {
+            class: "btn timeline-earlier",
+            type: "button",
+            key: "earlier",
+            title: "show the events before these",
+            onclick: (event: Event) => {
+              event.stopPropagation();
+              this.showEarlier(ticketId, attempt.number, shown);
+            },
+          },
+          `show ${Math.min(TIMELINE_WINDOW, from)} earlier (${from} not shown)`,
+        ),
+      );
+    }
+    for (let i = from; i < attempt.count; i++) {
+      // Only the shown events are decoded, each once.
+      const event = timelineEvent(attempt, i);
+      row.append(
+        this.drawRow(`${attempt.number}:${i}`, [event], () => renderTimelineEntry(event, i)),
+      );
+    }
+    return row;
+  }
+
+  /**
+   * A timeline row, or a stand-in for its node when it would be drawn from
+   * the very things it was drawn from last time (issue #161): the morph
+   * keeps that node as it stands. `from` is compared item by item, by
+   * identity, so a row's projected view arriving unchanged is a kept row.
+   */
+  private drawRow(key: string, from: readonly unknown[], build: () => HTMLElement): Element {
+    return this.drawKept(this.timelineRows, key, from, build);
+  }
+
+  private drawKept(
+    rows: Map<string, DrawnRow>,
+    key: string,
+    from: readonly unknown[],
+    build: () => HTMLElement,
+  ): Element {
+    const held = rows.get(key);
+    if (held && held.from.length === from.length && held.from.every((x, i) => x === from[i])) {
+      const live = placed(held.node);
+      if (live) return keep(live);
+    }
+    const node = build();
+    rows.set(key, { from, node });
+    return node;
+  }
+
+  /**
+   * Where in the held text the log pane starts drawing: on a pane newly
+   * shown, or one whose text was let go of at the front, the start of the
+   * last LOG_SLICES_SHOWN slices; on one that "load earlier" just
+   * prepended to, the very start, since that is what was asked to see. A
+   * new pane, or a new start of the held text, drops the slices drawn.
+   */
+  private logShownFrom(
+    pane: string,
+    firstOffset: number,
+    slices: LogSlice[],
+  ): { pane: string; firstOffset: number; from: number } {
+    const held = this.logShown;
+    const tail = slices[Math.max(0, slices.length - LOG_SLICES_SHOWN)]?.start ?? 0;
+    if (held?.pane !== pane || firstOffset > held.firstOffset) {
+      this.logRows.clear();
+      this.logShown = { pane, firstOffset, from: tail };
+    } else if (firstOffset < held.firstOffset) {
+      this.logRows.clear();
+      this.logShown = { pane, firstOffset, from: 0 };
+    } else if (!slices.some((slice) => slice.start === held.from)) {
+      // The held text was replaced under the same start: back to its tail.
+      this.logShown = { pane, firstOffset, from: tail };
+    }
+    return this.logShown!;
+  }
+
+  // "Show earlier" on the log pane: LOG_SLICES_SHOWN more slices of what
+  // it holds, drawn above, with the reading position held where it was.
+  private showEarlierLog(slices: LogSlice[]): void {
+    const held = this.logShown;
+    if (!held) return;
+    const at = slices.findIndex((slice) => slice.start === held.from);
+    const from = slices[Math.max(0, at - LOG_SLICES_SHOWN)]?.start ?? 0;
+    captureLogAnchor();
+    this.logShown = { ...held, from };
+    this.onChange();
+  }
+
+  // Open or close an attempt by hand: the card keeps it so while it shows.
+  private openAttempt(cardId: string, attempt: number, open: boolean): void {
+    const opened = this.attemptsOpen.get(cardId) ?? new Map<number, boolean>();
+    opened.set(attempt, open);
+    this.attemptsOpen.set(cardId, opened);
+    if (!open && this.timelineCard === cardId) {
+      // A closed attempt's event rows leave the page: let their nodes go.
+      const prefix = `${attempt}:`;
+      for (const key of [...this.timelineRows.keys()]) {
+        if (key.startsWith(prefix)) this.timelineRows.delete(key);
+      }
+    }
+    this.onChange();
+  }
+
+  // One more window of an open attempt's events, the older ones.
+  private showEarlier(cardId: string, attempt: number, shown: number): void {
+    this.eventsShown.set(`${cardId}:${attempt}`, shown + TIMELINE_WINDOW);
+    this.onChange();
+  }
+
   // The raw log pane below the timeline: the harness output of the selected
-  // attempt, opened tail-first and tailed live on the snapshot cadence.
-  // Content is fetched as byte ranges and already ANSI-stripped server-side.
-  // A "load earlier" button prepends the previous window while the opened
-  // view stays anchored; the scroll listener drives the pin that decides
-  // whether renders follow the tail. While a fetch is in flight the
-  // previously loaded content stays visible.
+  // attempt, opened tail-first and followed as the server pushes its bytes.
+  // Content arrives already ANSI-stripped server-side. "Load earlier"
+  // prepends the previous window while the opened view stays anchored; the
+  // scroll listener drives the pin that decides whether renders follow the
+  // tail. While a read is in flight the previously loaded content stays
+  // visible.
+  //
+  // The text is drawn in line-aligned slices, each its own block (issue
+  // #161): an append lays out the last slice, not the whole log, and a slice
+  // whose text has not moved is kept as it stands. The pane opens on the
+  // last LOG_SLICES_SHOWN of them, so a click draws a frame's worth of text
+  // however much the pane holds; "show earlier" draws more of what is held,
+  // and once all of it shows, "load earlier" reads more from the server.
   private renderLogPane(
     logPane: LogPaneView,
     ticketId: string,
@@ -516,7 +713,25 @@ export class Detail {
           : null,
       ),
     );
-    if (logPane.hasEarlier && logPane.selectedAttempt !== null) {
+    const slices = logSlices(logPane.content);
+    const shown = this.logShownFrom(
+      `${ticketId}:${logPane.selectedAttempt}:${logPane.stream}`,
+      logPane.firstOffset,
+      slices,
+    );
+    if (shown.from > 0) {
+      pane.append(
+        h(
+          "button",
+          {
+            class: "btn log-pane-earlier",
+            title: "show more of the log this pane holds, above what it shows",
+            onclick: () => this.showEarlierLog(slices),
+          },
+          "show earlier",
+        ),
+      );
+    } else if (logPane.hasEarlier && logPane.selectedAttempt !== null) {
       const attempt = logPane.selectedAttempt;
       pane.append(
         h(
@@ -530,6 +745,24 @@ export class Detail {
         ),
       );
     }
+    const text =
+      logPane.content.length === 0
+        ? ["(no output yet)"]
+        : slices
+            .filter((slice) => slice.start >= shown.from)
+            .map((slice) =>
+              this.drawKept(
+                this.logRows,
+                `${logPane.firstOffset}:${slice.start}`,
+                [slice.end],
+                () =>
+                  h(
+                    "span",
+                    { class: "log-slice", key: `${logPane.firstOffset}:${slice.start}` },
+                    logPane.content.slice(slice.start, slice.end),
+                  ),
+              ),
+            );
     const pre = h(
       "pre",
       {
@@ -539,7 +772,7 @@ export class Detail {
           noteLogScroll(el.scrollTop, el.clientHeight, el.scrollHeight);
         },
       },
-      logPane.content.length > 0 ? logPane.content : "(no output yet)",
+      ...text,
     );
     pane.append(pre);
     if (logPane.hasMore) {
@@ -1350,6 +1583,93 @@ function canvasHeaderBottom(): number {
 // read from the same append-only events file after the run has ended. A Jev
 // Grade (ADR-0023) also carries provenance, shown small and dim beside it, so
 // a score always says which instrument produced it.
+/**
+ * How many of an open attempt's newest events the timeline shows, and how
+ * many more each "show earlier" adds (issue #161): a window a frame can
+ * build, however long the attempt ran.
+ */
+export const TIMELINE_WINDOW = 50;
+
+/** A drawn row the Detail can keep: what it was drawn from, and its node. */
+interface DrawnRow {
+  from: readonly unknown[];
+  node: Element;
+}
+
+/**
+ * The log pane draws its text in slices of about this many characters,
+ * each cut after a newline so a slice holds whole lines (issue #161), and
+ * opens on the last LOG_SLICES_SHOWN of them: what a frame can lay out.
+ */
+export const LOG_SLICE_CHARS = 8 * 1024;
+export const LOG_SLICES_SHOWN = 2;
+
+/** A slice of the log pane's text: characters `start` up to `end`. */
+export interface LogSlice {
+  start: number;
+  end: number;
+}
+
+/**
+ * The log pane's text cut into slices of whole lines. A cut depends only
+ * on the text before it, so text appended to the log never moves one: an
+ * append grows the last slice, or adds slices after it, and every other
+ * slice is the one already drawn.
+ */
+export function logSlices(text: string): LogSlice[] {
+  const slices: LogSlice[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const cut = text.indexOf("\n", start + LOG_SLICE_CHARS);
+    const end = cut === -1 ? text.length : cut + 1;
+    slices.push({ start, end });
+    start = end;
+  }
+  return slices;
+}
+
+/** How many attempts the timeline lists at first, and how many more each
+ *  "show earlier attempts" adds. */
+export const TIMELINE_ATTEMPTS = 10;
+
+/** A closed attempt's one line: its grade, else its last event, and how
+ *  many events it holds. */
+export function attemptSummary(attempt: TimelineView["attempts"][number]): string {
+  const count = `${attempt.count} event${attempt.count === 1 ? "" : "s"}`;
+  return attempt.outcome ? `${attempt.outcome} · ${count}` : count;
+}
+
+/** One event's entry: its row, then whatever it carries beneath. */
+function renderTimelineEntry(
+  event: TimelineView["attempts"][number]["events"][number],
+  index: number,
+): HTMLElement {
+  return h(
+    "div",
+    { class: "timeline-entry", key: `event-${index}` },
+    h(
+      "div",
+      { class: "timeline-event" },
+      h("span", { class: "timeline-event-kind" }, event.kind),
+      h("span", { class: "dim timeline-event-at" }, event.timeLabel),
+    ),
+    event.grade ? renderGrade(event.grade) : null,
+    event.reassignment ? h("div", { class: "timeline-reassigned" }, event.reassignment) : null,
+    event.spawn ? h("div", { class: "timeline-spawn" }, event.spawn) : null,
+    event.steward
+      ? h("div", { class: "timeline-steward" }, event.steward)
+      : event.closeNote !== null
+        ? // The operator's Close (issue #154); the Steward's reads on its
+          // own line above.
+          h(
+            "div",
+            { class: "timeline-closed" },
+            "closed without merging" + (event.closeNote ? ` · ${event.closeNote}` : ""),
+          )
+        : null,
+  );
+}
+
 function renderGrade(grade: TimelineGradeView): HTMLElement {
   const provenance = [
     grade.rubric,

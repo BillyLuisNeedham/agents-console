@@ -14,6 +14,7 @@
  */
 
 import { join } from "node:path";
+import type { Mark } from "./timeline.ts";
 
 type FakeModule = typeof import("../../engine/herdr-executing-fake.ts");
 
@@ -27,6 +28,29 @@ const { startExecutingFakeHerdr } = (await import(
 
 const fake = await startExecutingFakeHerdr({ rendered: "agent starting\n> " });
 process.stdout.write(`READY ${fake.socketPath}\n`);
+
+// This process's timeline (issue #161), on the wall clock the server and the
+// proxy share: when each RPC reached the fake (its request log is appended
+// as the call lands), and every late wake of this loop, so a slow Open in
+// herdr can be told apart from a slow server.
+const wall = () => performance.timeOrigin + performance.now();
+const timeline: Mark[] = [];
+const keep = (m: Mark) => {
+  if (timeline.length < 100_000) timeline.push(m);
+};
+const logRequest = fake.requests.push.bind(fake.requests);
+fake.requests.push = (...calls) => {
+  const at = Math.round(wall() * 10) / 10;
+  for (const call of calls) keep({ at, what: "herdr got", ms: 0, detail: call.method });
+  return logRequest(...calls);
+};
+let lastTick = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const lag = now - lastTick - 10;
+  if (lag >= 3) keep({ at: Math.round((wall() - lag) * 10) / 10, what: "herdr lag", ms: Math.round(lag * 100) / 100, detail: "" });
+  lastTick = now;
+}, 10);
 
 interface Pane {
   paneId: string;
@@ -57,7 +81,8 @@ setInterval(() => {
 }, 2_000);
 
 process.on("message", (msg: unknown) => {
-  const m = msg as { panes?: Pane[]; requests?: boolean };
+  const m = msg as { panes?: Pane[]; requests?: boolean; timeline?: boolean };
+  if (m.timeline) process.send?.({ kind: "timeline", marks: timeline });
   if (m.panes) panes = m.panes;
   if (m.requests) {
     const counts: Record<string, number> = {};
