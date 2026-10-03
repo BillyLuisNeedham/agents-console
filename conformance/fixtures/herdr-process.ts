@@ -47,6 +47,7 @@ const CONTROLS: Record<string, Control> = {
     if (on === false) fake.fail.delete(String(method));
     else fake.fail.add(String(method));
   },
+  delay: (fake, [method, ms]) => fake.delay(String(method), Number(ms)),
   workspaceIds: (fake) => fake.workspaceIds(),
   workspaceLabel: (fake, [workspaceId]) => fake.workspaceLabel(String(workspaceId)),
   tabLabel: (fake, [tabId]) => fake.tabLabel(String(tabId)),
