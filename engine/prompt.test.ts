@@ -75,6 +75,15 @@ describe("buildPrompt spawn teaching", () => {
     expect(body).toContain("07-spawn-1");
   });
 
+  it("offers assign with exactly the four Assignment fields, and says verify is ignored (issue #116)", () => {
+    const body = prompt();
+    expect(body).toContain(
+      '"assign": {"harness": "...", "model": "...", "effort": "...", "drivers": "..."}',
+    );
+    expect(body).toContain("when absent it inherits your own Assignment");
+    expect(body).toContain("a verify in it is ignored");
+  });
+
   it("names the same body floor the engine's validator enforces", () => {
     expect(prompt()).toContain(
       `at least ${SPAWN_BODY_MIN_CHARS} characters of intent`,
@@ -200,6 +209,7 @@ describe("buildConversationTeaching", () => {
     expect(body).toContain('"blockedBy"');
     expect(body).toContain('"kind"');
     expect(body).toContain('"assign"');
+    expect(body).toContain('"assign" takes harness, model, effort and drivers only');
   });
 
   it("names the same body floor the engine's validator enforces", () => {

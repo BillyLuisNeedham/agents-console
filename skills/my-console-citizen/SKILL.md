@@ -19,8 +19,8 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states four thing
 1. Read the Spawn ledger first. Work it already lists is taken: do not propose it again, whoever proposed it. If your follow-up still overlaps something listed there, say so with `overlaps: ["id", ...]`, naming the Tickets, Conversations or proposals (`proposal-N`) it overlaps. The proposal is then held for the operator to decide, instead of landing on its own.
 2. Write the body for a fresh agent with none of your context: the goal, the files, the acceptance criteria. A thin body is dropped with the reason in the ticket log.
 3. Decide the follow-up's Assignment:
-   - The pool defaults fit: omit `assign`. Whatever your own Assignment leaves empty falls through to the defaults.
-   - The follow-up needs something the defaults do not give (a stronger model or a higher effort for a review, a different harness): set only the fields that differ in `assign`.
+   - Your own Assignment fits: omit `assign`. The follow-up inherits it, and whatever it leaves empty falls through to the pool defaults.
+   - The follow-up needs something your Assignment does not give (a stronger model or a higher effort for a review, a different harness): set only the fields that differ in `assign`. It takes `harness`, `model`, `effort` and `drivers`, nothing else; a `verify` in it is ignored, since grading is the operator's call.
    - `effort` is the harness's own word (claude: low, medium, high, xhigh, max), passed through as written; leave it out for the harness's default.
    - You cannot tell, or the defaults name no model: ask the operator in this pane before you write the file. The operator is in the room; a guess costs a wasted Attempt.
 4. `blockedBy` names Tickets only, never a Conversation.
