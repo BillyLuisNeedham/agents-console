@@ -4,14 +4,15 @@
  * The Console's socket (issue #161, ADR-0032): what the server pushes down
  * /api/ws and when. The opening frames, one delta per coalesced change for
  * every socket alike, a reply behind the delta that carries its effect,
- * refusals in the HTTP twin's status, the cards and their log, the live
+ * refusals in the HTTP twin's status, a reply or push that cannot go
+ * leaving the server up, the cards and their log, the live
  * check's rule for hidden tabs, the stop's farewell, the page's embedded
  * boot, the pool log's earlier lines, and every request kind answered
  * exactly as its HTTP twin answers.
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { appendFileSync, chmodSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPoolServer, type PoolServer, type PoolServerOptions } from "./server.ts";
 import { REVIEW_TICKET_ID, type HarnessCommand, type PoolConfig } from "./engine.ts";
@@ -29,7 +30,16 @@ import {
   type RequestPayload,
   type ServerMessage,
 } from "./protocol.ts";
-import type { TicketLogResponse } from "./wire.ts";
+import type { EnrichedSnapshot, TicketLogResponse } from "./wire.ts";
+import {
+  answered,
+  createPushHub,
+  refused,
+  type PushHub,
+  type PushHubOptions,
+  type PushSources,
+  type SocketState,
+} from "./ws.ts";
 import {
   STUB_DEFAULTS,
   cleanupPools,
@@ -44,11 +54,18 @@ import { makeTempDir } from "./tmp.ts";
 const servers: PoolServer[] = [];
 const sockets: SocketClient[] = [];
 const fakes: ExecutingFakeHerdr[] = [];
+const hubs: { hub: PushHub; serving: Bun.Server<SocketState> }[] = [];
 
 afterEach(async () => {
   while (sockets.length > 0) sockets.pop()!.close();
   await cleanupPools(servers);
   while (fakes.length > 0) await fakes.pop()!.close();
+  while (hubs.length > 0) {
+    const { hub, serving } = hubs.pop()!;
+    hub.close();
+    // Bounded, as server.ts's stopServing is: Bun may never settle it.
+    await Promise.race([serving.stop(true), Bun.sleep(100)]);
+  }
 });
 
 const ready = (id: string, blockedBy = "none"): string =>
@@ -105,6 +122,83 @@ async function finishedPool(
   await server.settled();
   await waitFor(() => server.latest?.phase === "done", "the pool to finish");
   return { poolDir, server };
+}
+
+/**
+ * A push hub alone behind a bare server, reading the pool through `sources`
+ * instead of a pool server's own reads: the seam a test takes to hand the
+ * hub what no pool server makes on purpose, a result that cannot be
+ * serialised or a snapshot read that throws. Unlisted sources read an empty
+ * pool, and every request is answered `{}`.
+ */
+function serveHub(
+  sources: Partial<PushSources>,
+  options: Partial<PushHubOptions> = {},
+): { hub: PushHub; url: string } {
+  const hub = createPushHub(
+    {
+      current: () => null,
+      runsDir: "/nonexistent",
+      issuesDir: "/nonexistent",
+      bodyFile: () => null,
+      body: () => null,
+      events: () => ({ events: [], attempts: [], reconstructed: false, spec: "" }),
+      attempts: () => [],
+      readLog: () => ({ content: "", offset: 0, nextOffset: 0, totalSize: 0 }),
+      log: () => refused(404, "error", "no log here"),
+      activity: () => Promise.reject(new Error("no activity here")),
+      peek: async () => refused(404, "error", "no pane here"),
+      grades: () => ({}),
+      request: async () => answered({}),
+      ...sources,
+    },
+    { heartbeatMs: HEARTBEAT_MS, coalesceMs: 0, checkMs: 50, ...options },
+  );
+  const serving = Bun.serve<SocketState>({
+    port: 0,
+    websocket: hub.websocket,
+    fetch(req, bunServer) {
+      if (bunServer.upgrade(req, { data: hub.socketState() })) return undefined;
+      return new Response("expected a WebSocket upgrade", { status: 400 });
+    },
+  });
+  hubs.push({ hub, serving });
+  return { hub, url: `http://localhost:${serving.port}` };
+}
+
+/** The smallest snapshot the push takes: a running pool with nothing in it. */
+const EMPTY_POOL = {
+  seq: 1,
+  phase: "running",
+  poolName: "pools/hub",
+  poolTitle: null,
+  poolDir: "/nonexistent",
+  state: { tickets: [], conversations: [], log: [], outcomes: {}, interrupts: [] },
+} as unknown as EnrichedSnapshot;
+
+/**
+ * What `body` logged with console.error, and every rejection that went
+ * unhandled while it ran: in the server's process Bun exits on the first of
+ * those, so a test that finds none shows the server would have stayed up.
+ */
+async function escapesDuring(
+  body: () => Promise<void>,
+): Promise<{ logged: string[]; rejections: unknown[] }> {
+  const logged: string[] = [];
+  const rejections: unknown[] = [];
+  const quiet = console.error;
+  const record = (reason: unknown): void => void rejections.push(reason);
+  console.error = (...args: unknown[]) => void logged.push(args.map(String).join(" "));
+  process.on("unhandledRejection", record);
+  try {
+    await body();
+    // A rejection is reported once the microtasks behind it have run.
+    await Bun.sleep(20);
+  } finally {
+    process.off("unhandledRejection", record);
+    console.error = quiet;
+  }
+  return { logged, rejections };
 }
 
 /** The snapshot as a socket held it just before frame `index` arrived. */
@@ -327,6 +421,45 @@ describe("requests", () => {
     expect(machine.reply.rev).toBe(reassigned.reply.rev);
   });
 
+  // The HTTP route answers a write its dry run turns away (a
+  // ReassignRefusal) with 400 and the reason naming the ticket it would
+  // break; the socket refuses it the same, and the file stays as it was.
+  it("refuses a Reassign the dry run turns away with 400, naming the ticket", async () => {
+    const config = {
+      defaults: { harness: "stub" },
+      assign: { "01": { model: "m" }, "02": { model: "m" } },
+    } satisfies PoolConfig;
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: ready("01") },
+        { file: "02-a.md", marker: ready("02", "01") },
+      ],
+      config,
+    });
+    const server = startServer(
+      poolDir,
+      stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] } }).harnesses,
+    );
+    await server.start();
+    await server.settled();
+    const client = await socket(server);
+    const before = readFileSync(join(poolDir, "console.json"), "utf8");
+
+    // 02's model is its own entry's alone: clearing it leaves none.
+    const reply = await client.request("reassign", { tickets: ["02"], fields: { model: null } });
+    expect(reply).toMatchObject({
+      kind: "reassign",
+      ok: false,
+      refusal: {
+        reason:
+          "reassign: ticket '02' would be left with no model " +
+          "(set one, or leave the field alone so it follows the pool defaults)",
+        status: 400,
+      },
+    });
+    expect(readFileSync(join(poolDir, "console.json"), "utf8")).toBe(before);
+  });
+
   it("refuses with the HTTP twin's status, for every status class", async () => {
     const poolDir = makePool({
       tickets: [{ file: "01-a.md", marker: ready("01") }],
@@ -378,6 +511,73 @@ describe("requests", () => {
       ok: false,
       refusal: { reason: "request without payload", status: 400 },
     });
+  });
+});
+
+// Nothing on the way out takes the server down: Bun ends the process on an
+// unhandled rejection, so a throw a push or a reply leaves behind would stop
+// every tab's pool, not just the one press.
+describe("a push or a reply that cannot go", () => {
+  it("refuses a result it cannot serialise, keeps the socket, and answers the next request", async () => {
+    const circular: Record<string, unknown> = { name: "loop" };
+    circular.self = circular;
+    const results: Partial<Record<RequestKind, unknown>> = {
+      "settings.get": circular,
+      "panes.list": { panes: [], count: 1n },
+    };
+    const { url } = serveHub({
+      request: async (kind) => answered(kind in results ? results[kind] : { fine: true }),
+    });
+    const client = await openSocket(url);
+    sockets.push(client);
+
+    const replies: ServerMessage[] = [];
+    const { logged, rejections } = await escapesDuring(async () => {
+      replies.push(await client.request("settings.get", {}));
+      replies.push(await client.request("panes.list", {}));
+      replies.push(await client.request("start", {}));
+    });
+
+    expect(rejections).toEqual([]);
+    const [cyclic, bigInt, next] = replies;
+    for (const [reply, kind] of [
+      [cyclic, "settings.get"],
+      [bigInt, "panes.list"],
+    ] as const) {
+      expect(reply).toMatchObject({ type: "reply", kind, ok: false, refusal: { status: 500 } });
+      const { reason } = (reply as Extract<ServerMessage, { ok: false }>).refusal;
+      expect(reason).toStartWith("could not encode the result: ");
+      expect(logged.some((line) => line.includes(`reply to ${kind}`))).toBe(true);
+    }
+    // The socket is still up: the request after them is answered.
+    expect(next).toMatchObject({ type: "reply", kind: "start", ok: true, result: { fine: true } });
+  });
+
+  // With no coalescing window the engine's emit pushes in its own call
+  // stack, inside the engine's async drive, where a throw would reject it.
+  // The emit here is fired and left, so a throw would escape unhandled.
+  it("logs a push that throws with no coalescing window, and pushes the next emit", async () => {
+    let current: () => EnrichedSnapshot | null = () => null;
+    const { hub, url } = serveHub({ current: () => current() }, { coalesceMs: 0 });
+    const client = await openSocket(url);
+    sockets.push(client);
+    await client.sync();
+
+    current = () => {
+      throw new Error("enrichment failed");
+    };
+    const emit = async (): Promise<void> => hub.schedule();
+    const { logged, rejections } = await escapesDuring(async () => void emit());
+    expect(rejections).toEqual([]);
+    expect(logged).toContain("snapshot push: enrichment failed");
+
+    current = () => EMPTY_POOL;
+    hub.schedule();
+    const pushed = await client.waitFor<Extract<ServerMessage, { type: "snapshot" }>>(
+      (frame) => frame.type === "snapshot" && frame.rev === 1,
+      { what: "the next emit's snapshot" },
+    );
+    expect(pushed.snapshot?.seq).toBe(EMPTY_POOL.seq);
   });
 });
 
