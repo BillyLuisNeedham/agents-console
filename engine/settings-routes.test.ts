@@ -21,11 +21,11 @@ import {
   makePool,
   registerTempDir,
   stubHarness,
-} from "./pool-fixture.ts";
-import { makeTempDir } from "./tmp.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import { CLOSE_STOPPED } from "./protocol.ts";
-import { openSocket } from "./socket-fixture.ts";
-import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "./herdr-executing-fake.ts";
+import { openSocket } from "../conformance/fixtures/socket-fixture.ts";
+import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "../conformance/fixtures/herdr-executing-fake.ts";
 
 const servers: PoolServer[] = [];
 const fakes: ExecutingFakeHerdr[] = [];

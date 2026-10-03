@@ -3,3 +3,7 @@
 # whose per-machine files the engine writes at scratch locations, so a suite
 # can never touch the operator's own config (issue #127).
 preload = ["./engine/test-preload.ts"]
+# The conformance cases start a real server process each, so they run only
+# through `bun run conformance`, from conformance/ with its own bunfig.toml.
+# The suite's static checks beside them (the boundary test) stay in here.
+pathIgnorePatterns = ["conformance/cases/**"]

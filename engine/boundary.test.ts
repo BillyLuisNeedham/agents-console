@@ -32,8 +32,9 @@ const ENV_READERS = new Set([
   "test-preload.ts",
 ]);
 
-/** The engine files that may import the judgement SDK: the port and its wire fake. */
-const SDK_IMPORTERS = new Set(["jev.ts", "jev-fake.ts"]);
+/** The engine files that may import the judgement SDK: the port alone. Its
+ *  wire fake lives in conformance/fixtures (ADR-0036). */
+const SDK_IMPORTERS = new Set(["jev.ts"]);
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -75,7 +76,7 @@ describe("the CLI boundary", () => {
 });
 
 describe("the judgement SDK", () => {
-  it("is imported only by the Jev port and its wire fake", () => {
+  it("is imported only by the Jev port", () => {
     const offenders = sourceFiles(ENGINE_DIR)
       .filter((path) => /@typesafe-ai\/sdk/.test(codeOf(path)))
       .map((path) => path.slice(ENGINE_DIR.length + 1))

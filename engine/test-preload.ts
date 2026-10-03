@@ -8,7 +8,7 @@
 // the operator's session, whatever the shell had.
 
 import { join } from "node:path";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 process.env.CLAUDE_CONFIG_DIR = makeTempDir("claude-config-");
 

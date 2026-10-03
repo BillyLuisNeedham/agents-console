@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cachedByStamp, fileStamp, RACY_MS } from "./stat-cache.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const tempDirs: string[] = [];
 

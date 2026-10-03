@@ -14,7 +14,7 @@ import {
   throughMergeHold,
 } from "./merge-hold.ts";
 import type { TicketStatus } from "./pool.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import { branchFor } from "./worktrees.ts";
 
 /**

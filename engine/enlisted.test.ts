@@ -6,7 +6,7 @@ import { createEnlistedAttempts, type EnlistedHost } from "./enlisted.ts";
 import {
   startExecutingFakeHerdr,
   type ExecutingFakeHerdr,
-} from "./herdr-executing-fake.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
 import { createPaneReadRegister } from "./pane-reads.ts";
 
 // The enlisted-attempts module on its own (engine/enlisted.ts), against the

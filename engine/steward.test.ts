@@ -23,8 +23,8 @@ import { loadConversations, readConversation } from "./conversations.ts";
 import {
   startExecutingFakeHerdr,
   type ExecutingFakeHerdr,
-} from "./herdr-executing-fake.ts";
-import { cleanupPools, makeGitPool, registerTempDir } from "./pool-fixture.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
+import { cleanupPools, makeGitPool, registerTempDir } from "../conformance/fixtures/pool-fixture.ts";
 import { writePoolSettings } from "./pool-settings.ts";
 import {
   checkStewardConfig,
@@ -39,7 +39,7 @@ import {
   type StewardPoolView,
 } from "./steward.ts";
 import { parseStewardArgs, runStewardCli, stewardCall } from "./steward-cli.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import { branchFor } from "./worktrees.ts";
 
 // ---------------------------------------------------------------------------

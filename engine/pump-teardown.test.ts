@@ -30,7 +30,7 @@ import {
   STUB_DEFAULTS,
   cleanupPools,
   makePool,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 // The teardown failures the pinned bug produced. A genuine failure (the
 // drive reading files that are gone) may still kill the drive and reject

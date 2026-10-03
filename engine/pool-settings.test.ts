@@ -9,7 +9,7 @@ import {
   readPoolSettings,
   writePoolSettings,
 } from "./pool-settings.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const dirs: string[] = [];
 

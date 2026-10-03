@@ -1,31 +1,28 @@
 /**
- * The two Jev fakes, in the herdr-fake.ts spirit: not a test file, so
- * importing one never drags another suite's cases in.
+ * The Jev wire fake, in the herdr-fake.ts spirit: not a test file, so
+ * importing it never drags another suite's cases in.
  *
- * `startFakeJev` is the wire fake: a scripted `fetch` handed to the real
- * SDK client, speaking the real request and response shape of
- * `POST /v1/systemone`, so jev.test.ts exercises the SDK's retries, error
- * classes and body parsing for real without a network. Scripted by options
- * (an answer per question id, a failure to serve, a garbage body, a delay);
- * assertions read `requests` afterwards.
+ * `startFakeJev` is a scripted `fetch` handed to the real SDK client,
+ * speaking the real request and response shape of `POST /v1/systemone`, so
+ * jev.test.ts exercises the SDK's retries, error classes and body parsing
+ * for real without a network. Scripted by options (an answer per question
+ * id, a failure to serve, a garbage body, a delay); assertions read
+ * `requests` afterwards.
  *
- * `fakeJev` is the port fake: it implements the `Jev` port without the SDK
- * at all, answering by question id, so an engine suite can say "Jev
- * answers waiting at 0.93" or "Jev is rate-limited" and drive a call site.
+ * It sits in conformance/fixtures (ADR-0036), where nothing may import the
+ * engine but the wire's types, so it speaks only the API's own shapes. The
+ * port fake that answers through `answerFor` without the SDK at all is the
+ * engine's own Jev port, notice board included, so it stays with the engine
+ * suites as engine/jev-port-fake.ts.
  */
 
-import {
-  createNoticeBoard,
-  JEV_CHARS_PER_TOKEN,
-  JEV_MODEL,
-  type Evidence,
-  type Jev,
-  type JevCause,
-  type JevResult,
-  type Question,
-  type Questions,
-} from "./jev.ts";
-import type { Fetch, SystemOneResult } from "@typesafe-ai/sdk";
+import type { Fetch, Question, Questions } from "@typesafe-ai/sdk";
+
+/** The model the API answers with when a request names none. */
+const DEFAULT_MODEL = "jev-latest";
+
+/** Characters per token in the usage the fake reports: the API's measured rate. */
+const CHARS_PER_TOKEN = 3.5;
 
 /**
  * How a test scripts one answer: a number for a Noul (the probability of
@@ -96,10 +93,10 @@ export function startFakeJev(options: FakeJevOptions = {}): FakeJev {
       answers[id] = answerFor(question, options.answers?.[id]);
     }
     return json(200, {
-      model: JEV_MODEL,
+      model: body.model ?? DEFAULT_MODEL,
       answers,
       usage: {
-        input_tokens: Math.ceil(String(init?.body ?? "").length / JEV_CHARS_PER_TOKEN),
+        input_tokens: Math.ceil(String(init?.body ?? "").length / CHARS_PER_TOKEN),
         output_tokens: 0,
       },
     });
@@ -167,76 +164,4 @@ function spread(keys: string[], picked: string | null): Record<string, number> {
 
 function confidenceOf(probabilities: Record<string, number>): number {
   return Math.max(...Object.values(probabilities));
-}
-
-export interface PortFakeOptions {
-  /** Answers by question id, as for the wire fake. */
-  answers?: Record<string, ScriptedAnswer>;
-  /**
-   * A per-ask answer script chosen from the Evidence, for a suite that needs
-   * one port to answer two Attempts differently (a verify round grades each
-   * Attempt over its own Evidence). Wins over `answers` when it returns a
-   * map; returning undefined falls back to `answers`.
-   */
-  answersFor?: (evidence: Evidence) => Record<string, ScriptedAnswer> | undefined;
-  /**
-   * Fail the asks whose Evidence `failFor` selects, for a suite that needs
-   * one port to answer one Attempt and fall back on another (a verify round
-   * is one instrument, so a failure on any Attempt falls the whole round
-   * back). Checked after `cause`, which fails every ask; returning undefined
-   * answers normally. `detail` defaults to "scripted by the test".
-   */
-  failFor?: (evidence: Evidence) => { cause: JevCause; detail?: string } | undefined;
-  /** Fall back with this cause on every ask instead of answering. */
-  cause?: JevCause;
-  /** Report as unconfigured (every ask falls back with `not-configured`). Default: configured. */
-  configured?: boolean;
-}
-
-export interface PortFake extends Jev {
-  asks: { evidence: Evidence; questions: Questions }[];
-  /** Change what later asks do, to play a recovery or a new cause mid-test. */
-  script(next: Pick<PortFakeOptions, "answers" | "cause">): void;
-}
-
-export function fakeJev(options: PortFakeOptions = {}): PortFake {
-  const board = createNoticeBoard();
-  const configured = options.configured ?? true;
-  let answers = options.answers ?? {};
-  let cause: JevCause | undefined = configured ? options.cause : "not-configured";
-  const asks: PortFake["asks"] = [];
-  return {
-    configured,
-    asks,
-    subscribe: board.subscribe,
-    script(next) {
-      answers = next.answers ?? answers;
-      cause = next.cause;
-    },
-    async ask<Q extends Questions>(evidence: Evidence, questions: Q): Promise<JevResult<Q>> {
-      asks.push({ evidence, questions });
-      if (cause) {
-        board.fellBack(cause, "scripted by the test");
-        return { ok: false, cause, detail: "scripted by the test" };
-      }
-      const failure = options.failFor?.(evidence);
-      if (failure) {
-        const detail = failure.detail ?? "scripted by the test";
-        board.fellBack(failure.cause, detail);
-        return { ok: false, cause: failure.cause, detail };
-      }
-      const scripted = options.answersFor?.(evidence) ?? answers;
-      const built: Record<string, unknown> = {};
-      for (const [id, question] of Object.entries(questions)) {
-        built[id] = answerFor(question, scripted[id]);
-      }
-      board.succeeded();
-      return {
-        ok: true,
-        answers: built as unknown as SystemOneResult<Q>["answers"],
-        usage: { input_tokens: 0, output_tokens: 0 },
-        model: JEV_MODEL,
-      };
-    },
-  };
 }

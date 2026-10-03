@@ -17,10 +17,10 @@ import { join } from "node:path";
 import { createPoolServer, type PoolServer } from "./server.ts";
 import type { HarnessCommand } from "./engine.ts";
 import { readEvents } from "./events.ts";
-import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "./herdr-executing-fake.ts";
-import { cleanupPools, makeGitPool, registerTempDir } from "./pool-fixture.ts";
+import { startExecutingFakeHerdr, type ExecutingFakeHerdr } from "../conformance/fixtures/herdr-executing-fake.ts";
+import { cleanupPools, makeGitPool, registerTempDir } from "../conformance/fixtures/pool-fixture.ts";
 import { runStewardCli } from "./steward-cli.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const servers: PoolServer[] = [];
 const fakes: ExecutingFakeHerdr[] = [];

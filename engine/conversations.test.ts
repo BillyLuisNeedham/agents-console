@@ -32,7 +32,7 @@ import {
   makePool,
   registerTempDir,
   stubHarness,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 afterEach(async () => {
   await cleanupPools();

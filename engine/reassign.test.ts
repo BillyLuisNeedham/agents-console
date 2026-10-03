@@ -21,7 +21,7 @@ import {
   writeReassign,
   type ReassignContext,
 } from "./reassign.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const dirs: string[] = [];
 

@@ -20,7 +20,7 @@ import {
   cleanupPools,
   makePool,
   stubHarness,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 const servers: PoolServer[] = [];
 
