@@ -20,7 +20,8 @@ import {
   type JevNotice,
   type Questions,
 } from "./jev.ts";
-import { fakeJev, startFakeJev, stopFakeJevs, type FakeJev } from "./jev-fake.ts";
+import { startFakeJev, stopFakeJevs, type FakeJev } from "../conformance/fixtures/jev-fake.ts";
+import { fakeJev } from "./jev-port-fake.ts";
 
 afterEach(stopFakeJevs);
 

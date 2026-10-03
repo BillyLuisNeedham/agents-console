@@ -32,10 +32,10 @@ import {
   startExecutingFakeHerdr,
   type ExecutingFakeHerdr,
   type ExecutingFakeHerdrOptions,
-} from "./herdr-executing-fake.ts";
-import { makeTempDir } from "./tmp.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import { CLOSE_STOPPED, PROTOCOL_VERSION } from "./protocol.ts";
-import { openSocket, type SocketClient } from "./socket-fixture.ts";
+import { openSocket, type SocketClient } from "../conformance/fixtures/socket-fixture.ts";
 import {
   STUB_DEFAULTS,
   cleanupPools,
@@ -44,7 +44,7 @@ import {
   registerTempDir,
   settleOrBeat,
   stubHarness,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 const servers: PoolServer[] = [];
 const sockets: SocketClient[] = [];

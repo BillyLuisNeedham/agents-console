@@ -1,12 +1,12 @@
 /**
  * The Jev grader rubric's composition (ADR-0023, REPORT.md sections 1 and 3).
  * These cases pin the arithmetic, the gates and the fixed-phrase reasons with
- * typed answers built by the port fake's own `answerFor`, so the wording Jev
+ * typed answers built by the Jev fake's own `answerFor`, so the wording Jev
  * would have seen is the wording here.
  */
 
 import { describe, expect, it } from "bun:test";
-import { answerFor, type ScriptedAnswer } from "./jev-fake.ts";
+import { answerFor, type ScriptedAnswer } from "../conformance/fixtures/jev-fake.ts";
 import {
   compose,
   DERIVED_GATE,

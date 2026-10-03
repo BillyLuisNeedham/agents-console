@@ -13,7 +13,7 @@ import {
 import { join } from "node:path";
 import { defaultClaudeConfigPath, seedClaudeFolderTrust } from "./claude-trust.ts";
 import { homedir } from "node:os";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 // The folder-trust seed (issue #127, ADR-0025) against a scratch copy of
 // claude's config: it adds the one entry claude reads to skip its workspace

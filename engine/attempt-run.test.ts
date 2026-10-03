@@ -28,17 +28,17 @@ import {
   type HarnessCommand,
   type SpawnContext,
 } from "./spawn.ts";
-import { makeTempDir } from "./tmp.ts";
-import { stubHarness } from "./pool-fixture.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
+import { stubHarness } from "../conformance/fixtures/pool-fixture.ts";
 import {
   startExecutingFakeHerdr,
   type ExecutingFakeHerdr,
   type ExecutingFakeHerdrOptions,
-} from "./herdr-executing-fake.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
 import {
   startFakeHerdr as startProtocolFakeHerdr,
   stopFakeHerdrs,
-} from "./herdr-fake.ts";
+} from "../conformance/fixtures/herdr-fake.ts";
 
 // The `script` invocation ADR-0016's wrapper opens with, in the form the
 // host's script(1) accepts (issue #58): util-linux's `-c` string form on

@@ -4,22 +4,28 @@
  * snapshot and delta frames build, and the waits a test needs on top. Lives
  * in its own module beside pool-fixture.ts for the same reason that one
  * does: the suites that drive /api/ws share one client, and importing it
- * never drags another suite's cases into the importer's run.
+ * never drags another suite's cases into the importer's run. The engine's
+ * socket suites and the conformance suite (ADR-0036) both drive it, so it
+ * decodes and applies frames by socket-protocol.ts's rules, not the
+ * engine's own functions.
  */
 
+import type {
+  CardSubscription,
+  ClientMessage,
+  PushedSnapshot,
+  Reply,
+  RequestKind,
+  RequestPayload,
+  ServerMessage,
+} from "../../engine/protocol.ts";
 import {
+  PROTOCOL_VERSION,
   WS_PATH,
-  applyDelta,
-  decodeServerMessage,
-  encodeMessage,
-  type CardSubscription,
-  type ClientMessage,
-  type PushedSnapshot,
-  type Reply,
-  type RequestKind,
-  type RequestPayload,
-  type ServerMessage,
-} from "./protocol.ts";
+  applySnapshotDelta,
+  decodeServerFrame,
+  encodeClientMessage,
+} from "./socket-protocol.ts";
 
 export interface SocketClient {
   /** Every frame so far, in arrival order. */
@@ -70,7 +76,7 @@ export async function openSocket(
     pushed: null,
     rev: 0,
     seqs: [],
-    send: (message) => ws.send(encodeMessage(message)),
+    send: (message) => ws.send(encodeClientMessage(message)),
     async request(kind, payload) {
       const id = ++nextId;
       const from = client.frames.length;
@@ -111,7 +117,7 @@ export async function openSocket(
     close: () => ws.close(),
   };
   ws.onmessage = (event) => {
-    const frame = decodeServerMessage(String(event.data));
+    const frame = decodeServerFrame(String(event.data));
     if (frame.type === "snapshot") {
       client.pushed =
         frame.snapshot === null
@@ -120,7 +126,7 @@ export async function openSocket(
       client.rev = frame.rev;
       if (frame.snapshot !== null) client.seqs.push(frame.snapshot.seq);
     } else if (frame.type === "delta") {
-      client.pushed = applyDelta(client.pushed!, frame.delta);
+      client.pushed = applySnapshotDelta(client.pushed!, frame.delta);
       client.rev = frame.delta.rev;
       client.seqs.push(client.pushed.snapshot.seq);
     }
@@ -133,7 +139,7 @@ export async function openSocket(
     ws.onopen = () => resolve();
     ws.onerror = () => reject(new Error(`socket to ${base} failed to open`));
   });
-  if (hello) client.send({ type: "hello", protocol: 1, visible: hello.visible, cards: hello.cards ?? [] });
+  if (hello) client.send({ type: "hello", protocol: PROTOCOL_VERSION, visible: hello.visible, cards: hello.cards ?? [] });
   return client;
 }
 

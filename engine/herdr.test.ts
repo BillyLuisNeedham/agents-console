@@ -26,7 +26,7 @@ import {
   until,
   type FakeHerdr,
   type FakePane,
-} from "./herdr-fake.ts";
+} from "../conformance/fixtures/herdr-fake.ts";
 
 afterEach(stopFakeHerdrs);
 

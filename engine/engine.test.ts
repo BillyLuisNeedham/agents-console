@@ -33,13 +33,13 @@ import { branchFor, worktreePathFor } from "./worktrees.ts";
 import { QueuedAnswerStore } from "./queued-answers.ts";
 import { processIsLive } from "./children.ts";
 import { type SpawnContext } from "./spawn.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import { noul } from "./jev.ts";
-import { fakeJev } from "./jev-fake.ts";
+import { fakeJev } from "./jev-port-fake.ts";
 import {
   startExecutingFakeHerdr,
   type FakeHerdrRequest,
-} from "./herdr-executing-fake.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
 import {
   cleanupPools,
   makeGitPool,
@@ -50,7 +50,7 @@ import {
   type PoolSpec,
   type StubBehaviour,
   type StubRig,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 afterEach(async () => {
   await cleanupPools();

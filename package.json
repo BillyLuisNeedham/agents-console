@@ -5,7 +5,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "boot": "bun run engine/boot-cli.ts",
-    "fleet": "bun run engine/fleet-cli.ts"
+    "fleet": "bun run engine/fleet-cli.ts",
+    "conformance": "bun run conformance/run.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

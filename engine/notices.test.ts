@@ -15,14 +15,14 @@ import {
   ticketClosedNoticeText,
   ticketEndedNoticeText,
 } from "./notices.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 import {
   cleanupPools,
   makeGitPool,
   makePool,
   registerTempDir,
   stubHarness,
-} from "./pool-fixture.ts";
+} from "../conformance/fixtures/pool-fixture.ts";
 
 afterEach(async () => {
   await cleanupPools();

@@ -13,18 +13,25 @@
  * state, so each change the engine's 2 s Turn read sees is a snapshot emit.
  */
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Mark } from "./timeline.ts";
 
-type FakeModule = typeof import("../../engine/herdr-executing-fake.ts");
+type FakeModule = typeof import("../../conformance/fixtures/herdr-executing-fake.ts");
 
 const i = process.argv.indexOf("--repo");
 const repo = i >= 0 ? process.argv[i + 1] : undefined;
 if (!repo) throw new Error("herdr.ts: --repo is required");
 
-const { startExecutingFakeHerdr } = (await import(
-  join(repo, "engine/herdr-executing-fake.ts")
-)) as FakeModule;
+// The fake moved to conformance/fixtures (ADR-0036); a checkout from before
+// the move still keeps it under engine/.
+const fakePath = [
+  join(repo, "conformance/fixtures/herdr-executing-fake.ts"),
+  join(repo, "engine/herdr-executing-fake.ts"),
+].find((path) => existsSync(path));
+if (!fakePath) throw new Error(`herdr.ts: no executing fake herdr in ${repo}`);
+
+const { startExecutingFakeHerdr } = (await import(fakePath)) as FakeModule;
 
 const fake = await startExecutingFakeHerdr({ rendered: "agent starting\n> " });
 process.stdout.write(`READY ${fake.socketPath}\n`);

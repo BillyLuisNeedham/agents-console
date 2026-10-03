@@ -5,7 +5,7 @@ import { rmSync } from "node:fs";
 import { appendEvent } from "./events.ts";
 import { finishedTerminals, openedTabs, tabRecordedClosed, type OpenedTab } from "./finished-terminals.ts";
 import type { ListedPane, PaneListing } from "./pane-survey.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const AT = "2026-09-25T10:00:00.000Z";
 const dirs: string[] = [];

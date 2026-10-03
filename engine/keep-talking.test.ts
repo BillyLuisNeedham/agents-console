@@ -16,8 +16,8 @@ import { startPool, type HarnessCommand, type PoolRun, type PoolSnapshot } from 
 import {
   startExecutingFakeHerdr,
   type ExecutingFakeHerdr,
-} from "./herdr-executing-fake.ts";
-import { cleanupPools, makeGitPool, makePool } from "./pool-fixture.ts";
+} from "../conformance/fixtures/herdr-executing-fake.ts";
+import { cleanupPools, makeGitPool, makePool } from "../conformance/fixtures/pool-fixture.ts";
 import { branchFor, worktreePathFor } from "./worktrees.ts";
 
 const fakes: ExecutingFakeHerdr[] = [];

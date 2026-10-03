@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadSpawnProposals } from "./spawn-proposals.ts";
-import { makeTempDir } from "./tmp.ts";
+import { makeTempDir } from "../conformance/fixtures/tmp.ts";
 
 const dirs: string[] = [];
 
