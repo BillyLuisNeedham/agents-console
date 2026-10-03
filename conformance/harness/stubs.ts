@@ -22,6 +22,14 @@ const SCRIPT = join(import.meta.dir, "..", "fixtures", "stub-harness.sh");
 export interface ConformanceStubBehaviour extends StubBehaviour {
   /** Standard output, per launch when an array (the last repeats). */
   stdout?: string | string[];
+  /**
+   * Bash the launch runs in its working directory before its outcome is
+   * written, per launch when an array (the last repeats): the work an agent
+   * does, a commit in its worktree say. It sees STUB_KEY, STUB_N, STUB_ISSUE
+   * and STUB_OUTCOME, and may write the outcome itself; a script that fails
+   * ends the launch with exit 97 and no outcome.
+   */
+  run?: string | string[];
 }
 
 /** One launch the server made, as the stub recorded it. */
@@ -48,7 +56,7 @@ export interface Stubs {
   bin: string;
   /** CONFORMANCE_STUBS: the scripts and the record of launches. */
   dir: string;
-  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`). */
+  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`, `02.resolver`). */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
@@ -103,6 +111,7 @@ export function installStubs(root: string): Stubs {
         behaviour.statuses?.length ?? 1,
         behaviour.exitCodes?.length ?? 1,
         Array.isArray(behaviour.stdout) ? behaviour.stdout.length : 1,
+        Array.isArray(behaviour.run) ? behaviour.run.length : 1,
       );
       const scriptDir = join(dir, "scripts", key);
       mkdirSync(scriptDir, { recursive: true });
@@ -119,6 +128,10 @@ export function installStubs(root: string): Stubs {
           ? behaviour.stdout[Math.min(k - 1, behaviour.stdout.length - 1)]
           : behaviour.stdout;
         if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
+        const run = Array.isArray(behaviour.run)
+          ? behaviour.run[Math.min(k - 1, behaviour.run.length - 1)]
+          : behaviour.run;
+        if (run !== undefined) writeFileSync(join(scriptDir, `${k}.sh`), `set -euo pipefail\n${run}\n`);
       }
     },
     calls() {

@@ -9,7 +9,9 @@
 # It records each launch, then does what the case scripted for it. A launch
 # is keyed by its outcome file: `01` for a Ticket's Attempt, `01.attempt-2`
 # for one Attempt of a verify round, `01-grader-1` for a grader; a launch
-# whose argv names no outcome file (a terminal-backed one) is `_<name>`.
+# whose argv names no outcome file (a terminal-backed one) is `_<name>`. A
+# resolver's prompt names its outcome file differently, so it is keyed
+# `02.resolver` the same way, with no Ticket file.
 #
 # CONFORMANCE_STUBS names the directory holding the scripts and the record:
 #   scripts/<key>/steps          how many launches are scripted; the last repeats
@@ -18,6 +20,11 @@
 #   scripts/<key>/<k>.marker     launch k's old-protocol misbehaviour: a status
 #                                it writes into the Ticket's marker itself
 #   scripts/<key>/<k>.stdout     launch k's standard output
+#   scripts/<key>/<k>.sh         launch k's own work, run by bash in the launch's
+#                                working directory before its outcome is written:
+#                                a commit in its worktree, say. It sees STUB_KEY,
+#                                STUB_N, STUB_ISSUE and STUB_OUTCOME; a failure
+#                                ends the launch with exit 97 and no outcome
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
 #   calls/<key>.<n>/             launch n of the key: seq, argv, cwd, env,
 #                                issue and outcome
@@ -42,6 +49,11 @@ for arg in "$@"; do
       outcome="${rest%%:*}"
       first="${arg%%$'\n'*}"
       issue="${first##* }"
+      break
+      ;;
+    *"Resolve the git merge conflict for ticket "*"write JSON to "*)
+      rest="${arg#*write JSON to }"
+      outcome="${rest%%: *}"
       break
       ;;
   esac
@@ -98,6 +110,13 @@ if [ -f "$script/wait" ]; then
     [ -e "$wait_for" ] && break
     sleep 0.05
   done
+fi
+if [ -f "$script/$k.sh" ]; then
+  STUB_KEY="$key" STUB_N="$n" STUB_ISSUE="$issue" STUB_OUTCOME="$outcome" bash "$script/$k.sh" || {
+    code=$?
+    echo "stub-harness: $key launch $n: its script exited $code" >&2
+    exit 97
+  }
 fi
 if [ -f "$script/$k.stdout" ]; then
   cat "$script/$k.stdout"

@@ -43,9 +43,11 @@ export interface Case {
   /**
    * The server under test on a world's pool, ready. With `herdr` it talks
    * to that fake; without, its HERDR_SOCKET_PATH names a socket nobody
-   * listens on, so the pool runs headless.
+   * listens on, so the pool runs headless. With `pool` it runs that
+   * directory as its pool instead, spelled as given: a second pool in the
+   * world's repository, or the pool reached through a symlink.
    */
-  start(world: World, options?: { herdr?: HerdrProcess }): Promise<CaseServer>;
+  start(world: World, options?: { herdr?: HerdrProcess; pool?: string }): Promise<CaseServer>;
   /** A socket on a server; with `hello`, the client's hello goes first. */
   socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
 }
@@ -75,7 +77,7 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
     },
     async start(world, options = {}) {
       const socket = options.herdr?.socketPath ?? `${world.root}/no-herdr.sock`;
-      const running = await startServer({ pool: world.pool, env: world.env(socket), choice });
+      const running = await startServer({ pool: options.pool ?? world.pool, env: world.env(socket), choice });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);
       return server;
