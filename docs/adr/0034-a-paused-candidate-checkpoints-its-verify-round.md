@@ -1,0 +1,18 @@
+# A paused candidate checkpoints its verify round: no candidate is taken over a pause
+
+A verify Ticket fans out into several candidate Attempts, grades each, and selects a winner only when every candidate finished `done` (ADR-0006). A round where one candidate wrote a checkpoint Outcome and another finished was never decided. The verify spec covered only a lone failure, a grader crash and the margins. The lone case (verify: 1) was settled, and the partial case was left "for a later ticket" that never came. So the engine graded the round, decided nothing and raised no Interrupt. The run ended `stalled` with the Ticket stuck `in-progress`, and neither Resume nor Close (ADR-0033) could be reached. On the next Restart the stuck Ticket was quietly reset to ready and the whole round ran again.
+
+**Any checkpointed candidate checkpoints the round.** Once every candidate has exited and been graded, a round holding at least one checkpoint selects nothing and merges nothing, however its other candidates ended. The engine writes `status=checkpoint` itself (ADR-0005) and raises one checkpoint Interrupt. The operator gets the answers every checkpoint offers: Resume runs a fresh fan-out, numbering on from this round; Close drops the Ticket; Keep talking continues a paused candidate. The same rule covers a round where every candidate checkpointed.
+
+**The Brief says what work exists.** It opens with the round's count, then has one `### Attempt N` part per candidate in attempt order. A paused candidate's part holds its own brief, or the engine's placeholder if it wrote none. A finished candidate's part holds its grade and the branch its work waits on, unmerged. A crashed candidate's part holds its crash reason and its log.
+
+**The checkpoint owns the round over a crash.** A round that both crashed and paused raises the checkpoint Interrupt only. The crash stays on the Ticket log and in the Brief. The checkpoint offers what a crash Interrupt does (Resume) plus Close and Keep talking, and the paused agent's question is the one the operator has to answer anyway.
+
+**The lowest-numbered paused candidate is the checkpoint's Attempt.** Its `checkpoint` event names that Attempt, so its pane is the Held pane for Keep talking (ADR-0027) and the tab a plain Resume closes. The other candidates' panes are left to the existing rules. Its Outcome becomes the Ticket's Outcome, as a lone checkpoint's does. No candidate's spawn proposals are taken: a candidate's proposals ride or die with selection, and no selection ran.
+
+**Rejected:**
+- **Select among the finished candidates and ignore the pause.** It keeps the pool moving, but a checkpoint means an agent met a decision or a guess it would not make. Taking a sibling that guessed through the same point lets the guess win without the operator ever seeing the question.
+- **Let the operator adopt a finished candidate from the checkpoint Interrupt.** It is useful, but a Resume note is free text and may contain numbers, so reading a candidate pick out of it would be ambiguous. That needs its own answer, which is a protocol change and a ticket of its own.
+- **Leave the crash Interrupt in charge when a round also paused.** A crash Interrupt cannot be Closed (ADR-0033), and it would leave the paused agent's question unanswered.
+
+**Consequences:** no contract changes. The marker, the event kinds, the Interrupt kinds and the Brief section are the ones a lone checkpoint already uses, so the Rust port (issue #162) inherits this as behaviour, not format. A finished candidate's branch outlives the checkpoint until a later round's selection or a Close discards it.
