@@ -31,7 +31,7 @@ under `--virtual-time-budget` a `requestAnimationFrame` may never fire.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
 one is on screen at a time, one more the Detail of a Pending spawn's faded
 card (issue #150), whose card and a Held spawn's keep their nodes too, and one
-the Steward's Detail opened from the header's on-duty line (ADR-0030), whose
+the Steward's Detail opened from the tray's Steward box (ADR-0030), whose
 card and the Steward note on a tray row keep theirs.
 
 ## Run it
@@ -67,10 +67,10 @@ A last one types into a Settings text field key by key, with a caret
 mid-text, and checks each keystroke re-renders on its own, the field keeps its
 node, focus and caret, and the pool's Save enables and greys out again on a
 revert (issue #142). Before it, a Steward pass (ADR-0030) checks what only a
-laid-out page can: the on-duty line brings the Steward's card back into view
+laid-out page can: the Steward box brings the Steward's card back into view
 from far off screen, Use as answer fills the tray row's note and the open
 Detail's from one click, the Steward note fits its tray row, and the canvas
-header keeps its width with the Steward's controls in it.
+header keeps its width, and the tray's Steward box fits the tray.
 
 ## Baseline on the `replaceChildren` renderer (2026-09-21)
 

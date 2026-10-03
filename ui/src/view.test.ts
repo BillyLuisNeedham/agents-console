@@ -374,11 +374,12 @@ describe("ConsoleView: the Steward (ADR-0030)", () => {
     expect(c.detailNote()!.value).toBe(note.text);
   });
 
-  it("selects the Steward's card from the header's on-duty line, and keeps it selected on a second click", () => {
+  it("selects the Steward's card from the tray's Steward box, and keeps it selected on a second click", () => {
     const c = mountConsole(STEWARD_SNAPSHOT);
-    c.q<HTMLButtonElement>(".canvas-steward")!.click();
+    expect(c.q(".canvas-header .canvas-steward")).toBeNull();
+    c.q<HTMLButtonElement>(".steward-box-name")!.click();
     expect(c.q(".detail-open .detail-title")?.textContent).toBe("conv-3");
-    c.q<HTMLButtonElement>(".canvas-steward")!.click();
+    c.q<HTMLButtonElement>(".steward-box-name")!.click();
     expect(c.q(".detail-open .detail-title")?.textContent).toBe("conv-3");
     expect(c.q(".detail-open .steward-badge")).not.toBeNull();
   });
@@ -388,9 +389,9 @@ describe("ConsoleView: the Steward (ADR-0030)", () => {
     expect(c.q(".needs-input-row-conversation")).toBeNull();
   });
 
-  it("opens the tray's Start Steward form from the header while none is on duty", () => {
+  it("opens the Start Steward form from the tray's Steward box while none is on duty", () => {
     const c = mountConsole({ ...STEWARD_SNAPSHOT, state: { ...STEWARD_SNAPSHOT.state, conversations: [] } });
-    c.q<HTMLButtonElement>(".canvas-start-steward")!.click();
+    c.q<HTMLButtonElement>(".steward-box-off .conversations-steward-toggle")!.click();
     expect(c.q(".steward-form")).not.toBeNull();
     expect(c.q<HTMLButtonElement>(".steward-start")!.disabled).toBe(false);
   });
