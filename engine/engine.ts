@@ -2179,6 +2179,15 @@ async function runSuperStep(
     return "stop";
   }
   for (const result of results) {
+    // A verify round that also holds a checkpointed candidate is owned by
+    // the checkpoint its grading raises (ADR-0034): the crash stays on the
+    // ticket log and goes into that checkpoint's Brief instead.
+    if (
+      result.plan.verify &&
+      results.some((r) => r.marker.id === result.marker.id && r.status === "checkpoint")
+    ) {
+      continue;
+    }
     if (result.status === "in-progress") {
       // The crash event and the marker update landed at attempt exit;
       // only the crash interrupt waits for the boundary here. A
@@ -2254,16 +2263,22 @@ async function runSuperStep(
         );
         continue;
       }
+      const round = results.filter((r) => r.marker.id === marker.id);
+      // A paused candidate checkpoints the whole round (ADR-0034), however
+      // its siblings ended.
+      if (round.some((r) => r.status === "checkpoint")) {
+        checkpointFanOutRound(session, marker, round, grades, emit);
+        continue;
+      }
       // Winner selection (ticket 04): with more than one graded candidate
       // and every attempt done, the engine picks the best and merges only
-      // that attempt's branch. A round with a crashed or paused attempt
-      // grades but decides nothing: the crash or checkpoint interrupt owns
-      // the ticket and the re-round after the human answers selects
-      // afresh. A grader without a usable grade is equally undecided
-      // (ticket 07's re-spawn supplies it). With the pool's selection set
-      // to human (ticket 08), the same completed fan-out raises the
-      // selection interrupt instead and the answer picks the winner.
-      const round = results.filter((r) => r.marker.id === marker.id);
+      // that attempt's branch. A round with a crashed attempt grades but
+      // decides nothing: the crash interrupt owns the ticket and the
+      // re-round after the human answers selects afresh. A grader without
+      // a usable grade is equally undecided (ticket 07's re-spawn supplies
+      // it). With the pool's selection set to human (ticket 08), the same
+      // completed fan-out raises the selection interrupt instead and the
+      // answer picks the winner.
       if (
         round.every((r) => r.status === "done") &&
         attempts.every((attempt) => grades.has(attempt))
@@ -4962,7 +4977,7 @@ function endContinuedAttempt(
       },
     });
     clearInterrupts();
-    checkpointLoneAttempt(
+    checkpointTicketByEngine(
       session,
       marker,
       attempt,
@@ -5047,7 +5062,7 @@ function endContinuedAttempt(
   });
   clearInterrupts();
   if (outcome.status === "checkpoint") {
-    checkpointLoneAttempt(
+    checkpointTicketByEngine(
       session,
       marker,
       attempt,
@@ -7799,7 +7814,7 @@ function resolveLoneAttempt(
     // The attempt paused, so there is no done-claim and the agent's own
     // brief travels, exactly as an unverified ticket's checkpoint does
     // today; the grade lands as context only and never overrides a pause.
-    checkpointLoneAttempt(
+    checkpointTicketByEngine(
       session,
       marker,
       attempt,
@@ -7820,7 +7835,7 @@ function resolveLoneAttempt(
   }
   if (!grade) return;
   if (grade.verdict === "flag") {
-    checkpointLoneAttempt(
+    checkpointTicketByEngine(
       session,
       marker,
       attempt,
@@ -7834,12 +7849,95 @@ function resolveLoneAttempt(
   completeLoneAttempt(session, marker, result, outcome, emit);
 }
 
-// The engine-side checkpoint for a lone attempt: the engine writes the
-// checkpoint status itself (ADR-0005), lands the Brief in the canonical
-// Issue, and raises the interrupt through the same path an attempt's own
-// checkpoint uses, so the resume flow and the re-raise after a restart are
-// the existing ones.
-function checkpointLoneAttempt(
+// A verify round holding a checkpointed candidate (ADR-0034): nothing is
+// selected and nothing merges, whatever the finished candidates scored,
+// because a pause means an agent met a decision or a guess it would not
+// make, and taking a sibling's work would let that guess win unseen. The
+// ticket checkpoints. Its Brief carries each paused candidate's own brief,
+// then a line for every finished candidate with its grade and every crashed
+// one with its reason, so the operator sees what work exists before
+// answering. A crash in the same round raises no interrupt of its own: this
+// checkpoint owns the ticket. The lowest-numbered paused candidate is the
+// checkpoint's attempt, so its pane is the one held for Keep talking.
+function checkpointFanOutRound(
+  session: Session,
+  marker: TicketMarker,
+  round: TicketResult[],
+  grades: Map<number, Grade>,
+  emit: (phase: RunPhase) => void,
+): void {
+  const sorted = [...round].sort((a, b) => a.plan.attempt - b.plan.attempt);
+  const paused = sorted.filter((r) => r.status === "checkpoint");
+  const sections: string[] = [];
+  let pausedOutcome: Outcome | undefined;
+  for (const result of sorted) {
+    const attempt = result.plan.attempt;
+    if (result.status === "checkpoint") {
+      const outcome = readAttemptResult(
+        join(session.runsDir, attemptOutcomeName(marker.id, attempt, false)),
+        validateOutcome,
+      );
+      if (outcome.ok) pausedOutcome ??= outcome.outcome;
+      const brief = outcome.ok ? outcome.outcome.brief?.trim() : undefined;
+      sections.push(
+        `### Attempt ${attempt} checkpointed\n\n` +
+          (brief || ENGINE_CHECKPOINT_PLACEHOLDER),
+      );
+    } else if (result.status === "done") {
+      const grade = grades.get(attempt);
+      sections.push(
+        `### Attempt ${attempt} finished\n\n` +
+          (grade
+            ? `Graded ${grade.score}/10, verdict ${grade.verdict}.`
+            : "It has no usable grade.") +
+          (session.git
+            ? ` Its work waits unmerged on ${branchFor(session.cwd, marker.id, attempt)}.`
+            : ""),
+      );
+    } else {
+      sections.push(
+        `### Attempt ${attempt} crashed\n\n` +
+          `${result.crashReason ?? "crashed"}. Its log is ${result.logPath}.`,
+      );
+    }
+  }
+  const brief =
+    `The verify round of ${sorted.length} attempts ended with ` +
+    `${paused.length} checkpointed, so no candidate was selected and ` +
+    "nothing merged.\n\n" +
+    sections.join("\n\n") +
+    "\n\nAnswering resume resets the ticket to ready; the next round runs " +
+    "a fresh fan-out and grades it again. Closing it ends the ticket " +
+    "without merging any candidate.";
+  const attempt = paused[0].plan.attempt;
+  checkpointTicketByEngine(
+    session,
+    marker,
+    attempt,
+    brief,
+    `ticket ${marker.id}: verify round checkpointed (` +
+      `${paused.map((r) => r.plan.attempt).join(", ")} paused); ` +
+      "no candidate selected, attempt " +
+      `${attempt}'s pane is the one held`,
+    emit,
+  );
+  // The paused candidate's outcome becomes the ticket's, as a lone
+  // checkpoint's does. Its spawn proposals stay with the round: a verify
+  // candidate's proposals ride or die with selection, and none ran.
+  if (pausedOutcome) {
+    session.state = applyUpdate(session.state, {
+      outcomes: { [marker.id]: pausedOutcome },
+    });
+  }
+}
+
+// The engine-side checkpoint for a ticket whose status the engine decides
+// (a lone attempt, a flagged grade, a verify round holding a paused
+// candidate, a conflicted winner): the engine writes the checkpoint status
+// itself (ADR-0005), lands the Brief in the canonical Issue, and raises the
+// interrupt through the same path an attempt's own checkpoint uses, so the
+// resume flow and the re-raise after a restart are the existing ones.
+function checkpointTicketByEngine(
   session: Session,
   marker: TicketMarker,
   attempt: number,
@@ -7892,7 +7990,7 @@ function completeLoneAttempt(
       // lone attempt has none, so the conflict surfaces as a checkpoint
       // instead: the Brief names the conflicted files and the parked
       // attempt branch, and resume re-runs the ticket from the moved HEAD.
-      checkpointLoneAttempt(
+      checkpointTicketByEngine(
         session,
         marker,
         attempt,
@@ -8256,7 +8354,7 @@ function completeSelection(
     const merge = mergeTicket(session, marker, worktree);
     if (!merge.ok) {
       discardLosers(session, marker.id, attempt);
-      checkpointLoneAttempt(
+      checkpointTicketByEngine(
         session,
         marker,
         attempt,
