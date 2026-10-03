@@ -205,6 +205,42 @@ describe("pool settings", () => {
     expect(onDisk(dir)).toEqual({ spawnCaps: { perRun: 20 } });
   });
 
+  // "Steward may Close checkpoints" (issue #154) is a checkbox inside the
+  // Steward entry: true is kept beside the budget and the assign, false
+  // leaves it out as the default, and anything else is refused by name.
+  it("carries steward.mayClose beside the budget and assign, false leaving it out", () => {
+    const dir = pool({ steward: { budget: 3 } });
+    expect(
+      writePoolSettings(
+        dir,
+        { steward: { budget: "3", assign: { model: "judge" }, mayClose: true } },
+        { harnesses: HARNESSES },
+      ).steward,
+    ).toEqual({ budget: 3, assign: { model: "judge" }, mayClose: true });
+    expect(onDisk(dir).steward).toEqual({ budget: 3, assign: { model: "judge" }, mayClose: true });
+    expect(
+      writePoolSettings(dir, { steward: { budget: 3, mayClose: false } }, { harnesses: HARNESSES })
+        .steward,
+    ).toEqual({ budget: 3 });
+    // As the pane sends it when the box is off: the key absent.
+    expect(writePoolSettings(dir, { steward: { budget: 3 } }, { harnesses: HARNESSES }).steward).toEqual({
+      budget: 3,
+    });
+    expect(writePoolSettings(dir, { steward: { mayClose: true } }, { harnesses: HARNESSES }).steward).toEqual({
+      mayClose: true,
+    });
+  });
+
+  it("refuses a steward.mayClose that is not true or false, leaving the file as it was", () => {
+    const dir = pool({ steward: { mayClose: true } });
+    for (const bad of ["true", 1, {}]) {
+      expect(() =>
+        writePoolSettings(dir, { steward: { mayClose: bad } }, { harnesses: HARNESSES }),
+      ).toThrow("pool settings: steward.mayClose must be true or false");
+    }
+    expect(onDisk(dir)).toEqual({ steward: { mayClose: true } });
+  });
+
   // Issue #150: a cap of 0 holds every proposal for the operator.
   it("takes a cap of 0, as a number or as the pane's text", () => {
     const dir = pool({});

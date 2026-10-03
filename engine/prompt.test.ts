@@ -367,15 +367,18 @@ describe("buildContinuedTeaching", () => {
 });
 
 describe("buildStewardTeaching (ADR-0030)", () => {
-  const teaching = buildStewardTeaching({
-    spawnPath: "/pool/runs/conv-2.spawn.json",
-    own: { harness: "claude", model: "opus", drivers: "implement" },
-    defaults: { harness: "claude", model: "sonnet", drivers: "implement" },
-    perFile: 5,
-    ledgerPath: LEDGER,
-    command: "bun /engine/steward-cli.ts --pool /pool --as conv-2",
-    budget: 1,
-  });
+  const teach = (mayClose: boolean) =>
+    buildStewardTeaching({
+      spawnPath: "/pool/runs/conv-2.spawn.json",
+      own: { harness: "claude", model: "opus", drivers: "implement" },
+      defaults: { harness: "claude", model: "sonnet", drivers: "implement" },
+      perFile: 5,
+      ledgerPath: LEDGER,
+      command: "bun /engine/steward-cli.ts --pool /pool --as conv-2",
+      budget: 1,
+      mayClose,
+    });
+  const teaching = teach(false);
 
   it("names the skill, the exact command and every verb, and the budget in force", () => {
     expect(teaching).toContain("Load the my-console-steward skill");
@@ -386,6 +389,23 @@ describe("buildStewardTeaching (ADR-0030)", () => {
     expect(teaching).toContain("Your Steward budget is 1 answer per Ticket");
     expect(teaching).toContain("which Tickets merged since your last Notice");
     expect(teaching).toContain("Review waits for the operator");
+  });
+
+  // Issue #154: the close command is listed only while the pool lets the
+  // Steward Close; either way the engine's check is the rule, and state
+  // reads it live.
+  it("lists close only while Steward may Close is on, with its rule", () => {
+    expect(teaching).not.toContain("- close <ticket>");
+    expect(teaching).toContain("Closing a Ticket without merging it is the operator's in this pool");
+    expect(teaching).toContain("state says so and each Notice offers close");
+    const allowed = teach(true);
+    expect(allowed).toContain("- close <ticket> <note>: drop a Ticket waiting at a checkpoint or a merge conflict");
+    expect(allowed).toContain("always with a note saying why");
+    expect(allowed).toContain("It counts against your budget");
+    expect(allowed).toContain("A deadlocked dependent of a closed Ticket is the operator's to close");
+    expect(allowed).toContain("The operator lets you Close for now");
+    expect(allowed).not.toContain("is the operator's in this pool");
+    for (const text of [teaching, allowed]) expect(text).toContain("whether the pool lets you Close now");
   });
 
   it("states the exclusions, the hands-off rule, the push rule, and how to leave and end", () => {

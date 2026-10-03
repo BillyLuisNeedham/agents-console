@@ -74,6 +74,19 @@ export function ticketEndedNoticeText(params: {
   return lines.join("\n");
 }
 
+// A spawned Ticket closed at an Interrupt (issue #154): it ended without
+// merging, so there is no branch or diff to report, only that it was
+// dropped and the note it was dropped with.
+export function ticketClosedNoticeText(params: {
+  id: string;
+  title: string;
+  note?: string;
+}): string {
+  const lines = [`Ticket ${params.id} ("${params.title}") was closed: its work was not merged.`];
+  if (params.note?.trim()) lines.push(`Close note: ${params.note.trim()}`);
+  return lines.join("\n");
+}
+
 export function conversationEndedNoticeText(params: {
   branch: string;
   closing?: string;

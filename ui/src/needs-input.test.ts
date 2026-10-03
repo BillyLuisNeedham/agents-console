@@ -25,11 +25,21 @@ import { useDom } from "./test-dom";
 
 useDom();
 
-// The form shapes the resume-all tests need: the single-action resume form
-// for the resume kinds, the two-action approve/reject form for review. The
+// The form shapes the bulk-action tests need: resume with close for the
+// kinds Close is offered on (issue #154), the single-action resume form for
+// the other resume kinds, the two-action approve/reject form for review. The
 // projection's own mapping is pinned by project.test.ts through
 // projectNeedsInput; these fixtures only need the distinction.
 function form(kind: string): InterruptView["form"] {
+  if (kind === "checkpoint" || kind === "merge-conflict" || kind === "deadlock") {
+    return {
+      title: kind,
+      actions: [
+        { action: "resume", label: "resume", tone: "primary" },
+        { action: "close", label: "close", tone: "danger" },
+      ],
+    };
+  }
   if (kind === "review" || kind === "merge-approval") {
     return {
       title: kind,
@@ -56,6 +66,7 @@ function row(ticketId: string, kind: InterruptKind, queued = false): NeedsInputR
       kind,
       body: "",
       queued,
+      closing: false,
       form: form(kind),
       keepTalking: null,
     },
@@ -267,6 +278,20 @@ describe("NeedsInputTray waiting rows", () => {
     expect(waitingStatus(rows[1])).toBeNull();
   });
 
+  it("says a queued Close is closing, not plainly answered (issue #154)", () => {
+    const snap = queuedAnswerSnapshot();
+    snap.state.queuedAnswers = snap.state.queuedAnswers.map((answer) => ({
+      ...answer,
+      action: "close" as const,
+    }));
+    const rows = projectNeedsInput(projectPool(snap).cards);
+    expect(rows[0].interrupt.closing).toBe(true);
+    expect(waitingStatus(rows[0])).toBe("closing · waiting");
+    // A queued Close leaves nothing to tick.
+    const el = stateTray().render(rows, [], trayHandlers())!;
+    expect(el.querySelector('[data-key="ticket:A"] .needs-input-tick')).toBeNull();
+  });
+
   it("keeps a waiting row's draft pending until the boundary drains it", () => {
     const drafts = new DraftAnswers();
     const tray = stateTray(drafts);
@@ -365,6 +390,152 @@ describe("NeedsInputTray resume all", () => {
   });
 });
 
+describe("NeedsInputTray close selected (issue #154)", () => {
+  function paint(tray: NeedsInputTray, rows: NeedsInputRow[]): HTMLElement {
+    return tray.render(rows, [], trayHandlers())!;
+  }
+  const tickIn = (el: Element, cardId: string) =>
+    el.querySelector<HTMLInputElement>(`[data-key="${cardId}"] .needs-input-tick`);
+  // The test DOM fires no change on a checkbox click, so a tick is the
+  // browser's two steps spelled out.
+  const tick = (box: HTMLInputElement) => {
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  };
+
+  it("puts a tick box only on open rows whose form offers Close", () => {
+    const el = paint(stateTray(), [
+      row("01", "checkpoint"),
+      row("02", "merge-conflict"),
+      row("03", "deadlock"),
+      row("04", "crash"),
+      row("05", "config"),
+      row("06", "review"),
+      row("07", "merge-approval"),
+      row("08", "checkpoint", true),
+    ]);
+    const ticked = [...el.querySelectorAll(".needs-input-tick")].map(
+      (box) => box.closest(".needs-input-row")!.getAttribute("data-key"),
+    );
+    expect(ticked).toEqual(["ticket:01", "ticket:02", "ticket:03"]);
+  });
+
+  it("draws no close bar when no row can be closed", () => {
+    const el = paint(stateTray(), [row("01", "crash"), row("02", "review")]);
+    expect(el.querySelector(".needs-input-close-bar")).toBeNull();
+  });
+
+  it("counts the ticks on close selected, disabled with none and the note hidden", () => {
+    const tray = stateTray();
+    const rows = [row("01", "checkpoint"), row("02", "deadlock")];
+    let el = paint(tray, rows);
+    const button = () => el.querySelector<HTMLButtonElement>(".needs-input-close-selected")!;
+    expect(button().textContent).toBe("close selected 0");
+    expect(button().disabled).toBe(true);
+    expect(el.querySelector(".needs-input-close-note")).toBeNull();
+    tick(tickIn(el, "ticket:01")!);
+    tick(tickIn(el, "ticket:02")!);
+    el = paint(tray, rows);
+    expect(button().textContent).toBe("close selected 2");
+    expect(button().disabled).toBe(false);
+    expect(el.querySelector(".needs-input-close-note")).not.toBeNull();
+    expect(tickIn(el, "ticket:01")!.checked).toBe(true);
+  });
+
+  it("closes every ticked row with the one shared note, leaving each row's draft alone", async () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    tray.setNote("01", "my own note for 01");
+    tray.toggleTicked("01");
+    tray.toggleTicked("03");
+    tray.setSharedCloseNote("direction changed");
+    const rows = [row("01", "checkpoint"), row("02", "checkpoint"), row("03", "merge-conflict")];
+    const fired = tray.closeSelected(rows);
+    expect(fake.calls).toEqual([
+      { ticketId: "01", action: "close", note: "direction changed" },
+      { ticketId: "03", action: "close", note: "direction changed" },
+    ]);
+    fake.deferreds.get("01")!.resolve();
+    fake.deferreds.get("03")!.resolve();
+    await fired;
+    expect(tray.note("01")).toBe("my own note for 01");
+    // Closed rows lose their ticks, and the shared note clears once all landed.
+    expect(tray.isTicked("01")).toBe(false);
+    expect(tray.isTicked("03")).toBe(false);
+    expect(tray.sharedCloseNote).toBe("");
+  });
+
+  it("marks a failed close, keeps its tick, and retry resends the shared note, not the draft", async () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    tray.setNote("02", "the row's own draft");
+    tray.toggleTicked("01");
+    tray.toggleTicked("02");
+    tray.setSharedCloseNote("superseded");
+    const fired = tray.closeSelected([row("01", "checkpoint"), row("02", "deadlock")]);
+    fake.deferreds.get("01")!.resolve();
+    fake.deferreds.get("02")!.reject(new Error("pool resume failed: 500"));
+    await fired;
+    expect(tray.failure("02")).toEqual({
+      action: "close",
+      message: "pool resume failed: 500",
+      note: "superseded",
+    } satisfies NeedsInputFailure);
+    expect(tray.isTicked("01")).toBe(false);
+    expect(tray.isTicked("02")).toBe(true);
+    // A partial failure keeps the shared note for another go.
+    expect(tray.sharedCloseNote).toBe("superseded");
+    tray.setSharedCloseNote("typed since");
+    const retried = tray.retry("02");
+    expect(fake.calls[2]).toEqual({ ticketId: "02", action: "close", note: "superseded" });
+    fake.deferreds.get("02")!.resolve();
+    await retried;
+    expect(tray.failure("02")).toBeNull();
+    expect(tray.note("02")).toBe("the row's own draft");
+  });
+
+  it("a row's own close sends its draft, as resume does", () => {
+    const fake = fakeAnswer();
+    const tray = trayWith(fake);
+    tray.setNote("01", "obsolete now");
+    const el = paint(tray, [row("01", "checkpoint")]);
+    const close = [...el.querySelectorAll<HTMLButtonElement>('[data-key="ticket:01"] .needs-input-actions button')]
+      .find((b) => b.textContent === "close")!;
+    expect(close.className).toContain("btn-danger");
+    close.click();
+    expect(fake.calls).toEqual([{ ticketId: "01", action: "close", note: "obsolete now" }]);
+    fake.deferreds.get("01")!.resolve();
+  });
+
+  it("prunes ticks to the rows still closable", () => {
+    const tray = stateTray();
+    tray.toggleTicked("01");
+    tray.toggleTicked("02");
+    tray.pruneTicks(new Set(["02"]));
+    expect(tray.isTicked("01")).toBe(false);
+    expect(tray.isTicked("02")).toBe(true);
+  });
+
+  it("keeps a tick box's node and its tick across a re-render", () => {
+    const tray = stateTray();
+    const rows = [row("01", "checkpoint"), row("02", "checkpoint")];
+    const root = document.createElement("div");
+    const repaint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(paint(tray, rows));
+        return shell;
+      });
+    repaint();
+    const box = tickIn(root, "ticket:02")!;
+    tick(box);
+    repaint();
+    expect(tickIn(root, "ticket:02")).toBe(box);
+    expect(box.checked).toBe(true);
+    expect(tickIn(root, "ticket:01")!.checked).toBe(false);
+  });
+});
+
 describe("NeedsInputTray Keep talking (issue #139)", () => {
   // A row as the projection hands it over: `keepTalking` set only on a
   // checkpoint whose ticket still has its Held pane.
@@ -396,7 +567,7 @@ describe("NeedsInputTray Keep talking (issue #139)", () => {
       offered("01", "checkpoint", { requesting: false, failure: null }),
     ]);
     const actions = [...el.querySelectorAll('[data-key="ticket:01"] .needs-input-actions button')];
-    expect(actions.map((b) => b.textContent)).toEqual(["resume", "Keep talking"]);
+    expect(actions.map((b) => b.textContent)).toEqual(["resume", "close", "Keep talking"]);
     keepTalkingIn(el, "ticket:01")!.click();
     expect(keepTalks).toEqual(["01"]);
   });

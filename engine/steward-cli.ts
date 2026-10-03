@@ -7,6 +7,7 @@
  *
  * Verbs:
  *   answer <ticket> resume|approve|reject [note]
+ *   close <ticket> <note>                (only while the pool lets the Steward Close)
  *   keep-talking <ticket> <message>
  *   leave <ticket> <note>
  *   held adopt|discard <proposal-id>
@@ -47,6 +48,7 @@ const OPTIONS = { "--pool": "pool", "--url": "url", "--as": "conversation", "--r
 export const STEWARD_USAGE = [
   "usage: bun steward-cli.ts --pool <pool-dir> [--url <console-url>] --as <conversation> <verb> ...",
   "  answer <ticket> resume|approve|reject [note]",
+  "  close <ticket> <note>   (only while the pool lets the Steward Close)",
   "  keep-talking <ticket> <message>",
   "  leave <ticket> <note>",
   "  held adopt|discard <proposal-id>",
@@ -103,6 +105,14 @@ export function stewardCall(
       }
       const text = freeText(note, stdin);
       return post("/api/steward/answer", { ticketId, action, ...(text ? { note: text } : {}) });
+    }
+    // Close is its own verb, not an answer action, so the teaching can list
+    // it only while the pool allows it. The engine holds that rule.
+    case "close": {
+      const [ticketId, ...note] = words;
+      const text = freeText(note, stdin);
+      if (!ticketId || !text) throw new UsageError("close <ticket> <note>");
+      return post("/api/steward/answer", { ticketId, action: "close", note: text });
     }
     case "keep-talking": {
       const [ticketId, ...message] = words;
@@ -193,7 +203,11 @@ export function stewardConsoleUrls(args: {
 
 /** The state read, compact: one line per pending Interrupt, then the queue and the spawns. */
 export function formatStewardState(state: StewardStateResponse): string {
-  const lines = [`Steward ${state.steward}; budget ${state.budget} per Ticket; pool ${state.phase}.`];
+  const lines = [
+    `Steward ${state.steward}; budget ${state.budget} per Ticket; ` +
+      `Close ${state.mayClose ? "allowed (checkpoint and merge-conflict, with a note)" : "off (the operator's)"}; ` +
+      `pool ${state.phase}.`,
+  ];
   if (state.interrupts.length === 0) lines.push("Interrupts: none pending.");
   else lines.push("Interrupts:");
   for (const i of state.interrupts) {

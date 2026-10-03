@@ -85,6 +85,7 @@ import { spawnLedgerPath } from "./spawn-ledger.ts";
 import {
   conversationEndedNoticeText,
   diffStatSummary,
+  ticketClosedNoticeText,
   ticketEndedNoticeText,
   type Notice,
   type NoticeDelivery,
@@ -113,6 +114,7 @@ import {
   stewardBatchText,
   stewardBudgetOf,
   stewardCommand,
+  stewardMayCloseOf,
   type AnswerBy,
   type ConversationRole,
   type StewardItem,
@@ -593,6 +595,8 @@ export interface ConversationModule {
   ticketEnded(marker: TicketLike, branch: string, diffRange: string | null): void;
   /** A spawned Ticket checkpointed: notify its parent Conversation, if any. */
   ticketCheckpointed(marker: TicketLike, brief: string): void;
+  /** A spawned Ticket was closed without merging: notify its parent Conversation, if any. */
+  ticketClosed(marker: TicketLike, note: string | undefined): void;
   /** Whether a Conversation is live right now (ending included). */
   isLive(id: string): boolean;
   /** Ids of Conversations whose start is still in flight and has no record on disk yet. */
@@ -1393,6 +1397,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
         conversation: id,
       }),
       budget: stewardBudgetOf(config),
+      mayClose: stewardMayCloseOf(config),
     });
   }
 
@@ -2363,6 +2368,17 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     enqueue({ to: marker.spawnedBy, from: marker.id, kind: "ticket-ended", text });
   }
 
+  /**
+   * A spawned Ticket was closed (issue #154): the same "known, not just
+   * live" rule as ticketEnded. Nothing merged, so the Notice carries the
+   * closing note rather than a branch and a diff.
+   */
+  function ticketClosed(marker: TicketLike, note: string | undefined): void {
+    if (!marker.spawnedBy || !isKnown(marker.spawnedBy)) return;
+    const text = ticketClosedNoticeText({ id: marker.id, title: marker.title, note });
+    enqueue({ to: marker.spawnedBy, from: marker.id, kind: "ticket-ended", text });
+  }
+
   // A Conversation has genuinely ended (merged, ended with no commits, or
   // ended with its branch parked on reject) or crashed: drop what never
   // delivered, and tell its own parent, if it has one. Called while the
@@ -2493,6 +2509,7 @@ export function createConversations(env: ConversationEnv, host: ConversationHost
     adoptEnlistedAtBoot,
     ticketEnded,
     ticketCheckpointed,
+    ticketClosed,
     isLive: (id) => runtimes.has(id),
     reservedIds: () => reserved,
     stewardId,

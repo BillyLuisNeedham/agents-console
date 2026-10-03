@@ -82,6 +82,8 @@ export interface PoolDraft {
   stewardModel: string;
   stewardEffort: string;
   stewardDrivers: string;
+  /** "Steward may Close checkpoints" (issue #154): off unless the file says so. */
+  stewardMayClose: boolean;
 }
 
 export interface MachineDraft {
@@ -93,7 +95,7 @@ export interface MachineDraft {
   engine: string;
 }
 
-export type PoolTextField = Exclude<keyof PoolDraft, "terminal">;
+export type PoolTextField = Exclude<keyof PoolDraft, "terminal" | "stewardMayClose">;
 export type MachineTextField = Exclude<keyof MachineDraft, "terminal">;
 
 /** The "opt out of resolution" value, which the file holds as a plain string. */
@@ -120,6 +122,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   stewardModel: "",
   stewardEffort: "",
   stewardDrivers: "",
+  stewardMayClose: false,
 };
 
 /** The engine's Steward budget when the file sets none (engine/steward.ts),
@@ -174,6 +177,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     stewardModel: config.steward?.assign?.model ?? "",
     stewardEffort: config.steward?.assign?.effort ?? "",
     stewardDrivers: config.steward?.assign?.drivers ?? "",
+    stewardMayClose: config.steward?.mayClose === true,
   };
 }
 
@@ -280,6 +284,9 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
         effort: trim(draft.stewardEffort),
         drivers: trim(draft.stewardDrivers),
       },
+      // Off is the default, so it travels as an absent key and the file
+      // never holds a `mayClose: false`.
+      ...(draft.stewardMayClose ? { mayClose: true } : {}),
     },
   };
 }
@@ -409,6 +416,10 @@ export class SettingsStore {
     return this.machineDraft.terminal;
   }
 
+  get stewardMayClose(): boolean {
+    return this.poolDraft.stewardMayClose;
+  }
+
   /**
    * The boot-only keys waiting on a Restart, as the engine reports them.
    * Empty before the first read: with nothing read off disk, there is
@@ -481,6 +492,14 @@ export class SettingsStore {
   setPoolTerminal(value: boolean): void {
     if (this.poolDraft.terminal === value) return;
     this.poolDraft.terminal = value;
+    if (this.poolState === "saved") this.poolState = "idle";
+    this.poolError = null;
+    this.onChange();
+  }
+
+  setStewardMayClose(value: boolean): void {
+    if (this.poolDraft.stewardMayClose === value) return;
+    this.poolDraft.stewardMayClose = value;
     if (this.poolState === "saved") this.poolState = "idle";
     this.poolError = null;
     this.onChange();
@@ -921,8 +940,9 @@ export class SettingsStore {
   }
 
   /**
-   * The Steward entry (ADR-0030): its budget and its Assignment. Both reload
-   * at the next boundary, like the Spawn caps, so neither carries a badge.
+   * The Steward entry (ADR-0030): its budget, its Assignment, and whether it
+   * may Close (issue #154). All reload at the next boundary, like the Spawn
+   * caps, so none carries a badge.
    * The Assignment's empty fields show the pool defaults they fall to, the
    * Steward resolving its own entry ahead of them the way the resolver does.
    */
@@ -984,6 +1004,24 @@ export class SettingsStore {
         ),
         false,
         "the Steward's Assignment; empty fields use the pool defaults",
+      ),
+      this.renderField(
+        "pool-stewardMayClose",
+        "steward close",
+        h(
+          "label",
+          { class: "settings-check" },
+          h("input", {
+            type: "checkbox",
+            key: "pool-stewardMayClose-input",
+            checked: this.poolDraft.stewardMayClose,
+            onchange: (event: Event) =>
+              this.setStewardMayClose((event.currentTarget as HTMLInputElement).checked),
+          }),
+          h("span", {}, "Steward may Close checkpoints"),
+        ),
+        false,
+        "on, the Steward may close a checkpoint or merge conflict without merging; off, only you can",
       ),
     ];
   }
