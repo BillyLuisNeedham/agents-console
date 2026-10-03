@@ -183,7 +183,9 @@ function normaliseKey(
 // emptied goes back to its default (a budget of 5, the pool defaults). The
 // budget is a text input, so a numeric string is a budget; anything but a
 // whole number of 1 or more is refused by name, as the engine refuses it at
-// reload. A named harness must be one the pool knows.
+// reload. A named harness must be one the pool knows. "Steward may Close
+// checkpoints" (issue #154) is a checkbox: true is kept, false or absent
+// leaves it out, since off is the default.
 function normaliseSteward(value: unknown, harnesses: string[]): StewardConfig | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("pool settings: steward must be an object");
@@ -217,6 +219,12 @@ function normaliseSteward(value: unknown, harnesses: string[]): StewardConfig | 
       requireKnownHarness("pool settings: steward.assign.harness", assign.harness, harnesses);
     }
     if (Object.keys(assign).length > 0) out.assign = assign;
+  }
+  if (raw.mayClose !== undefined && raw.mayClose !== null) {
+    if (typeof raw.mayClose !== "boolean") {
+      throw new Error("pool settings: steward.mayClose must be true or false");
+    }
+    if (raw.mayClose) out.mayClose = true;
   }
   return Object.keys(out).length === 0 ? undefined : out;
 }

@@ -35,6 +35,11 @@ import type { SessionSocket } from "../src/session";
 const SELECTED_TICKET = "t-3";
 const DONE_TICKET = "t-2";
 const CHANGED_TICKET = "t-1";
+// A second row that offers Close (issue #154), beside the selected ticket's
+// checkpoint, so "close selected" has two rows to tick.
+const SECOND_CHECKPOINT = "t-8";
+// A ticket closed at a checkpoint (issue #154), drawn faded and grey.
+const CLOSED_TICKET = "t-31";
 const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textarea.needs-input-note`;
 /** The Steward on duty (ADR-0030), and the note it left on the selected
  *  ticket's checkpoint, which the tray row and the Detail both show. */
@@ -68,7 +73,8 @@ function ticket(id: string, overrides: Partial<EnrichedTicketState> = {}): Enric
   };
   // The Reassign view the wire carries (issue #126): derived so a done or
   // in-flight fixture ticket is not claimed as reassignable.
-  const eligible = base.liveAttempt === null && base.status !== "done";
+  const eligible =
+    base.liveAttempt === null && base.status !== "done" && base.status !== "closed";
   return {
     ...base,
     reassign: base.reassign ?? {
@@ -123,7 +129,10 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // every in-progress ticket above carries one.
     ...Array.from({ length: 12 }, (_, i) =>
       // One of them enlisted, so the dialog renders its "harness only" tag.
-      ticket(`t-${i + 20}`, { status: "ready", enlisted: i === 0 }),
+      ticket(`t-${i + 20}`, {
+        status: `t-${i + 20}` === CLOSED_TICKET ? "closed" : "ready",
+        enlisted: i === 0,
+      }),
     ),
   ];
   return {
@@ -220,7 +229,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         { ticketId: "t-1", kind: "merge-approval", body: lines("merge", 10) },
         ...Array.from({ length: 12 }, (_, i) => ({
           ticketId: `t-${i + 8}`,
-          kind: "crash" as const,
+          kind: `t-${i + 8}` === SECOND_CHECKPOINT ? ("checkpoint" as const) : ("crash" as const),
           body: lines("crash", 3),
         })),
       ],
@@ -898,6 +907,95 @@ async function stewardChecks(): Promise<void> {
   }
 }
 
+/**
+ * Close selected (issue #154): two closable rows ticked from their boxes
+ * keep their tick box nodes and their ticks across poll renders and a live
+ * snapshot, and the close bar (count, shared note, button) is on screen and
+ * fits the tray's width. A closed ticket's card reads closed, faded, in its
+ * own state class.
+ */
+async function closeSelectedChecks(): Promise<void> {
+  const name = "close selected";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const tickOf = (id: string) =>
+    q<HTMLInputElement>(`.needs-input-row[data-key="${card(id)}"] .needs-input-tick`);
+  const first = tickOf(SELECTED_TICKET);
+  const second = tickOf(SECOND_CHECKPOINT);
+  const crashTick = tickOf("t-9");
+  if (!first || !second) {
+    report.push({ scenario: name, assertion: "ticks survive renders", pass: null, detail: "tick boxes absent" });
+    return;
+  }
+  push("no tick on a crash row", crashTick === null ? null : "a crash row has a tick box", "crash rows carry none");
+  first.click();
+  second.click();
+  await settleAll();
+  let failure: string | null = null;
+  for (let pass = 1; pass <= 4; pass++) {
+    if (pass === 4) {
+      session.setSnapshot(snapshot(2, "ticket t-1 (changed again)"));
+      await settleAll();
+    } else {
+      render();
+    }
+    for (const [id, box] of [[SELECTED_TICKET, first], [SECOND_CHECKPOINT, second]] as const) {
+      const now = tickOf(id);
+      if (now !== box) failure ??= `render ${pass}: ${id}'s tick box was replaced`;
+      else if (!now.checked) failure ??= `render ${pass}: ${id} lost its tick`;
+    }
+  }
+  push("ticks survive renders", failure, "both tick box nodes and their ticks held over 4 renders");
+
+  const tray = q<HTMLElement>(".needs-input-tray");
+  const bar = q<HTMLElement>(".needs-input-close-bar");
+  const button = q<HTMLButtonElement>(".needs-input-close-selected");
+  const closeNote = q<HTMLTextAreaElement>(".needs-input-close-note");
+  if (tray && bar && button) {
+    const t = tray.getBoundingClientRect();
+    const b = button.getBoundingClientRect();
+    const n = closeNote?.getBoundingClientRect();
+    push(
+      "close selected visible with the count",
+      b.width > 0 && b.height > 0 && button.textContent === "close selected 2" && !button.disabled && closeNote
+        ? null
+        : `${Math.round(b.width)}x${Math.round(b.height)}, "${button.textContent}", disabled ${button.disabled}, note ${closeNote ? "shown" : "absent"}`,
+      `"${button.textContent}" at ${Math.round(b.width)}px, with the shared note beside it`,
+    );
+    push(
+      "close bar fits the tray width",
+      bar.scrollWidth <= bar.clientWidth + 1 && b.right <= t.right + 1 && (!n || (n.left >= t.left - 1 && n.right <= t.right + 1))
+        ? null
+        : `bar scrollWidth ${bar.scrollWidth} > clientWidth ${bar.clientWidth}, or button right ${b.right} / note ${n?.left}-${n?.right} outside the tray's ${t.left}-${t.right}`,
+      `${Math.round(bar.clientWidth)}px bar inside a ${Math.round(t.width)}px tray`,
+    );
+  } else {
+    report.push({ scenario: name, assertion: "close selected visible with the count", pass: null, detail: "close bar absent" });
+  }
+
+  const closed = q<HTMLElement>(`.node-card[data-node-id="${card(CLOSED_TICKET)}"]`);
+  const state = closed?.querySelector<HTMLElement>(".node-card-state");
+  push(
+    "closed card reads closed, faded",
+    closed &&
+      closed.classList.contains("ticket-card-closed") &&
+      getComputedStyle(closed).opacity === "0.55" &&
+      state?.textContent === "closed" &&
+      state.classList.contains("ticket-state-closed") &&
+      getComputedStyle(state).color !== getComputedStyle(document.documentElement).getPropertyValue("--status-done")
+      ? null
+      : `card ${closed ? closed.className : "absent"}, opacity ${closed ? getComputedStyle(closed).opacity : "-"}, state "${state?.textContent}"`,
+    "ticket-card-closed at 0.55, its state word closed in grey",
+  );
+
+  // Put the ticks back for whatever runs next.
+  first.click();
+  second.click();
+  session.setSnapshot(snapshot(0, null));
+  await settleAll();
+}
+
 function parsePan(transform: string): { x: number; y: number; zoom: number } {
   const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(transform);
   return m ? { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) } : { x: NaN, y: NaN, zoom: NaN };
@@ -1000,6 +1098,7 @@ async function main(): Promise<void> {
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   await stewardChecks();
+  await closeSelectedChecks();
   await settingsTyping();
 
   for (const selector of DEAD_SELECTORS) {

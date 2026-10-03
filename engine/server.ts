@@ -55,6 +55,7 @@ import {
 } from "./engine.ts";
 import { loadConversations, type ConversationRecord } from "./conversations.ts";
 import { titleOf } from "./pool-title.ts";
+import { AnswerQueuedConflict } from "./queued-answers.ts";
 import { UNASSIGNED_ASSIGNMENT_VIEW } from "./assignment.ts";
 import {
   ConfigUnreadableError,
@@ -293,6 +294,15 @@ export interface PoolServer {
    *  reason, which the POST route maps to a 409. */
   keepTalking: (ticketId: string) => Promise<KeepTalkingResponse>;
 }
+
+// Every action POST /api/resume takes, spelled out as a record so a new
+// ResumeAction that is not listed here is a compile error.
+const RESUME_ACTIONS = Object.keys({
+  resume: true,
+  approve: true,
+  reject: true,
+  close: true,
+} satisfies Record<ResumeAction, true>) as ResumeAction[];
 
 // The Reassign row a ticket the module did not answer for falls back to: it
 // is not reassignable, because nothing here can say that a write would reach
@@ -1473,7 +1483,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
   ): Promise<EnrichedSnapshot> {
     const run = currentRun;
     if (!run) throw new Error("pool not started");
-    if (action !== "resume") {
+    // A Close (issue #154) is the engine's to refuse: it knows which
+    // Interrupts a Close answers and which ids are Tickets.
+    if (action === "approve" || action === "reject") {
       // Only the run's review gate (REVIEW_TICKET_ID) and a ticket's
       // merge-approval take approve/reject; anything else is a malformed
       // request, so fail at the seam instead of the engine silently treating
@@ -1492,11 +1504,7 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         );
       }
     }
-    run.accept(
-      ticketId,
-      note,
-      action === "approve" ? true : action === "reject" ? false : undefined,
-    );
+    run.accept(ticketId, note, action);
     // The snapshot after acceptance: mid-flight it carries the queued answer
     // (the acceptance emit has already broadcast it), idle it carries the
     // processed state, since the drain and the fresh drive's first emit run
@@ -1898,14 +1906,23 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
         note?: unknown;
       };
       const ticketId = typeof body.ticketId === "string" ? body.ticketId : "";
-      const action: ResumeAction =
-        body.action === "approve" || body.action === "reject" ? body.action : "resume";
+      // An absent action is a plain resume, as it always was; an action
+      // the server does not know is a malformed request, never quietly
+      // a resume (a Close read as a Resume would merge the work).
+      if (body.action !== undefined && !RESUME_ACTIONS.includes(body.action as ResumeAction)) {
+        throw new Error(
+          `unknown action ${JSON.stringify(body.action)}: expected one of ${RESUME_ACTIONS.join(", ")}`,
+        );
+      }
+      const action = (body.action as ResumeAction | undefined) ?? "resume";
       const note = typeof body.note === "string" ? body.note : undefined;
       if (!ticketId) throw new Error("missing ticketId");
       const snapshot = await answer(ticketId, action, note);
       return answered({ snapshot }, 202);
     } catch (err) {
-      return refused(400, "error", err);
+      // A different answer already queued is a conflict with the queue,
+      // not a malformed request.
+      return refused(err instanceof AnswerQueuedConflict ? 409 : 400, "error", err);
     }
   }
 
@@ -2505,9 +2522,9 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
             switch (pathname) {
               case "/api/steward/answer": {
                 const action = text("action") as StewardAnswerRequest["action"];
-                if (!ticketId || !["resume", "approve", "reject"].includes(action)) {
+                if (!ticketId || !["resume", "approve", "reject", "close"].includes(action)) {
                   return Response.json(
-                    { reason: "ticketId and an action of resume, approve or reject are required" },
+                    { reason: "ticketId and an action of resume, approve, reject or close are required" },
                     { status: 400 },
                   );
                 }

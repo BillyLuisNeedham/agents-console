@@ -302,7 +302,7 @@ function eligibilityOf(
   if (liveAttempts.has(marker.id)) {
     return { eligible: false, reason: "an Attempt is running" };
   }
-  if (status === "done") return { eligible: false, reason: "done" };
+  if (status === "done" || status === "closed") return { eligible: false, reason: status };
   if (marker.enlistedFrom !== undefined) {
     return {
       eligible: true,

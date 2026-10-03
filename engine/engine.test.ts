@@ -11468,7 +11468,7 @@ describe("worktrees", () => {
     // is back to its own commits and the working branch still holds 01's
     // content. The re-run starts inside the same drive, so the reopen is
     // read from the snapshot stream (the settle waits for the whole re-run).
-    run.accept("02", "the resolver dropped a field", false);
+    run.accept("02", "the resolver dropped a field", "reject");
     await waitFor(() =>
       run.snapshots.some((s) =>
         s.state.log.some((l) => l.includes("ticket reopened")),
@@ -11768,7 +11768,7 @@ describe("worktrees", () => {
     // conflict pauses the pool on the hold again, so the review reject is
     // accepted without awaiting a settle and the second resolver run is
     // waited for on its own event.
-    run.accept(REVIEW_TICKET_ID, "redo 02 04", false);
+    run.accept(REVIEW_TICKET_ID, "redo 02 04", "reject");
     await waitFor(() => resolver.spawnOrder.length === 2);
     await waitFor(() =>
       run.interrupts.some((i) => i.kind === "merge-approval"),
@@ -11966,7 +11966,7 @@ describe("accept/process split", () => {
       "checkpoint",
       "answered",
     ]);
-    expect(readEventsFile(poolDir, "02").at(-1)?.payload).toEqual({
+    expect(readEventLines(poolDir, "02").at(-1)?.payload).toEqual({
       kind: "checkpoint",
     });
     const queue = readQueuedAnswers(poolDir);
@@ -12140,7 +12140,7 @@ describe("accept/process split", () => {
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
     expect(run.interrupts.map((i) => i.kind)).toEqual(["review"]);
 
-    run.accept(REVIEW_TICKET_ID, "ship it", true);
+    run.accept(REVIEW_TICKET_ID, "ship it", "approve");
 
     expect(readEventsFile(poolDir, REVIEW_TICKET_ID).map((e) => e.kind)).toEqual([
       "answered",
@@ -13143,5 +13143,431 @@ describe("Jev at boot (ADR-0020)", () => {
       "Jev unavailable (rate-limited: scripted by the test); heuristics until it answers",
       "Jev answering again",
     ]);
+  });
+});
+
+// Close (issue #154): a ticket at a checkpoint, merge-conflict or deadlock
+// Interrupt is dropped without merging. Its status is `closed`, its own
+// work goes the way a losing Attempt's does, and its dependents get a
+// deadlock Interrupt naming it rather than running on work that never lands.
+describe("Close (issue #154)", () => {
+  function issueText(poolDir: string, file: string): string {
+    return readFileSync(join(poolDir, "issues", file), "utf8");
+  }
+
+  it("closes a checkpointed ticket: marker closed, note logged and appended, branch and worktree gone, nothing merged", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      // Two tickets in one super-step: 01 works in its own worktree, and
+      // leaves a note in the worktree's copy of its ticket file.
+      "01": {
+        status: "checkpoint",
+        workFile: "one.txt",
+        commitMsg: "work-01",
+        ticketAppend: "\n## Notes\n\nthe agent's own note\n",
+      },
+      "02": { workFile: "two.txt", commitMsg: "work-02" },
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+    expect(existsSync(worktreePathFor(poolDir, "01"))).toBe(true);
+
+    const closed = await run.closeTicket("01", "the direction changed");
+
+    expect(closed.final.tickets["01"]).toBe("closed");
+    expect(issueText(poolDir, "01-t.md").split("\n")[0]).toContain("status=closed");
+    expect(issueText(poolDir, "01-t.md")).toContain("\n## Close note\n\nthe direction changed\n");
+    // The agent's note in the worktree copy survives the discard.
+    expect(issueText(poolDir, "01-t.md")).toContain("the agent's own note");
+    const answered = readEventLines(poolDir, "01").find((e) => e.kind === "answered")!;
+    expect(answered.payload).toEqual({
+      kind: "checkpoint",
+      action: "close",
+      note: "the direction changed",
+    });
+    // Discarded, never merged.
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).not.toBe(0);
+    expect(existsSync(worktreePathFor(poolDir, "01"))).toBe(false);
+    expect(existsSync(join(poolDir, "one.txt"))).toBe(false);
+    expect(git(["log", "--format=%s"]).stdout.toString()).not.toContain("work-01");
+    expect(closed.final.log).toContain(
+      `interrupt answered for 01 (checkpoint): closed; discarded ${branchFor(poolDir, "01")} unmerged, with its worktree`,
+    );
+
+    // The Review gate does not wait on the closed ticket, and the run ends
+    // done, not stalled.
+    const review = closed.interrupts.find((i) => i.kind === "review")!;
+    expect(review.body).toStartWith("every ticket is done or closed.");
+    expect(review.body).toContain("- 01: closed without merging");
+    const done = await approveReview(closed);
+    expect(done.phase).toBe("done");
+    expect(done.final.log.at(-1)).toBe("pool done: every ticket reached done or was closed (01 closed)");
+  }, 15000);
+
+  it("discards a lone verify Attempt's branch at the checkpoint its flagged grade raised", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: { ...stubConfig, assign: { "01": { verify: 1 } } },
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "a.txt", commitMsg: "work-a" },
+      "01-grader-1": { grade: { score: 2, verdict: "flag", reasons: "off target" } },
+    });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+    expect(existsSync(worktreePathFor(poolDir, "01", 1))).toBe(true);
+
+    const closed = await run.closeTicket("01");
+
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 1)]).exitCode).not.toBe(0);
+    expect(existsSync(worktreePathFor(poolDir, "01", 1))).toBe(false);
+    expect(existsSync(join(poolDir, "a.txt"))).toBe(false);
+    expect(closed.final.log).toContain(
+      `interrupt answered for 01 (checkpoint): closed; discarded ${branchFor(poolDir, "01", 1)} ` +
+        "unmerged, with its worktree",
+    );
+    // The grader had finished its work: it stays done, not closed.
+    expect(closed.final.tickets["01-grader-1"]).toBe("done");
+    expect((await approveReview(closed)).phase).toBe("done");
+  }, 20000);
+
+  it("says a worktree ticket's branch was already gone, never that its work was left in place", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { status: "checkpoint", workFile: "one.txt", commitMsg: "work-01" },
+    });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+    // Someone tidied the branch away by hand before the Close.
+    git(["worktree", "remove", "--force", worktreePathFor(poolDir, "01")]);
+    git(["branch", "-D", branchFor(poolDir, "01")]);
+
+    const closed = await run.closeTicket("01");
+
+    expect(closed.final.tickets["01"]).toBe("closed");
+    expect(closed.final.log).toContain(
+      "interrupt answered for 01 (checkpoint): closed; its branch was already gone, so there was no work to discard",
+    );
+  }, 15000);
+
+  it("still closes the ticket when discarding its work fails part way, and says what is left", async () => {
+    const { poolDir, git } = makeGitPool({
+      tickets: [readyTicket("01"), readyTicket("02")],
+      config: stubConfig,
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": { status: "checkpoint", workFile: "one.txt", commitMsg: "work-01" },
+    });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+    // The worktree's copy of the ticket file cannot be read.
+    const copy = join(worktreePathFor(poolDir, "01"), "issues", "01-t.md");
+    rmSync(copy);
+    mkdirSync(copy);
+
+    const closed = await run.closeTicket("01", "dropped anyway");
+
+    expect(closed.final.tickets["01"]).toBe("closed");
+    expect(issueText(poolDir, "01-t.md").split("\n")[0]).toContain("status=closed");
+    expect(issueText(poolDir, "01-t.md")).toContain("## Close note\n\ndropped anyway");
+    expect(closed.interrupts.some((i) => i.ticketId === "01")).toBe(false);
+    const line = closed.final.log.find((l) => l.startsWith("interrupt answered for 01 (checkpoint): closed;"))!;
+    expect(line).toContain("discarding its work failed (");
+    expect(line).toContain(`; ${branchFor(poolDir, "01")} is still there`);
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "01")]).exitCode).toBe(0);
+  }, 15000);
+
+  it("names the closed ticket at the end of a blocked chain", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    const closed = await run.closeTicket("01");
+
+    expect(closed.interrupts).toEqual([
+      { ticketId: "02", kind: "deadlock", body: "blocker 01 was closed" },
+      { ticketId: "03", kind: "deadlock", body: "blocker 02 can never complete (blocker 01 was closed)" },
+    ]);
+  });
+
+  it("leaves a lone ticket's work in place on the pool branch and says so", async () => {
+    const { poolDir, git } = makeGitPool({ tickets: [readyTicket("01")], config: stubConfig });
+    const rig = gitStubHarness(poolDir, {
+      "01": { status: "checkpoint", workFile: "one.txt", commitMsg: "work-01" },
+    });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+
+    const closed = await run.closeTicket("01");
+
+    expect(closed.final.tickets["01"]).toBe("closed");
+    expect(existsSync(join(poolDir, "one.txt"))).toBe(true);
+    expect(git(["log", "--format=%s"]).stdout.toString()).toContain("work-01");
+    expect(closed.final.log).toContain(
+      "interrupt answered for 01 (checkpoint): closed; it ran in the pool checkout, " +
+        "so its work was left in place there; nothing was reset",
+    );
+    // No note, no heading.
+    expect(issueText(poolDir, "01-t.md")).not.toContain("## Close note");
+    const done = await approveReview(closed);
+    expect(done.phase).toBe("done");
+  }, 15000);
+
+  it("discards a merge-conflicted ticket's branch on Close, merging nothing, and lifts the hold", async () => {
+    const { poolDir, git } = makeGitPool(
+      {
+        tickets: [readyTicket("01"), readyTicket("02"), readyTicket("03", "02")],
+        config: noResolverConfig,
+      },
+      { "shared.txt": "base\n" },
+    );
+    const rig = gitStubHarness(poolDir, {
+      "01": { workFile: "shared.txt", workLine: "from-01", overwrite: true, commitMsg: "work-01" },
+      "02": {
+        waitMerged: "work-01",
+        workFile: "shared.txt",
+        workLine: "from-02",
+        overwrite: true,
+        commitMsg: "work-02",
+      },
+    });
+    const run = await heldRun({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["02", "merge-conflict"]]);
+
+    git(["checkout", "--", "issues/02-t.md"]);
+    const closed = await run.closeTicket("02", "01 already covers it");
+
+    expect(markerStatuses(poolDir, ["01-t.md", "02-t.md"])).toEqual({ "01": "done", "02": "closed" });
+    expect(git(["rev-parse", "--verify", branchFor(poolDir, "02")]).exitCode).not.toBe(0);
+    expect(existsSync(worktreePathFor(poolDir, "02"))).toBe(false);
+    expect(readFileSync(join(poolDir, "shared.txt"), "utf8")).toBe("from-01\n");
+    expect(issueText(poolDir, "02-t.md")).toContain("## Close note\n\n01 already covers it");
+    // 03 waited on 02, which will now never be done: a deadlock naming it.
+    expect(closed.interrupts).toEqual([
+      { ticketId: "03", kind: "deadlock", body: "blocker 02 was closed" },
+    ]);
+  }, 15000);
+
+  it("raises a deadlock naming a closed blocker, takes Close on it, and ends the run done", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint", brief: "obsolete?" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+
+    const afterClose = await run.closeTicket("01", "superseded");
+    expect(afterClose.phase).toBe("quiescent");
+    expect(afterClose.interrupts).toEqual([
+      { ticketId: "02", kind: "deadlock", body: "blocker 01 was closed" },
+    ]);
+    expect(readEventLines(poolDir, "02").at(-1)).toMatchObject({
+      kind: "deadlock",
+      payload: { blockers: ["01"] },
+    });
+
+    // Close is one click per dependent, never a cascade.
+    const afterSecond = await run.closeTicket("02", "goes with 01");
+    expect(afterSecond.final.tickets).toEqual({ "01": "closed", "02": "closed", "03": "done" });
+    expect(afterSecond.final.log).toContain(
+      "interrupt answered for 02 (deadlock): closed; it never ran, so there was no work to discard",
+    );
+    expect(afterSecond.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    const done = await approveReview(afterSecond);
+    expect(done.phase).toBe("done");
+    expect(rig.spawnOrder).toEqual(["01", "03"]);
+  });
+
+  it("raises the dependent's deadlock when the Close is drained mid-run at a boundary, never ending stalled", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+        { file: "04-d.md", marker: "<!-- state: id=04 blocked-by=03 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const release = join(poolDir, "release-04");
+    const rig = stubHarness(poolDir, {
+      "01": { status: "checkpoint" },
+      "04": { waitFor: release },
+    });
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    // Super-step 1 checkpoints 01 and finishes 03; super-step 2 holds 04
+    // open, so the Close is accepted with a super-step in flight.
+    await waitFor(
+      () =>
+        run.interrupts.some((i) => i.ticketId === "01") &&
+        run.snapshots.at(-1)?.state.tickets["04"] === "in-progress",
+    );
+    run.accept("01", "drop it", "close");
+    expect(run.final.tickets["01"]).toBe("checkpoint");
+    writeFileSync(release, "");
+    const settled = await run.settled;
+
+    expect(settled.phase).toBe("quiescent");
+    expect(settled.final.tickets["01"]).toBe("closed");
+    expect(settled.interrupts).toEqual([
+      { ticketId: "02", kind: "deadlock", body: "blocker 01 was closed" },
+    ]);
+  });
+
+  it("closes the engine-written judges of a closed build ticket with it, and only those", async () => {
+    const poolDir = makePool({
+      tickets: [
+        {
+          file: "01-a.md",
+          marker: "<!-- state: id=01 blocked-by=none status=checkpoint -->",
+          body: "# 01\n\n## Brief\n\nshould this still happen?",
+        },
+        { file: "01-grader-1.md", marker: "<!-- state: id=01-grader-1 blocked-by=01 status=ready -->" },
+        { file: "01-head-to-head.md", marker: "<!-- state: id=01-head-to-head blocked-by=01 status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {});
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
+
+    const closed = await run.closeTicket("01");
+
+    expect(closed.final.tickets).toEqual({
+      "01": "closed",
+      "01-grader-1": "closed",
+      "01-head-to-head": "closed",
+      "02": "ready",
+    });
+    expect(closed.final.log).toContain("ticket 01-grader-1: closed with its build ticket 01");
+    expect(closed.final.log).toContain("ticket 01-head-to-head: closed with its build ticket 01");
+    // The hand-written dependent is the operator's to decide.
+    expect(closed.interrupts).toEqual([
+      { ticketId: "02", kind: "deadlock", body: "blocker 01 was closed" },
+    ]);
+    expect(rig.spawnOrder).toEqual([]);
+  });
+
+  it("refuses a Close behind a queued Resume and a Resume behind a queued Close, and Close on an Interrupt it does not answer", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+        { file: "03-c.md", marker: "<!-- state: id=03 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const release = join(poolDir, "release-02");
+    const rig = stubHarness(poolDir, {
+      "01": { statuses: ["checkpoint", "done"] },
+      "02": { statuses: ["ready", "done"], exitCodes: [1, 0], waitFor: release },
+      "03": { status: "checkpoint" },
+    });
+    const run = startPool({ poolDir, harnesses: rig.harnesses });
+    await waitFor(() => ["01", "03"].every((id) => run.interrupts.some((i) => i.ticketId === id)));
+
+    // Mid-flight: a second, different answer for a ticket would be consumed
+    // as stale at the drain with nobody told, so it is refused at once, in
+    // either order. A retry of the queued answer is still acknowledged.
+    run.accept("01", "go on");
+    expect(() => run.accept("01", "drop it", "close")).toThrow(
+      "answer: ticket 01 already has an answer queued",
+    );
+    run.accept("03", "drop it", "close");
+    expect(() => run.accept("03", "go on")).toThrow("answer: ticket 03 already has an answer queued");
+    run.accept("03", "drop it", "close");
+    const store = new QueuedAnswerStore(join(poolDir, "runs"));
+    expect(store.pending().map((a) => [a.ticketId, a.action ?? "resume"])).toEqual([
+      ["01", "resume"],
+      ["03", "close"],
+    ]);
+    // The idempotent-retry lookup tells a Close from a Resume.
+    expect(store.latestFor("01", undefined, "close")).toBeNull();
+    expect(store.latestFor("03", undefined)).toBeNull();
+    expect(store.latestFor("03", undefined, "close")?.note).toBe("drop it");
+
+    writeFileSync(release, "");
+    const settled = await run.settled;
+    expect(settled.final.tickets["01"]).not.toBe("closed");
+    expect(settled.final.tickets["03"]).toBe("closed");
+    const crash = settled.interrupts.find((i) => i.ticketId === "02");
+    expect(crash?.kind).toBe("crash");
+    await expect(run.closeTicket("02")).rejects.toThrow(
+      "close takes a checkpoint, merge-conflict or deadlock interrupt, got crash for 02",
+    );
+  });
+
+  it("does not reopen a closed ticket on a review reject", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+    const closed = await run.closeTicket("01");
+    expect(closed.interrupts.map((i) => i.kind)).toEqual(["review"]);
+
+    await expect(run.reject(REVIEW_TICKET_ID, "redo 01")).rejects.toThrow(
+      "review reject: name at least one ticket in the note (known: 02)",
+    );
+    const rejected = await run.reject(REVIEW_TICKET_ID, "redo 01 and 02");
+    expect(rejected.final.tickets["01"]).toBe("closed");
+    expect(rejected.final.log).toContain("review rejected: 02 back to ready");
+  });
+
+  it("keeps a closed ticket closed across a restart, with no Interrupt raised for it", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, { "01": { status: "checkpoint" } });
+    const first = await runPool({ poolDir, harnesses: rig.harnesses });
+    await first.closeTicket("01");
+    first.close();
+
+    const again = await runPool({ poolDir, harnesses: rig.harnesses });
+    expect(again.final.tickets).toEqual({ "01": "closed", "02": "done" });
+    expect(again.interrupts.map((i) => i.kind)).toEqual(["review"]);
+    expect(rig.spawnOrder).toEqual(["01", "02"]);
+    expect((await approveReview(again)).phase).toBe("done");
+  });
+
+  it("refuses to add a blocker to a closed ticket", async () => {
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=closed -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: stubConfig,
+    });
+    expect(addBlockerToTicket(poolDir, "01", "02")).toEqual({
+      ok: false,
+      reason: "ticket 01 is closed; blocked-by cannot be added to it",
+    });
   });
 });

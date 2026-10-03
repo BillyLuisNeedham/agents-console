@@ -390,6 +390,26 @@ describe("the Spawn caps (issue #149)", () => {
     });
   });
 
+  // Issue #154: the Steward entry's checkbox persists through the pane's own
+  // route and comes back on the next read.
+  it("saves Steward may Close checkpoints and serves it back, refusing a non-boolean", async () => {
+    const { poolDir, server } = await startRig();
+    const res = await putJson(server, "/api/settings/pool", {
+      config: { steward: { budget: "2", mayClose: true } },
+    });
+    expect(res.status).toBe(200);
+    expect(onDisk(poolDir).steward).toEqual({ budget: 2, mayClose: true });
+    expect((await getSettings(server)).pool.config.steward).toEqual({ budget: 2, mayClose: true });
+
+    const off = await putJson(server, "/api/settings/pool", { config: { steward: { budget: 2 } } });
+    expect(off.status).toBe(200);
+    expect((await getSettings(server)).pool.config.steward).toEqual({ budget: 2 });
+
+    const bad = await putJson(server, "/api/settings/pool", { config: { steward: { mayClose: "on" } } });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { error: string }).error).toContain("steward.mayClose");
+  });
+
   it("refuses a cap that is not a whole number of 0 or more with a 400 naming the field", async () => {
     const { server } = await startRig();
     const res = await putJson(server, "/api/settings/pool", {

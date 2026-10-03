@@ -25,3 +25,7 @@ To answer a checkpoint it may Resume with a note, or Keep talking with a message
 **Rejected:** an engine-side unattended mode answering Interrupts by rule or by Jev. It cannot read a Brief and coach the agent that wrote it, which is most of what an overnight checkpoint needs.
 
 **Consequences:** ADR-0018's deferral is settled for the Steward only. Other Conversations still cannot answer Interrupts. The Console's HTTP API is still unauthenticated. The Steward's command names its Conversation id, and the engine checks that id against the live Steward to attribute answers and enforce the budget. That check is an attribution check, not a security boundary.
+
+## Amendment (issue #154): the Steward may Close when the operator allows it
+
+ADR-0033 added Close, which drops a Ticket at a checkpoint without merging. The Steward may Close a checkpoint or merge conflict, with a note, only while the Pool setting "Steward may Close checkpoints" is on. It is off by default, the engine refuses a Steward Close while it is off, and the teaching lists the command only while it is on. A Steward Close counts against the Steward budget like any other answer. Closing a deadlocked Ticket stays the operator's.

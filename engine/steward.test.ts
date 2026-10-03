@@ -35,6 +35,7 @@ import {
   stewardBudgetUsed,
   stewardCommand,
   stewardItems,
+  stewardMayCloseOf,
   type StewardPoolView,
 } from "./steward.ts";
 import { parseStewardArgs, runStewardCli, stewardCall } from "./steward-cli.ts";
@@ -63,6 +64,17 @@ describe("the steward entry of console.json", () => {
     expect(() => checkStewardConfig("x")).toThrow("steward must be an object");
     expect(checkStewardConfig(undefined)).toBeUndefined();
     expect(checkStewardConfig({ budget: 3, assign: { model: "m" } })).toEqual({ budget: 3, assign: { model: "m" } });
+  });
+
+  // "Steward may Close checkpoints" (issue #154): off unless the pool says true.
+  it("reads mayClose as off unless it is true, and refuses one that is not a boolean", () => {
+    expect(stewardMayCloseOf({})).toBe(false);
+    expect(stewardMayCloseOf({ steward: { budget: 2 } })).toBe(false);
+    expect(stewardMayCloseOf({ steward: { mayClose: false } })).toBe(false);
+    expect(stewardMayCloseOf({ steward: { mayClose: true } })).toBe(true);
+    expect(() => checkStewardConfig({ mayClose: "yes" })).toThrow("steward.mayClose must be true or false");
+    expect(() => parseConfig(JSON.stringify({ steward: { mayClose: 1 } }), "/pool")).toThrow("steward.mayClose");
+    expect(checkStewardConfig({ budget: 2, mayClose: true })).toEqual({ budget: 2, mayClose: true });
   });
 
   it("is refused at boot's parse like any other malformed key", () => {
@@ -124,6 +136,7 @@ function view(overrides: Partial<StewardPoolView> = {}): StewardPoolView {
     keepTalking: () => false,
     budget: 5,
     used: () => 0,
+    mayClose: false,
     mergeQueue: [],
     merged: [],
     review: null,
@@ -159,6 +172,22 @@ describe("what the Steward is told about", () => {
     expect(checkpoint.text).toContain("Steward budget on 01: 3 of 5 answers left.");
     expect(approval.text).toContain("answer 03 approve [note], or answer 03 reject [note]");
     expect(approval.text).toContain("Steward budget on 03 is spent (5 of 5)");
+  });
+
+  it("offers close on a checkpoint and a merge conflict only while the pool lets the Steward Close", () => {
+    const interrupts = [
+      { ticketId: "01", kind: "checkpoint", body: "ask me" },
+      { ticketId: "02", kind: "merge-conflict", body: "conflict" },
+      { ticketId: "03", kind: "deadlock", body: "blocker 09 was closed" },
+      { ticketId: "04", kind: "crash", body: "died" },
+    ];
+    const off = stewardItems(view({ interrupts }));
+    for (const item of off) expect(item.text).not.toContain("close ");
+    const [checkpoint, conflict, deadlock, crash] = stewardItems(view({ interrupts, mayClose: true }));
+    expect(checkpoint.text).toContain("Answers: answer 01 resume [note], or close 01 <note>;");
+    expect(conflict.text).toContain("answer 02 resume (re-attempts the merge), or close 02 <note>;");
+    expect(deadlock.text).not.toContain("close 03");
+    expect(crash.text).not.toContain("close 04");
   });
 
   it("tells a stalled Merge queue head, and only the head", () => {
@@ -288,6 +317,15 @@ describe("the Steward's command", () => {
       conversation: "conv-1",
       closing: "all done",
     });
+    expect(stewardCall("conv-1", "close", ["01", "superseded", "by", "02"], stdin)).toEqual({
+      method: "POST",
+      path: "/api/steward/answer",
+      body: { conversation: "conv-1", ticketId: "01", action: "close", note: "superseded by 02" },
+    });
+    expect(stewardCall("conv-1", "close", ["01", "-"], stdin).body).toMatchObject({ note: "from stdin" });
+    // A close always says why; answer keeps its own three actions.
+    expect(() => stewardCall("conv-1", "close", ["01"], stdin)).toThrow("close <ticket> <note>");
+    expect(() => stewardCall("conv-1", "answer", ["01", "close", "x"], stdin)).toThrow("answer <ticket>");
     expect(() => stewardCall("conv-1", "answer", ["01", "maybe"], stdin)).toThrow("answer <ticket>");
     expect(() => stewardCall("conv-1", "dance", [], stdin)).toThrow("unknown verb");
   });
@@ -699,6 +737,77 @@ describe("the Steward's answers", () => {
     pool.run.steward.answer(id, "01", "resume");
     await until("the fourth checkpoint", () => pool.run.interrupts.some((i) => i.body.includes("four")));
   }, 60_000);
+
+  // Issue #154: Close is the operator's unless the pool lets the Steward
+  // Close, read when the answer arrives.
+  it("refuses a close while Steward may Close is off, and closes once the setting is on and reloaded", async () => {
+    const pool = await stewardPool({});
+    await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run);
+    expect(pool.run.steward.state(id).mayClose).toBe(false);
+    expect(() => pool.run.steward.answer(id, "01", "close", "superseded")).toThrow(
+      "steward: Close is off for this pool; the operator turns on Steward may Close checkpoints in Settings",
+    );
+    expect(readEvents(join(pool.poolDir, "runs"), "01").some((e) => e.kind === "answered")).toBe(false);
+
+    writeFileSync(
+      join(pool.poolDir, "console.json"),
+      JSON.stringify({ ...baseConfig, steward: { mayClose: true } }),
+    );
+    pool.run.reloadConfig();
+    expect(pool.run.final.log).toContain("config reloaded: steward");
+    expect(pool.run.steward.state(id).mayClose).toBe(true);
+    expect(() => pool.run.steward.answer(id, "01", "close", "  ")).toThrow("a close needs a note");
+
+    pool.run.steward.answer(id, "01", "close", "The plan moved on; 02 covers it.");
+    await until("the close", () => pool.run.final.tickets["01"] === "closed");
+    const events = readEvents(join(pool.poolDir, "runs"), "01");
+    expect(events.find((e) => e.kind === "answered")!.payload).toEqual({
+      kind: "checkpoint",
+      by: "steward",
+      conversation: id,
+      action: "close",
+      note: "The plan moved on; 02 covers it.",
+    });
+    // A Close counts against the budget like any answer.
+    expect(stewardBudgetUsed(events)).toBe(1);
+    const ticket = readFileSync(join(pool.poolDir, "issues", "01.md"), "utf8");
+    expect(ticket.split("\n")[0]).toContain("status=closed");
+    expect(ticket).toContain("## Close note, from the Steward\n\nThe plan moved on; 02 covers it.");
+    expect(pool.run.final.log.some((line) => line.startsWith("interrupt answered for 01 (checkpoint): closed by the Steward"))).toBe(true);
+  }, 40_000);
+
+  it("never closes a deadlocked dependent, even with Steward may Close on", async () => {
+    const pool = await stewardPool({
+      config: { steward: { mayClose: true } },
+      tickets: [
+        { file: "01.md", marker: READY, body: "# First\n\nbody" },
+        { file: "02.md", marker: "<!-- state: id=02 blocked-by=01 status=ready -->", body: "# Second\n\nbody" },
+      ],
+    });
+    await until("the checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run);
+    pool.run.steward.answer(id, "01", "close", "Not wanted any more.");
+    await until("the deadlock", () => pool.run.interrupts.some((i) => i.ticketId === "02" && i.kind === "deadlock"));
+    expect(() => pool.run.steward.answer(id, "02", "close", "its blocker is gone")).toThrow(
+      "steward: closing a deadlocked ticket is the operator's",
+    );
+    expect(pool.run.final.tickets["02"]).toBe("ready");
+  }, 40_000);
+
+  it("refuses a close once the budget is spent", async () => {
+    const pool = await stewardPool({
+      config: { steward: { budget: 1, mayClose: true } },
+      outcomes: { "01": [checkpoint("one"), checkpoint("two")] },
+    });
+    await until("the first checkpoint", () => pool.run.interrupts.some((i) => i.kind === "checkpoint"));
+    const id = await enlistSteward(pool.run);
+    pool.run.steward.answer(id, "01", "resume");
+    await until("the second checkpoint", () => pool.run.interrupts.some((i) => i.body.includes("two")));
+    expect(() => pool.run.steward.answer(id, "01", "close", "give up")).toThrow(
+      "the Steward budget on ticket 01 is spent",
+    );
+  }, 40_000);
 
   it("keeps talking with a message typed after the teaching Turn, counted on the budget", async () => {
     const pool = await stewardPool({});
