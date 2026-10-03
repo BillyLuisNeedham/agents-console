@@ -51,7 +51,6 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     mergeQueueLine: null,
     spawnLine: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
-    steward: null,
     ...overrides,
   };
 }
@@ -160,9 +159,6 @@ function mountCanvas(
     onChange: () => commit(),
     onCardTap: () => {},
     onFocusTerminal: async () => true,
-    onNewConversation: () => {},
-    onStartSteward: () => {},
-    onFocusSteward: () => {},
     onEnlist: () => {},
     onOpenSettings: () => {},
     onOpenHeldSpawns: () => {},
@@ -679,7 +675,7 @@ describe("the Steward on the canvas (ADR-0030)", () => {
       },
     };
     const view = projectPool(snapshot);
-    return model({ cards: view.cards, steward: view.steward });
+    return model({ cards: view.cards });
   }
 
   it("marks the Steward's card", () => {
@@ -690,43 +686,46 @@ describe("the Steward on the canvas (ADR-0030)", () => {
     expect(card.querySelector(".steward-badge")?.textContent).toBe("Steward");
   });
 
-  it("says a Steward is on duty in the header, a click focusing its card", () => {
-    const focused: string[] = [];
-    const { root, commit } = mountCanvas(stewardPool(), {
-      onFocusSteward: (cardId) => focused.push(cardId),
-    });
-    commit();
-    const line = root.querySelector<HTMLButtonElement>(".canvas-steward")!;
-    expect(line.textContent).toBe("Steward on duty · conv-3");
-    line.click();
-    expect(focused).toEqual(["conversation:conv-3"]);
+  // The Steward and New Conversation live in the Conversations tray, which
+  // conversations.test.ts covers; the header keeps status, view and pool tools.
+  it("keeps no Steward or New Conversation control in the header, on duty or not", () => {
+    const none = model({ cards: [{ kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 }] });
+    for (const pool of [stewardPool(), none]) {
+      const { root, commit } = mountCanvas(pool);
+      commit();
+      const header = root.querySelector<HTMLElement>(".canvas-header")!;
+      expect(header.querySelector(".canvas-steward, .canvas-start-steward, .canvas-new-conversation")).toBeNull();
+      const labels = [...header.querySelectorAll("button")].map((b) => b.textContent ?? "");
+      expect(labels.some((label) => /steward|conversation/i.test(label))).toBe(false);
+    }
   });
 
-  it("disables Start Steward with the reason while one is on duty", () => {
-    const { root, commit } = mountCanvas(stewardPool());
-    commit();
-    const start = root.querySelector<HTMLButtonElement>(".canvas-start-steward")!;
-    expect(start.disabled).toBe(true);
-    expect(start.title).toContain("already on duty (conv-3)");
-  });
-
-  it("offers Start Steward, and no on-duty line, while none is", () => {
-    const started: number[] = [];
+  it("orders the tools: view tools, a separator, then pool tools", () => {
     const { root, commit } = mountCanvas(
-      model({ cards: [{ kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 }] }),
-      { onStartSteward: () => started.push(1) },
+      model({
+        terminalBacked: true,
+        cards: [{ kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 }],
+      }),
     );
     commit();
-    expect(root.querySelector(".canvas-steward")).toBeNull();
-    const start = root.querySelector<HTMLButtonElement>(".canvas-start-steward")!;
-    expect(start.disabled).toBe(false);
-    start.click();
-    expect(started).toEqual([1]);
+    const tools = [...root.querySelector(".canvas-tools")!.children].map((el) =>
+      el.classList.contains("canvas-tools-sep") ? "|" : (el.textContent ?? "").trim(),
+    );
+    expect(tools).toEqual([
+      "right angles",
+      "−",
+      "+",
+      "reset",
+      "reset layout",
+      "|",
+      "Enlist terminal",
+      "Settings",
+    ]);
   });
 });
 
 describe("Notices not landing on the canvas", () => {
-  it("warns on the card and turns the Steward's on-duty line amber, the error on hover", () => {
+  it("warns on the card, the error on hover", () => {
     const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };
     const snapshot: EnrichedSnapshot = {
       seq: 1,
@@ -766,15 +765,12 @@ describe("Notices not landing on the canvas", () => {
       },
     };
     const view = projectPool(snapshot);
-    const { root, commit } = mountCanvas(model({ cards: view.cards, steward: view.steward }));
+    const { root, commit } = mountCanvas(model({ cards: view.cards }));
     commit();
     const warn = root.querySelector<HTMLElement>(
       '[data-conversation-id="conv-3"] .conversation-delivery-warn',
     );
     expect(warn?.textContent).toContain("Notices not reaching this pane");
     expect(warn?.title).toBe("a dialog is open");
-    const line = root.querySelector<HTMLElement>(".canvas-steward")!;
-    expect(line.classList.contains("canvas-steward-warn")).toBe(true);
-    expect(line.title).toContain("a dialog is open");
   });
 });

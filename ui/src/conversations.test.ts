@@ -334,14 +334,74 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
       title: "Steward",
       delivery: null,
     };
-    const handlers = { onSelect: () => {} };
+    const handlers = { onSelect: () => {}, onFocusSteward: () => {} };
 
-    it("disables the tray's start steward toggle with the reason while one is on duty", () => {
+    it("pins the on-duty box first, its name focusing the Steward's card", () => {
       const { tray } = trayHarness();
-      const el = tray.render([], {}, handlers, { onDuty, defaults: {} });
-      const toggle = el.querySelector<HTMLButtonElement>(".conversations-steward-toggle")!;
-      expect(toggle.disabled).toBe(true);
-      expect(toggle.title).toContain("conv-3");
+      const focused: string[] = [];
+      const selected: string[] = [];
+      const el = tray.render(
+        [],
+        {},
+        { onSelect: (id) => selected.push(id), onFocusSteward: (id) => focused.push(id) },
+        { onDuty, defaults: {} },
+      );
+      const box = el.firstElementChild as HTMLElement;
+      expect(box.classList.contains("steward-box")).toBe(true);
+      expect(box.classList.contains("steward-box-off")).toBe(false);
+      expect(box.classList.contains("steward-box-warn")).toBe(false);
+      expect(box.querySelector(".steward-box-label")?.textContent).toBe("steward on duty");
+      expect(box.querySelector(".steward-box-warn-text")).toBeNull();
+      // No second Steward can start while one is on duty, so no toggle.
+      expect(box.querySelector(".conversations-steward-toggle")).toBeNull();
+      const name = box.querySelector<HTMLButtonElement>(".steward-box-name")!;
+      expect(name.textContent).toBe("Steward · conv-3");
+      name.click();
+      expect(focused).toEqual(["conversation:conv-3"]);
+      expect(selected).toEqual([]);
+    });
+
+    it("turns the on-duty box amber with the warning while its Notices are not landing", () => {
+      const { tray } = trayHarness();
+      const delivery = { text: "Notices not reaching this pane since 02:05", lastError: "a dialog is open" };
+      const el = tray.render([], {}, handlers, { onDuty: { ...onDuty, delivery }, defaults: {} });
+      const box = el.querySelector<HTMLElement>(".steward-box")!;
+      expect(box.classList.contains("steward-box-warn")).toBe(true);
+      expect(box.querySelector(".steward-box-warn-text")?.textContent).toBe(delivery.text);
+      expect(box.querySelector<HTMLElement>(".steward-box-name")!.title).toContain("a dialog is open");
+    });
+
+    it("offers start steward in a dashed box while none is on duty, the form opening under it", () => {
+      const { tray } = trayHarness();
+      const el = tray.render([], {}, handlers, { onDuty: null, defaults: {} });
+      const box = el.firstElementChild as HTMLElement;
+      expect(box.classList.contains("steward-box-off")).toBe(true);
+      expect(box.querySelector(".steward-box-label")?.textContent).toBe("no steward on duty");
+      const toggle = box.querySelector<HTMLButtonElement>(".conversations-steward-toggle")!;
+      expect(toggle.textContent).toBe("start steward");
+      toggle.click();
+      const open = tray.render([], {}, handlers, { onDuty: null, defaults: {} });
+      const order = [...open.children].map((c) => c.className);
+      expect(order[0]).toContain("steward-box");
+      expect(order[1]).toContain("steward-form");
+      expect(order[2]).toBe("conversations-head");
+      expect(open.querySelector(".conversations-steward-toggle")?.textContent).toBe("cancel");
+    });
+
+    it("heads the list with the count and a single + new toggle that opens the form under it", () => {
+      const { tray } = trayHarness();
+      const el = tray.render([], {}, handlers);
+      const head = el.querySelector<HTMLElement>(".conversations-head")!;
+      expect(head.querySelector(".conversations-count")?.textContent).toBe("conversations · 0");
+      const toggles = head.querySelectorAll<HTMLButtonElement>("button");
+      expect(toggles.length).toBe(1);
+      expect(toggles[0]!.textContent).toBe("+ new");
+      toggles[0]!.click();
+      expect(tray.isFormOpen).toBe(true);
+      const open = tray.render([], {}, handlers);
+      const openHead = open.querySelector<HTMLElement>(".conversations-head")!;
+      expect(openHead.querySelector("button")?.textContent).toBe("cancel");
+      expect(openHead.nextElementSibling?.classList.contains("conversations-form")).toBe(true);
     });
 
     it("shows the Steward entry's Assignment as placeholders, and disables Start once one is on duty", () => {
@@ -399,7 +459,7 @@ describe("ConversationsTray: Notices not landing", () => {
         },
       ],
       {},
-      { onSelect: () => {} },
+      { onSelect: () => {}, onFocusSteward: () => {} },
     );
     const row = el.querySelector(".conversations-row")!;
     expect(row.classList.contains("conversations-row-blocked")).toBe(true);
