@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { SpawnAssignRequest } from "./assignment.ts";
 import { cachedByStamp } from "./stat-cache.ts";
 
 const TICKET_STATUSES = [
@@ -32,6 +33,46 @@ export interface TicketMarker {
    * for files that carry it.
    */
   enlistedFrom?: string;
+  /**
+   * Set on engine-adopted spawn tickets whose proposal carried an `assign`
+   * (issue #116): the child's requested Assignment, persisted so every
+   * resolution pass honours it, not only the run that adopted it. It ranks
+   * under the operator's console.json assign entry for the id and over the
+   * parent's Assignment. The engine writes the field.
+   */
+  spawnAssign?: SpawnAssignRequest;
+}
+
+const SPAWN_ASSIGN_FIELDS = ["harness", "model", "effort", "drivers"] as const;
+
+// The marker carries the request as one whitespace-free token (the marker
+// line is split on whitespace, and `drivers` may contain a space), so it is
+// encoded JSON rather than raw. These two functions are the only codec.
+export function encodeSpawnAssign(assign: SpawnAssignRequest): string {
+  return encodeURIComponent(JSON.stringify(assign));
+}
+
+function decodeSpawnAssign(raw: string, file: string): SpawnAssignRequest {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeURIComponent(raw));
+  } catch {
+    throw new Error(`pool load: ${file}: spawn-assign is not valid encoded JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`pool load: ${file}: spawn-assign must be a JSON object`);
+  }
+  const a = parsed as Record<string, unknown>;
+  const request: SpawnAssignRequest = {};
+  for (const field of SPAWN_ASSIGN_FIELDS) {
+    const value = a[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string") {
+      throw new Error(`pool load: ${file}: spawn-assign.${field} is not a string`);
+    }
+    request[field] = value;
+  }
+  return request;
 }
 
 export const MARKER_RE = /^<!--\s*state:\s*(.+?)\s*-->\s*$/;
@@ -65,6 +106,7 @@ function parseMarkerLine(
     blockedRaw === "none" ? [] : blockedRaw.split(",").filter(Boolean);
   const spawnedBy = fields.get("spawned-by");
   const enlistedFrom = fields.get("enlisted-from");
+  const spawnAssignRaw = fields.get("spawn-assign");
   return {
     id,
     file,
@@ -72,6 +114,9 @@ function parseMarkerLine(
     status: status as TicketStatus,
     ...(spawnedBy ? { spawnedBy } : {}),
     ...(enlistedFrom ? { enlistedFrom } : {}),
+    ...(spawnAssignRaw !== undefined
+      ? { spawnAssign: decodeSpawnAssign(spawnAssignRaw, file) }
+      : {}),
   };
 }
 

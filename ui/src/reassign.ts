@@ -672,7 +672,7 @@ export class ReassignStore {
       h(
         "div",
         { class: "dim reassign-form-note" },
-        "leave keeps a field as each ticket has it; set pins the same value on every ticked ticket; clear drops the ticket's own entry so it follows its parent or the pool defaults again",
+        "leave keeps a field as each ticket has it; set pins the same value on every ticked ticket; clear drops the ticket's own entry so it follows its Spawn request, its parent or the pool defaults again",
       ),
       this.renderBulkField("harness", "harness"),
       this.renderBulkField("model", "model"),
@@ -791,8 +791,9 @@ function fieldPill(
 }
 
 /**
- * A field's provenance as a small pill: pinned on the ticket, inherited from
- * its parent or build ticket, taken from the pool defaults, or nowhere at
+ * A field's provenance as a small pill: pinned on the ticket, requested by
+ * the Spawn proposal that created it, inherited from its parent or build
+ * ticket, taken from the pool defaults, or nowhere at
  * all. The one thing that says whether editing the pool defaults would move
  * this ticket.
  */
@@ -809,6 +810,7 @@ export function renderSource(source: AssignmentSource): HTMLElement {
 
 const SOURCE_TITLES: Record<AssignmentSource, string> = {
   pinned: "this ticket's own assign entry sets this field",
+  requested: "requested by the Spawn proposal that created this ticket",
   inherited: "taken from this ticket's parent or build ticket",
   default: "taken from the pool defaults; editing them moves this ticket",
   unset: "nothing sets this field",

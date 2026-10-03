@@ -7946,6 +7946,159 @@ describe("spawn adoption", () => {
     });
   });
 
+  // Issue #116: the stub harness with the effort flag claude's argv carries,
+  // so a spawned event's argv shows the effort the Attempt launched on. The
+  // empty element fills the stub script's optional wait-for slot first.
+  const effortArgv = (rig: StubRig): Record<string, HarnessCommand> => ({
+    stub: (ctx) => {
+      const argv = rig.harnesses.stub!(ctx);
+      return ctx.effort ? [...argv, ...(argv.length === 7 ? [""] : []), "--effort", ctx.effort] : argv;
+    },
+  });
+  const spawnedArgv = (poolDir: string, id: string): string[] =>
+    readEventLines(poolDir, id).find((e) => e.kind === "spawned")!.payload.argv as string[];
+  const effortFlag = (argv: string[]): string[] =>
+    argv.slice(argv.indexOf("--effort"), argv.indexOf("--effort") + 2);
+
+  it("launches a ticket-proposed child on the proposal's assign, persisted on its marker", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "stub", model: "stub-model", effort: "high" } },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [{ ...proposal("Harder"), assign: { model: "child-model", effort: "max" } }],
+      },
+    });
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: effortArgv(rig) }));
+
+    expect(run.final.tickets["01-spawn-1"]).toBe("done");
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain(
+      `spawned-by=01 spawn-assign=${encodeURIComponent(
+        JSON.stringify({ model: "child-model", effort: "max" }),
+      )} -->`,
+    );
+    expect(loadPoolMarkers(join(poolDir, "issues")).find((m) => m.id === "01-spawn-1")!.spawnAssign).toEqual({
+      model: "child-model",
+      effort: "max",
+    });
+    expect(effortFlag(spawnedArgv(poolDir, "01"))).toEqual(["--effort", "high"]);
+    expect(effortFlag(spawnedArgv(poolDir, "01-spawn-1"))).toEqual(["--effort", "max"]);
+    expect(rig.spawned["01-spawn-1"]!.model).toBe("child-model");
+  });
+
+  it("writes no spawn-assign for a proposal with no assign, so the child inherits", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: { defaults: { harness: "stub", model: "stub-model" }, assign: { "01": { effort: "low" } } },
+    });
+    const rig = stubHarness(poolDir, { "01": { spawn: [proposal("Plain")] } });
+
+    await approveReview(await runPool({ poolDir, harnesses: effortArgv(rig) }));
+
+    expect(markerLine(poolDir, "01-spawn-1.md")).not.toContain("spawn-assign");
+    expect(effortFlag(spawnedArgv(poolDir, "01-spawn-1"))).toEqual(["--effort", "low"]);
+  });
+
+  it("lets the operator's assign entry for the child override the proposal's request field by field", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: {
+        defaults: { harness: "stub", model: "stub-model" },
+        assign: { "01-spawn-1": { effort: "medium" } },
+      },
+    });
+    const rig = stubHarness(poolDir, {
+      "01": {
+        spawn: [{ ...proposal("Harder"), assign: { model: "child-model", effort: "max" } }],
+      },
+    });
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: effortArgv(rig) }));
+
+    expect(effortFlag(spawnedArgv(poolDir, "01-spawn-1"))).toEqual(["--effort", "medium"]);
+    expect(rig.spawned["01-spawn-1"]!.model).toBe("child-model");
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["01-spawn-1"]).toMatchObject({ model: "child-model", effort: "medium" });
+  });
+
+  it("ignores a proposal's assign.verify, landing the rest with a log line", async () => {
+    const poolDir = makePool({
+      tickets: [readyTicket("01")],
+      config: stubConfig,
+    });
+    const rig = stubHarness(poolDir, {
+      "01": { spawn: [{ ...proposal("Graded?"), assign: { effort: "max", verify: 3 } }] },
+    });
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: effortArgv(rig) }));
+
+    expect(run.final.log).toContain(
+      "ticket 01: spawn proposal 'Graded?' asked for assign.verify; " +
+        "ignored, since whether a Ticket is graded is the operator's call",
+    );
+    expect(markerLine(poolDir, "01-spawn-1.md")).toContain(
+      `spawn-assign=${encodeURIComponent(JSON.stringify({ effort: "max" }))} -->`,
+    );
+    // One ordinary Attempt, no candidates fanned out and no grader.
+    expect(run.final.tickets["01-spawn-1"]).toBe("done");
+    expect(Object.keys(run.final.tickets).filter((id) => id.includes("grader"))).toEqual([]);
+    expect(rig.spawnOrder.filter((id) => id === "01-spawn-1")).toHaveLength(1);
+    expect(readEventLines(poolDir, "01").some((e) => e.kind === "spawn-rejected")).toBe(false);
+  });
+
+  it("resolves spawned children from their markers at a fresh start, a Conversation's included", async () => {
+    // A fresh start reads only files: the adopting run's table is gone, so
+    // the requested Assignment must come off each child's marker.
+    const req = (assign: Record<string, string>) => encodeURIComponent(JSON.stringify(assign));
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+        {
+          file: "01-spawn-1.md",
+          marker:
+            "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 " +
+            `spawn-assign=${req({ effort: "max" })} -->`,
+          body: "# 01-spawn-1: Adopted earlier\n\nAlready on disk.\n",
+        },
+        {
+          file: "conv-1-spawn-1.md",
+          marker:
+            "<!-- state: id=conv-1-spawn-1 blocked-by=none status=ready spawned-by=conv-1 " +
+            `spawn-assign=${req({ model: "child-model", effort: "max" })} -->`,
+          body: "# conv-1-spawn-1: Proposed from a Conversation\n\nAlready on disk.\n",
+        },
+        {
+          file: "conv-1-spawn-2.md",
+          marker:
+            "<!-- state: id=conv-1-spawn-2 blocked-by=none status=ready spawned-by=conv-1 " +
+            `spawn-assign=${req({ model: "child-model", effort: "max" })} -->`,
+          body: "# conv-1-spawn-2: Proposed from a Conversation\n\nAlready on disk.\n",
+        },
+      ],
+      config: {
+        defaults: { harness: "stub", model: "m", effort: "low" },
+        assign: { "conv-1-spawn-2": { model: "operator-model" } },
+      },
+    });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub model=m effort=high drivers=implement -->\n\n# conv-1\n",
+    );
+    const rig = stubHarness(poolDir, {});
+
+    const run = await approveReview(await runPool({ poolDir, harnesses: effortArgv(rig) }));
+
+    expect(run.phase).toBe("done");
+    for (const id of ["01-spawn-1", "conv-1-spawn-1", "conv-1-spawn-2"]) {
+      expect(effortFlag(spawnedArgv(poolDir, id))).toEqual(["--effort", "max"]);
+    }
+    expect(rig.spawned["conv-1-spawn-1"]!.model).toBe("child-model");
+    expect(rig.spawned["conv-1-spawn-2"]!.model).toBe("operator-model");
+  });
+
   it("holds a proposal blocked by an in-flight ticket until the blocker finishes", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01"), readyTicket("02", "01")],

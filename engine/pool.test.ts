@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPoolMarkers, readMarker } from "./pool.ts";
+import { encodeSpawnAssign, loadPoolMarkers, readMarker } from "./pool.ts";
 
 const tempDirs: string[] = [];
 
@@ -88,6 +88,55 @@ describe("spawn namespace reservation", () => {
     const markers = loadPoolMarkers(dir);
     expect(markers.map((m) => m.id)).toEqual(["01", "01-spawn-1"]);
     expect(markers[1].spawnedBy).toBe("01");
+  });
+
+  // Issue #116: a proposal's assign rides on the child's marker as one
+  // whitespace-free token.
+  it("round-trips a spawn proposal's assign off the marker, effort and a space in drivers and all", () => {
+    const assign = encodeSpawnAssign({
+      model: "child-model",
+      effort: "max",
+      drivers: "implement code-review",
+    });
+    expect(assign).not.toMatch(/\s/);
+    const file = tempFile(
+      `<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=${assign} -->\n\n# Spawned\n\nbody\n`,
+    );
+    expect(readMarker(file).spawnAssign).toEqual({
+      model: "child-model",
+      effort: "max",
+      drivers: "implement code-review",
+    });
+  });
+
+  it("keeps only the four Assignment fields off a spawn-assign, never a verify", () => {
+    const assign = encodeURIComponent(JSON.stringify({ effort: "max", verify: 3 }));
+    const file = tempFile(
+      `<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=${assign} -->\n\n# Spawned\n\nbody\n`,
+    );
+    expect(readMarker(file).spawnAssign).toEqual({ effort: "max" });
+  });
+
+  it("fails pool load on a malformed spawn-assign, naming the file", () => {
+    const dir = poolWithFiles({
+      "01-a.md": parent,
+      "01-spawn-1.md":
+        "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=not-json -->\n\n# Spawned\n\nbody\n",
+    });
+    expect(() => loadPoolMarkers(dir)).toThrow(
+      `pool load: ${join(dir, "01-spawn-1.md")}: spawn-assign is not valid encoded JSON`,
+    );
+  });
+
+  it("fails pool load on a spawn-assign field that is not a string, naming the file", () => {
+    const assign = encodeURIComponent(JSON.stringify({ effort: 5 }));
+    const dir = poolWithFiles({
+      "01-a.md": parent,
+      "01-spawn-1.md": `<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign=${assign} -->\n\n# Spawned\n\nbody\n`,
+    });
+    expect(() => loadPoolMarkers(dir)).toThrow(
+      `pool load: ${join(dir, "01-spawn-1.md")}: spawn-assign.effort is not a string`,
+    );
   });
 
   it("rejects a hand-written ticket in the reserved namespace", () => {
