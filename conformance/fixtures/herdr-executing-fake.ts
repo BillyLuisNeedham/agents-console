@@ -75,12 +75,19 @@ export interface ExecutingFakeHerdrOptions {
   workspaces?: string[];
   fail?: string[];
   /**
+   * Methods the daemon takes and never answers, its connection left open:
+   * a daemon wedged mid-call, for the client's own timeout to end.
+   */
+  hang?: string[];
+  /**
    * Called with every request the daemon receives, after it is recorded and
    * before it is answered: the seam a test drives the daemon's own world
    * from at an exact moment (closing a workspace as boot reconciliation's
-   * listing lands, say), where a timer would race the engine.
+   * listing lands, say), where a timer would race the engine. `connection`
+   * numbers the connection the request arrived on, from 1, so a test can
+   * tell one request per connection from several on one.
    */
-  onRequest?: (method: string, params: Record<string, unknown>) => void;
+  onRequest?: (method: string, params: Record<string, unknown>, connection: number) => void;
   rendered?: string;
   dropInputs?: number;
   hideInputs?: number;
@@ -145,6 +152,10 @@ export interface ExecutingFakeHerdr {
   submitted: string[];
   /** Methods that answer with an error body from now on. */
   fail: Set<string>;
+  /** Methods that are never answered from now on. */
+  hang: Set<string>;
+  /** The numbers (as `onRequest` numbers them) of the connections still open. */
+  openConnections: () => number[];
   /** Refuse the next `times` calls of this method, then answer normally again: a daemon blip, not a daemon that is down. */
   failNextCall: (method: string, times?: number) => void;
   close: () => Promise<void>;
@@ -183,6 +194,8 @@ export async function startExecutingFakeHerdr(
   let swallowRemaining = options?.swallowWrapper ?? 0;
   const shellPromptDelayMs = options?.shellPromptDelayMs ?? 0;
   const fail = new Set(options?.fail ?? []);
+  const hang = new Set(options?.hang ?? []);
+  let connectionCount = 0;
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
   const workspaces = new Set(options?.workspaces ?? []);
@@ -239,6 +252,7 @@ export async function startExecutingFakeHerdr(
   >();
   const subscribers: Socket[] = [];
   const connections = new Set<Socket>();
+  const connectionIds = new Map<Socket, number>();
   const procs: ReturnType<typeof Bun.spawn>[] = [];
   const firePaneEnd = (
     paneId: string,
@@ -266,7 +280,12 @@ export async function startExecutingFakeHerdr(
   };
   const server = createServer((socket) => {
     connections.add(socket);
-    socket.on("close", () => connections.delete(socket));
+    const connection = ++connectionCount;
+    connectionIds.set(socket, connection);
+    socket.on("close", () => {
+      connections.delete(socket);
+      connectionIds.delete(socket);
+    });
     let buf = "";
     socket.on("data", (d) => {
       buf += d.toString();
@@ -277,7 +296,9 @@ export async function startExecutingFakeHerdr(
         params: Record<string, unknown>;
       };
       requests.push({ method: msg.method, params: msg.params });
-      options?.onRequest?.(msg.method, msg.params);
+      options?.onRequest?.(msg.method, msg.params, connection);
+      // A wedged daemon: the request is taken and nothing ever comes back.
+      if (hang.has(msg.method)) return;
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
@@ -579,6 +600,8 @@ export async function startExecutingFakeHerdr(
     requests,
     submitted,
     fail,
+    hang,
+    openConnections: () => [...connectionIds.values()],
     failNextCall: (method, times = 1) => {
       failNext.set(method, (failNext.get(method) ?? 0) + times);
     },
