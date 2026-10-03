@@ -103,10 +103,12 @@ import type { TicketReassignView } from "./reassign.ts";
 import type { StewardBudgetView } from "./steward.ts";
 
 /** The action a resume request carries (POST /api/resume): `approve` and
- *  `reject` answer the review gate and merge-approval interrupts; plain
- *  `resume` answers every other kind. Declared once here; the server's
- *  answer path and the Console's client and interrupt forms all use it. */
-export type ResumeAction = "resume" | "approve" | "reject";
+ *  `reject` answer the review gate and merge-approval interrupts; `close`
+ *  drops a ticket at a checkpoint, merge-conflict or deadlock Interrupt
+ *  without merging it (issue #154); plain `resume` answers every other
+ *  kind. Declared once here; the server's answer path and the Console's
+ *  client and interrupt forms all use it. */
+export type ResumeAction = "resume" | "approve" | "reject" | "close";
 
 // ---------------------------------------------------------------------------
 // The snapshot (GET /api/state, POST /api/start and /api/resume, SSE stream)

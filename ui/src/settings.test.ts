@@ -786,3 +786,67 @@ describe("the Steward entry (ADR-0030)", () => {
     expect(root.querySelector('[data-key="pool-steward"] select')).not.toBeNull();
   });
 });
+
+describe("Steward may Close checkpoints (issue #154)", () => {
+  it("seeds the toggle from the file, off when absent", () => {
+    expect(poolDraftFrom({ steward: { mayClose: true } }).stewardMayClose).toBe(true);
+    expect(poolDraftFrom({ steward: { budget: 3 } }).stewardMayClose).toBe(false);
+    expect(EMPTY.stewardMayClose).toBe(false);
+  });
+
+  it("sends mayClose inside the whole steward entry when on, and leaves it out when off", () => {
+    expect(poolPatchFrom({ ...EMPTY, stewardBudget: "3", stewardMayClose: true }).steward).toEqual({
+      budget: 3,
+      assign: { harness: "", model: "", effort: "", drivers: "" },
+      mayClose: true,
+    });
+    expect(poolPatchFrom(EMPTY).steward).not.toHaveProperty("mayClose");
+  });
+
+  it("dirties the pool form, saves, and re-seeds from the answer", async () => {
+    const rig = await opened();
+    const before = rig.changes();
+    rig.store.setStewardMayClose(true);
+    expect(rig.changes()).toBe(before + 1);
+    expect(rig.store.poolDirty).toBe(true);
+    const save = rig.store.savePool();
+    expect(rig.poolSaves[0]!.config.steward?.mayClose).toBe(true);
+    const saved = settings();
+    saved.pool.config.steward = { mayClose: true };
+    rig.poolSaves[0]!.deferred.resolve(saved);
+    await save;
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.stewardMayClose).toBe(true);
+    rig.store.setStewardMayClose(false);
+    expect(rig.store.poolDirty).toBe(true);
+  });
+
+  it("draws the toggle beside the Steward fields and flips it from the checkbox", async () => {
+    const rig = await opened();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          rig.store.render(
+            { offered: true, state: "idle", failure: null, waiting: false },
+            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+          )!,
+        );
+        return shell;
+      });
+    paint();
+    const box = root.querySelector<HTMLInputElement>('[data-key="pool-stewardMayClose-input"]')!;
+    expect(box.checked).toBe(false);
+    expect(box.closest('[data-key="pool-stewardMayClose"]')?.textContent).toContain(
+      "Steward may Close checkpoints",
+    );
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    paint();
+    expect(rig.store.stewardMayClose).toBe(true);
+    expect(root.querySelector<HTMLInputElement>('[data-key="pool-stewardMayClose-input"]')).toBe(box);
+    expect(box.checked).toBe(true);
+  });
+});

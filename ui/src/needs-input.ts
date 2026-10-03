@@ -11,13 +11,16 @@
  * when the engine accepts the answer and rejects when it does not, so a
  * failed answer marks its own row inline ("answer failed · retry") without
  * disturbing the others. The header's bulk action fires every open
- * resume-kind row at once, each with its own note. Clicking a row's ticket
- * id selects the card and opens its Detail; its expand opens that Detail
- * full size with the note focused, for an answer too long to write in a row
- * (issue #147). State outlives any one render: the collapsed flag, the
- * failure marks and the dragged width live on the instance, the note drafts
- * in the Draft answers store the Detail shares, and a note being typed keeps
- * focus and cursor across the morph.
+ * resume-kind row at once, each with its own note. A row that can be closed
+ * carries a tick box, and "close selected" closes every ticked row with one
+ * shared note (issue #154), leaving each row's own note alone. Clicking a
+ * row's ticket id selects the card and opens its Detail; its expand opens
+ * that Detail full size with the note focused, for an answer too long to
+ * write in a row (issue #147). State outlives any one render: the collapsed
+ * flag, the failure marks, the ticks, the shared close note and the dragged
+ * width live on the instance, the note drafts in the Draft answers store the
+ * Detail shares, and a note being typed keeps focus and cursor across the
+ * morph.
  */
 
 import { h } from "./dom";
@@ -27,6 +30,7 @@ import { renderStewardNote } from "./steward";
 import {
   bulkResumeRows,
   clampNeedsInputWidth,
+  closableRows,
   NEEDS_INPUT_MAX_FRACTION,
   NEEDS_INPUT_MIN_PX,
   parseStoredNeedsInputWidth,
@@ -77,18 +81,24 @@ export interface NeedsInputHandlers {
   onExpand: (cardId: string, ticketId: string) => void;
 }
 
-/** One row's failed answer: the action a retry refires, and why it failed. */
+/** One row's failed answer: the action a retry refires, and why it failed.
+ *  `note` is set when the answer carried a note other than the row's own
+ *  draft (close selected's shared note), so a retry resends that note;
+ *  absent, a retry reads the row's draft as it stands. */
 export interface NeedsInputFailure {
   action: ResumeAction;
   message: string;
+  note?: string;
 }
 
 /**
  * The waiting line a row renders, or null while the row is open: a matching
- * Queued answer means the answer is accepted and held for the boundary.
+ * Queued answer means the answer is accepted and held for the boundary. A
+ * Close waiting says so (issue #154).
  */
 export function waitingStatus(row: NeedsInputRow): string | null {
-  return row.interrupt.queued ? "answered · waiting" : null;
+  if (!row.interrupt.queued) return null;
+  return row.interrupt.closing ? "closing · waiting" : "answered · waiting";
 }
 
 /**
@@ -112,6 +122,13 @@ export class NeedsInputTray {
   // row "answer failed · retry" until a retry (or another accepted answer)
   // clears it. A failure never touches the row's note draft.
   private readonly failures = new Map<string, NeedsInputFailure>();
+  // The rows ticked for "close selected" (issue #154), by ticket id. Starts
+  // empty and is pruned to the rows still closable on every render, so a row
+  // that resolved never comes back ticked.
+  private readonly ticked = new Set<string>();
+  // The one note "close selected" sends to every ticked row, apart from the
+  // rows' own drafts.
+  private closeNote = "";
   // Collapsed, the tray leaves only its "needs input · N" badge. Session
   // state, like the drafts: a snapshot re-render never expands it.
   private collapsed = false;
@@ -171,6 +188,32 @@ export class NeedsInputTray {
     }
   }
 
+  isTicked(ticketId: string): boolean {
+    return this.ticked.has(ticketId);
+  }
+
+  toggleTicked(ticketId: string): void {
+    if (!this.ticked.delete(ticketId)) this.ticked.add(ticketId);
+    this.onChange();
+  }
+
+  /** Drop ticks whose row can no longer be closed: answered, resolved, or
+   *  gone from the pool. */
+  pruneTicks(closableTicketIds: ReadonlySet<string>): void {
+    for (const id of [...this.ticked]) {
+      if (!closableTicketIds.has(id)) this.ticked.delete(id);
+    }
+  }
+
+  /** The note "close selected" sends; "" when none is typed. */
+  get sharedCloseNote(): string {
+    return this.closeNote;
+  }
+
+  setSharedCloseNote(value: string): void {
+    this.closeNote = value;
+  }
+
   /**
    * The canvas's reset layout (issue #147): back to the default width, the
    * stored one forgotten. Applied to the page at once, since the reset
@@ -198,30 +241,57 @@ export class NeedsInputTray {
   }
 
   /**
-   * Refire a failed row's action with its note. A no-op for a row with no
-   * failure mark.
+   * Close every ticked row at once (issue #154): one close per row, in
+   * parallel, all with the shared close note; the rows' own drafts are
+   * neither sent nor touched. A row that closes loses its tick; a failed row
+   * keeps it and is marked inline, and its retry resends the shared note.
+   * The shared note clears once every close was accepted.
+   */
+  async closeSelected(rows: NeedsInputRow[]): Promise<void> {
+    const note = this.closeNote;
+    const targets = closableRows(rows).filter((row) => this.ticked.has(row.ticketId));
+    const accepted = await Promise.all(
+      targets.map((row) => this.fire(row.ticketId, "close", note)),
+    );
+    if (accepted.length > 0 && accepted.every(Boolean) && this.closeNote === note) {
+      this.closeNote = "";
+      this.onChange();
+    }
+  }
+
+  /**
+   * Refire a failed row's action with its note: the note the failed answer
+   * carried when it was not the row's draft, the row's draft otherwise. A
+   * no-op for a row with no failure mark.
    */
   async retry(ticketId: string): Promise<void> {
     const failure = this.failures.get(ticketId);
     if (!failure) return;
-    await this.fire(ticketId, failure.action);
+    await this.fire(ticketId, failure.action, failure.note);
   }
 
-  // One answer, one row: a resolve clears the row's mark (the queued flag in
-  // the answer's own snapshot has already greyed the row, so a re-render is
-  // only needed when a mark actually drops), a reject marks it. The note
-  // draft is read at dispatch and never written, so a failure leaves it
-  // intact.
-  private async fire(ticketId: string, action: ResumeAction): Promise<void> {
+  // One answer, one row: a resolve clears the row's mark and its tick (the
+  // queued flag in the answer's own snapshot has already greyed the row, so
+  // a re-render is only needed when something actually drops), a reject
+  // marks it. The note is the row's draft unless one is given, read at
+  // dispatch and never written, so a failure leaves the draft intact.
+  // Resolves true when the engine accepted the answer.
+  private async fire(ticketId: string, action: ResumeAction, note?: string): Promise<boolean> {
     try {
-      await this.onAnswer(ticketId, action, this.note(ticketId));
-      if (this.failures.delete(ticketId)) this.onChange();
+      await this.onAnswer(ticketId, action, note ?? this.note(ticketId));
+      const unmarked = this.failures.delete(ticketId);
+      const unticked = this.ticked.delete(ticketId);
+      if (unmarked || unticked) this.onChange();
+      return true;
     } catch (err) {
-      this.failures.set(ticketId, {
+      const failure: NeedsInputFailure = {
         action,
         message: err instanceof Error ? err.message : String(err),
-      });
+      };
+      if (note !== undefined) failure.note = note;
+      this.failures.set(ticketId, failure);
       this.onChange();
+      return false;
     }
   }
 
@@ -230,7 +300,9 @@ export class NeedsInputTray {
    * renders, an idle pool shows no dead chrome. The header count is the row
    * count, waiting rows included; the bulk action's count is the open
    * resume-kind rows alone, and it stands disabled when that count is zero.
-   * Every unresolved interrupt lists, one row per card, in the projection's
+   * While any row can be closed, the close bar sits under the head: "close
+   * selected" with the ticked count, disabled at zero, and once a row is
+   * ticked the shared close note beside it. Every unresolved interrupt lists, one row per card, in the projection's
    * card order. The rows scroll under a fixed head, and the right edge is a
    * drag handle that widens the tray (issue #147).
    */
@@ -256,6 +328,7 @@ export class NeedsInputTray {
       );
     }
     const bulk = bulkResumeRows(rows);
+    const closable = closableRows(rows);
     return h(
       "div",
       {
@@ -274,7 +347,8 @@ export class NeedsInputTray {
             {
               class: "btn btn-primary needs-input-resume-all",
               disabled: bulk.length === 0,
-              title: "resume every open resume row with its note; review and merge-approval rows answer individually",
+              title:
+                "resume every open row that offers resume, each with its own note; review and merge-approval rows answer individually",
               onclick: () => {
                 void this.resumeAll(rows);
               },
@@ -295,6 +369,7 @@ export class NeedsInputTray {
           ),
         ),
       ),
+      closable.length > 0 ? this.renderCloseBar(rows, closable) : null,
       h(
         "div",
         { class: "needs-input-rows" },
@@ -302,6 +377,45 @@ export class NeedsInputTray {
         ...rows.flatMap((row) => this.renderRow(row, handlers)),
       ),
       this.renderHandle(),
+    );
+  }
+
+  // The close bar (issue #154): "close selected" fires a close at every
+  // ticked row with the one note typed here. The note box shows only once a
+  // row is ticked, so a tray nobody bulk-closes from carries no extra field.
+  private renderCloseBar(rows: NeedsInputRow[], closable: NeedsInputRow[]): HTMLElement {
+    const count = closable.filter((row) => this.ticked.has(row.ticketId)).length;
+    return h(
+      "div",
+      { class: "needs-input-close-bar", key: "needs-input-close-bar" },
+      count > 0
+        ? h("textarea", {
+            class: "interrupt-note needs-input-close-note",
+            key: "needs-input-close-note",
+            placeholder: "close note for every ticked row",
+            rows: noteRows(this.closeNote),
+            value: this.closeNote,
+            oninput: (event: Event) => {
+              const field = event.currentTarget as HTMLTextAreaElement;
+              this.closeNote = field.value;
+              field.rows = noteRows(field.value);
+            },
+          })
+        : null,
+      h(
+        "button",
+        {
+          class: "btn btn-danger needs-input-close-selected",
+          key: "needs-input-close-selected",
+          disabled: count === 0,
+          title:
+            "close every ticked ticket without merging it, all with this one note; each row's own note stays as it is",
+          onclick: () => {
+            void this.closeSelected(rows);
+          },
+        },
+        `close selected ${count}`,
+      ),
     );
   }
 
@@ -424,8 +538,9 @@ export class NeedsInputTray {
   // disable and the waiting line stands in, until the boundary snapshot
   // drops the row. A failed answer adds an inline mark under the row with
   // its retry. A checkpoint row whose Held pane is alive also offers Keep
-  // talking beside Resume (issue #139), with a refusal's reason under the
-  // row. A Steward note (ADR-0030) sits between the line and the note, with
+  // talking after its form's actions (issue #139), with a refusal's reason
+  // under the row. A row whose form offers Close and is not waiting leads
+  // with a tick box for "close selected" (issue #154). A Steward note (ADR-0030) sits between the line and the note, with
   // "Use as answer" to take it as the draft. The interrupt body stays in the
   // Detail; the row is the queue entry, not the reading surface.
   private renderRow(row: NeedsInputRow, handlers: NeedsInputHandlers): HTMLElement[] {
@@ -456,6 +571,16 @@ export class NeedsInputTray {
         h(
           "div",
           { class: "needs-input-row-line" },
+          !waiting && row.interrupt.form.actions.some((entry) => entry.action === "close")
+            ? h("input", {
+                class: "needs-input-tick",
+                key: `${row.cardId}-tick`,
+                type: "checkbox",
+                title: "tick to close with close selected",
+                checked: this.isTicked(row.ticketId),
+                onchange: () => this.toggleTicked(row.ticketId),
+              })
+            : null,
           h(
             "button",
             {

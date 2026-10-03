@@ -552,6 +552,7 @@ describe("Detail: Keep talking (issue #139)", () => {
       actions: [{ action: "resume", label: "resume", tone: "primary" }],
     },
     queued: false,
+    closing: false,
     keepTalking,
   });
 
@@ -603,6 +604,7 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
       actions: [{ action: "resume", label: "resume", tone: "primary" }],
     },
     queued: false,
+    closing: false,
     keepTalking: null,
   };
 
@@ -713,6 +715,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
       spawn,
       files: null,
       steward: null,
+      closeNote: null,
     });
     const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const base = model(detailView());
@@ -824,6 +827,7 @@ describe("Detail: the Steward (ADR-0030)", () => {
     body: "the brief",
     form: { title: "checkpoint", actions: [{ action: "resume", label: "resume", tone: "primary" }] },
     queued,
+    closing: false,
     keepTalking: null,
     stewardNote: note,
   });
@@ -836,6 +840,18 @@ describe("Detail: the Steward (ADR-0030)", () => {
     box!.querySelector<HTMLButtonElement>(".steward-note-use")!.click();
     expect(r.uses).toEqual([{ ticketId: "A", text: note.text }]);
     expect(r.answers).toEqual([]);
+  });
+
+  it("says a queued Close is closing in the waiting line (issue #154)", () => {
+    const closing = { ...interrupt(true)!, closing: true };
+    const r = paintProgress(detailView({ status: "checkpoint", interrupt: closing }));
+    expect(r.root.querySelector(".interrupt-waiting")?.textContent).toBe(
+      "closing · waiting for the next super-step boundary",
+    );
+    const plain = paintProgress(detailView({ status: "checkpoint", interrupt: interrupt(true) }));
+    expect(plain.root.querySelector(".interrupt-waiting")?.textContent).toBe(
+      "answered · waiting for the next super-step boundary",
+    );
   });
 
   it("steps the note aside with the form once an answer is queued", () => {
@@ -875,6 +891,7 @@ describe("Detail: the Steward (ADR-0030)", () => {
               spawn: null,
               files: null,
               steward: "the Steward answered checkpoint: resume · tests pass now",
+              closeNote: null,
             },
           ],
         },
@@ -882,6 +899,102 @@ describe("Detail: the Steward (ADR-0030)", () => {
     });
     expect(r.root.querySelector(".timeline-steward")?.textContent).toBe(
       "the Steward answered checkpoint: resume · tests pass now",
+    );
+  });
+});
+
+describe("Detail: a closed ticket (issue #154)", () => {
+  function paint(detail: TicketDetailView, tab: "progress" | "outcome", timeline: DetailModel["timeline"]) {
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: () => {},
+      onKeepTalking: () => {},
+      onUseStewardNote: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        pane.render(
+          {
+            ...model(detail),
+            timeline,
+            detailTabs: (["spec", "progress", "outcome"] as const).map((id) => ({
+              id,
+              label: id,
+              active: id === tab,
+              interruptDot: false,
+            })),
+          },
+          handlers,
+        ),
+      );
+      return shell;
+    });
+    return root;
+  }
+
+  const closedTimeline = (note: string): DetailModel["timeline"] => ({
+    reconstructed: false,
+    attempts: [
+      {
+        number: 1,
+        reconstructed: false,
+        running: false,
+        logFile: null,
+        streamFile: null,
+        count: 1,
+        outcome: "answered",
+        events: [
+          {
+            kind: "answered",
+            at: "2026-10-03T02:00:00Z",
+            timeLabel: "02:00:00",
+            grade: null,
+            reassignment: null,
+            spawn: null,
+            files: null,
+            steward: null,
+            closeNote: note,
+          },
+        ],
+      },
+    ],
+  });
+
+  it("says on Outcome that it was closed without merging, with the Close note", () => {
+    const root = paint(detailView({ status: "closed" }), "outcome", closedTimeline("direction changed"));
+    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
+    expect(root.querySelector(".detail-close-note")?.textContent).toBe("direction changed");
+    expect(root.textContent).not.toContain("not finished yet");
+  });
+
+  it("says closed without merging before the timeline has loaded", () => {
+    const root = paint(detailView({ status: "closed" }), "outcome", null);
+    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
+    expect(root.querySelector(".detail-close-note")).toBeNull();
+  });
+
+  it("labels the status closed in its own class and marks the operator's Close on its timeline row", () => {
+    const root = paint(detailView({ status: "closed" }), "progress", closedTimeline("superseded"));
+    const status = root.querySelector(".detail-status");
+    expect(status?.textContent).toBe("closed");
+    expect(status?.classList.contains("ticket-state-closed")).toBe(true);
+    expect(root.querySelector(".timeline-closed")?.textContent).toBe(
+      "closed without merging · superseded",
     );
   });
 });

@@ -131,6 +131,9 @@ export interface InterruptView extends Interrupt {
   form: InterruptFormView;
   /** True while an accepted answer waits for processing: answered-and-waiting. */
   queued: boolean;
+  /** True while the answer waiting is a Close (issue #154), so the waiting
+   *  line says the ticket is closing rather than plainly answered. */
+  closing: boolean;
   /**
    * Keep talking (issue #139), offered beside Resume only on an open
    * checkpoint whose ticket still has its Held pane: the operator carries
@@ -169,13 +172,17 @@ export interface KeepTalkingView {
 const RESUME: InterruptFormAction = { action: "resume", label: "resume", tone: "primary" };
 const APPROVE: InterruptFormAction = { action: "approve", label: "approve", tone: "primary" };
 const REJECT: InterruptFormAction = { action: "reject", label: "reject", tone: "danger" };
+// Close (issue #154) drops the ticket without merging it. Offered where a
+// ticket's work can become obsolete: a checkpoint, a merge conflict, and a
+// deadlock (a closed blocker's dependents among them).
+const CLOSE: InterruptFormAction = { action: "close", label: "close", tone: "danger" };
 
 const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
-  checkpoint: { title: "checkpoint", actions: [RESUME] },
+  checkpoint: { title: "checkpoint", actions: [RESUME, CLOSE] },
   config: { title: "pool config", actions: [RESUME] },
   crash: { title: "harness crash", actions: [RESUME] },
-  deadlock: { title: "deadlock", actions: [RESUME] },
-  "merge-conflict": { title: "merge conflict", actions: [RESUME] },
+  deadlock: { title: "deadlock", actions: [RESUME, CLOSE] },
+  "merge-conflict": { title: "merge conflict", actions: [RESUME, CLOSE] },
   "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
   selection: {
     title: "human selection",
@@ -242,6 +249,9 @@ interface TimelineEventView {
    *  a Keep talking, a Steward note left for the operator, a Reassign, or
    *  its own End. Null on the operator's events and every other kind. */
   steward: string | null;
+  /** An `answered` event that closed the ticket (issue #154), whoever gave
+   *  it: its note, "" when it carried none. Null on every other event. */
+  closeNote: string | null;
 }
 
 // The formatters the timeline and the delivery warning print times with,
@@ -431,7 +441,9 @@ function stewardFromPayload(kind: string, payload: Record<string, unknown>): str
       ? (INTERRUPT_FORMS[interruptKind]?.title ?? interruptKind)
       : "the interrupt";
     const action =
-      payload.action === "approve" || payload.action === "reject" ? payload.action : "resume";
+      payload.action === "approve" || payload.action === "reject" || payload.action === "close"
+        ? payload.action
+        : "resume";
     const note = text(payload.note);
     return `the Steward answered ${what}: ${action}` + (note ? ` · ${note}` : "");
   }
@@ -468,7 +480,28 @@ function decodeTimelineEvent(event: TicketEvent): TimelineEventView {
     spawn: spawn !== null && event.payload.by === "steward" ? `${spawn} · by the Steward` : spawn,
     files: FILE_EVENT_KINDS.has(event.kind) ? filesFromPayload(event.payload) : null,
     steward: stewardFromPayload(event.kind, event.payload),
+    closeNote: closeNoteFromPayload(event.kind, event.payload),
   };
+}
+
+function closeNoteFromPayload(kind: string, payload: Record<string, unknown>): string | null {
+  if (kind !== "answered" || payload.action !== "close") return null;
+  return typeof payload.note === "string" ? payload.note.trim() : "";
+}
+
+/**
+ * A closed ticket's Close note (issue #154), read off the last `answered`
+ * event that closed it in its timeline: null until the timeline has loaded,
+ * when no close is recorded, and when the close carried no note.
+ */
+export function ticketCloseNote(timeline: TimelineView | null): string | null {
+  let note: string | null = null;
+  for (const attempt of timeline?.attempts ?? []) {
+    for (const event of attempt.events) {
+      if (event.closeNote !== null) note = event.closeNote || null;
+    }
+  }
+  return note;
 }
 
 const FILE_EVENT_KINDS = new Set(["merge-conflict", "merge-blocked", "resolver"]);
@@ -932,7 +965,7 @@ export function pushVitalsSample(samples: number[], total: number): number[] {
  * an attempt that is running, including a resolver in flight on a
  * checkpointed merge (which the response's running flag already means),
  * frozen on a checkpoint whose latest response says nothing is live, and
- * hidden for done and ready tickets, for an in-progress ticket that is not
+ * hidden for done, closed and ready tickets, for an in-progress ticket that is not
  * running (a crashed attempt parked at in-progress is not live work), and
  * whenever no payload has arrived: the no-empty-flash rule. The one done
  * ticket that shows them is one whose resolver the engine says is live
@@ -945,7 +978,7 @@ export function projectVitals(
   resolverStartedAt: string | null = null,
 ): VitalsView | null {
   if (!input) return null;
-  if (status === "ready") return null;
+  if (status === "ready" || status === "closed") return null;
   if (status === "done" && (resolverStartedAt === null || !input.activity.running)) return null;
   const live = input.activity.running;
   if (status === "in-progress" && !live) return null;
@@ -1512,10 +1545,16 @@ function isAnswerQueued(
   answers: QueuedAnswer[],
   interrupt: Interrupt,
 ): boolean {
-  return answers.some(
-    (answer) =>
-      answer.ticketId === interrupt.ticketId && answer.kind === interrupt.kind,
-  );
+  return queuedAnswerFor(answers, interrupt) !== null;
+}
+
+/** The latest queued answer accepted for this interrupt, or null. */
+function queuedAnswerFor(answers: QueuedAnswer[], interrupt: Interrupt): QueuedAnswer | null {
+  for (let i = answers.length - 1; i >= 0; i -= 1) {
+    const answer = answers[i];
+    if (answer.ticketId === interrupt.ticketId && answer.kind === interrupt.kind) return answer;
+  }
+  return null;
 }
 
 function toInterruptView(
@@ -1525,11 +1564,13 @@ function toInterruptView(
   keepTalking: KeepTalkingState | undefined = undefined,
 ): InterruptView | null {
   if (!raw) return null;
-  const queued = isAnswerQueued(state.queuedAnswers, raw);
+  const answer = queuedAnswerFor(state.queuedAnswers, raw);
+  const queued = answer !== null;
   return {
     ...raw,
     form: interruptForm(raw),
     queued,
+    closing: answer?.action === "close",
     keepTalking: queued ? null : projectKeepTalking(raw, heldPane, keepTalking),
   };
 }
@@ -2257,10 +2298,12 @@ export interface PoolConfigPatch {
   spawnCaps?: { perAttempt: number | null; perRun: number | null };
   /** The Steward entry (ADR-0030), replaced whole like `defaults`: a null
    *  budget goes back to 5, an empty Assignment field to the pool defaults,
-   *  and nothing set removes the key. */
+   *  an absent `mayClose` to off (issue #154), and nothing set removes the
+   *  key. */
   steward?: {
     budget: number | null;
     assign: { harness: string; model: string; effort: string; drivers: string };
+    mayClose?: boolean;
   };
 }
 
@@ -2341,14 +2384,14 @@ export interface EnlistBlockRow {
 
 /**
  * The Enlist form's "Blocks" tick list (issue #101): every ticket not yet
- * done, in pool order. A done ticket is excluded because blocked-by gates a
- * ticket's next Attempt and a done ticket has none, so ticking it could never
- * take effect. The enlisted ticket does not exist yet, so nothing is filtered
- * for it here.
+ * done or closed, in pool order. A done or closed ticket is excluded because
+ * blocked-by gates a ticket's next Attempt and a finished ticket has none,
+ * so ticking it could never take effect. The enlisted ticket does not exist
+ * yet, so nothing is filtered for it here.
  */
 export function projectEnlistBlocks(tickets: EnrichedTicketState[]): EnlistBlockRow[] {
   return tickets
-    .filter((ticket) => ticket.status !== "done")
+    .filter((ticket) => ticket.status !== "done" && ticket.status !== "closed")
     .map((ticket) => ({ id: ticket.id, title: ticket.title }));
 }
 
@@ -2816,15 +2859,18 @@ export function projectNeedsInput(cards: PoolCardView[]): NeedsInputRow[] {
 }
 
 /**
- * True when a row's interrupt form is the single-action resume shape the
- * tray's bulk action covers: the resume kinds (checkpoint, crash, deadlock,
- * merge-conflict) and an unknown kind's plain resume fallback. Review and
- * merge-approval rows carry two actions and are answered individually.
+ * True when a row's interrupt form offers Resume and is not an
+ * approve/reject form: the resume kinds (checkpoint, crash, deadlock,
+ * merge-conflict, Close beside Resume on some of them) and an unknown
+ * kind's plain resume fallback. Review and merge-approval rows are answered
+ * individually.
  */
 function isResumeKindRow(row: NeedsInputRow): boolean {
+  const actions = row.interrupt.form.actions.map((entry) => entry.action);
   return (
-    row.interrupt.form.actions.length === 1 &&
-    row.interrupt.form.actions[0].action === "resume"
+    actions.includes("resume") &&
+    !actions.includes("approve") &&
+    !actions.includes("reject")
   );
 }
 
@@ -2836,6 +2882,19 @@ function isResumeKindRow(row: NeedsInputRow): boolean {
  */
 export function bulkResumeRows(rows: NeedsInputRow[]): NeedsInputRow[] {
   return rows.filter((row) => !row.interrupt.queued && isResumeKindRow(row));
+}
+
+/**
+ * The rows the tray's "close selected" can tick (issue #154): the open rows
+ * whose form offers Close (checkpoint, merge-conflict, deadlock). A row
+ * whose answer is already queued has nothing left to close.
+ */
+export function closableRows(rows: NeedsInputRow[]): NeedsInputRow[] {
+  return rows.filter(
+    (row) =>
+      !row.interrupt.queued &&
+      row.interrupt.form.actions.some((entry) => entry.action === "close"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2857,9 +2916,10 @@ export interface TabOverride {
 
 /**
  * The tab a ticket's Detail opens on: Progress for anything live or waiting
- * on a human, Spec before the ticket has run, Outcome once it is done. A
- * pending interrupt always wins over the status, even on a done ticket: the
- * interrupt is the action surface, and the action surface is Progress.
+ * on a human, Spec before the ticket has run, Outcome once it is done or
+ * closed. A pending interrupt always wins over the status, even on a done
+ * ticket: the interrupt is the action surface, and the action surface is
+ * Progress.
  */
 function defaultDetailTab(
   status: TicketStatus,
@@ -2873,6 +2933,7 @@ function defaultDetailTab(
     case "checkpoint":
       return "progress";
     case "done":
+    case "closed":
       return "outcome";
   }
 }

@@ -8,9 +8,17 @@ const TICKET_STATUSES = [
   "in-progress",
   "done",
   "checkpoint",
+  "closed",
 ] as const;
 
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
+
+/** A ticket that will never run again: done, or closed at an Interrupt
+ *  without merging (issue #154). Only done satisfies a `blocked-by`; this is
+ *  for the run's own end and the Review gate, which wait on neither. */
+export function isFinished(status: TicketStatus | undefined): boolean {
+  return status === "done" || status === "closed";
+}
 
 export interface TicketMarker {
   id: string;

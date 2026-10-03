@@ -534,6 +534,77 @@ describe("pool server", () => {
     await server.settled();
   });
 
+  it("takes close on a checkpoint, refuses it on a crash, and answers 400 for an unknown action (issue #154)", async () => {
+    const poolDir = makeServerPool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+      { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+    ]);
+    const server = await startServer(
+      poolDir,
+      stubHarness(poolDir, { "01": { status: "checkpoint" }, "02": { status: "keep" } }).harnesses,
+    );
+    await server.start();
+    const first = await server.settled();
+    expect(first.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([
+      ["01", "checkpoint"],
+      ["02", "crash"],
+    ]);
+    const post = (body: unknown) =>
+      fetch(`${server.url}/api/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    // An action the server does not know is never quietly a resume.
+    const unknown = await post({ ticketId: "01", action: "discard" });
+    expect(unknown.status).toBe(400);
+    expect(((await unknown.json()) as { error: string }).error).toContain('unknown action "discard"');
+    const crash = await post({ ticketId: "02", action: "close" });
+    expect(crash.status).toBe(400);
+    expect(((await crash.json()) as { error: string }).error).toContain("got crash for 02");
+    expect(existsSync(join(poolDir, "runs", "queued-answers.json"))).toBe(false);
+
+    const close = await post({ ticketId: "01", action: "close", note: "not needed now" });
+    expect(close.status).toBe(202);
+    const closed = await server.settled();
+    expect(closed.state.tickets.find((t) => t.id === "01")?.status).toBe("closed");
+    expect(closed.state.interrupts.map((i) => i.ticketId)).toEqual(["02"]);
+    // A retried Close is acknowledged again; a Resume after it is not.
+    expect((await post({ ticketId: "01", action: "close", note: "not needed now" })).status).toBe(202);
+    expect((await post({ ticketId: "01", action: "resume" })).status).toBe(400);
+  });
+
+  it("refuses close on the review gate and on a config interrupt (issue #154)", async () => {
+    const reviewDir = makeServerPool([
+      { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+    ]);
+    const review = await startServer(reviewDir, stubHarness(reviewDir, {}).harnesses);
+    await review.start();
+    expect((await review.settled()).state.interrupts[0]?.kind).toBe("review");
+    const onReview = await fetch(`${review.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: REVIEW_TICKET_ID, action: "close" }),
+    });
+    expect(onReview.status).toBe(400);
+
+    const configDir = makeServerPool(
+      [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" }],
+      { defaults: {} },
+    );
+    const config = await startServer(configDir, stubHarness(configDir, {}).harnesses);
+    await config.start();
+    expect((await config.settled()).state.interrupts[0]?.kind).toBe("config");
+    const onConfig = await fetch(`${config.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "close" }),
+    });
+    expect(onConfig.status).toBe(400);
+    expect(((await onConfig.json()) as { error: string }).error).toContain("got config for 01");
+  });
+
   it("carries queued answers in the 202, /api/state, and the socket while a super-step is in flight", async () => {
     const poolDir = makeServerPool([
       { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
@@ -577,6 +648,18 @@ describe("pool server", () => {
     ).toBe(true);
     expect(resumeBody.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
     expect(resumeBody.snapshot.state.queuedAnswers[0]?.kind).toBe("checkpoint");
+
+    // A Close behind the queued Resume would lose at the drain unseen, so it
+    // is refused as a conflict with the queue (issue #154).
+    const closeRes = await fetch(`${server.url}/api/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "01", action: "close" }),
+    });
+    expect(closeRes.status).toBe(409);
+    expect(((await closeRes.json()) as { error: string }).error).toBe(
+      "answer: ticket 01 already has an answer queued",
+    );
 
     const stateRes = await fetch(`${server.url}/api/state`);
     const stateBody = (await stateRes.json()) as { snapshot: Snap };

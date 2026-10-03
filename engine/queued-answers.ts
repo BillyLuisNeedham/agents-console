@@ -21,12 +21,20 @@ export interface QueuedAnswer {
   kind: InterruptKind;
   /** The answer payload: true approve, false reject, undefined resume. */
   approve?: boolean;
+  /** A Close (issue #154): the ticket is dropped without merging. Absent on
+   *  every other answer, so a file written before Close existed reads as
+   *  it always did. */
+  action?: "close";
   note?: string;
   /** The Steward gave it (ADR-0030); absent is the operator's. */
   by?: AnswerBy;
   at: string;
   processedAt: string | null;
 }
+
+/** An answer refused because the ticket already has a different one queued
+ *  (issue #154): a conflict with the queue, not a malformed request. */
+export class AnswerQueuedConflict extends Error {}
 
 export class QueuedAnswerStore {
   private readonly file: string;
@@ -73,17 +81,23 @@ export class QueuedAnswerStore {
 
   /**
    * The most recent accepted answer for a ticket with the same payload shape
-   * (approve strict-equal, so a resume never matches a recorded approval).
+   * (approve and action strict-equal, so a resume never matches a recorded
+   * approval or a Close).
    * This is the idempotent-resume lookup: a retried answer finds its
    * acceptance here and is acknowledged again rather than recorded twice.
    */
   latestFor(
     ticketId: string,
     approve: boolean | undefined,
+    action?: "close",
   ): QueuedAnswer | null {
     for (let i = this.answers.length - 1; i >= 0; i -= 1) {
       const answer = this.answers[i]!;
-      if (answer.ticketId === ticketId && answer.approve === approve) {
+      if (
+        answer.ticketId === ticketId &&
+        answer.approve === approve &&
+        answer.action === action
+      ) {
         return answer;
       }
     }

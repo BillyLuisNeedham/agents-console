@@ -21,6 +21,7 @@ import {
   timelineEvent,
   stewardBudgetText,
   ticketBodyHtml,
+  ticketCloseNote,
   UNASSIGNED_LABEL,
   type AssignmentSource,
   type ConversationDetailView,
@@ -325,7 +326,8 @@ export class Detail {
         h(
           "div",
           { class: "interrupt-waiting" },
-          "answered · waiting for the next super-step boundary",
+          (interrupt.closing ? "closing" : "answered") +
+            " · waiting for the next super-step boundary",
         ),
       );
       return box;
@@ -804,7 +806,7 @@ export class Detail {
         this.renderProgressTab(detail, model.timeline, model.logPane, handlers),
       );
     } else {
-      body.append(this.renderOutcomeTab(detail));
+      body.append(this.renderOutcomeTab(detail, model.timeline));
     }
     return body;
   }
@@ -1289,11 +1291,25 @@ export class Detail {
 
   // The Outcome tab: the summary and commit sha once the ticket has
   // finished, or a dim placeholder before then so the tab bar never
-  // reshapes.
+  // reshapes. A closed ticket (issue #154) says it was dropped without
+  // merging, with its Close note once the timeline has it, ahead of
+  // whatever outcome an earlier Attempt left.
   private renderOutcomeTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
+    timeline: TimelineView | null,
   ): HTMLElement {
     const outcome = detail.outcome;
+    if (detail.status === "closed") {
+      const note = ticketCloseNote(timeline);
+      return this.detailPanel(
+        h("div", { class: "detail-closed" }, "closed without merging"),
+        note ? h("pre", { class: "detail-pre detail-close-note" }, note) : null,
+        outcome?.summary
+          ? h("div", { class: "dim" }, "the last Attempt's outcome, not merged")
+          : null,
+        outcome?.summary ? h("pre", { class: "detail-pre" }, outcome.summary) : null,
+      );
+    }
     if (!outcome) {
       return this.detailPanel(h("div", { class: "dim" }, "not finished yet"));
     }
@@ -1640,7 +1656,17 @@ function renderTimelineEntry(
     event.grade ? renderGrade(event.grade) : null,
     event.reassignment ? h("div", { class: "timeline-reassigned" }, event.reassignment) : null,
     event.spawn ? h("div", { class: "timeline-spawn" }, event.spawn) : null,
-    event.steward ? h("div", { class: "timeline-steward" }, event.steward) : null,
+    event.steward
+      ? h("div", { class: "timeline-steward" }, event.steward)
+      : event.closeNote !== null
+        ? // The operator's Close (issue #154); the Steward's reads on its
+          // own line above.
+          h(
+            "div",
+            { class: "timeline-closed" },
+            "closed without merging" + (event.closeNote ? ` · ${event.closeNote}` : ""),
+          )
+        : null,
   );
 }
 

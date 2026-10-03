@@ -32,13 +32,14 @@ import {
   type CheckpointStore,
   SqliteCheckpointStore,
 } from "./checkpoints.ts";
-import { QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
+import { AnswerQueuedConflict, QueuedAnswerStore, type QueuedAnswer } from "./queued-answers.ts";
 import {
   MARKER_RE,
   encodeSpawnAssign,
   loadPoolMarkers,
   parseEnlistId,
   parseSpawnId,
+  isFinished,
   readMarker,
   writeMarkerStatus,
   type TicketMarker,
@@ -62,6 +63,8 @@ import {
   stewardBudgetUsed,
   stewardItems,
   stewardMayAnswer,
+  stewardMayCloseOf,
+  STEWARD_CLOSE_KINDS,
   type AnswerBy,
   type StewardBudgetView,
   type StewardConfig,
@@ -221,6 +224,7 @@ export { DEFAULT_SPAWN_CAPS, spawnCapsOf, type SpawnCaps } from "./spawn-caps.ts
 // keeps working now that the wrapper-shape logic lives in pane-session.ts.
 export { interactiveWrapper, RESIZE_RELAY } from "./pane-session.ts";
 import type { LaunchCadence } from "./pane-session.ts";
+import type { ResumeAction } from "./wire.ts";
 import { createJev, JEV_MODEL, type Jev, type JevCause, type JevNotice } from "./jev.ts";
 import { buildEvidence } from "./jev-evidence.ts";
 import { compose, QUESTIONS, RUBRIC_VERSION, THRESHOLDS } from "./jev-rubric.ts";
@@ -359,6 +363,12 @@ export type InterruptKind =
   | "persistence"
   | "review"
   | "selection";
+
+// The Interrupts a Close answers (issue #154): a ticket waiting at a
+// checkpoint, a merge that conflicted, and a deadlock on a blocker that will
+// never be done. Every other kind is about the run or the engine, not a
+// ticket that has lost its point.
+export const CLOSE_KINDS: readonly InterruptKind[] = ["checkpoint", "merge-conflict", "deadlock"];
 
 // The final Review interrupt is not a ticket's: it belongs to the run, and it
 // carries this id so the Console can hang it on the review utility card (the
@@ -574,7 +584,10 @@ export interface PoolRun {
   resume: (ticketId: string, note?: string) => Promise<PoolRun>;
   approve: (ticketId: string, note?: string) => Promise<PoolRun>;
   reject: (ticketId: string, note?: string) => Promise<PoolRun>;
-  accept: (ticketId: string, note?: string, approve?: boolean) => void;
+  /** Close (issue #154): drop the ticket at its checkpoint, merge-conflict
+   *  or deadlock Interrupt without merging it. */
+  closeTicket: (ticketId: string, note?: string) => Promise<PoolRun>;
+  accept: (ticketId: string, note?: string, action?: ResumeAction) => void;
   settled: Promise<PoolRun>;
   close: () => void;
   /**
@@ -654,11 +667,15 @@ export interface PoolRun {
 export interface StewardActions {
   /** Throws unless `conversation` is the live Steward. */
   check: (conversation: string) => void;
-  /** Answer on the operator's path, as the Steward's: never review or persistence, never past the budget. */
+  /**
+   * Answer on the operator's path, as the Steward's: never review or
+   * persistence, never past the budget, and close only while the pool's
+   * "Steward may Close checkpoints" is on.
+   */
   answer: (
     conversation: string,
     ticketId: string,
-    action: "resume" | "approve" | "reject",
+    action: "resume" | "approve" | "reject" | "close",
     note?: string,
   ) => void;
   /** Keep talking, the message typed after the teaching Turn; counts against the budget. */
@@ -1455,11 +1472,11 @@ function makeHandle(session: Session): PoolRun {
   const answer = (
     ticketId: string,
     note: string | undefined,
-    approve: boolean | undefined,
+    action: ResumeAction,
   ): Promise<PoolRun> => {
     let record: QueuedAnswer;
     try {
-      record = acceptAnswer(session, ticketId, note, approve);
+      record = acceptAnswer(session, ticketId, note, action);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1491,11 +1508,12 @@ function makeHandle(session: Session): PoolRun {
     get interrupts() {
       return session.state.interrupts;
     },
-    resume: (ticketId, note) => answer(ticketId, note, undefined),
-    approve: (ticketId, note) => answer(ticketId, note, true),
-    reject: (ticketId, note) => answer(ticketId, note, false),
-    accept: (ticketId, note, approve) => {
-      acceptAnswer(session, ticketId, note, approve);
+    resume: (ticketId, note) => answer(ticketId, note, "resume"),
+    approve: (ticketId, note) => answer(ticketId, note, "approve"),
+    reject: (ticketId, note) => answer(ticketId, note, "reject"),
+    closeTicket: (ticketId, note) => answer(ticketId, note, "close"),
+    accept: (ticketId, note, action = "resume") => {
+      acceptAnswer(session, ticketId, note, action);
       kickProcessing(session);
     },
     get settled() {
@@ -1766,6 +1784,10 @@ async function superStepBoundary(
     // itself, so a resume is on disk before this super-step schedules, not
     // only at its closing persist.
     drainAnswers(session);
+    // A Close the drain just applied leaves its dependents unable to run:
+    // their deadlock Interrupt is raised now, or the close below would read
+    // them as stalled with nothing for the operator to answer.
+    reconcileDeadlocks(session);
     // Spawn adoption (ADR-0010) rides the same boundary: proposals
     // established by the previous super-step's outcomes, or by the answer
     // drain just now, are written into the pool here, before the ready
@@ -2272,9 +2294,14 @@ async function closeDrive(
   session: Session,
   emit: (phase: RunPhase) => void,
 ): Promise<void> {
+  // A closed ticket (issue #154) is finished too: a run whose leftovers are
+  // all closed ends as any other does.
   const pending = session.markers
     .map((m) => m.id)
-    .filter((id) => session.state.tickets[id] !== "done");
+    .filter((id) => !isFinished(session.state.tickets[id]));
+  const closedIds = session.markers
+    .map((m) => m.id)
+    .filter((id) => session.state.tickets[id] === "closed");
   // The closing gate: every ticket done and nothing else waiting on the human
   // raises the final Review interrupt. The dedupe in raiseInterrupt keeps it
   // to exactly one; an approval recorded in state holds it down for good.
@@ -2311,7 +2338,9 @@ async function closeDrive(
   session.state = applyUpdate(session.state, {
     log: [
       phase === "done"
-        ? "pool done: every ticket reached done"
+        ? closedIds.length > 0
+          ? `pool done: every ticket reached done or was closed (${closedIds.join(", ")} closed)`
+          : "pool done: every ticket reached done"
         : phase === "quiescent"
           ? session.state.interrupts.length > 0
             ? `pool quiescent: interrupts pending for ${session.state.interrupts
@@ -2543,7 +2572,7 @@ function rehydrate(session: Session): void {
   // An approval only stands while every marker on disk is done: a human who
   // reset tickets between runs gets a fresh Review when they finish again.
   if (
-    session.markers.some((marker) => marker.status !== "done") &&
+    session.markers.some((marker) => !isFinished(marker.status)) &&
     (session.state.reviewApproved ||
       session.state.interrupts.some((i) => i.kind === "review"))
   ) {
@@ -2557,8 +2586,10 @@ function rehydrate(session: Session): void {
     );
   }
   const stale = session.state.interrupts.filter((i) => {
-    if (i.kind === "merge-conflict" || i.kind === "merge-approval") return false;
     const status = session.state.tickets[i.ticketId];
+    // A closed ticket waits on nothing, a merge least of all.
+    if (status === "closed") return true;
+    if (i.kind === "merge-conflict" || i.kind === "merge-approval") return false;
     return status === "done" || status === "ready";
   });
   if (stale.length > 0) {
@@ -3953,7 +3984,7 @@ function endEnlistedAttempt(
 ): void {
   const marker = session.markers.find((candidate) => candidate.id === ticketId);
   if (!marker) return;
-  if (marker.status === "done") return;
+  if (isFinished(marker.status)) return;
   // A re-adopted pane's ending arrives through its runtime: the adoption is
   // over with it, so a later answer to a stale interrupt abandons nothing.
   session.adopted.delete(ticketId);
@@ -5137,14 +5168,7 @@ async function gradeContinuedAttempt(
 // recorded; a listing that could not be had closes nothing.
 async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]): Promise<void> {
   if (session.paneSurvey === null) return;
-  const candidates: {
-    marker: TicketMarker;
-    attempt: number;
-    tabId: string;
-    paneId: string;
-    cwd: string | null;
-    terminalId: string | null;
-  }[] = [];
+  const candidates: IdleTab[] = [];
   for (const marker of new Set(markers)) {
     if (marker.enlistedFrom !== undefined) continue;
     session.held.delete(marker.id);
@@ -5172,21 +5196,61 @@ async function closeCheckpointedTabs(session: Session, markers: TicketMarker[]):
         event.payload.tab_id === tabId,
     );
     if (reused) continue;
-    candidates.push({ marker, attempt, tabId, paneId, cwd, terminalId });
+    candidates.push({ owner: marker.id, attempt, tabId, paneId, cwd, terminalId });
   }
-  if (candidates.length === 0) return;
+  await closeIdleTabs(session, candidates, "resume");
+}
+
+// A tab the engine recorded opening, as its `spawned` event named it.
+interface IdleTab {
+  owner: string;
+  attempt: number;
+  tabId: string;
+  paneId: string;
+  cwd: string | null;
+  terminalId: string | null;
+}
+
+// Close the tabs given that are certainly the pool's own and idle, by the
+// rule closeCheckpointedTabs states: never one over an untouchable pane,
+// never one herdr lists differently from how it was recorded, and nothing
+// at all when no listing could be had.
+async function closeIdleTabs(session: Session, candidates: IdleTab[], reason: string): Promise<void> {
+  if (candidates.length === 0 || session.paneSurvey === null) return;
   if (!(await session.paneSurvey.refresh())) return;
   const listing = session.paneSurvey.latest()!;
   const off = untouchable(session);
   await Promise.all(
-    candidates.map(async ({ marker, attempt, tabId, paneId, cwd, terminalId }) => {
-      if (off.panes.has(paneId) || off.tabs.has(tabId)) return;
-      if (!listedAsRecorded(listing, { paneId, tabId, cwd, terminalId }, session.poolWorkspace.id)) {
-        return;
-      }
-      await closeTabRecorded(session, marker.id, attempt, tabId, terminalId, "resume");
+    candidates.map(async (tab) => {
+      if (off.panes.has(tab.paneId) || off.tabs.has(tab.tabId)) return;
+      if (!listedAsRecorded(listing, tab, session.poolWorkspace.id)) return;
+      await closeTabRecorded(session, tab.owner, tab.attempt, tab.tabId, tab.terminalId, reason);
     }),
   );
+}
+
+// A closed ticket's tabs (issue #154): its role has ended as a merge ends
+// it, so every tab it opened goes, the Held pane's included, but by the
+// idle rule above rather than closeAttemptTabs' unconditional close. One
+// close per terminal, as closeAttemptTabs keys them.
+async function closeTicketTabs(session: Session, ticketId: string): Promise<void> {
+  const events = readEvents(session.runsDir, ticketId);
+  const tabs = new Map<string, IdleTab>();
+  for (const spawned of events) {
+    const { tab_id: tabId, pane_id: paneId, cwd, terminal_id: terminalId } = spawned.payload;
+    if (spawned.kind !== "spawned" || typeof tabId !== "string" || typeof paneId !== "string") continue;
+    const terminal = typeof terminalId === "string" ? terminalId : null;
+    if (tabRecordedClosed(events, tabId, terminal)) continue;
+    tabs.set(terminal !== null ? `terminal:${terminal}` : `tab:${tabId}`, {
+      owner: ticketId,
+      attempt: spawned.attempt,
+      tabId,
+      paneId,
+      cwd: typeof cwd === "string" ? cwd : null,
+      terminalId: terminal,
+    });
+  }
+  await closeIdleTabs(session, [...tabs.values()], "closed");
 }
 
 /**
@@ -5314,18 +5378,32 @@ function acceptAnswer(
   session: Session,
   ticketId: string,
   note: string | undefined,
-  approve: boolean | undefined,
+  action: ResumeAction,
   // The Steward answering on the operator's path (ADR-0030): the answer is
   // recorded as its own, with its note, and counts against its budget.
   steward?: { conversation: string },
 ): QueuedAnswer {
+  const approve = action === "approve" ? true : action === "reject" ? false : undefined;
+  const close = action === "close" ? ("close" as const) : undefined;
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === ticketId,
   );
   if (!interrupt) {
-    const prior = session.answers.latestFor(ticketId, approve);
+    const prior = session.answers.latestFor(ticketId, approve, close);
     if (prior) return prior;
     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+  }
+  // Close (issue #154) drops a Ticket that can no longer usefully finish:
+  // one waiting at a checkpoint, a merge that conflicted, or a deadlock on
+  // a blocker that will never be done. Nothing else is a ticket left to drop.
+  if (close && !CLOSE_KINDS.includes(interrupt.kind)) {
+    throw new Error(
+      `answer: close takes a checkpoint, merge-conflict or deadlock interrupt, ` +
+        `got ${interrupt.kind} for ${ticketId}`,
+    );
+  }
+  if (close && !session.markers.some((m) => m.id === ticketId)) {
+    throw new Error(`answer: ${ticketId} is not a Ticket in this pool; only a Ticket can be closed`);
   }
   if (interrupt.kind === "review" && approve === undefined) {
     throw new Error(
@@ -5344,9 +5422,17 @@ function acceptAnswer(
       (a) =>
         a.ticketId === ticketId &&
         a.kind === interrupt.kind &&
-        a.approve === approve,
+        a.approve === approve &&
+        a.action === close,
     );
   if (duplicate) return duplicate;
+  // A different answer already queued for the ticket wins at the drain and
+  // this one would be consumed there as stale, with nobody told (a Close
+  // behind a Resume, say). It is refused now instead, while the answerer is
+  // still listening.
+  if (session.answers.pending().some((a) => a.ticketId === ticketId)) {
+    throw new AnswerQueuedConflict(`answer: ticket ${ticketId} already has an answer queued`);
+  }
   // A reject that names no ticket is genuinely invalid, so it fails here at
   // acceptance (a 400 for the caller) rather than queueing an answer that
   // would fail at processing with nobody listening. The duplicate check runs
@@ -5369,13 +5455,18 @@ function acceptAnswer(
     kind: "answered",
     payload: {
       kind: interrupt.kind,
-      ...(steward ? stewardAnswerPayload(steward.conversation, approve, note) : {}),
+      // A Close carries its note on the log whoever gave it: the ticket
+      // ends here, and the note is the record of why.
+      ...(close ? { action: close } : {}),
+      ...(close && note?.trim() ? { note: note.trim() } : {}),
+      ...(steward ? stewardAnswerPayload(steward.conversation, action, note) : {}),
     },
   });
   const record = session.answers.enqueue({
     ticketId,
     kind: interrupt.kind,
     ...(approve !== undefined ? { approve } : {}),
+    ...(close ? { action: close } : {}),
     ...(note !== undefined ? { note } : {}),
     ...(steward ? { by: "steward" as const } : {}),
     at: new Date().toISOString(),
@@ -5418,9 +5509,10 @@ function drainAnswers(session: Session): void {
   for (const record of session.answers.pending()) {
     // An answer that merges into the pool checkout waits, still queued,
     // while a Continued attempt works there (ADR-0027); its ending kicks the
-    // drain again.
+    // drain again. A Close merges nothing, so it never waits.
     if (
       poolCheckoutHeld(session) &&
+      record.action !== "close" &&
       (record.kind === "merge-conflict" ||
         record.kind === "merge-approval" ||
         record.kind === "selection")
@@ -5514,6 +5606,10 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
       `resume: ticket ${record.ticketId} has no Issue file in ${session.issuesDir}`,
     );
   }
+  if (record.action === "close") {
+    closeTicket(session, marker, interrupt, record);
+    return;
+  }
   if (interrupt.kind === "merge-conflict") {
     resumeMerge(session, marker, interrupt, record.note);
     return;
@@ -5563,6 +5659,174 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
         (record.by === "steward" ? " by the Steward" : ""),
     ],
   });
+}
+
+// Close (issue #154): the ticket is dropped where it stands and never
+// merged. Its status becomes `closed`, which counts as finished for the
+// run's end and the Review gate but never satisfies a `blocked-by`, so a
+// dependent gets a deadlock Interrupt naming it at the next reconcile rather
+// than running on work that will never land. The work goes the way a losing
+// Attempt's does, every Attempt branch and the solo branch with their
+// worktrees, once whatever an agent wrote into a worktree copy of the
+// ticket file is carried into the file of record. Two kinds of work stay
+// where they are: a lone ticket that ran in the pool checkout has its
+// commits on the pool branch already, and nothing is ever reset; an
+// enlisted ticket's branch, directory and pane are the operator's
+// (ADR-0021). A closed ticket never runs again, so no later Resume closes
+// its tabs: they close here.
+function closeTicket(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  record: QueuedAnswer,
+): void {
+  // An adoption checkpoint's re-adopted attempt is abandoned first, as a
+  // Resume abandons it (ADR-0014).
+  if (session.adopted.has(marker.id)) abandonAdoption(session, marker.id);
+  session.held.delete(marker.id);
+  const enlisted = wasEnlisted(session, marker.id);
+  const work = enlisted
+    ? "enlisted, so its branch, directory and pane were left as found"
+    : discardClosedWork(session, marker);
+  writeMarkerStatus(marker.file, "closed");
+  marker.status = "closed";
+  if (record.note && record.note.trim()) {
+    const heading = record.by === "steward" ? "## Close note, from the Steward" : "## Close note";
+    appendFileSync(marker.file, `\n${heading}\n\n${record.note.trim()}\n`);
+  }
+  // Best-effort like every rule close: a tab herdr refuses is recorded by
+  // closeTabRecorded, and a survey that could not be had closes nothing.
+  if (!enlisted) void closeTicketTabs(session, marker.id).catch(() => {});
+  session.conversations.ticketClosed(marker, record.note);
+  const cascaded = closeEngineTickets(session, marker.id);
+  const closed = new Set([marker.id, ...cascaded]);
+  session.state = applyUpdate(session.state, {
+    tickets: Object.fromEntries([...closed].map((id) => [id, "closed" as const])),
+    interrupts: session.state.interrupts.filter((i) => !closed.has(i.ticketId)),
+    log: [
+      `interrupt answered for ${marker.id} (${interrupt.kind}): closed` +
+        (record.by === "steward" ? " by the Steward" : "") +
+        `; ${work}`,
+      ...cascaded.map((id) => `ticket ${id}: closed with its build ticket ${marker.id}`),
+    ],
+  });
+}
+
+// The closed ticket's work, discarded unmerged where it has a branch of its
+// own, and what happened to it, for the pool log. A failure part way (a
+// ticket file that cannot be read or written) is reported in that line and
+// stops the discard there, rather than the Close: the ticket still closes,
+// and what is left of its work is the operator's to tidy.
+function discardClosedWork(session: Session, marker: TicketMarker): string {
+  const discarded: string[] = [];
+  let worktrees: WorktreeInfo[] = [];
+  try {
+    worktrees = session.git
+      ? attemptBranches(session.cwd, marker.id)
+          .sort((a, b) => a - b)
+          .map((attempt) => ticketWorktree(session, marker, attempt))
+      : [];
+    if (session.git && branchExists(session.cwd, marker.id)) {
+      worktrees.push(ticketWorktree(session, marker));
+    }
+    if (worktrees.length === 0) return closedWorkWithoutBranch(session, marker);
+    for (const worktree of worktrees) {
+      keepTicketFileNotes(session, marker, worktree);
+      discardWorktree(session.cwd, worktree);
+      discarded.push(worktree.branch);
+    }
+  } catch (error) {
+    const left = worktrees.map((w) => w.branch).filter((branch) => !discarded.includes(branch));
+    return (
+      (discarded.length > 0 ? `discarded ${discarded.join(", ")} unmerged; ` : "") +
+      `discarding its work failed (${error instanceof Error ? error.message : String(error)})` +
+      (left.length > 0 ? `; ${left.join(", ")} ${left.length === 1 ? "is" : "are"} still there` : "")
+    );
+  }
+  return (
+    `discarded ${discarded.join(", ")} unmerged, with ` +
+    (discarded.length === 1 ? "its worktree" : "their worktrees")
+  );
+}
+
+// What became of a closed ticket's work when it has no branch: it never ran,
+// it ran in the pool checkout (its commits are on the pool branch, and
+// nothing is ever reset), or it ran in a worktree whose branch is gone.
+function closedWorkWithoutBranch(session: Session, marker: TicketMarker): string {
+  const cwds = readEvents(session.runsDir, marker.id)
+    .filter((event) => event.kind === "spawned")
+    .map((event) => event.payload.cwd);
+  if (cwds.length === 0) return "it never ran, so there was no work to discard";
+  // A pool worktree lives under the common git dir, which sits inside the
+  // pool checkout's own directory, so it is told apart by its path first.
+  const worktrees = dirname(worktreePathFor(session.cwd, marker.id));
+  const ranHere =
+    !session.git ||
+    cwds.some(
+      (cwd) =>
+        typeof cwd === "string" && !cwd.startsWith(`${worktrees}/`) && inPoolCheckout(session, cwd),
+    );
+  return ranHere
+    ? "it ran in the pool checkout, so its work was left in place there; nothing was reset"
+    : "its branch was already gone, so there was no work to discard";
+}
+
+// Carry what an agent wrote into its worktree's copy of the ticket file
+// into the file of record before the worktree goes (CONTEXT.md: Ticket
+// file; nothing an agent adds is discarded). The same reconcile a merge
+// runs, against the seed the worktree was planned from. A copy still equal
+// to its seed holds nothing of the agent's, and a worktree with no seed kept
+// (one this engine never planned) is left alone rather than guessed at.
+function keepTicketFileNotes(
+  session: Session,
+  marker: TicketMarker,
+  worktree: WorktreeInfo,
+): void {
+  const attempt = /\.attempt-(\d+)$/.exec(worktree.branch);
+  const seedPath = join(
+    session.runsDir,
+    ticketSeedName(marker.id, attempt ? Number(attempt[1]) : null),
+  );
+  if (!existsSync(seedPath)) return;
+  const rel = relative(session.cwd, marker.file);
+  const copy = join(worktree.path, rel);
+  let theirs: string | null = null;
+  if (existsSync(copy)) {
+    theirs = readFileSync(copy, "utf8");
+  } else {
+    const shown = Bun.spawnSync({
+      cmd: ["git", "-C", session.cwd, "show", `${worktree.branch}:${rel}`],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (shown.exitCode === 0) theirs = shown.stdout.toString();
+  }
+  if (theirs === null || theirs === readFileSync(seedPath, "utf8")) return;
+  const reconciled = reconcileTicketFile(
+    session,
+    marker,
+    worktree.branch,
+    readFileSync(marker.file, "utf8"),
+    theirs,
+  );
+  writeFileSync(marker.file, reconciled.content);
+  if (reconciled.conflicted) recordTicketFileConflict(session, marker, worktree.branch);
+}
+
+// The engine-written judges of a closed build ticket (its graders and its
+// head-to-head card) close with it: they are blocked by it, the engine alone
+// schedules them, and with their build ticket closed nothing ever will.
+// Tickets people or agents wrote are never closed for them; a dependent of
+// theirs gets the deadlock Interrupt instead. Returns the ids closed.
+function closeEngineTickets(session: Session, buildId: string): string[] {
+  const closed: string[] = [];
+  for (const marker of session.markers) {
+    if (engineTicketBuildId(marker.id) !== buildId || isFinished(marker.status)) continue;
+    writeMarkerStatus(marker.file, "closed");
+    marker.status = "closed";
+    closed.push(marker.id);
+  }
+  return closed;
 }
 
 // The branch this pool merges into, as a ref: the target an enlist captured
@@ -5657,25 +5921,29 @@ function mergeWithIssueAside(
   }
   const reconciled = reconcileTicketFile(session, marker, branch, ours, theirs);
   writeFileSync(marker.file, reconciled.content);
-  if (reconciled.conflicted) {
-    appendEvent(session.runsDir, marker.id, {
-      at: new Date().toISOString(),
-      attempt: lastAttempt(session.runsDir, marker.id),
-      kind: "ticket-file-conflict",
-      payload: {
-        file: relative(session.cwd, marker.file),
-        branch,
-      },
-    });
-    session.state = applyUpdate(session.state, {
-      log: [
-        `${marker.id}: the pool's ticket file and the branch's copy changed ` +
-          `the same lines; conflict markers left in ` +
-          `${relative(session.cwd, marker.file)}`,
-      ],
-    });
-  }
+  if (reconciled.conflicted) recordTicketFileConflict(session, marker, branch);
   return result;
+}
+
+// The two copies of a ticket file changed the same lines: the conflict
+// markers stay in the file of record, and the ticket log and pool log say so.
+function recordTicketFileConflict(session: Session, marker: TicketMarker, branch: string): void {
+  appendEvent(session.runsDir, marker.id, {
+    at: new Date().toISOString(),
+    attempt: lastAttempt(session.runsDir, marker.id),
+    kind: "ticket-file-conflict",
+    payload: {
+      file: relative(session.cwd, marker.file),
+      branch,
+    },
+  });
+  session.state = applyUpdate(session.state, {
+    log: [
+      `${marker.id}: the pool's ticket file and the branch's copy changed ` +
+        `the same lines; conflict markers left in ` +
+        `${relative(session.cwd, marker.file)}`,
+    ],
+  });
 }
 
 // The merge in the pool's own checkout: the pool copy of the ticket file
@@ -8324,7 +8592,7 @@ function closeSupersededHeadToHead(session: Session, buildId: string): void {
   const h2hId = headToHeadIdFor(buildId);
   const file = join(session.issuesDir, `${h2hId}.md`);
   if (!existsSync(file)) return;
-  if (readMarker(file).status === "done") return;
+  if (isFinished(readMarker(file).status)) return;
   writeMarkerStatus(file, "done");
   const marker = session.markers.find((m) => m.id === h2hId);
   if (marker) marker.status = "done";
@@ -8341,15 +8609,19 @@ function closeSupersededHeadToHead(session: Session, buildId: string): void {
 // and no other interrupt is pending. The body is the run's outcome list, so
 // the judgment happens over what actually happened, not a ticket count.
 function reviewInterrupt(session: Session): Interrupt {
+  const closed = session.markers.some((marker) => marker.status === "closed");
   const lines = session.markers.map(
     (marker) =>
-      `- ${marker.id}: ${session.state.outcomes[marker.id]?.summary ?? "(no outcome recorded)"}`,
+      `- ${marker.id}: ` +
+      (marker.status === "closed"
+        ? "closed without merging"
+        : (session.state.outcomes[marker.id]?.summary ?? "(no outcome recorded)")),
   );
   return {
     ticketId: REVIEW_TICKET_ID,
     kind: "review",
     body:
-      "every ticket is done.\n" +
+      (closed ? "every ticket is done or closed.\n" : "every ticket is done.\n") +
       lines.join("\n") +
       "\napprove to end the run, or reject with a note naming the tickets to " +
       "send back; their downstream tickets return to ready with them.",
@@ -8366,7 +8638,7 @@ function approveReview(
   interrupt: Interrupt,
   note?: string,
 ): void {
-  const allDone = session.markers.every((m) => m.status === "done");
+  const allDone = session.markers.every((m) => isFinished(m.status));
   session.state = applyUpdate(session.state, {
     tickets: Object.fromEntries(
       session.markers.map((m) => [m.id, m.status]),
@@ -8401,13 +8673,19 @@ function namedReviewTickets(
   note: string | undefined,
 ): string[] {
   const text = note?.trim() ?? "";
-  return markers.filter((marker) => namesTicket(text, marker.id)).map((m) => m.id);
+  return reopenable(markers).filter((marker) => namesTicket(text, marker.id)).map((m) => m.id);
+}
+
+// The tickets a review reject can send back: every one but a closed ticket,
+// which is out of scope to reopen (issue #154).
+function reopenable(markers: TicketMarker[]): TicketMarker[] {
+  return markers.filter((marker) => marker.status !== "closed");
 }
 
 function reviewRejectUnnamedError(markers: TicketMarker[]): string {
   return (
     "review reject: name at least one ticket in the note " +
-    `(known: ${markers.map((m) => m.id).join(", ")})`
+    `(known: ${reopenable(markers).map((m) => m.id).join(", ")})`
   );
 }
 
@@ -8430,7 +8708,7 @@ function rejectReview(
   let grew = true;
   while (grew) {
     grew = false;
-    for (const marker of session.markers) {
+    for (const marker of reopenable(session.markers)) {
       if (!reset.has(marker.id) && marker.blockedBy.some((b) => reset.has(b))) {
         reset.add(marker.id);
         grew = true;
@@ -8517,6 +8795,9 @@ function reconcileDeadlocks(session: Session): void {
   const canComplete = (id: string, visiting: Set<string>): boolean => {
     const status = state.tickets[id];
     if (status === "done" || status === "in-progress") return true;
+    // A closed ticket (issue #154) never becomes done, so it never satisfies
+    // the edge.
+    if (status === "closed") return false;
     if (resumable.has(id)) return true;
     if (deadlocked.has(id)) return false;
     if (visiting.has(id)) return false;
@@ -8527,13 +8808,28 @@ function reconcileDeadlocks(session: Session): void {
     visiting.delete(id);
     return ok;
   };
+  // The closed ticket a blocker that can never complete is stuck behind,
+  // followed up the chain of blockers that cannot complete either; null when
+  // the chain reaches none (a cycle, a missing id).
+  const closedBehind = (id: string, visiting: Set<string>): string | null => {
+    if (state.tickets[id] === "closed") return id;
+    if (visiting.has(id)) return null;
+    visiting.add(id);
+    const marker = markers.find((m) => m.id === id);
+    for (const b of marker?.blockedBy ?? []) {
+      if (canComplete(b, new Set())) continue;
+      const found = closedBehind(b, visiting);
+      if (found !== null) return found;
+    }
+    return null;
+  };
 
   const cleared = state.interrupts.filter(
     (i) => i.kind === "deadlock" && canComplete(i.ticketId, new Set()),
   );
   const raised = markers.filter(
     (marker) =>
-      state.tickets[marker.id] !== "done" &&
+      !isFinished(state.tickets[marker.id]) &&
       !resumable.has(marker.id) &&
       !deadlocked.has(marker.id) &&
       !canComplete(marker.id, new Set()),
@@ -8559,10 +8855,32 @@ function reconcileDeadlocks(session: Session): void {
     const blocking = marker.blockedBy.filter(
       (id) => !canComplete(id, new Set()),
     );
+    // A blocker that was closed is named as closed: the operator chose that,
+    // and the answer is a choice too (Close this one as well, or edit its
+    // blocked-by and Resume), not a cycle to untangle.
+    // A blocker stuck behind a closed ticket further up its chain names
+    // that ticket too, so the operator sees where the chain was cut.
+    const closed = blocking.filter((id) => state.tickets[id] === "closed");
+    const behind = blocking
+      .filter((id) => state.tickets[id] !== "closed")
+      .map((id) => ({ id, cause: closedBehind(id, new Set()) }));
+    const stuck = behind.filter((b) => b.cause === null).map((b) => b.id);
     const interrupt: Interrupt = {
       ticketId: marker.id,
       kind: "deadlock",
-      body: `blockers can never complete: ${blocking.join(", ")}`,
+      body: [
+        ...(closed.length > 0
+          ? [
+              closed.length === 1
+                ? `blocker ${closed[0]} was closed`
+                : `blockers ${closed.join(", ")} were closed`,
+            ]
+          : []),
+        ...behind
+          .filter((b) => b.cause !== null)
+          .map((b) => `blocker ${b.id} can never complete (blocker ${b.cause} was closed)`),
+        ...(stuck.length > 0 ? [`blockers can never complete: ${stuck.join(", ")}`] : []),
+      ].join("; "),
     };
     interrupts = [...interrupts, interrupt];
     appendEvent(session.runsDir, marker.id, {
@@ -9226,10 +9544,10 @@ export function addBlockerToTicket(
   if (!target) {
     return { ok: false, reason: `ticket ${ticketId} is not in the pool` };
   }
-  if (target.status === "done") {
+  if (isFinished(target.status)) {
     return {
       ok: false,
-      reason: `ticket ${ticketId} is done; blocked-by cannot be added to it`,
+      reason: `ticket ${ticketId} is ${target.status}; blocked-by cannot be added to it`,
     };
   }
   if (target.blockedBy.includes(blockerId)) {
@@ -9262,13 +9580,13 @@ export function addBlockerToTicket(
 // morning what was decided and why.
 function stewardAnswerPayload(
   conversation: string,
-  approve: boolean | undefined,
+  action: ResumeAction,
   note: string | undefined,
 ): Record<string, unknown> {
   return {
     by: "steward",
     conversation,
-    ...(approve !== undefined ? { action: approve ? "approve" : "reject" } : {}),
+    ...(action !== "resume" ? { action } : {}),
     ...(note !== undefined && note.trim() ? { note: note.trim() } : {}),
   };
 }
@@ -9320,6 +9638,7 @@ function stewardItemsOf(session: Session): StewardItem[] {
     keepTalking: (id) => session.held.has(id),
     budget: stewardBudgetOf(session.state.config),
     used: (id) => session.stewardUsed.get(id) ?? 0,
+    mayClose: stewardMayCloseOf(session.state.config),
     mergeQueue: last?.mergeQueue ?? [],
     merged: last
       ? session.markers
@@ -9404,28 +9723,43 @@ function checkStewardBudget(session: Session, ticketId: string): void {
   }
 }
 
+// A Steward Close (ADR-0030's #154 amendment) is allowed only while the
+// pool's "Steward may Close checkpoints" is on, read at the moment the
+// answer arrives, and only on a checkpoint or a merge conflict: closing a
+// deadlocked dependent is the operator's. It needs a note saying why, and
+// counts against the budget like any answer.
+function checkStewardClose(session: Session, ticketId: string, kind: string, note: string | undefined): void {
+  if (!stewardMayCloseOf(session.state.config)) {
+    throw stewardRefusal(
+      "Close is off for this pool; the operator turns on Steward may Close checkpoints in Settings",
+    );
+  }
+  if (kind === "deadlock") {
+    throw stewardRefusal(`closing a deadlocked ticket is the operator's: leave ${ticketId} with a note`);
+  }
+  if (!STEWARD_CLOSE_KINDS.includes(kind)) {
+    throw stewardRefusal(`ticket ${ticketId}'s ${kind} Interrupt cannot be closed`);
+  }
+  if (!note?.trim()) throw stewardRefusal("a close needs a note saying why the ticket is dropped");
+}
+
 function stewardAnswer(
   session: Session,
   conversation: string,
   ticketId: string,
-  action: "resume" | "approve" | "reject",
+  action: "resume" | "approve" | "reject" | "close",
   note: string | undefined,
 ): void {
   const interrupt = stewardInterrupt(session, conversation, ticketId);
-  if (interrupt.kind === "merge-approval" && action === "resume") {
+  if (action === "close") {
+    checkStewardClose(session, ticketId, interrupt.kind, note);
+  } else if (interrupt.kind === "merge-approval" && action === "resume") {
     throw stewardRefusal(`ticket ${ticketId}'s merge-approval takes approve or reject`);
-  }
-  if (interrupt.kind !== "merge-approval" && action !== "resume") {
+  } else if (interrupt.kind !== "merge-approval" && action !== "resume") {
     throw stewardRefusal(`ticket ${ticketId}'s ${interrupt.kind} Interrupt takes resume`);
   }
   checkStewardBudget(session, ticketId);
-  acceptAnswer(
-    session,
-    ticketId,
-    note,
-    action === "approve" ? true : action === "reject" ? false : undefined,
-    { conversation },
-  );
+  acceptAnswer(session, ticketId, note, action, { conversation });
   kickProcessing(session);
 }
 
@@ -9516,6 +9850,7 @@ function stewardState(session: Session, conversation: string): StewardStateRespo
   return {
     steward: conversation,
     budget,
+    mayClose: stewardMayCloseOf(session.state.config),
     phase: session.driving ? "running" : (session.settledPhase ?? "running"),
     interrupts: session.state.interrupts.map((interrupt) => {
       const used = session.stewardUsed.get(interrupt.ticketId) ?? 0;
@@ -9860,9 +10195,9 @@ export async function enlistTicket(
     if (!target) {
       throw new Error(`enlist: ticket ${blockerId} is not in the pool`);
     }
-    if (target.status === "done") {
+    if (isFinished(target.status)) {
       throw new Error(
-        `enlist: ticket ${blockerId} is done; a done ticket cannot wait on anything`,
+        `enlist: ticket ${blockerId} is ${target.status}; a ${target.status} ticket cannot wait on anything`,
       );
     }
   }
@@ -10244,6 +10579,10 @@ function spawnProposalProblem(
       [
         "blocks names done tickets, which have no next attempt to hold",
         named.filter((id) => known.ids.has(id) && session.state.tickets[id] === "done"),
+      ],
+      [
+        "blocks names closed tickets, which never run again",
+        named.filter((id) => known.ids.has(id) && session.state.tickets[id] === "closed"),
       ],
       [
         "blocks names engine-run tickets, which the engine schedules itself",

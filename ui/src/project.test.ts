@@ -8,6 +8,7 @@ import {
   clampNeedsInputWidth,
   clampDrawersHeight,
   bulkResumeRows,
+  closableRows,
   projectConversationsNeedsInput,
   projectConversationsTray,
   DETAIL_MAX_FRACTION,
@@ -53,6 +54,7 @@ import {
   safeMarkdownUrl,
   ticketBodyHtml,
   projectVitals,
+  ticketCloseNote,
   pushVitalsSample,
   VITALS_MAX_SAMPLES,
   type ConversationCardView,
@@ -380,11 +382,11 @@ describe("interrupt forms", () => {
       ]),
     );
     expect(actions).toEqual({
-      checkpoint: ["resume"],
+      checkpoint: ["resume", "close"],
       config: ["resume"],
       crash: ["resume"],
-      deadlock: ["resume"],
-      "merge-conflict": ["resume"],
+      deadlock: ["resume", "close"],
+      "merge-conflict": ["resume", "close"],
       "merge-approval": ["approve", "reject"],
       selection: ["resume"],
       review: ["approve", "reject"],
@@ -568,7 +570,7 @@ describe("projectNeedsInput", () => {
     expect(rows.map((r) => r.label)).toEqual(["A", "B"]);
     expect(rows.map((r) => r.title)).toEqual(["ticket A", "ticket B"]);
     expect(rows[0].interrupt.kind).toBe("checkpoint");
-    expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume"]);
+    expect(rows[0].interrupt.form.actions.map((a) => a.action)).toEqual(["resume", "close"]);
     expect(rows[1].interrupt.kind).toBe("merge-approval");
     expect(rows[1].interrupt.form.actions.map((a) => a.action)).toEqual([
       "approve",
@@ -681,6 +683,22 @@ describe("bulkResumeRows", () => {
     expect(bulkResumeRows(rows).map((r) => r.ticketId)).toEqual(["A", "D"]);
   });
 
+  it("keeps checkpoint, deadlock and merge-conflict rows though they offer Close too", () => {
+    const snap = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A"), ticket("B"), ticket("C")],
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief" },
+          { ticketId: "B", kind: "deadlock", body: "blocker X was closed" },
+          { ticketId: "C", kind: "merge-conflict", body: "files" },
+        ],
+      },
+    });
+    const rows = projectNeedsInput(projectPool(snap).cards);
+    expect(bulkResumeRows(rows).map((r) => r.ticketId)).toEqual(["A", "B", "C"]);
+  });
+
   it("is empty when every row is queued or answered individually", () => {
     const snap = snapshot({
       state: {
@@ -693,6 +711,29 @@ describe("bulkResumeRows", () => {
       },
     });
     expect(bulkResumeRows(projectNeedsInput(projectPool(snap).cards))).toEqual([]);
+  });
+});
+
+describe("closableRows", () => {
+  it("keeps the open rows whose form offers Close, in row order", () => {
+    const snap = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: ["A", "B", "C", "D", "E", "F"].map((id) => ticket(id)),
+        interrupts: [
+          { ticketId: "A", kind: "checkpoint", body: "brief" },
+          { ticketId: "B", kind: "crash", body: "log path" },
+          { ticketId: "C", kind: "merge-conflict", body: "files" },
+          { ticketId: "D", kind: "config", body: "bad key" },
+          { ticketId: "E", kind: "deadlock", body: "cycle" },
+          { ticketId: "F", kind: "checkpoint", body: "brief" },
+        ],
+        queuedAnswers: [queued("F", "checkpoint")],
+      },
+    });
+    const rows = projectNeedsInput(projectPool(snap).cards);
+    // Crash and config never offer Close; a queued row has nothing to close.
+    expect(closableRows(rows).map((r) => r.ticketId)).toEqual(["A", "C", "E"]);
   });
 });
 
@@ -843,7 +884,7 @@ describe("checkpoint visible at attempt exit", () => {
       expect(card.status).toBe("checkpoint");
       expect(card.interrupt?.kind).toBe("checkpoint");
       expect(card.interrupt?.body).toBe("pick a name");
-      expect(card.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+      expect(card.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume", "close"]);
       expect(sibling.status).toBe("in-progress");
       expect(sibling.interrupt).toBeNull();
     }
@@ -856,6 +897,7 @@ describe("checkpoint visible at attempt exit", () => {
       expect(detail.interrupt?.form.title).toBe("checkpoint");
       expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual([
         "resume",
+        "close",
       ]);
     }
     expect(poolStatus(windowSnapshot())).toEqual({
@@ -1115,6 +1157,7 @@ describe("projectDetailTabs", () => {
       actions: [{ action: "resume", label: "resume", tone: "primary" }],
     },
     queued: false,
+    closing: false,
     keepTalking: null,
   });
 
@@ -1122,7 +1165,7 @@ describe("projectDetailTabs", () => {
     projectDetailTabs(detail(status), override).find((tab) => tab.active)?.id;
 
   it("projects the fixed Spec / Progress / Outcome bar on every status", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as TicketStatus[]) {
+    for (const status of ["ready", "in-progress", "checkpoint", "done", "closed"] as TicketStatus[]) {
       const tabs = projectDetailTabs(detail(status), null);
       expect(tabs.map((tab) => tab.id)).toEqual(["spec", "progress", "outcome"]);
       expect(tabs.map((tab) => tab.label)).toEqual(["Spec", "Progress", "Outcome"]);
@@ -1135,10 +1178,11 @@ describe("projectDetailTabs", () => {
     expect(active("in-progress")).toBe("progress");
     expect(active("checkpoint")).toBe("progress");
     expect(active("done")).toBe("outcome");
+    expect(active("closed")).toBe("outcome");
   });
 
   it("maps a pending interrupt to Progress on every status, including done", () => {
-    for (const status of ["ready", "in-progress", "checkpoint", "done"] as TicketStatus[]) {
+    for (const status of ["ready", "in-progress", "checkpoint", "done", "closed"] as TicketStatus[]) {
       const tabs = projectDetailTabs(detail(status, pending()), null);
       expect(tabs.find((tab) => tab.active)?.id).toBe("progress");
     }
@@ -1304,6 +1348,7 @@ describe("statusLabel", () => {
     expect(statusLabel("in-progress")).toBe("running");
     expect(statusLabel("done")).toBe("done");
     expect(statusLabel("checkpoint")).toBe("checkpoint");
+    expect(statusLabel("closed")).toBe("closed");
   });
 
   it("names where a held ticket stands in the Merge queue (#129), never a bare merge pending", () => {
@@ -2389,7 +2434,7 @@ describe("a card click opens the Detail", () => {
     expect(detail?.kind).toBe("ticket");
     if (detail?.kind === "ticket") {
       expect(detail.interrupt?.body).toBe("the brief");
-      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+      expect(detail.interrupt?.form.actions.map((a) => a.action)).toEqual(["resume", "close"]);
     }
   });
 
@@ -2461,9 +2506,10 @@ describe("projectVitals", () => {
     }
   });
 
-  it("is hidden for done and ready tickets even with a payload", () => {
+  it("is hidden for done, closed and ready tickets even with a payload", () => {
     expect(projectVitals(vitalsState(), "done", VITALS_NOW)).toBeNull();
     expect(projectVitals(vitalsState(), "ready", VITALS_NOW)).toBeNull();
+    expect(projectVitals(vitalsState(), "closed", VITALS_NOW)).toBeNull();
   });
 
   it("is live for a running attempt, on in-progress and checkpoint alike", () => {
@@ -2802,8 +2848,9 @@ describe("Held pane and Keep talking (issue #139)", () => {
     );
     const interrupt = cardOf(view, "A")?.interrupt;
     expect(interrupt?.keepTalking).toEqual({ requesting: false, failure: null });
-    // Not an answer: the form's actions (and so "resume all") stay Resume alone.
-    expect(interrupt?.form.actions.map((a) => a.action)).toEqual(["resume"]);
+    // Not an answer: Keep talking never joins the form's actions, which stay
+    // Resume and Close.
+    expect(interrupt?.form.actions.map((a) => a.action)).toEqual(["resume", "close"]);
   });
 
   it("offers it on no other interrupt kind, even with a Held pane", () => {
@@ -3419,6 +3466,12 @@ describe("projectEnlistBlocks", () => {
   it("is empty when every ticket is done", () => {
     expect(projectEnlistBlocks([ticket("01", { status: "done" })])).toEqual([]);
   });
+
+  it("leaves out a closed ticket, which never runs again (issue #154)", () => {
+    expect(
+      projectEnlistBlocks([ticket("01", { status: "closed" }), ticket("02")]).map((r) => r.id),
+    ).toEqual(["02"]);
+  });
 });
 
 describe("enlisted card marker", () => {
@@ -3986,6 +4039,50 @@ describe("the Steward (ADR-0030)", () => {
         "the Steward answered merge approval: approve",
         "the Steward kept talking: run the linter first",
       ]);
+    });
+
+    it("reads the Steward's Close as its own, with the note (issue #154)", () => {
+      expect(
+        stewardLines([
+          event("answered", { kind: "checkpoint", action: "close", ...by, note: "superseded by 07" }),
+          event("answered", { kind: "merge-conflict", action: "close", ...by }),
+        ]),
+      ).toEqual([
+        "the Steward answered checkpoint: close · superseded by 07",
+        "the Steward answered merge conflict: close",
+      ]);
+    });
+
+    it("carries every Close's note for the timeline and the Outcome tab (issue #154)", () => {
+      const timeline = projectTimeline(
+        {
+          events: [
+            event("answered", { kind: "checkpoint", note: "go on" }),
+            event("answered", { kind: "checkpoint", action: "close", note: " direction changed " }),
+          ],
+          attempts: [],
+          reconstructed: false,
+          spec: "",
+        },
+        "closed",
+      );
+      expect(timeline.attempts[0].events.map((e) => e.closeNote)).toEqual([
+        null,
+        "direction changed",
+      ]);
+      expect(ticketCloseNote(timeline)).toBe("direction changed");
+      const bare = projectTimeline(
+        {
+          events: [event("answered", { kind: "deadlock", action: "close" })],
+          attempts: [],
+          reconstructed: false,
+          spec: "",
+        },
+        "closed",
+      );
+      expect(bare.attempts[0].events[0].closeNote).toBe("");
+      expect(ticketCloseNote(bare)).toBeNull();
+      expect(ticketCloseNote(null)).toBeNull();
     });
 
     it("leaves the operator's answers as they were", () => {
