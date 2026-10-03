@@ -19,6 +19,8 @@
 #                                it writes into the Ticket's marker itself
 #   scripts/<key>/<k>.stdout     launch k's standard output
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
+#   scripts/<key>/hold           a FIFO to read one line from first, however
+#                                long that takes: the case's release
 #   calls/<key>.<n>/             launch n of the key: seq, argv, cwd, env,
 #                                issue and outcome
 # A key with no scripts writes a done outcome and exits 0, the same step
@@ -92,6 +94,9 @@ fi
 
 steps="$(cat "$script/steps")"
 k=$(( n < steps ? n : steps ))
+if [ -p "$script/hold" ]; then
+  read -r _ < "$script/hold"
+fi
 if [ -f "$script/wait" ]; then
   wait_for="$(cat "$script/wait")"
   for _ in $(seq 1 200); do
