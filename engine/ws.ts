@@ -399,6 +399,10 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   // same revision and every delta is computed and serialised once.
   let lastPushed: PushedSnapshot | null = null;
   let pushedFrom: EnrichedSnapshot | null = null;
+  // The emit whose version could not be encoded, passed over until the next
+  // emit replaces it, so it is logged once rather than at every socket,
+  // page load and action until then.
+  let unencodable: EnrichedSnapshot | null = null;
   let snapshotText: { of: PushedSnapshot | null; text: string } | null = null;
   let sendTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -410,47 +414,57 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     for (const ws of sockets) send(ws, text);
   }
 
+  function encodeSnapshot(of: PushedSnapshot | null): string {
+    return encodeMessage(
+      of
+        ? { type: "snapshot", rev: of.rev, logTotal: of.logTotal, snapshot: of.snapshot }
+        : { type: "snapshot", rev: 0, logTotal: 0, snapshot: null },
+    );
+  }
+
   function snapshotFrame(): string {
     if (snapshotText?.of !== lastPushed) {
-      snapshotText = {
-        of: lastPushed,
-        text: encodeMessage(
-          lastPushed
-            ? {
-                type: "snapshot",
-                rev: lastPushed.rev,
-                logTotal: lastPushed.logTotal,
-                snapshot: lastPushed.snapshot,
-              }
-            : { type: "snapshot", rev: 0, logTotal: 0, snapshot: null },
-        ),
-      };
+      snapshotText = { of: lastPushed, text: encodeSnapshot(lastPushed) };
     }
-    return snapshotText!.text;
+    return snapshotText.text;
   }
 
   // The window's end. The snapshot is brought up to date even with no tab
   // open, so the ids the ticket routes accept and the Pool title the run is
   // told follow the engine without waiting for a reader, and the next page
   // load or socket starts from it.
+  //
+  // A version counts as pushed only once its frame is written: one that
+  // cannot be (a circular reference, a BigInt) throws first, and leaves the
+  // hub and every socket at the last good revision, so the next delta's
+  // base is the one they hold and a socket opening meanwhile is sent that.
   function flush(): void {
     if (sendTimer !== null) clearTimeout(sendTimer);
     sendTimer = null;
     const full = sources.current();
-    if (full === null || full === pushedFrom) return;
-    pushedFrom = full;
-    if (lastPushed === null) {
-      // The first version since the process started goes whole: the
-      // sockets hold the null snapshot of revision 0.
-      lastPushed = toPushed(full, 1);
-      broadcast(snapshotFrame());
-    } else {
-      const next = toPushed(full, lastPushed.rev + 1);
-      const delta = diffSnapshot(lastPushed, next);
-      if (delta === null) return;
-      lastPushed = next;
-      broadcast(encodeMessage({ type: "delta", delta }));
+    if (full === null || full === pushedFrom || full === unencodable) return;
+    let next: PushedSnapshot;
+    let frame: string | null;
+    try {
+      if (lastPushed === null) {
+        // The first version since the process started goes whole: the
+        // sockets hold the null snapshot of revision 0.
+        next = toPushed(full, 1);
+        frame = encodeSnapshot(next);
+      } else {
+        next = toPushed(full, lastPushed.rev + 1);
+        const delta = diffSnapshot(lastPushed, next);
+        frame = delta === null ? null : encodeMessage({ type: "delta", delta });
+      }
+    } catch (err) {
+      unencodable = full;
+      throw err;
     }
+    pushedFrom = full;
+    if (frame === null) return;
+    if (lastPushed === null) snapshotText = { of: next, text: frame };
+    lastPushed = next;
+    broadcast(frame);
     pushed();
   }
 
@@ -1151,7 +1165,22 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     }
   }
 
+  // Bun reports a throw out of its open handler as uncaught and drops the
+  // socket with no close frame. The throw is logged here instead, and the
+  // socket let go the same way, so the Console sees what it always saw and
+  // reconnects after its delay. What can throw is the version the sockets
+  // hold, encoded whole for the first time: a flush wrote it, whole or as a
+  // delta, so only an object of it changed in place since can stop it.
   function open(ws: Socket): void {
+    try {
+      opened(ws);
+    } catch (err) {
+      console.error(`socket: open: ${errorText(err)}`);
+      ws.terminate();
+    }
+  }
+
+  function opened(ws: Socket): void {
     // Anything waiting goes to the sockets already open first, so this one
     // starts from the version they are all at.
     flushQuietly();
@@ -1211,9 +1240,21 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
         logTotal: lastPushed?.logTotal ?? 0,
         snapshot: lastPushed?.snapshot ?? null,
       };
-      made = { mtimeMs, rev: boot.rev, text: embedBoot(html.text, boot) };
+      try {
+        made = { mtimeMs, rev: boot.rev, text: embedBoot(html.text, boot) };
+      } catch (err) {
+        // A version that no longer encodes whole (open's note): the page
+        // goes as built, and the Console takes its first snapshot from the
+        // socket instead.
+        console.error(`page: ${errorText(err)}`);
+        return htmlResponse(html.text);
+      }
     }
-    return new Response(made.text, {
+    return htmlResponse(made.text);
+  }
+
+  function htmlResponse(text: string): Response {
+    return new Response(text, {
       headers: { "content-type": "text/html", "cache-control": "no-store" },
     });
   }

@@ -22,8 +22,10 @@ import {
   EMBED_ELEMENT_ID,
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
+  WS_PATH,
   applyDelta,
   readEmbeddedBoot,
+  toPushed,
   type LogPush,
   type PushedSnapshot,
   type RequestKind,
@@ -175,6 +177,11 @@ const EMPTY_POOL = {
   poolDir: "/nonexistent",
   state: { tickets: [], conversations: [], log: [], outcomes: {}, interrupts: [] },
 } as unknown as EnrichedSnapshot;
+
+/** EMPTY_POOL at `seq`, holding `tickets` as the push reads them. */
+function poolWith(seq: number, tickets: Record<string, unknown>[]): EnrichedSnapshot {
+  return { ...EMPTY_POOL, seq, state: { ...EMPTY_POOL.state, tickets } } as unknown as EnrichedSnapshot;
+}
 
 /**
  * What `body` logged with console.error, and every rejection that went
@@ -583,6 +590,144 @@ describe("a push or a reply that cannot go", () => {
       { what: "the next emit's snapshot" },
     );
     expect(pushed.snapshot?.seq).toBe(EMPTY_POOL.seq);
+  });
+
+  // A ticket the diff has not seen before goes into the delta unread, so a
+  // BigInt in it throws in the delta's own encode, where a version that was
+  // already counted pushed would leave every socket a revision behind.
+  it("keeps every socket at the last good revision when a snapshot cannot be encoded", async () => {
+    let current = poolWith(1, [{ id: "01", status: "ready" }]);
+    const { hub, url } = serveHub({ current: () => current });
+    const first = await openSocket(url);
+    sockets.push(first);
+    await first.sync();
+    expect(first.rev).toBe(1);
+
+    current = poolWith(2, [
+      { id: "01", status: "ready" },
+      { id: "02", status: "ready", cost: 1n },
+    ]);
+    const emit = async (): Promise<void> => hub.schedule();
+    const pushing = await escapesDuring(async () => void emit());
+    expect(pushing.rejections).toEqual([]);
+    expect(pushing.logged).toHaveLength(1);
+    expect(pushing.logged[0]).toStartWith("snapshot push: ");
+
+    // The server is up, and the socket open through it was sent nothing.
+    await first.sync();
+    expect(framesOf(first, "delta")).toEqual([]);
+    expect(first.rev).toBe(1);
+
+    // A socket opened now starts from the last good version, and the one
+    // that would not encode is not tried again until the next emit.
+    const opened: SocketClient[] = [];
+    const opening = await escapesDuring(async () => {
+      const client = await openSocket(url);
+      sockets.push(client);
+      opened.push(client);
+      await client.sync();
+    });
+    expect(opening).toEqual({ logged: [], rejections: [] });
+    const second = opened[0]!;
+    expect(second.rev).toBe(1);
+    expect(second.pushed).toEqual(first.pushed);
+
+    // The next good emit is a delta from the revision both hold.
+    current = poolWith(3, [
+      { id: "01", status: "done" },
+      { id: "02", status: "ready" },
+    ]);
+    hub.schedule();
+    for (const client of [first, second]) {
+      const frame = await client.waitFor<Extract<ServerMessage, { type: "delta" }>>(
+        (frame) => frame.type === "delta",
+        { what: "the next good emit's delta" },
+      );
+      expect(frame.delta).toMatchObject({ base: 1, rev: 2 });
+      expect(heldBefore(client.frames, client.frames.indexOf(frame))?.rev).toBe(frame.delta.base);
+      expect(client.pushed).toEqual(toPushed(current, 2));
+    }
+  });
+
+  // The first version goes whole, and before this a whole one that would
+  // not encode was still counted pushed: no socket could be sent it, and
+  // every later diff read it and threw.
+  it("never counts a first snapshot it cannot encode, and sends the next good one whole", async () => {
+    let current = poolWith(1, [{ id: "01", status: "ready", cost: 1n }]);
+    const { hub, url } = serveHub({ current: () => current });
+    const opened: SocketClient[] = [];
+    const opening = await escapesDuring(async () => {
+      const client = await openSocket(url);
+      sockets.push(client);
+      opened.push(client);
+      await client.sync();
+    });
+    expect(opening.rejections).toEqual([]);
+    expect(opening.logged).toHaveLength(1);
+    expect(opening.logged[0]).toStartWith("snapshot push: ");
+    const client = opened[0]!;
+    expect(framesOf(client, "snapshot")).toMatchObject([{ rev: 0, snapshot: null }]);
+
+    current = poolWith(2, [{ id: "01", status: "ready" }]);
+    hub.schedule();
+    const whole = await client.waitFor<Extract<ServerMessage, { type: "snapshot" }>>(
+      (frame) => frame.type === "snapshot" && frame.rev === 1,
+      { what: "the first good snapshot, whole" },
+    );
+    expect(whole.snapshot?.seq).toBe(2);
+    expect(framesOf(client, "delta")).toEqual([]);
+  });
+
+  // A version that went out as a delta is first encoded whole when a
+  // socket opens on it or the page embeds it. If an object of it changed in
+  // place since (nothing in the engine means to), that is where it throws,
+  // inside a Bun handler.
+  it("logs a pushed version that no longer encodes whole, drops only the socket opening on it, and serves the page bare", async () => {
+    const changed: Record<string, unknown> = { id: "02", status: "ready" };
+    let current = poolWith(1, [{ id: "01", status: "ready" }]);
+    const { hub, url } = serveHub({ current: () => current });
+    const first = await openSocket(url);
+    sockets.push(first);
+    await first.sync();
+    current = poolWith(2, [{ id: "01", status: "ready" }, changed]);
+    hub.schedule();
+    await first.waitFor((frame) => frame.type === "delta", { what: "revision 2's delta" });
+    changed.cost = 1n;
+
+    const dist = makeTempDir("dist-");
+    registerTempDir(dist);
+    const html = "<!doctype html><html><head><title>Console</title></head><body></body></html>";
+    writeFileSync(join(dist, "index.html"), html);
+
+    const late: { frames: string[]; code: number } = { frames: [], code: 0 };
+    const pages: (Response | null)[] = [];
+    const { logged, rejections } = await escapesDuring(async () => {
+      // Bun's own client, bare: the socket may go before its open is seen.
+      await new Promise<void>((resolve) => {
+        const ws = new WebSocket(`${url.replace(/^http/, "ws")}${WS_PATH}`);
+        ws.onmessage = (event) => void late.frames.push(String(event.data));
+        ws.onclose = (event) => {
+          late.code = event.code;
+          resolve();
+        };
+      });
+      pages.push(hub.page(join(dist, "index.html")));
+    });
+
+    expect(rejections).toEqual([]);
+    expect(logged.filter((line) => line.startsWith("socket: open: "))).toHaveLength(1);
+    expect(logged.filter((line) => line.startsWith("page: "))).toHaveLength(1);
+    // Let go with no close frame, as a socket Bun drops always was, and
+    // with no snapshot: the Console reconnects after its delay.
+    expect(late.code).toBe(1006);
+    expect(late.frames.some((text) => text.includes('"type":"snapshot"'))).toBe(false);
+    const page = pages[0]!;
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(await page.text()).toBe(html);
+
+    // The socket already open is untouched.
+    await first.sync();
+    expect(first.rev).toBe(2);
   });
 });
 
