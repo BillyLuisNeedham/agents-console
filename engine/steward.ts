@@ -44,7 +44,7 @@ export interface StewardAssign {
 export interface StewardConfig {
   budget?: number;
   assign?: StewardAssign;
-  /** "Steward may Close checkpoints" (issue #154, ADR-0032): off unless true. */
+  /** "Steward may Close checkpoints" (issue #154, ADR-0033): off unless true. */
   mayClose?: boolean;
 }
 

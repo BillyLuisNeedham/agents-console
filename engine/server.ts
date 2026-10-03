@@ -1920,8 +1920,8 @@ export function createPoolServer(options: PoolServerOptions): PoolServer {
       const snapshot = await answer(ticketId, action, note);
       return answered({ snapshot }, 202);
     } catch (err) {
-      // A different answer already queued is a conflict with the
-      // queue, not a malformed request.
+      // A different answer already queued is a conflict with the queue,
+      // not a malformed request.
       return refused(err instanceof AnswerQueuedConflict ? 409 : 400, "error", err);
     }
   }

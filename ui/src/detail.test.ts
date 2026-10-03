@@ -903,102 +903,6 @@ describe("Detail: the Steward (ADR-0030)", () => {
   });
 });
 
-describe("Detail: a closed ticket (issue #154)", () => {
-  function paint(detail: TicketDetailView, tab: "progress" | "outcome", timeline: DetailModel["timeline"]) {
-    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
-    const handlers: DetailHandlers = {
-      onSelectAttempt: () => {},
-      onSelectStream: () => {},
-      onLoadEarlier: () => {},
-      onAnswer: () => {},
-      onKeepTalking: () => {},
-      onUseStewardNote: () => {},
-      onSelectTab: () => {},
-      onEndConversation: () => {},
-      onFocusConversationTerminal: () => Promise.resolve(true),
-      onFocusResolver: () => Promise.resolve(true),
-      renderSpawnDecision: () => document.createElement("div"),
-      reassign: new ReassignStore({
-        onGetSettings: () => new Promise(() => {}),
-        onReassign: () => new Promise(() => {}),
-        onChange: () => {},
-      }),
-    };
-    const root = document.createElement("div");
-    commit(root, () => {
-      const shell = document.createElement("div");
-      shell.appendChild(
-        pane.render(
-          {
-            ...model(detail),
-            timeline,
-            detailTabs: (["spec", "progress", "outcome"] as const).map((id) => ({
-              id,
-              label: id,
-              active: id === tab,
-              interruptDot: false,
-            })),
-          },
-          handlers,
-        ),
-      );
-      return shell;
-    });
-    return root;
-  }
-
-  const closedTimeline = (note: string): DetailModel["timeline"] => ({
-    reconstructed: false,
-    attempts: [
-      {
-        number: 1,
-        reconstructed: false,
-        running: false,
-        logFile: null,
-        streamFile: null,
-        count: 1,
-        outcome: "answered",
-        events: [
-          {
-            kind: "answered",
-            at: "2026-10-03T02:00:00Z",
-            timeLabel: "02:00:00",
-            grade: null,
-            reassignment: null,
-            spawn: null,
-            files: null,
-            steward: null,
-            closeNote: note,
-          },
-        ],
-      },
-    ],
-  });
-
-  it("says on Outcome that it was closed without merging, with the Close note", () => {
-    const root = paint(detailView({ status: "closed" }), "outcome", closedTimeline("direction changed"));
-    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
-    expect(root.querySelector(".detail-close-note")?.textContent).toBe("direction changed");
-    expect(root.textContent).not.toContain("not finished yet");
-  });
-
-  it("says closed without merging before the timeline has loaded", () => {
-    const root = paint(detailView({ status: "closed" }), "outcome", null);
-    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
-    expect(root.querySelector(".detail-close-note")).toBeNull();
-  });
-
-  it("labels the status closed in its own class and marks the operator's Close on its timeline row", () => {
-    const root = paint(detailView({ status: "closed" }), "progress", closedTimeline("superseded"));
-    const status = root.querySelector(".detail-status");
-    expect(status?.textContent).toBe("closed");
-    expect(status?.classList.contains("ticket-state-closed")).toBe(true);
-    expect(root.querySelector(".timeline-closed")?.textContent).toBe(
-      "closed without merging · superseded",
-    );
-  });
-});
-
 describe("Detail: a long timeline (issue #161)", () => {
   /** A ticket's events: `attempts` attempts of `perAttempt` events each, the
    *  last of each a graded one. */
@@ -1240,5 +1144,101 @@ describe("logSlices (issue #161)", () => {
     const grown = logSlices(text + "one more line\n");
     expect(grown.slice(0, slices.length - 1)).toEqual(slices.slice(0, -1));
     expect(logSlices("")).toEqual([]);
+  });
+});
+
+describe("Detail: a closed ticket (issue #154)", () => {
+  function paint(detail: TicketDetailView, tab: "progress" | "outcome", timeline: DetailModel["timeline"]) {
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: () => {},
+      onKeepTalking: () => {},
+      onUseStewardNote: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        pane.render(
+          {
+            ...model(detail),
+            timeline,
+            detailTabs: (["spec", "progress", "outcome"] as const).map((id) => ({
+              id,
+              label: id,
+              active: id === tab,
+              interruptDot: false,
+            })),
+          },
+          handlers,
+        ),
+      );
+      return shell;
+    });
+    return root;
+  }
+
+  const closedTimeline = (note: string): DetailModel["timeline"] => ({
+    reconstructed: false,
+    attempts: [
+      {
+        number: 1,
+        count: 1,
+        outcome: "answered",
+        reconstructed: false,
+        running: false,
+        logFile: null,
+        streamFile: null,
+        events: [
+          {
+            kind: "answered",
+            at: "2026-10-03T02:00:00Z",
+            timeLabel: "02:00:00",
+            grade: null,
+            reassignment: null,
+            spawn: null,
+            files: null,
+            steward: null,
+            closeNote: note,
+          },
+        ],
+      },
+    ],
+  });
+
+  it("says on Outcome that it was closed without merging, with the Close note", () => {
+    const root = paint(detailView({ status: "closed" }), "outcome", closedTimeline("direction changed"));
+    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
+    expect(root.querySelector(".detail-close-note")?.textContent).toBe("direction changed");
+    expect(root.textContent).not.toContain("not finished yet");
+  });
+
+  it("says closed without merging before the timeline has loaded", () => {
+    const root = paint(detailView({ status: "closed" }), "outcome", null);
+    expect(root.querySelector(".detail-closed")?.textContent).toBe("closed without merging");
+    expect(root.querySelector(".detail-close-note")).toBeNull();
+  });
+
+  it("labels the status closed in its own class and marks the operator's Close on its timeline row", () => {
+    const root = paint(detailView({ status: "closed" }), "progress", closedTimeline("superseded"));
+    const status = root.querySelector(".detail-status");
+    expect(status?.textContent).toBe("closed");
+    expect(status?.classList.contains("ticket-state-closed")).toBe(true);
+    expect(root.querySelector(".timeline-closed")?.textContent).toBe(
+      "closed without merging · superseded",
+    );
   });
 });
