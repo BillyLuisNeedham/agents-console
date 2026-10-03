@@ -465,7 +465,7 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
   }
 
   function schedule(): void {
-    if (options.coalesceMs <= 0) flush();
+    if (options.coalesceMs <= 0) flushQuietly();
     else if (sendTimer === null) sendTimer = setTimeout(flushQuietly, options.coalesceMs);
   }
 
@@ -1039,22 +1039,32 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
     }
   }
 
-  function reply(ws: Socket, id: number, kind: RequestKind, answer: RequestAnswer<unknown>): void {
-    send(
-      ws,
-      encodeMessage(
-        (answer.ok
-          ? { type: "reply", id, kind, rev: rev(), ok: true, result: answer.result }
-          : {
-              type: "reply",
-              id,
-              kind,
-              rev: rev(),
-              ok: false,
-              refusal: { reason: answer.reason, status: answer.status },
-            }) as ServerMessage,
-      ),
+  function replyFrame(id: number, kind: RequestKind, answer: RequestAnswer<unknown>): string {
+    return encodeMessage(
+      (answer.ok
+        ? { type: "reply", id, kind, rev: rev(), ok: true, result: answer.result }
+        : {
+            type: "reply",
+            id,
+            kind,
+            rev: rev(),
+            ok: false,
+            refusal: { reason: answer.reason, status: answer.status },
+          }) as ServerMessage,
     );
+  }
+
+  // A result the frame cannot carry (a circular reference, a BigInt) is
+  // refused instead, so its press is still answered and the socket stays up.
+  function reply(ws: Socket, id: number, kind: RequestKind, answer: RequestAnswer<unknown>): void {
+    let text: string;
+    try {
+      text = replyFrame(id, kind, answer);
+    } catch (err) {
+      console.error(`socket: reply to ${kind} ${id}: ${errorText(err)}`);
+      text = replyFrame(id, kind, refused(500, "error", `could not encode the result: ${errorText(err)}`));
+    }
+    send(ws, text);
   }
 
   async function request(
@@ -1124,9 +1134,15 @@ export function createPushHub(sources: PushSources, options: PushHubOptions): Pu
         case "unsubscribe":
           unsubscribe(ws, decoded.id);
           break;
-        case "request":
-          void request(ws, decoded.id, decoded.kind, decoded.payload as Record<string, unknown>);
+        case "request": {
+          // Bun ends the process on a rejection nothing handles: whatever
+          // the reply's path throws is logged here and goes no further.
+          const { id, kind } = decoded;
+          request(ws, id, kind, decoded.payload as Record<string, unknown>).catch((err: unknown) =>
+            console.error(`socket: request ${kind} ${id}: ${errorText(err)}`),
+          );
           break;
+        }
       }
     } catch (err) {
       // A read that failed under a subscribe (a file torn mid-write): the
