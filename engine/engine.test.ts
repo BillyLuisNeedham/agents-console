@@ -168,7 +168,7 @@ const resolverConfig: PoolConfig = {
 
 interface GitStubBehaviour {
   status?: "done" | "checkpoint" | "keep";
-  outcome?: { summary: string; commitSha: string | null } | null;
+  outcome?: { summary: string; commitSha: string | null; brief?: string } | null;
   outcomeRaw?: string;
   spawn?: unknown;
   grade?: { score: number; verdict: "pass" | "flag"; reasons: string };
@@ -1017,32 +1017,52 @@ describe("verify fan-out", () => {
     expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
   }, 15000);
 
-  it("records a checkpoint outcome from one candidate without proceeding", async () => {
+  it("checkpoints the ticket when one candidate checkpoints and another finishes", async () => {
     const { poolDir, git } = makeGitPool({
       tickets: [readyTicket("01")],
       config: verifyConfig(2),
     });
     const rig = gitStubHarness(poolDir, {
       "01": [
-        { status: "checkpoint", outcome: { summary: "paused-1", commitSha: null } },
+        {
+          status: "checkpoint",
+          outcome: {
+            summary: "paused-1",
+            commitSha: null,
+            brief: "Which port should the server take?",
+          },
+        },
         { workFile: "cand-2.txt", commitMsg: "cand-2" },
       ],
     });
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // The candidate's ending is recorded, but the fan-out gate holds: no
-    // checkpoint interrupt, no Brief landing, no status write. How a
-    // partial checkpoint interacts with the grade is ticket 05's to settle;
-    // this pins the gate through grading.
-    expect(run.phase).toBe("stalled");
-    expect(run.interrupts).toEqual([]);
+    // A paused candidate checkpoints the round (ADR-0034): one checkpoint
+    // interrupt the operator can resume or close, no selection, no merge.
+    // The finished candidate's branch waits, named in the Brief with its
+    // grade, beside the paused candidate's own brief.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([
+      ["01", "checkpoint"],
+    ]);
     expect(run.final.tickets).toEqual({
-      "01": "in-progress",
+      "01": "checkpoint",
       "01-grader-1": "done",
       "01-grader-2": "done",
     });
-    expect(markerLine(poolDir, "01-t.md")).not.toContain("Brief");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+    const body = run.interrupts[0].body;
+    expect(body).toContain(
+      "The verify round of 2 attempts ended with 1 checkpointed",
+    );
+    expect(body).toContain(
+      "### Attempt 1 checkpointed\n\nWhich port should the server take?",
+    );
+    expect(body).toContain(
+      "### Attempt 2 finished\n\nGraded 8/10, verdict pass. Its work waits " +
+        `unmerged on ${branchFor(poolDir, "01", 2)}.`,
+    );
     const events = readEventLines(poolDir, "01");
     const exit1 = events.find((e) => e.kind === "exited" && e.attempt === 1);
     expect(exit1?.payload).toEqual({
@@ -1051,17 +1071,102 @@ describe("verify fan-out", () => {
       logTail: [],
       outcomeExists: true,
     });
+    // The checkpoint is the paused candidate's, so its pane is the one a
+    // Keep talking would continue.
     expect(
-      JSON.parse(
-        readFileSync(
-          join(poolDir, "runs", "01.attempt-1.outcome.json"),
-          "utf8",
-        ),
-      ).status,
-    ).toBe("checkpoint");
+      events.filter((e) => e.kind === "checkpoint").map((e) => e.attempt),
+    ).toEqual([1]);
+    expect(events.some((e) => e.kind === "selected" || e.kind === "merged"))
+      .toBe(false);
     expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .toBe(0);
     expect(existsSync(join(poolDir, "cand-2.txt"))).toBe(false);
+
+    // Resume runs a fresh fan-out, numbering on from the paused round.
+    const resumed = await run.resume("01");
+    expect(rig.spawnOrder.filter((id) => id === "01")).toHaveLength(4);
+    expect(
+      readEventLines(poolDir, "01")
+        .filter((e) => e.kind === "scheduled")
+        .map((e) => e.attempt),
+    ).toEqual([1, 2, 3, 4]);
+    expect(resumed.final.tickets["01"]).not.toBe("in-progress");
+  }, 20000);
+
+  it("checkpoints a round whose every candidate checkpoints, briefs in attempt order", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        {
+          status: "checkpoint",
+          outcome: { summary: "p1", commitSha: null, brief: "brief one" },
+        },
+        {
+          status: "checkpoint",
+          outcome: { summary: "p2", commitSha: null, brief: "brief two" },
+        },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    expect(run.final.tickets["01"]).toBe("checkpoint");
+    const body = run.interrupts[0].body;
+    expect(body).toContain("ended with 2 checkpointed");
+    expect(body.indexOf("### Attempt 1 checkpointed\n\nbrief one"))
+      .toBeGreaterThan(-1);
+    expect(body.indexOf("### Attempt 2 checkpointed\n\nbrief two"))
+      .toBeGreaterThan(body.indexOf("brief one"));
+    // The lowest-numbered paused candidate owns the checkpoint.
+    expect(
+      readEventLines(poolDir, "01")
+        .filter((e) => e.kind === "checkpoint")
+        .map((e) => e.attempt),
+    ).toEqual([1]);
+
+    // Close (ADR-0033) is reachable from the round's checkpoint.
+    const closed = await run.closeTicket("01");
+    expect(closed.final.tickets["01"]).toBe("closed");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=closed");
+  }, 15000);
+
+  it("lets a paused candidate's checkpoint own a round that also crashed", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [readyTicket("01")],
+      config: verifyConfig(2),
+    });
+    const rig = gitStubHarness(poolDir, {
+      "01": [
+        {
+          status: "checkpoint",
+          outcome: { summary: "p1", commitSha: null, brief: "brief one" },
+        },
+        { status: "keep", exitCode: 3 },
+      ],
+    });
+
+    const run = await runPool({ poolDir, harnesses: rig.harnesses });
+
+    // One interrupt, the checkpoint: it offers what a crash's would and
+    // Close besides. The crash stays on the ticket log and in the Brief.
+    expect(run.phase).toBe("quiescent");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    expect(run.final.tickets["01"]).toBe("checkpoint");
+    expect(run.interrupts[0].body).toContain(
+      "### Attempt 2 crashed\n\nharness exited 3. Its log is " +
+        join(poolDir, "runs", "01.attempt-2.log") +
+        ".",
+    );
+    expect(
+      readEventLines(poolDir, "01").some(
+        (e) => e.kind === "crash" && e.attempt === 2,
+      ),
+    ).toBe(true);
   }, 15000);
 
   it("rotates a pre-verify solo attempt's well-known log before the fan-out", async () => {
@@ -2606,7 +2711,7 @@ describe("verify selection", () => {
     expect(run.phase).toBe("quiescent");
   }, 15000);
 
-  it("decides nothing while a round holds a paused candidate", async () => {
+  it("checkpoints instead of selecting while a round holds a paused candidate", async () => {
     const { poolDir, git } = makeGitPool({
       tickets: [readyTicket("01")],
       config: verifyConfig(2),
@@ -2621,17 +2726,24 @@ describe("verify selection", () => {
 
     const run = await runPool({ poolDir, harnesses: rig.harnesses });
 
-    // Attempt 1 paused, so its round is not all done and selection never
-    // runs, no matter how good the surviving candidate's grade is: the
-    // ticket stays in-progress and its branch stays a candidate.
+    // Attempt 1 paused, so selection never runs, no matter how good the
+    // surviving candidate's grade is (ADR-0034): the ticket checkpoints,
+    // the grade rides in the Brief, and the branch stays a candidate.
     const events = readEventLines(poolDir, "01");
     expect(events.some((e) => e.kind === "selected")).toBe(false);
     expect(events.some((e) => e.kind === "merged")).toBe(false);
-    expect(run.final.tickets["01"]).toBe("in-progress");
-    expect(markerLine(poolDir, "01-t.md")).toContain("status=in-progress");
+    expect(run.final.tickets["01"]).toBe("checkpoint");
+    expect(markerLine(poolDir, "01-t.md")).toContain("status=checkpoint");
+    expect(run.interrupts.map((i) => i.kind)).toEqual(["checkpoint"]);
+    // The paused candidate wrote no brief, so the engine's placeholder
+    // stands in for it.
+    expect(run.interrupts[0].body).toContain(
+      "### Attempt 1 checkpointed\n\nThe agent signalled a checkpoint but wrote no brief",
+    );
+    expect(run.interrupts[0].body).toContain("Graded 9/10, verdict pass.");
     expect(git(["rev-parse", "--verify", branchFor(poolDir, "01", 2)]).exitCode)
       .toBe(0);
-    expect(run.phase).toBe("stalled");
+    expect(run.phase).toBe("quiescent");
   }, 15000);
 
   it("spawns one head-to-head for a tight spread and merges its pick", async () => {
