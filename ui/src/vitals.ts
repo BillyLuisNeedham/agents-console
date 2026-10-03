@@ -1,16 +1,18 @@
 /**
- * Vitals store: the client side of the client-polled liveness readout
- * (ADR 0011). Polls the activity endpoint for every ticket that can hold a
- * live attempt (status in-progress, or checkpoint where a resolver may be
- * in flight, which only the response's running flag can tell, or a done
- * ticket whose live attempt the engine marks a resolver, issue #129), every 2s and
- * once per pool snapshot, the snapshot's poll throttled so a burst of
- * snapshots asks once (issue #157). A response that says nothing is live drops the
- * ticket from the 2s cadence until the next snapshot re-arms it, so a silent
- * pool costs no git spawns, and no polling happens at all when no candidate
- * exists. Held payloads and sparkline samples are ephemeral client memory:
- * the projection renders live or frozen Vitals from them, and nothing
- * renders before the first payload lands.
+ * Vitals store: the Console's side of the liveness readout (ADR 0011), fed
+ * by the socket (issue #161). The server checks activity for every ticket
+ * that can hold a live attempt (status in-progress, or checkpoint where a
+ * resolver may be in flight, or a done ticket whose live attempt the engine
+ * marks a resolver, issue #129) once for every tab, and pushes in `live`
+ * frames only the payloads that moved. The store holds them and the
+ * sparkline samples the cards' footers project from; held payloads and
+ * samples are ephemeral client memory, and nothing renders before the first
+ * payload lands.
+ *
+ * A 2 s wall-clock tick stays, and sends nothing: it appends one sparkline
+ * sample per running candidate from its held payload (the one-sample-per-
+ * poll timeline the polling store kept), and it repaints only when what the
+ * cards would show moved, the staleness copy or a sparkline.
  */
 
 import {
@@ -21,36 +23,23 @@ import {
   type TicketStatus,
   type VitalsState,
 } from "./project";
-import { TargetPoller } from "./poll";
 
-/** The poll cadence: one request per live ticket per interval. */
-export const VITALS_POLL_MS = 2_000;
+/** The tick's cadence: one sparkline sample per live ticket per interval. */
+export const VITALS_TICK_MS = 2_000;
 
 const CANDIDATE_STATUSES = new Set<TicketStatus>(["in-progress", "checkpoint"]);
 
-export type ActivityFetch = (
-  ticketId: string,
-) => Promise<TicketActivityResponse>;
-
 export interface VitalsOptions {
-  fetch: ActivityFetch;
   /** Called after every state change the view should repaint. */
   onChange: () => void;
-  /** The poll cadence; tests shorten or lengthen it. */
-  pollMs?: number;
+  /** The tick's cadence; tests shorten or lengthen it. */
+  tickMs?: number;
 }
 
 export class Vitals {
-  private readonly fetchActivity: ActivityFetch;
   private readonly notify: () => void;
-  private readonly pollMs: number;
   private readonly payloads = new Map<string, TicketActivityResponse>();
   private readonly samples = new Map<string, number[]>();
-  /** Tickets currently on the 2s cadence: a live latest attempt. */
-  private readonly active = new Set<string>();
-  /** The per-ticket cadence: one fetch out per ticket, so a slow answer
-   *  never stacks or delays the others, and the snapshot's refetch throttled. */
-  private readonly poller: TargetPoller;
   /** What the last tick would have shown, so a tick that changes no copy
    *  repaints nothing. */
   private shownCopy = "";
@@ -61,25 +50,16 @@ export class Vitals {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: VitalsOptions) {
-    this.fetchActivity = options.fetch;
     this.notify = options.onChange;
-    this.pollMs = options.pollMs ?? VITALS_POLL_MS;
-    this.poller = new TargetPoller({
-      run: (ticketId) => this.load(ticketId),
-      gapMs: this.pollMs / 2,
-    });
     if (typeof setInterval !== "undefined") {
-      this.timer = setInterval(() => this.tick(), this.pollMs);
+      this.timer = setInterval(() => this.tick(), options.tickMs ?? VITALS_TICK_MS);
     }
   }
 
   /**
-   * The snapshot cadence: prune to the pool, re-derive the candidates, and
-   * refetch each once. A spawn or resolver start emits a snapshot, so this is
-   * also what re-arms a ticket whose last response said nothing was live.
-   * A ticket polled inside the last half interval is refetched when the
-   * half is up rather than now, and one with a fetch out gets one more after
-   * it lands, so a burst of snapshots never stacks fetches.
+   * The snapshot cadence: prune to the pool and re-derive the candidates,
+   * which the tick samples and the staleness copy is drawn for. The server
+   * keeps its own candidate set; this one only decides what is shown.
    */
   update(snapshot: EnrichedSnapshot | null): void {
     const tickets = snapshot?.state.tickets ?? [];
@@ -101,13 +81,21 @@ export class Vitals {
         .map((t) => t.id),
     );
     this.statuses = new Map(tickets.map((t) => [t.id, t.status]));
-    for (const id of [...this.active]) {
-      if (!this.candidates.has(id)) this.active.delete(id);
+  }
+
+  /**
+   * A `live` frame's activity: the payloads that moved since the last one,
+   * by ticket id. Repaints once for the whole frame, and only when a held
+   * payload actually changed.
+   */
+  apply(activity: Record<string, TicketActivityResponse>): void {
+    let changed = false;
+    for (const [id, payload] of Object.entries(activity)) {
+      if (JSON.stringify(this.payloads.get(id)) === JSON.stringify(payload)) continue;
+      this.payloads.set(id, payload);
+      changed = true;
     }
-    for (const id of known) {
-      if (!this.candidates.has(id)) this.poller.forget(id);
-    }
-    for (const id of this.candidates) this.poller.pollSoon(id);
+    if (changed) this.notify();
   }
 
   /** The per-ticket vitals input the projection renders from. */
@@ -119,64 +107,46 @@ export class Vitals {
     return state;
   }
 
-  /** Stop the poll timer (session teardown). */
+  /** Stop the tick (session teardown). */
   dispose(): void {
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.poller.dispose();
   }
 
-  private tick(): void {
-    for (const id of this.active) this.poller.poll(id);
-    // The staleness copy ticks in wall-clock time even while the snapshot
-    // stream is silent (a resolver run, a quiet agent, a pool parked at an
-    // interrupt with frozen cards), so a tick re-renders whenever the copy
-    // the candidates' held payloads would show has moved since the last
-    // tick, and only then: a tick that would draw the same words draws
-    // nothing.
-    const now = Date.now();
+  /**
+   * The wall-clock tick. Each running candidate gets one sparkline sample
+   * from the payload it holds; a run that did not move keeps the array it
+   * had, so the sparkline drawn from it is the one already on the card. The
+   * staleness copy ticks in wall-clock time even while nothing is pushed (a
+   * resolver run, a quiet agent, a pool parked at an interrupt with frozen
+   * cards), so the tick repaints whenever that copy or a sparkline moved,
+   * and only then: a tick that would draw the same words draws nothing.
+   */
+  tick(now: number = Date.now()): void {
+    let moved = false;
     const shown: unknown[] = [];
     for (const id of this.candidates) {
       const payload = this.payloads.get(id);
       const status = this.statuses.get(id);
       if (!payload || !status) continue;
+      if (payload.running) {
+        const diff = payload.diff;
+        const held = this.samples.get(id) ?? [];
+        const next = pushVitalsSample(held, diff ? diff.added + diff.removed : 0);
+        if (next.length !== held.length || next.some((value, i) => value !== held[i])) {
+          this.samples.set(id, next);
+          moved = true;
+        }
+      }
       const resolver = this.resolvers.get(id) ?? null;
       const view = projectVitals({ activity: payload, samples: [] }, status, now, resolver);
       if (view) shown.push([id, view.mode, view.elapsed, view.staleness]);
     }
     const copy = JSON.stringify(shown);
-    if (copy === this.shownCopy) return;
+    const copyMoved = copy !== this.shownCopy;
     this.shownCopy = copy;
-    if (shown.length > 0) this.notify();
-  }
-
-  /**
-   * One activity fetch and its answer. A failed fetch leaves the last
-   * payload in place and the next tick or snapshot retries. The view
-   * repaints only when the answer moved something it shows: the payload, or
-   * the sparkline, which stops moving once it holds a full run of one
-   * unchanged total.
-   */
-  private async load(ticketId: string): Promise<void> {
-    const activity = await this.fetchActivity(ticketId);
-    const changed =
-      JSON.stringify(this.payloads.get(ticketId)) !== JSON.stringify(activity);
-    this.payloads.set(ticketId, activity);
-    let moved = false;
-    if (activity.running && this.candidates.has(ticketId)) {
-      this.active.add(ticketId);
-      const diff = activity.diff;
-      const held = this.samples.get(ticketId) ?? [];
-      const next = pushVitalsSample(held, diff ? diff.added + diff.removed : 0);
-      moved = next.length !== held.length || next.some((value, i) => value !== held[i]);
-      // A run that did not move keeps the array it had, so the sparkline
-      // drawn from it is the one already on the card.
-      if (moved) this.samples.set(ticketId, next);
-    } else {
-      this.active.delete(ticketId);
-    }
-    if (changed || moved) this.notify();
+    if (moved || (copyMoved && shown.length > 0)) this.notify();
   }
 }

@@ -1,17 +1,30 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { Detail, type DetailHandlers, type DetailModel } from "./detail";
+import {
+  Detail,
+  LOG_SLICE_CHARS,
+  LOG_SLICES_SHOWN,
+  logSlices,
+  TIMELINE_ATTEMPTS,
+  TIMELINE_WINDOW,
+  type DetailHandlers,
+  type DetailModel,
+} from "./detail";
 import { ReassignStore } from "./reassign";
 import { commit } from "./morph";
 import { DraftAnswers } from "./drafts";
 import { useDom } from "./test-dom";
-import type {
-  EnrichedSnapshot,
-  ReassignRequest,
-  ReassignResponse,
-  SettingsResponse,
-  TicketDetailView,
+import {
+  projectTimeline,
+  type EnrichedSnapshot,
+  type LogPaneView,
+  type ReassignRequest,
+  type ReassignResponse,
+  type SettingsResponse,
+  type TicketDetailView,
+  type TicketEventsResponse,
+  type TimelineView,
 } from "./project";
 
 useDom();
@@ -716,6 +729,8 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
               attempts: [
                 {
                   number: 1,
+                  count: 2,
+                  outcome: "exited",
                   reconstructed: false,
                   running: false,
                   logFile: null,
@@ -844,6 +859,8 @@ describe("Detail: the Steward (ADR-0030)", () => {
       attempts: [
         {
           number: 1,
+          count: 1,
+          outcome: "answered",
           reconstructed: false,
           running: false,
           logFile: null,
@@ -866,5 +883,249 @@ describe("Detail: the Steward (ADR-0030)", () => {
     expect(r.root.querySelector(".timeline-steward")?.textContent).toBe(
       "the Steward answered checkpoint: resume · tests pass now",
     );
+  });
+});
+
+describe("Detail: a long timeline (issue #161)", () => {
+  /** A ticket's events: `attempts` attempts of `perAttempt` events each, the
+   *  last of each a graded one. */
+  function events(attempts: number, perAttempt: number): TicketEventsResponse {
+    const list: TicketEventsResponse["events"] = [];
+    let n = 0;
+    const at = () => new Date(Date.UTC(2026, 9, 1) + n++ * 1000).toISOString();
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      for (let i = 0; i < perAttempt - 1; i++) {
+        list.push({ at: at(), attempt, kind: "checkpoint", payload: {} });
+      }
+      list.push({
+        at: at(),
+        attempt,
+        kind: "graded",
+        payload: { score: 7, verdict: "pass", reasons: "fine" },
+      });
+    }
+    return { events: list, attempts: [], reconstructed: false, spec: "" };
+  }
+
+  /** The Detail on Progress over a timeline, re-rendered as the app does. */
+  function mount() {
+    let changes = 0;
+    const pane = new Detail({
+      onClose: () => {},
+      drafts: new DraftAnswers(),
+      onChange: () => {
+        changes += 1;
+      },
+    });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: () => {},
+      onKeepTalking: () => {},
+      onUseStewardNote: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = (timeline: TimelineView, logPane: LogPaneView | null = null) =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          pane.render(
+            {
+              ...model(detailView()),
+              timeline,
+              logPane,
+              detailTabs: [
+                { id: "spec", label: "Spec", active: false, interruptDot: false },
+                { id: "progress", label: "Progress", active: true, interruptDot: false },
+                { id: "outcome", label: "Outcome", active: false, interruptDot: false },
+              ],
+            },
+            handlers,
+          ),
+        );
+        return shell;
+      });
+    const q = <T extends Element = HTMLElement>(selector: string) =>
+      root.querySelector<T>(selector);
+    const all = (selector: string) => [...root.querySelectorAll<HTMLElement>(selector)];
+    return { pane, paint, q, all, changes: () => changes };
+  }
+
+  it("opens the latest attempt and closes each earlier one to a line with its outcome and count", () => {
+    const r = mount();
+    r.paint(projectTimeline(events(3, 4), "done"));
+    const rows = r.all(".timeline-attempt");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]!.querySelector(".timeline-attempt-summary")?.textContent).toBe(
+      "7/10 pass · 4 events",
+    );
+    expect(rows[0]!.querySelectorAll(".timeline-entry")).toHaveLength(0);
+    expect(rows[2]!.querySelector(".timeline-attempt-summary")).toBeNull();
+    expect(rows[2]!.querySelectorAll(".timeline-entry")).toHaveLength(4);
+  });
+
+  it("opens an earlier attempt on its toggle, and keeps it open across renders of the card", () => {
+    const r = mount();
+    const timeline = projectTimeline(events(3, 4), "done");
+    r.paint(timeline);
+    r.all(".timeline-attempt")[0]!
+      .querySelector<HTMLButtonElement>(".timeline-attempt-toggle")!
+      .click();
+    expect(r.changes()).toBe(1);
+    r.paint(timeline);
+    r.paint(projectTimeline(events(3, 4), "done"));
+    expect(r.all(".timeline-attempt")[0]!.querySelectorAll(".timeline-entry")).toHaveLength(4);
+  });
+
+  it("lets a closed attempt's event rows go, nodes and all", () => {
+    const r = mount();
+    const timeline = projectTimeline(events(3, 4), "done");
+    r.paint(timeline);
+    const toggle = () =>
+      r.all(".timeline-attempt")[0]!
+        .querySelector<HTMLButtonElement>(".timeline-attempt-toggle")!
+        .click();
+    const held = () =>
+      [...(r.pane as unknown as { timelineRows: Map<string, unknown> }).timelineRows.keys()].filter(
+        (key) => key.startsWith("1:"),
+      );
+    toggle();
+    r.paint(timeline);
+    expect(held()).toHaveLength(4);
+    toggle();
+    r.paint(timeline);
+    expect(held()).toHaveLength(0);
+  });
+
+  it("shows a huge attempt's newest events, and the earlier ones a window at a time", () => {
+    const r = mount();
+    const timeline = projectTimeline(events(1, 2_000), "done");
+    r.paint(timeline);
+    expect(r.all(".timeline-entry")).toHaveLength(TIMELINE_WINDOW);
+    const earlier = r.q<HTMLButtonElement>(".timeline-attempt .timeline-earlier")!;
+    expect(earlier.textContent).toBe(
+      `show ${TIMELINE_WINDOW} earlier (${2_000 - TIMELINE_WINDOW} not shown)`,
+    );
+    const newest = r.all(".timeline-entry").at(-1)!;
+    earlier.click();
+    r.paint(timeline);
+    expect(r.all(".timeline-entry")).toHaveLength(2 * TIMELINE_WINDOW);
+    // The rows already drawn are the same nodes: only the window's are new.
+    expect(r.all(".timeline-entry").at(-1)).toBe(newest);
+  });
+
+  it("lists a retried ticket's newest attempts, and the earlier ones a window at a time", () => {
+    const r = mount();
+    const timeline = projectTimeline(events(TIMELINE_ATTEMPTS + 5, 2), "done");
+    r.paint(timeline);
+    expect(r.all(".timeline-attempt")).toHaveLength(TIMELINE_ATTEMPTS);
+    const earlier = r.q<HTMLButtonElement>(".timeline > .timeline-earlier")!;
+    expect(earlier.textContent).toBe("show 5 earlier attempts (5 not shown)");
+    earlier.click();
+    r.paint(timeline);
+    expect(r.all(".timeline-attempt")).toHaveLength(TIMELINE_ATTEMPTS + 5);
+  });
+
+  it("keeps every row an events frame left alone, and builds only what it added", () => {
+    const r = mount();
+    const first = events(2, 3);
+    const before = projectTimeline(first, "in-progress");
+    r.paint(before);
+    // A mark no render draws: a row the morph walks loses it, a kept one does not.
+    const mark = () => {
+      for (const el of r.all(".timeline-attempt, .timeline-entry")) el.setAttribute("data-mark", "");
+    };
+    mark();
+    const grown: TicketEventsResponse = {
+      ...first,
+      events: [
+        ...first.events.map((e) => ({ ...e })),
+        { at: "2026-10-01T01:00:00.000Z", attempt: 2, kind: "checkpoint", payload: {} },
+      ],
+    };
+    const after = projectTimeline(grown, "in-progress", { response: first, view: before });
+    r.paint(after);
+    const rows = r.all(".timeline-attempt");
+    // Attempt 1 had nothing new: kept whole.
+    expect(rows[0]!.hasAttribute("data-mark")).toBe(true);
+    // Attempt 2 grew: its row is redrawn, its three old entries kept, the new one built.
+    expect(rows[1]!.hasAttribute("data-mark")).toBe(false);
+    const entries = [...rows[1]!.querySelectorAll(".timeline-entry")];
+    expect(entries.map((el) => el.hasAttribute("data-mark"))).toEqual([true, true, true, false]);
+    // The same frame again (a delta, a live frame): everything kept.
+    mark();
+    r.paint(projectTimeline(grown, "in-progress", { response: grown, view: after }));
+    expect(r.all(".timeline-attempt, .timeline-entry").every((el) => el.hasAttribute("data-mark"))).toBe(
+      true,
+    );
+  });
+
+  it("opens the log pane on its last slices, and shows the earlier ones it holds on a press", () => {
+    const r = mount();
+    const line = (i: number) => `line ${String(i).padStart(5, "0")} of the agent's raw log output\n`;
+    const content = Array.from({ length: 2_000 }, (_, i) => line(i)).join("");
+    const pane: LogPaneView = {
+      selectedAttempt: 1,
+      stream: false,
+      content,
+      firstOffset: 0,
+      offset: content.length,
+      totalSize: content.length,
+      hasMore: false,
+      hasEarlier: false,
+      neverRun: false,
+      error: null,
+    };
+    const timeline = projectTimeline(events(1, 2), "in-progress");
+    r.paint(timeline, pane);
+    const slices = logSlices(content);
+    const pre = r.q(".log-pane-content")!;
+    expect(pre.querySelectorAll(".log-slice")).toHaveLength(LOG_SLICES_SHOWN);
+    expect(pre.textContent).toBe(content.slice(slices[slices.length - LOG_SLICES_SHOWN]!.start));
+    // An append grows the last slice; the slices before it are the same nodes.
+    const kept = pre.querySelector(".log-slice")!;
+    kept.setAttribute("data-mark", "");
+    const appended = content + line(2_000);
+    const grown = { ...pane, content: appended, offset: appended.length, totalSize: appended.length };
+    r.paint(timeline, grown);
+    expect(pre.querySelector(".log-slice")).toBe(kept);
+    expect(kept.hasAttribute("data-mark")).toBe(true);
+    expect(pre.textContent!.endsWith(line(2_000))).toBe(true);
+    // "Show earlier" draws more of what the pane holds, then "load earlier" reads more.
+    expect(r.q(".log-pane-earlier")?.textContent).toBe("show earlier");
+    while (r.q(".log-pane-earlier")?.textContent === "show earlier") {
+      r.q<HTMLButtonElement>(".log-pane-earlier")!.click();
+      r.paint(timeline, { ...grown, hasEarlier: true });
+    }
+    expect(pre.textContent).toBe(appended);
+    expect(r.q(".log-pane-earlier")?.textContent).toBe("load earlier");
+  });
+});
+
+describe("logSlices (issue #161)", () => {
+  it("cuts whole lines of about LOG_SLICE_CHARS, and an append never moves a cut", () => {
+    const text = Array.from({ length: 3_000 }, (_, i) => `line ${i}\n`).join("");
+    const slices = logSlices(text);
+    expect(slices[0]!.start).toBe(0);
+    expect(slices.at(-1)!.end).toBe(text.length);
+    for (const slice of slices.slice(0, -1)) {
+      expect(text[slice.end - 1]).toBe("\n");
+      expect(slice.end - slice.start).toBeGreaterThanOrEqual(LOG_SLICE_CHARS);
+    }
+    const grown = logSlices(text + "one more line\n");
+    expect(grown.slice(0, slices.length - 1)).toEqual(slices.slice(0, -1));
+    expect(logSlices("")).toEqual([]);
   });
 });

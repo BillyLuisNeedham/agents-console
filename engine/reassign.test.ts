@@ -329,17 +329,54 @@ describe("reassignViews: who may be reassigned", () => {
     });
   });
 
-  it("refuses every ticket while the config will not resolve, saying why", () => {
+  // One ticket the file does not resolve is that ticket's trouble alone
+  // (issue #159): the rest stay offered, and its reason names the cause.
+  it("refuses only the ticket the config does not resolve, saying why", () => {
     const rows = views([marker("01"), marker("02")], {
       defaults: DEFAULTS,
       assign: { "02": { harness: "gemini" } },
     });
 
-    for (const id of ["01", "02"]) {
-      expect(rows.get(id)!.reassign.eligible).toBe(false);
-      expect(rows.get(id)!.reassign.reason).toContain("the pool config does not resolve");
-      expect(rows.get(id)!.reassign.reason).toContain("unknown harness 'gemini'");
-    }
+    expect(rows.get("01")!.reassign.eligible).toBe(true);
+    expect(rows.get("01")!.reassign.reason).toBeNull();
+    expect(rows.get("02")!.reassign.eligible).toBe(false);
+    expect(rows.get("02")!.reassign.reason).toContain("the pool config does not resolve");
+    expect(rows.get("02")!.reassign.reason).toContain("unknown harness 'gemini'");
+  });
+
+  it("refuses only a ticket whose parent has no Assignment, naming the parent", () => {
+    // conv-3 is a Conversation the engine holds no Assignment for: nothing
+    // seeds it, so its spawn cannot resolve, and that is the only casualty.
+    const rows = views(
+      [
+        marker("01"),
+        marker("conv-3-spawn-1", { spawnedBy: "conv-3" }),
+        marker("conv-3-spawn-1-spawn-1", { spawnedBy: "conv-3-spawn-1" }),
+      ],
+      { defaults: DEFAULTS },
+    );
+
+    expect(rows.get("01")!.reassign.eligible).toBe(true);
+    const orphan = rows.get("conv-3-spawn-1")!.reassign;
+    expect(orphan.eligible).toBe(false);
+    expect(orphan.reason).toContain("parent conv-3 has no Assignment");
+    expect(orphan.reason).not.toContain("cycle");
+    expect(rows.get("conv-3-spawn-1")!.assignment).toBeNull();
+    // Its own child fails too, and says it is the parent, not a cycle.
+    const grandchild = rows.get("conv-3-spawn-1-spawn-1")!.reassign;
+    expect(grandchild.eligible).toBe(false);
+    expect(grandchild.reason).toContain("parent conv-3-spawn-1 did not resolve");
+  });
+
+  it("still reports a real spawned-by cycle as a cycle", () => {
+    const rows = views(
+      [marker("01"), marker("a", { spawnedBy: "b" }), marker("b", { spawnedBy: "a" })],
+      { defaults: DEFAULTS },
+    );
+
+    expect(rows.get("01")!.reassign.eligible).toBe(true);
+    expect(rows.get("a")!.reassign.reason).toContain("spawned-by cycle: a -> b -> a");
+    expect(rows.get("b")!.reassign.reason).toContain("spawned-by cycle: b -> a -> b");
   });
 
   it("refuses every ticket while the config will not parse", () => {
@@ -348,6 +385,119 @@ describe("reassignViews: who may be reassigned", () => {
     expect(rows.get("01")!.reassign.reason).toBe(
       "the pool config does not resolve: console.json: bad JSON",
     );
+  });
+});
+
+// A ticket's spawned-by may name a Conversation (issue #156). The engine
+// seeds every Conversation's Assignment before it resolves the tickets, and
+// carries them on the snapshot under their own ids; Reassign has to seed them
+// the same way or every one of their descendants looks unresolvable.
+const CONVERSATION: Record<string, AssignmentView> = {
+  "conv-9": { harness: "claude", model: "opus", effort: "high", drivers: "implement tdd" },
+};
+
+function conversationTickets(): TicketMarker[] {
+  return [
+    marker("01"),
+    marker("conv-9-spawn-1", { spawnedBy: "conv-9" }),
+    marker("conv-9-spawn-1-spawn-1", { spawnedBy: "conv-9-spawn-1" }),
+  ];
+}
+
+const ALL_INHERITED = {
+  harness: "inherited",
+  model: "inherited",
+  effort: "inherited",
+  drivers: "inherited",
+} as const;
+
+describe("Reassign on a ticket spawned by a Conversation", () => {
+  it("offers the child and grandchild, inheriting the Conversation's Assignment", () => {
+    const rows = views(conversationTickets(), { defaults: DEFAULTS }, { engine: CONVERSATION });
+
+    for (const id of ["01", "conv-9-spawn-1", "conv-9-spawn-1-spawn-1"]) {
+      expect(rows.get(id)!.reassign.eligible).toBe(true);
+      expect(rows.get(id)!.reassign.reason).toBeNull();
+    }
+    for (const id of ["conv-9-spawn-1", "conv-9-spawn-1-spawn-1"]) {
+      expect(rows.get(id)!.reassign.sources).toEqual(ALL_INHERITED);
+      expect(rows.get(id)!.assignment).toMatchObject({
+        harness: "claude",
+        model: "opus",
+        effort: "high",
+        drivers: "implement tdd",
+      });
+    }
+    // The Conversation itself is not a ticket and gets no row.
+    expect(rows.has("conv-9")).toBe(false);
+  });
+
+  it("writes the child's assign entry, and the dry run resolves the grandchild from it", () => {
+    const dir = pool({ defaults: DEFAULTS });
+    const markers = conversationTickets();
+
+    const result = writeReassign(
+      dir,
+      { tickets: ["conv-9-spawn-1"], fields: { model: "sonnet", effort: "low" } },
+      context(markers, { engine: CONVERSATION }),
+    );
+
+    expect(result).toEqual({ applied: ["conv-9-spawn-1"], skipped: [] });
+    expect(onDisk(dir).assign).toEqual({
+      "conv-9-spawn-1": { model: "sonnet", effort: "low" },
+    });
+
+    // Read back as the Console will: the child pins what it was given and
+    // inherits the rest; the grandchild inherits all of it from the child.
+    const rows = views(
+      markers,
+      onDisk(dir) as PoolConfig,
+      { engine: CONVERSATION },
+    );
+    expect(rows.get("conv-9-spawn-1")!.reassign.sources).toEqual({
+      harness: "inherited",
+      model: "pinned",
+      effort: "pinned",
+      drivers: "inherited",
+    });
+    expect(rows.get("conv-9-spawn-1-spawn-1")!.reassign.eligible).toBe(true);
+    expect(rows.get("conv-9-spawn-1-spawn-1")!.reassign.sources).toEqual(ALL_INHERITED);
+    expect(rows.get("conv-9-spawn-1-spawn-1")!.assignment).toMatchObject({
+      model: "sonnet",
+      effort: "low",
+    });
+  });
+
+  it("writes the grandchild's assign entry too", () => {
+    const dir = pool({ defaults: DEFAULTS });
+
+    const result = writeReassign(
+      dir,
+      { tickets: ["conv-9-spawn-1-spawn-1"], fields: { harness: "stub" } },
+      context(conversationTickets(), { engine: CONVERSATION }),
+    );
+
+    expect(result.applied).toEqual(["conv-9-spawn-1-spawn-1"]);
+    expect(onDisk(dir).assign).toEqual({ "conv-9-spawn-1-spawn-1": { harness: "stub" } });
+  });
+
+  // A file the engine already refuses for one ticket does not hold every
+  // other write hostage to it (issue #159); only a failure the write itself
+  // brings is refused.
+  it("applies a write beside a ticket the file already fails to resolve", () => {
+    const dir = pool({ defaults: DEFAULTS, assign: { "02": { harness: "gemini" } } });
+
+    const result = writeReassign(
+      dir,
+      { tickets: ["01"], fields: { model: "opus" } },
+      context([marker("01"), marker("02")]),
+    );
+
+    expect(result).toEqual({ applied: ["01"], skipped: [] });
+    expect(onDisk(dir).assign).toEqual({
+      "01": { model: "opus" },
+      "02": { harness: "gemini" },
+    });
   });
 });
 

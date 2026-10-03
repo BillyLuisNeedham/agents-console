@@ -1,0 +1,193 @@
+{
+  "at": "2026-10-02T22:11:21.678Z",
+  "repo": "/home/billy/repos/agent-console",
+  "revision": "feat/157-push-protocol@ba06c42",
+  "machine": {
+    "bun": "1.3.14",
+    "platform": "linux",
+    "cpus": 12,
+    "loadavgAtStart": [
+      5.24,
+      4.17,
+      4.08
+    ]
+  },
+  "server": {
+    "durationS": 60,
+    "tabs": 2,
+    "rttMs": 0,
+    "protocol": "ws",
+    "pool": {
+      "tickets": 20,
+      "done": 12,
+      "inProgress": 4,
+      "ready": 4,
+      "conversations": 3,
+      "mergeHold": 3,
+      "interrupts": 0
+    },
+    "pingMs": {
+      "n": 2297,
+      "mean": 0.5,
+      "p50": 0.4,
+      "p95": 1,
+      "p99": 1.9,
+      "max": 8.4
+    },
+    "pingFailures": 0,
+    "clickMs": {
+      "n": 19,
+      "mean": 2,
+      "p50": 1.7,
+      "p95": 7.7,
+      "p99": 7.7,
+      "max": 7.7,
+      "queuedMean": 0
+    },
+    "focusMs": {
+      "n": 19,
+      "mean": 1.2,
+      "p50": 1,
+      "p95": 3.1,
+      "p99": 3.1,
+      "max": 3.1,
+      "queuedMean": 0,
+      "serverP50": 1
+    },
+    "requestsByKind": {},
+    "frames": {
+      "card": {
+        "perSec": 0.55,
+        "meanBytes": 7378
+      },
+      "live": {
+        "perSec": 1,
+        "meanBytes": 12061
+      },
+      "delta": {
+        "perSec": 2,
+        "meanBytes": 412
+      },
+      "reply": {
+        "perSec": 0.32,
+        "meanBytes": 106
+      },
+      "heartbeat": {
+        "perSec": 0.1,
+        "meanBytes": 20
+      }
+    },
+    "unanswered": 0,
+    "snapshots": {
+      "perSec": 1,
+      "meanBytes": 412,
+      "maxBytes": 414,
+      "gapP50Ms": 922.7
+    },
+    "server": {
+      "rssStartMb": 95.2,
+      "rssEndMb": 103.7,
+      "cpuPercent": 14.2,
+      "loopLagMs": {
+        "samples": 5729,
+        "p50": 0.3,
+        "p95": 1.3,
+        "p99": 2.2,
+        "max": 9.8,
+        "over50ms": 0
+      },
+      "syncSpawn": {
+        "calls": 0,
+        "totalMs": 0,
+        "blockedPercent": 0,
+        "byCommand": []
+      },
+      "asyncSpawns": 240
+    },
+    "herdrRequests": {
+      "workspace.create": 1,
+      "pane.list": 27,
+      "tab.create": 19,
+      "pane.read": 292,
+      "pane.send_input": 25,
+      "pane.report_agent": 19,
+      "events.subscribe": 8,
+      "pane.release_agent": 12,
+      "pane.focus": 19
+    }
+  },
+  "ui": {
+    "durationMs": 29999,
+    "snapshotsPerSec": 1,
+    "cards": 25,
+    "domNodes": 479,
+    "renders": 85,
+    "rendersPerSec": 2.83,
+    "renderMs": {
+      "mean": 5.26,
+      "p50": 4.6,
+      "p95": 10.4,
+      "max": 14.3
+    },
+    "modelMs": {
+      "n": 85,
+      "mean": 0.24,
+      "p50": 0.2,
+      "p95": 0.4,
+      "max": 0.6
+    },
+    "renderLayoutMs": {
+      "n": 85,
+      "mean": 5.29,
+      "p50": 4.6,
+      "p95": 10.5,
+      "max": 14.3
+    },
+    "renderBusyPct": 1.5,
+    "longestTaskMs": 0,
+    "longTasksOver50ms": 0,
+    "frameGapMs": {
+      "p50": 16.7,
+      "p95": 16.7,
+      "max": 16.8
+    },
+    "framesOver50ms": 0,
+    "clickToDetailMs": {
+      "n": 20,
+      "p50": 17.9,
+      "p95": 33.2,
+      "max": 33.2
+    },
+    "clickSyncMs": {
+      "n": 20,
+      "mean": 4.3,
+      "p50": 3.5,
+      "p95": 8.9,
+      "max": 8.9
+    },
+    "rendersDuringClicks": 40,
+    "dragMoveMs": {
+      "n": 120,
+      "mean": 0.04,
+      "p95": 0.1,
+      "max": 0.2
+    },
+    "dragMoveToFrameMs": {
+      "n": 120,
+      "mean": 16.67,
+      "p50": 16.7,
+      "p95": 17.2,
+      "max": 17.3
+    },
+    "rendersDuringDrags": 4,
+    "sanity": {
+      "detailOpened": true,
+      "clicksMissed": 0,
+      "dragMoved": true,
+      "longTaskApi": true,
+      "snapshotsPushed": 32,
+      "focusCalls": 0
+    }
+  },
+  "e2e": null
+}

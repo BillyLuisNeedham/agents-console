@@ -3612,6 +3612,54 @@ describe("channels", () => {
 });
 
 describe("config reload (ADR-0018)", () => {
+  // A ticket a Conversation spawned resolves from that Conversation's
+  // Assignment, which startPool seeds. The reload has to seed it too, or the
+  // one ticket makes it reject every edit to the file (issue #156).
+  it("reloads while a Conversation-spawned ticket exists, which keeps inheriting the Conversation", async () => {
+    const poolDir = makePool({
+      tickets: [
+        readyTicket("01"),
+        readyTicket("02", "01"),
+        {
+          file: "conv-1-spawn-1.md",
+          marker:
+            "<!-- state: id=conv-1-spawn-1 blocked-by=01 status=ready spawned-by=conv-1 -->",
+          body: "# conv-1-spawn-1: Proposed from a Conversation\n\nAlready on disk.\n",
+        },
+      ],
+      config: { defaults: { harness: "stub", model: "model-a" } },
+    });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub model=conv-model effort=low drivers=implement -->\n\n# conv-1\n",
+    );
+    const rig = stubHarness(poolDir, {});
+    const harnesses = {
+      stub: (ctx: SpawnContext) => {
+        if (ctx.id === "01") {
+          writeFileSync(
+            join(poolDir, "console.json"),
+            JSON.stringify({ defaults: { harness: "stub", model: "model-b" } }),
+          );
+        }
+        return rig.harnesses.stub(ctx);
+      },
+    };
+
+    const run = await approveReview(await runPool({ poolDir, harnesses }));
+
+    expect(run.phase).toBe("done");
+    expect(run.final.log).toContain("config reloaded: defaults");
+    expect(run.final.log.filter((line) => line.startsWith("config reload rejected"))).toEqual([]);
+    expect(rig.spawned["02"].model).toBe("model-b");
+    expect(rig.spawned["conv-1-spawn-1"].model).toBe("conv-model");
+    expect(rig.spawned["conv-1-spawn-1"].effort).toBe("low");
+    // The Conversation's own record survives the reload's swap of the map.
+    const last = run.snapshots[run.snapshots.length - 1]!;
+    expect(last.assignments["conv-1"]).toMatchObject({ harness: "stub", model: "conv-model" });
+  });
+
   it("reassigns a not-yet-run ticket edited between super-steps, with a reassigned event on its log", async () => {
     const poolDir = makePool({
       tickets: [readyTicket("01"), readyTicket("02", "01")],

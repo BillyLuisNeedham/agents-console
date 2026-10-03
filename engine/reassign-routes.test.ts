@@ -9,7 +9,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPoolServer, type PoolServer } from "./server.ts";
 import type { PoolConfig } from "./engine.ts";
@@ -186,6 +186,72 @@ describe("the snapshot's Reassign rows", () => {
       harness: "stub",
       model: "model-a",
       drivers: "review",
+    });
+  });
+});
+
+// A ticket's spawned-by may name a Conversation (issue #156). The wiring:
+// the engine's snapshot carries the Conversation's Assignment under its own
+// id, and the server hands it to the module, so the child and the grandchild
+// resolve from it instead of refusing the whole pool.
+describe("Reassign on a Conversation's spawns", () => {
+  it("offers the child and grandchild with inherited sources, and writes the child", async () => {
+    const spawned = (id: string, parent: string, blocked: string) =>
+      `${READY(id, blocked).slice(0, -4)} spawned-by=${parent} -->`;
+    const poolDir = makePool({
+      tickets: [
+        { file: "01-a.md", marker: READY("01") },
+        { file: "conv-1-spawn-1.md", marker: spawned("conv-1-spawn-1", "conv-1", "01") },
+        {
+          file: "conv-1-spawn-1-spawn-1.md",
+          marker: spawned("conv-1-spawn-1-spawn-1", "conv-1-spawn-1", "conv-1-spawn-1"),
+        },
+      ],
+      config: STUB_DEFAULTS,
+    });
+    mkdirSync(join(poolDir, "conversations"), { recursive: true });
+    writeFileSync(
+      join(poolDir, "conversations", "conv-1.md"),
+      "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=stub " +
+        "model=conv-model effort=low drivers=implement -->\n\n# Talk\n",
+    );
+    const server = createPoolServer({
+      poolDir,
+      port: 0,
+      // 01 held open, so neither spawn runs and both stay reassignable.
+      harnesses: stubHarness(poolDir, { "01": { waitFor: "/nonexistent-forever" } }).harnesses,
+      distDir: "/nonexistent",
+      registryPath: join(poolDir, "fleet.json"),
+    });
+    servers.push(server);
+    await server.start();
+
+    const state = await getState(server);
+    for (const id of ["conv-1-spawn-1", "conv-1-spawn-1-spawn-1"]) {
+      expect(ticket(state, id).reassign.eligible).toBe(true);
+      expect(ticket(state, id).reassign.reason).toBeNull();
+      expect(ticket(state, id).reassign.sources).toEqual({
+        harness: "inherited",
+        model: "inherited",
+        effort: "inherited",
+        drivers: "inherited",
+      });
+      expect(ticket(state, id).assignment).toMatchObject({ model: "conv-model", effort: "low" });
+    }
+
+    const res = await putReassign(server, {
+      tickets: ["conv-1-spawn-1"],
+      fields: { model: "opus" },
+    });
+    expect(res.status).toBe(200);
+    const answer = (await res.json()) as ReassignResponse;
+
+    expect(answer.applied).toEqual(["conv-1-spawn-1"]);
+    expect(onDisk(poolDir).assign).toEqual({ "conv-1-spawn-1": { model: "opus" } });
+    expect(ticket(answer.snapshot, "conv-1-spawn-1").assignment).toMatchObject({ model: "opus" });
+    expect(ticket(answer.snapshot, "conv-1-spawn-1-spawn-1").assignment).toMatchObject({
+      model: "opus",
+      effort: "low",
     });
   });
 });
