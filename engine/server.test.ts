@@ -39,6 +39,7 @@ import { openSocket, type SocketClient } from "./socket-fixture.ts";
 import {
   STUB_DEFAULTS,
   cleanupPools,
+  makeGitPool,
   makePool,
   registerTempDir,
   settleOrBeat,
@@ -573,6 +574,71 @@ describe("pool server", () => {
     // A retried Close is acknowledged again; a Resume after it is not.
     expect((await post({ ticketId: "01", action: "close", note: "not needed now" })).status).toBe(202);
     expect((await post({ ticketId: "01", action: "resume" })).status).toBe(400);
+  });
+
+  it("takes adopt with the candidate's attempt and refuses an attempt it cannot use (ADR-0035)", async () => {
+    const { poolDir } = makeGitPool({
+      tickets: [
+        { file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->" },
+        { file: "02-b.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->" },
+      ],
+      config: { ...STUB_DEFAULTS, assign: { "01": { verify: 2 } } },
+    });
+    const server = await startServer(
+      poolDir,
+      stubHarness(poolDir, { "01": { statuses: ["checkpoint", "done"] }, "02": { status: "checkpoint" } })
+        .harnesses,
+    );
+    await server.start();
+    const first = await server.settled();
+    expect(
+      first.state.interrupts
+        .map((i) => [i.ticketId, i.kind, i.candidates])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ).toEqual([
+      ["01", "checkpoint", [2]],
+      ["02", "checkpoint", undefined],
+    ]);
+    const post = (body: unknown) =>
+      fetch(`${server.url}/api/resume`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const refusal = async (body: unknown): Promise<[number, string]> => {
+      const res = await post(body);
+      return [res.status, ((await res.json()) as { error: string }).error];
+    };
+
+    expect(await refusal({ ticketId: "01", action: "adopt" })).toEqual([
+      400,
+      "answer: adopt needs the attempt number of the candidate to take for 01",
+    ]);
+    expect(await refusal({ ticketId: "01", action: "adopt", attempt: "2" })).toEqual([
+      400,
+      'attempt must be a whole attempt number, got "2"',
+    ]);
+    expect(await refusal({ ticketId: "01", action: "resume", attempt: 2 })).toEqual([
+      400,
+      "answer: an attempt only goes with adopt, not resume, for 01",
+    ]);
+    expect(await refusal({ ticketId: "01", action: "adopt", attempt: 1 })).toEqual([
+      400,
+      "answer: adopt must name one of the finished candidates (2); got attempt 1 for 01",
+    ]);
+    expect(await refusal({ ticketId: "02", action: "adopt", attempt: 1 })).toEqual([
+      400,
+      "answer: 02's checkpoint names no finished candidate to adopt; resume or close it",
+    ]);
+    expect(existsSync(join(poolDir, "runs", "queued-answers.json"))).toBe(false);
+
+    const adopt = await post({ ticketId: "01", action: "adopt", attempt: 2, note: "the finished one" });
+    expect(adopt.status).toBe(202);
+    const adopted = await server.settled();
+    expect(adopted.state.tickets.find((t) => t.id === "01")?.status).toBe("done");
+    expect(adopted.state.interrupts.map((i) => i.ticketId)).toEqual(["02"]);
+    // A retried Adopt of the same Candidate is acknowledged again.
+    expect((await post({ ticketId: "01", action: "adopt", attempt: 2, note: "the finished one" })).status).toBe(202);
   });
 
   it("refuses close on the review gate and on a config interrupt (issue #154)", async () => {

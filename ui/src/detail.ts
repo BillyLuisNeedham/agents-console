@@ -22,6 +22,8 @@ import {
   stewardBudgetText,
   ticketBodyHtml,
   ticketCloseNote,
+  adoptLabel,
+  adoptWithTimelineScores,
   UNASSIGNED_LABEL,
   type AssignmentSource,
   type ConversationDetailView,
@@ -75,7 +77,8 @@ export interface DetailHandlers {
   onSelectAttempt: (ticketId: string, attempt: number) => void;
   onSelectStream: (ticketId: string, attempt: number) => void;
   onLoadEarlier: (ticketId: string, attempt: number) => void;
-  onAnswer: (ticketId: string, action: ResumeAction, note?: string) => void;
+  /** `attempt` names the Candidate an Adopt takes (ADR-0035). */
+  onAnswer: (ticketId: string, action: ResumeAction, note?: string, attempt?: number) => void;
   /** Keep talking on a checkpoint with a Held pane (issue #139): fire and
    *  forget, like onAnswer; the session holds the in-flight and refusal
    *  state the interrupt's `keepTalking` view reads back. */
@@ -306,11 +309,15 @@ export class Detail {
   // engine: a checkpoint's Brief, a crash's log path, a conflict's resolution
   // or attempt. A checkpoint whose Held pane is still alive also offers Keep
   // talking beside Resume (issue #139); it is not an answer, so the note
-  // stays with Resume and the button sends none. A Steward note (ADR-0030)
-  // sits above the note field, with "Use as answer" to take it as the draft.
+  // stays with Resume and the button sends none. A paused verify round's
+  // checkpoint offers one Adopt per finished Candidate (ADR-0035), scored
+  // from the timeline's graded events when it has them, each sending the
+  // note. A Steward note (ADR-0030) sits above the note field, with "Use as
+  // answer" to take it as the draft.
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
+    timeline: TimelineView | null = null,
   ): HTMLElement {
     const box = h(
       "div",
@@ -371,6 +378,24 @@ export class Detail {
                 ),
             },
             label,
+          ),
+        ),
+        ...adoptWithTimelineScores(interrupt.adopt, timeline).map((candidate) =>
+          h(
+            "button",
+            {
+              class: "btn interrupt-adopt",
+              key: `adopt-${interrupt.ticketId}-${candidate.attempt}`,
+              title: `merge attempt ${candidate.attempt} as the winner and discard the other attempts`,
+              onclick: () =>
+                handlers.onAnswer(
+                  interrupt.ticketId,
+                  "adopt",
+                  this.drafts.get(interrupt.ticketId) || undefined,
+                  candidate.attempt,
+                ),
+            },
+            adoptLabel(candidate),
           ),
         ),
         interrupt.keepTalking
@@ -931,7 +956,7 @@ export class Detail {
       panel.append(this.renderResolver(detail.ticketId, detail.resolver, timeline, handlers));
     }
     if (detail.interrupt) {
-      panel.append(this.renderInterrupt(detail.interrupt, handlers));
+      panel.append(this.renderInterrupt(detail.interrupt, handlers, timeline));
     }
     if (timeline) {
       panel.append(

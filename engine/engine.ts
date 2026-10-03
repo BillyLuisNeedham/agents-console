@@ -587,7 +587,10 @@ export interface PoolRun {
   /** Close (issue #154): drop the ticket at its checkpoint, merge-conflict
    *  or deadlock Interrupt without merging it. */
   closeTicket: (ticketId: string, note?: string) => Promise<PoolRun>;
-  accept: (ticketId: string, note?: string, action?: ResumeAction) => void;
+  /** Adopt (ADR-0035): take one finished Candidate of a paused verify round
+   *  as the Winner, from the round's checkpoint Interrupt. */
+  adopt: (ticketId: string, attempt: number, note?: string) => Promise<PoolRun>;
+  accept: (ticketId: string, note?: string, action?: ResumeAction, attempt?: number) => void;
   settled: Promise<PoolRun>;
   close: () => void;
   /**
@@ -1473,10 +1476,11 @@ function makeHandle(session: Session): PoolRun {
     ticketId: string,
     note: string | undefined,
     action: ResumeAction,
+    attempt?: number,
   ): Promise<PoolRun> => {
     let record: QueuedAnswer;
     try {
-      record = acceptAnswer(session, ticketId, note, action);
+      record = acceptAnswer(session, ticketId, note, action, attempt);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1512,8 +1516,9 @@ function makeHandle(session: Session): PoolRun {
     approve: (ticketId, note) => answer(ticketId, note, "approve"),
     reject: (ticketId, note) => answer(ticketId, note, "reject"),
     closeTicket: (ticketId, note) => answer(ticketId, note, "close"),
-    accept: (ticketId, note, action = "resume") => {
-      acceptAnswer(session, ticketId, note, action);
+    adopt: (ticketId, attempt, note) => answer(ticketId, note, "adopt", attempt),
+    accept: (ticketId, note, action = "resume", attempt) => {
+      acceptAnswer(session, ticketId, note, action, attempt);
       kickProcessing(session);
     },
     get settled() {
@@ -5394,19 +5399,40 @@ function acceptAnswer(
   ticketId: string,
   note: string | undefined,
   action: ResumeAction,
+  // The Candidate an Adopt takes (ADR-0035); every other action takes none.
+  attempt: number | undefined,
   // The Steward answering on the operator's path (ADR-0030): the answer is
   // recorded as its own, with its note, and counts against its budget.
   steward?: { conversation: string },
 ): QueuedAnswer {
   const approve = action === "approve" ? true : action === "reject" ? false : undefined;
   const close = action === "close" ? ("close" as const) : undefined;
+  const adopt = action === "adopt" ? ("adopt" as const) : undefined;
+  // The action the queued record carries: absent on a resume or an approval.
+  const queuedAction = close ?? adopt;
+  // An attempt only ever names the Candidate an Adopt takes: one riding on
+  // any other answer is a malformed request, never quietly ignored.
+  if (adopt && (attempt === undefined || !Number.isInteger(attempt))) {
+    throw new Error(`answer: adopt needs the attempt number of the candidate to take for ${ticketId}`);
+  }
+  if (!adopt && attempt !== undefined) {
+    throw new Error(`answer: an attempt only goes with adopt, not ${action}, for ${ticketId}`);
+  }
   const interrupt = session.state.interrupts.find(
     (i) => i.ticketId === ticketId,
   );
   if (!interrupt) {
-    const prior = session.answers.latestFor(ticketId, approve, close);
+    const prior = session.answers.latestFor(ticketId, approve, queuedAction, attempt);
     if (prior) return prior;
     throw new Error(`resume: no pending interrupt for ticket ${ticketId}`);
+  }
+  // Adopt (ADR-0035) takes one finished Candidate of a paused verify round,
+  // and only one its checkpoint names: a paused, crashed or earlier-round
+  // attempt, a lone checkpoint and one raised before Adopt existed carry no
+  // such name and are refused.
+  if (adopt) {
+    const refusal = adoptRefusal(interrupt, attempt!);
+    if (refusal !== null) throw new Error(refusal);
   }
   // Close (issue #154) drops a Ticket that can no longer usefully finish:
   // one waiting at a checkpoint, a merge that conflicted, or a deadlock on
@@ -5438,7 +5464,8 @@ function acceptAnswer(
         a.ticketId === ticketId &&
         a.kind === interrupt.kind &&
         a.approve === approve &&
-        a.action === close,
+        a.action === queuedAction &&
+        a.attempt === attempt,
     );
   if (duplicate) return duplicate;
   // A different answer already queued for the ticket wins at the drain and
@@ -5472,8 +5499,11 @@ function acceptAnswer(
       kind: interrupt.kind,
       // A Close carries its note on the log whoever gave it: the ticket
       // ends here, and the note is the record of why.
-      ...(close ? { action: close } : {}),
-      ...(close && note?.trim() ? { note: note.trim() } : {}),
+      // An Adopt carries its Candidate and its note the same way: the note
+      // is the record of why, never parsed.
+      ...(queuedAction ? { action: queuedAction } : {}),
+      ...(adopt ? { attempt } : {}),
+      ...(queuedAction && note?.trim() ? { note: note.trim() } : {}),
       ...(steward ? stewardAnswerPayload(steward.conversation, action, note) : {}),
     },
   });
@@ -5481,7 +5511,8 @@ function acceptAnswer(
     ticketId,
     kind: interrupt.kind,
     ...(approve !== undefined ? { approve } : {}),
-    ...(close ? { action: close } : {}),
+    ...(queuedAction ? { action: queuedAction } : {}),
+    ...(adopt ? { attempt } : {}),
     ...(note !== undefined ? { note } : {}),
     ...(steward ? { by: "steward" as const } : {}),
     at: new Date().toISOString(),
@@ -5524,13 +5555,15 @@ function drainAnswers(session: Session): void {
   for (const record of session.answers.pending()) {
     // An answer that merges into the pool checkout waits, still queued,
     // while a Continued attempt works there (ADR-0027); its ending kicks the
-    // drain again. A Close merges nothing, so it never waits.
+    // drain again. A Close merges nothing, so it never waits; an Adopt
+    // (ADR-0035) merges its Candidate, so it waits like a selection.
     if (
       poolCheckoutHeld(session) &&
-      record.action !== "close" &&
-      (record.kind === "merge-conflict" ||
-        record.kind === "merge-approval" ||
-        record.kind === "selection")
+      (record.action === "adopt" ||
+        (record.action !== "close" &&
+          (record.kind === "merge-conflict" ||
+            record.kind === "merge-approval" ||
+            record.kind === "selection")))
     ) {
       continue;
     }
@@ -5623,6 +5656,10 @@ function processAnswer(session: Session, record: QueuedAnswer): void {
   }
   if (record.action === "close") {
     closeTicket(session, marker, interrupt, record);
+    return;
+  }
+  if (record.action === "adopt") {
+    adoptCandidate(session, marker, interrupt, record);
     return;
   }
   if (interrupt.kind === "merge-conflict") {
@@ -7901,6 +7938,12 @@ function checkpointFanOutRound(
       );
     }
   }
+  // The Candidates the operator may adopt (ADR-0035): every one that
+  // finished done and was graded, pass or flag. They ride on the Interrupt,
+  // persisted with it, so an Adopt is checked against this exact round.
+  const adoptable = sorted
+    .filter((r) => r.status === "done" && grades.has(r.plan.attempt))
+    .map((r) => r.plan.attempt);
   const brief =
     `The verify round of ${sorted.length} attempts ended with ` +
     `${paused.length} checkpointed, so no candidate was selected and ` +
@@ -7908,7 +7951,12 @@ function checkpointFanOutRound(
     sections.join("\n\n") +
     "\n\nAnswering resume resets the ticket to ready; the next round runs " +
     "a fresh fan-out and grades it again. Closing it ends the ticket " +
-    "without merging any candidate.";
+    "without merging any candidate." +
+    (adoptable.length > 0
+      ? " The operator may instead adopt a finished candidate " +
+        `(${adoptable.join(", ")}): it merges as the winner and the rest ` +
+        "are discarded."
+      : "");
   const attempt = paused[0].plan.attempt;
   checkpointTicketByEngine(
     session,
@@ -7920,6 +7968,7 @@ function checkpointFanOutRound(
       "no candidate selected, attempt " +
       `${attempt}'s pane is the one held`,
     emit,
+    adoptable.length > 0 ? adoptable : undefined,
   );
   // The paused candidate's outcome becomes the ticket's, as a lone
   // checkpoint's does. Its spawn proposals stay with the round: a verify
@@ -7944,11 +7993,14 @@ function checkpointTicketByEngine(
   brief: string | undefined,
   logLine: string,
   emit: (phase: RunPhase) => void,
+  // A paused verify round's adoptable Candidates (ADR-0035), for its
+  // checkpoint Interrupt to carry.
+  candidates?: number[],
 ): void {
   writeMarkerStatus(marker.file, "checkpoint");
   marker.status = "checkpoint";
   landCheckpointBrief(marker.file, brief);
-  raiseCheckpoint(session, marker, attempt);
+  raiseCheckpoint(session, marker, attempt, candidates);
   session.state = applyUpdate(session.state, {
     tickets: { [marker.id]: "checkpoint" },
     log: [logLine],
@@ -8310,6 +8362,90 @@ function processSelectionAnswer(
     attempt,
     { score: null, margin: null, rule: "human" },
     `human selected attempt ${attempt}`,
+    () => {},
+  );
+}
+
+// Why an Adopt (ADR-0035) cannot take this attempt from this Interrupt, or
+// null when it can. Only a paused verify round's checkpoint names Candidates
+// to adopt, on its `candidates`: the finished, graded attempts of that round.
+function adoptRefusal(interrupt: Interrupt, attempt: number): string | null {
+  if (interrupt.kind !== "checkpoint") {
+    return (
+      "answer: adopt takes a paused verify round's checkpoint interrupt, " +
+      `got ${interrupt.kind} for ${interrupt.ticketId}`
+    );
+  }
+  const candidates = interrupt.candidates ?? [];
+  if (candidates.length === 0) {
+    return (
+      `answer: ${interrupt.ticketId}'s checkpoint names no finished candidate ` +
+      "to adopt; resume or close it"
+    );
+  }
+  if (!candidates.includes(attempt)) {
+    return (
+      "answer: adopt must name one of the finished candidates " +
+      `(${candidates.join(", ")}); got attempt ${attempt} for ${interrupt.ticketId}`
+    );
+  }
+  return null;
+}
+
+// The score of an adopted Candidate's grade: its latest well-formed graded
+// event on the ticket's log. The grades of a round live only for the
+// super-step that graded it, and the log is where they outlive a restart,
+// so the log is read in both cases. Null when no grade can be found.
+function candidateScore(session: Session, ticketId: string, attempt: number): number | null {
+  const graded = readEvents(session.runsDir, ticketId).filter(
+    (event) =>
+      event.kind === "graded" &&
+      event.attempt === attempt &&
+      typeof event.payload.score === "number",
+  );
+  return (graded.at(-1)?.payload.score as number | undefined) ?? null;
+}
+
+// Adopt (ADR-0035): the operator takes one finished Candidate of a paused
+// verify round as the Winner. The checkpoint Interrupt is dropped and the
+// paused candidate's question with it, unanswered; the Held pane is let go,
+// and its tab closes with every other attempt's when the selection discards
+// them. From there it is a human selection: the Candidate merges through
+// completeSelection, which takes only its Outcome and its spawn proposals,
+// and a conflicted merge checkpoints as a selected winner's does. The note
+// is the record of why, on the answered event and the pool log; it is never
+// read for a number.
+function adoptCandidate(
+  session: Session,
+  marker: TicketMarker,
+  interrupt: Interrupt,
+  record: QueuedAnswer,
+): void {
+  const attempt = record.attempt;
+  // The acceptance-time check guards the live caller; this one guards a
+  // record accepted against an Interrupt that has since changed.
+  const refusal =
+    attempt === undefined
+      ? `answer: adopt needs the attempt number of the candidate to take for ${marker.id}`
+      : adoptRefusal(interrupt, attempt);
+  if (refusal !== null) throw new Error(refusal);
+  if (session.adopted.has(marker.id)) abandonAdoption(session, marker.id);
+  session.held.delete(marker.id);
+  const note = record.note?.trim();
+  session.state = applyUpdate(session.state, {
+    interrupts: session.state.interrupts.filter((i) => i !== interrupt),
+    log: [
+      `interrupt answered for ${marker.id} (checkpoint): attempt ${attempt} ` +
+        "adopted from the paused verify round" +
+        (note ? `, with the note: ${note}` : ""),
+    ],
+  });
+  completeSelection(
+    session,
+    marker,
+    attempt!,
+    { score: candidateScore(session, marker.id, attempt!), margin: null, rule: "human" },
+    `the operator adopted attempt ${attempt} from the paused verify round's checkpoint`,
     () => {},
   );
 }
@@ -9008,8 +9144,14 @@ function raiseCheckpoint(
   session: Session,
   marker: TicketMarker,
   attempt: number,
+  // The adoptable Candidates of a paused verify round (ADR-0035); a lone
+  // checkpoint, and one rebuilt from its marker after a restart, has none.
+  candidates?: number[],
 ): void {
-  const interrupt = checkpointInterrupt(marker);
+  const interrupt: Interrupt = {
+    ...checkpointInterrupt(marker),
+    ...(candidates && candidates.length > 0 ? { candidates } : {}),
+  };
   raiseInterrupt(session, interrupt);
   appendEvent(session.runsDir, marker.id, {
     at: new Date().toISOString(),
@@ -9848,6 +9990,13 @@ function stewardAnswer(
   action: "resume" | "approve" | "reject" | "close",
   note: string | undefined,
 ): void {
+  // Adopting a Candidate is the operator's alone (ADR-0035). The type has no
+  // adopt, but the command's words arrive as strings, so the seam says so.
+  if ((action as string) === "adopt") {
+    throw stewardRefusal(
+      `adopting a candidate is the operator's: leave ${ticketId} with a note naming the one you recommend`,
+    );
+  }
   const interrupt = stewardInterrupt(session, conversation, ticketId);
   if (action === "close") {
     checkStewardClose(session, ticketId, interrupt.kind, note);
@@ -9857,7 +10006,7 @@ function stewardAnswer(
     throw stewardRefusal(`ticket ${ticketId}'s ${interrupt.kind} Interrupt takes resume`);
   }
   checkStewardBudget(session, ticketId);
-  acceptAnswer(session, ticketId, note, action, { conversation });
+  acceptAnswer(session, ticketId, note, action, undefined, { conversation });
   kickProcessing(session);
 }
 

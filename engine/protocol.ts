@@ -356,6 +356,9 @@ export interface ResumeRequest {
   ticketId: string;
   action: ResumeAction;
   note?: string;
+  /** The Candidate an `adopt` takes (ADR-0035): required with `adopt` and
+   *  refused with every other action. */
+  attempt?: number;
 }
 
 /** The ticket (or Conversation) whose pane "Open in herdr" focuses. */

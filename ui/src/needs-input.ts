@@ -28,6 +28,7 @@ import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderKeepTalkingButton, renderKeepTalkingFailure } from "./terminal";
 import { renderStewardNote } from "./steward";
 import {
+  adoptLabel,
   bulkResumeRows,
   clampNeedsInputWidth,
   closableRows,
@@ -57,6 +58,7 @@ export type AnswerHandler = (
   ticketId: string,
   action: ResumeAction,
   note?: string,
+  attempt?: number,
 ) => Promise<void>;
 
 export interface NeedsInputOptions {
@@ -89,6 +91,9 @@ export interface NeedsInputFailure {
   action: ResumeAction;
   message: string;
   note?: string;
+  /** The Candidate a failed Adopt named (ADR-0035), so a retry takes the
+   *  same one. */
+  attempt?: number;
 }
 
 /**
@@ -267,7 +272,7 @@ export class NeedsInputTray {
   async retry(ticketId: string): Promise<void> {
     const failure = this.failures.get(ticketId);
     if (!failure) return;
-    await this.fire(ticketId, failure.action, failure.note);
+    await this.fire(ticketId, failure.action, failure.note, failure.attempt);
   }
 
   // One answer, one row: a resolve clears the row's mark and its tick (the
@@ -275,10 +280,16 @@ export class NeedsInputTray {
   // a re-render is only needed when something actually drops), a reject
   // marks it. The note is the row's draft unless one is given, read at
   // dispatch and never written, so a failure leaves the draft intact.
-  // Resolves true when the engine accepted the answer.
-  private async fire(ticketId: string, action: ResumeAction, note?: string): Promise<boolean> {
+  // Resolves true when the engine accepted the answer. An Adopt names its
+  // Candidate's attempt (ADR-0035); every other answer names none.
+  private async fire(
+    ticketId: string,
+    action: ResumeAction,
+    note?: string,
+    attempt?: number,
+  ): Promise<boolean> {
     try {
-      await this.onAnswer(ticketId, action, note ?? this.note(ticketId));
+      await this.onAnswer(ticketId, action, note ?? this.note(ticketId), attempt);
       const unmarked = this.failures.delete(ticketId);
       const unticked = this.ticked.delete(ticketId);
       if (unmarked || unticked) this.onChange();
@@ -289,6 +300,7 @@ export class NeedsInputTray {
         message: err instanceof Error ? err.message : String(err),
       };
       if (note !== undefined) failure.note = note;
+      if (attempt !== undefined) failure.attempt = attempt;
       this.failures.set(ticketId, failure);
       this.onChange();
       return false;
@@ -540,7 +552,10 @@ export class NeedsInputTray {
   // its retry. A checkpoint row whose Held pane is alive also offers Keep
   // talking after its form's actions (issue #139), with a refusal's reason
   // under the row. A row whose form offers Close and is not waiting leads
-  // with a tick box for "close selected" (issue #154). A Steward note (ADR-0030) sits between the line and the note, with
+  // with a tick box for "close selected" (issue #154). A paused verify
+  // round's checkpoint row also offers one Adopt per finished Candidate
+  // after its form's actions (ADR-0035), each sending the row's note; no
+  // bulk action ever fires one. A Steward note (ADR-0030) sits between the line and the note, with
   // "Use as answer" to take it as the draft. The interrupt body stays in the
   // Detail; the row is the queue entry, not the reading surface.
   private renderRow(row: NeedsInputRow, handlers: NeedsInputHandlers): HTMLElement[] {
@@ -617,6 +632,21 @@ export class NeedsInputTray {
                   },
                 },
                 label,
+              ),
+            ),
+            ...row.interrupt.adopt.map((candidate) =>
+              h(
+                "button",
+                {
+                  class: "btn needs-input-adopt",
+                  key: `${row.cardId}-adopt-${candidate.attempt}`,
+                  disabled: waiting,
+                  title: `merge attempt ${candidate.attempt} as the winner and discard the other attempts`,
+                  onclick: () => {
+                    void this.fire(row.ticketId, "adopt", undefined, candidate.attempt);
+                  },
+                },
+                adoptLabel(candidate),
               ),
             ),
             row.interrupt.keepTalking

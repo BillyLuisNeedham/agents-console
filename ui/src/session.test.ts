@@ -17,6 +17,7 @@ import {
 import { createConsole } from "./console";
 import { ConsoleSession, type ConsoleSessionOptions } from "./session";
 import { RequestRefused } from "./socket";
+import { answered } from "./optimistic";
 import {
   projectPool,
   type ConversationView,
@@ -653,6 +654,45 @@ describe("optimistic presses (issue #161)", () => {
     expect(row?.interrupt.queued).toBe(true);
     expect(row?.interrupt.closing).toBe(true);
     expect(r.last("resume").payload).toEqual({ ticketId: "A", action: "close", note: "not needed" });
+  });
+
+  it("draws an Adopt as queued in the press's frame and sends its Candidate (ADR-0035)", () => {
+    const paused = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "checkpoint" })],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief", candidates: [2, 3] }],
+      },
+    });
+    const { r, session } = sessionOver(paused);
+    void session.answer("A", "adopt", "the passing one", 3).catch(() => {});
+    const row = session.model({}).needsInput.find((x) => x.ticketId === "A");
+    expect(row?.interrupt.queued).toBe(true);
+    expect(row?.interrupt.closing).toBe(false);
+    expect(r.last("resume").payload).toEqual({
+      ticketId: "A",
+      action: "adopt",
+      note: "the passing one",
+      attempt: 3,
+    });
+  });
+
+  it("queues the optimistic Adopt with its action and attempt, as the engine will (ADR-0035)", () => {
+    const paused = snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A", { status: "checkpoint" })],
+        interrupts: [{ ticketId: "A", kind: "checkpoint", body: "brief", candidates: [2] }],
+      },
+    });
+    const queued = answered("A", "adopt", undefined, 2)(paused).state.queuedAnswers;
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ ticketId: "A", kind: "checkpoint", action: "adopt", attempt: 2 });
+    expect(queued[0]).not.toHaveProperty("note");
+    // Every other answer names no attempt.
+    const resumed = answered("A", "resume", "go")(paused).state.queuedAnswers[0];
+    expect(resumed).not.toHaveProperty("attempt");
+    expect(resumed).not.toHaveProperty("action");
   });
 
   it("rolls a refused answer back and puts the reason beside it until the next answer", async () => {

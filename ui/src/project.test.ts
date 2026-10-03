@@ -7,6 +7,8 @@ import {
   clampDetailWidth,
   clampNeedsInputWidth,
   clampDrawersHeight,
+  adoptLabel,
+  adoptWithTimelineScores,
   bulkResumeRows,
   closableRows,
   projectConversationsNeedsInput,
@@ -476,6 +478,73 @@ describe("interrupt projection", () => {
         "reject",
       ]);
     }
+  });
+});
+
+describe("Adopt projection (ADR-0035)", () => {
+  const paused = (
+    candidates: number[] | undefined,
+    kind: InterruptKind = "checkpoint",
+  ): EnrichedSnapshot =>
+    snapshot({
+      phase: "quiescent",
+      state: {
+        tickets: [ticket("A")],
+        interrupts: [{ ticketId: "A", kind, body: "the brief", ...(candidates ? { candidates } : {}) }],
+      },
+    });
+  const adoptOf = (snap: EnrichedSnapshot, grades = {}) => {
+    const card = projectPool(snap, grades).cards.find((c) => c.id === "ticket:A");
+    return card?.kind === "ticket" ? card.interrupt?.adopt : undefined;
+  };
+
+  it("offers one Adopt per Candidate, scoring only the one the card's grade is about", () => {
+    expect(
+      adoptOf(paused([2, 3]), { A: { attempt: 3, score: 8, verdict: "pass", winner: null } }),
+    ).toEqual([
+      { attempt: 2, score: null },
+      { attempt: 3, score: 8 },
+    ]);
+  });
+
+  it("offers none on a checkpoint without Candidates, or on any other kind", () => {
+    expect(adoptOf(paused(undefined))).toEqual([]);
+    expect(adoptOf(paused([2], "crash"))).toEqual([]);
+  });
+
+  it("keeps Adopt out of the form's actions, so no bulk answer fires it", () => {
+    const card = projectPool(paused([2])).cards.find((c) => c.id === "ticket:A");
+    const actions = card?.kind === "ticket" ? card.interrupt?.form.actions.map((a) => a.action) : [];
+    expect(actions).toEqual(["resume", "close"]);
+  });
+
+  it("labels an Adopt with its score when known", () => {
+    expect(adoptLabel({ attempt: 2, score: null })).toBe("Adopt 2");
+    expect(adoptLabel({ attempt: 3, score: 8 })).toBe("Adopt 3 (8/10)");
+  });
+
+  it("fills each Candidate's score from the timeline's graded events", () => {
+    const timeline = projectTimeline(
+      {
+        events: [
+          { at: "2026-10-01T00:00:01Z", attempt: 2, kind: "graded", payload: { score: 5, verdict: "flag", reasons: "a" } },
+          { at: "2026-10-01T00:00:02Z", attempt: 2, kind: "graded", payload: { score: 6, verdict: "flag", reasons: "b" } },
+        ],
+        attempts: [],
+        reconstructed: false,
+        spec: "",
+      },
+      "checkpoint",
+    );
+    const adopt = [
+      { attempt: 2, score: null },
+      { attempt: 3, score: 8 },
+    ];
+    expect(adoptWithTimelineScores(adopt, timeline)).toEqual([
+      { attempt: 2, score: 6 },
+      { attempt: 3, score: 8 },
+    ]);
+    expect(adoptWithTimelineScores(adopt, null)).toBe(adopt);
   });
 });
 
@@ -1158,6 +1227,7 @@ describe("projectDetailTabs", () => {
     },
     queued: false,
     closing: false,
+    adopt: [],
     keepTalking: null,
   });
 

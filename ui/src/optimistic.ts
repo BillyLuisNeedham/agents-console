@@ -30,7 +30,12 @@ export type Overlay = (snapshot: EnrichedSnapshot) => EnrichedSnapshot;
  * as "answered · waiting" and their actions disable. An interrupt already
  * answered, or gone, is left alone.
  */
-export function answered(ticketId: string, action: ResumeAction, note?: string): Overlay {
+export function answered(
+  ticketId: string,
+  action: ResumeAction,
+  note?: string,
+  attempt?: number,
+): Overlay {
   const at = new Date().toISOString();
   return (snapshot) => {
     const interrupt = snapshot.state.interrupts.find((i) => i.ticketId === ticketId);
@@ -47,6 +52,10 @@ export function answered(ticketId: string, action: ResumeAction, note?: string):
       // A Close (issue #154) shows as closing from the press, as the
       // engine's queued answer will.
       ...(action === "close" ? { action: "close" as const } : {}),
+      // An Adopt (ADR-0035) queues with the Candidate it takes, as the
+      // engine's queued answer will.
+      ...(action === "adopt" ? { action: "adopt" as const } : {}),
+      ...(action === "adopt" && attempt !== undefined ? { attempt } : {}),
       ...(note ? { note } : {}),
       at,
       processedAt: null,

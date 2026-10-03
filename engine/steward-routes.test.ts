@@ -6,7 +6,8 @@
  * own cases (steward.test.ts) cover the rules; these cover that a Steward
  * Enlisted and started over HTTP is refused a second time, that the command
  * run against a live server reads, reassigns, leaves and ends, that a close
- * is refused while the pool keeps Close the operator's, and that a
+ * is refused while the pool keeps Close the operator's, that an adopt is
+ * always refused (ADR-0035), and that a
  * refusal comes back as the 409 `reason` the command prints.
  */
 
@@ -126,6 +127,18 @@ describe("the Steward's routes and command", () => {
     expect(await cli("close", "01", "superseded")).toBe(1);
     expect(err.at(-1)).toBe(
       "steward: Close is off for this pool; the operator turns on Steward may Close checkpoints in Settings",
+    );
+
+    // ADR-0035: Adopt is the operator's; the route refuses it with the reason.
+    const adopt = await post(server, "/api/steward/answer", {
+      conversation: id,
+      ticketId: "01",
+      action: "adopt",
+      attempt: 2,
+    });
+    expect(adopt.status).toBe(400);
+    expect(((await adopt.json()) as { reason: string }).reason).toBe(
+      "adopting a candidate is the operator's: leave 01 with a note naming the one you recommend",
     );
 
     expect(
