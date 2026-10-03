@@ -300,6 +300,24 @@ describe("Keep talking (issue #139)", () => {
     expect(closes).not.toContain(second.tab);
   }, 30_000);
 
+  it("closes the Held pane's tab at a Close, which never relaunches the ticket (issue #154)", async () => {
+    const { run, poolDir, fake } = await checkpointed({ git: true });
+    const [first] = spawnedPanes(poolDir);
+
+    await run.closeTicket("01", "dropped");
+    await until("the held tab's close", () =>
+      readEvents(join(poolDir, "runs"), "01").some((e) => e.kind === "tab-closed"),
+    );
+
+    expect(run.final.tickets["01"]).toBe("closed");
+    expect(latest(run).heldPanes["01"]).toBeUndefined();
+    const closes = readEvents(join(poolDir, "runs"), "01").filter((e) => e.kind === "tab-closed");
+    expect(closes.map((e) => [e.payload.tab_id, e.payload.reason])).toEqual([[first.tab, "closed"]]);
+    expect(fake.requests.filter((r) => r.method === "tab.close").map((r) => r.params.tab_id)).toEqual([first.tab]);
+    // Nothing launched after it.
+    expect(spawnedPanes(poolDir)).toHaveLength(1);
+  }, 30_000);
+
   it("leaves the tab open at a Resume when a Continued attempt crashed in it after the checkpoint (R6)", async () => {
     const { run, poolDir, fake, quit } = await checkpointed({ holdPane: true });
     const [first] = spawnedPanes(poolDir);
@@ -584,11 +602,16 @@ describe("Keep talking review fixes (issue #139)", () => {
     marker: string;
     events: { attempt: number; kind: Parameters<typeof appendEvent>[2]["kind"]; payload?: Record<string, unknown> }[];
     paneId: string;
-  }): Promise<PoolRun> {
-    const poolDir = makePool({
+    git?: boolean;
+    // Called with the pool's directory before the pool starts.
+    before?: (poolDir: string) => void;
+  }): Promise<{ run: PoolRun; poolDir: string; fake: ExecutingFakeHerdr }> {
+    const spec = {
       tickets: [{ file: `${options.id}.md`, marker: options.marker, body: "# Held?\n\nbody\n\n## Brief\n\nask me" }],
       config,
-    });
+    };
+    const poolDir = options.git ? makeGitPool(spec).poolDir : makePool(spec);
+    options.before?.(poolDir);
     for (const event of options.events) {
       appendEvent(join(poolDir, "runs"), options.id, {
         at: new Date(Date.now() - 60_000).toISOString(),
@@ -605,14 +628,14 @@ describe("Keep talking review fixes (issue #139)", () => {
     runs.push(run);
     await until("the checkpoint Interrupt", () => run.interrupts.some((i) => i.kind === "checkpoint"));
     await Bun.sleep(300);
-    return run;
+    return { run, poolDir, fake };
   }
 
   const CHECKPOINTED = "<!-- state: id=01 blocked-by= status=checkpoint -->";
   const spawnedInPane = { argv: ["tui"], pane_id: "p-x", tab_id: "tab-ghost", branch: null };
 
   it("holds the checkpointed attempt's own pane at boot", async () => {
-    const run = await bootOver({
+    const { run } = await bootOver({
       id: "01",
       marker: CHECKPOINTED,
       paneId: "p-x",
@@ -626,7 +649,7 @@ describe("Keep talking review fixes (issue #139)", () => {
   }, 30_000);
 
   it("holds nothing for an engine-raised checkpoint about a held branch (review item 11)", async () => {
-    const run = await bootOver({
+    const { run } = await bootOver({
       id: "01",
       marker: CHECKPOINTED,
       paneId: "p-x",
@@ -650,7 +673,7 @@ describe("Keep talking review fixes (issue #139)", () => {
   };
 
   it("holds an enlisted Ticket's checkpointed pane at boot", async () => {
-    const run = await bootOver({
+    const { run } = await bootOver({
       id: "enlist-1",
       marker: ENLISTED,
       paneId: "p-op",
@@ -663,8 +686,38 @@ describe("Keep talking review fixes (issue #139)", () => {
     expect(latest(run).heldPanes["enlist-1"]).toEqual({ attempt: 1, paneId: "p-op" });
   }, 30_000);
 
+  it("closes an enlisted Ticket but leaves its pane, tab and branch as found (issue #154)", async () => {
+    const git = (poolDir: string, args: string[]) =>
+      Bun.spawnSync(["git", ...args], { cwd: poolDir, stdout: "pipe", stderr: "pipe" });
+    const { run, poolDir, fake } = await bootOver({
+      id: "enlist-1",
+      marker: ENLISTED,
+      paneId: "p-op",
+      git: true,
+      before: (dir) => git(dir, ["branch", "op-branch"]),
+      events: [
+        { attempt: 1, kind: "spawned", payload: { ...enlistSpawn, branch: "op-branch" } },
+        { attempt: 1, kind: "exited", payload: { status: "checkpoint" } },
+        { attempt: 1, kind: "checkpoint" },
+      ],
+    });
+    expect(latest(run).heldPanes["enlist-1"]).toEqual({ attempt: 1, paneId: "p-op" });
+
+    await run.closeTicket("enlist-1", "not this way");
+    await Bun.sleep(300);
+
+    expect(run.final.tickets["enlist-1"]).toBe("closed");
+    expect(latest(run).heldPanes["enlist-1"]).toBeUndefined();
+    expect(run.final.log).toContain(
+      "interrupt answered for enlist-1 (checkpoint): closed; enlisted, so its branch, directory and pane were left as found",
+    );
+    expect(fake.requests.some((r) => r.method === "tab.close" || r.method === "pane.close")).toBe(false);
+    expect(git(poolDir, ["rev-parse", "--verify", "op-branch"]).exitCode).toBe(0);
+    expect(readFileSync(join(poolDir, "issues", "enlist-1.md"), "utf8")).toContain("## Close note\n\nnot this way");
+  }, 30_000);
+
   it("never holds an enlisted pane the pool let go, across a restart (review item 9)", async () => {
-    const run = await bootOver({
+    const { run } = await bootOver({
       id: "enlist-1",
       marker: ENLISTED,
       paneId: "p-op",

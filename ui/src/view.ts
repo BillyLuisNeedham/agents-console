@@ -10,6 +10,7 @@
  */
 
 import {
+  closableRows,
   nextNodeSelection,
   type ConversationNeedsInputRow,
   type ConversationTrayRow,
@@ -340,6 +341,9 @@ export class ConsoleView {
     const pendingInterrupts = new Set(model.needsInput.map((row) => row.ticketId));
     this.drafts.prune(pendingInterrupts);
     this.needsInput.pruneFailures(pendingInterrupts);
+    this.needsInput.pruneTicks(
+      new Set(closableRows(model.needsInput).map((row) => row.ticketId)),
+    );
     this.conversationsTray.pruneEndFailures(
       new Set(model.conversationsTray.map((row) => row.id)),
     );

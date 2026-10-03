@@ -5,7 +5,8 @@
  * seam between steward-cli.ts and the engine's Steward actions. The engine's
  * own cases (steward.test.ts) cover the rules; these cover that a Steward
  * Enlisted and started over HTTP is refused a second time, that the command
- * run against a live server reads, reassigns, leaves and ends, and that a
+ * run against a live server reads, reassigns, leaves and ends, that a close
+ * is refused while the pool keeps Close the operator's, and that a
  * refusal comes back as the 409 `reason` the command prints.
  */
 
@@ -118,6 +119,14 @@ describe("the Steward's routes and command", () => {
     expect(await cli("state")).toBe(0);
     expect(out.at(-1)).toContain(`Steward ${id}; budget 5 per Ticket`);
     expect(out.at(-1)).toContain('01 "Talk": checkpoint (pane alive, budget 5 of 5 left)');
+    expect(out.at(-1)).toContain("Close off (the operator's)");
+
+    // Issue #154: Close is the operator's while the pool has not let the
+    // Steward Close; the command prints the engine's refusal.
+    expect(await cli("close", "01", "superseded")).toBe(1);
+    expect(err.at(-1)).toBe(
+      "steward: Close is off for this pool; the operator turns on Steward may Close checkpoints in Settings",
+    );
 
     expect(
       await runStewardCli(["--pool", poolDir, "--as", "conv-9", "answer", "01", "resume"], {

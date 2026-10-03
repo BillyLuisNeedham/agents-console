@@ -405,8 +405,10 @@ function conversationProtocol(
  * when it is Enlisted: the Steward's role, the command it answers with (its
  * exact invocation, `command`), its budget, what it may never answer or do,
  * how to leave an Interrupt and how to end itself, then the Conversation
- * protocol every Conversation is taught. The budget is the one in force at
- * start; the `state` verb reads it live.
+ * protocol every Conversation is taught. The budget, and whether the pool
+ * lets it Close (ADR-0030's #154 amendment), are the ones in force at
+ * start; the `state` verb reads both live, and the engine's check is the
+ * rule.
  */
 export function buildStewardTeaching(parts: {
   spawnPath: string;
@@ -416,6 +418,7 @@ export function buildStewardTeaching(parts: {
   ledgerPath: string;
   command: string;
   budget: number;
+  mayClose: boolean;
 }): string {
   return [
     "---",
@@ -442,6 +445,15 @@ export function buildStewardTeaching(parts: {
       "answer path. resume starts a fresh Attempt with your note in the " +
       "Ticket file; approve or reject answer a merge-approval; a selection " +
       "is answered with resume and the attempt number to merge.",
+    ...(parts.mayClose
+      ? [
+          "- close <ticket> <note>: drop a Ticket waiting at a checkpoint or a " +
+            "merge conflict without merging it; its branch and worktree are " +
+            "discarded. Only when the work is no longer wanted, always with a " +
+            "note saying why. It counts against your budget. A deadlocked " +
+            "dependent of a closed Ticket is the operator's to close, not yours.",
+        ]
+      : []),
     "- keep-talking <ticket> <message>: continue a checkpointed Attempt in " +
       "its still-live pane; the engine types your message there after its " +
       "own teaching Turn.",
@@ -453,20 +465,31 @@ export function buildStewardTeaching(parts: {
       "(harness, model, effort, drivers, verify; field= clears one). The engine " +
       "picks it up at the next boundary, so resume the Ticket after.",
     "- state: the pending Interrupts, the Merge queue, the Pending and Held " +
-      "spawns, and your budget left per Ticket.",
+      "spawns, your budget left per Ticket, and whether the pool lets you " +
+      "Close now.",
     "- end [closing line]: end yourself.",
     "",
     'A note or message given as "-" is read from standard input.',
     "",
     `Your Steward budget is ${parts.budget} ${parts.budget === 1 ? "answer" : "answers"} ` +
-      "per Ticket since the operator last answered it. Answers and Keep " +
-      "talks count; leaves, adopts, discards and reassigns do not. The " +
+      "per Ticket since the operator last answered it. Answers, Closes and " +
+      "Keep talks count; leaves, adopts, discards and reassigns do not. The " +
       "engine refuses an answer beyond it: leave that Ticket with a note.",
     "",
     "Never answer a review or a persistence Interrupt: review is the " +
       "operator's final judgement, and persistence is an engine store " +
       "failure. The engine refuses both. A Conversation's waits are not " +
       "yours either: you steward Tickets.",
+    "",
+    parts.mayClose
+      ? "The operator lets you Close for now; they can turn it off in " +
+        "Settings at any time, and the engine then refuses a close. Run " +
+        "state when in doubt."
+      : "Closing a Ticket without merging it is the operator's in this " +
+        "pool: the engine refuses it from you. To recommend one, leave the " +
+        "Ticket with a note saying so. If the operator turns on Steward " +
+        "may Close checkpoints later, state says so and each Notice offers " +
+        "close.",
     "",
     "Decide and talk, never do the work: make no edits in any Ticket's " +
       "worktree or in the pool checkout. Your only ways to change the code " +

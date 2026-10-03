@@ -40,13 +40,20 @@ export interface StewardAssign {
   drivers?: string;
 }
 
-/** console.json `steward`: the Steward budget and the Steward's Assignment. */
+/** console.json `steward`: the Steward budget, the Steward's Assignment, and whether it may Close. */
 export interface StewardConfig {
   budget?: number;
   assign?: StewardAssign;
+  /** "Steward may Close checkpoints" (issue #154, ADR-0032): off unless true. */
+  mayClose?: boolean;
 }
 
 export const DEFAULT_STEWARD_BUDGET = 5;
+
+/** Whether the Steward may Close under a config: only while the pool says true. */
+export function stewardMayCloseOf(config: { steward?: StewardConfig }): boolean {
+  return config.steward?.mayClose === true;
+}
 
 /** The Steward budget in force under a config: 5 unless the pool says otherwise. */
 export function stewardBudgetOf(config: { steward?: StewardConfig }): number {
@@ -62,8 +69,9 @@ const ASSIGN_FIELDS = ["harness", "model", "effort", "drivers"] as const;
 
 /**
  * A console.json `steward` value, checked for shape: absent, or an object
- * whose budget, where present, is a whole number of 1 or more, and whose
- * assign, where present, is an object of strings. Boot's parse and the
+ * whose budget, where present, is a whole number of 1 or more, whose
+ * assign, where present, is an object of strings, and whose mayClose,
+ * where present, is a boolean. Boot's parse and the
  * boundary's reload share it, so a value the reload would refuse never
  * boots. Whether the assign names a harness the pool knows is the caller's
  * check: only the engine has the harness table.
@@ -76,6 +84,9 @@ export function checkStewardConfig(raw: unknown): StewardConfig | undefined {
   const steward = raw as Record<string, unknown>;
   if (steward.budget !== undefined && !isStewardBudget(steward.budget)) {
     throw new Error("pool config: steward.budget must be a whole number, 1 or more");
+  }
+  if (steward.mayClose !== undefined && typeof steward.mayClose !== "boolean") {
+    throw new Error("pool config: steward.mayClose must be true or false");
   }
   if (steward.assign !== undefined) {
     const assign = steward.assign;
@@ -256,6 +267,8 @@ export interface StewardPoolView {
   keepTalking: (ticketId: string) => boolean;
   budget: number;
   used: (ticketId: string) => number;
+  /** "Steward may Close checkpoints", read live: whether Close is among the answers offered. */
+  mayClose: boolean;
   mergeQueue: readonly { ticketId: string; state: string }[];
   /** Tickets done with their branch landed: what has merged. */
   merged: readonly string[];
@@ -288,6 +301,7 @@ export function stewardItems(pool: StewardPoolView): StewardItem[] {
         kind: interrupt.kind,
         body: interrupt.body,
         keepTalking: interrupt.kind === "checkpoint" && pool.keepTalking(interrupt.ticketId),
+        mayClose: pool.mayClose,
         remaining: Math.max(0, pool.budget - used),
         budget: pool.budget,
       }),
@@ -362,13 +376,19 @@ function clip(text: string): string {
     : `${trimmed.slice(0, BODY_CHARS)}\n... (cut short: read the Ticket file and its log for the rest)`;
 }
 
-// The answers each kind takes, in the command's own words.
-function answersFor(kind: string, ticketId: string, keepTalking: boolean): string {
+/** The Interrupt kinds a Steward may Close while the pool allows it: never a deadlock (ADR-0030). */
+export const STEWARD_CLOSE_KINDS: readonly string[] = ["checkpoint", "merge-conflict"];
+
+// The answers each kind takes, in the command's own words. Close is offered
+// only while the pool allows it, and only on the kinds it may close.
+function answersFor(kind: string, ticketId: string, keepTalking: boolean, mayClose: boolean): string {
+  const close = mayClose && STEWARD_CLOSE_KINDS.includes(kind) ? `, or close ${ticketId} <note>` : "";
   switch (kind) {
     case "checkpoint":
       return (
         `answer ${ticketId} resume [note]` +
-        (keepTalking ? `, or keep-talking ${ticketId} <message> (its pane is still alive)` : "")
+        (keepTalking ? `, or keep-talking ${ticketId} <message> (its pane is still alive)` : "") +
+        close
       );
     case "merge-approval":
       return `answer ${ticketId} approve [note], or answer ${ticketId} reject [note]`;
@@ -377,7 +397,7 @@ function answersFor(kind: string, ticketId: string, keepTalking: boolean): strin
     case "config":
       return `reassign ${ticketId} field=value..., then answer ${ticketId} resume`;
     case "merge-conflict":
-      return `answer ${ticketId} resume (re-attempts the merge)`;
+      return `answer ${ticketId} resume (re-attempts the merge)${close}`;
     default:
       return `answer ${ticketId} resume [note]`;
   }
@@ -389,6 +409,7 @@ export function stewardInterruptText(params: {
   kind: string;
   body: string;
   keepTalking: boolean;
+  mayClose: boolean;
   remaining: number;
   budget: number;
 }): string {
@@ -397,7 +418,7 @@ export function stewardInterruptText(params: {
     `Ticket ${params.ticketId}${title} is waiting at a ${params.kind} Interrupt.`,
     `${params.kind === "checkpoint" ? "Brief" : "Body"}:`,
     clip(params.body),
-    `Answers: ${answersFor(params.kind, params.ticketId, params.keepTalking)}; ` +
+    `Answers: ${answersFor(params.kind, params.ticketId, params.keepTalking, params.mayClose)}; ` +
       `or leave ${params.ticketId} <note> for the operator.`,
     params.remaining > 0
       ? `Steward budget on ${params.ticketId}: ${params.remaining} of ${params.budget} answers left.`
@@ -484,7 +505,7 @@ export function stewardCommand(params: {
 export interface StewardAnswerRequest {
   conversation: string;
   ticketId: string;
-  action: "resume" | "approve" | "reject";
+  action: "resume" | "approve" | "reject" | "close";
   note?: string;
 }
 
@@ -546,6 +567,8 @@ export interface StewardStateInterrupt {
 export interface StewardStateResponse {
   steward: string;
   budget: number;
+  /** "Steward may Close checkpoints", read live from the pool settings. */
+  mayClose: boolean;
   phase: string;
   interrupts: StewardStateInterrupt[];
   mergeQueue: { ticketId: string; state: string }[];

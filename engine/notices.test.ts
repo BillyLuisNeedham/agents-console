@@ -12,6 +12,7 @@ import { readEvents } from "./events.ts";
 import {
   conversationEndedNoticeText,
   diffStatSummary,
+  ticketClosedNoticeText,
   ticketEndedNoticeText,
 } from "./notices.ts";
 import { makeTempDir } from "./tmp.ts";
@@ -78,6 +79,20 @@ describe("ticketEndedNoticeText", () => {
       diffStat: "d",
     });
     expect(text).toContain("Brief: (none written)");
+  });
+});
+
+describe("ticketClosedNoticeText", () => {
+  it("says the ticket was closed unmerged, with its trimmed note", () => {
+    expect(ticketClosedNoticeText({ id: "conv-1-spawn-2", title: "Old idea", note: "  superseded by 3 " })).toBe(
+      'Ticket conv-1-spawn-2 ("Old idea") was closed: its work was not merged.\nClose note: superseded by 3',
+    );
+  });
+
+  it("leaves the note line out when there is none", () => {
+    expect(ticketClosedNoticeText({ id: "01-spawn-1", title: "T", note: " " })).toBe(
+      'Ticket 01-spawn-1 ("T") was closed: its work was not merged.',
+    );
   });
 });
 
@@ -883,6 +898,20 @@ describe("Notice delivery", () => {
     expect(dropped.payload).toMatchObject({ to: "conv-1", kind: "ticket-ended" });
     // Never delivered, and never logged on the (nonexistent-runtime) parent.
     expect(existsSync(join(poolDir, "runs", "conv-1.events.jsonl"))).toBe(false);
+
+    // Closing the checkpointed child (issue #154) tells the parent too, with
+    // the closing note: dropped the same way here, for the same reason.
+    await run.closeTicket("conv-1-spawn-1", "the parent changed course");
+    const closedNotice = readEvents(join(poolDir, "runs"), "conv-1-spawn-1")
+      .filter((e) => e.kind === "notice-dropped")
+      .at(-1)!;
+    expect(closedNotice.payload).toMatchObject({
+      to: "conv-1",
+      kind: "ticket-ended",
+      text:
+        'Ticket conv-1-spawn-1 ("body") was closed: its work was not merged.\n' +
+        "Close note: the parent changed course",
+    });
 
     await run.shutdown(0);
   }, 10000);
