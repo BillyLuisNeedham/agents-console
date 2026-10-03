@@ -60,6 +60,9 @@ export interface ConversationsOptions {
 export interface ConversationsHandlers {
   /** A row's id was clicked: select that card and open its Detail. */
   onSelect: (cardId: string) => void;
+  /** The Steward box's name was clicked (ADR-0030): select the Steward's
+   *  card, open its Detail and bring the card into view. */
+  onFocusSteward: (cardId: string) => void;
 }
 
 /** Pool defaults shown as the New Conversation form's field placeholders. */
@@ -362,12 +365,12 @@ export class ConversationsTray {
   // -------------------------------------------------------------------------
 
   /**
-   * The Conversations tray: the count, the collapsible "New Conversation"
-   * and "Start Steward" forms, and every live Conversation row, already
-   * sorted by the projection (waiting-on-you first, then longest idle), the
-   * Steward's marked. Clicking a row selects its card and opens the Detail,
-   * the same navigation the canvas offers. Start Steward stands disabled,
-   * the reason on hover, while a Steward is on duty.
+   * The Conversations tray: the Steward box pinned at the top with the
+   * Start Steward form under it, then the count and the "+ new" toggle with
+   * the New Conversation form under that, then every live Conversation row,
+   * already sorted by the projection (waiting-on-you first, then longest
+   * idle), the Steward's marked. Clicking a row selects its card and opens
+   * the Detail, the same navigation the canvas offers.
    */
   render(
     rows: ConversationTrayRow[],
@@ -375,43 +378,85 @@ export class ConversationsTray {
     handlers: ConversationsHandlers,
     steward: StewardFormContext = NO_STEWARD,
   ): HTMLElement {
-    const stewardBlocked = steward.onDuty !== null && !this.stewardFormOpen;
     return h(
       "div",
       { class: "conversations-tray" },
+      this.renderStewardBox(steward, handlers),
+      this.stewardFormOpen ? this.renderStewardForm(steward) : null,
       h(
         "div",
         { class: "conversations-head" },
         h("span", { class: "conversations-count" }, `conversations · ${rows.length}`),
         h(
-          "div",
-          { class: "conversations-head-actions" },
-          h(
+          "button",
+          {
+            class: "btn btn-primary conversations-new-toggle",
+            title: this.formOpen ? null : "start a new Conversation",
+            onclick: () => (this.formOpen ? this.closeForm() : this.openForm()),
+          },
+          this.formOpen ? "cancel" : "+ new",
+        ),
+      ),
+      this.formOpen ? this.renderForm(defaults) : null,
+      ...rows.map((row) => this.renderRow(row, handlers)),
+    );
+  }
+
+  // The Steward box (ADR-0030), pinned at the top of the tray because it
+  // says who answers while the operator is away. On duty, its name is a
+  // button that selects the Steward's card and brings it into view; while
+  // its Notices keep failing it is on duty but blind to every Interrupt, so
+  // the box warns and says why. With none on duty, the box offers Start
+  // Steward. A form left open when one came on duty (another tab, an
+  // Enlist) keeps its cancel, and the form says why Start is disabled.
+  private renderStewardBox(
+    steward: StewardFormContext,
+    handlers: ConversationsHandlers,
+  ): HTMLElement {
+    const onDuty = steward.onDuty;
+    const toggle =
+      onDuty === null || this.stewardFormOpen
+        ? h(
             "button",
             {
               class: "btn conversations-steward-toggle",
-              disabled: stewardBlocked,
-              title: steward.onDuty
-                ? stewardLiveReason(steward.onDuty)
+              title: this.stewardFormOpen
+                ? null
                 : "start a Steward to answer Interrupts while you are away",
               onclick: () =>
                 this.stewardFormOpen ? this.closeStewardForm() : this.openStewardForm(),
             },
             this.stewardFormOpen ? "cancel" : "start steward",
-          ),
-          h(
-            "button",
-            {
-              class: "btn btn-primary conversations-new-toggle",
-              onclick: () => (this.formOpen ? this.closeForm() : this.openForm()),
-            },
-            this.formOpen ? "cancel" : "new conversation",
-          ),
-        ),
+          )
+        : null;
+    if (onDuty === null) {
+      return h(
+        "div",
+        { class: "steward-box steward-box-off" },
+        h("span", { class: "steward-box-label" }, "no steward on duty"),
+        toggle,
+      );
+    }
+    return h(
+      "div",
+      { class: "steward-box" + (onDuty.delivery ? " steward-box-warn" : "") },
+      h("span", { class: "steward-box-label" }, "steward on duty"),
+      h(
+        "button",
+        {
+          class: "steward-box-name",
+          type: "button",
+          title: onDuty.delivery
+            ? `${onDuty.delivery.text} (${onDuty.delivery.lastError}); show its card`
+            : `${onDuty.title} is on duty (show its card)`,
+          onclick: () => handlers.onFocusSteward(onDuty.cardId),
+        },
+        `${onDuty.title} · ${onDuty.conversationId}`,
       ),
-      this.formOpen ? this.renderForm(defaults) : null,
-      this.stewardFormOpen ? this.renderStewardForm(steward) : null,
-      ...rows.map((row) => this.renderRow(row, handlers)),
+      onDuty.delivery
+        ? h("span", { class: "steward-box-warn-text" }, onDuty.delivery.text)
+        : null,
+      toggle,
     );
   }
 

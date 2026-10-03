@@ -812,7 +812,7 @@ async function settingsTyping(): Promise<void> {
 
 /**
  * The Steward (ADR-0030), the parts only a laid-out page can say: the
- * header's on-duty line brings a card panned far off screen back into view,
+ * tray's Steward box brings a card panned far off screen back into view,
  * "Use as answer" fills the tray row's note and the open Detail's from one
  * click, and the note box fits the tray row without widening it.
  */
@@ -829,7 +829,7 @@ async function stewardChecks(): Promise<void> {
   const viewport = q<HTMLElement>(".canvas-viewport");
   const stewardCard = () => q<HTMLElement>(`.node-card[data-node-id="conversation:${STEWARD}"]`);
   if (viewport && stewardCard()) {
-    // Pan the card well out of view, then follow the header's line to it.
+    // Pan the card well out of view, then follow the tray's Steward box to it.
     const rect = viewport.getBoundingClientRect();
     const x = rect.right - 20;
     const y = rect.bottom - 20;
@@ -843,11 +843,11 @@ async function stewardChecks(): Promise<void> {
       return box.left >= view.left && box.right <= view.right && box.top >= view.top && box.top < view.bottom;
     };
     const hiddenFirst = !inView();
-    q<HTMLButtonElement>(".canvas-steward")?.click();
+    q<HTMLButtonElement>(".steward-box-name")?.click();
     await settleAll();
     const selected = q(".detail-open .detail-title")?.textContent;
     push(
-      "on-duty line reveals and selects the Steward",
+      "steward box reveals and selects the Steward",
       hiddenFirst && inView() && selected === STEWARD
         ? null
         : `hidden first ${hiddenFirst}, in view after ${inView()}, Detail ${selected}`,
@@ -855,7 +855,7 @@ async function stewardChecks(): Promise<void> {
     );
     q<HTMLButtonElement>('.canvas-tools button[title="reset pan and zoom"]')?.click();
   } else {
-    report.push({ scenario: name, assertion: "on-duty line reveals and selects the Steward", pass: null, detail: "steward card absent" });
+    report.push({ scenario: name, assertion: "steward box reveals and selects the Steward", pass: null, detail: "steward card absent" });
   }
 
   session.select(card(SELECTED_TICKET));
@@ -897,14 +897,91 @@ async function stewardChecks(): Promise<void> {
     trayNote.value = "";
     trayNote.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  layoutChecks(name);
+}
+
+/** An element that holds its width: nothing scrolls inside it, and it ends
+ *  inside its container. Null when it does, the failure otherwise. */
+function overflowOf(el: HTMLElement, container: HTMLElement): string | null {
+  const e = el.getBoundingClientRect();
+  const c = container.getBoundingClientRect();
+  return el.scrollWidth <= el.clientWidth + 1 && e.left >= c.left - 1 && e.right <= c.right + 1
+    ? null
+    : `scrollWidth ${el.scrollWidth} > clientWidth ${el.clientWidth}, or ${Math.round(e.left)}-${Math.round(e.right)} outside ${Math.round(c.left)}-${Math.round(c.right)}`;
+}
+
+/**
+ * The canvas header and the Conversations tray's head and Steward box hold
+ * their width: the header's tools wrap rather than run off its right edge,
+ * and nothing in the tray's top clips past the tray.
+ */
+function layoutChecks(name: string): void {
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
   const header = q<HTMLElement>(".canvas-header");
-  if (header) {
+  const column = q<HTMLElement>(".canvas-column");
+  if (header && column) {
+    const tools = [...header.querySelectorAll<HTMLElement>(".canvas-tools > :not(.canvas-tools-sep)")];
+    const outside = tools.filter((tool) => overflowOf(tool, header) !== null);
+    // A squeezed tool wraps its label: taller than the one-line tools.
+    const lineHeight = Math.min(...tools.map((tool) => tool.getBoundingClientRect().height));
+    const squeezed = tools.filter((tool) => tool.getBoundingClientRect().height > lineHeight * 1.5);
     push(
       "canvas header holds its width",
-      header.scrollWidth <= header.clientWidth + 1 ? null : `scrollWidth ${header.scrollWidth} > clientWidth ${header.clientWidth}`,
-      `${header.clientWidth}px, the on-duty line and Start Steward included`,
+      overflowOf(header, column) ??
+        (outside.length ? `tools past the edge: ${outside.map((t) => t.textContent).join(", ")}` : null) ??
+        (squeezed.length ? `labels wrapped: ${squeezed.map((t) => t.textContent).join(", ")}` : null),
+      `${header.clientWidth}px, every tool inside it on one line`,
     );
+  } else {
+    push("canvas header holds its width", "no canvas header", "");
   }
+  const tray = q<HTMLElement>(".conversations-tray");
+  for (const [assertion, selector] of [
+    ["tray head holds the tray's width", ".conversations-head"],
+    ["steward box holds the tray's width", ".steward-box"],
+  ] as const) {
+    const el = q<HTMLElement>(selector);
+    if (!tray || !el) {
+      push(assertion, `${selector} absent`, "");
+      continue;
+    }
+    push(assertion, overflowOf(el, tray), `${Math.round(el.getBoundingClientRect().width)}px inside a ${tray.clientWidth}px tray`);
+  }
+}
+
+/**
+ * The narrow run (`?layout`, which harness/run.ts opens at a narrow window):
+ * only the layout checks, with a Steward on duty, with none, and with a
+ * Detail open beside the canvas, which narrows its header further.
+ */
+async function layoutMain(): Promise<void> {
+  const width = `${window.innerWidth}px`;
+  stage = "layout: mount";
+  session.setSnapshot(current);
+  session.toggleLog();
+  await settleAll();
+  layoutChecks(`layout ${width}, steward on duty`);
+  q<HTMLButtonElement>(".steward-box-name")?.click();
+  await settleAll();
+  layoutChecks(`layout ${width}, steward detail open`);
+  session.select(null);
+  session.setSnapshot({
+    ...current,
+    state: { ...current.state, conversations: current.state.conversations.filter((c) => c.id !== STEWARD) },
+  });
+  await settleAll();
+  layoutChecks(`layout ${width}, no steward`);
+  publish("done");
+}
+
+/** Hand the report to the runner: the page's <pre>, base64, and the title. */
+function publish(outcome: string): void {
+  const json = JSON.stringify({ renders, checks: report }, null, 2);
+  console.log("RENDER-SURVIVAL-REPORT " + json);
+  const pre = document.getElementById("report") as HTMLPreElement;
+  pre.textContent = btoa(unescape(encodeURIComponent(json)));
+  document.title = `render survival: ${outcome}`;
 }
 
 /**
@@ -1085,10 +1162,10 @@ async function main(): Promise<void> {
   await runScenario("spawn detail", async () => {
     session.select("spawn:proposal-1");
   });
-  // The Steward's Detail, reached the operator's way: the header's on-duty
-  // line (ADR-0030).
+  // The Steward's Detail, reached the operator's way: the Conversations
+  // tray's Steward box (ADR-0030).
   await runScenario("steward detail", async () => {
-    q<HTMLButtonElement>(".canvas-steward")?.click();
+    q<HTMLButtonElement>(".steward-box-name")?.click();
   });
   await runScenario("fullscreen detail", async () => {
     session.select(card(SELECTED_TICKET));
@@ -1105,11 +1182,7 @@ async function main(): Promise<void> {
     report.push({ scenario: "-", assertion: `scroll ${selector}`, pass: null, detail: "selector in styles.css but no live module renders it" });
   }
 
-  const json = JSON.stringify({ renders, checks: report }, null, 2);
-  console.log("RENDER-SURVIVAL-REPORT " + json);
-  const pre = document.getElementById("report") as HTMLPreElement;
-  pre.textContent = btoa(unescape(encodeURIComponent(json)));
-  document.title = "render survival: done";
+  publish("done");
 }
 
 // Watchdog: if a step never settles, publish the partial report anyway so
@@ -1123,7 +1196,7 @@ setTimeout(() => {
   document.title = "render survival: stalled";
 }, 10_000);
 
-main().catch((err) => {
+(new URLSearchParams(location.search).has("layout") ? layoutMain() : main()).catch((err) => {
   const pre = document.getElementById("report") as HTMLPreElement;
   const json = JSON.stringify({ error: err instanceof Error ? err.stack ?? err.message : String(err), checks: report });
   pre.textContent = btoa(unescape(encodeURIComponent(json)));

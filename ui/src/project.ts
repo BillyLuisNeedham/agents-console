@@ -2233,13 +2233,14 @@ function projectDelivery(delivery: NoticeDelivery | undefined): DeliveryWarningV
   };
 }
 
-/** The Steward on duty, as the pool header names it and focuses its card. */
+/** The Steward on duty, as the Conversations tray's Steward box names it
+ *  and focuses its card. */
 export interface StewardOnDutyView {
   conversationId: string;
   cardId: string;
   title: string;
   /** Notices are not reaching the Steward's pane: it is on duty but blind
-   *  to the Interrupts the engine delivers it, and the header warns. */
+   *  to the Interrupts the engine delivers it, and the Steward box warns. */
   delivery: DeliveryWarningView | null;
 }
 
@@ -2262,13 +2263,6 @@ export function stewardOnDuty(conversations: ConversationView[]): StewardOnDutyV
 /** Why Start Steward and Enlist as Steward stand disabled while one is live. */
 export function stewardLiveReason(steward: StewardOnDutyView): string {
   return `a Steward is already on duty (${steward.conversationId}); a Pool has one at a time`;
-}
-
-/** The pool header's word that a Steward is on duty, and that it cannot
- *  hear the engine while its Notices are not landing. */
-export function stewardOnDutyLine(steward: StewardOnDutyView): string {
-  const line = `Steward on duty · ${steward.conversationId}`;
-  return steward.delivery ? `${line} · Notices not landing` : line;
 }
 
 /**
