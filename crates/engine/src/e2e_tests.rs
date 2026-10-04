@@ -718,3 +718,122 @@ async fn an_idle_accept_processes_at_once_and_starts_a_fresh_drive() {
     assert_eq!(settled(&engine).await, RunPhase::Quiescent);
     assert_eq!(answered(&pool), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_an_agent_commits_to_its_worktree_copy_of_the_ticket_file_reaches_the_file_of_record()
+{
+    let pool = Pool::git(&[("01", &[]), ("02", &[])]);
+    pool.script(
+        "01",
+        vec![Script::done("one").with_work(
+            "echo '- note from 01' >> issues/01.md && git add issues/01.md && git commit -qm note",
+        )],
+    );
+    let engine = pool.start().await;
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    let file = pool.read("issues/01.md");
+    assert!(
+        file.starts_with("<!-- state: id=01 blocked-by=none status=done -->\n"),
+        "{file}"
+    );
+    assert!(file.ends_with("Do 01.\n- note from 01\n"), "{file}");
+    assert!(
+        !pool
+            .kinds("01")
+            .contains(&TicketEventKind::TicketFileConflict)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_copies_changing_the_same_lines_leave_conflict_markers_and_a_record() {
+    let pool = Pool::git(&[("01", &[]), ("02", &[])]);
+    let go = pool.file("go");
+    pool.script(
+        "01",
+        vec![Script::done("one").with_work(&format!(
+            "while [ ! -f {} ]; do sleep 0.05; done; sed -i 's/Do 01./Done by the agent./' issues/01.md && git add issues/01.md && git commit -qm note",
+            go.display()
+        ))],
+    );
+    // The operator edits the same line of the file of record while the attempt runs.
+    let file = pool.file("issues/01.md");
+    let engine = pool.start().await;
+    let _ = wait_for(&engine, |s| {
+        s.state.log.iter().any(|l| l.starts_with("super-step 1:"))
+    })
+    .await;
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("Do 01.", "Do 01, by the operator.")).unwrap();
+    std::fs::write(&go, "").unwrap();
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("<<<<<<< pool (file of record)\n"), "{text}");
+    assert!(text.contains(">>>>>>> branch pool/"), "{text}");
+    assert!(
+        pool.kinds("01")
+            .contains(&TicketEventKind::TicketFileConflict)
+    );
+    let log = &last(&engine).state.log;
+    assert!(log.contains(&"01: the pool's ticket file and the branch's copy changed the same lines; conflict markers left in issues/01.md".to_string()), "{log:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_store_gains_a_checkpoint_at_every_super_step_the_review_and_its_approval() {
+    let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
+    let engine = pool.start().await;
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    let phase = answer(&engine, "REVIEW".into(), None, ResumeAction::Approve, None)
+        .await
+        .unwrap();
+    assert_eq!(phase, RunPhase::Done);
+    let rows = pool.store.writes.lock().unwrap().clone();
+    assert_eq!(rows.len(), 6);
+    assert_eq!(
+        rows[0]["tickets"],
+        serde_json::json!({"01": "done", "02": "ready"})
+    );
+    assert_eq!(
+        rows[1]["tickets"],
+        serde_json::json!({"01": "done", "02": "done"})
+    );
+    assert_eq!(rows[1]["outcomes"]["01"]["summary"], "did 01");
+    assert_eq!(rows[4]["interrupts"], serde_json::json!([]));
+    assert_eq!(rows[4]["reviewApproved"], true);
+    assert_eq!(
+        rows[5]["log"].as_array().unwrap().last().unwrap(),
+        "pool done: every ticket reached done"
+    );
+    assert_eq!(
+        pool.store.closed.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_by_cycle_raises_deadlocks_without_launching_anything() {
+    let pool = Pool::git(&[("01", &["02"]), ("02", &["01"])]);
+    let engine = pool.start().await;
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    let snap = last(&engine);
+    let bodies: Vec<(&str, &str)> = snap
+        .state
+        .interrupts
+        .iter()
+        .map(|i| (i.ticket_id.as_str(), i.body.as_str()))
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            ("01", "blockers can never complete: 02"),
+            ("02", "blockers can never complete: 01")
+        ]
+    );
+    assert!(snap.state.log.contains(
+        &"interrupt raised for 01 (deadlock): blockers can never complete: 02".to_string()
+    ));
+    assert_eq!(pool.kinds("01"), [TicketEventKind::Deadlock]);
+    assert_eq!(
+        serde_json::Value::Object(pool.events("01")[0].payload.clone()),
+        serde_json::json!({"blockers": ["02"]})
+    );
+}
