@@ -1021,7 +1021,9 @@ conformance("scheduling", "a result joined at exit is applied once, and the last
   );
   writeFileSync(release, "go");
   const settled = await settle(server, "03 done", (s) => statusOf(s, "03") === "done");
-  await socket.sync();
+  // The server coalesces its pushes and never flushes one ahead of a read's reply, so a round trip
+  // (socket.sync) can overtake the push carrying the settled snapshot: wait for the frame itself.
+  await pushedWhen(socket, `the frame at seq ${settled.seq}`, (s) => s.seq === settled.seq);
 
   expect(settled.state.log.filter((line) => line === "ticket 01: exited 0, marker checkpoint")).toHaveLength(1);
   expect(statuses(settled)).toEqual({ "01": "checkpoint", "02": "done", "03": "done" });
