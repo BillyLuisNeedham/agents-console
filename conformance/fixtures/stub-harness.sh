@@ -32,14 +32,25 @@
 #                                STUB_KEY, STUB_N, STUB_ISSUE and STUB_OUTCOME
 #                                and may write the outcome itself; a failure
 #                                ends the launch with exit 97 and no outcome
+#   scripts/<key>/hold           a FIFO to read one line from first, before
+#                                anything but the record, however long that
+#                                takes: the case's release
+#   scripts/<key>/touch          a file to create first, before any wait
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
-#   scripts/<key>/<k>.hold       seconds launch k keeps running before it
-#                                exits, as a TUI does; it gives up early once
-#                                the world is deleted
-#   scripts/<key>/hold           a FIFO to read one line from first, however
-#                                long that takes: the case's release
+#   scripts/<key>/work           a file to write in the working directory and
+#                                commit there, after the stdout and before the
+#                                outcome; work.line, work.overwrite and
+#                                work.message say what line, whether it
+#                                replaces the file, and the commit message
+#   scripts/<key>/<k>.hold       seconds launch k stays up last, after the
+#                                outcome, as an interactive harness does
+#   scripts/<key>/hold-until     a file every launch waits for last, after the
+#                                outcome, the same way, bounded at a minute;
+#                                either hold is over at once when
+#                                CONFORMANCE_STUBS (the world) is deleted
 #   calls/<key>.<n>/             launch n of the key: seq, argv, cwd, env,
-#                                issue and outcome
+#                                issue, outcome, and the head and branch of
+#                                the git checkout it ran in (empty outside one)
 # A key with no scripts writes a done outcome and exits 0, the same step
 # stubStep (conformance/fixtures/pool-fixture.ts) reads for no behaviour.
 #
@@ -122,6 +133,8 @@ printf '%s\0' "$name" "$@" > "$call/argv"
 printf '%s' "$PWD" > "$call/cwd"
 printf '%s' "$issue" > "$call/issue"
 printf '%s' "$outcome" > "$call/outcome"
+git rev-parse HEAD 2>/dev/null | tr -d '\n' > "$call/head"
+git branch --show-current 2>/dev/null | tr -d '\n' > "$call/branch"
 for var in $(compgen -e); do printf '%s=%s\0' "$var" "${!var}"; done > "$call/env"
 
 script="$stubs/scripts/$key"
@@ -139,6 +152,9 @@ steps="$(cat "$script/steps")"
 k=$(( n < steps ? n : steps ))
 if [ -p "$script/hold" ]; then
   read -r _ < "$script/hold"
+fi
+if [ -f "$script/touch" ]; then
+  touch "$(cat "$script/touch")"
 fi
 if [ -f "$script/wait" ]; then
   wait_for="$(cat "$script/wait")"
@@ -163,9 +179,22 @@ if [ -f "$script/$k.marker" ] && [ -n "$issue" ]; then
   awk -v s="$(cat "$script/$k.marker")" 'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}' "$issue" > "$issue.new"
   mv "$issue.new" "$issue"
 fi
+if [ -f "$script/work" ]; then
+  work="$(cat "$script/work")"
+  line="$(cat "$script/work.line" 2>/dev/null || echo work)"
+  mkdir -p "$(dirname "$work")"
+  if [ -f "$script/work.overwrite" ]; then
+    printf '%s\n' "$line" > "$work"
+  else
+    printf '%s\n' "$line" >> "$work"
+  fi
+  git add "$work" && git commit -qm "$(cat "$script/work.message" 2>/dev/null || echo work)"
+fi
 if [ -f "$script/$k.outcome" ] && [ -n "$outcome" ]; then
   cat "$script/$k.outcome" > "$outcome"
 fi
+# Read before any hold: the teardown that ends a hold deletes the script.
+code="$(cat "$script/$k.exit")"
 if [ -f "$script/$k.hold" ]; then
   # SECONDS is bash's own clock. The teardown deletes the world, stubs
   # directory included, and a held launch the fake herdr's close left
@@ -175,4 +204,12 @@ if [ -f "$script/$k.hold" ]; then
     sleep 0.1
   done
 fi
-exit "$(cat "$script/$k.exit")"
+if [ -f "$script/hold-until" ]; then
+  hold="$(cat "$script/hold-until")"
+  for _ in $(seq 1 1200); do
+    [ -e "$hold" ] && break
+    [ -d "$stubs" ] || break
+    sleep 0.05
+  done
+fi
+exit "$code"

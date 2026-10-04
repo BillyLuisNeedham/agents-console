@@ -10,7 +10,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { stubStep, type StubBehaviour } from "../fixtures/pool-fixture.ts";
+import { stubStep, type StubBehaviour, type StubStep } from "../fixtures/pool-fixture.ts";
 
 /** The binaries a pool's default harnesses run, each stubbed. */
 export const STUBBED_BINARIES = ["claude", "opencode", "agent"] as const;
@@ -31,11 +31,22 @@ export interface ConformanceStubBehaviour extends StubBehaviour {
    * ends the launch with exit 97 and no outcome.
    */
   run?: string | string[];
+  /** A file every launch creates first, before it waits for `waitFor`. */
+  touch?: string;
   /**
-   * Seconds each launch keeps running before it exits, as a TUI holds its
-   * pane: a terminal-backed launch whose stub exits at once ends its pane.
+   * Work every launch commits in its working directory (an attempt's
+   * worktree, or the checkout): `line` appended to `file`, or written over
+   * it with `overwrite`, then committed with `message`.
    */
-  hold?: number;
+  work?: { file: string; line?: string; overwrite?: boolean; message?: string };
+  /**
+   * How long each launch stays up after its outcome, the way an interactive
+   * harness holds its pane (a terminal-backed launch whose stub exits at
+   * once ends its pane): a number is that many seconds; a string is a file
+   * to wait for, bounded at a minute. Either is over at once when the world
+   * is deleted.
+   */
+  hold?: number | string;
 }
 
 /** One launch the server made, as the stub recorded it. */
@@ -55,6 +66,10 @@ export interface StubCall {
   issue: string;
   /** The outcome file its prompt names, or "" when it names none. */
   outcome: string;
+  /** HEAD of the git checkout it ran in, as it started; "" outside one. */
+  head: string;
+  /** The branch checked out where it ran; "" outside git or detached. */
+  branch: string;
 }
 
 export interface Stubs {
@@ -65,6 +80,7 @@ export interface Stubs {
   /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`, `02.resolver`), replacing any script it had. */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
   /**
+  /**
    * Script `key` as `behaviour`, but hold each launch open, before it does
    * anything but record itself, until the case releases it. Unlike
    * `waitFor`, which gives up after ten seconds, a held launch outlives any
@@ -72,6 +88,12 @@ export interface Stubs {
    * has written nothing. A release lets every launch held at that moment go on.
    */
   hold(key: string, behaviour?: ConformanceStubBehaviour): StubHold;
+  /**
+   * Script `key` launch by launch: launch k plays `behaviours[k-1]`, the
+   * last repeating, for a grader whose outcome differs from run to run.
+   * touch, waitFor, work and hold are the key's, read from the first.
+   */
+  launches(key: string, behaviours: ConformanceStubBehaviour[]): void;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
 }
@@ -102,6 +124,8 @@ function readCall(dir: string, name: string): StubCall | null {
     env,
     issue: readText(join(path, "issue")),
     outcome: readText(join(path, "outcome")),
+    head: readText(join(path, "head")),
+    branch: readText(join(path, "branch")),
   };
 }
 
@@ -109,6 +133,49 @@ function readCall(dir: string, name: string): StubCall | null {
 export interface StubHold {
   /** Let the held launches go on; waits up to `ms` for one to be held. */
   release(ms?: number): Promise<void>;
+}
+
+/** One launch's own part of a key's script. */
+interface LaunchScript {
+  step: StubStep;
+  stdout: string | undefined;
+  run: string | undefined;
+}
+
+/**
+ * One key's script files, afresh (no step of an old script stays): the
+ * key-wide fields from `behaviour`, then each of `steps` launches as
+ * `launch(k)` (from 0) says, in the layout stub-harness.sh reads.
+ */
+function writeScript(
+  scriptDir: string,
+  behaviour: ConformanceStubBehaviour,
+  steps: number,
+  launch: (k: number) => LaunchScript,
+): void {
+  rmSync(scriptDir, { recursive: true, force: true });
+  mkdirSync(scriptDir, { recursive: true });
+  writeFileSync(join(scriptDir, "steps"), `${steps}\n`);
+  if (behaviour.waitFor) writeFileSync(join(scriptDir, "wait"), behaviour.waitFor);
+  if (behaviour.touch) writeFileSync(join(scriptDir, "touch"), behaviour.touch);
+  if (typeof behaviour.hold === "string") writeFileSync(join(scriptDir, "hold-until"), behaviour.hold);
+  if (behaviour.work) {
+    writeFileSync(join(scriptDir, "work"), behaviour.work.file);
+    if (behaviour.work.line !== undefined) writeFileSync(join(scriptDir, "work.line"), behaviour.work.line);
+    if (behaviour.work.overwrite) writeFileSync(join(scriptDir, "work.overwrite"), "");
+    if (behaviour.work.message !== undefined) writeFileSync(join(scriptDir, "work.message"), behaviour.work.message);
+  }
+  for (let k = 1; k <= steps; k++) {
+    const { step, stdout, run } = launch(k - 1);
+    writeFileSync(join(scriptDir, `${k}.exit`), `${step.exitCode}\n`);
+    if (step.outcome !== "") writeFileSync(join(scriptDir, `${k}.outcome`), step.outcome);
+    if (step.status === "ready" || step.status === "marker-done") {
+      writeFileSync(join(scriptDir, `${k}.marker`), step.status.replace(/^marker-/, ""));
+    }
+    if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
+    if (run !== undefined) writeFileSync(join(scriptDir, `${k}.sh`), `set -euo pipefail\n${run}\n`);
+    if (typeof behaviour.hold === "number") writeFileSync(join(scriptDir, `${k}.hold`), `${behaviour.hold}\n`);
+  }
 }
 
 /** Write the wrappers into `<root>/bin` and make `<root>/stubs`. */
@@ -133,29 +200,24 @@ export function installStubs(root: string): Stubs {
         Array.isArray(behaviour.stdout) ? behaviour.stdout.length : 1,
         Array.isArray(behaviour.run) ? behaviour.run.length : 1,
       );
-      const scriptDir = join(dir, "scripts", key);
-      // A key scripted again is scripted afresh: no step of the old script stays.
-      rmSync(scriptDir, { recursive: true, force: true });
-      mkdirSync(scriptDir, { recursive: true });
-      writeFileSync(join(scriptDir, "steps"), `${steps}\n`);
-      if (behaviour.waitFor) writeFileSync(join(scriptDir, "wait"), behaviour.waitFor);
-      for (let k = 1; k <= steps; k++) {
-        const step = stubStep(key, behaviour, k - 1, null);
-        writeFileSync(join(scriptDir, `${k}.exit`), `${step.exitCode}\n`);
-        if (step.outcome !== "") writeFileSync(join(scriptDir, `${k}.outcome`), step.outcome);
-        if (step.status === "ready" || step.status === "marker-done") {
-          writeFileSync(join(scriptDir, `${k}.marker`), step.status.replace(/^marker-/, ""));
-        }
+      writeScript(join(dir, "scripts", key), behaviour, steps, (k) => {
         const stdout = Array.isArray(behaviour.stdout)
-          ? behaviour.stdout[Math.min(k - 1, behaviour.stdout.length - 1)]
+          ? behaviour.stdout[Math.min(k, behaviour.stdout.length - 1)]
           : behaviour.stdout;
-        if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
         const run = Array.isArray(behaviour.run)
-          ? behaviour.run[Math.min(k - 1, behaviour.run.length - 1)]
+          ? behaviour.run[Math.min(k, behaviour.run.length - 1)]
           : behaviour.run;
-        if (run !== undefined) writeFileSync(join(scriptDir, `${k}.sh`), `set -euo pipefail\n${run}\n`);
-        if (behaviour.hold !== undefined) writeFileSync(join(scriptDir, `${k}.hold`), `${behaviour.hold}\n`);
-      }
+        return { step: stubStep(key, behaviour, k, null), stdout, run };
+      });
+    },
+    launches(key, behaviours) {
+      if (behaviours.length === 0) throw new Error(`no launches scripted for ${key}`);
+      writeScript(join(dir, "scripts", key), behaviours[0]!, behaviours.length, (k) => {
+        const behaviour = behaviours[k]!;
+        const stdout = Array.isArray(behaviour.stdout) ? behaviour.stdout[0] : behaviour.stdout;
+        const run = Array.isArray(behaviour.run) ? behaviour.run[0] : behaviour.run;
+        return { step: stubStep(key, behaviour, 0, null), stdout, run };
+      });
     },
     hold(key, behaviour = {}) {
       this.script(key, behaviour);

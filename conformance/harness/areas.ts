@@ -14,7 +14,7 @@ export const AREAS = {
   conversations: "Conversations: storage, start and launch, ending, spawn.json adoption, the teaching Turn, Seeded Pools",
   scheduling: "the drive loop: super-steps, the ready set, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
   spawns: "Spawns: proposals in Outcomes, adoption at the boundary, Pending and Held spawns, caps, the spawn routes",
-  verify: "verify and Jev: the fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head",
+  verify: "verify and Jev: the verify: N fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head, human selection, Adopt",
   merges: "pool worktrees and branches, merges, the Merge hold and Merge queue, the resolver, Ticket file reconcile",
   cli: "the boot, fleet and steward command lines: what they print, write, exit with and launch",
   restart: "restart and takeover: a server picking up a pool another server process left on disk",
