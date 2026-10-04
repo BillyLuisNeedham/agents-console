@@ -711,12 +711,8 @@ pub(crate) mod stewards {
     pub type Item = StewardItem;
 
     /// What a Steward should be told about now (steward.ts's `stewardItems` over the session).
-    ///
-    /// STUB(steward): the Steward port's `steward_items_of` (engine.ts `stewardItemsOf`) replaces this
-    /// body; until then no item is ever pending.
     pub(super) fn items(s: &mut Session) -> Vec<StewardItem> {
-        let _ = s;
-        Vec::new()
+        crate::steward_actions::steward_items_of(s)
     }
 
     pub(super) fn fresh(

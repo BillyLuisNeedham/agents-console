@@ -186,14 +186,15 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     if validation.proposals.is_empty() {
         return;
     }
-    let before = s.spawn_proposals.pending().len();
-    crate::spawns::take_spawn_proposals(
+    let pending = match crate::spawns::take_spawn_proposals(
         s,
         parent_id,
         validation.proposals,
         SpawnKind::Conversation,
-    );
-    let pending = s.spawn_proposals.pending().len() > before;
+    ) {
+        Ok((pending, _held)) => !pending.is_empty(),
+        Err(_) => return,
+    };
     // Idle: land what is pending (write the files / start the child Conversations) and kick a drive at
     // once, since nothing else will reach the boundary that does this. In flight: leave it pending: the
     // driving super-step's own adoption at its next boundary picks it up, and landing here too would

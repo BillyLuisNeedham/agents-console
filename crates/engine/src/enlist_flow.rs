@@ -1061,7 +1061,7 @@ pub fn end_enlisted_attempt(
                 .as_ref()
                 .filter(|spawn| !spawn.is_empty())
         {
-            crate::spawns::take_spawn_proposals(
+            let _ = crate::spawns::take_spawn_proposals(
                 session,
                 ticket_id,
                 spawn.clone(),

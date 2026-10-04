@@ -40,3 +40,24 @@ pub fn owed_continued_grade(session: &Session, marker: &TicketMarker) -> Option<
     let _ = (session, marker);
     None
 }
+
+/// The Steward choosing Keep talking (ADR-0030): its message is typed after the teaching Turn, and
+/// the answer is its own, counted on its budget.
+#[derive(Debug, Clone)]
+pub struct StewardTalk {
+    pub conversation: String,
+    pub message: String,
+}
+
+/// `keepTalking`: continue a ticket's checkpointed Attempt in its Held pane as a Continued attempt;
+/// the new Attempt's number. STUB(keep_talking): refuses.
+pub async fn keep_talking(
+    engine: &Engine,
+    ticket_id: String,
+    steward: Option<StewardTalk>,
+) -> Result<u64, crate::error::EngineError> {
+    let _ = (engine, steward);
+    Err(crate::error::EngineError::refused(format!(
+        "keep talking: ticket {ticket_id} is in a pool that is not terminal-backed"
+    )))
+}
