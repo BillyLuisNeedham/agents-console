@@ -52,8 +52,14 @@ export interface Case {
 }
 
 export interface CaseOptions {
-  /** The case's bound, start and stop included. Default 60 s. */
+  /** The case's bound, start and stop included. Default 60 s, 180 s when slow. */
   timeoutMs?: number;
+  /**
+   * The case waits out one of the server's fixed timings for real (the
+   * inventory's Decided 2: no knobs). Its name ends ` [slow]`, so a run
+   * can leave the slow ones out with `-t '^(?!.*\[slow\]$)'`.
+   */
+  slow?: boolean;
 }
 
 function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
@@ -129,7 +135,7 @@ export function conformance(
   body: (t: Case) => Promise<void>,
   options: CaseOptions = {},
 ): void {
-  const title = `[${area}] ${name}`;
+  const title = `[${area}] ${name}${options.slow ? " [slow]" : ""}`;
   if (serverMissing(serverChoice()) !== null) {
     test.skip(title, () => {});
     return;
@@ -148,6 +154,6 @@ export function conformance(
         await teardown(failed);
       }
     },
-    options.timeoutMs ?? 60_000,
+    options.timeoutMs ?? (options.slow ? 180_000 : 60_000),
   );
 }
