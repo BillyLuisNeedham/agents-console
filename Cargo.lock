@@ -50,6 +50,7 @@ dependencies = [
  "ac-core",
  "ac-protocol",
  "anyhow",
+ "axum",
  "chrono",
  "futures",
  "libc",
@@ -106,8 +107,11 @@ dependencies = [
  "anyhow",
  "libc",
  "nix",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

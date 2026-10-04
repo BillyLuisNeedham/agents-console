@@ -683,6 +683,7 @@ pub async fn run_super_step(engine: &Engine, plan: SuperStepPlan) -> anyhow::Res
     let (env, assignments, chain) = engine
         .call(move |s| {
             let env = TicketEnv {
+                engine: s.engine(),
                 attempt: attempt_env_of(s, Some(&config)),
                 pool_dir: s.pool_dir.clone(),
                 issues_dir: s.issues_dir.clone(),

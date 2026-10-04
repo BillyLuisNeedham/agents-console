@@ -310,7 +310,10 @@ impl Session {
             children: ChildTracker::default(),
             orphans: Vec::new(),
             conversations: Conversations::default(),
-            live_attempts: LiveAttempts::default(),
+            live_attempts: LiveAttempts::new(Some(|s: &mut Session| {
+                let phase = s.idle_phase();
+                crate::snapshot::emit_snapshot(s, phase);
+            })),
             hold_watch: MergeHoldWatch::new(),
             hold_watch_timer: 0,
             derive_hold: MergeHoldMemo::new(),

@@ -29,11 +29,11 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | attempts, endings and logs | C13 | landed (1e39261), 30 cases |
 | herdr panes | C15 | landed (eecd384..1bee44e), 42 cases |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
-| protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
+| protocol and http outside route files | C02 | landed (d9db343), 31 cases |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
 | restart, Tickets and Attempts | C05 | landed, 55 cases |
-| restart, Conversations and panes | C06 | wave 2 |
-| Conversation Turn state and Notices | C17 | wave 2 |
+| restart, Conversations and panes | C06 | landed (f0eef0a), 30 cases |
+| Conversation Turn state and Notices | C17 | landed, 22 cases |
 | verify with Jev | C22 | wave 2 |
 | the failing scheduling case | | fixed in 879b564: the case now waits for the settled frame (a read's reply can overtake a coalesced push) |
 
@@ -41,14 +41,43 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 
 - Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md; wire shapes
   research at docs/specs/162-rust-port-wire-shapes.md.
-- Landed: ac_io::herdr (1c8824d), ac_io::git and ac_core::stat_cache (d94eec5..b8b3947), ac-protocol types
-  (2e17992; the TypeScript generator and its tsc check still to come from r-protocol).
-- Running: r-protocol (generator), r-formats-a (pool files, events, streamlog, checkpoints, queued answers,
-  ledger, runs/ files, Conversation records, ac_core::js), r-formats-b (console.json, Pool settings, Machine
-  defaults, fleet, harness descriptors, Assignments).
-- Next: the foundation, F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
-  persist, snapshot) and S-server (server CLI, lock, ports, routes, /api/ws) side by side; then the feature
-  wave by area (see the design doc's module map).
+- Landed: ac_io::herdr, ac_io::git, ac-protocol (types, TypeScript generator and its tsc check), ac-core
+  formats (pool files, events, streamlog, checkpoints, queued answers, spawn proposals and ledger,
+  Conversation records, steward notes, config, Pool settings, Machine defaults, fleet, harness table,
+  Assignments, `ac_core::js`), the engine's actor and handle API (93f6920). Whole workspace green at b9b1919.
+
+## Right now (for a resumed or compacted context)
+
+Running subagents, each in a detached worktree at `~/.herdr/worktrees/agent-console/rust-port-<name>`,
+briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
+- r-f1-engine: engine core (session, boot, drive, persist, interrupts, answers, config reload, tickets,
+  merges success path, outcome). Started from 5e6b558.
+- r-s-server: ac-server and the `server` subcommand (server.ts, ws.ts, ports.ts). Started from 5e6b558.
+- r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
+  Started from 78e6eea.
+- m0-c22 (verify with Jev).
+- Landed on the branch: r-cli (9c0a162..512e90f; cli 22/71 against Rust, the rest wait on `server`), r-jev
+  (bbdd5ea, 4b94f5c), r-f1-attempts (26c6a3c). Flaky under load: cli `reports_an_exit_before_the_boot_line_with_the_logs_tail`,
+  ac-io `rpc_fails_with_buns_connect_text_when_no_daemon_listens`.
+- r-f1-engine finished (435a4df..d56cc96 in its worktree, not landed): it must merge the branch head, drop
+  its attempt STUBs for 26c6a3c's real modules, then run conformance. r-s-server stopped at the session
+  limit with uncommitted work in rust-port-s-server.
+- Model: from here, Sonnet subagents for well-specified work, Opus for the engine core and integration.
+
+How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
+its worktree merged the branch itself), resolve NOT-PORTED.md conflicts by keeping both sides
+(scratchpad `bin/union-conflicts.py`), run `bun run typecheck` and `cargo test --workspace`, record its
+notes below under "Notes from the Rust port agents" or "Hidden behaviour", tick its row, and `git worktree
+remove` it. Agents' long reports are cut off in the notification: ask them with SendMessage for the rest.
+
+Next, in order:
+1. When r-f1-engine, r-s-server and r-f1-attempts have all landed: merge, build, and tell each to merge
+   the branch head and run its conformance areas against `--rust-bin target/debug/agent-console`.
+2. When M0's last three land: run the whole Bun suite once (`bun run conformance --server bun`, about
+   30 min) to finish M0 green; fix racy cases the way 879b564, 8d674c7, b09c4ae and 8956893 did.
+3. M3 feature wave by area (merges resolver and approval, verify and Jev, spawns, conversations,
+   steward, enlist and held panes, restart, config reload and Reassign), then the CLI (boot, steward,
+   fleet), then M5 (bench gates, render-survival, two real pools, the flip). At most four agents.
 
 ## Decisions
 
@@ -92,6 +121,50 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Keep talking's "lost its terminal" and "lost its agent" refusals are dead code in the TypeScript (pinned
   as "has no terminal left to continue in").
 
+### protocol and HTTP reads (C02, d9db343)
+
+- A delta carries only what changed: a changed Ticket goes whole under `tickets.upsert`, `tickets.order` only
+  when ids are added, removed or reordered, removed ids under `tickets.remove`, changed state fields whole
+  under `delta.state`. Conversations follow the same rules. An emit that changes only `seq` still sends a
+  delta of `set.seq` alone (seen, not pinned). A Reassign that changes nothing sends no delta and replies
+  with the unchanged revision. An action's delta is flushed before its reply; `reply.rev` is the socket's.
+- Pool log: a pushed snapshot (socket and page embed) carries the last 500 lines with `logTotal` the full
+  count; a delta's log is `{append, total}` even past the 500 edge; GET /api/state carries every line.
+- The page embed escapes every `<` in the boot JSON as `\u003c`, and sits right before `</head>`.
+- Frames with no reply: non-JSON text, an array, an unknown type, a request with an unknown kind, no id or
+  a negative id, a subscribe with no card, any binary frame (a binary frame holding a valid stop is
+  dropped). Request ids are per socket.
+- Card with no Attempt: log null; a new Attempt brings a window naming it. Conversation card: body null,
+  events as GET /api/events serves them, window on `<id>.log`. Card log window is the last 65536 bytes; a
+  catch-up of 256 KiB or less goes as appends of at most 64 KiB; more behind gets a fresh window.
+- Grades go to hidden sockets as live frames with grades only. Quirk (Rust unit test, not pinnable): a
+  socket counts as visible until its hello lands, and the whole live cache goes out at open.
+- A Ticket file with no state line keeps the server on its last good list, retried on each read. Log reads
+  hold back at an unfinished escape (`"ok \x1b[31"` serves `"ok "`, nextOffset 3). Empty query params count
+  as absent. Activity's diff comes from the last spawned or resolver event with a cwd; a gone cwd gives
+  diff null with lastEventAt still served.
+- Refusal texts (400, nothing written): enlist "paneId is required", keep-talking "ticketId is required",
+  conversations/end "id is required", conversations 'role must be "steward" when given', settings/machine
+  "settings: defaults must be an object". terminal.focus refusal is 404 "no terminal-backed pane for ticket
+  <id>". Non-JSON body: resume and both settings PUTs 400 `{error:"Failed to parse JSON"}`, Reassign 500
+  with that text, every other JSON route 400 `{reason:"invalid JSON body"}`. Unknown paths answer 500
+  (pinned; 404 intended).
+
+### restart, Conversations and panes (C06, f0eef0a)
+
+- Pinned as Bun does it: boot reconciliation looks for Ticket orphans only in the Pool workspace, so a
+  pane the operator moved to another workspace reads as gone (Attempt crashed, agent released, Ticket re-run
+  in a new tab in the same worktree). Conversations and enlisted Tickets are looked up daemon-wide. A merge
+  redone at boot appends a second merge-deferred when it meets the gate again.
+- Rust unit tests: Conversation claims are serialised per id (two Ends, or an End and the survey's
+  re-adoption, build one runtime and record the ending once). An End on an unadopted record whose pane
+  herdr lists as another terminal releases no agent and closes no tab. Unadopted Conversations are retried
+  on every survey listing, cadence or on-demand (`readoptPending` from `surveyListed`). A Conversation's TUI
+  counts as exited at boot only if its exit-code file's mtime is no older than its spawned event's `at`.
+- Not pinned: while a redone merge waits at the pool checkout's gate, the phase stays "running" until the
+  Continued attempt ends; cases wait for "merge dropped at the last shutdown chained again" and mergeState
+  "queued" instead.
+
 ## Notes from the Rust port agents
 
 ### ac_io::herdr (r-herdr, 1c8824d)
@@ -110,9 +183,7 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   `.context(...)` only where the TypeScript's text changed too. `is_tab_not_found` takes anything Display.
 - `Herdr::rpc` returns `Option<Value>`: `None` is JavaScript's undefined, `Some(Null)` is null; they print
   differently in shape errors.
-- `crates/io/src/herdr/js.rs` holds JavaScript-compatible helpers (number printing, JSON.stringify of a
-  Value, String(), trim, UTF-16 length and prefix), private for now: move them to `ac_core::js` once it
-  exists and point herdr at it.
+- herdr's JavaScript helpers now live in `ac_core::js` (5e6b558).
 - `crates/io/src/herdr/fake.rs` is a test-only port of the fake herdr; share it behind a test-support
   feature if engine unit tests need one.
 - The RPC watchdog is a fixed 10 s; tests that need it to fire use `#[tokio::test(start_paused = true)]`.
@@ -132,8 +203,7 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   `merge_base`, `show_file`, `merge_file`). Left for M4: the activity diff's 1.5 s TTL cache.
 - `pool_key_for` is total (hashes the given path when realpath fails); the functions that change disk use
   `try_pool_key_for`, which fails first with Bun's lstat ENOENT text, as the TypeScript does.
-- `node.rs` holds crate-private JS/Node helpers (trim, Number, path join and relative, realpath, Bun's fs
-  error texts): candidates for `ac_core::js` together with herdr's `js.rs`.
+- git's JS/Node helpers now live in `ac_core::js` (5e6b558).
 - engine.ts:10279-10281's enlist capture ports as `pane_top.is_some() && pane_top == cwd_top`.
 - `merge_file`: an exit code above 127 is git's error, `None` is killed by a signal.
 - This box's git config enables rerere (autoupdate): a conflict's stderr starts "Recorded preimage", which
@@ -279,6 +349,46 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Deviations (edges, nothing pins them): a hand-written non-string Assignment field (`model: 5`) becomes
   the string "5" (TypeScript keeps the number); a verify past u64 saturates; a non-string effort is
   coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
+- Its JavaScript helpers were folded into `ac_core::js` (5e6b558).
+
+### pool files in ac-core (r-formats-a, 5e6b558)
+
+- Modules: `js` (every JavaScript-compatible helper), `pool` (markers, loading, `write_markers`, spawned
+  Ticket text, `add_blocker_to_ticket`), `conversation_record`, `events`, `streamlog` (derived log, line
+  buffers, `rotate_attempt_log`, `list_attempt_logs`, `reconstruct_attempts`), `checkpoints`
+  (`CheckpointStore`, SQLite with busy_timeout 0 so a locked console.db fails at once with "database is
+  locked"; byte-identical schema and rows, round-tripped against Bun's store), `queued_answers`,
+  `spawn_proposals`, `spawn_ledger`, `pool_workspace`, `drive_errors`, `steward_notes`.
+- Tickets, Conversation records and events each have one process-wide cache behind a Mutex, as the
+  TypeScript modules held one map; `read_events` returns `Vec<Arc<TicketEvent>>`.
+- `js::utf16_prefix_lossy` is for text bound for a file (a cut surrogate pair becomes U+FFFD, as Bun
+  writes it); `js::utf16_prefix` drops the pair, for text bound for JSON.
+- Left for the owners: `attemptStreamPath` (needs the harness stream mode; three lines over
+  `events::attempt_stream_name`), the engine-flow writes into Ticket files (landCheckpointBrief,
+  extractBrief, Resume and Review note appends, the restart's reset and orphan notes, grader and
+  head-to-head templates).
+- Deviations, reachable only with hand-edited files: an events line with a non-integer attempt or with no
+  `at` or `payload` is skipped (TypeScript takes it) and extra keys are dropped; GET /api/events serves
+  lines verbatim in the TypeScript, so revisit if a case writes such a line. A held-spawns.json entry that
+  does not fit fails the load with "cannot be read" (TypeScript fails later at the first view); a
+  queued-answers.json record that does not fit starts the queue empty; reconstruct_attempts skips a log
+  whose stat fails (TypeScript throws); a Steward note with a non-string at or conversation reads "".
+- Kept on purpose: a Conversation record's tab=none and session=none read back as the id "none".
+
+### Conversation Turn state and Notices (C17)
+
+- Likely TypeScript bug, not pinned, copied as is: a lone spawned Ticket that finishes done tells its parent
+  nothing (it ran in the pool checkout, and only the merge paths call `ticketEnded`), though the teaching
+  Turn promises a report on done. A decision for the operator.
+- Pinned quirk: a lone spawned Ticket's checkpoint Notice names `Branch: pool/<key>/<id>`, a branch that
+  does not exist, with `(no changes)` as its diff. A spawned Ticket's Notice title includes its id
+  (`conv-1-spawn-2: Old idea`), the Ticket file's heading.
+- Binding: the Turn-state tick is the only viewport read (`source: visible`) of a Conversation's pane, one
+  per tick; the cases count those reads.
+- Rust unit tests: the drop reason `parent conversation is ending`; the Notice queue is claimed whole
+  before the first Turn is typed (a racing tick never types one twice); a failed Turn puts itself and the
+  rest of the claimed queue back at the front, in order; a Turn-state read that throws leaves the state as
+  it was.
 - `js_compat.rs` is a private copy of the JavaScript helpers, to fold into `ac_core::js` with herdr's
   `js.rs` and git's `node.rs`.
 

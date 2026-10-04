@@ -39,11 +39,12 @@ use crate::session::{PoolState, PoolUpdate, Session};
 pub fn attempt_env_of(session: &Session, config: Option<&PoolConfig>) -> AttemptEnv {
     let config = config.unwrap_or(&session.state.config);
     AttemptEnv {
-        engine: session.engine(),
         runs_dir: session.runs_dir.clone(),
         harnesses: session.harnesses.clone(),
         herdr_socket: session.herdr_socket.clone(),
         parent_env: Arc::clone(&session.parent_env),
+        pool_workspace: Arc::new(crate::attempt_run::NoPoolWorkspace),
+        host: Arc::new(session.engine()),
         terminal_backed: config.terminal() == Some(TerminalKind::Herdr),
         launch_cadence: session.launch_cadence.clone(),
         claude_config_path: None,
@@ -352,6 +353,7 @@ fn spawn_rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Map<Str
 
 /// What `runTicket` reads of the pool besides the Attempt-run environment.
 pub struct TicketEnv {
+    pub engine: Engine,
     pub attempt: AttemptEnv,
     pub pool_dir: String,
     pub issues_dir: String,
@@ -451,8 +453,7 @@ pub async fn run_ticket(
     {
         let brief = ok_outcome.as_ref().and_then(|v| v.outcome.brief.clone());
         let ok = ok_outcome.is_some();
-        env.attempt
-            .engine
+        env.engine
             .call(move |_| -> anyhow::Result<()> {
                 if verify {
                     return Ok(());

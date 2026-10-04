@@ -27,6 +27,7 @@ pub mod attempt_run;
 pub mod boot;
 pub mod checkout_gate;
 pub mod children;
+pub mod claude_trust;
 pub mod config_reload;
 pub mod conversations;
 pub mod drive;

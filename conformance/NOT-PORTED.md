@@ -738,3 +738,272 @@ Behaviour of the TypeScript server the cases tolerate rather than pin:
   under `-q`. The server does not strip them, and the cases read the transcript without them (`transcriptLines` in
   `attempts-endings-support.ts`). A Rust server that runs the same `script` keeps them unless the port decides to
   strip them.
+
+## `conversations`: Turn state and Notices (C17)
+
+Every one of C17's 38 rows is a passing case under `conformance/cases/conversations-turns-state.test.ts`,
+`conversations-turns-lines.test.ts`, `conversations-notices-texts.test.ts` and
+`conversations-notices-delivery.test.ts`, on the shared setup in `conversations-support.ts`. So is the gap the C16
+section above leaves here, a Notice still queued when its parent ends (`engine/conversations.ts:2386-2390`), and two
+more no list named: a checkpoint Notice from a pool with no git checkout, and the placeholder Brief a checkpoint
+written without one is told with (the visible side of the hidden row `notices.test.ts:73`). Every Notice typed or
+dropped is compared whole, byte for byte, with its text written out in the case (Decided 4). No harness or fixture
+changed. The area's four hidden rows (`turn-state.test.ts:39`, `:97`, `:316`, `notices.test.ts:73`) stay Rust unit
+tests, as the inventory sorts them: a publish that changes nothing on the wire sends no frame, so whether the server
+signalled one cannot be seen.
+
+How the cases see a Turn, which binds the Rust server:
+
+- A Conversation's Turn-state reads are the only viewport reads (`pane.read` with `source: visible`) of its pane;
+  readiness and paste checks read `recent`. The cases count them to tell which read did what, so a Rust server that
+  reads a Conversation's viewport for anything else, or more than once a tick, fails them.
+- The flip to waiting is pinned by its idleSince: no earlier than the third read of the idle frame reaching herdr
+  and no later than the fourth. The Bun server stamps it as the third read returns.
+- "Publishes nothing" is pinned as no socket frame that changes the Conversation's `turn`.
+
+Where the cases reach a row differently from its wording:
+
+- **`notices.test.ts:139`'s seam** (a diff git cannot compute) is reached without one: the case plays an agent that
+  renames its own branch before it pauses, so the branch the server names in `git diff --stat
+  <target>...<branch>` no longer exists and git refuses the diff.
+- **`notices.test.ts:44`, `:130`**: a lone spawned Ticket runs in the pool checkout and never merges (see below),
+  so the case spawns two at once, which gives each a worktree, and pauses the second. Its done and checkpoint
+  Notices are each matched whole, in either order: the pause is told at its exit and the merge at the end of the
+  super-step.
+- **`notices.test.ts:86`** and every other spawned Ticket's Notice: the title is the heading the server writes into
+  a spawned Ticket's file, which leads with its id (`conv-1-spawn-2: Old idea`), not the proposal's title alone.
+- **`notices.test.ts:668`, `:744`, `:813`**: the spawned Ticket runs in a pane on the claude TUI stand-in like its
+  parent, not headless on a stub, and the case plays its agent. Under `verify: 1` its Attempt's prompt names
+  `conv-1-spawn-1.attempt-1.outcome.json`, and the Notice names that Attempt's branch, `pool/<key>/conv-1-spawn-1.attempt-1`.
+- **`notices.test.ts:744`**: the failed delivery's `error` is pinned as `pane.send_input failed: ` followed by the
+  daemon's error body, which is the fake's own, so only its message is checked inside it.
+- **`turn-state.test.ts:119`**: a frame with content stands between the all-chrome frame and the empty one, so
+  each of the two publishes its own empty last line.
+- **`steward.test.ts:671`** is pinned on the Steward, as worded. The delivery failure shown on the view and its
+  pool log lines are the same for any Conversation; the case for `notices.test.ts:744` pins them on a plain one.
+
+Behaviour of the TypeScript server the cases pin as it is today, each worth a look before the port copies it:
+
+- A spawned Ticket's Notice repeats its id inside the title, `Ticket conv-1-spawn-1 ("conv-1-spawn-1: Checkpointing
+  child") ended: checkpoint.`, since the title is the file's heading.
+- A lone spawned Ticket runs in the pool checkout, on no branch of its own, yet its checkpoint Notice names
+  `Branch: pool/<key>/<id>`, a branch that does not exist, and `(no changes)` as its diff, because git cannot
+  compute one against a missing branch.
+
+Observed while writing these, not pinned:
+
+- **A lone spawned Ticket that finishes done tells its parent nothing.** It ran in the pool checkout, so nothing
+  merges, and only the merge paths call `ticketEnded` (`engine/engine.ts`). No Notice is queued, typed or dropped:
+  a run with the parent waiting saw none in twelve seconds after the Ticket's done. The teaching tells the agent a
+  spawned Ticket reports back once it ends, done included. Intended behaviour (inference): a done Notice whose
+  diff is the range the Attempt added to the working branch. Rust unit test, once decided: *a spawned Ticket that
+  ends done in the pool checkout queues a ticket-ended Notice to its parent.*
+- **The third drop reason**, `parent conversation is ending`, needs a child's Notice raised after its parent's End
+  began and before it finished, and an End with nothing to merge takes no time a case can hold open from outside.
+  Rust unit test: *Notice queue: a Notice for a parent whose End is under way is dropped at once, logged on the
+  child's latest attempt with reason `parent conversation is ending` and the Notice's text.*
+- Rust unit tests for what the delivery does inside one drain, which no case can time: *Notice delivery: the queue
+  is claimed whole before the first Turn is typed, so a tick and an enqueue racing it never type a Notice twice;
+  a Turn that fails puts itself and the rest of the claimed queue back at the front, in order; a read that throws
+  leaves the Turn state as it was, and the next tick reads as usual.*
+
+## C02: the socket protocol and the HTTP read surface (`protocol`, `http`)
+
+Ticket C02's 16 rows are passing cases: the fourteen `protocol.test.ts` rows of the `protocol` area in
+`cases/protocol-deltas.test.ts`, `protocol-log-window.test.ts` and `protocol-envelope.test.ts`, and the two
+`http` rows, `protocol.test.ts:306` and `stat-cache.test.ts:65`, in `http-page.test.ts` and
+`http-reads.test.ts`. (`protocol.test.ts` has since moved to `ui/src/protocol.test.ts`, each case two lines
+below the line the inventory cites.) All six of the `protocol` area's gaps and nine of the `http` area's ten
+are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-page.test.ts`,
+`http-reads.test.ts` and `http-bodies.test.ts`.
+
+### Left out
+
+- **GET /api/ticket?id=01 beside an adopted `01-spawn-1.md`** (the gap at `engine/server.ts:958`).
+  `ticketBodyFile` serves the first file `readdir` lists whose name before its first `-` is the id, so which
+  of `01-a.md` and `01-spawn-1.md` answers for 01 depends on the filesystem: tmpfs lists the newest first, so
+  under this machine's `/tmp` the spawned child's body is served, while a sorted listing (APFS) serves
+  `01-a.md`. No case can pin today's answer on both, and the control over directory order the inventory names
+  does not exist. The intended answer, the Ticket's own file, is open question 5's (Decided 5);
+  conv-1-spawn-14 was to fix it and was closed before it ran. The socket's card for 01 reads the same file.
+  Rust unit test: *ticket body lookup: with `01-a.md` and `01-spawn-1.md` in issues/, id 01 resolves to
+  `01-a.md`, the file whose state line says id=01, whatever order the directory lists them in, for GET
+  /api/ticket and the card alike.*
+
+### Pinned as the Bun server does it, worth a look before the port copies it
+
+- **Unknown paths answer 500** (`http-page.test.ts`, the gap at `engine/server.ts:395`). An unknown `/api/`
+  route, a GET on a POST-only route and a missing asset each answer 500 with Bun's own HTML error page:
+  `serveStatic` tests the Promise `Bun.file().exists()` returns, which is always truthy, so it answers every
+  path with a file that is not there and the read fails; the `not found` 404 at the end of the route table is
+  never reached. The case pins the 500 alone, and that the server stays up. Intended behaviour (open question
+  5, Decided 5): 404 `not found`. Once conv-1-spawn-14's fix lands, the case pins 404 and the Rust server
+  answers 404. The traversal case beside it asks only that a path climbing out of the build answers an error
+  and nothing of the file, so it holds either way.
+- **A body that is not JSON** (`http-bodies.test.ts`, the gap at `engine/server.ts:1958`). POST /api/resume
+  and both settings PUTs answer 400 `{error: "Failed to parse JSON"}`, the message Bun's `req.json()` throws;
+  PUT /api/reassign answers 500 with it, as the server's own failure, though the route's comment keeps that for
+  a file it cannot read (C20's section notes the same); every other JSON route answers 400
+  `{reason: "invalid JSON body"}`. The case pins all of it, Bun's words included, so a Rust server says
+  `Failed to parse JSON` where the Bun server does. Intended behaviour (inference): the Reassign answers 400,
+  as the routes beside it do.
+
+### Where the cases reach a row differently from its wording
+
+- **The snapshot re-read.** GET /api/state serves the snapshot built at the last engine emit, Reassign or
+  settings save, and a pool at rest emits nothing (C20's section has the detail). `protocol.test.ts:92`,
+  `:114` and `:122` re-read with a Reassign of a Ticket to the model its assign entry already names, as the
+  rows say, which leaves every Assignment as it was and rebuilds the snapshot. `stat-cache.test.ts:65` and the
+  gap at `engine/server.ts:1244` re-read with a Reassign naming only a done Ticket (`rebuiltSnapshot` in
+  `cases/config-support.ts`), which writes nothing.
+- **A pool log over the window** (`protocol.test.ts:149`, `:233`, `:247`) comes from a restored checkpoint,
+  one of the two ways the rows name: a first server rests and stops, its last checkpoint in console.db has
+  its log replaced by lines of the case's own, and the server under test restores them as it boots. The rest
+  of that checkpoint is as the first server wrote it. `:247` also reads the page's embedded boot, which
+  carries the same trimmed window.
+- **By reference** (`protocol.test.ts:97` and `:184`). Neighbours and untouched lists kept by reference are
+  the Console's apply, client code now in `ui/src/protocol.ts` (Decided 3); the cases pin the server's half,
+  that a delta resends none of them.
+- **The hostile title** (`protocol.test.ts:306`). The engine test counted one `</script>` in a page of its
+  own making. The built page carries its own module script, so the case pins that the boot element's text
+  holds no `<` at all, runs whole to the `</script></head>` that closes it, and parses back to GET
+  /api/state's snapshot with the title intact.
+- **The envelope** (`protocol.test.ts:258`, `:276`). The engine tests decoded frames in process; the cases
+  send them to a real server, on a finished pool so that a stop run by mistake would show. Request 3's reply
+  carries id 3, its kind, the socket's revision and the HTTP twin's refusal; the six frames that are not the
+  protocol's get nothing back, and the next request is answered. A frame sent as given, text or binary, goes
+  through `sendRaw`, which the socket fixture gained for these cases.
+- **Conversations** (`protocol.test.ts:130`, and the gap at `engine/ws.ts:681`) are started through POST
+  /api/conversations on the fake herdr, each waited for until its Turn rests, so the first is unchanged while
+  the second starts.
+
+### Hidden behaviour worth a Rust unit test
+
+- A socket counts as visible from its opening until its hello says otherwise. A live check that runs before a
+  hidden tab's hello lands sends it activity and peeks once, and a socket opening after a live check is sent
+  the whole live cache before its hello is read. The hidden-grades case counts only what follows its hello's
+  round trip. Rust unit test: *live check: a socket is visible until its hello says otherwise; once a hello
+  says visible false, no live frame it is sent carries activity or peeks, and a change of grades still
+  reaches it as a live frame with grades alone.*
+- A Ticket file that will not load leaves the server on the last Ticket list that did, for every route and
+  the snapshot alike, and each later read tries again. The draft case pins two readers of it. Rust unit test:
+  *pool meta: a read of issues/ that fails keeps the last list that loaded, and the next read that loads
+  replaces it.*
+
+### Observed while writing these, not pinned
+
+- An engine emit that changes nothing but `seq` goes out as a delta of `set.seq` alone (seen while a
+  Conversation starts, on its Turn polls).
+- The Steward routes answer a body that is not JSON with 400 `{reason: "invalid JSON body"}` too (C18's area).
+- GET / with no UI build answers 500, Bun's page for the missing `index.html`; the Rust binary embeds the UI,
+  so it never lacks one.
+
+## `restart`: Conversations and panes (C06)
+
+Every one of C06's 28 rows is a passing case under `conformance/cases/restart-conversations-boot.test.ts`,
+`restart-conversations-ends.test.ts`, `restart-panes-held.test.ts`, `restart-panes-continued.test.ts` and
+`restart-panes-workspace.test.ts`, on the shared setup in `restart-conversations-support.ts`. So are the two gaps C05
+left here, as restarts rather than seeded boots: the relabel at boot of a Pool workspace the pool created, to a title
+edited while no server ran (`engine/engine.ts:3039`), and a torn `runs/pool-workspace.json` resolved afresh
+(`engine/engine.ts:2929`). A case that starts two servers on its pool is a takeover case (`restartCase`), its second
+server the next leg of CONFORMANCE_LEGS, with one fake herdr alive across both. A row that boots on records a dead
+server left, written by hand, starts one server. The one seam row (`herdr.test.ts:544`) answers `agent.list` with the
+fake's `answerWith`. Two cases wait out the pane survey's real fifteen-second cadence and are named slow. No row is
+left out, and no harness or fixture changed.
+
+### Where the cases reach a row differently from its wording
+
+- **`herdr.test.ts:158`, `:176` and `:255`** run as restarts. The first server, launched in no workspace, creates the
+  Pool workspace (the fake's `w1`), remembers it and stops; the second is launched in `w-launch`, which the fake
+  holds, and runs a Ticket added while no server ran, so its tab shows where the pool's tabs go. For `:255` two
+  Tickets run in `w1` and stop held in their panes; while no server runs, 02's pane is listed under `w8`. The boot's
+  listing is `pane.list {workspace_id: w1}`: 01 is re-adopted, and 02's attempt is crashed as pane gone and re-run in
+  a new tab of `w1`, its moved pane only released (see the first entry below).
+- **`conversations.test.ts:993`**: the exit-code file is written by hand while no server runs, as the row says, with
+  the stub TUI still running in the pane; the boot reads it, crashes the Conversation and closes the tab.
+- **`conversations.test.ts:1061` and `:1200`** have no survey knob (Decided 2). `:1061` waits for the cadence
+  listing that re-adopts the record. `:1200` must End before any listing finds the other terminal, or that listing
+  would crash the record first (the boot rule for a pane listed as another terminal), so the case waits for the
+  survey's first refused cadence listing, then relists the pane, lets `pane.list` answer and Ends at once, inside the
+  fifteen seconds before the next. Rust unit test: *an End on a live started Conversation with no runtime, whose
+  recorded pane herdr lists as another terminal, releases no agent, closes no tab and ends it.*
+- **`conversations.test.ts:1087`**: `finishedTerminals` 0 is read after a listing on demand (POST
+  /api/terminals/close-finished, which answers `closed: 0`), since a boot over a pane it holds no Ticket for lists
+  only on the cadence.
+- **`conversations.test.ts:1134`**: both concurrent POST /api/conversations/end answer 202, and the events hold one
+  `end-requested`, one `merged` and one `ended`. The race the row is about, two claims on one id, is inside the
+  server; HTTP reaches it only while the first End's claim awaits its listing, which the second request almost always
+  lands in. Rust unit test: *Conversation claims: two Ends, or an End and the boot's adoption pass, racing on a live
+  record with no runtime build one runtime, and the ending is recorded once.*
+- **`keep-talking.test.ts:832`**: the first server boots on 02's orphan written by hand in its worktree, as the engine
+  test does, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arises only from a
+  restart; the stop and start that follow are real.
+- **`keep-talking.test.ts:889`**: the Conversation runs on opencode and the Ticket it proposes names claude in its
+  `assign`. Once `_claude` is scripted the stub keys every claude launch `_claude`, so a Conversation on claude could
+  not be told apart from the Tickets' launches.
+- **`keep-talking.test.ts:768`**: the TUI quitting while no server runs is its pane ended through the fake
+  (`endPane`), since the stub's own quit file is bounded at a minute; with attempt 2's exit on record, the boot reads
+  either the same way.
+- **`held-panes.test.ts:93`**: the attempt between the two checkpoints crashed and was answered, and attempt 1's pane
+  is still listed beside attempt 3's, so the latest checkpoint decides, not the first listed pane.
+- **`herdr.test.ts:544`** boots once on the live enlisted record with the operator's pane seeded and `agent.list`
+  answered `{type: agent_list}` with no `agents`; the drive at rest proves boot reconciliation has run.
+
+### Pinned as the TypeScript server does it today, each worth a look before the port copies it
+
+- **An orphan pane moved out of the Pool workspace while no server ran is crashed, and its Ticket re-run beside it**
+  (`herdr.test.ts:255`'s case). Boot reconciliation lists only the Pool workspace, so a Ticket's pane the operator
+  moved to another workspace reads as gone: the attempt is crashed, its agent released, and the Ticket re-run in a
+  new tab, in the same worktree, while the moved pane's harness may still be working there. The comment before
+  `releaseOrphanAgent` in `reconcileTerminalAttempts` (`engine/engine.ts`) says the pane may still be alive. Intended
+  behaviour (inference): an orphan's pane is looked for daemon-wide by its recorded ids before it is called gone, as a
+  Conversation's is and as an enlisted Ticket's already is.
+- **A merge redone at boot is recorded deferred a second time** (`keep-talking.test.ts:832`, `:889`): meeting the
+  pool checkout's gate again, the redo appends another `merge-deferred`, so the Ticket's events read `merge-deferred`
+  twice before `merged`. The cases pin the whole list.
+
+### Observed while writing these, not pinned
+
+- While a merge redone at boot waits at the pool checkout's gate, the drive's phase stays `running` until the Continued
+  attempt ends (inference: the merge hold stands at the first boundary). The cases wait for the redo's pool log line
+  (`ticket <id>: merge dropped at the last shutdown chained again`) and the Ticket's `mergeState: queued` instead.
+- A started Conversation's TUI counts as exited at boot only when its exit-code file is no older than its launch's
+  `spawned` event, so a stale file never crashes a live talk. No case makes a stale file appear after a launch. Rust
+  unit test: *Conversation boot adoption: an exit-code file older than the recorded launch is not read as the TUI
+  exiting, and the Conversation is re-adopted.*
+
+## `cli`: Boot, the Steward's command and the fleet list (C04)
+
+### Changed on purpose (ADR-0036, "Scope")
+
+Boot no longer builds the Console. The release binary embeds the UI and the shim (`bin/agent-console`)
+rebuilds the binary when it is stale, so `buildConsole`, its staleness check (`needsRebuild`, `distMtime`,
+`uiSourceCommitMs`) and Boot's prose about building have no Rust counterpart. These are the lines the
+TypeScript Boot printed that the Rust Boot never prints:
+
+- `the Console build is missing or stale; rebuilding` (stdout, when `ui/dist/index.html` was missing or older
+  than the last commit touching `ui/src`).
+- Everything `bun install` and `bun run build` printed in the engine's `ui/`, on both streams.
+- `the Console build failed; fix it and boot again` (stderr, then exit 1).
+
+`boot-cli.test.ts:536` (rebuilds when there is no build and when the source is newer) is dropped with them, as
+the inventory already says.
+
+Boot starts the server as this same binary, `agent-console server --pool <dir> [--port <n>]`, in the engine
+checkout, detached in its own session with both streams appended to `runs/server.log`, where the TypeScript
+ran `bun run engine/server.ts` with the same arguments. So the Machine defaults' `engine` no longer chooses
+which server code runs; it still names the checkout Boot reads `skills/my-console-runner/` from, runs the
+server in, prints on the `detected:` line and writes into a first Machine defaults file. When it names no
+directory that exists, that checkout is the one the binary was built from, where the TypeScript took the one
+its source sat in.
+
+The Steward command's usage names the command it is: its first line reads `usage: agent-console steward
+--pool <pool-dir> [--url <console-url>] --as <conversation> <verb> ...` where steward-cli.ts printed
+`usage: bun steward-cli.ts --pool ...`. The verb lines are unchanged, and `cli-steward.test.ts` pins only
+those. Boot's own usage line is the TypeScript's, word for word.
+
+### Hidden: Rust unit tests
+
+Both of the area's hidden rows are unit tests in `crates/cli/src/boot/config.rs`:
+`removes_the_port_pin_on_an_explicit_auto_and_the_terminal_key_on_a_no` (`boot-cli.test.ts:348`) and
+`returns_nothing_to_write_when_the_template_itself_has_no_marker` (`boot-cli.test.ts:451`).

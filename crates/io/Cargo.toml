@@ -22,8 +22,17 @@ libc.workspace = true
 nix.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
+# The fake herdr daemon (`herdr::fake`), shared with the crates above under the test-support feature.
+tempfile = { workspace = true, optional = true }
+
+[features]
+test-support = ["dep:tempfile"]
+# The Jev port fake (`ac_io::jev::fake`), for the engine's own tests.
+fake = []
 
 [dev-dependencies]
 tempfile.workspace = true
+# The fake TypeSafe endpoint the Jev client's tests talk to.
+axum.workspace = true
 # Paused time, so the RPC watchdog's 10 s passes without being waited out.
 tokio = { workspace = true, features = ["test-util"] }
