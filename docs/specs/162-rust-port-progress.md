@@ -56,7 +56,13 @@ briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
 - r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
   Started from 78e6eea.
 - m0-c22 (verify with Jev).
-- r-cli: the boot, steward and fleet subcommands (brief-r-cli.md). Started from d9db343.
+- Landed on the branch: r-cli (9c0a162..512e90f; cli 22/71 against Rust, the rest wait on `server`), r-jev
+  (bbdd5ea, 4b94f5c), r-f1-attempts (26c6a3c). Flaky under load: cli `reports_an_exit_before_the_boot_line_with_the_logs_tail`,
+  ac-io `rpc_fails_with_buns_connect_text_when_no_daemon_listens`.
+- r-f1-engine finished (435a4df..d56cc96 in its worktree, not landed): it must merge the branch head, drop
+  its attempt STUBs for 26c6a3c's real modules, then run conformance. r-s-server stopped at the session
+  limit with uncommitted work in rust-port-s-server.
+- Model: from here, Sonnet subagents for well-specified work, Opus for the engine core and integration.
 
 How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
 its worktree merged the branch itself), resolve NOT-PORTED.md conflicts by keeping both sides
