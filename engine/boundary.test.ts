@@ -14,7 +14,8 @@ const UI_SRC = join(ENGINE_DIR, "..", "ui", "src");
 
 /** The engine files that may read `process.env`, and why. */
 const ENV_READERS = new Set([
-  // The CLI boundary: HERDR_WORKSPACE_ID and TYPESAFE_API_KEY become options here.
+  // The CLI boundary: HERDR_WORKSPACE_ID, TYPESAFE_API_KEY and JEV_BASE_URL
+  // become options here.
   "server.ts",
   // The child harness environment is the parent's, plus PWD; and the spawn
   // event records the delta against it.

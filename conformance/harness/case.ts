@@ -22,6 +22,7 @@
 import { test } from "bun:test";
 import { rmSync } from "node:fs";
 import type { CardSubscription } from "../../engine/protocol.ts";
+import { serveFakeJev, type ServedFakeJev, type ServedFakeJevOptions } from "../fixtures/jev-fake.ts";
 import { openSocket, type SocketClient } from "../fixtures/socket-fixture.ts";
 import type { Area } from "./areas.ts";
 import { startHerdr, type HerdrOptions, type HerdrProcess } from "./herdr.ts";
@@ -33,6 +34,9 @@ export interface CaseServer extends RunningServer {
   http: Http;
 }
 
+/** The TypeSafe key a server started with `jev` gets; the fake records it as `Bearer <key>`. */
+export const CONFORMANCE_JEV_KEY = "conformance-key";
+
 export interface Case {
   /** The server this run drives. */
   kind: ServerKind;
@@ -40,13 +44,21 @@ export interface Case {
   world(spec?: WorldSpec): World;
   /** The fake herdr for a world, as its own process with the world's environment. */
   herdr(world: World, options?: HerdrOptions): Promise<HerdrProcess>;
+  /** A fake TypeSafe endpoint, scripted by its options, for `start`'s `jev`. */
+  jev(options?: ServedFakeJevOptions): ServedFakeJev;
   /**
    * The server under test on a world's pool, ready. With `herdr` it talks
    * to that fake; without, its HERDR_SOCKET_PATH names a socket nobody
-   * listens on, so the pool runs headless. `env` adds to or overrides the
-   * world's environment for this server alone (a PWD it was launched with).
+   * listens on, so the pool runs headless. With `jev` it holds a TypeSafe
+   * key and its JEV_BASE_URL names that fake, so Jev answers as scripted;
+   * without, it has no key and runs on its heuristics. `env` adds to or
+   * overrides the world's environment for this server alone (a PWD it was
+   * launched with).
    */
-  start(world: World, options?: { herdr?: HerdrProcess; env?: Record<string, string> }): Promise<CaseServer>;
+  start(
+    world: World,
+    options?: { herdr?: HerdrProcess; jev?: ServedFakeJev; env?: Record<string, string> },
+  ): Promise<CaseServer>;
   /** A socket on a server; with `hello`, the client's hello goes first. */
   socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
 }
@@ -66,6 +78,7 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
   const choice = serverChoice();
   const worlds: World[] = [];
   const herdrs: HerdrProcess[] = [];
+  const jevs: ServedFakeJev[] = [];
   const servers: CaseServer[] = [];
   const sockets: SocketClient[] = [];
   const t: Case = {
@@ -80,9 +93,19 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
       herdrs.push(fake);
       return fake;
     },
+    jev(options) {
+      const fake = serveFakeJev(options);
+      jevs.push(fake);
+      return fake;
+    },
     async start(world, options = {}) {
       const socket = options.herdr?.socketPath ?? `${world.root}/no-herdr.sock`;
-      const env = { ...world.env(socket), ...options.env };
+      const env = world.env(socket);
+      if (options.jev) {
+        env.TYPESAFE_API_KEY = CONFORMANCE_JEV_KEY;
+        env.JEV_BASE_URL = options.jev.url;
+      }
+      Object.assign(env, options.env);
       const running = await startServer({ pool: world.pool, env, choice });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);
@@ -111,6 +134,7 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
         }
       }
       for (const fake of herdrs) await fake.stop();
+      for (const fake of jevs) await fake.stop();
       for (const world of worlds) {
         if (process.env.CONFORMANCE_KEEP === "1") {
           console.error(`kept the world at ${world.root}`);

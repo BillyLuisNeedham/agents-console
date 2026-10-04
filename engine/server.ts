@@ -2770,8 +2770,14 @@ function runServerCli(): void {
   // The one read of TYPESAFE_API_KEY (ADR-0020): the key becomes a Jev port
   // here and travels on as an option; absent, the port is unconfigured and
   // the pool runs on its heuristics. Nothing below this boundary reads it,
-  // and the SDK is never given the chance to (jev.ts).
-  const jev = createJev({ apiKey: process.env.TYPESAFE_API_KEY || undefined });
+  // and the SDK is never given the chance to (jev.ts). JEV_BASE_URL rides
+  // with it: unset, the port talks to TypeSafe's own API; set, to the root
+  // it names, which is how the conformance suite scripts Jev's answers
+  // (ADR-0036).
+  const jev = createJev({
+    apiKey: process.env.TYPESAFE_API_KEY || undefined,
+    baseURL: process.env.JEV_BASE_URL || undefined,
+  });
   let server: PoolServer;
   const stopAndExit = shutdownThenExit(() => server);
   try {
