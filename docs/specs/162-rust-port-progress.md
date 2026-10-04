@@ -30,7 +30,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | herdr panes | C15 | wave 1, subagent m0-c15 |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
 | protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
-| server lifecycle | C03 | wave 2, subagent m0-c03 |
+| server lifecycle | C03 | landed (490a174..e890464), 37 cases |
 | restart, Tickets and Attempts | C05 | wave 2 |
 | restart, Conversations and panes | C06 | wave 2 |
 | Conversation Turn state and Notices | C17 | wave 2 |
@@ -150,3 +150,26 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Rust unit tests implied: the frame block keeps the last 19 lines; the trust seed writes both the path
   and its realpath when they differ; readiness needs 3 matching reads 500 ms apart; a dialog still up 4
   polls after its answer ends the wait; a harness without a descriptor gets the wrapper and nothing typed.
+
+### server lifecycle (C03, 490a174..e890464)
+
+- Pool lock (runs/server.pid): O_EXCL create; a dead holder is removed only if a re-read still names the
+  same pid; an empty lock gets a 25 ms beat and is cleared if still empty; give up after 5 attempts. On
+  release, remove the file only if it still names our own pid.
+- A start refused after the lock (an unloadable Ticket file, a --port or console.json port out of range)
+  exits 1 and leaves runs/server.pid naming its dead pid (pinned); the next start takes it over. With
+  verify 0 the drive refuses its first load only after the bind and the registration: exit 1 (unhandled
+  rejection, no boot line), lock and registry entry left behind (pinned).
+- Fleet write: O_EXCL `pools.json.lock`; a live holder is polled every 10 ms for up to 10 s, then the write
+  fails; a dead holder's lock is cleared at once; an empty lock only once that deadline passed. Written to
+  pools.json.tmp then renamed; the lock released in a finally. The registry is never pruned on write; only
+  malformed entries are dropped and unknown keys survive (keep it as serde_json::Value). A stopping server
+  never touches the registry. pidIsLive counts EPERM as alive. Entries match by exact string equality on
+  the lexically resolved poolDir (steward-cli compares realpaths). The live-registry-lock message reads
+  "fleet registry: fleet registry: lock ..." on Bun (only the prefix is pinned).
+- --port is read with JavaScript's Number: "abc" says "got NaN" (pinned); "" boots on any free port; 0x10
+  and 1e3 read as 16 and 1000 (not pinned).
+- The boot line prints --pool exactly as given; everything else uses the resolved path. It is printed only
+  after the drive's first load succeeds.
+- Shutdown has a 15 s hard limit: past it the server exits 1 and skips the Boot hand-off. The Boot a
+  Restart relaunches opens the browser again (no --no-open passed).
