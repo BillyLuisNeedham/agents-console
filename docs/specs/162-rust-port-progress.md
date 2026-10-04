@@ -257,3 +257,24 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Typed as declared, not reproduced: `?offset=abc` giving null offsets, a missing or non-string
   `lastEventAt`, extra keys on hand-written event lines (the server should pass event lines through as
   raw JSON to keep them).
+
+### config and Assignments in ac-core (r-formats-b, 7813eac, 8b79dfa)
+
+- Modules: `config` (console.json, the live config `PoolConfig` = raw JSON with JavaScript's undefined
+  slots, `reload_candidate`, accessors documented against the TypeScript reads), `pool_settings`
+  (validation and saves on raw values with the TypeScript's messages; `write_config_atomically`, which
+  Reassign must use too; the settings payload, stale-key badge, relaunch port, Restart answer),
+  `pool_title`, `machine_defaults`, `fleet`, `harness` (spawn.ts, renamed so it is not confused with
+  Spawns), `spawn_caps`, `assignment` (every resolution path, `resolve_pool_assignments` never fails a
+  ticket, `resolve_unseen_assignments` is all or nothing), `steward` (the console.json entry only).
+- Never use the typed `ac_protocol::PoolConfig` in the engine or server; change the live config with
+  `set`, `remove` and `set_undefined`, which keep key order.
+- `upsert_fleet_entry` blocks its thread while it polls the lock (Bun.sleepSync): call it from
+  `spawn_blocking` or at boot. The server adds its own prefix ("fleet registry: fleet registry: lock").
+- `spawn_env` and `engine_env_set` take the parent environment as an argument; only the CLI reads it.
+- Test overrides of the harness table go in as `Harness::Custom(Arc<dyn Fn>)`.
+- Deviations (edges, nothing pins them): a hand-written non-string Assignment field (`model: 5`) becomes
+  the string "5" (TypeScript keeps the number); a verify past u64 saturates; a non-string effort is
+  coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
+- `js_compat.rs` is a private copy of the JavaScript helpers, to fold into `ac_core::js` with herdr's
+  `js.rs` and git's `node.rs`.
