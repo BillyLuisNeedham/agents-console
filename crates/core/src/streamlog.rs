@@ -378,7 +378,7 @@ pub fn rotate_attempt_log(
     if well_known_path.exists() {
         js::rename(
             well_known_path,
-            &runs_dir.join(attempt_log_name(ticket_id, Some(attempt), resolver)),
+            runs_dir.join(attempt_log_name(ticket_id, Some(attempt), resolver)),
         )?;
     }
     // The Stream file was written by the run that wrote the log, so it rotates under the same attempt
@@ -388,7 +388,7 @@ pub fn rotate_attempt_log(
     if well_known_stream.exists() {
         js::rename(
             &well_known_stream,
-            &runs_dir.join(attempt_stream_name(ticket_id, Some(attempt), resolver)),
+            runs_dir.join(attempt_stream_name(ticket_id, Some(attempt), resolver)),
         )?;
     }
     Ok(())

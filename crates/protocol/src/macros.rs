@@ -27,9 +27,9 @@ macro_rules! wire_struct {
             $( $(#[$($fattr:tt)*])* pub $field:ident : $ty:ty ),* $(,)?
         }
     ) => {
-        $(#[$($sattr)*])*
         #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
+        $(#[$($sattr)*])*
         pub struct $name {
             $( $(#[$($fattr)*])* pub $field: $ty, )*
         }
@@ -164,5 +164,124 @@ macro_rules! wire_enum {
     };
     ($($rest:tt)*) => {
         wire_enum!(@parse declared; $($rest)*);
+    };
+}
+
+/// A union of JSON shapes, one Rust variant per arm, each holding the arm's type. Its serde attributes
+/// say how an arm is told apart: `untagged` by its fields, or `tag = "..."` by that field, which the
+/// TypeScript arm then carries first.
+macro_rules! wire_union {
+    (@inline $($rest:tt)*) => {
+        wire_union!(@parse inline; $($rest)*);
+    };
+    (@parse $mode:ident;
+        $(#[$($eattr:tt)*])*
+        pub enum $name:ident {
+            $( $(#[$($vattr:tt)*])* $variant:ident($ty:ty) ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+        $(#[$($eattr)*])*
+        pub enum $name {
+            $( $(#[$($vattr)*])* $variant($ty), )*
+        }
+
+        impl $name {
+            /// The union's own doc lines.
+            pub fn ts_docs() -> Vec<&'static str> {
+                $crate::ts::docs_of(&[$(ts_attr!($($eattr)*)),*])
+            }
+
+            /// The TypeScript arms, each with its doc lines.
+            pub fn ts_arms() -> Vec<(Vec<&'static str>, $crate::ts::TsType)> {
+                let tag = $crate::ts::tag_of(&[$(ts_attr!($($eattr)*)),*]);
+                vec![$(
+                    $crate::ts::arm(
+                        tag.as_deref(),
+                        stringify!($variant),
+                        &[$(ts_attr!($($vattr)*)),*],
+                        <$ty as $crate::ts::Ts>::ts(),
+                    )
+                ),*]
+            }
+        }
+
+        wire_union!(@ts $mode $name);
+    };
+    (@ts inline $name:ident) => {
+        impl $crate::ts::Ts for $name {
+            fn ts() -> $crate::ts::TsType {
+                $crate::ts::TsType::Union(Self::ts_arms().into_iter().map(|(_, ty)| ty).collect())
+            }
+        }
+    };
+    (@ts declared $name:ident) => {
+        impl $crate::ts::Ts for $name {
+            fn ts() -> $crate::ts::TsType {
+                $crate::ts::TsType::Name(stringify!($name))
+            }
+        }
+
+        impl $crate::ts::TsDecl for $name {
+            fn decl() -> $crate::ts::Decl {
+                let arms = Self::ts_arms();
+                let ty = if arms.iter().all(|(docs, _)| docs.is_empty()) && arms.len() < 4 {
+                    $crate::ts::TsType::Union(arms.into_iter().map(|(_, ty)| ty).collect())
+                } else {
+                    $crate::ts::TsType::DocUnion(arms)
+                };
+                $crate::ts::Decl {
+                    name: stringify!($name).to_string(),
+                    docs: Self::ts_docs(),
+                    body: $crate::ts::DeclBody::Alias { generics: Vec::new(), ty },
+                }
+            }
+        }
+    };
+    ($($rest:tt)*) => {
+        wire_union!(@parse declared; $($rest)*);
+    };
+}
+
+/// Constants the TypeScript declares too, each with its doc lines and its TypeScript value.
+macro_rules! wire_consts {
+    ($list:ident => $( $(#[$($attr:tt)*])* pub const $name:ident : $ty:ty = $value:expr; )*) => {
+        $( $(#[$($attr)*])* pub const $name: $ty = $value; )*
+
+        /// These constants as the generated TypeScript declares them, in order.
+        pub fn $list() -> Vec<$crate::ts::Decl> {
+            vec![$({
+                let (annotation, value) = $crate::ts::TsConst::ts_const(&$name);
+                $crate::ts::Decl {
+                    name: stringify!($name).to_string(),
+                    docs: $crate::ts::docs_of(&[$(ts_attr!($($attr)*)),*]),
+                    body: $crate::ts::DeclBody::Const { annotation, value },
+                }
+            }),*]
+        }
+    };
+}
+
+/// TypeScript declarations no Rust type stands for, written out whole, each with its doc lines. An
+/// `export` entry is exported from the generated file; a `local` one is not.
+macro_rules! ts_declarations {
+    ($list:ident => $( $(#[$($attr:tt)*])* $visibility:ident $name:ident => $text:expr; )*) => {
+        /// These declarations as the generated TypeScript writes them, each with whether it is exported.
+        pub fn $list() -> Vec<($crate::ts::Decl, bool)> {
+            vec![$((
+                $crate::ts::Decl {
+                    name: stringify!($name).to_string(),
+                    docs: $crate::ts::docs_of(&[$(ts_attr!($($attr)*)),*]),
+                    body: $crate::ts::DeclBody::Text($text.to_string()),
+                },
+                ts_declarations!(@exported $visibility),
+            )),*]
+        }
+    };
+    (@exported export) => {
+        true
+    };
+    (@exported local) => {
+        false
     };
 }

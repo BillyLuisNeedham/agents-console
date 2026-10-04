@@ -10,7 +10,7 @@ pub enum TsType {
     /// A declared generic type with its arguments: `EntityDelta<ConversationView>`.
     Generic(&'static str, Vec<TsType>),
     /// A string literal type, unquoted here: `herdr` prints as `"herdr"`.
-    Lit(&'static str),
+    Lit(String),
     /// `T[]`.
     Array(Box<TsType>),
     /// `T | null`: a Rust `Option` the JSON always carries.
@@ -78,6 +78,9 @@ pub enum DeclBody {
     },
     /// `const Name: annotation = value;`, the annotation left out when empty.
     Const { annotation: String, value: String },
+    /// A declaration written out whole after `export `: what TypeScript spells with its own operators
+    /// (mapped types, conditional types, method signatures), which no Rust type stands for.
+    Text(String),
 }
 
 impl TsField {
@@ -123,6 +126,53 @@ pub fn docs_of(attrs: &[Attr]) -> Vec<&'static str> {
             Attr::Other(_) => None,
         })
         .collect()
+}
+
+/// The tag a `#[serde(tag = "...")]` union carries, if it has one.
+pub fn tag_of(attrs: &[Attr]) -> Option<String> {
+    attrs.iter().find_map(|attr| match attr {
+        Attr::Other(text) => quoted_after(text, "tag ="),
+        Attr::Doc(_) => None,
+    })
+}
+
+/// One arm of a union. A tagged union's arm is its variant's object with the tag first: the variant's
+/// `rename`, or its name with a lower-case first letter (`rename_all = "camelCase"`).
+pub fn arm(
+    tag: Option<&str>,
+    variant: &str,
+    attrs: &[Attr],
+    ty: TsType,
+) -> (Vec<&'static str>, TsType) {
+    let docs = docs_of(attrs);
+    let Some(tag) = tag else { return (docs, ty) };
+    let name = attrs
+        .iter()
+        .find_map(|attr| match attr {
+            Attr::Other(text) => quoted_after(text, "rename ="),
+            Attr::Doc(_) => None,
+        })
+        .unwrap_or_else(|| {
+            let mut chars = variant.chars();
+            chars
+                .next()
+                .map(|first| first.to_lowercase().chain(chars).collect())
+                .unwrap_or_default()
+        });
+    let tag_field = TsField {
+        name: tag.to_string(),
+        docs: Vec::new(),
+        optional: false,
+        ty: TsType::Lit(name),
+    };
+    match ty {
+        TsType::Object(fields) => {
+            let mut all = vec![tag_field];
+            all.extend(fields);
+            (docs, TsType::Object(all))
+        }
+        other => (docs, other),
+    }
 }
 
 /// serde's camelCase for a snake_case field name.
@@ -230,7 +280,8 @@ pub fn print_docs(docs: &[&str], indent: &str) -> String {
     }
 }
 
-fn property_name(name: &str) -> String {
+/// A property name as TypeScript writes it: bare when it is an identifier, quoted otherwise.
+pub fn property_name(name: &str) -> String {
     let plain = name.chars().enumerate().all(|(i, c)| {
         c == '_' || c == '$' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
     });
@@ -307,7 +358,10 @@ pub fn print_type(ty: &TsType, indent: &str) -> String {
             for (docs, member) in members {
                 out.push('\n');
                 out.push_str(print_docs(docs, &inner).as_str());
-                out.push_str(&format!("{inner}| {}", print_type(member, &inner)));
+                out.push_str(&format!(
+                    "{inner}| {}",
+                    print_type(member, &format!("{inner}  "))
+                ));
             }
             out
         }
@@ -390,7 +444,24 @@ pub fn print_decl(decl: &Decl, exported: bool) -> String {
             generics: names,
             ty,
         } => {
-            let text = print_type(ty, "");
+            let mut text = print_type(ty, "");
+            if !text.contains('\n') && text.len() + decl.name.len() > 80 {
+                // A long union reads one member per line, as the hand-written files write it.
+                let members = match ty {
+                    TsType::Enum(members) => members
+                        .iter()
+                        .map(|(docs, text)| (docs.clone(), TsType::Lit(text.to_string())))
+                        .collect(),
+                    TsType::Union(members) => members
+                        .iter()
+                        .map(|member| (Vec::new(), member.clone()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !members.is_empty() {
+                    text = print_type(&TsType::DocUnion(members), "");
+                }
+            }
             let sep = if text.starts_with('\n') { "" } else { " " };
             out.push_str(&format!(
                 "{export}type {}{} ={sep}{text};\n",
@@ -409,8 +480,48 @@ pub fn print_decl(decl: &Decl, exported: bool) -> String {
                 decl.name
             ));
         }
+        DeclBody::Text(text) => {
+            out.push_str(&format!("{export}{text}\n"));
+        }
     }
     out
+}
+
+/// A Rust constant's TypeScript declaration: its type annotation (empty for none, so a literal keeps
+/// its literal type) and its value.
+pub trait TsConst {
+    fn ts_const(&self) -> (String, String);
+}
+
+impl TsConst for u64 {
+    fn ts_const(&self) -> (String, String) {
+        (String::new(), self.to_string())
+    }
+}
+
+impl TsConst for usize {
+    fn ts_const(&self) -> (String, String) {
+        (String::new(), self.to_string())
+    }
+}
+
+impl TsConst for &str {
+    fn ts_const(&self) -> (String, String) {
+        (
+            String::new(),
+            serde_json::to_string(self).expect("a string serializes"),
+        )
+    }
+}
+
+impl TsConst for &[u64] {
+    fn ts_const(&self) -> (String, String) {
+        let values: Vec<String> = self.iter().map(u64::to_string).collect();
+        (
+            "readonly number[]".to_string(),
+            format!("[{}]", values.join(", ")),
+        )
+    }
 }
 
 #[cfg(test)]

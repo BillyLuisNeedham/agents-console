@@ -57,6 +57,12 @@ export interface HerdrProcess {
    */
   settle(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * SIGKILL the fake's process, a daemon that dies without closing anything:
+   * the processes its panes run live on, and its socket file stays behind
+   * with nobody listening on it. `stop` after this has nothing to do.
+   */
+  kill(): Promise<void>;
 }
 
 /** The fake's options a process can be handed: everything but the callback. */
@@ -161,6 +167,10 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
         proc.kill("SIGKILL");
         await proc.exited;
       }
+    },
+    async kill() {
+      proc.kill("SIGKILL");
+      await proc.exited;
     },
   };
   return herdr;

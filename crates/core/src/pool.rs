@@ -15,6 +15,7 @@ use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde_json::Value;
 
+use crate::assignment::AssignmentMarker;
 use crate::conversation_record::load_conversations;
 use crate::js;
 use crate::stat_cache::StampCache;
@@ -48,6 +49,24 @@ pub struct TicketMarker {
     /// adopted it. It ranks under the operator's console.json assign entry for the id and over the
     /// parent's Assignment. The engine writes the field.
     pub spawn_assign: Option<SpawnAssignRequest>,
+}
+
+impl AssignmentMarker for TicketMarker {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn spawned_by(&self) -> Option<&str> {
+        self.spawned_by.as_deref()
+    }
+
+    fn spawn_assign(&self) -> Option<&SpawnAssignRequest> {
+        self.spawn_assign.as_ref()
+    }
+
+    fn enlisted_from(&self) -> Option<&str> {
+        self.enlisted_from.as_deref()
+    }
 }
 
 /// The state line on line 1 of a Ticket file.
@@ -457,7 +476,7 @@ pub fn write_spawn_ticket(
     proposal: &SpawnProposal,
 ) -> Result<()> {
     js::write_file(
-        &issues_dir.join(format!("{id}.md")),
+        issues_dir.join(format!("{id}.md")),
         &spawn_ticket_text(parent_id, id, proposal),
     )?;
     Ok(())
@@ -644,6 +663,27 @@ mod tests {
         assert_eq!(marker.blocked_by, ["a", "b"]);
         assert_eq!(marker.title, "Title here");
         assert_eq!(marker.spec, "Spec");
+    }
+
+    #[test]
+    fn hands_the_resolution_pass_its_marker_facts() {
+        let dir = temp();
+        let token = encode_spawn_assign(&assign(None, Some("m"), None, None));
+        let file = temp_file(
+            &dir,
+            &format!(
+                "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 enlisted-from=w1:p2 spawn-assign={token} -->\n"
+            ),
+        );
+        let marker = read_marker(&file).unwrap();
+        let facts: &dyn AssignmentMarker = &marker;
+        assert_eq!(facts.id(), "01-spawn-1");
+        assert_eq!(facts.spawned_by(), Some("01"));
+        assert_eq!(facts.enlisted_from(), Some("w1:p2"));
+        assert_eq!(
+            facts.spawn_assign(),
+            Some(&assign(None, Some("m"), None, None))
+        );
     }
 
     // pool.test.ts:74

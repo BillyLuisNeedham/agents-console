@@ -73,6 +73,19 @@ const CONTROLS: Record<string, Control> = {
   workspaceLabel: (fake, [workspaceId]) => fake.workspaceLabel(String(workspaceId)),
   tabLabel: (fake, [tabId]) => fake.tabLabel(String(tabId)),
   submitted: (fake) => fake.submitted,
+  closePane: (fake, [paneId]) => fake.closePane(String(paneId)),
+  delistPane: (fake, [paneId]) => fake.delistPane(String(paneId)),
+  hangUpSubscribers: (fake) => fake.hangUpSubscribers(),
+  listedPanes: (fake) => fake.listedPanes(),
+  /**
+   * End a pane (as `endPane` does) the moment the `nth` call of `method` from
+   * now arrives, 1 being the next, before the daemon answers it: a pane gone
+   * just as the server subscribes to its end, where a timer would race the
+   * server.
+   */
+  endPaneOn: (_fake, [method, paneId, nth]) => {
+    paneEnds.push({ method: String(method), paneId: String(paneId), left: nth === undefined ? 1 : Number(nth) });
+  },
 };
 
 function option(name: string): string | undefined {
@@ -87,6 +100,10 @@ function emit(line: string): void {
 // The workspace closes armed by `removeWorkspaceOn`, each spent on its call.
 const removals: { method: string; workspaceId: string }[] = [];
 
+// The pane ends armed by `endPaneOn`, each counting down the calls of its
+// method and spent on the one that brings it to 0.
+const paneEnds: { method: string; paneId: string; left: number }[] = [];
+
 const raw = option("--options");
 const options = (raw ? JSON.parse(raw) : {}) as Omit<ExecutingFakeHerdrOptions, "onRequest">;
 const fake: ExecutingFakeHerdr = await startExecutingFakeHerdr({
@@ -95,6 +112,12 @@ const fake: ExecutingFakeHerdr = await startExecutingFakeHerdr({
     emit(`REQUEST ${JSON.stringify({ method, params, connection, at: Date.now() })}`);
     const armed = removals.findIndex((removal) => removal.method === method);
     if (armed >= 0) fake.removeWorkspace(removals.splice(armed, 1)[0]!.workspaceId);
+    for (const end of paneEnds.filter((pending) => pending.method === method)) {
+      end.left -= 1;
+      if (end.left > 0) continue;
+      paneEnds.splice(paneEnds.indexOf(end), 1);
+      fake.endPane(end.paneId);
+    }
   },
 });
 

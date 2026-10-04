@@ -610,3 +610,131 @@ Behaviour of the TypeScript server the cases pin as it is today, each worth a lo
 - The enlist claim's teaching Turn reads the scrollback of the operator's pane to check its paste, which moves
   the viewport of an operator sitting in it: what issue #122 stopped the Turn-state reads from doing. Not
   pinned either way; the case for `enlisted.test.ts:69` counts only the reads after the claim.
+
+## `restart`: Tickets and Attempts (C05)
+
+Forty-nine of C05's 50 rows are passing cases under `conformance/cases/restart-tickets-durability.test.ts`,
+`restart-tickets-orphans.test.ts`, `restart-tickets-terminal.test.ts`, `restart-tickets-answers.test.ts`,
+`restart-tickets-spawns.test.ts`, `restart-tickets-verify.test.ts` and `restart-tickets-merges.test.ts`. A case
+that starts more than one server on its pool is a takeover case (`restartCase` in `restart-support.ts`): each
+server after the first runs the next leg of CONFORMANCE_LEGS, so `--legs bun,rust` has the Rust server boot on
+what the Bun one left. The five rows that stop at an Interrupt and resume with nothing changed between servers
+(`engine.test.ts:7647`, `:9881`, `:13877`, `:1327`, `:3354`) run on the takeover harness itself and are matched
+against the same run uninterrupted. Seven of the area's nine gaps are cases there too; the two about the
+remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `engine/engine.ts:2929`, a torn
+`runs/pool-workspace.json`) belong with the Pool workspace rows of ticket C06 and are left to it.
+
+### Left out
+
+- **`merge-hold.test.ts:536`**, *reads a live resolver as resolving even when the engine never took the merge on
+  (a boot adoption)*. The row's premise does not hold on the Bun server: boot never re-adopts a resolver's
+  pane. `terminalAdoptable` in `engine/engine.ts` gives a resolver Attempt the headless orphan fate and releases
+  its agent (the case for `engine.test.ts:6228` pins exactly that), so after a restart the Ticket's merge-conflict
+  Interrupt stands and its `mergeState` reads needs-you. Every resolver the server does launch is one whose merge
+  it took and marked resolving before the launch, so a live resolver the merge line never took cannot be made from
+  outside. Rust unit test: *merge queue: a held ticket whose resolver Attempt is live reads resolving, not
+  needs-you, even when the merge line never took it and its merge-conflict Interrupt is on record.*
+
+### Pinned short
+
+- **The crash Interrupt of a re-adopted Attempt decided at boot** (`attempt-ending.test.ts:248`, `:390`). The
+  body is pinned at its head (the reason and the log path) and its foot (the outcome file line) only, and the
+  crash event's `logTail` only as an array: the lines between come from the pane's Stream file, where util-linux
+  `script` writes its own start and done lines and BSD `script -q` writes none, as C08 found for Continued
+  attempts.
+- **The reused-pid and gone-worktree orphan checks run on Linux only** (`children.test.ts:86`,
+  `engine.test.ts:13235`). The server reads a pid's working directory from `/proc` (`processCwd` in
+  `engine/children.ts`); with no procfs it trusts liveness alone, so on macOS these two cases are skipped, not
+  failed. See the first entry below.
+
+### Pinned as the TypeScript server does it today, each worth a look before the port copies it
+
+- **On macOS a reused pid is stopped as an orphan.** With no procfs, `orphanIsLive` treats any live process
+  holding a recorded pid as the previous server's harness, so a boot TERMs, then KILLs, the process group of
+  whatever unrelated process has since been given that pid, and also stops a recorded pid whose worktree is gone.
+  Intended behaviour (inference): the cwd check holds on every platform (macOS has `proc_pidinfo`). Rust unit
+  test: *orphan liveness: a live pid whose working directory is not the recorded worktree, or whose worktree is
+  gone, is never an orphan, on Linux and macOS alike.*
+- **A store that refuses every write does not stop a server from stopping in order** (`engine.test.ts:7114`). The
+  server stopped while the case holds its exclusive lock on `console.db` exits 0 and releases the pool lock, with
+  no checkpoint row ever written; the next boot runs from the state lines alone. The case pins that.
+
+### Where the cases reach a row differently from its wording
+
+- **`engine.test.ts:10346`** (a SIGKILL mid-super-step). A SIGKILL stops nothing, so 02's held stub outlives the
+  server in its worktree, and the next boot stops it as an orphan before it puts 02 back to ready: the "back to
+  ready" line the row names is the orphan line (`... is still running from the previous engine process; stopping
+  it before scheduling, ticket back to ready`), which the case pins with the stub's pid.
+- **`engine.test.ts:12561`** (an answered Interrupt across a SIGKILL). The resumed attempt the kill left running is
+  let go and waited out before the restart, so the boot finds no agent alive and takes the plain reset; left
+  running, it would take the orphan path of `engine.test.ts:13174` instead.
+- **`merge-hold.test.ts:526`** (a restart's merge queue). The one merge the restart takes on must stay queued long
+  enough to read, and a merge is one synchronous git run inside the server. The only thing that holds one from
+  outside is the pool checkout's gate: the case continues Ticket 01 in the pool checkout by Keep talking, stops,
+  writes 03, 07 and 09 done on branches main lacks with 07's events ending in `merge-deferred`, and restarts. The
+  re-adopted Continued attempt holds 07's re-chained merge at the gate, so the queue reads 07 queued, then 03 and
+  09 stalled, beside the Continued attempt's adoption checkpoint, the one Interrupt up.
+- **`children.test.ts:62`** (a harness that ignores TERM). The stub is made to ignore TERM by its own wrapper
+  (`trap '' TERM` before its exec), since the stop signals the whole process group and the stub script itself
+  must outlive the TERM for the KILL to be what ends it (exit 137).
+
+### Hidden
+
+- `children.test.ts:76` stays a Rust unit test, as the inventory sorts it: *shutdown child stop: a harness child
+  registered after the shutdown began is sent TERM to its process group on arrival, so a launch racing the stop
+  cannot outlive it.*
+
+## `attempts`: endings and logs (C13)
+
+Every one of C13's 60 rows is a passing case under `conformance/cases/attempts-endings-pane.test.ts`,
+`attempts-endings-liveness.test.ts`, `attempts-endings-exits.test.ts` and `attempts-endings-logs.test.ts`, and so is
+the area's stderr gap (a headless Attempt's stderr reaches its log, never its Stream file, and never joins a stdout
+line part way through). One gap no list named is a case too: an exit-code file left in `runs/` from before a
+terminal-backed launch is removed as the wrapper is sent, so it never ends the new Attempt
+(`engine/pane-session.ts:314`). No row is left out. Of the twelve rows with a seam:
+
+- The eight that ask for short liveness and grace cadences (`attempt-ending.test.ts:120`, `:150`, `:167`, `:195`,
+  `:223`, `:452`, `:484`, `:491`) wait out the real 30 s sweep and 10 s grace window (Decided 2), in the two slow
+  cases of `attempts-endings-liveness.test.ts`, each of which runs its worlds side by side.
+- `attempt-ending.test.ts:80` and `herdr.test.ts:449` (the subscriber connections) use the fake's
+  `openConnections` (C14) and a new `listedPanes` control.
+- The fake herdr gained the rest: `delistPane` (a pane reaped from the listing while its process runs on,
+  `attempt-ending.test.ts:167`), `hangUpSubscribers` (a plain FIN on every subscriber, `herdr.test.ts:418`),
+  `endPaneOn(method, paneId, nth)` (a pane ended as a chosen call arrives, `herdr.test.ts:462`), `closeTab` and
+  `closePane` (an operator's own closes, `herdr.test.ts:337`, `:351`, `:398`, `:406`), and the fake's process a
+  `kill()` (a daemon that dies mid-Attempt, `herdr.test.ts:441`).
+
+Where the cases reach a row differently from its wording:
+
+- **Which `pane.list` is the sweep.** The ending's liveness sweep and the pane survey both list with `pane.list {}`,
+  so a case cannot tell one from the other. The "several sweeps" rows (`:120`, `:195`, `:223`) wait two sweep
+  periods from the moment the ending's wait began, and `:167` lets its stub exit 2 s after the first sweep is due,
+  inside the grace window (one run saw the sweep 30.0 s in and, with no exit, the pane-gone crash at 40.1 s). A
+  server whose sweep fires late finds the exit code through its file poll instead, and the case passes without
+  reaching the grace window. Rust unit test: *ending wait: an exit-code file that lands inside the grace window
+  after a sweep found the pane gone ends the Attempt with the file's code, never as pane gone.*
+- **Where the ending's wait begins.** A case finds it as the `events.subscribe` the server holds open once the
+  prompt's Enter is in, or, with every subscription dropped, the one made after the Enter. The Bun server
+  subscribes twice per launch, once for the readiness wait, let go before the prompt is typed; only
+  `herdr.test.ts:462` depends on that, arming the pane's end on the second `events.subscribe`.
+- **`streamlog.test.ts:199`** (the operator's keystrokes in the typescript): the fake herdr types nothing into a
+  pane's terminal, so the stub prints the echoed prompt line itself, as a TUI does.
+- **Splits across chunks** (`streamlog.test.ts:137`, `:144`, `:209`): the stub pauses 0.3 to 0.6 s inside the line,
+  the character or the escape. A server that reads both halves in one go passes without reassembling anything.
+  Rust unit test: *stream and transcript line buffers: a line, a UTF-8 character and an escape sequence split
+  across two chunks each come out whole, exactly once.*
+- **`attempt-ending.test.ts:435`** pins what `attempt-run.test.ts:420` (C11, `attempts-launch.test.ts`) already
+  does, plus the resolver's own log and Stream file. `engine.test.ts:5026` builds the conflict the way C11 does,
+  so the resolver's files are `01.resolver.*` rather than the row's `02.resolver.*`.
+- **`engine.test.ts:3825` and `:5163`** are one case on opencode: its raw log, a stream-json line and a carriage
+  return kept as they came, rotated to `01.attempt-1.log` by the re-run, and no Stream file for either attempt.
+
+Behaviour of the TypeScript server the cases tolerate rather than pin:
+
+- On Linux every terminal-backed Attempt's derived log carries util-linux script(1)'s own banner: a
+  `Script started on <local time> [COMMAND="..." <not executed on terminal>]` line before the harness's first
+  output and, once the harness exits, a blank line and `Script done on <local time> [COMMAND_EXIT_CODE="<n>"]`. So
+  do the exited and crash events' `logTail` and the crash Interrupt body. BSD's script, the Mac's, writes neither
+  under `-q`. The server does not strip them, and the cases read the transcript without them (`transcriptLines` in
+  `attempts-endings-support.ts`). A Rust server that runs the same `script` keeps them unless the port decides to
+  strip them.

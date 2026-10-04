@@ -8,9 +8,11 @@ mod macros;
 pub mod json;
 pub mod protocol;
 pub mod ts;
+pub mod typescript;
 pub mod wire;
+
+#[cfg(test)]
+mod roundtrip;
 
 pub use protocol::*;
 pub use wire::*;
-#[cfg(test)]
-mod roundtrip;

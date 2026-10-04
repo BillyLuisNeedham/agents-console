@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use super::node::js_trim;
+use ac_core::js;
 
 /// One git run as the TypeScript's probes read it: whether it exited 0, and its stdout and stderr
 /// decoded as UTF-8 and trimmed the way JavaScript's `trim()` trims.
@@ -49,8 +49,8 @@ impl GitOutput {
     pub fn probe(&self) -> GitProbe {
         GitProbe {
             ok: self.ok(),
-            out: js_trim(&self.stdout_text()).to_string(),
-            err: js_trim(&self.stderr_text()).to_string(),
+            out: js::trim(&self.stdout_text()).to_string(),
+            err: js::trim(&self.stderr_text()).to_string(),
         }
     }
 }
@@ -110,7 +110,7 @@ where
     if !output.ok() {
         return None;
     }
-    let line = js_trim(&output.stdout_text()).to_string();
+    let line = js::trim(&output.stdout_text()).to_string();
     (!line.is_empty()).then_some(line)
 }
 

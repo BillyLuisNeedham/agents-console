@@ -172,7 +172,7 @@ pub fn append_event(
 ) -> Result<(), js::FsError> {
     js::mkdir_all(runs_dir)?;
     js::append_file(
-        &events_file(runs_dir, ticket_id),
+        events_file(runs_dir, ticket_id),
         &format!("{}\n", js::to_json(event)),
     )
 }

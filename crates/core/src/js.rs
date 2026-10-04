@@ -1,20 +1,25 @@
-//! JavaScript's own spellings, for every port module whose output the TypeScript produced through them:
-//! `new Date().toISOString()`, `String(n)` of a number, `JSON.stringify` (compact and with two-space
-//! indent), `JSON.parse`, `String.prototype.trim` and the `\s` of a regular expression, string lengths
-//! and cuts in UTF-16 code units, `encodeURIComponent` and `decodeURIComponent`, a replacement string's
-//! `$` patterns, `TextDecoder` fed chunk by chunk, `readFileSync(path, "utf8")`, and the text of a failed
-//! `fs` call as Bun throws it. The TypeScript leaned on these without saying so, and a file, a log line
-//! or an error must read the same from Rust.
+//! JavaScript's and Node's own spellings, for every port module whose output the TypeScript produced
+//! through them: `new Date().toISOString()`, `String(n)` of a number and `String(value)` of any value,
+//! `Number(text)` and `Number.isInteger`, `JSON.stringify` (compact and with two-space indent, objects
+//! in JavaScript's key order), `JSON.parse`, `String.prototype.trim` and the `\s` of a regular
+//! expression, string lengths and cuts in UTF-16 code units, the default `Array.prototype.sort`,
+//! `encodeURIComponent` and `decodeURIComponent`, a replacement string's `$` patterns, `TextDecoder`
+//! fed chunk by chunk, `path.join`, `path.relative` and `path.basename`, `realpathSync`,
+//! `readFileSync(path, "utf8")` and the other `fs` calls, and the text of a failed `fs` call as Bun
+//! throws it. The TypeScript leaned on these without saying so, and a file, a log line, a frame or an
+//! error must read the same from Rust. This is the one copy: the formats, the herdr client and the git
+//! edge all spell JavaScript through it.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 
 // ---------------------------------------------------------------------------
@@ -108,6 +113,93 @@ pub fn exact_whole_number(digits: &str) -> Option<u64> {
     (number_string(value as f64) == digits).then_some(value)
 }
 
+/// `Number(text)`: trimmed, empty is 0, `0x`, `0o` and `0b` integers, signed decimals with an
+/// exponent, `Infinity`, and NaN for anything else.
+pub fn number_from_text(text: &str) -> f64 {
+    let text = trim(text);
+    if text.is_empty() {
+        return 0.0;
+    }
+    let radix = match text.get(..2) {
+        Some("0x" | "0X") => Some(16),
+        Some("0o" | "0O") => Some(8),
+        Some("0b" | "0B") => Some(2),
+        _ => None,
+    };
+    if let Some(radix) = radix {
+        let digits = &text[2..];
+        if digits.is_empty() {
+            return f64::NAN;
+        }
+        let mut value = 0.0_f64;
+        for c in digits.chars() {
+            match c.to_digit(radix) {
+                Some(d) => value = value * f64::from(radix) + f64::from(d),
+                None => return f64::NAN,
+            }
+        }
+        return value;
+    }
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if unsigned == "Infinity" {
+        return if text.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    // Rust's float grammar is JavaScript's decimal literal once its words (inf, nan) are kept out.
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))
+    {
+        return f64::NAN;
+    }
+    text.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// The value as a JavaScript number, when it is one.
+pub fn number_of(value: &Value) -> Option<f64> {
+    value.as_number().and_then(Number::as_f64)
+}
+
+/// A JavaScript number as a JSON value: a whole number as an integer, so it prints without a fraction
+/// in either serializer.
+pub fn number_value(value: f64) -> Value {
+    if value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+        if value >= 0.0 {
+            return Value::from(value as u64);
+        }
+        return Value::from(value as i64);
+    }
+    Number::from_f64(value).map_or(Value::Null, Value::Number)
+}
+
+/// `Number.isInteger(value)`.
+pub fn is_integer(value: &Value) -> bool {
+    number_of(value).is_some_and(|n| n.is_finite() && n.fract() == 0.0)
+}
+
+/// `String(value)`, as a template literal coerces a value it interpolates.
+pub fn string_of(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number_string(number.as_f64().unwrap_or(f64::NAN)),
+        Value::String(text) => text.clone(),
+        // Array.prototype.join: null and undefined elements print as nothing.
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Null => String::new(),
+                other => string_of(other),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".to_owned(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
@@ -135,6 +227,51 @@ pub fn to_json<T: Serialize + ?Sized>(value: &T) -> String {
 /// `JSON.stringify(value, null, 2)` of anything serde can turn into a JSON value.
 pub fn to_json_pretty<T: Serialize + ?Sized>(value: &T) -> String {
     stringify_pretty(&serde_json::to_value(value).expect("serializes to a JSON value"))
+}
+
+/// `JSON.stringify(value)` of a value that may be JavaScript's `undefined` (`None`), as a template
+/// literal prints it: `undefined`.
+pub fn stringify_or_undefined(value: Option<&Value>) -> String {
+    value.map_or_else(|| "undefined".to_owned(), stringify)
+}
+
+/// `String(value)` for a primitive, `JSON.stringify(value)` for an object or array: how a message
+/// spells a value it was handed whole (the herdr client's `<method> failed: <detail>`).
+pub fn json_or_string(value: &Value) -> String {
+    match value {
+        Value::Array(_) | Value::Object(_) => stringify(value),
+        primitive => string_of(primitive),
+    }
+}
+
+/// A JSON value serialized as `JSON.stringify` would write it, through any serde serializer: every
+/// object's keys in JavaScript's order, every whole number without a fraction.
+pub struct JsOrdered<'a>(pub &'a Value);
+
+impl Serialize for JsOrdered<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Number(number) => match number.as_f64() {
+                Some(value) if value.is_finite() => number_value(value).serialize(serializer),
+                _ => serializer.serialize_unit(),
+            },
+            Value::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&JsOrdered(item))?;
+                }
+                seq.end()
+            }
+            Value::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, item) in own_entries(fields) {
+                    map.serialize_entry(key, &JsOrdered(item))?;
+                }
+                map.end()
+            }
+            other => other.serialize(serializer),
+        }
+    }
 }
 
 /// `JSON.parse(text)`, its error worded as Bun words a `SyntaxError` well enough to name what broke.
@@ -177,8 +314,8 @@ pub fn own_entries(map: &Map<String, Value>) -> Vec<(&String, &Value)> {
         .collect()
 }
 
-// A canonical array index: `0`, or digits with no leading zero, below 2^32 - 1.
-fn array_index(key: &str) -> Option<u32> {
+/// A canonical array index: `0`, or digits with no leading zero, below 2^32 - 1.
+pub fn array_index(key: &str) -> Option<u32> {
     if key.is_empty() || (key.len() > 1 && key.starts_with('0')) {
         return None;
     }
@@ -379,6 +516,11 @@ pub fn compare_utf16(a: &str, b: &str) -> Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
+/// The default `Array.prototype.sort()` of strings: by UTF-16 code units.
+pub fn sort_strings(items: &mut [String]) {
+    items.sort_by(|a, b| compare_utf16(a, b));
+}
+
 /// `text.replace(pattern, replacement)` with a pattern of no capture groups: the first match only, and
 /// the replacement's `$$`, `$&`, `` $` `` and `$'` expanded as JavaScript expands them.
 pub fn replace_first(text: &str, pattern: &regex::Regex, replacement: &str) -> String {
@@ -492,6 +634,131 @@ impl fmt::Display for UriError {
 impl std::error::Error for UriError {}
 
 // ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/// A path as a string, the way the TypeScript holds every path.
+pub fn path_text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Node's `path.join` for POSIX paths: the non-empty parts joined with `/`, then normalized (`.` and
+/// `..` resolved, repeated separators collapsed, a trailing separator kept).
+pub fn path_join(parts: &[&str]) -> String {
+    let joined = parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("/");
+    path_normalize(&joined)
+}
+
+fn path_normalize(path: &str) -> String {
+    if path.is_empty() {
+        return ".".to_owned();
+    }
+    let absolute = path.starts_with('/');
+    let trailing = path.ends_with('/');
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if kept.last().is_some_and(|last| *last != "..") {
+                    kept.pop();
+                } else if !absolute {
+                    kept.push("..");
+                }
+            }
+            other => kept.push(other),
+        }
+    }
+    let mut normalized = kept.join("/");
+    if normalized.is_empty() {
+        return match (absolute, trailing) {
+            (true, _) => "/".to_owned(),
+            (false, true) => "./".to_owned(),
+            (false, false) => ".".to_owned(),
+        };
+    }
+    if trailing {
+        normalized.push('/');
+    }
+    if absolute {
+        format!("/{normalized}")
+    } else {
+        normalized
+    }
+}
+
+/// Node's `path.resolve` of one path for POSIX: made absolute against the process's working directory,
+/// normalized, no trailing separator.
+pub fn path_resolve(path: &str) -> String {
+    let absolute = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        let cwd = std::env::current_dir()
+            .map(|dir| path_text(&dir))
+            .unwrap_or_default();
+        format!("{cwd}/{path}")
+    };
+    let normalized = path_normalize(&absolute);
+    match normalized.trim_end_matches('/') {
+        "" => "/".to_owned(),
+        trimmed => trimmed.to_owned(),
+    }
+}
+
+/// Node's `path.relative` for POSIX paths: the way from `from` to `to`, both resolved against the
+/// process's working directory first; empty when they are the same place.
+pub fn path_relative(from: &str, to: &str) -> String {
+    let from = path_resolve(from);
+    let to = path_resolve(to);
+    if from == to {
+        return String::new();
+    }
+    let from_parts: Vec<&str> = from.split('/').filter(|part| !part.is_empty()).collect();
+    let to_parts: Vec<&str> = to.split('/').filter(|part| !part.is_empty()).collect();
+    let common = from_parts
+        .iter()
+        .zip(&to_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut parts = vec![".."; from_parts.len() - common];
+    parts.extend(&to_parts[common..]);
+    parts.join("/")
+}
+
+/// Node's `path.basename(path)` for POSIX paths: the last segment, trailing separators ignored.
+pub fn basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "";
+    }
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
+}
+
+/// `realpathSync`: the empty path is the working directory, as Bun resolves it.
+pub fn realpath(path: &str) -> io::Result<PathBuf> {
+    std::fs::canonicalize(if path.is_empty() { "." } else { path })
+}
+
+/// `realpathSync`, or the path as given when there is nothing on disk to resolve (canonicalDir in
+/// engine.ts, canonical in enlist.ts).
+pub fn canonical_dir(dir: &str) -> String {
+    match realpath(dir) {
+        Ok(real) => path_text(&real),
+        Err(_) => dir.to_owned(),
+    }
+}
+
+/// `existsSync(path)`: false for anything that cannot be stat'd, a dangling link included.
+pub fn exists(path: impl AsRef<Path>) -> bool {
+    std::fs::metadata(path).is_ok()
+}
+
+// ---------------------------------------------------------------------------
 // Decoding bytes
 // ---------------------------------------------------------------------------
 
@@ -566,8 +833,9 @@ pub fn decode_utf8(bytes: &[u8]) -> String {
 /// `readFileSync(path, "utf8")`: the file as text, every invalid sequence a U+FFFD and a byte-order
 /// mark kept. Its error reads as Bun's (`ENOENT: no such file or directory, open '<path>'`, or
 /// `EISDIR: illegal operation on a directory, read` for a directory).
-pub fn read_text(path: &Path) -> Result<String, FsError> {
+pub fn read_text(path: impl AsRef<Path>) -> Result<String, FsError> {
     use std::io::Read;
+    let path = path.as_ref();
     let mut file = std::fs::File::open(path).map_err(|err| FsError::new(&err, "open", path))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
@@ -607,8 +875,8 @@ impl FsError {
         }
     }
 
-    pub fn new(err: &io::Error, syscall: &str, path: &Path) -> Self {
-        let path = path.display();
+    pub fn new(err: &io::Error, syscall: &str, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().display();
         match errno_text(err) {
             Some((code, description)) => FsError {
                 message: format!("{code}: {description}, {syscall} '{path}'"),
@@ -621,7 +889,8 @@ impl FsError {
         }
     }
 
-    pub fn rename(err: &io::Error, from: &Path, to: &Path) -> Self {
+    pub fn rename(err: &io::Error, from: impl AsRef<Path>, to: impl AsRef<Path>) -> Self {
+        let (from, to) = (from.as_ref(), to.as_ref());
         match errno_text(err) {
             Some((code, description)) => FsError {
                 message: format!(
@@ -649,7 +918,8 @@ impl std::error::Error for FsError {}
 
 /// `readdirSync(dir)`: the entry names in the order the system lists them, a name that is not UTF-8
 /// read lossily.
-pub fn read_dir_names(dir: &Path) -> Result<Vec<String>, FsError> {
+pub fn read_dir_names(dir: impl AsRef<Path>) -> Result<Vec<String>, FsError> {
+    let dir = dir.as_ref();
     let entries = std::fs::read_dir(dir).map_err(|err| FsError::new(&err, "scandir", dir))?;
     entries
         .map(|entry| {
@@ -661,13 +931,15 @@ pub fn read_dir_names(dir: &Path) -> Result<Vec<String>, FsError> {
 }
 
 /// `mkdirSync(dir, { recursive: true })`.
-pub fn mkdir_all(dir: &Path) -> Result<(), FsError> {
+pub fn mkdir_all(dir: impl AsRef<Path>) -> Result<(), FsError> {
+    let dir = dir.as_ref();
     std::fs::create_dir_all(dir).map_err(|err| FsError::new(&err, "mkdir", dir))
 }
 
 /// `writeFileSync(path, text)`.
-pub fn write_file(path: &Path, text: &str) -> Result<(), FsError> {
+pub fn write_file(path: impl AsRef<Path>, text: &str) -> Result<(), FsError> {
     use std::io::Write;
+    let path = path.as_ref();
     std::fs::File::create(path)
         .map_err(|err| FsError::new(&err, "open", path))?
         .write_all(text.as_bytes())
@@ -675,7 +947,7 @@ pub fn write_file(path: &Path, text: &str) -> Result<(), FsError> {
 }
 
 /// `appendFileSync(path, text)`. Bun names no path when it fails.
-pub fn append_file(path: &Path, text: &str) -> Result<(), FsError> {
+pub fn append_file(path: impl AsRef<Path>, text: &str) -> Result<(), FsError> {
     use std::io::Write;
     std::fs::OpenOptions::new()
         .append(true)
@@ -687,13 +959,19 @@ pub fn append_file(path: &Path, text: &str) -> Result<(), FsError> {
 }
 
 /// `renameSync(from, to)`.
-pub fn rename(from: &Path, to: &Path) -> Result<(), FsError> {
+pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), FsError> {
+    let (from, to) = (from.as_ref(), to.as_ref());
     std::fs::rename(from, to).map_err(|err| FsError::rename(&err, from, to))
 }
 
 /// `writeFileSync(tmp, text)` then `renameSync(tmp, path)`: the way the engine replaces a file whole,
 /// so a reader never sees half of it.
-pub fn write_through_rename(path: &Path, tmp: &Path, text: &str) -> Result<(), FsError> {
+pub fn write_through_rename(
+    path: impl AsRef<Path>,
+    tmp: impl AsRef<Path>,
+    text: &str,
+) -> Result<(), FsError> {
+    let (path, tmp) = (path.as_ref(), tmp.as_ref());
     write_file(tmp, text)?;
     rename(tmp, path)
 }
@@ -941,7 +1219,7 @@ mod tests {
         let file = dir.path().join("f");
         std::fs::write(&file, "").unwrap();
         assert_eq!(
-            mkdir_all(&file.join("sub")).unwrap_err().to_string(),
+            mkdir_all(file.join("sub")).unwrap_err().to_string(),
             format!(
                 "ENOTDIR: not a directory, mkdir '{}'",
                 file.join("sub").display()
@@ -952,6 +1230,182 @@ mod tests {
             format!("ENOTDIR: not a directory, scandir '{}'", file.display())
         );
     }
+
+    #[test]
+    fn stringifies_a_parse_with_its_duplicates_and_key_order_as_javascript_does() {
+        let value = parse(
+            r#"{"b":1.0,"2":"x","a":[1e21,0.5,null,true],"10":{},"01":[],"e":{"1":2,"z":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stringify(&value),
+            r#"{"2":"x","10":{},"b":1,"a":[1e+21,0.5,null,true],"01":[],"e":{"1":2,"z":3}}"#
+        );
+        assert_eq!(
+            stringify_pretty(&value),
+            "{\n  \"2\": \"x\",\n  \"10\": {},\n  \"b\": 1,\n  \"a\": [\n    1e+21,\n    0.5,\n    null,\n    true\n  ],\n  \"01\": [],\n  \"e\": {\n    \"1\": 2,\n    \"z\": 3\n  }\n}"
+        );
+        // The last of a duplicated key wins, where the first stood.
+        assert_eq!(
+            stringify(&parse(r#"{"a":1,"b":2,"a":3}"#).unwrap()),
+            r#"{"a":3,"b":2}"#
+        );
+        assert_eq!(
+            parse("{torn").unwrap_err().to_string(),
+            "JSON Parse error: key must be a string at line 1 column 2"
+        );
+    }
+
+    #[test]
+    fn serializes_through_serde_as_json_stringify_writes() {
+        let value = parse(r#"{"b":1.0,"2":[{"z":0.5,"1":-0.0}],"a":1e21}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&JsOrdered(&value)).unwrap(),
+            r#"{"2":[{"1":0,"z":0.5}],"b":1,"a":1e+21}"#
+        );
+    }
+
+    #[test]
+    fn spells_a_value_as_a_template_literal_or_a_message_does() {
+        let answer: Value = serde_json::from_str(
+            r#"{"type":"tab_created","tab":{"tab_id":"w7:t1","n":1.0,"big":1e21},"list":[null,true,"a\"b\u001b"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stringify_or_undefined(Some(&answer)),
+            r#"{"type":"tab_created","tab":{"tab_id":"w7:t1","n":1,"big":1e+21},"list":[null,true,"a\"b\u001b"]}"#
+        );
+        assert_eq!(stringify_or_undefined(None), "undefined");
+        assert_eq!(stringify_or_undefined(Some(&Value::Null)), "null");
+        assert_eq!(
+            json_or_string(&json!({"code": -1, "message": "daemon says no"})),
+            r#"{"code":-1,"message":"daemon says no"}"#
+        );
+        assert_eq!(json_or_string(&json!("refused")), "refused");
+        assert_eq!(json_or_string(&json!(null)), "null");
+        assert_eq!(json_or_string(&json!(false)), "false");
+        assert_eq!(json_or_string(&json!(7)), "7");
+        assert_eq!(json_or_string(&json!(["a", 1])), r#"["a",1]"#);
+        assert_eq!(string_of(&json!(5)), "5");
+        assert_eq!(string_of(&json!(2.5)), "2.5");
+        assert_eq!(string_of(&json!(true)), "true");
+        assert_eq!(string_of(&json!(null)), "null");
+        assert_eq!(string_of(&json!(["a", null, 1])), "a,,1");
+        assert_eq!(string_of(&json!({"a": 1})), "[object Object]");
+    }
+
+    #[test]
+    fn reads_numbers_as_javascript_does() {
+        assert!(is_integer(&json!(3)));
+        assert!(is_integer(&json!(3.0)));
+        assert!(is_integer(&json!(-1)));
+        assert!(!is_integer(&json!(2.5)));
+        assert!(!is_integer(&json!("3")));
+        assert!(!is_integer(&json!(true)));
+        assert_eq!(number_value(8.0), json!(8));
+        assert_eq!(number_value(-2.0), json!(-2));
+        assert_eq!(number_value(0.5), json!(0.5));
+        for (text, value) in [
+            ("12", 12.0),
+            (" 7\n", 7.0),
+            ("", 0.0),
+            ("-1", -1.0),
+            ("+3", 3.0),
+            ("1e3", 1000.0),
+            ("1.5", 1.5),
+            (".5", 0.5),
+            ("5.", 5.0),
+            ("0x10", 16.0),
+            ("0b11", 3.0),
+            ("0o17", 15.0),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("1.e5", 100000.0),
+            ("+.5", 0.5),
+            ("0X1f", 31.0),
+            ("00012", 12.0),
+            ("1e400", f64::INFINITY),
+        ] {
+            assert_eq!(number_from_text(text), value, "{text:?}");
+        }
+        for nan in [
+            "abc",
+            "1_0",
+            "0x",
+            "-0x10",
+            "inf",
+            "nan",
+            "1e",
+            ".",
+            "e1",
+            "1 2",
+            "Infinityx",
+            "-",
+            "\u{85}0",
+        ] {
+            assert!(number_from_text(nan).is_nan(), "{nan:?}");
+        }
+    }
+
+    #[test]
+    fn sorts_and_handles_paths_as_javascript_and_node_do() {
+        let mut names = vec![
+            "opencode".to_owned(),
+            "claude".to_owned(),
+            "Zed".to_owned(),
+            "cursor".to_owned(),
+        ];
+        sort_strings(&mut names);
+        assert_eq!(names, ["Zed", "claude", "cursor", "opencode"]);
+        assert_eq!(path_join(&["/pool", "console.json"]), "/pool/console.json");
+        assert_eq!(path_join(&["/pool/", "console.json"]), "/pool/console.json");
+        assert_eq!(path_join(&["./pool", "console.json"]), "pool/console.json");
+        assert_eq!(
+            path_join(&["/repo/.git", "pool-worktrees", "abcd1234", "01"]),
+            "/repo/.git/pool-worktrees/abcd1234/01"
+        );
+        assert_eq!(path_join(&["/repo/", "", "./x//y/"]), "/repo/x/y/");
+        assert_eq!(path_join(&["/a/b", "../c"]), "/a/c");
+        assert_eq!(path_join(&["/", ".."]), "/");
+        assert_eq!(path_join(&["a", "../../b"]), "../b");
+        assert_eq!(path_join(&["", ""]), ".");
+        assert_eq!(path_join(&["a", ".."]), ".");
+        assert_eq!(
+            path_relative("/repo", "/repo/.scratch/pool/issues/01.md"),
+            ".scratch/pool/issues/01.md"
+        );
+        assert_eq!(path_relative("/repo/", "/repo"), "");
+        assert_eq!(path_relative("/a/b/c", "/a"), "../..");
+        assert_eq!(path_relative("/a/b", "/a/bc/d"), "../bc/d");
+        assert_eq!(path_relative("/", "/x"), "x");
+        assert_eq!(path_relative("/x/./y/../z", "/x/z/w"), "w");
+        assert_eq!(basename("/repos/my-pool/"), "my-pool");
+        assert_eq!(basename("pool"), "pool");
+        assert_eq!(
+            canonical_dir("/nonexistent-dir-for-test"),
+            "/nonexistent-dir-for-test"
+        );
+        assert!(!exists("/nonexistent-dir-for-test"));
+    }
+
+    #[test]
+    fn words_an_errno_as_bun_does() {
+        let missing = io::Error::from_raw_os_error(ENOENT_FOR_TEST);
+        assert_eq!(
+            FsError::new(&missing, "mkdir", "/proc/nope").to_string(),
+            "ENOENT: no such file or directory, mkdir '/proc/nope'"
+        );
+        assert_eq!(
+            FsError::rename(&missing, "/a", "/b").to_string(),
+            "ENOENT: no such file or directory, rename '/a' -> '/b'"
+        );
+        let denied = io::Error::from_raw_os_error(13);
+        assert_eq!(
+            FsError::new(&denied, "rm", "/x").to_string(),
+            "EACCES: permission denied, rm '/x'"
+        );
+    }
+
+    const ENOENT_FOR_TEST: i32 = 2;
 
     #[test]
     fn walks_own_keys_in_javascript_order() {

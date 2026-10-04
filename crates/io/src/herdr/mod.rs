@@ -27,7 +27,6 @@
 //! call the TypeScript fired and forgot (`void closeTab(...)`) is a `tokio::spawn` here, never a future
 //! left to drop.
 
-mod js;
 mod pane_end;
 mod rpc;
 
@@ -42,6 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ac_core::js;
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
@@ -341,13 +341,13 @@ impl Herdr {
         let Some(tab_id) = non_empty_str(answer, &["tab", "tab_id"]) else {
             return Err(HerdrError::new(format!(
                 "tab.create returned no tab id: {}",
-                js::stringify(answer)
+                js::stringify_or_undefined(answer)
             )));
         };
         let Some(pane_id) = non_empty_str(answer, &["root_pane", "pane_id"]) else {
             return Err(HerdrError::new(format!(
                 "tab.create returned no root pane id: {}",
-                js::stringify(answer)
+                js::stringify_or_undefined(answer)
             )));
         };
         Ok(AttemptTab {
@@ -405,7 +405,7 @@ impl Herdr {
             }),
             None => Err(HerdrError::new(format!(
                 "workspace.create returned no workspace id: {}",
-                js::stringify(created.as_ref())
+                js::stringify_or_undefined(created.as_ref())
             ))),
         }
     }
@@ -563,7 +563,7 @@ impl Herdr {
         else {
             return Err(HerdrError::new(format!(
                 "pane.list answered without a panes list: {}",
-                js::stringify(list.as_ref())
+                js::stringify_or_undefined(list.as_ref())
             )));
         };
         Ok(panes
@@ -596,7 +596,7 @@ impl Herdr {
         else {
             return Err(HerdrError::new(format!(
                 "agent.list answered without an agents list: {}",
-                js::stringify(list.as_ref())
+                js::stringify_or_undefined(list.as_ref())
             )));
         };
         Ok(agents

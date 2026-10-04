@@ -918,7 +918,8 @@ conformance(
     await untilInterrupt(server, "01", "checkpoint");
     await enlistSteward(server);
     await untilNotices(sw.herdr, 1);
-    expect(loggedNotice(sw.world.pool, "01", "steward-interrupt")).toBe(true);
+    // The fake records the Turn as it is typed; the engine logs the delivery once the send returns.
+    await until(() => loggedNotice(sw.world.pool, "01", "steward-interrupt"), (logged) => logged, { what: "01's steward-interrupt notice logged" });
     await noFurtherNotices(sw.herdr, 1);
     expectNotices(sw.herdr, [`Pool news for the Steward:\n\n${CHECKPOINT_01}`]);
 
@@ -1058,7 +1059,8 @@ conformance(
     ]);
     // Informing costs nothing: the one answer is all the budget spent.
     expect((await snapshot(server)).stewardBudget?.used).toEqual({ "01": 1 });
-    expect(loggedNotice(sw.world.pool, "01", "steward-merged")).toBe(true);
+    // The fake records the Turn as it is typed; the engine logs the delivery once the send returns.
+    await until(() => loggedNotice(sw.world.pool, "01", "steward-merged"), (logged) => logged, { what: "01's steward-merged notice logged" });
   },
   { timeoutMs: 90_000 },
 );

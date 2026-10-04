@@ -44,13 +44,17 @@
  * daemon that cannot keep a subscription (restart mid-wait), for the
  * exit-code file fallback. `injectPane` and `endPane` simulate the orphans
  * boot reconciliation must handle: a pane with no process behind it, and
- * its later end. A method named in `fail` (seeded by the option, mutable on
- * the handle) answers with a herdr-style error body, the shape of a daemon
- * refusing the call, so a refusal can be switched on mid-run; one named in
- * `failFrom` is refused from its nth call on, so a refusal can land at an
- * exact call. `keyFrames` changes what a pane shows as a key lands (a TUI
- * dialog answered), and `noRootPane` answers `tab.create` without its root
- * pane, as a daemon before herdr protocol 20 did.
+ * its later end. `closeTab` and `closePane` are an operator's own closes,
+ * `delistPane` a pane reaped from the listing while its process runs on,
+ * and `hangUpSubscribers` a daemon hanging up on its subscribers, each done
+ * from outside the engine's calls. A method named in `fail` (seeded by the
+ * option, mutable on the handle) answers with a herdr-style error body, the
+ * shape of a daemon refusing the call, so a refusal can be switched on
+ * mid-run; one named in `failFrom` is refused from its nth call on, so a
+ * refusal can land at an exact call. `keyFrames` changes what a pane shows
+ * as a key lands (a TUI dialog answered), and `noRootPane` answers
+ * `tab.create` without its root pane, as a daemon before herdr protocol 20
+ * did.
  *
  * Workspaces are modelled too (issue #94): `workspaces` seeds the ones the
  * daemon already holds (a pool's remembered or launch workspace),
@@ -255,6 +259,17 @@ export interface ExecutingFakeHerdr {
   dropPaneInput: (paneId: string, count: number) => void;
   /** The tab's current label, from `tab.create` or a later `tab.rename`. */
   tabLabel: (tabId: string) => string | null;
+  /** Close a pane by hand: what `pane.close` does, with no request on the socket. */
+  closePane: (paneId: string) => void;
+  /**
+   * Take a pane out of `pane.list` while its process runs on, with no event:
+   * a daemon that reaped a pane it still runs.
+   */
+  delistPane: (paneId: string) => void;
+  /** Hang up (a plain FIN) on every `events.subscribe` connection still open. */
+  hangUpSubscribers: () => void;
+  /** The pane ids `pane.list` lists now, in every workspace. */
+  listedPanes: () => string[];
 }
 
 export async function startExecutingFakeHerdr(
@@ -344,6 +359,8 @@ export async function startExecutingFakeHerdr(
   const connections = new Set<Socket>();
   const connectionIds = new Map<Socket, number>();
   const procs: ReturnType<typeof Bun.spawn>[] = [];
+  // A closed tab's panes leave the listing and their processes die; the
+  // caller sends the one `tab_closed` that follows.
   const firePaneEnd = (
     paneId: string,
     event: "pane_exited" | "pane_closed",
@@ -859,5 +876,15 @@ export async function startExecutingFakeHerdr(
       if (pane) pane.dropInputs += count;
     },
     tabLabel: (tabId) => tabLabels.get(tabId) ?? null,
+    closePane: (paneId) => firePaneEnd(paneId, "pane_closed"),
+    delistPane: (paneId) => {
+      const pane = panes.get(paneId);
+      if (pane) pane.alive = false;
+    },
+    hangUpSubscribers: () => {
+      for (const sub of [...subscribers]) sub.end();
+    },
+    listedPanes: () =>
+      [...panes.entries()].filter(([, pane]) => pane.alive).map(([paneId]) => paneId),
   };
 }

@@ -26,12 +26,12 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | --- | --- | --- |
 | interrupts | C08 | landed (588d76d..63102a3), 48 cases |
 | attempts, terminal launch | C12 | landed (1f8a9b2..e54c5bc), 66 cases |
-| attempts, endings and logs | C13 | wave 1, subagent m0-c13 |
+| attempts, endings and logs | C13 | landed (1e39261), 30 cases |
 | herdr panes | C15 | landed (eecd384..1bee44e), 42 cases |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
 | protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
-| restart, Tickets and Attempts | C05 | wave 2 |
+| restart, Tickets and Attempts | C05 | landed, 55 cases |
 | restart, Conversations and panes | C06 | wave 2 |
 | Conversation Turn state and Notices | C17 | wave 2 |
 | verify with Jev | C22 | wave 2 |
@@ -39,13 +39,14 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 
 ### M1 to M5
 
-- Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md.
-- Running: r-protocol (ac-protocol types, then the TypeScript generator and its tsc check), r-git (ac-io git,
-  worktrees.ts, stat-cache), r-herdr (ac-io herdr client).
-- Next once r-protocol commits its types: formats-a (pool files, events, streamlog, checkpoints, queued
-  answers, ledger, runs/ files, Conversation records) and formats-b (console.json, Pool settings, Machine
-  defaults, fleet, harness descriptors, Assignments). Briefs drafted in the session scratchpad.
-- Then the foundation: F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
+- Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md; wire shapes
+  research at docs/specs/162-rust-port-wire-shapes.md.
+- Landed: ac_io::herdr (1c8824d), ac_io::git and ac_core::stat_cache (d94eec5..b8b3947), ac-protocol types
+  (2e17992; the TypeScript generator and its tsc check still to come from r-protocol).
+- Running: r-protocol (generator), r-formats-a (pool files, events, streamlog, checkpoints, queued answers,
+  ledger, runs/ files, Conversation records, ac_core::js), r-formats-b (console.json, Pool settings, Machine
+  defaults, fleet, harness descriptors, Assignments).
+- Next: the foundation, F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
   persist, snapshot) and S-server (server CLI, lock, ports, routes, /api/ws) side by side; then the feature
   wave by area (see the design doc's module map).
 
@@ -198,3 +199,61 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   checks its paste with `recent` 200-line reads of the operator's pane, which moves their viewport.
 - Known load flakes outside C15: attempts-argv "a terminal-backed launch runs each harness's interactive
   argv" (timed out waiting for launches); engine attempt-run.test.ts "surfaces a botched spawn".
+
+### restart, Tickets and Attempts (C05)
+
+- Restart cases that start more than one server are takeover cases: each later server runs the next leg
+  of CONFORMANCE_LEGS, so `--legs bun,rust` has Rust boot on what Bun left.
+- merge-hold.test.ts:536 is a Rust unit test: boot never re-adopts a resolver's pane (`terminalAdoptable`
+  gives a resolver the headless orphan fate), so after a restart the Ticket reads needs-you.
+- On macOS a reused pid is stopped as an orphan: with no procfs, `orphanIsLive` trusts liveness alone and
+  boot TERMs then KILLs the process group of whatever now holds the recorded pid. Rust should check the
+  working directory on every platform (unit test drafted in NOT-PORTED.md).
+- A server whose store refuses every write still stops cleanly (exit 0, lock released) with no checkpoint
+  row; the next boot runs from the state lines alone (pinned).
+- children.test.ts:76 is a Rust unit test: a child registered after shutdown began gets TERM sent to its
+  process group as it arrives.
+
+### attempts, endings and logs (C13, 1e39261)
+
+- The fake herdr gained `closePane`, `delistPane`, `hangUpSubscribers`, `listedPanes`,
+  `endPaneOn(method, paneId, nth)` and `HerdrProcess.kill()` (C15's `closeTab` serves both tickets).
+- A pane leaving herdr's listing is noticed only by the ending's 30 s liveness sweep, which lists every
+  workspace's panes (`pane.list {}`); a refused listing is skipped, a dropped or hung-up subscription is
+  not an ending, and the wait is never re-subscribed or clock-bounded. A pane gone from the listing gets
+  a 10 s grace (the exit-code file polled at 250 ms) before pane gone (-2).
+- A pane that ends with no exit-code file is exit code unreadable (-1) about 2 s later: readExitCode
+  retries 10 times at 200 ms.
+- The Bun server subscribes to pane ends twice per launch: once for readiness (let go before the paste),
+  once for the ending; on the ending subscription's ack it lists panes once (catches a pane already gone).
+- The wrapper's send removes a stale exit-code file and Stream file first (pane-session.ts:314).
+- A terminal-backed log is cut at the Attempt's end: the tailer drains once at the ending, so output after
+  the Outcome (and script's "Script done on" footer) never reaches runs/<id>.log or the logTail.
+- An Outcome valid when the pane ends wins: the ending re-reads the result before calling it a crash.
+- In stream mode stderr goes through the same stream-json deriver as stdout (not pinned); raw-mode logs
+  (opencode) are written chunk by chunk with no line splitting (pinned).
+- Rust unit tests: an exit-code file landing inside the grace window ends with the file's code, never pane
+  gone; the stream and transcript line buffers reassemble a line, a UTF-8 character and an escape
+  sequence split across two chunks, exactly once.
+- Known race in tests reading "notice delivered" events: the fake records the submitted Turn before the
+  engine appends the event (steward.test.ts engine tests; conformance steward/notices "a Steward enlisted
+  beside a checkpoint is told it once ...").
+
+### ac-protocol (r-protocol, 2e17992..bacc23b)
+
+- Every wire type and protocol.ts in `crates/protocol/src/{wire,protocol}.rs`, re-exported at the crate
+  root; serde helpers in `json.rs` (`True` for `ok: true`, `js_number` for floats so 8 prints 8,
+  absent/null/set as `Option<Option<T>>`, `Unchecked<T>` for raw passed-through values); declare new wire
+  types with `wire_struct!`, `wire_enum!`, `wire_union!` so the generator covers them.
+- `ac_protocol::typescript::generate()` writes wire.ts and protocol.ts (`cargo run -p ac-protocol --bin
+  gen-typescript -- <dir>`); `crates/protocol/tests/typescript.rs` checks them against engine/wire.ts and
+  engine/protocol.ts with the repository's tsc (identical types both ways, export names, the UI's strict
+  settings, constant values). Real Bun frames and bodies in `crates/protocol/testdata/bun` round-trip
+  byte for byte.
+- Left to others: the snapshot diff and its hidden rows protocol.test.ts:161 and :169 (ac-core or the
+  server), the envelope decode (server). The server checks the envelope on a `serde_json::Value` and hands
+  the raw payload to the handler (a bad payload is a 400 refusal, as ui/src/protocol.ts does), never a
+  typed decode into ClientMessage.
+- Typed as declared, not reproduced: `?offset=abc` giving null offsets, a missing or non-string
+  `lastEventAt`, extra keys on hand-written event lines (the server should pass event lines through as
+  raw JSON to keep them).

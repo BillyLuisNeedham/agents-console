@@ -13,9 +13,9 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::node::{fs_error, js_number, js_trim, node_join, path_text, realpath};
 use super::repo::ref_exists;
 use super::runner::{GitProbe, git};
+use ac_core::js;
 
 /// Where a Ticket's work happens when it has a worktree of its own, and the branch checked out there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ fn cached(
 
 /// The repository's common git dir, absolute, or `<repo_root>/.git` when git cannot say.
 pub fn git_common_dir(repo_root: impl AsRef<Path>) -> String {
-    let root = path_text(repo_root.as_ref());
+    let root = js::path_text(repo_root.as_ref());
     cached(&COMMON_DIRS, &root, || {
         let probe = git(
             &root,
@@ -68,7 +68,7 @@ pub fn git_common_dir(repo_root: impl AsRef<Path>) -> String {
         if probe.ok && !probe.out.is_empty() {
             probe.out
         } else {
-            node_join(&[&root, ".git"])
+            js::path_join(&[&root, ".git"])
         }
     })
 }
@@ -79,7 +79,7 @@ fn git_dir_of(repo_root: &str) -> String {
         if probe.ok && !probe.out.is_empty() {
             probe.out
         } else {
-            node_join(&[repo_root, ".git"])
+            js::path_join(&[repo_root, ".git"])
         }
     })
 }
@@ -96,10 +96,10 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let root = path_text(repo_root.as_ref());
+    let root = js::path_text(repo_root.as_ref());
     let git_dir = git_dir_of(&root);
     let common = git_common_dir(&root);
-    let head = fs::read(node_join(&[&git_dir, "HEAD"])).ok()?;
+    let head = fs::read(js::path_join(&[&git_dir, "HEAD"])).ok()?;
     let head = String::from_utf8_lossy(&head).into_owned();
     let mut names: Vec<String> = branches
         .into_iter()
@@ -107,18 +107,18 @@ where
         .collect();
     names.extend(head_branch(&head));
     let mut paths = vec![
-        node_join(&[&common, "packed-refs"]),
-        node_join(&[&common, "reftable", "tables.list"]),
+        js::path_join(&[&common, "packed-refs"]),
+        js::path_join(&[&common, "reftable", "tables.list"]),
     ];
     for name in &names {
         paths.extend([
-            node_join(&[&git_dir, name]),
-            node_join(&[&common, name]),
-            node_join(&[&common, "refs", name]),
-            node_join(&[&common, "refs", "tags", name]),
-            node_join(&[&common, "refs", "heads", name]),
-            node_join(&[&common, "refs", "remotes", name]),
-            node_join(&[&common, "refs", "remotes", name, "HEAD"]),
+            js::path_join(&[&git_dir, name]),
+            js::path_join(&[&common, name]),
+            js::path_join(&[&common, "refs", name]),
+            js::path_join(&[&common, "refs", "tags", name]),
+            js::path_join(&[&common, "refs", "heads", name]),
+            js::path_join(&[&common, "refs", "remotes", name]),
+            js::path_join(&[&common, "refs", "remotes", name, "HEAD"]),
         ]);
     }
     let now = now_ms();
@@ -138,7 +138,7 @@ fn head_branch(head: &str) -> Option<String> {
             line.strip_prefix("ref: refs/heads/")
                 .filter(|rest| !rest.is_empty())
         })?;
-    let name = js_trim(line);
+    let name = js::trim(line);
     (!name.is_empty()).then(|| name.to_string())
 }
 
@@ -156,19 +156,20 @@ fn head_branch(head: &str) -> Option<String> {
 /// [`remove_stale_merge_checkout`]) go through [`try_pool_key_for`] instead and fail there, as the
 /// TypeScript does, before any side effect.
 pub fn pool_key_for(repo_root: impl AsRef<Path>) -> String {
-    let root = path_text(repo_root.as_ref());
+    let root = js::path_text(repo_root.as_ref());
     try_pool_key_for(&root).unwrap_or_else(|_| key_of(&root))
 }
 
 /// The pool key, failing as `realpathSync` throws when there is nothing on disk at `repo_root`:
 /// `ENOENT: no such file or directory, lstat '<repo_root>'`.
 pub fn try_pool_key_for(repo_root: impl AsRef<Path>) -> Result<String> {
-    let root = path_text(repo_root.as_ref());
+    let root = js::path_text(repo_root.as_ref());
     if let Some(hit) = lock(&POOL_KEYS).get(&root) {
         return Ok(hit.clone());
     }
-    let real = realpath(&root).map_err(|err| anyhow!(fs_error(&err, "lstat", &root)))?;
-    let key = key_of(&path_text(&real));
+    let real =
+        js::realpath(&root).map_err(|err| anyhow!(js::FsError::new(&err, "lstat", &root)))?;
+    let key = key_of(&js::path_text(&real));
     Ok(lock(&POOL_KEYS).entry(root).or_insert(key).clone())
 }
 
@@ -201,7 +202,7 @@ pub fn worktree_path_for(
         None => ticket_id.to_string(),
         Some(n) => format!("{ticket_id}.attempt-{n}"),
     };
-    node_join(&[
+    js::path_join(&[
         &git_common_dir(root),
         "pool-worktrees",
         &pool_key_for(root),
@@ -329,7 +330,7 @@ pub fn prepare_worktree(
 /// apart from every ticket worktree beside it, since a ticket id never starts with one.
 pub fn merge_checkout_path_for(repo_root: impl AsRef<Path>) -> String {
     let root = repo_root.as_ref();
-    node_join(&[
+    js::path_join(&[
         &git_common_dir(root),
         "pool-worktrees",
         &pool_key_for(root),
@@ -411,7 +412,7 @@ pub fn attempt_branches(repo_root: impl AsRef<Path>, ticket_id: &str) -> Vec<u32
         .out
         .split('\n')
         .filter_map(|refname| refname.strip_prefix(&prefix))
-        .map(js_number)
+        .map(js::number_from_text)
         .filter(|n| n.is_finite() && n.fract() == 0.0)
         .filter(|n| (0.0..=f64::from(u32::MAX)).contains(n))
         .map(|n| n as u32)
@@ -441,9 +442,8 @@ pub(crate) fn err_or_out(probe: &GitProbe) -> &str {
 // not make.
 fn make_parent_dir(path: &str) -> Result<()> {
     match Path::new(path).parent() {
-        Some(parent) => {
-            make_dirs(parent).map_err(|(err, at)| anyhow!(fs_error(&err, "mkdir", &path_text(&at))))
-        }
+        Some(parent) => make_dirs(parent)
+            .map_err(|(err, at)| anyhow!(js::FsError::new(&err, "mkdir", js::path_text(&at)))),
         None => Ok(()),
     }
 }
@@ -478,7 +478,7 @@ fn remove_tree(path: &str) -> Result<()> {
         Ok(meta) if meta.is_dir() => gone(fs::remove_dir_all(path)),
         Ok(_) => gone(fs::remove_file(path)),
     };
-    removed.map_err(|err| anyhow!(fs_error(&err, "rm", path)))
+    removed.map_err(|err| anyhow!(js::FsError::new(&err, "rm", path)))
 }
 
 #[cfg(test)]
@@ -614,7 +614,7 @@ mod tests {
     fn a_missing_root_fails_the_disk_changes_before_any_side_effect() {
         let plain = Repo::bare_dir();
         let root = plain.path("gone");
-        let root_text = path_text(&root);
+        let root_text = js::path_text(&root);
         let missing = format!("ENOENT: no such file or directory, lstat '{root_text}'");
         assert_eq!(try_pool_key_for(&root).unwrap_err().to_string(), missing);
         assert_eq!(

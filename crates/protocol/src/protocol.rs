@@ -15,40 +15,52 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::json::True;
-use crate::ts::{Decl, DeclBody, Ts, TsDecl, TsField, TsType};
+use crate::ts::{Attr, Decl, DeclBody, Ts, TsConst, TsDecl, TsField, TsType};
 use crate::wire::*;
 
-/// Bumped on every change to a message's shape. The server says its version
-/// in `hello`; a page that was built for another one reloads itself, which is
-/// how a Restart that rebuilt the UI reaches a tab left open across it.
-pub const PROTOCOL_VERSION: u64 = 1;
+wire_consts! {
+    ts_constants =>
+    /// Bumped on every change to a message's shape. The server says its version
+    /// in `hello`; a page that was built for another one reloads itself, which is
+    /// how a Restart that rebuilt the UI reaches a tab left open across it.
+    pub const PROTOCOL_VERSION: u64 = 1;
 
-/// Where the socket is served.
-pub const WS_PATH: &str = "/api/ws";
+    /// Where the socket is served.
+    pub const WS_PATH: &str = "/api/ws";
 
-/// The server's heartbeat cadence, served in `hello`; this is its default.
-pub const HEARTBEAT_MS: u64 = 20_000;
+    /// The server's heartbeat cadence, served in `hello`; this is its default.
+    pub const HEARTBEAT_MS: u64 = 20_000;
 
-/// A socket silent for this many heartbeats is closed and reopened.
-pub const SILENCE_FACTOR: u64 = 3;
+    /// A socket silent for this many heartbeats is closed and reopened.
+    pub const SILENCE_FACTOR: u64 = 3;
 
-/// The reconnect delays after a socket closes, the last one repeating.
-pub const RECONNECT_DELAYS_MS: &[u64] = &[250, 500, 1_000, 2_000, 3_000];
+    /// The reconnect delays after a socket closes, the last one repeating.
+    pub const RECONNECT_DELAYS_MS: &[u64] = &[250, 500, 1_000, 2_000, 3_000];
 
-/// How many of `state.log`'s last lines the snapshot carries.
-pub const POOL_LOG_WINDOW: usize = 500;
+    /// How many of `state.log`'s last lines the snapshot carries.
+    pub const POOL_LOG_WINDOW: usize = 500;
 
-/// The server's one check of activity, peeks and subscribed files.
-pub const LIVE_CHECK_MS: u64 = 2_000;
+    /// The server's one check of activity, peeks and subscribed files.
+    pub const LIVE_CHECK_MS: u64 = 2_000;
 
-/// How long the pointer rests on a card before the Console prefetches it.
-pub const HOVER_DWELL_MS: u64 = 100;
+    /// How long the pointer rests on a card before the Console prefetches it.
+    pub const HOVER_DWELL_MS: u64 = 100;
 
-/// How many hovered cards stay subscribed beside the selected one.
-pub const HOVER_SUBSCRIPTIONS: u64 = 2;
+    /// How many hovered cards stay subscribed beside the selected one.
+    pub const HOVER_SUBSCRIPTIONS: u64 = 2;
 
-/// The id of the script element the served index.html carries the first snapshot in.
-pub const EMBED_ELEMENT_ID: &str = "console-boot";
+    /// The id of the script element the served index.html carries the first snapshot in.
+    pub const EMBED_ELEMENT_ID: &str = "console-boot";
+
+    /// The close the server ends a socket with after the `stopped` farewell
+    /// (ADR-0019): a clean close the client reads as the expected end of an
+    /// orderly shutdown, never as a fault.
+    pub const CLOSE_STOPPED: CloseFrame = CloseFrame { code: 1000, reason: "stopped" };
+
+    /// The close a client ends its own socket with when a delta does not fit
+    /// the revision it holds; the reconnect brings a fresh snapshot.
+    pub const CLOSE_RESYNC: CloseFrame = CloseFrame { code: 4001, reason: "resync" };
+}
 
 /// A WebSocket close: its code and reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,20 +69,17 @@ pub struct CloseFrame {
     pub reason: &'static str,
 }
 
-/// The close the server ends a socket with after the `stopped` farewell
-/// (ADR-0019): a clean close the client reads as the expected end of an
-/// orderly shutdown, never as a fault.
-pub const CLOSE_STOPPED: CloseFrame = CloseFrame {
-    code: 1000,
-    reason: "stopped",
-};
-
-/// The close a client ends its own socket with when a delta does not fit
-/// the revision it holds; the reconnect brings a fresh snapshot.
-pub const CLOSE_RESYNC: CloseFrame = CloseFrame {
-    code: 4001,
-    reason: "resync",
-};
+impl TsConst for CloseFrame {
+    fn ts_const(&self) -> (String, String) {
+        (
+            String::new(),
+            format!(
+                "{{ code: {}, reason: {:?} }} as const",
+                self.code, self.reason
+            ),
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The snapshot as pushed
@@ -94,9 +103,16 @@ wire_struct! {
 // The delta
 // ---------------------------------------------------------------------------
 
-/// A keyed list's change: the entities that are new or changed, whole; the
-/// ids that went; and the full id order, present only when the order of ids
-/// moved (an add, a removal or a reorder).
+/// The doc of `EntityDelta`, shared by the Rust type and its TypeScript declaration.
+macro_rules! entity_delta_doc {
+    () => {
+        " A keyed list's change: the entities that are new or changed, whole; the
+ ids that went; and the full id order, present only when the order of ids
+ moved (an add, a removal or a reorder)."
+    };
+}
+
+#[doc = entity_delta_doc!()]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityDelta<T> {
@@ -118,72 +134,52 @@ impl<T> Default for EntityDelta<T> {
     }
 }
 
-const ENTITY_DELTA_DOCS: &[&str] = &[
-    " A keyed list's change: the entities that are new or changed, whole; the",
-    " ids that went; and the full id order, present only when the order of ids",
-    " moved (an add, a removal or a reorder).",
-];
-
 impl<T: Ts> Ts for EntityDelta<T> {
     fn ts() -> TsType {
         TsType::Generic("EntityDelta", vec![T::ts()])
     }
 }
 
-/// The generic declaration, `EntityDelta<T>`.
+/// The generic TypeScript declaration `EntityDelta<T>`, whose fields are `EntityDelta`'s own.
 pub struct EntityDeltaDecl;
+
+/// Stands for the type parameter `T` where the declaration is written.
+struct TypeParameter;
+
+impl Ts for TypeParameter {
+    fn ts() -> TsType {
+        TsType::Name("T")
+    }
+}
 
 impl TsDecl for EntityDeltaDecl {
     fn decl() -> Decl {
-        let field = |name: &str, ty: TsType| TsField {
-            name: name.to_string(),
-            docs: Vec::new(),
-            optional: true,
-            ty,
-        };
+        let field = |name: &str, ty: TsType| TsField::from_rust(name, &[OPTIONAL], ty);
         Decl {
             name: "EntityDelta".to_string(),
-            docs: ENTITY_DELTA_DOCS.to_vec(),
+            docs: vec![entity_delta_doc!()],
             body: DeclBody::Interface {
                 generics: vec!["T"],
                 fields: vec![
-                    field("upsert", TsType::Array(Box::new(TsType::Name("T")))),
-                    field("remove", <Vec<String>>::ts()),
-                    field("order", <Vec<String>>::ts()),
+                    field("upsert", <Option<Vec<TypeParameter>>>::ts()),
+                    field("remove", <Option<Vec<String>>>::ts()),
+                    field("order", <Option<Vec<String>>>::ts()),
                 ],
             },
         }
     }
 }
 
-/// New pool log lines past the old end, or a whole new window when the log
-/// did not simply grow (a new run's log). Either way, the new total.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PoolLogDelta {
-    Append(PoolLogAppend),
-    Replace(PoolLogReplace),
-}
+/// How a field serde skips when `None` reads among its attributes.
+const OPTIONAL: Attr = Attr::Other("serde(skip_serializing_if = \"Option::is_none\")");
 
-impl Ts for PoolLogDelta {
-    fn ts() -> TsType {
-        TsType::Name("PoolLogDelta")
-    }
-}
-
-impl TsDecl for PoolLogDelta {
-    fn decl() -> Decl {
-        Decl {
-            name: "PoolLogDelta".to_string(),
-            docs: vec![
-                " New pool log lines past the old end, or a whole new window when the log",
-                " did not simply grow (a new run's log). Either way, the new total.",
-            ],
-            body: DeclBody::Alias {
-                generics: Vec::new(),
-                ty: TsType::Union(vec![PoolLogAppend::ts(), PoolLogReplace::ts()]),
-            },
-        }
+wire_union! {
+    /// New pool log lines past the old end, or a whole new window when the log
+    /// did not simply grow (a new run's log). Either way, the new total.
+    #[serde(untagged)]
+    pub enum PoolLogDelta {
+        Append(PoolLogAppend),
+        Replace(PoolLogReplace),
     }
 }
 
@@ -295,8 +291,15 @@ wire_struct! {
 // Requests and replies
 // ---------------------------------------------------------------------------
 
-/// A request with nothing to say, and a reply with nothing to add: the
-/// change it made arrives as a delta ahead of the reply.
+/// The doc of `Empty`, shared by the Rust type and its TypeScript declaration.
+macro_rules! empty_doc {
+    () => {
+        " A request with nothing to say, and a reply with nothing to add: the
+ change it made arrives as a delta ahead of the reply."
+    };
+}
+
+#[doc = empty_doc!()]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
@@ -310,10 +313,7 @@ impl TsDecl for Empty {
     fn decl() -> Decl {
         Decl {
             name: "Empty".to_string(),
-            docs: vec![
-                " A request with nothing to say, and a reply with nothing to add: the",
-                " change it made arrives as a delta ahead of the reply.",
-            ],
+            docs: vec![empty_doc!()],
             body: DeclBody::Alias {
                 generics: Vec::new(),
                 ty: TsType::Raw("Record<string, never>".to_string()),
@@ -453,6 +453,17 @@ wire_struct! {
     }
 }
 
+/// The doc of the Requests table, shared by the Rust `Request` and the TypeScript `Requests`.
+macro_rules! requests_doc {
+    () => {
+        " Every request the socket takes, by kind: what it carries and what a
+ success answers with. Each one is an HTTP route's twin (HTTP_TWINS) and
+ runs the same function the route does; the result is the route's own
+ response type, less any snapshot it carried, since the snapshot's change
+ reaches the socket as a delta ahead of the reply."
+    };
+}
+
 /// Declares the Requests table once: the request kinds, each one's HTTP twin, whether it is an
 /// action, and its payload and result types.
 macro_rules! requests {
@@ -490,6 +501,8 @@ macro_rules! requests {
             }
         }
 
+        #[doc = requests_doc!()]
+        ///
         /// A request as the socket takes it: its kind and its payload.
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         #[serde(tag = "kind", content = "payload")]
@@ -565,6 +578,109 @@ requests! {
     PoolLogRead = "poolLog.read", "GET /api/pool-log", false, PoolLogReadRequest => PoolLogRange;
 }
 
+/// The TypeScript `Requests` interface: each kind's payload and result.
+pub struct RequestsDecl;
+
+impl TsDecl for RequestsDecl {
+    fn decl() -> Decl {
+        let field = |name: &str, ty: TsType| TsField {
+            name: name.to_string(),
+            docs: Vec::new(),
+            optional: false,
+            ty,
+        };
+        let fields = RequestKind::ts_table()
+            .into_iter()
+            .map(|(kind, payload, result)| {
+                field(
+                    kind,
+                    TsType::Object(vec![field("payload", payload), field("result", result)]),
+                )
+            })
+            .collect();
+        Decl {
+            name: "Requests".to_string(),
+            docs: vec![requests_doc!()],
+            body: DeclBody::Interface {
+                generics: Vec::new(),
+                fields,
+            },
+        }
+    }
+}
+
+ts_declarations! {
+    ts_request_aliases =>
+    export RequestPayload => "type RequestPayload<K extends RequestKind> = Requests[K][\"payload\"];";
+    export RequestResult => "type RequestResult<K extends RequestKind> = Requests[K][\"result\"];";
+}
+
+wire_consts! {
+    ts_request_constants =>
+    /// Each request's HTTP twin, which stays for the Steward's command, Boot,
+    /// the bench and the tests. `log.follow` reads what `GET /api/log` reads,
+    /// and the pool log's range is a route new with this protocol.
+    pub const HTTP_TWINS: HttpTwins = HttpTwins;
+
+    /// The kinds that change something. The server flushes the snapshot's
+    /// pending push before it replies to one, so the delta carrying the
+    /// action's effect is always on the socket ahead of its reply.
+    pub const ACTION_KINDS: ActionKinds = ActionKinds;
+}
+
+/// The table of HTTP twins, by request kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpTwins;
+
+impl HttpTwins {
+    pub fn get(self, kind: RequestKind) -> &'static str {
+        kind.http_twin()
+    }
+}
+
+impl TsConst for HttpTwins {
+    fn ts_const(&self) -> (String, String) {
+        let rows: Vec<String> = RequestKind::ALL
+            .iter()
+            .map(|kind| {
+                format!(
+                    "  {}: {:?},\n",
+                    crate::ts::property_name(kind.as_str()),
+                    kind.http_twin()
+                )
+            })
+            .collect();
+        (
+            "Record<RequestKind, string>".to_string(),
+            format!("{{\n{}}}", rows.concat()),
+        )
+    }
+}
+
+/// The set of request kinds that change something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionKinds;
+
+impl ActionKinds {
+    pub fn contains(self, kind: RequestKind) -> bool {
+        kind.is_action()
+    }
+}
+
+impl TsConst for ActionKinds {
+    fn ts_const(&self) -> (String, String) {
+        let rows: Vec<String> = RequestKind::ALL
+            .iter()
+            .filter(|kind| kind.is_action())
+            .map(|kind| format!("  {:?},\n", kind.as_str()))
+            .collect();
+        (
+            "ReadonlySet<RequestKind>".to_string(),
+            format!("new Set<RequestKind>([\n{}])", rows.concat()),
+        )
+    }
+}
+
 wire_struct! {
     /// Every refusal, whichever field the HTTP route puts its reason in today
     /// (`error` or `reason`): the reason to show beside the control, and the
@@ -626,35 +742,35 @@ wire_struct! {
     }
 }
 
-/// One card's terminal peek on the live frame: the viewport, or why it could not be read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PeekResult {
-    Peek(TerminalPeekResponse),
-    Failure(PeekFailure),
-}
-
-impl Ts for PeekResult {
-    fn ts() -> TsType {
-        TsType::Union(vec![TerminalPeekResponse::ts(), PeekFailure::ts()])
+wire_union! {
+    @inline
+    /// One card's terminal peek on the live frame: the viewport, or why it could not be read.
+    #[serde(untagged)]
+    pub enum PeekResult {
+        Peek(TerminalPeekResponse),
+        Failure(PeekFailure),
     }
 }
 
-/// A frame from the Console.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ClientMessage {
-    Hello(ClientHello),
-    Visibility(Visibility),
-    Subscribe(Subscribe),
-    Unsubscribe(Unsubscribe),
-    Request(RequestFrame),
+wire_union! {
+    /// A frame from the Console.
+    #[serde(tag = "type", rename_all = "camelCase")]
+    pub enum ClientMessage {
+        /// The first frame on every socket, and the whole of a reconnect's
+        /// resubscription.
+        Hello(ClientHello),
+        Visibility(Visibility),
+        /// Subscribe, or change a subscription's follow; idempotent.
+        Subscribe(Subscribe),
+        Unsubscribe(Unsubscribe),
+        Request(RequestFrame),
+    }
 }
 
 wire_struct! {
     @inline
-    /// The first frame on every socket, and the whole of a reconnect's
-    /// resubscription.
+    /// The first frame on every socket: the protocol the page was built for, whether it shows, and
+    /// every card it wants kept current.
     pub struct ClientHello {
         pub protocol: u64,
         pub visible: bool,
@@ -672,7 +788,7 @@ wire_struct! {
 
 wire_struct! {
     @inline
-    /// Subscribe, or change a subscription's follow; idempotent.
+    /// A card to keep current, or a new follow for one already kept.
     pub struct Subscribe {
         pub card: CardSubscription,
     }
@@ -694,64 +810,40 @@ pub struct RequestFrame {
     pub request: Request,
 }
 
-impl Ts for ClientMessage {
-    fn ts() -> TsType {
-        TsType::Name("ClientMessage")
-    }
-}
-
-/// The arm of a `type`-tagged union: the tag first, then the arm's own fields.
-fn tagged(tag: &'static str, fields: Vec<TsField>) -> TsType {
-    let mut all = vec![TsField {
-        name: "type".to_string(),
-        docs: Vec::new(),
-        optional: false,
-        ty: TsType::Lit(tag),
-    }];
-    all.extend(fields);
-    TsType::Object(all)
-}
-
+/// The request arm of `ClientMessage`, one per kind, as the TypeScript derives it from `Requests`.
 const REQUEST_ARM: &str = "{
       [K in RequestKind]: { type: \"request\"; id: number; kind: K; payload: RequestPayload<K> };
     }[RequestKind]";
 
-impl TsDecl for ClientMessage {
-    fn decl() -> Decl {
-        Decl {
-            name: "ClientMessage".to_string(),
-            docs: vec![" A frame from the Console."],
-            body: DeclBody::Alias {
-                generics: Vec::new(),
-                ty: TsType::DocUnion(vec![
-                    (
-                        ClientHello::ts_docs(),
-                        tagged("hello", ClientHello::ts_fields()),
-                    ),
-                    (Vec::new(), tagged("visibility", Visibility::ts_fields())),
-                    (
-                        Subscribe::ts_docs(),
-                        tagged("subscribe", Subscribe::ts_fields()),
-                    ),
-                    (Vec::new(), tagged("unsubscribe", Unsubscribe::ts_fields())),
-                    (Vec::new(), TsType::Raw(REQUEST_ARM.to_string())),
-                ]),
-            },
-        }
+impl Ts for RequestFrame {
+    fn ts() -> TsType {
+        TsType::Raw(REQUEST_ARM.to_string())
     }
 }
 
-/// A frame from the server.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ServerMessage {
-    Hello(ServerHello),
-    Snapshot(SnapshotFrame),
-    Delta(DeltaFrame),
-    Live(LiveFrame),
-    Card(CardFrame),
-    Reply(Reply),
-    Heartbeat,
+wire_union! {
+    /// A frame from the server.
+    #[serde(tag = "type", rename_all = "camelCase")]
+    pub enum ServerMessage {
+        Hello(ServerHello),
+        /// The whole snapshot, at `rev`; null before the pool has started.
+        Snapshot(SnapshotFrame),
+        Delta(DeltaFrame),
+        /// Live values that moved since this socket last heard: the changed
+        /// entries of activity and peeks, by ticket or Conversation id, and the
+        /// grades whole. Visible sockets only.
+        Live(LiveFrame),
+        /// A subscribed card's data: the fields present replace (or, for an
+        /// `append` log, continue) what the Console holds. Its events leave out
+        /// each event payload's `logTail`, which GET /api/events still serves.
+        /// `error` for an id the pool does not know, or a card whose files could
+        /// not be read; the card is then not held.
+        Card(CardFrame),
+        /// A request's answer. `rev` is the revision the socket had been sent
+        /// when the reply went out, so the action's effect is in hand.
+        Reply(Reply),
+        Heartbeat(Heartbeat),
+    }
 }
 
 wire_struct! {
@@ -880,46 +972,23 @@ impl<'de> Deserialize<'de> for Reply {
     }
 }
 
+/// The reply arm of `ServerMessage`, one pair per kind, as the TypeScript derives it from `Requests`.
 const REPLY_ARM: &str = "{
       [K in RequestKind]:
         | { type: \"reply\"; id: number; kind: K; rev: number; ok: true; result: RequestResult<K> }
         | { type: \"reply\"; id: number; kind: K; rev: number; ok: false; refusal: Refusal };
     }[RequestKind]";
 
-impl Ts for ServerMessage {
+impl Ts for Reply {
     fn ts() -> TsType {
-        TsType::Name("ServerMessage")
+        TsType::Raw(REPLY_ARM.to_string())
     }
 }
 
-impl TsDecl for ServerMessage {
-    fn decl() -> Decl {
-        Decl {
-            name: "ServerMessage".to_string(),
-            docs: vec![" A frame from the server."],
-            body: DeclBody::Alias {
-                generics: Vec::new(),
-                ty: TsType::DocUnion(vec![
-                    (Vec::new(), tagged("hello", ServerHello::ts_fields())),
-                    (
-                        SnapshotFrame::ts_docs(),
-                        tagged("snapshot", SnapshotFrame::ts_fields()),
-                    ),
-                    (Vec::new(), tagged("delta", DeltaFrame::ts_fields())),
-                    (LiveFrame::ts_docs(), tagged("live", LiveFrame::ts_fields())),
-                    (CardFrame::ts_docs(), tagged("card", CardFrame::ts_fields())),
-                    (
-                        vec![
-                            " A request's answer. `rev` is the revision the socket had been sent",
-                            " when the reply went out, so the action's effect is in hand.",
-                        ],
-                        TsType::Raw(REPLY_ARM.to_string()),
-                    ),
-                    (Vec::new(), tagged("heartbeat", Vec::new())),
-                ]),
-            },
-        }
-    }
+wire_struct! {
+    @inline
+    /// The server is still there.
+    pub struct Heartbeat {}
 }
 
 // ---------------------------------------------------------------------------
@@ -938,4 +1007,29 @@ wire_struct! {
         pub log_total: u64,
         pub snapshot: Option<EnrichedSnapshot>,
     }
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript only: the reply by kind, and the socket seam
+// ---------------------------------------------------------------------------
+
+ts_declarations! {
+    ts_socket_declarations =>
+    /// A reply to one kind of request.
+    export Reply => "type Reply<K extends RequestKind> = Extract<ServerMessage, { type: \"reply\"; kind: K }>;";
+    /// A handler property a real WebSocket's own handlers fit: its parameter is
+    /// read bivariantly, as a method's is, so `(ev: MessageEvent) => any` is one.
+    local Handler => "type Handler<E> = { bivarianceHack(event: E): void }[\"bivarianceHack\"];";
+    /// The part of a browser WebSocket the Console uses. The real one satisfies
+    /// it; the UI tests and the bench's UI half hand the Console a fake that
+    /// speaks these messages, so the seam they fake is the wire itself.
+    export SocketLike => "interface SocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  onopen: Handler<unknown> | null;
+  onmessage: Handler<{ data: unknown }> | null;
+  onclose: Handler<{ code: number; reason: string }> | null;
+  onerror: Handler<unknown> | null;
+}";
 }

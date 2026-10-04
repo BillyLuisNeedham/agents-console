@@ -27,7 +27,7 @@ pub fn record_drive_death(
         record.insert("stack".into(), Value::String(stack.to_owned()));
     }
     js::append_file(
-        &runs_dir.join(ERRORS_LOG_NAME),
+        runs_dir.join(ERRORS_LOG_NAME),
         &format!("{}\n", js::stringify(&Value::Object(record))),
     )
 }
