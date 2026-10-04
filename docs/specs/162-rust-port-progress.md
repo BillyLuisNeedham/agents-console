@@ -25,7 +25,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | Area | Inventory ticket | State |
 | --- | --- | --- |
 | interrupts | C08 | landed (588d76d..63102a3), 48 cases |
-| attempts, terminal launch | C12 | wave 1, subagent m0-c12 |
+| attempts, terminal launch | C12 | landed (1f8a9b2..e54c5bc), 66 cases |
 | attempts, endings and logs | C13 | wave 1, subagent m0-c13 |
 | herdr panes | C15 | wave 1, subagent m0-c15 |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
@@ -137,3 +137,16 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - `merge_file`: an exit code above 127 is git's error, `None` is killed by a signal.
 - This box's git config enables rerere (autoupdate): a conflict's stderr starts "Recorded preimage", which
   becomes `MergeResult.detail`; tests must not assume the CONFLICT lines come first.
+
+### attempts, terminal-backed launch (C12, 1f8a9b2..e54c5bc)
+
+- The fake herdr gained `noRootPane`, `keyFrames`, `failFrom`, and an `at` on every recorded call.
+- A terminal-backed attempt's derived log carries util-linux script's own "Script started on ..." (and
+  "Script done ...") lines; script writes its header only on the harness's first output or its exit, so a
+  silent TUI leaves the log empty. Cases pin the harness's lines and the frame block, never script's.
+- GET /api/log?stream=1 serves the Stream file with ANSI stripped (seen, not pinned).
+- An attempt botched in all three tabs never reports its pane's agent but still releases it (inference).
+- A tab.create answer without root_pane leaves two tabs open that nothing closes.
+- Rust unit tests implied: the frame block keeps the last 19 lines; the trust seed writes both the path
+  and its realpath when they differ; readiness needs 3 matching reads 500 ms apart; a dialog still up 4
+  polls after its answer ends the wait; a harness without a descriptor gets the wrapper and nothing typed.
