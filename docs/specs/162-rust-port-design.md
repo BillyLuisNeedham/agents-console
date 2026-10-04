@@ -113,3 +113,41 @@ bun run conformance --server rust --rust-bin target/debug/agent-console <filter>
 `<filter>` is a path fragment of the case files. `CONFORMANCE_KEEP=1` keeps the worlds for a failure worth
 reading. The Bun server is the reference: run the same filter with `--server bun` to see what passing looks
 like.
+
+## The engine's modules
+
+`engine/engine.ts` is one file of functions over `Session`. In `ac-engine` it splits by feature, so port
+work can run side by side. A Rust function is the TypeScript name in snake_case, in the module its section
+maps to. When port work needs a function another module owns and that module has not been ported yet, it
+adds a stub in the owning module, marked `// STUB(<module>): <TypeScript name>`, with the narrowest
+behaviour that compiles; the module's own port replaces it.
+
+| engine.ts lines (at c429645) | What | `ac-engine` module |
+| --- | --- | --- |
+| 250-1110 | Outcome, PoolConfig, Interrupt, PoolState, PoolUpdate, the snapshot, Session, reducers, `applyUpdate` | `session` (wire types in `ac-protocol`) |
+| 1107-1198 | the Conversation and enlisted hosts | `conversations`, `enlisted` (as functions over Session) |
+| 1199-1552 | `startPool`, `runPool`, the handle | `boot` (start), `handle` (the PoolRun API as methods on `Engine`) |
+| 1553-1740 | shutdown, settle, `startDrive`, `reportDriveDeath`, `emitSnapshot` | `drive`, `snapshot` |
+| 1740-2440 | `driveLoop`, the boundary, `planSuperStep`, `runSuperStep`, `closeDrive` | `drive` |
+| 2407-2440, 2518-2891, 3232-3935 | boot notes, `rehydrate`, deferred merges, headless and terminal orphans, terminal adoption and its finalize | `restart` |
+| 2440-2518, 3935-4196, 10163-10699 | enlisted work, enlisted endings, enlist | `enlist_flow` |
+| 2891-3232 | the Pool workspace | `pool_workspace` |
+| 4196-4480 | Held panes, the survey's listing, untouchable, tab owners | `held` |
+| 4480-4611 | the pool checkout gate | `checkout_gate` |
+| 4611-5190 | Keep talking, Continued attempts and their grading | `keep_talking` |
+| 5189-5316 | closing tabs, Finished terminals | `terminals` |
+| 5316-5397 | `writeMarkers`, `persist`, the persistence Interrupt, `closeStore` | `persist` |
+| 5397-5887 | accepting, draining and processing answers, Close | `answers` |
+| 5887-6560, 11616-11732 | the merge target and checkout, Ticket file reconcile, `resumeMerge`, the resolver, approval, `mergeTicket` | `merges` |
+| 6559-6627, 7145-8845 | graders, Jev grading, Selection, head-to-head, Adopt | `verify` |
+| 6627-7145 | engine-written Tickets' Assignments, the Config reload | `config_reload` (pure resolution in `ac-core`) |
+| 8845-9235 | Review, `raiseInterrupt`, deadlocks, checkpoints and Briefs | `interrupts` |
+| 9235-9554, 11732-11870 | the attempt env, `planTicket`, attempt tabs, crash facts, `runTicket` | `tickets` |
+| 9554-9821 | Outcome validation, writing spawned Tickets, `addBlockerToTicket` | `outcome` (validation in `ac-core`) |
+| 9821-10163 | the Steward's actions | `steward_actions` |
+| 10699-11616 | Spawn counters, proposals, adoption, the ledger refresh, Held and Pending spawns | `spawns` |
+| 11870-end | config reading, canonical paths | `ac-core` |
+
+The other engine files keep their names: `attempt_run`, `attempt_ending`, `pane_session`, `pane_survey`,
+`pane_reads`, `held_panes`, `finished_terminals`, `live_attempts`, `continued`, `enlisted`, `enlist`,
+`claude_trust`, `conversations`, `reassign`, `spawn_proposals`, `steward`, `turn_state`.
