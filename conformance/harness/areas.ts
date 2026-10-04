@@ -12,6 +12,7 @@ export const AREAS = {
   attempts: "Attempts and harness launch: argv, env, cwd, the ticket prompt, spawned and exited facts, fallbacks",
   steward: "the Steward: its console.json entry, what it is told, its answers and their limits, its notes, routes and teaching",
   conversations: "Conversations: storage, start and launch, ending, spawn.json adoption, the teaching Turn, Seeded Pools",
+  scheduling: "the drive loop: super-steps, the ready set, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
 } as const;
 
 export type Area = keyof typeof AREAS;
