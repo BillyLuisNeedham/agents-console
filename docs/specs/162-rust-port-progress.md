@@ -62,6 +62,11 @@ steward_actions, steward.ts), r-conversations, r-panes (enlist, held, Pool works
 (restart, Reassign, config reload). Land each with `git merge --no-ff` after checking for attribution
 trailers (`git log --format=%B | grep -c 'Co-Authored\|Claude-Session'`); rewrite any that carry them.
 
+Landed: r-verify at 728577c (verify 89/90, interrupts 47/48, merges 60/62; the rest wait on spawns,
+conversations and restart). The wave agents merge each other's commits; some carry git's default "Merge
+commit '...' into HEAD" message. Before the final message, reword those across the branch (one
+`git filter-branch --msg-filter` over the branch's own range, no other change).
+
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
    `--legs bun,rust,bun`.
