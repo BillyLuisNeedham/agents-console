@@ -51,3 +51,23 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 ## Decisions
 
 (none yet)
+
+## Hidden behaviour the M0 agents reported
+
+What no case pins but the Rust port should copy (or decide on), as each M0 agent reported it. Port work
+reads its area's entries here as well as in conformance/NOT-PORTED.md.
+
+### config (C20)
+
+- GET /api/state serves a stale snapshot after a hand edit of console.json: the Bun server rebuilds the
+  snapshot only on an engine emit, a Reassign or a settings save. No case pins it either way.
+- A non-object or non-JSON body to PUT /api/reassign answers 500; PUT /api/settings/pool answers 400 for the
+  same body (recorded, not pinned). Reassign checks the request before it reads the file, so a malformed
+  request against an unreadable console.json answers 400, not 500. Duplicate ids are applied once.
+- The Pool title is cut to 80 characters before it is trimmed (leading whitespace counts against the 80);
+  control characters are dropped after whitespace is collapsed. Worth a Rust unit test.
+- console.json and defaults.json are written to a `.tmp-<pid>` file beside them, then renamed over the old
+  file. When console.json stops parsing, the snapshot keeps the last good Pool title (pinned).
+- NOT-PORTED.md's formats note that a spawn-assign effort makes reassign.sources.effort read unset does not
+  reproduce at 7e67446: a spawned Ticket that has not run reads `requested` (the case for
+  reassign.test.ts:154 pins requested).
