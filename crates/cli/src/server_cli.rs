@@ -103,23 +103,36 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         args.push("--port".to_owned());
         args.push(js::string_of(port));
     }
-    // The Boot is this same binary's `boot`: the running executable, not whatever PATH names.
-    let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-console"));
-    let mut command = Command::new(program);
-    command
-        .args(&args)
-        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(err_log));
-    // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    // `agent-console` as PATH finds it, as the TypeScript runs `bun` by name; with none on PATH, this
+    // same binary.
+    let spawn = |program: PathBuf, log: std::fs::File, err_log: std::fs::File| {
+        let mut command = Command::new(program);
+        command
+            .args(&args)
+            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err_log));
+        // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        command.spawn().map(drop)
+    };
+    let (log_again, err_again) = (
+        log.try_clone().map_err(|err| err.to_string())?,
+        err_log.try_clone().map_err(|err| err.to_string())?,
+    );
+    match spawn(PathBuf::from("agent-console"), log, err_log) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let own = std::env::current_exe().map_err(|err| format!("{err}"))?;
+            spawn(own, log_again, err_again).map_err(|err| format!("{err}"))
+        }
+        other => other.map_err(|err| format!("{err}")),
     }
-    command.spawn().map(drop).map_err(|err| format!("{err}"))
 }
 
 /// Run the `server` subcommand; never returns.
@@ -209,6 +222,7 @@ pub fn run(args: Vec<String>) -> ! {
                 })
                 .collect(),
         ),
+        home: home.clone(),
         starter: None,
     };
     runtime.block_on(async move {

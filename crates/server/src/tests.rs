@@ -161,6 +161,7 @@ async fn rig(options: RigOptions) -> Rig {
         on_restart_requested: None,
         machine_defaults_paths: default_machine_defaults_paths(&home),
         parent_env: Default::default(),
+        home: home.clone(),
         starter: Some(Arc::new(move |_options| {
             let slot = slot.clone();
             async move {
