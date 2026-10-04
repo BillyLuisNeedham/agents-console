@@ -534,11 +534,17 @@ impl Server {
     /// reload that fails keeps the last-known-good meta.
     pub(crate) fn refresh_meta(&self, inner: &mut Inner, raw: Option<&Arc<PoolSnapshot>>) {
         let pool_dir = std::path::Path::new(&self.0.pool_dir);
-        if let Ok(meta) = load_pool_tickets(pool_dir, false) {
+        let (tickets, conversations) = ac_core::pool::reading_pool_files(|| {
+            (
+                load_pool_tickets(pool_dir, false),
+                load_conversations(&pool_dir.join("conversations")),
+            )
+        });
+        if let Ok(meta) = tickets {
             inner.ticket_ids = meta.iter().map(|m| m.id.clone()).collect();
             inner.meta = meta;
         }
-        let mut ids: HashSet<String> = match load_conversations(&pool_dir.join("conversations")) {
+        let mut ids: HashSet<String> = match conversations {
             Ok(records) => records.into_iter().map(|record| record.id).collect(),
             Err(_) => std::mem::take(&mut inner.conversation_ids),
         };

@@ -131,6 +131,8 @@ impl HoldHost for EngineHoldHost<'_> {
             .call(|s| {
                 let before = s.answers.pending().len();
                 crate::answers::drain_answers(s)?;
+                // The drive waits on the hold from here.
+                crate::drive::drive_turned(s);
                 Ok(s.answers.pending().len() != before)
             })
             .await?

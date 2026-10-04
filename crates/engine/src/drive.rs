@@ -61,6 +61,13 @@ pub fn start_drive(session: &mut Session) {
     });
 }
 
+/// The boot's drive has reached its first real wait, or settled: start_pool may return.
+pub fn drive_turned(session: &mut Session) {
+    if let Some(turned) = session.first_turn.take() {
+        let _ = turned.send(());
+    }
+}
+
 /// What `nextSettle` hands back: the phase now when no drive is in flight, or a wait for the next
 /// settle.
 pub enum Settle {
@@ -123,6 +130,7 @@ pub fn report_drive_death(session: &mut Session, message: &str) {
     close_store(session);
     emit_snapshot(session, RunPhase::Dead);
     settle_drive(session, Some(RunPhase::Dead), Some(message));
+    drive_turned(session);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -134,6 +142,9 @@ pub fn report_drive_death(session: &mut Session, message: &str) {
 pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
     // Boot reconciliation lands before the first scheduling.
     let mut reconcile = engine.call(|s| s.terminal_reconcile.clone()).await?;
+    if !*reconcile.borrow() {
+        engine.call(drive_turned).await?;
+    }
     let _ = reconcile.wait_for(|done| *done).await;
     loop {
         // A verify ticket's Continued attempt that ended done is graded here, between super-steps.
@@ -420,6 +431,7 @@ pub fn plan_super_step(
         ..PoolUpdate::default()
     });
     write_markers(session)?;
+    drive_turned(session);
     for (marker, plan) in &planned {
         append_event(
             &runs,
@@ -947,6 +959,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 close_store(s);
             }
             settle_drive(s, Some(phase), None);
+            drive_turned(s);
             // A Continued attempt's grading or spawns waiting to land kicked a drive that was still
             // in flight, which does nothing: the drive that closes starts the next. So does an answer
             // queued after the last boundary's drain.

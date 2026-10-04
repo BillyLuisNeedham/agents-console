@@ -165,6 +165,10 @@ pub struct Session {
     /// settle is never left waiting for an unrelated kick (in the TypeScript only microtasks run in
     /// that window, so no answer can arrive there).
     pub queued_since_drain: bool,
+    /// Fired once when the boot's drive first waits on something real (an attempt, a merge hold, the
+    /// boot reconcile) or settles: start_pool returns then, as the TypeScript's start returns before
+    /// any I/O but after every microtask the drive runs first.
+    pub first_turn: Option<oneshot::Sender<()>>,
     pub on_snapshot: Option<SnapshotHook>,
     /// Where the Machine defaults live (issue #121).
     pub machine_defaults: MachineDefaultsPaths,
@@ -292,6 +296,7 @@ impl Session {
             settle_waiters: Vec::new(),
             answer_waiters: HashMap::new(),
             queued_since_drain: false,
+            first_turn: None,
             on_snapshot: None,
             machine_defaults: base.machine_defaults,
             herdr_socket: base.herdr_socket,

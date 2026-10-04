@@ -150,6 +150,7 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     let engine = Engine::spawn(session, snapshots, |session, engine| {
         session.engine = Some(engine)
     });
+    let (turned, first_turn) = tokio::sync::oneshot::channel();
     engine
         .call(move |s| {
             // The pane survey (issue #139) only has panes to list in a terminal-backed pool; it is
@@ -164,9 +165,13 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
             // Conversations do not resume: any recorded live at boot crashes now.
             s.conversations.crash_stale_at_boot();
             start_boot_reconcile(s, reconcile_done);
+            s.first_turn = Some(turned);
             crate::drive::start_drive(s);
         })
         .await?;
+    // The drive's first stretch runs before start_pool returns, as the TypeScript's runs in the
+    // microtasks after startPool and before the server's boot line.
+    let _ = first_turn.await;
     Ok(engine)
 }
 
@@ -175,6 +180,14 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
 // stopped (ADR-0017), enlisted and started Conversations re-adopted; then the merges a shutdown
 // dropped at the pool checkout's gate are chained again.
 fn start_boot_reconcile(session: &mut Session, done: watch::Sender<bool>) {
+    // A headless pool with no orphan has nothing to reconcile against: the TypeScript's chain settles
+    // in microtasks, before the drive's first await, so it is done here and now.
+    let terminal_backed = session.state.config.terminal() == Some(ac_protocol::TerminalKind::Herdr);
+    if !terminal_backed && session.orphans.is_empty() {
+        crate::restart::redo_deferred_merges(session);
+        let _ = done.send(true);
+        return;
+    }
     let engine = session.engine();
     tokio::spawn(async move {
         crate::pool_workspace::resolve_pool_workspace_for_session(&engine).await;
