@@ -347,3 +347,49 @@ fn every_string_union_reads_its_own_strings() {
     assert_eq!(TicketStatus::parse("blocked"), None);
     assert_eq!(InterruptKind::MergeApproval.to_string(), "merge-approval");
 }
+
+// ---------------------------------------------------------------------------
+// What the Bun server really sent: a two-ticket pool run through a checkpoint, a
+// settings save, a Reassign and a resume to its Review gate, captured with the
+// conformance harness (testdata/bun).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StateAnswer {
+    snapshot: Option<EnrichedSnapshot>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GradesAnswer {
+    grades: indexmap::IndexMap<String, TicketGradeSummary>,
+}
+
+#[test]
+fn every_frame_the_bun_server_sent() {
+    let frames = include_str!("../testdata/bun/frames.jsonl");
+    let mut kinds = std::collections::BTreeSet::new();
+    for line in frames.lines().filter(|line| !line.is_empty()) {
+        round_trip::<ServerMessage>(line);
+        let value: Value = serde_json::from_str(line).unwrap();
+        kinds.insert(value["type"].as_str().unwrap().to_string());
+    }
+    let seen: Vec<&str> = kinds.iter().map(String::as_str).collect();
+    assert_eq!(
+        seen,
+        ["card", "delta", "hello", "live", "reply", "snapshot"]
+    );
+}
+
+#[test]
+fn every_body_the_bun_server_sent() {
+    round_trip::<StateAnswer>(include_str!("../testdata/bun/state-checkpoint.json"));
+    let settled: StateAnswer = round_trip(include_str!("../testdata/bun/state-settled.json"));
+    assert_eq!(settled.snapshot.unwrap().phase, RunPhase::Quiescent);
+    round_trip::<SettingsResponse>(include_str!("../testdata/bun/settings.json"));
+    round_trip::<TicketEventsResponse>(include_str!("../testdata/bun/events-01.json"));
+    round_trip::<TicketEventsResponse>(include_str!("../testdata/bun/events-02.json"));
+    round_trip::<TicketActivityResponse>(include_str!("../testdata/bun/activity-01.json"));
+    round_trip::<GradesAnswer>(include_str!("../testdata/bun/grades.json"));
+    round_trip::<TicketBodyResponse>(include_str!("../testdata/bun/ticket-01.json"));
+    round_trip::<PoolLogRange>(include_str!("../testdata/bun/pool-log.json"));
+}
