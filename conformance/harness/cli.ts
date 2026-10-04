@@ -156,9 +156,10 @@ let uiBuild: Promise<void> | null = null;
  * to `ui/src`, with `bun` from PATH. A fresh checkout has no build, so the
  * Bun build is brought up to date once per run, the way Boot itself would
  * do it, rather than by every case's first Boot. The decision is no part of
- * the contract: the Rust binary embeds its UI.
+ * the contract: the Rust binary embeds its UI. A case whose server hands
+ * its pool to Boot (a Restart) calls this itself before it does.
  */
-function ensureUiBuilt(): Promise<void> {
+export function ensureUiBuilt(): Promise<void> {
   uiBuild ??= (async () => {
     const index = join(CHECKOUT, "ui", "dist", "index.html");
     const built = existsSync(index) ? statSync(index).mtimeMs : null;

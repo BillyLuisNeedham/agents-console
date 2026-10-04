@@ -449,3 +449,94 @@ Rust unit tests these rows imply, for what no case can show from outside:
 - Readiness needs the ready pattern on three consecutive reads 500 ms apart, an empty read never counts, and a
   Blocking dialog still on screen four polls after its answer ends the wait. The cases pin only that readiness is read
   between the wrapper and the prompt, and the dialog endings' words.
+
+## C03: server lifecycle outside the route files (`server`)
+
+Ticket C03's 25 rows are `engine.test.ts:7183` and `:13274`, `fleet.test.ts` and `ports.test.ts`. Every one is
+a passing case in `cases/server-fleet.test.ts`, `server-ports.test.ts` and `server-terminal-phases.test.ts`,
+but the half of `ports.test.ts:15` that a C00 case pins already. All seven of the area's gaps are cases, or
+pinned by C00 already, and `cases/server-boot.test.ts` and `server-restart.test.ts` hold the rest: the boot
+line, what a refused start leaves, and the Restart hand-off end to end through the real Boot. Some extras ride
+along: a console.json port out of range, a registry lock a live writer holds and one left empty (both
+`[slow]`, ten real seconds each), and a `--pool` spelt with `..` and a trailing slash.
+
+### Pinned by a C00 case already
+
+- `ports.test.ts:15`, the half with 8787 free: `server-lifecycle.test.ts`'s case for `server.test.ts:2466`,
+  which runs only when 8787 is free on the machine (Decided 2). The half with 8787 busy is in
+  `server-ports.test.ts`, pinned short (below).
+- The gap at `engine/server.ts:2694-2706` (a busy pin leaves no runs/server.pid of its own): the case for
+  `server.test.ts:2307`.
+- The gap at `engine/server.ts:1075-1081` (an empty runs/server.pid is cleared and claimed): the case for
+  `server.test.ts:2198`, whose four lock contents include the empty one.
+
+### Pinned as the Bun server does it, worth a look before the port copies it
+
+- **A start refused after the pool lock leaves runs/server.pid behind** (`server-boot.test.ts`; the
+  `conversations` section above meets the same with an empty pool). `createPoolServer` claims the lock before
+  it loads the Tickets and Conversations and before it resolves the port, and releases it only on an orderly
+  stop or a failed bind. So a Ticket file with no state line, a `--port` outside 0-65535 and a console.json
+  port outside it each exit 1 leaving runs/server.pid naming the dead process. The next start takes a dead
+  pid's lock over, which the case pins too, so nothing is stuck. Intended behaviour (inference): a start
+  refused before it serves releases the lock it took, as a failed bind does, or checks the port before it
+  takes the lock.
+- **A refusal from the drive's first load comes after the bind and the registration**
+  (`server-boot.test.ts`; inventory open question 5, its first bullet). An Assignment the drive refuses
+  (`verify: 0`), or a `held-spawns.json` it cannot read, surfaces from `server.start()`, which the command line
+  calls after the lock, the bind and the fleet entry, with no catch: the process dies of an unhandled
+  rejection with exit 1, Bun's crash dump on stderr and no boot line, leaving runs/server.pid and its registry
+  entry. The case pins the exit, the empty stdout, the message within stderr, the lock and the entry.
+  Intended behaviour (inference): refused before the bind like any other pool-load error, exit 1 naming the
+  problem, nothing left behind.
+- **`--port` is read with JavaScript's `Number`** (`server-ports.test.ts`). A word is refused as `got NaN`,
+  which the case pins for `abc`; a `--port` with nothing after it says the same. Not pinned: `--port ""` reads
+  as 0 and boots on any free port, and `--port 0x10` and `--port 1e3` read as ports 16 and 1000 (which the
+  system then refuses an ordinary user), where a Rust server parsing a decimal integer would refuse all three
+  as given. Intended behaviour (inference): anything but decimal digits is refused, naming the text as given.
+
+### Pinned short of what the Bun server prints
+
+- **A registry lock a live writer holds.** After its ten-second wait the server writes
+  `fleet registry: fleet registry: lock <path> is held by live pid <pid>` to stderr: `engine/fleet.ts`'s error
+  starts `fleet registry: ` already and `engine/server.ts` adds it again. The case asks for one line that
+  starts `fleet registry: ` and names the lock and its pid, so a server that says it once passes.
+- **A registry that cannot be written** (the gap at `engine/server.ts:2711`): what follows `fleet registry: `
+  is Bun's own error (`EEXIST: file already exists, mkdir '<HOME>/.agent-graphs'`), so the case pins the prefix
+  and that the line is the only one on stderr.
+- **The dead drive's error** (`engine.test.ts:7183`): Bun's is `Executable not found in $PATH: "claude"`, and
+  runs/errors.jsonl carries its JavaScript stack beside it. The case asks for an error naming `claude`, the
+  same error after `pool dead: ` as the pool log's last line, and no key beside `at`, `error` and an optional
+  `stack`.
+- **Which port the unpinned hunt lands on** (`ports.test.ts:15`, 8787 busy): other servers come and go on the
+  ports just above 8787 on a shared machine, so the case pins a port above 8787 and outside the range the
+  system assigns for port 0, not the first free one. Rust unit test: *port resolution: with neither a flag
+  nor a pin, the server binds the first free port from 8787 upward.*
+- **Port 0** (`ports.test.ts:30`, `:35`): "a free port the system assigns" is a port in the system's ephemeral
+  range, read from Linux's `ip_local_port_range` or macOS's `net.inet.ip.portrange` sysctls; where neither can
+  be read, only that it bound.
+- **"Registers without waiting"** (`fleet.test.ts:152`): a boot within ten seconds of the launch, the wait a
+  live writer's lock gets. A machine loaded enough to take that long to boot fails the case though the server
+  is right.
+
+### Where the cases reach a row differently from its wording
+
+- `engine.test.ts:7183`: a drive that dies in its first super-step is dead before a socket can open, so the
+  case runs 01 on the opencode stub, held until a socket watches, and kills the drive with 02's launch on
+  claude. The server coalesces frames (seen: one running snapshot, then one delta straight to dead), so the
+  case asks for at least one running frame before the dead one, and nothing else.
+- `engine.test.ts:13274`, "SIGTERM (or POST /api/stop)": both, as two cases.
+- `fleet.test.ts:211` and `:224`: "the live pid of the listener holding P" is the test process's own, since
+  the rig's listener runs in it.
+- `ports.test.ts:11`: the busy half holds the pin after the first server stopped on it, so the registry still
+  lists that server; the refusal names no holder because its pid is dead.
+
+### Observed while writing these, not pinned
+
+- The relaunched Boot of a Restart opens the Console in a browser again: the hand-off passes no `--no-open`,
+  so the tab already waiting for the port gets another beside it. The restart case puts a recording
+  `xdg-open` and `open` first on the server's PATH. Intended behaviour (inference): a relaunch opens nothing.
+- The boot line names `--pool` as given, not resolved: launched with `<repo>/.scratch/../.scratch/./pool/` it
+  prints that spelling, while runs/server.pid, the registry and the refusals use the resolved path. Boot reads
+  only the port from it.
+- `ports.test.ts:23` stays hidden, as the inventory files it: the hunt's start port cannot be set from
+  outside (Decided 2, no knobs).
