@@ -542,3 +542,71 @@ all; nothing malformed).
   only the port from it.
 - `ports.test.ts:23` stays hidden, as the inventory files it: the hunt's start port cannot be set from
   outside (Decided 2, no knobs).
+
+## `herdr` panes: the pane survey, Peek, Held panes and Finished terminals (C15)
+
+Every one of C15's 39 visible rows (36 `herdr`, 3 `enlist`) is a passing case in
+`cases/herdr-panes-finished.test.ts`, `herdr-panes-held.test.ts`, `herdr-panes-survey.test.ts` and
+`herdr-panes-reads.test.ts`, on the shared setup in `herdr-panes-support.ts`. So are the four gaps the C14
+section above leaves here: the bulk close, its refused `tab.close`, the bulk close when `pane.list` fails, and
+Peek of a pane no Turn loop watches. The two seam rows use new fake herdr controls: `answerWith(method, reply)`
+answers every call of a method with a body given whole (a `pane.list` result with no `panes` list for
+`herdr.test.ts:497`, a `tab_not_found` error for `:560`). Two more serve the survey rows: `relistPane(paneId,
+listing)` changes how `pane.list` reports a pane, and `closeTab(tabId)` closes a tab the way the operator does
+from herdr. Seven cases wait out the survey's real fifteen-second cadence and are named slow. The area's two hidden
+rows (`pane-survey.test.ts:43` and `:64`, how refreshes queue behind a listing) stay Rust unit tests, as the
+inventory sorts them.
+
+How the cases come by a listing, which binds the Rust server:
+
+- The Held panes and the Finished terminals count come from the survey's last listing, which lands on the
+  cadence or when the engine asks for one. Where a row needs a listing at a moment of its own, the case asks
+  for the bulk close (POST /api/terminals/close-finished) or Keep talking, both of which list through the
+  survey before they act; only the cadence rows (`pane-survey.test.ts:9`, `:25`, `herdr.test.ts:497`) wait
+  for the timer. So a Rust bulk close and Keep talking must list through the same survey the snapshot is
+  derived from, and the listing they take must move the Held panes and the count as a cadence listing does.
+- A pool booted over events written by hand carries a witness, a Ticket at a checkpoint over a listed pane.
+  Holding it at boot asks for a listing at once, as `seedHeldPanes` does, so the first listing lands without
+  the cadence. A server that waits for its cadence still passes, fifteen seconds slower.
+
+Where the cases reach a row differently from its wording:
+
+- `finished-terminals.test.ts:52`: the crash Interrupts of 01, 04 and 05 wait for their super-step, which the
+  Live attempt holds open, so the case waits for the three Attempts to end rather than for their Interrupts.
+- `held-panes.test.ts:78`: the headless attempt, the resolver attempt and the attempt never spawned are
+  booted from events written by hand, since a terminal-backed pool runs nothing headless but a fallback and a
+  resolver never checkpoints its Ticket. The fallback is a real run with `tab.create` refused.
+- `held-panes.test.ts:48`: the candidate's checkpoint is raised only once its grader has graded it, so the
+  case answers the grader with a pass.
+- `keep-talking.test.ts:251`: the pane leaves herdr's listing through the fake's `endPane`, which writes no
+  exit-code file, so the case is told apart from `:218`, where the TUI exits.
+- `finished-terminals.test.ts:66`: the attempt's ending released the engine's report of its agent from herdr's
+  `agent.list`, so the case binds the agent again (`seedAgent`) before the operator enlists it.
+- `enlisted.test.ts:69`: the row has every `pane.read` of the enlisted pane a viewport read. Through POST
+  /api/enlist that holds from the claim on only: the teaching Turn the claim types checks its paste with
+  `recent` reads of 200 lines, as every typed Turn does (`LAUNCH_READ` in `engine/pane-session.ts`). The unit
+  test registers with no teaching Turn, the shape a boot re-adoption has. The case pins the reads after the
+  claim answers. Rust unit test: *enlisted attempts: registered with no teaching Turn, every read of the pane,
+  the settling reads included, is `pane.read {pane_id, source: visible, format: text, strip_ansi: true}` with no
+  line count, and each is recorded for Peek.*
+- `enlisted.test.ts:128`: the row's second half, that disposing the enlisted attempts at shutdown forgets a
+  live pane's recorded read, leaves nothing to see once the process is gone. Rust unit test: *enlisted
+  attempts: dispose stops every tick and forgets every pane's recorded read.*
+- `pane-reads.test.ts:20`: that forgetting a pane never recorded changes nothing is in-memory only. Rust unit
+  test: *pane read register: forgetting a pane with no recorded read is a no-op and leaves the others.*
+
+Behaviour of the TypeScript server the cases pin as it is today, each worth a look before the port copies it:
+
+- A tab herdr refuses to close at a Conversation's crash (`keep-talking.test.ts:491`) puts its
+  `<id>: herdr tab <tab> could not be closed (<error>)` line in the pool's state with no snapshot of its own
+  (`closeTabRecorded` in `engine/engine.ts` applies the line without emitting), so the line reaches GET
+  /api/pool-log and the socket only with the next snapshot. The case publishes one with a Settings save that
+  changes nothing (PUT /api/settings/pool with an empty `config`), and passes as well on a server that
+  publishes the line when it writes it. Intended behaviour (inference): the line is published at once.
+- The bulk close records each `tab-closed` on its owner's latest attempt, not on the attempt that opened the
+  tab, and with the terminal id of the last spawn that named the tab (`finished-terminals.test.ts:38`: Ticket
+  01's t1, opened by attempt 1 and named again by its Continued attempt 2, is recorded closed on attempt 3, a
+  headless one, with no terminal id).
+- The enlist claim's teaching Turn reads the scrollback of the operator's pane to check its paste, which moves
+  the viewport of an operator sitting in it: what issue #122 stopped the Turn-state reads from doing. Not
+  pinned either way; the case for `enlisted.test.ts:69` counts only the reads after the claim.
