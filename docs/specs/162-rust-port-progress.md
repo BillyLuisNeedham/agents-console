@@ -50,25 +50,22 @@ M0 done: C22's full Bun run after the last fixture change passed 1159 of 1160 (o
 
 ## Right now (for a resumed or compacted context)
 
-M0 is done. On the branch: every Rust port except the engine core and server (CLI, Jev, attempts, herdr,
-git, protocol, formats), the bench's `--server rust` (3f4916f) and the flaky-test fixes (d49414a).
+M0 is done. On the branch: every Rust port up to the feature wave. The engine core and the server port are
+merged (9860f30, rebuilt on r-s-server's trailer-free commits) and `agent-console server` runs a pool on
+`start_pool(RunOptions)`. Unmatched paths answer 500 as Bun does (7f4a310). The engine core's conformance at
+that point: scheduling 43/46, interrupts 32/48, merges 56/62, formats 31/41, http 12/12, disk, socket and
+server green; every failure is a feature-wave module.
 
-Running:
-- r-f1-engine (Opus) in rust-port-f1-engine: merging the branch head f4e2839 and the server port ce034ed
-  (r-s-server's commits rewritten without attribution trailers), wiring `agent-console server` to
-  `start_pool(RunOptions)`, making unmatched paths answer 500 as Bun does, then running conformance against
-  `target/debug/agent-console`: scheduling, interrupts, merges, formats, disk, http, socket, server. It
-  reports when scheduling and interrupts are green. Land its merge commit with `git merge --no-ff` and
-  check no Co-Authored-By or Claude-Session trailer arrived (`git log --format=%B`).
+Running (Sonnet, from 7f4a310, worktrees rust-port-<name>, briefs brief-r-<name>.md plus
+wave-launch-state.md in the scratchpad): r-verify (verify, Jev, keep talking), r-spawns (spawns,
+steward_actions, steward.ts), r-conversations, r-panes (enlist, held, Pool workspace, terminals), r-restart
+(restart, Reassign, config reload). Land each with `git merge --no-ff` after checking for attribution
+trailers (`git log --format=%B | grep -c 'Co-Authored\|Claude-Session'`); rewrite any that carry them.
 
 Next, in order:
-1. When r-f1-engine lands: start the feature wave on Sonnet from the new head, one detached worktree each
-   (scratchpad `bin/mkwt.sh <name>`), briefs ready in the scratchpad: brief-r-verify.md, brief-r-spawns.md,
-   brief-r-conversations.md, brief-r-panes.md, brief-r-restart.md. Opus only for integration and the
-   engine core. Every brief forbids attribution trailers; check anyway at landing.
-2. Land each, run its areas against Rust, then the whole suite `--server rust`, then takeover with
+1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
    `--legs bun,rust,bun`.
-3. M5: bench gates (`bun run scripts/bench-lag.ts --e2e --server rust --rust-bin target/release/agent-console`
+2. M5: bench gates (`bun run scripts/bench-lag.ts --e2e --server rust --rust-bin target/release/agent-console`
    against `--server bun`), render-survival (`bun ui/harness/run.ts`), two real throwaway pools, the flip
    (shim builds and execs the binary, delete the TS engine, generated protocol.ts and wire.ts replace the
    hand files), merge main, outcome JSON, final message.
