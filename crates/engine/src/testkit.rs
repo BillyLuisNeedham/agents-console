@@ -279,3 +279,50 @@ pub async fn settled(engine: &Engine) -> RunPhase {
 pub fn last(engine: &Engine) -> Arc<PoolSnapshot> {
     engine.snapshot().expect("a snapshot was emitted")
 }
+
+/// Wait, at most 30 s, for a snapshot that satisfies `ready`, and hand it back.
+pub async fn wait_for(engine: &Engine, ready: impl Fn(&PoolSnapshot) -> bool) -> Arc<PoolSnapshot> {
+    let mut snapshots = engine.subscribe();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(snapshot) = snapshots.borrow_and_update().clone()
+                && ready(&snapshot)
+            {
+                return snapshot;
+            }
+            snapshots.changed().await.expect("the engine runs");
+        }
+    })
+    .await
+    .expect("the snapshot arrives")
+}
+
+/// Whether a snapshot has an Interrupt of this kind on this ticket.
+pub fn has_interrupt(snapshot: &PoolSnapshot, id: &str, kind: ac_protocol::InterruptKind) -> bool {
+    snapshot
+        .state
+        .interrupts
+        .iter()
+        .any(|i| i.ticket_id == id && i.kind == kind)
+}
+
+/// Run git in the pool.
+pub fn pool_git(pool: &Pool, args: &[&str]) {
+    git(Path::new(&pool.path), args);
+}
+
+/// `engine.answer`, waited for at most 30 s.
+pub async fn answer(
+    engine: &Engine,
+    id: String,
+    note: Option<String>,
+    action: ac_protocol::ResumeAction,
+    attempt: Option<u32>,
+) -> Result<RunPhase, crate::error::EngineError> {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        engine.answer(id, note, action, attempt),
+    )
+    .await
+    .expect("the answer is processed and the pool settles")
+}

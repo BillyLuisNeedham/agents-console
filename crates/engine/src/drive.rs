@@ -947,8 +947,9 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             }
             settle_drive(s, Some(phase), None);
             // A Continued attempt's grading or spawns waiting to land kicked a drive that was still
-            // in flight, which does nothing: the drive that closes starts the next.
-            if !s.continued_grades.is_empty() || spawns_await_boundary(s) {
+            // in flight, which does nothing: the drive that closes starts the next. So does an answer
+            // queued after the last boundary's drain.
+            if !s.continued_grades.is_empty() || spawns_await_boundary(s) || s.queued_since_drain {
                 crate::answers::kick_processing(s)?;
             }
             Ok(())

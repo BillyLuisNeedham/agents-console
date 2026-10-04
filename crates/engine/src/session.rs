@@ -160,6 +160,11 @@ pub struct Session {
     pub settled_phase: Option<RunPhase>,
     pub settle_waiters: Vec<SettleWaiter>,
     pub answer_waiters: HashMap<u64, Vec<AnswerWaiter>>,
+    /// An answer was queued while a drive was in flight and no drain has run since. The drive that
+    /// closes with one kicks the next, so an answer accepted between the last boundary and the
+    /// settle is never left waiting for an unrelated kick (in the TypeScript only microtasks run in
+    /// that window, so no answer can arrive there).
+    pub queued_since_drain: bool,
     pub on_snapshot: Option<SnapshotHook>,
     /// Where the Machine defaults live (issue #121).
     pub machine_defaults: MachineDefaultsPaths,
@@ -286,6 +291,7 @@ impl Session {
             settled_phase: None,
             settle_waiters: Vec::new(),
             answer_waiters: HashMap::new(),
+            queued_since_drain: false,
             on_snapshot: None,
             machine_defaults: base.machine_defaults,
             herdr_socket: base.herdr_socket,

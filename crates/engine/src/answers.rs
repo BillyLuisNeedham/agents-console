@@ -214,6 +214,7 @@ pub fn accept_answer(
     );
     // Mid-flight acceptance is the one moment the queue changes without an emit of its own.
     if session.driving {
+        session.queued_since_drain = true;
         emit_snapshot(session, RunPhase::Running);
     }
     Ok(record)
@@ -234,6 +235,7 @@ pub fn kick_processing(session: &mut Session) -> anyhow::Result<()> {
 /// rejects its own waiters and is consumed; a processed one persists the resulting state itself
 /// before its record is marked processed. A persist failure propagates.
 pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
+    session.queued_since_drain = false;
     for record in session.answers.pending() {
         // An answer that merges into the pool checkout waits, still queued, while a Continued attempt
         // works there (ADR-0027). A Close merges nothing, so it never waits.
