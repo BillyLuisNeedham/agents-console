@@ -15,6 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 futures.workspace = true
+tokio-util.workspace = true
 regex.workspace = true
 chrono.workspace = true
 libc.workspace = true
@@ -23,3 +24,5 @@ reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Paused time, so the RPC watchdog's 10 s passes without being waited out.
+tokio = { workspace = true, features = ["test-util"] }
