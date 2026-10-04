@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::watch;
 
 use ac_core::checkpoints::CheckpointStore;
 use ac_core::harness::{Harness, Harnesses};
@@ -17,7 +16,7 @@ use ac_protocol::{RunPhase, TicketEvent, TicketEventKind};
 
 use crate::actor::{Engine, SnapshotPublisher};
 use crate::options::RunOptions;
-use crate::session::{Session, SessionBase};
+use crate::session::Session;
 use crate::snapshot::PoolSnapshot;
 
 /// A checkpoint store in memory: every write is kept, and the next `fail` writes fail.
@@ -52,22 +51,7 @@ impl CheckpointStore for MemoryStore {
 
 /// A session with nothing in it, over a directory that need not exist.
 pub fn bare_session(publisher: SnapshotPublisher) -> Session {
-    let (_, terminal_reconcile) = watch::channel(true);
-    let runs = "/nonexistent/runs";
-    Session::new(SessionBase {
-        publisher,
-        pool_dir: "/nonexistent".into(),
-        runs_dir: runs.into(),
-        cwd: "/nonexistent".into(),
-        git: false,
-        harnesses: Harnesses::defaults(),
-        config: ac_core::config::PoolConfig::default(),
-        store: Box::new(MemoryStore::default()),
-        machine_defaults: ac_core::machine_defaults::default_machine_defaults_paths("/nonexistent"),
-        herdr_socket: "/nonexistent/herdr.sock".into(),
-        spawn_proposals: ac_core::spawn_proposals::load_spawn_proposals(Path::new(runs)).unwrap(),
-        terminal_reconcile,
-    })
+    crate::session::stand_in_session(publisher)
 }
 
 fn git(dir: &Path, args: &[&str]) {

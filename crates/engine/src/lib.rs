@@ -33,6 +33,7 @@ pub mod conversations;
 pub mod drive;
 #[cfg(test)]
 mod e2e_tests;
+pub mod enlist;
 pub mod enlisted;
 pub mod error;
 pub mod handle;
@@ -61,5 +62,6 @@ pub mod verify;
 pub use actor::{Engine, EngineGone};
 pub use boot::start_pool;
 pub use error::EngineError;
+pub use handle::PoolOptions;
 pub use options::RunOptions;
 pub use snapshot::{PoolSnapshot, PoolState};

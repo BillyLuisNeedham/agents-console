@@ -420,6 +420,44 @@ pub fn js_key_order<V>(map: &IndexMap<String, V>) -> Vec<(&String, &V)> {
         .collect()
 }
 
+/// A checkpoint store that keeps nothing: what a stand-in session is built over.
+#[derive(Debug, Default)]
+pub struct NoStore;
+
+impl CheckpointStore for NoStore {
+    fn write(&mut self, _state: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn latest(&mut self) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
+    fn close(&mut self) {}
+}
+
+/// A session with nothing in it, over a pool directory that need not exist: the stand-in a test of
+/// another crate (the server's) runs the real actor on, publishing its own snapshots.
+pub fn stand_in_session(publisher: SnapshotPublisher) -> Session {
+    let (_, terminal_reconcile) = watch::channel(true);
+    let runs = "/nonexistent/runs";
+    Session::new(SessionBase {
+        publisher,
+        pool_dir: "/nonexistent".into(),
+        runs_dir: runs.into(),
+        cwd: "/nonexistent".into(),
+        git: false,
+        harnesses: Harnesses::defaults(),
+        config: ac_core::config::PoolConfig::default(),
+        store: Box::new(NoStore),
+        machine_defaults: ac_core::machine_defaults::default_machine_defaults_paths("/nonexistent"),
+        herdr_socket: "/nonexistent/herdr.sock".into(),
+        spawn_proposals: ac_core::spawn_proposals::load_spawn_proposals(std::path::Path::new(runs))
+            .expect("an absent proposals file loads empty"),
+        terminal_reconcile,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

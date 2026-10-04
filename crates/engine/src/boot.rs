@@ -96,7 +96,10 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
         Some(store) => store,
         None => Box::new(SqliteCheckpointStore::open(Path::new(&pool_dir))?),
     };
-    let mut machine_defaults = default_machine_defaults_paths(&options.home);
+    let mut machine_defaults = options
+        .machine_defaults
+        .clone()
+        .unwrap_or_else(|| default_machine_defaults_paths(&options.home));
     if let Some(file) = &options.machine_defaults_path {
         machine_defaults.file = file.clone();
     }
@@ -127,7 +130,7 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     session.snapshot_history = options.snapshot_history;
     session.on_snapshot = options.on_snapshot.clone();
     session.parent_env = options.parent_env.clone();
-    session.launch_cadence = options.launch_cadence.clone();
+    session.launch_cadence = options.launch_cadence;
     session.pool_workspace = PoolWorkspaceState {
         launch: options.herdr_workspace.clone(),
         wanted: pool_workspace_label(title_of(&config).as_deref(), &pool_dir),

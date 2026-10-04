@@ -5,10 +5,14 @@
 //! Ported: accept, answer, settled, shutdown, close, reload_config, pane_read. The rest refuse with
 //! "not ported yet" until their feature's port replaces the body, keeping the signature.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use ac_core::harness::Harnesses;
+use ac_core::machine_defaults::MachineDefaultsPaths;
 use ac_protocol::{
     ConversationView, EnlistRequest, EnlistResponse, ResumeAction, RunPhase,
     StartConversationRequest, StewardAnswerAction, StewardStateResponse,
@@ -17,6 +21,7 @@ use ac_protocol::{
 use crate::actor::Engine;
 use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
+use crate::options::RunOptions;
 use crate::pane_reads::PaneRead;
 
 fn not_ported<T>(what: &str) -> Result<T, EngineError> {
@@ -30,7 +35,69 @@ enum Accepted {
     Waiting(tokio::sync::oneshot::Receiver<Result<(), EngineError>>),
 }
 
+/// What the server starts a pool's run with (engine.ts `startPool`'s options as server.ts passes
+/// them). Every value was read at the CLI boundary; nothing below it reads the environment.
+#[derive(Clone)]
+pub struct PoolOptions {
+    /// The pool directory, `path.resolve`d from `--pool` (not realpath'd).
+    pub pool_dir: String,
+    /// The harness table (`{...defaultHarnesses, ...options.harnesses}`).
+    pub harnesses: Harnesses,
+    /// The herdr daemon's socket.
+    pub herdr_socket: PathBuf,
+    /// The herdr workspace the server was launched in (`HERDR_WORKSPACE_ID`, issue #94).
+    pub herdr_workspace: Option<String>,
+    /// Jev's key (`TYPESAFE_API_KEY`, ADR-0020); absent, the pool runs on its heuristics.
+    pub jev_api_key: Option<String>,
+    /// Where Jev's TypeSafe calls go (`JEV_BASE_URL`); absent, TypeSafe's own API.
+    pub jev_base_url: Option<String>,
+    /// Where the Steward's command reaches this server (`http://localhost:<port>`, ADR-0030).
+    pub console_url: String,
+    /// How often an enlisted attempt re-reads its pane (tests shrink it; 2 s otherwise).
+    pub enlist_poll: Option<Duration>,
+    /// How often a live Conversation re-reads its pane (tests shrink it; 2 s otherwise).
+    pub conversation_poll: Option<Duration>,
+    /// How long an enlist waits for a working pane to reach waiting (tests shrink it).
+    pub enlist_teaching_wait: Option<Duration>,
+    /// How often the pane survey lists herdr's panes (tests shrink it; 15 s otherwise).
+    pub pane_survey: Option<Duration>,
+    /// The environment every harness child inherits (`process.env`, read by the CLI).
+    pub parent_env: Arc<Vec<(String, String)>>,
+    /// Where the Machine defaults live (the resolver's fallback).
+    pub machine_defaults: MachineDefaultsPaths,
+}
+
 impl Engine {
+    /// `startPool` (with `snapshotHistory: 1`): load the pool, start its actor and drive, and resolve
+    /// once the first snapshot is published, so the server's `current()` is never null after a start.
+    /// A pool the first load refuses (a Ticket file that will not load, a config that does not resolve)
+    /// is the error, with the TypeScript's message; the CLI prints it and exits 1.
+    pub async fn start_pool(options: PoolOptions) -> Result<Engine, EngineError> {
+        let ms = |d: Option<Duration>| d.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let mut run = RunOptions::new(options.pool_dir, "");
+        run.harnesses = Some(options.harnesses);
+        run.parent_env = options.parent_env;
+        run.machine_defaults = Some(options.machine_defaults);
+        run.herdr_socket = Some(ac_core::js::path_text(&options.herdr_socket));
+        run.herdr_workspace = options.herdr_workspace;
+        run.console_url = Some(options.console_url);
+        run.enlist_poll_ms = ms(options.enlist_poll);
+        run.conversation_poll_ms = ms(options.conversation_poll);
+        run.enlist_teaching_wait_ms = ms(options.enlist_teaching_wait);
+        run.pane_survey_ms = ms(options.pane_survey);
+        // STUB(verify): the configured port is the TypeSafe client (ac_io::jev); until the verify port
+        // wires it in, only whether a key was given is carried, for the boot line.
+        run.jev = options
+            .jev_api_key
+            .filter(|key| !key.is_empty())
+            .map(|_| crate::jev::Jev::configured_stub());
+        // The server reads only the snapshot it was last handed (issue #157).
+        run.snapshot_history = Some(1);
+        crate::boot::start_pool(run)
+            .await
+            .map_err(|error| EngineError::refused(error.to_string()))
+    }
+
     /// `accept`: record an answer (ADR-0004) and kick processing; never waits for it. An idle pool
     /// drains it and starts a fresh drive inside this call, so the snapshot read right after holds
     /// the processed state.

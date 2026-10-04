@@ -31,6 +31,9 @@ pub struct RunOptions {
     pub issue_runner_path: Option<String>,
     /// The Machine defaults file (issue #121), which wins field by field over the legacy one above.
     pub machine_defaults_path: Option<String>,
+    /// The Machine defaults files whole, in place of the ones under `home` (the server passes its
+    /// own); the two overrides above still apply over them.
+    pub machine_defaults: Option<ac_core::machine_defaults::MachineDefaultsPaths>,
     /// The checkpoint store seam: tests substitute a store whose write fails on demand. Defaults to
     /// the real SQLite store on `<pool>/console.db`.
     pub store: Option<Box<dyn CheckpointStore>>,
@@ -71,6 +74,7 @@ impl RunOptions {
             parent_env: Arc::new(Vec::new()),
             issue_runner_path: None,
             machine_defaults_path: None,
+            machine_defaults: None,
             store: None,
             herdr_socket: None,
             launch_cadence: None,

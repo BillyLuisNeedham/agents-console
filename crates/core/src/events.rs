@@ -193,14 +193,31 @@ struct ParsedEvents {
     settled: u64,
     /// The last bytes before `settled`, as they were read.
     tail: Vec<u8>,
-    events: Vec<Arc<TicketEvent>>,
+    events: Vec<ParsedLine>,
     /// The final line with no newline yet, as last read: parsed, never kept past a change.
-    unsettled: Vec<Arc<TicketEvent>>,
+    unsettled: Vec<ParsedLine>,
+}
+
+/// One events line the TypeScript reader takes: its JSON verbatim (unknown keys and an unvalidated `at`
+/// or `payload` included, as the server serves it), and the typed event when the line has every field
+/// one needs.
+#[derive(Debug)]
+struct ParsedLine {
+    raw: Arc<Value>,
+    event: Option<Arc<TicketEvent>>,
 }
 
 impl ParsedEvents {
+    fn lines(&self) -> impl Iterator<Item = &ParsedLine> {
+        self.events.iter().chain(&self.unsettled)
+    }
+
     fn all(&self) -> Vec<Arc<TicketEvent>> {
-        self.events.iter().chain(&self.unsettled).cloned().collect()
+        self.lines().filter_map(|line| line.event.clone()).collect()
+    }
+
+    fn all_raw(&self) -> Vec<Arc<Value>> {
+        self.lines().map(|line| line.raw.clone()).collect()
     }
 }
 
@@ -221,16 +238,29 @@ impl EventsCache {
 
     /// The events of the file at `path`, in file order. A missing file is no events.
     pub fn read(&mut self, path: &Path) -> Vec<Arc<TicketEvent>> {
+        self.parsed_at(path)
+            .map_or_else(Vec::new, ParsedEvents::all)
+    }
+
+    /// The file's event lines as JSON, verbatim, in file order: every line the TypeScript reader takes
+    /// (a known `kind` and a numeric `attempt`; `at` and `payload` unchecked, extra keys kept), as the
+    /// server serves them.
+    pub fn read_raw(&mut self, path: &Path) -> Vec<Arc<Value>> {
+        self.parsed_at(path)
+            .map_or_else(Vec::new, ParsedEvents::all_raw)
+    }
+
+    fn parsed_at(&mut self, path: &Path) -> Option<&ParsedEvents> {
         let Ok(meta) = std::fs::metadata(path) else {
             self.parsed.remove(path);
-            return Vec::new();
+            return None;
         };
         let stamp = stamp_of(&meta, now_ms());
         if let Some(entry) = self.parsed.get(path)
             && stamp.is_some()
             && entry.stamp == stamp
         {
-            return entry.all();
+            return self.parsed.get(path);
         }
         let fresh_start = !self.parsed.get(path).is_some_and(|entry| {
             entry.dev == meta.dev()
@@ -252,12 +282,13 @@ impl EventsCache {
                 },
             );
         }
-        let entry = self.parsed.get_mut(path).expect("the entry was just made");
-        let Ok(fresh) = read_from(path, entry.settled) else {
+        let settled = self.parsed.get(path).map_or(0, |entry| entry.settled);
+        let Ok(fresh) = read_from(path, settled) else {
             // Gone between the stat and the read: as absent.
             self.parsed.remove(path);
-            return Vec::new();
+            return None;
         };
+        let entry = self.parsed.get_mut(path).expect("the entry was just made");
         let last_newline = fresh.iter().rposition(|b| *b == b'\n');
         let unsettled_from = match last_newline {
             Some(at) => {
@@ -270,7 +301,7 @@ impl EventsCache {
         };
         entry.unsettled = parse_lines(&fresh[unsettled_from..]);
         entry.stamp = stamp;
-        entry.all()
+        Some(entry)
     }
 }
 
@@ -299,7 +330,7 @@ fn ends_settled_with(path: &Path, entry: &ParsedEvents) -> bool {
 /// Parse events lines. The file is only ever appended to, but a crash could tear a line, so a
 /// malformed or partial line is skipped and the rest of the timeline stays readable. A line whose kind
 /// is not a known event kind, or whose attempt is not a number, is skipped the same way.
-fn parse_lines(bytes: &[u8]) -> Vec<Arc<TicketEvent>> {
+fn parse_lines(bytes: &[u8]) -> Vec<ParsedLine> {
     if bytes.is_empty() {
         return Vec::new();
     }
@@ -307,11 +338,10 @@ fn parse_lines(bytes: &[u8]) -> Vec<Arc<TicketEvent>> {
         .split('\n')
         .filter(|line| !js::trim(line).is_empty())
         .filter_map(parse_line)
-        .map(Arc::new)
         .collect()
 }
 
-fn parse_line(line: &str) -> Option<TicketEvent> {
+fn parse_line(line: &str) -> Option<ParsedLine> {
     let value = js::parse(line).ok()?;
     let Value::Object(fields) = &value else {
         return None;
@@ -321,8 +351,13 @@ fn parse_line(line: &str) -> Option<TicketEvent> {
         return None;
     }
     // A line the TypeScript would take but no TicketEvent can hold (an attempt that is not a whole
-    // number, no `at` or `payload`) is as torn as one that does not parse; the engine writes none.
-    serde_json::from_value(value).ok()
+    // number, no `at` or `payload`) is as torn as one that does not parse to the typed readers; the
+    // engine writes none. The server's raw read still serves it, as the TypeScript does.
+    let event = serde_json::from_value(value.clone()).ok().map(Arc::new);
+    Some(ParsedLine {
+        raw: Arc::new(value),
+        event,
+    })
 }
 
 // Every snapshot, request and survey reads these files (issue #157): one cache for the process, as
@@ -338,6 +373,16 @@ pub fn read_events(runs_dir: &Path, ticket_id: &str) -> Vec<Arc<TicketEvent>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .read(&path)
+}
+
+/// A Ticket's event lines as JSON, verbatim, through the same cache (`EventsCache::read_raw`): what
+/// GET /api/events and the socket's cards serve.
+pub fn read_event_values(runs_dir: &Path, ticket_id: &str) -> Vec<Arc<Value>> {
+    let path = events_file(runs_dir, ticket_id);
+    EVENTS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .read_raw(&path)
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +495,30 @@ mod tests {
         let events = read_events(&runs.path().join("nested"), "01");
         assert_eq!(events.len(), 1);
         assert_eq!(*events[0], event);
+    }
+
+    // The server serves event lines as the TypeScript reader takes them: unknown keys kept, and a line
+    // with no `at` (which no typed event can hold) served all the same.
+    #[test]
+    fn serves_raw_lines_verbatim_where_the_typed_read_skips_them() {
+        let runs = temp_runs();
+        append(
+            &file(runs.path()),
+            "{\"at\":\"t\",\"attempt\":1,\"kind\":\"spawned\",\"payload\":{},\"extra\":true}\n\
+             {\"attempt\":2,\"kind\":\"exited\",\"payload\":{}}\n\
+             {\"attempt\":\"x\",\"kind\":\"exited\"}\n",
+        );
+        let raw = read_event_values(runs.path(), "01");
+        assert_eq!(
+            raw.iter()
+                .map(|value| (**value).clone())
+                .collect::<Vec<_>>(),
+            vec![
+                serde_json::json!({"at": "t", "attempt": 1, "kind": "spawned", "payload": {}, "extra": true}),
+                serde_json::json!({"attempt": 2, "kind": "exited", "payload": {}}),
+            ]
+        );
+        assert_eq!(read_events(runs.path(), "01").len(), 1);
     }
 
     // events.test.ts:45, and the conformance gap at events.ts:419-426

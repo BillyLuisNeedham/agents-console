@@ -46,7 +46,7 @@ pub fn attempt_env_of(session: &Session, config: Option<&PoolConfig>) -> Attempt
         pool_workspace: Arc::new(crate::attempt_run::NoPoolWorkspace),
         host: Arc::new(session.engine()),
         terminal_backed: config.terminal() == Some(TerminalKind::Herdr),
-        launch_cadence: session.launch_cadence.clone(),
+        launch_cadence: session.launch_cadence,
         claude_config_path: None,
     }
 }
