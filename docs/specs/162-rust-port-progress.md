@@ -27,7 +27,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | interrupts | C08 | landed (588d76d..63102a3), 48 cases |
 | attempts, terminal launch | C12 | landed (1f8a9b2..e54c5bc), 66 cases |
 | attempts, endings and logs | C13 | wave 1, subagent m0-c13 |
-| herdr panes | C15 | wave 1, subagent m0-c15 |
+| herdr panes | C15 | landed (eecd384..1bee44e), 42 cases |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
 | protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
@@ -173,3 +173,28 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   after the drive's first load succeeds.
 - Shutdown has a 15 s hard limit: past it the server exits 1 and skips the Boot hand-off. The Boot a
   Restart relaunches opens the browser again (no --no-open passed).
+
+### herdr panes (C15, eecd384..1bee44e)
+
+- The fake herdr gained `closeTab(tabId)`, `relistPane(paneId, listing)` and `answerWith(method, reply)`.
+- The bulk close (POST /api/terminals/close-finished) and Keep talking list through the same pane survey
+  the snapshot derives from, and their listing updates Held panes and the Finished terminals count exactly
+  as a cadence listing does; cases use them as on-demand listing triggers instead of the 15 s cadence. A
+  bulk close with its own one-off listing fails them.
+- At boot, holding a checkpointed pane (seedHeldPanes) asks the survey for a listing at once.
+- A Held pane let go by a listing (gone, listed differently, TUI exited) stays let go; if a later listing
+  shows it again, its tab becomes a Finished terminal, never held again (pinned).
+- Hidden, Rust unit tests: opened tabs and enlisted terminals are recomputed only when the survey lists
+  (inside its list callback); the untouchable panes (live, held, Conversations, registered) at every emit.
+  A failed listing still refreshes the opened tabs while the old listing stays. The snapshot's Held panes
+  check the TUI's exit-code file at every emit, but the hold itself is deleted only at a listing (or Keep
+  talking's refresh).
+- Crash Interrupts join at the super-step boundary (a live sibling holds them back); checkpoints join at
+  exit and hold their pane at once.
+- The bulk close records each tab-closed on the owner's latest attempt, with the terminal id of the last
+  spawn that named the tab (pinned).
+- For the operator to judge before the port copies them (recorded in NOT-PORTED.md): a tab.close refused
+  outside the bulk close writes its pool-log line without emitting a snapshot; the enlist teaching Turn
+  checks its paste with `recent` 200-line reads of the operator's pane, which moves their viewport.
+- Known load flakes outside C15: attempts-argv "a terminal-backed launch runs each harness's interactive
+  argv" (timed out waiting for launches); engine attempt-run.test.ts "surfaces a botched spawn".
