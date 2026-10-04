@@ -757,7 +757,7 @@ fn end_continued_attempt(
             && valid.outcome.status == OutcomeStatus::Done
             && let Some(proposals) = valid.outcome.spawn.as_ref().filter(|p| !p.is_empty())
         {
-            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket);
+            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
         }
         return record_adopted_exit(
             session,
@@ -802,7 +802,7 @@ fn end_continued_attempt(
             ..PoolUpdate::default()
         });
         if let Some(proposals) = outcome.spawn.as_ref().filter(|p| !p.is_empty()) {
-            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket);
+            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
         }
         finish_adopted_finalize(session);
         return Ok(());

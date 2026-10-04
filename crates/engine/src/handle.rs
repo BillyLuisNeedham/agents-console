@@ -2,8 +2,9 @@
 //! the server asks of a running pool. Each method is one job on the actor (or a flow that sends jobs),
 //! and refuses with the TypeScript's message as an [`EngineError`].
 //!
-//! Ported: accept, answer, settled, shutdown, close, reload_config, pane_read. The rest refuse with
-//! "not ported yet" until their feature's port replaces the body, keeping the signature.
+//! Ported: accept, answer, settled, shutdown, close, reload_config, pane_read, the Spawn actions and
+//! the Steward's. The rest refuse with "not ported yet" until their feature's port replaces the body,
+//! keeping the signature.
 
 use std::time::Duration;
 
@@ -19,6 +20,8 @@ use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
 
+// Kept while other feature ports still land on calls to it.
+#[allow(dead_code)]
 fn not_ported<T>(what: &str) -> Result<T, EngineError> {
     Err(EngineError::refused(format!("{what}: not ported yet")))
 }
@@ -120,7 +123,7 @@ impl Engine {
         }
         let _ = self
             .call(|s| {
-                s.conversations.dispose();
+                crate::conversations::dispose(s);
                 s.enlisted.dispose();
                 crate::keep_talking::release_continued_attempts(s);
                 crate::pane_survey::stop_pane_survey(s);
@@ -141,8 +144,7 @@ impl Engine {
         &self,
         request: StartConversationRequest,
     ) -> Result<ConversationView, EngineError> {
-        let _ = request;
-        not_ported("startConversation")
+        crate::conversations::start(self, request).await
     }
 
     /// `endConversation` (conversations.ts).
@@ -151,8 +153,7 @@ impl Engine {
         id: String,
         closing: Option<String>,
     ) -> Result<(), EngineError> {
-        let _ = (id, closing);
-        not_ported("endConversation")
+        crate::conversations::end(self, &id, closing, ac_protocol::AnswerBy::Operator).await
     }
 
     /// `paneRead` (issue #122): the last recorded read of a pane a loop watches.
@@ -184,32 +185,32 @@ impl Engine {
 
     /// `adoptHeldSpawn` (ADR-0029).
     pub async fn adopt_held_spawn(&self, id: String) -> Result<(), EngineError> {
-        let _ = id;
-        not_ported("adoptHeldSpawn")
+        self.call(move |s| crate::spawns::adopt_held_spawn(s, &id))
+            .await?
     }
 
     /// `discardHeldSpawn` (ADR-0029).
     pub async fn discard_held_spawn(&self, id: String) -> Result<(), EngineError> {
-        let _ = id;
-        not_ported("discardHeldSpawn")
+        self.call(move |s| crate::spawns::discard_held_spawn(s, &id, None))
+            .await?
     }
 
     /// `holdPendingSpawn` (issue #150).
     pub async fn hold_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        let _ = id;
-        not_ported("holdPendingSpawn")
+        self.call(move |s| crate::spawns::hold_pending_spawn(s, &id))
+            .await?
     }
 
     /// `discardPendingSpawn` (issue #150).
     pub async fn discard_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        let _ = id;
-        not_ported("discardPendingSpawn")
+        self.call(move |s| crate::spawns::discard_pending_spawn(s, &id))
+            .await?
     }
 
     /// `steward.check`: refuses unless `conversation` is the live Steward.
     pub async fn steward_check(&self, conversation: String) -> Result<(), EngineError> {
-        let _ = conversation;
-        not_ported("steward.check")
+        self.call(move |s| crate::steward_actions::check_steward(s, &conversation))
+            .await?
     }
 
     /// `steward.answer`: answer on the operator's path, as the Steward's.
@@ -220,8 +221,10 @@ impl Engine {
         action: StewardAnswerAction,
         note: Option<String>,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, ticket_id, action, note);
-        not_ported("steward.answer")
+        self.call(move |s| {
+            crate::steward_actions::steward_answer(s, &conversation, &ticket_id, action, note)
+        })
+        .await?
     }
 
     /// `steward.keepTalking`: the new Attempt's number.
@@ -231,8 +234,9 @@ impl Engine {
         ticket_id: String,
         message: String,
     ) -> Result<u32, EngineError> {
-        let _ = (conversation, ticket_id, message);
-        not_ported("steward.keepTalking")
+        crate::steward_actions::steward_keep_talking(self, conversation, ticket_id, message)
+            .await
+            .map(|attempt| u32::try_from(attempt).unwrap_or(u32::MAX))
     }
 
     /// `steward.leave`: leave a pending Interrupt to the operator with a Steward note.
@@ -242,8 +246,10 @@ impl Engine {
         ticket_id: String,
         note: String,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, ticket_id, note);
-        not_ported("steward.leave")
+        self.call(move |s| {
+            crate::steward_actions::steward_leave(s, &conversation, &ticket_id, &note)
+        })
+        .await?
     }
 
     /// `steward.adoptHeldSpawn`.
@@ -252,8 +258,8 @@ impl Engine {
         conversation: String,
         id: String,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, id);
-        not_ported("steward.adoptHeldSpawn")
+        self.call(move |s| crate::steward_actions::steward_adopt_held_spawn(s, &conversation, &id))
+            .await?
     }
 
     /// `steward.discardHeldSpawn`.
@@ -262,8 +268,11 @@ impl Engine {
         conversation: String,
         id: String,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, id);
-        not_ported("steward.discardHeldSpawn")
+        self.call(move |s| {
+            crate::steward_actions::check_steward(s, &conversation)?;
+            crate::spawns::discard_held_spawn(s, &id, Some(&conversation))
+        })
+        .await?
     }
 
     /// `steward.reassigned`: record on each Ticket's log that the Steward wrote its assign entry.
@@ -273,8 +282,10 @@ impl Engine {
         tickets: Vec<String>,
         fields: Map<String, Value>,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, tickets, fields);
-        not_ported("steward.reassigned")
+        self.call(move |s| {
+            crate::steward_actions::steward_reassigned(s, &conversation, &tickets, fields)
+        })
+        .await?
     }
 
     /// `steward.state`.
@@ -282,8 +293,8 @@ impl Engine {
         &self,
         conversation: String,
     ) -> Result<StewardStateResponse, EngineError> {
-        let _ = conversation;
-        not_ported("steward.state")
+        self.call(move |s| crate::steward_actions::steward_state(s, &conversation))
+            .await?
     }
 
     /// `steward.end`: the Steward ends itself, as an operator End would.
@@ -292,7 +303,6 @@ impl Engine {
         conversation: String,
         closing: Option<String>,
     ) -> Result<(), EngineError> {
-        let _ = (conversation, closing);
-        not_ported("steward.end")
+        crate::steward_actions::steward_end(self, conversation, closing).await
     }
 }

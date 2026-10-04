@@ -1174,8 +1174,7 @@ async fn merge_link(
         close_attempt_tab(s, &marker.id, attempt);
         let range =
             (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(s)));
-        s.conversations
-            .ticket_ended(&marker, &worktree.branch, range);
+        crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
         s.apply(PoolUpdate::log([format!(
             "ticket {}: {what} {attempt} merged {} onto the working branch",
             marker.id, worktree.branch

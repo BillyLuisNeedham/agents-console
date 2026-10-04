@@ -14,6 +14,7 @@ pub mod jev_rubric;
 pub mod js;
 pub mod machine_defaults;
 pub mod merge_hold;
+pub mod notices;
 pub mod outcome;
 pub mod pool;
 pub mod pool_settings;

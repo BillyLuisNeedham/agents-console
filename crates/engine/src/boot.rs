@@ -180,7 +180,7 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
                 "Jev not configured, heuristics only".to_owned()
             });
             // Conversations do not resume: any recorded live at boot crashes now.
-            s.conversations.crash_stale_at_boot();
+            crate::conversations::crash_stale_at_boot(s);
             start_boot_reconcile(s, reconcile_done);
             s.first_turn = Some(turned);
             crate::drive::start_drive(s);

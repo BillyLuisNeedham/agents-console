@@ -218,6 +218,268 @@ pub fn build_prompt(parts: &PromptParts<'_>) -> String {
     sections.join("\n")
 }
 
+/// An Assignment as a teaching names it (engine/prompt.ts's `TeachingAssignment`): every field optional,
+/// since an enlisted pane names no model and the pool may name no defaults at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TeachingAssignment {
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub drivers: Option<String>,
+}
+
+// What the teaching says a field is: an enlisted pane names no model, and the pool may name no defaults
+// at all, so the empty case is spelled out rather than left as a blank the agent would read past.
+fn describe_assignment(assignment: &TeachingAssignment) -> String {
+    let field = |value: &Option<String>| match value.as_deref() {
+        Some(text) if !text.is_empty() => text.to_owned(),
+        _ => "(none)".to_owned(),
+    };
+    // Effort is optional (the harness's own default when unset), so it is named only when set rather
+    // than as a gap the agent might try to fill.
+    let effort = match assignment.effort.as_deref() {
+        Some(effort) if !effort.is_empty() => format!(", effort {effort}"),
+        _ => String::new(),
+    };
+    format!(
+        "harness {}, model {}{effort}, drivers {}",
+        field(&assignment.harness),
+        field(&assignment.model),
+        field(&assignment.drivers)
+    )
+}
+
+/// The teaching the Conversation module appends to a Conversation's opening Turn (or types alone when
+/// there is none, so the mechanism is learned either way): how to propose Spawns mid-conversation.
+pub fn build_conversation_teaching(
+    spawn_path: &str,
+    own: &TeachingAssignment,
+    defaults: &TeachingAssignment,
+    per_file: u64,
+    ledger_path: &str,
+) -> String {
+    let mut lines = vec![
+        "---".to_owned(),
+        String::new(),
+        "Load the my-console-citizen skill: it is how to work inside this pool.".to_owned(),
+        String::new(),
+    ];
+    lines.extend(conversation_protocol(
+        spawn_path,
+        own,
+        defaults,
+        per_file,
+        ledger_path,
+        false,
+    ));
+    lines.join("\n")
+}
+
+/// The Conversation protocol both teachings share: how to Spawn, what the Assignment and caps are, what
+/// reports back. A Steward's differs in one sentence, since the Interrupts of what it spawns are its to
+/// answer.
+pub fn conversation_protocol(
+    spawn_path: &str,
+    own: &TeachingAssignment,
+    defaults: &TeachingAssignment,
+    per_file: u64,
+    ledger_path: &str,
+    steward: bool,
+) -> Vec<String> {
+    let caps = if per_file == 0 {
+        "0 entries honored per file written: the pool's cap is 0, so every entry is held for the \
+         operator to adopt or discard and none starts on its own; "
+            .to_owned()
+    } else {
+        format!(
+            "{per_file} {} honored per file written, and entries beyond it are held for the \
+             operator to adopt or discard; ",
+            if per_file == 1 { "entry" } else { "entries" }
+        )
+    };
+    vec![
+        format!(
+            "You can start follow-up work without leaving this conversation. Write JSON to \
+             {spawn_path}: {{\"spawn\": [...]}}, one entry per follow-up, each shaped \
+             {{\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...], \"kind\": \"ticket\" \
+             or \"conversation\", \"assign\": {{\"harness\": \"...\", \"model\": \"...\", \"effort\": \
+             \"...\", \"drivers\": \"...\"}}}}."
+        ),
+        String::new(),
+        format!(
+            "The body needs at least {SPAWN_BODY_MIN_CHARS} characters of intent for a fresh agent to \
+             work from. \"blockedBy\" is optional and may only name Tickets, never another \
+             Conversation (an entry naming one is dropped and logged). \"kind\" defaults to \
+             \"ticket\"; \"conversation\" starts a new open-ended talk instead of a Ticket. \"assign\" \
+             is optional; when absent the follow-up inherits this Conversation's own Assignment, and \
+             any field that leaves empty falls through to the pool defaults. \
+             {SPAWN_ASSIGN_FIELDS_TEACHING} {SPAWN_BLOCKS_TEACHING}"
+        ),
+        String::new(),
+        format!(
+            "This Conversation's Assignment: {}. The pool defaults: {}. Set \"assign\" only for a \
+             field the follow-up needs different; when no model would resolve, ask the operator \
+             here before you write the file.",
+            describe_assignment(own),
+            describe_assignment(defaults)
+        ),
+        String::new(),
+        format!(
+            "The engine polls for this file, reads it, and deletes it once read: write it whenever \
+             you like, mid-conversation, not only once. Caps: {caps}unlike a Ticket's own spawns \
+             there is no run-wide cap on what a Conversation spawns."
+        ),
+        String::new(),
+        spawn_ledger_teaching(ledger_path),
+        String::new(),
+        format!(
+            "A spawned Ticket reports back here as a Turn typed into this conversation once it \
+             ends (done, or checkpoint with its Brief) and you are next idle: its id, title, \
+             outcome, branch, and a diff summary. A spawned Conversation reports back the same way \
+             once the operator ends it: its branch and the operator's closing note, if {}",
+            if steward {
+                "any. Both only inform; a spawned Ticket's Interrupt reaches you as a Steward \
+                 Notice like any other Ticket's."
+            } else {
+                "any. Both inform only; you cannot answer either one's own Interrupt."
+            }
+        ),
+        String::new(),
+        "You never write pool state yourself: no ticket files, no ids, no statuses, no status \
+         markers. You propose; the engine writes."
+            .to_owned(),
+    ]
+}
+
+/// What the teaching a Steward starts with names.
+pub struct StewardTeaching<'a> {
+    pub spawn_path: &'a str,
+    pub own: &'a TeachingAssignment,
+    pub defaults: &'a TeachingAssignment,
+    pub per_file: u64,
+    pub ledger_path: &'a str,
+    /// The exact invocation of the Steward's command.
+    pub command: &'a str,
+    pub budget: u64,
+    pub may_close: bool,
+}
+
+/// The teaching a Steward starts with (ADR-0030), appended to the operator's standing orders when it is
+/// started and typed as an enlist's teaching Turn when it is Enlisted: the Steward's role, the command
+/// it answers with, its budget, what it may never answer or do, how to leave an Interrupt and how to end
+/// itself, then the Conversation protocol every Conversation is taught. The budget, and whether the pool
+/// lets it Close (ADR-0030's #154 amendment), are the ones in force at start; the `state` verb reads
+/// both live, and the engine's check is the rule.
+pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
+    let command = parts.command;
+    let budget = parts.budget;
+    let mut lines: Vec<String> = vec![
+        "---".to_owned(),
+        String::new(),
+        "You are this pool's Steward: you keep its Tickets moving while the operator is away, under \
+         the orders above. Load the my-console-steward skill now: it is how to judge each Interrupt. \
+         It builds on the my-console-citizen skill, which is how to work inside this pool."
+            .to_owned(),
+        String::new(),
+        "You do not poll. Whenever you are waiting, the engine types a Turn here naming every pending \
+         Ticket Interrupt you may answer and have not left, and a Merge queue head that has stalled. \
+         Items that arrive together come as one Turn. The same Turn also tells you, with nothing to \
+         answer, which Tickets merged since your last Notice and when every Ticket is done and Review \
+         waits for the operator: that is how you know when orders like \"watch the next super-step, \
+         then finish\" are done, and can end yourself."
+            .to_owned(),
+        String::new(),
+        "Act with this command, run in your shell:".to_owned(),
+        String::new(),
+        format!("    {command} <verb> ..."),
+        String::new(),
+        "- answer <ticket> resume|approve|reject [note]: the operator's own answer path. resume starts \
+         a fresh Attempt with your note in the Ticket file; approve or reject answer a \
+         merge-approval; a selection is answered with resume and the attempt number to merge."
+            .to_owned(),
+    ];
+    if parts.may_close {
+        lines.push(
+            "- close <ticket> <note>: drop a Ticket waiting at a checkpoint or a merge conflict \
+             without merging it; its branch and worktree are discarded. Only when the work is no \
+             longer wanted, always with a note saying why. It counts against your budget. A \
+             deadlocked dependent of a closed Ticket is the operator's to close, not yours."
+                .to_owned(),
+        );
+    }
+    lines.extend([
+        "- keep-talking <ticket> <message>: continue a checkpointed Attempt in its still-live pane; \
+         the engine types your message there after its own teaching Turn."
+            .to_owned(),
+        "- leave <ticket> <note>: leave the Interrupt to the operator. Your note is your \
+         recommendation, shown to them beside it. You are not told about that Interrupt again until \
+         it changes."
+            .to_owned(),
+        "- held adopt|discard <proposal-id>: decide a Held spawn.".to_owned(),
+        "- reassign <ticket> field=value...: change a Ticket's Assignment (harness, model, effort, \
+         drivers, verify; field= clears one). The engine picks it up at the next boundary, so resume \
+         the Ticket after."
+            .to_owned(),
+        "- state: the pending Interrupts, the Merge queue, the Pending and Held spawns, your budget \
+         left per Ticket, and whether the pool lets you Close now."
+            .to_owned(),
+        "- end [closing line]: end yourself.".to_owned(),
+        String::new(),
+        "A note or message given as \"-\" is read from standard input.".to_owned(),
+        String::new(),
+        format!(
+            "Your Steward budget is {budget} {} per Ticket since the operator last answered it. \
+             Answers, Closes and Keep talks count; leaves, adopts, discards and reassigns do not. The \
+             engine refuses an answer beyond it: leave that Ticket with a note.",
+            if budget == 1 { "answer" } else { "answers" }
+        ),
+        String::new(),
+        "Never answer a review or a persistence Interrupt: review is the operator's final \
+         judgement, and persistence is an engine store failure. The engine refuses both. A \
+         Conversation's waits are not yours either: you steward Tickets."
+            .to_owned(),
+        String::new(),
+        if parts.may_close {
+            "The operator lets you Close for now; they can turn it off in Settings at any time, and \
+             the engine then refuses a close. Run state when in doubt."
+        } else {
+            "Closing a Ticket without merging it is the operator's in this pool: the engine refuses \
+             it from you. To recommend one, leave the Ticket with a note saying so. If the operator \
+             turns on Steward may Close checkpoints later, state says so and each Notice offers \
+             close."
+        }
+        .to_owned(),
+        String::new(),
+        "Decide and talk, never do the work: make no edits in any Ticket's worktree or in the pool \
+         checkout. Your only ways to change the code are an answer, a coaching message and a Spawn."
+            .to_owned(),
+        String::new(),
+        "You may push, open pull requests or merge pull requests only if the operator's own words in \
+         this pane allow it. Nothing else grants it."
+            .to_owned(),
+        String::new(),
+        "When you cannot decide an Interrupt sensibly, or it is a product decision or anything \
+         destructive or irreversible, leave it with a note that recommends an answer and says why."
+            .to_owned(),
+        String::new(),
+        "When your orders are done, run end with a closing line: what you decided, and what waits \
+         for the operator."
+            .to_owned(),
+        String::new(),
+        "---".to_owned(),
+        String::new(),
+    ]);
+    lines.extend(conversation_protocol(
+        parts.spawn_path,
+        parts.own,
+        parts.defaults,
+        parts.per_file,
+        parts.ledger_path,
+        true,
+    ));
+    lines.join("\n")
+}
+
 /// What the enlist teaching names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnlistTeachingParts<'a> {
@@ -389,5 +651,87 @@ mod tests {
             }
         });
         assert!(none.contains("(see git status)"));
+    }
+
+    // prompt.test.ts: the Conversation teaching, compared with what the TypeScript builds for the same
+    // inputs (crates/core/testdata/conversation_teaching.json).
+    #[test]
+    fn the_conversation_teaching_is_the_typescripts_byte_for_byte() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/conversation_teaching.json")).unwrap();
+        let text = |name: &str| expected[name].as_str().unwrap().to_owned();
+        let own = |model: &str, effort: Option<&str>, drivers: &str| TeachingAssignment {
+            harness: Some("claude".into()),
+            model: Some(model.into()),
+            effort: effort.map(str::to_owned),
+            drivers: Some(drivers.into()),
+        };
+        let defaults = TeachingAssignment {
+            harness: Some("opencode".into()),
+            model: Some("x".into()),
+            effort: None,
+            drivers: Some("implement review".into()),
+        };
+        assert_eq!(
+            build_conversation_teaching(
+                "/p/runs/conv-1.spawn.json",
+                &own("m", Some("high"), "implement"),
+                &defaults,
+                5,
+                "/p/runs/spawn-ledger.md"
+            ),
+            text("a")
+        );
+        assert_eq!(
+            build_conversation_teaching(
+                "/s",
+                &own("", None, "implement"),
+                &TeachingAssignment::default(),
+                0,
+                "/l"
+            ),
+            text("b")
+        );
+        assert_eq!(
+            build_conversation_teaching(
+                "/s",
+                &own("", None, "implement"),
+                &TeachingAssignment::default(),
+                1,
+                "/l"
+            ),
+            text("c")
+        );
+    }
+
+    #[test]
+    fn the_steward_teaching_is_the_typescripts_byte_for_byte() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/steward_teaching.json")).unwrap();
+        let own = TeachingAssignment {
+            harness: Some("claude".into()),
+            model: Some("m".into()),
+            effort: None,
+            drivers: Some("implement".into()),
+        };
+        let defaults = TeachingAssignment {
+            harness: Some("opencode".into()),
+            model: Some("x".into()),
+            ..TeachingAssignment::default()
+        };
+        let build = |budget, may_close| {
+            build_steward_teaching(&StewardTeaching {
+                spawn_path: "/p/runs/conv-1.spawn.json",
+                own: &own,
+                defaults: &defaults,
+                per_file: 5,
+                ledger_path: "/p/runs/spawn-ledger.md",
+                command: "/bin/ac steward --pool /p --as conv-1",
+                budget,
+                may_close,
+            })
+        };
+        assert_eq!(build(1, true), expected["a"].as_str().unwrap());
+        assert_eq!(build(5, false), expected["b"].as_str().unwrap());
     }
 }

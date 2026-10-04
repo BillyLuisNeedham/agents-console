@@ -299,7 +299,7 @@ async fn enlist_conversation(
                 }
                 // One Steward at a time (ADR-0030), refused before the pane is touched; the
                 // Conversation module checks again as it claims, against a race.
-                if steward_flag && let Some(on_duty) = s.conversations.steward_id() {
+                if steward_flag && let Some(on_duty) = crate::conversations::steward_id(s) {
                     return Err(refused(format!(
                         "enlist: a Steward is already on duty ({on_duty}); end it before starting another"
                     )));
@@ -328,7 +328,7 @@ async fn enlist_conversation(
             .call(move |s| -> Result<(String, BranchRule), EngineError> {
                 let existing = load_conversations(&Path::new(&s.pool_dir).join("conversations"))
                     .map_err(|error| refused(error.to_string()))?;
-                let reserved = s.conversations.reserved_ids();
+                let reserved = crate::conversations::reserved_ids(s);
                 let id = next_conversation_id(&existing, |id| reserved.iter().any(|r| r == id));
                 let rule = apply_enlist_branch_rule(s, &pane, &id)?;
                 Ok((id, rule))
@@ -1061,7 +1061,7 @@ pub fn end_enlisted_attempt(
                 .as_ref()
                 .filter(|spawn| !spawn.is_empty())
         {
-            crate::spawns::take_spawn_proposals(
+            let _ = crate::spawns::take_spawn_proposals(
                 session,
                 ticket_id,
                 spawn.clone(),

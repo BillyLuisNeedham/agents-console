@@ -348,7 +348,7 @@ pub fn registered_panes_of(session: &Session) -> HashSet<String> {
             panes.insert(pane.clone());
         }
     }
-    for view in conversations.views() {
+    for view in crate::conversations::views(session) {
         if let Some(pane) = view.pane_id.filter(|pane| !pane.is_empty()) {
             panes.insert(pane);
         }
@@ -356,7 +356,7 @@ pub fn registered_panes_of(session: &Session) -> HashSet<String> {
     for held in session.held.values() {
         panes.insert(held.pane_id.clone());
     }
-    panes.extend(conversations.live_terminals().0);
+    panes.extend(crate::conversations::live_terminals(session).0);
     panes
 }
 
@@ -371,7 +371,7 @@ pub fn untouchable(session: &Session) -> Untouchable {
     for held in session.held.values() {
         panes.insert(held.pane_id.clone());
     }
-    for view in session.conversations.views() {
+    for view in crate::conversations::views(session) {
         if let Some(pane) = view.pane_id.filter(|pane| !pane.is_empty())
             && session.conversations.is_live(&view.id)
         {
@@ -381,7 +381,7 @@ pub fn untouchable(session: &Session) -> Untouchable {
     panes.extend(registered_panes_of(session));
     panes.extend(session.enlisted_terminals.panes.iter().cloned());
     let mut tabs: HashSet<String> = session.enlisted_terminals.tabs.iter().cloned().collect();
-    tabs.extend(session.conversations.live_terminals().1);
+    tabs.extend(crate::conversations::live_terminals(session).1);
     Untouchable { panes, tabs }
 }
 

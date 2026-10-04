@@ -158,9 +158,7 @@ pub fn tab_owners(session: &Session) -> Vec<String> {
         .filter(|marker| marker.enlisted_from.is_none())
         .map(|marker| marker.id.clone())
         .chain(
-            session
-                .conversations
-                .views()
+            crate::conversations::views(session)
                 .into_iter()
                 .filter(|view| !view.enlisted)
                 .map(|view| view.id),
@@ -177,9 +175,7 @@ pub fn enlisted_terminals_of(session: &Session) -> EnlistedTerminals {
         .filter(|marker| marker.enlisted_from.is_some())
         .map(|marker| marker.id.clone())
         .chain(
-            session
-                .conversations
-                .views()
+            crate::conversations::views(session)
                 .into_iter()
                 .filter(|view| view.enlisted)
                 .map(|view| view.id),

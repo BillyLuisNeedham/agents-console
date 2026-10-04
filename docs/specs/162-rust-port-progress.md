@@ -464,3 +464,38 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Unreachable in Rust, so tested only through a seam: a pushed version that "no longer encodes" (ws.ts
   :685; values are immutable once pushed) and an unencodable request result (an `Answer` whose result
   failed to serialize).
+
+### Conversations in ac-engine (r-conversations)
+
+- `engine/conversations.ts` is the directory module `crates/engine/src/conversations/`: `mod` (the runtime,
+  views, claims, teaching and the Steward seam), `start` (start, enlist), `end` (End, the merge answers,
+  a pane lost without End), `notices` (the queue, delivery, the ticket hooks), `adopt` (boot, re-adoption),
+  `tick` (Turn state, the spawn.json poll). Notice texts are `ac_core::notices`; the Conversation and
+  Steward teachings are `ac_core::prompt` (`build_conversation_teaching`, `conversation_protocol`,
+  `build_steward_teaching`), each compared byte for byte with the TypeScript's output in a test.
+- A runtime is a shared handle (`Rt`, an `Arc<Mutex<Runtime>>`), as the TypeScript's runtime object was: a
+  flow that holds one across an await (a start, an enlist, a boot adoption) sees every change the actor's
+  jobs make to it, and it stays usable after it leaves the map. It is touched only inside a job or by its
+  own flow between awaits, never held across an await. The map and the other session state stay on the
+  Session, owned by the actor.
+- The hooks the old stub exposed as methods are free functions over `&mut Session`:
+  `ticket_ended`, `ticket_checkpointed`, `ticket_closed`, `answer_merge`, `steward_forget`,
+  `crash_stale_at_boot`, `dispose`; `views`, `live_terminals`, `live_directories` and `steward_id` read the
+  records and take `&Session`.
+- Each synchronous TypeScript stretch is one job. Where a TypeScript function ran its first lines before its
+  first await (`deliver` claiming the queue, `end` marking itself ending when a runtime exists) the Rust
+  splits at the same line: `deliver_begin` (a job) and `deliver_run` (the typing), `begin_end` inside the
+  job that finds the runtime.
+- A per-id claim is a `tokio::sync::Mutex` per id (`claim`), with a holder count so `claiming(id)` is the
+  TypeScript's `claiming.has(id)`. Boot adoption passes take one session-wide mutex (`serially`).
+- A Conversation's End merge goes through the merge chain and the pool checkout's gate as one link whose
+  hold lasts until the resolver's run is over, as the TypeScript's `throughPoolCheckoutGate` held it
+  across the awaited `resolveConflict`; the shared gate helper takes a synchronous merge, so the End has
+  its own copy of the three steps (check, wait, hold).
+- A start that crashed at launch sweeps its tabs 300 ms after it answers: the TypeScript's single thread
+  wrote the response before it read herdr's replies, so a caller never saw the `tab-closed` events of the
+  sweep in the events it read right after the answer. Without the delay the Rust's other threads append
+  them first. Nothing else about the sweep differs.
+- Deviation, reachable only with a hand-edited file: a Conversation record that fails to load reads as no
+  Conversations in `views` and the boot decisions (the TypeScript throws out of the emit). A malformed
+  record is refused at boot already (`boot::start_pool` loads them).

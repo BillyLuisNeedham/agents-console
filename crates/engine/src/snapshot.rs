@@ -125,7 +125,7 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
         state,
         queued_answers: session.answers.pending(),
         assignments,
-        conversations: session.conversations.views(),
+        conversations: crate::conversations::views(session),
         live_attempts,
         held_panes: crate::held::held_pane_records(session),
         finished_terminals: listing_finished,
