@@ -33,7 +33,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
 | restart, Tickets and Attempts | C05 | landed, 55 cases |
 | restart, Conversations and panes | C06 | wave 2 |
-| Conversation Turn state and Notices | C17 | wave 2 |
+| Conversation Turn state and Notices | C17 | landed, 22 cases |
 | verify with Jev | C22 | wave 2 |
 | the failing scheduling case | | fixed in 879b564: the case now waits for the settled frame (a read's reply can overtake a coalesced push) |
 
@@ -301,3 +301,18 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   queued-answers.json record that does not fit starts the queue empty; reconstruct_attempts skips a log
   whose stat fails (TypeScript throws); a Steward note with a non-string at or conversation reads "".
 - Kept on purpose: a Conversation record's tab=none and session=none read back as the id "none".
+
+### Conversation Turn state and Notices (C17)
+
+- Likely TypeScript bug, not pinned, copied as is: a lone spawned Ticket that finishes done tells its parent
+  nothing (it ran in the pool checkout, and only the merge paths call `ticketEnded`), though the teaching
+  Turn promises a report on done. A decision for the operator.
+- Pinned quirk: a lone spawned Ticket's checkpoint Notice names `Branch: pool/<key>/<id>`, a branch that
+  does not exist, with `(no changes)` as its diff. A spawned Ticket's Notice title includes its id
+  (`conv-1-spawn-2: Old idea`), the Ticket file's heading.
+- Binding: the Turn-state tick is the only viewport read (`source: visible`) of a Conversation's pane, one
+  per tick; the cases count those reads.
+- Rust unit tests: the drop reason `parent conversation is ending`; the Notice queue is claimed whole
+  before the first Turn is typed (a racing tick never types one twice); a failed Turn puts itself and the
+  rest of the claimed queue back at the front, in order; a Turn-state read that throws leaves the state as
+  it was.
