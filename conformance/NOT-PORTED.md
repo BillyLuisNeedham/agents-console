@@ -897,3 +897,77 @@ are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-p
 - The Steward routes answer a body that is not JSON with 400 `{reason: "invalid JSON body"}` too (C18's area).
 - GET / with no UI build answers 500, Bun's page for the missing `index.html`; the Rust binary embeds the UI,
   so it never lacks one.
+
+## `restart`: Conversations and panes (C06)
+
+Every one of C06's 28 rows is a passing case under `conformance/cases/restart-conversations-boot.test.ts`,
+`restart-conversations-ends.test.ts`, `restart-panes-held.test.ts`, `restart-panes-continued.test.ts` and
+`restart-panes-workspace.test.ts`, on the shared setup in `restart-conversations-support.ts`. So are the two gaps C05
+left here, as restarts rather than seeded boots: the relabel at boot of a Pool workspace the pool created, to a title
+edited while no server ran (`engine/engine.ts:3039`), and a torn `runs/pool-workspace.json` resolved afresh
+(`engine/engine.ts:2929`). A case that starts two servers on its pool is a takeover case (`restartCase`), its second
+server the next leg of CONFORMANCE_LEGS, with one fake herdr alive across both. A row that boots on records a dead
+server left, written by hand, starts one server. The one seam row (`herdr.test.ts:544`) answers `agent.list` with the
+fake's `answerWith`. Two cases wait out the pane survey's real fifteen-second cadence and are named slow. No row is
+left out, and no harness or fixture changed.
+
+### Where the cases reach a row differently from its wording
+
+- **`herdr.test.ts:158`, `:176` and `:255`** run as restarts. The first server, launched in no workspace, creates the
+  Pool workspace (the fake's `w1`), remembers it and stops; the second is launched in `w-launch`, which the fake
+  holds, and runs a Ticket added while no server ran, so its tab shows where the pool's tabs go. For `:255` two
+  Tickets run in `w1` and stop held in their panes; while no server runs, 02's pane is listed under `w8`. The boot's
+  listing is `pane.list {workspace_id: w1}`: 01 is re-adopted, and 02's attempt is crashed as pane gone and re-run in
+  a new tab of `w1`, its moved pane only released (see the first entry below).
+- **`conversations.test.ts:993`**: the exit-code file is written by hand while no server runs, as the row says, with
+  the stub TUI still running in the pane; the boot reads it, crashes the Conversation and closes the tab.
+- **`conversations.test.ts:1061` and `:1200`** have no survey knob (Decided 2). `:1061` waits for the cadence
+  listing that re-adopts the record. `:1200` must End before any listing finds the other terminal, or that listing
+  would crash the record first (the boot rule for a pane listed as another terminal), so the case waits for the
+  survey's first refused cadence listing, then relists the pane, lets `pane.list` answer and Ends at once, inside the
+  fifteen seconds before the next. Rust unit test: *an End on a live started Conversation with no runtime, whose
+  recorded pane herdr lists as another terminal, releases no agent, closes no tab and ends it.*
+- **`conversations.test.ts:1087`**: `finishedTerminals` 0 is read after a listing on demand (POST
+  /api/terminals/close-finished, which answers `closed: 0`), since a boot over a pane it holds no Ticket for lists
+  only on the cadence.
+- **`conversations.test.ts:1134`**: both concurrent POST /api/conversations/end answer 202, and the events hold one
+  `end-requested`, one `merged` and one `ended`. The race the row is about, two claims on one id, is inside the
+  server; HTTP reaches it only while the first End's claim awaits its listing, which the second request almost always
+  lands in. Rust unit test: *Conversation claims: two Ends, or an End and the boot's adoption pass, racing on a live
+  record with no runtime build one runtime, and the ending is recorded once.*
+- **`keep-talking.test.ts:832`**: the first server boots on 02's orphan written by hand in its worktree, as the engine
+  test does, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arises only from a
+  restart; the stop and start that follow are real.
+- **`keep-talking.test.ts:889`**: the Conversation runs on opencode and the Ticket it proposes names claude in its
+  `assign`. Once `_claude` is scripted the stub keys every claude launch `_claude`, so a Conversation on claude could
+  not be told apart from the Tickets' launches.
+- **`keep-talking.test.ts:768`**: the TUI quitting while no server runs is its pane ended through the fake
+  (`endPane`), since the stub's own quit file is bounded at a minute; with attempt 2's exit on record, the boot reads
+  either the same way.
+- **`held-panes.test.ts:93`**: the attempt between the two checkpoints crashed and was answered, and attempt 1's pane
+  is still listed beside attempt 3's, so the latest checkpoint decides, not the first listed pane.
+- **`herdr.test.ts:544`** boots once on the live enlisted record with the operator's pane seeded and `agent.list`
+  answered `{type: agent_list}` with no `agents`; the drive at rest proves boot reconciliation has run.
+
+### Pinned as the TypeScript server does it today, each worth a look before the port copies it
+
+- **An orphan pane moved out of the Pool workspace while no server ran is crashed, and its Ticket re-run beside it**
+  (`herdr.test.ts:255`'s case). Boot reconciliation lists only the Pool workspace, so a Ticket's pane the operator
+  moved to another workspace reads as gone: the attempt is crashed, its agent released, and the Ticket re-run in a
+  new tab, in the same worktree, while the moved pane's harness may still be working there. The comment before
+  `releaseOrphanAgent` in `reconcileTerminalAttempts` (`engine/engine.ts`) says the pane may still be alive. Intended
+  behaviour (inference): an orphan's pane is looked for daemon-wide by its recorded ids before it is called gone, as a
+  Conversation's is and as an enlisted Ticket's already is.
+- **A merge redone at boot is recorded deferred a second time** (`keep-talking.test.ts:832`, `:889`): meeting the
+  pool checkout's gate again, the redo appends another `merge-deferred`, so the Ticket's events read `merge-deferred`
+  twice before `merged`. The cases pin the whole list.
+
+### Observed while writing these, not pinned
+
+- While a merge redone at boot waits at the pool checkout's gate, the drive's phase stays `running` until the Continued
+  attempt ends (inference: the merge hold stands at the first boundary). The cases wait for the redo's pool log line
+  (`ticket <id>: merge dropped at the last shutdown chained again`) and the Ticket's `mergeState: queued` instead.
+- A started Conversation's TUI counts as exited at boot only when its exit-code file is no older than its launch's
+  `spawned` event, so a stale file never crashes a live talk. No case makes a stale file appear after a launch. Rust
+  unit test: *Conversation boot adoption: an exit-code file older than the recorded launch is not read as the TUI
+  exiting, and the Conversation is re-adopted.*
