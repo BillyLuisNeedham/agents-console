@@ -354,4 +354,127 @@ mod tests {
         run.release.release();
         assert_eq!(run.ending.await.unwrap(), ContinuedEnding::Released);
     }
+
+    use ac_io::herdr::fake::{FakeHerdr, Options, Reply};
+    use serde_json::{Value, json};
+
+    fn input(dir: &std::path::Path, teaching: Option<&str>) -> ContinuedInput {
+        ContinuedInput {
+            pane_id: "p1".into(),
+            harness: "claude".into(),
+            teaching: teaching.map(str::to_owned),
+            message: None,
+            on_message: None,
+            focus: false,
+            outcome_path: dir.join("o.json").to_string_lossy().into_owned(),
+            exit_code_path: Some(dir.join("exit").to_string_lossy().into_owned()),
+            stream_path: None,
+            stream_offset: 0,
+            log_path: dir.join("l.log").to_string_lossy().into_owned(),
+        }
+    }
+
+    fn env(fake: &FakeHerdr) -> ContinuedEnv {
+        ContinuedEnv {
+            herdr_socket: fake.herdr().socket_path().to_string_lossy().into_owned(),
+            poll: Some(Duration::from_millis(10)),
+            teaching_wait: Some(Duration::from_millis(500)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pane_gone_from_the_listing_with_no_outcome_is_pane_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::start(Options {
+            list_only: Some(Vec::new()),
+            ..Options::default()
+        })
+        .await;
+        let run = run_continued(env(&fake), input(dir.path(), None));
+        assert_eq!(run.ending.await.unwrap(), ContinuedEnding::PaneGone);
+    }
+
+    #[tokio::test]
+    async fn the_exit_code_file_landing_is_the_tui_exiting_and_the_outcome_wins_a_tie() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::start(Options {
+            foreign_panes: vec![json!({"pane_id": "p1", "tab_id": "t1"})],
+            ..Options::default()
+        })
+        .await;
+        std::fs::write(dir.path().join("exit"), "0").unwrap();
+        let run = run_continued(env(&fake), input(dir.path(), None));
+        assert_eq!(run.ending.await.unwrap(), ContinuedEnding::Exited);
+        std::fs::write(dir.path().join("o.json"), "{\"status\":\"done\"}").unwrap();
+        let run = run_continued(env(&fake), input(dir.path(), None));
+        assert_eq!(run.ending.await.unwrap(), ContinuedEnding::Outcome);
+    }
+
+    #[tokio::test]
+    async fn the_teaching_turn_is_typed_once_the_pane_waits_then_the_outcome_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::start(Options {
+            foreign_panes: vec![json!({"pane_id": "p1", "tab_id": "t1"})],
+            script: Some(std::sync::Arc::new(|method: &str, _: &Value| {
+                (method == "pane.read").then(|| {
+                    Reply::Line(
+                        json!({"id": "1", "result": {"read": {"text": "[Pasted text #1 +3 lines]\n❯ "}}})
+                            .to_string(),
+                    )
+                })
+            })),
+            ..Options::default()
+        })
+        .await;
+        let mut watched = input(dir.path(), Some("the teaching"));
+        watched.focus = true;
+        let run = run_continued(env(&fake), watched);
+        ac_io::herdr::fake::until("the teaching typed", || {
+            fake.requests().iter().any(|r| {
+                r.method == "pane.send_input" && r.params.get("keys") == Some(&json!(["enter"]))
+            })
+        })
+        .await;
+        let typed: Vec<Value> = fake
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "pane.send_input")
+            .map(|r| r.params)
+            .collect();
+        assert_eq!(typed[0]["text"], "the teaching");
+        assert!(fake.methods().contains(&"pane.focus".to_owned()));
+        std::fs::write(dir.path().join("o.json"), "{\"status\":\"checkpoint\"}").unwrap();
+        assert_eq!(run.ending.await.unwrap(), ContinuedEnding::Outcome);
+    }
+
+    #[tokio::test]
+    async fn a_pane_that_never_waits_leaves_the_attempt_untaught() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::start(Options {
+            foreign_panes: vec![json!({"pane_id": "p1", "tab_id": "t1"})],
+            script: Some(std::sync::Arc::new(|method: &str, _: &Value| {
+                (method == "pane.read").then(|| {
+                    Reply::Line(
+                        json!({"id": "1", "result": {"read": {"text": "still thinking..."}}})
+                            .to_string(),
+                    )
+                })
+            })),
+            ..Options::default()
+        })
+        .await;
+        let run = run_continued(env(&fake), input(dir.path(), Some("the teaching")));
+        assert_eq!(
+            run.ending.await.unwrap(),
+            ContinuedEnding::Untaught {
+                reason: "the pane was still working after 1 s".into()
+            }
+        );
+        assert!(
+            !fake
+                .requests()
+                .iter()
+                .any(|r| r.method == "pane.send_input")
+        );
+    }
 }
