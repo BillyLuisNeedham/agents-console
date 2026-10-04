@@ -274,10 +274,22 @@ enum MarkerStep {
 /// interrupt up. Never fails: reconciliation is advisory boot work, and a daemon that cannot be asked
 /// changes nothing about the pool's ordinary recovery.
 pub async fn reconcile_terminal_attempts(engine: &Engine) {
-    let _ = reconcile(engine).await;
+    let _ = reconcile(engine, false).await;
 }
 
-async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
+/// [`reconcile_terminal_attempts`] followed by [`redo_deferred_merges`], for a boot with nothing else
+/// to reconcile: the TypeScript runs the second in the microtasks after the first, so nothing sees the
+/// adoption without the merges taken on beside it, and here the last stretch of the reconciliation
+/// takes them on in the same job. Fails only when the engine is gone.
+pub async fn reconcile_terminal_attempts_then_redo_merges(engine: &Engine) -> anyhow::Result<()> {
+    if !reconcile(engine, true).await.unwrap_or(false) {
+        engine.call(redo_deferred_merges).await?;
+    }
+    Ok(())
+}
+
+// Whether the deferred merges were redone, in the last job of the reconciliation.
+async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
     let (terminal_backed, socket, workspace) = engine
         .call(|s| {
             (
@@ -288,7 +300,7 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
         })
         .await?;
     if !terminal_backed {
-        return Ok(());
+        return Ok(false);
     }
     let herdr = Herdr::new(&socket);
     // Scoped to the Pool workspace when there is one (issue #94): this pool's orphans can only be in
@@ -301,36 +313,24 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
                 ]))
             })
             .await?;
-        return Ok(());
+        return Ok(false);
     };
     let live: HashSet<String> = live.into_iter().collect();
     // An enlisted pane is the one orphan the scoped listing cannot answer for (issue #101): the
     // operator opened its tab in their own workspace. The daemon-wide listing is the only honest
     // answer, fetched once and only when an enlisted marker needs it.
     let mut enlisted_panes: Option<HashSet<String>> = None;
-    let ids: Vec<String> = engine
-        .call(|s| s.markers.iter().map(|m| m.id.clone()).collect())
-        .await?;
-    let mut log: Vec<String> = Vec::new();
-    for id in ids {
-        let first = {
-            let (id, live) = (id.clone(), live.clone());
-            engine
-                .call(move |s| reconcile_marker(s, &id, &live, None))
-                .await??
-        };
-        let (MarkerStep::NeedsEnlistedLiveness, _) = first else {
-            log.extend(first.1);
-            continue;
-        };
-        let pane_id = {
-            let id = id.clone();
-            engine
-                .call(move |s| terminal_orphan(s, &id).map(|o| o.pane_id))
-                .await?
-        };
-        let Some(pane_id) = pane_id else {
-            continue;
+    // The markers run as one job each time, up to a marker that needs the daemon: the TypeScript's
+    // stretch between two awaits, which nothing can interleave with.
+    let mut pass = Pass::default();
+    loop {
+        let (taken, live) = (pass, live.clone());
+        let next = engine
+            .call(move |s| reconcile_markers(s, &live, taken, then_redo))
+            .await??;
+        let (pane_id, resumed) = match next {
+            Reconciled::Finished => return Ok(then_redo),
+            Reconciled::NeedsEnlistedLiveness { pane_id, pass } => (pane_id, pass),
         };
         let is_live = if let Some(panes) = &enlisted_panes {
             panes.contains(&pane_id)
@@ -348,16 +348,59 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
                 Err(_) => true,
             }
         };
-        let live = live.clone();
-        let (_, lines) = engine
-            .call(move |s| reconcile_marker(s, &id, &live, Some(is_live)))
-            .await??;
-        log.extend(lines);
+        pass = Pass {
+            enlisted_live: Some(is_live),
+            ..resumed
+        };
     }
-    if !log.is_empty() {
-        engine.call(move |s| s.apply(PoolUpdate::log(log))).await?;
+}
+
+// Where a pass over the markers stands.
+#[derive(Default)]
+struct Pass {
+    // The next marker to reconcile.
+    next: usize,
+    log: Vec<String>,
+    // The daemon's answer for the marker at `next`, once asked.
+    enlisted_live: Option<bool>,
+}
+
+enum Reconciled {
+    Finished,
+    NeedsEnlistedLiveness { pane_id: String, pass: Pass },
+}
+
+// The markers from `pass.next` on, until one needs the daemon's word on an enlisted pane; the log
+// lands once, at the end, as the TypeScript's does.
+fn reconcile_markers(
+    session: &mut Session,
+    live: &HashSet<String>,
+    mut pass: Pass,
+    then_redo: bool,
+) -> anyhow::Result<Reconciled> {
+    while pass.next < session.markers.len() {
+        let id = session.markers[pass.next].id.clone();
+        let (step, lines) = reconcile_marker(session, &id, live, pass.enlisted_live.take())?;
+        if let MarkerStep::NeedsEnlistedLiveness = step {
+            let Some(orphan) = terminal_orphan(session, &id) else {
+                pass.next += 1;
+                continue;
+            };
+            return Ok(Reconciled::NeedsEnlistedLiveness {
+                pane_id: orphan.pane_id,
+                pass,
+            });
+        }
+        pass.log.extend(lines);
+        pass.next += 1;
     }
-    Ok(())
+    if !pass.log.is_empty() {
+        session.apply(PoolUpdate::log(pass.log));
+    }
+    if then_redo {
+        redo_deferred_merges(session);
+    }
+    Ok(Reconciled::Finished)
 }
 
 // One marker's reconciliation, the TypeScript's loop body: everything between two awaits, so one job.
