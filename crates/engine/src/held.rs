@@ -206,7 +206,7 @@ pub fn own_held_pane(
 /// `heldExitCodePath`: the exit-code file the Held pane's wrapper writes when its TUI exits: the file
 /// of the attempt that launched the wrapper (the chain's first), named as that attempt's files are.
 /// `None` for an enlisted pane, which has none.
-fn held_exit_code_path(session: &Session, ticket_id: &str, held: &HeldPane) -> Option<String> {
+pub fn held_exit_code_path(session: &Session, ticket_id: &str, held: &HeldPane) -> Option<String> {
     if !held.wrapped {
         return None;
     }

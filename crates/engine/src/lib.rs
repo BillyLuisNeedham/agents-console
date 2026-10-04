@@ -29,6 +29,7 @@ pub mod checkout_gate;
 pub mod children;
 pub mod claude_trust;
 pub mod config_reload;
+pub mod continued;
 pub mod conversations;
 pub mod drive;
 #[cfg(test)]

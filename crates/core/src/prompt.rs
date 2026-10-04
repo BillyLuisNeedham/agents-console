@@ -10,7 +10,7 @@ use crate::spawn_caps::SpawnCaps;
 
 // The Spawn ledger (issue #150): the path, never the contents, so the prompt stays short (issue #84)
 // and the agent reads the pool as it is when it proposes, not as it was at launch.
-fn spawn_ledger_teaching(ledger_path: &str) -> String {
+pub(crate) fn spawn_ledger_teaching(ledger_path: &str) -> String {
     format!(
         "Before you propose anything, read the Spawn ledger at {ledger_path}: every Ticket and \
          Conversation in the pool, and every proposal still waiting to land or held for the \
