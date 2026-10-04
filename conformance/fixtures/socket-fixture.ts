@@ -39,6 +39,9 @@ export interface SocketClient {
   /** The snapshot's `seq` after each snapshot or delta frame. */
   seqs: number[];
   send(message: ClientMessage): void;
+  /** One frame as given, text or binary, never encoded: what a client that
+   *  is not the Console might send. */
+  sendRaw(data: string | Uint8Array<ArrayBuffer>): void;
   /** A request under the next id, and its reply. */
   request<K extends RequestKind>(kind: K, payload: RequestPayload<K>): Promise<Reply<K>>;
   /** A round trip: every frame the server sent ahead of it is in hand. */
@@ -77,6 +80,7 @@ export async function openSocket(
     rev: 0,
     seqs: [],
     send: (message) => ws.send(encodeClientMessage(message)),
+    sendRaw: (data) => ws.send(data),
     async request(kind, payload) {
       const id = ++nextId;
       const from = client.frames.length;

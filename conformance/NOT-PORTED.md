@@ -806,3 +806,94 @@ Observed while writing these, not pinned:
   is claimed whole before the first Turn is typed, so a tick and an enqueue racing it never type a Notice twice;
   a Turn that fails puts itself and the rest of the claimed queue back at the front, in order; a read that throws
   leaves the Turn state as it was, and the next tick reads as usual.*
+
+## C02: the socket protocol and the HTTP read surface (`protocol`, `http`)
+
+Ticket C02's 16 rows are passing cases: the fourteen `protocol.test.ts` rows of the `protocol` area in
+`cases/protocol-deltas.test.ts`, `protocol-log-window.test.ts` and `protocol-envelope.test.ts`, and the two
+`http` rows, `protocol.test.ts:306` and `stat-cache.test.ts:65`, in `http-page.test.ts` and
+`http-reads.test.ts`. (`protocol.test.ts` has since moved to `ui/src/protocol.test.ts`, each case two lines
+below the line the inventory cites.) All six of the `protocol` area's gaps and nine of the `http` area's ten
+are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-page.test.ts`,
+`http-reads.test.ts` and `http-bodies.test.ts`.
+
+### Left out
+
+- **GET /api/ticket?id=01 beside an adopted `01-spawn-1.md`** (the gap at `engine/server.ts:958`).
+  `ticketBodyFile` serves the first file `readdir` lists whose name before its first `-` is the id, so which
+  of `01-a.md` and `01-spawn-1.md` answers for 01 depends on the filesystem: tmpfs lists the newest first, so
+  under this machine's `/tmp` the spawned child's body is served, while a sorted listing (APFS) serves
+  `01-a.md`. No case can pin today's answer on both, and the control over directory order the inventory names
+  does not exist. The intended answer, the Ticket's own file, is open question 5's (Decided 5);
+  conv-1-spawn-14 was to fix it and was closed before it ran. The socket's card for 01 reads the same file.
+  Rust unit test: *ticket body lookup: with `01-a.md` and `01-spawn-1.md` in issues/, id 01 resolves to
+  `01-a.md`, the file whose state line says id=01, whatever order the directory lists them in, for GET
+  /api/ticket and the card alike.*
+
+### Pinned as the Bun server does it, worth a look before the port copies it
+
+- **Unknown paths answer 500** (`http-page.test.ts`, the gap at `engine/server.ts:395`). An unknown `/api/`
+  route, a GET on a POST-only route and a missing asset each answer 500 with Bun's own HTML error page:
+  `serveStatic` tests the Promise `Bun.file().exists()` returns, which is always truthy, so it answers every
+  path with a file that is not there and the read fails; the `not found` 404 at the end of the route table is
+  never reached. The case pins the 500 alone, and that the server stays up. Intended behaviour (open question
+  5, Decided 5): 404 `not found`. Once conv-1-spawn-14's fix lands, the case pins 404 and the Rust server
+  answers 404. The traversal case beside it asks only that a path climbing out of the build answers an error
+  and nothing of the file, so it holds either way.
+- **A body that is not JSON** (`http-bodies.test.ts`, the gap at `engine/server.ts:1958`). POST /api/resume
+  and both settings PUTs answer 400 `{error: "Failed to parse JSON"}`, the message Bun's `req.json()` throws;
+  PUT /api/reassign answers 500 with it, as the server's own failure, though the route's comment keeps that for
+  a file it cannot read (C20's section notes the same); every other JSON route answers 400
+  `{reason: "invalid JSON body"}`. The case pins all of it, Bun's words included, so a Rust server says
+  `Failed to parse JSON` where the Bun server does. Intended behaviour (inference): the Reassign answers 400,
+  as the routes beside it do.
+
+### Where the cases reach a row differently from its wording
+
+- **The snapshot re-read.** GET /api/state serves the snapshot built at the last engine emit, Reassign or
+  settings save, and a pool at rest emits nothing (C20's section has the detail). `protocol.test.ts:92`,
+  `:114` and `:122` re-read with a Reassign of a Ticket to the model its assign entry already names, as the
+  rows say, which leaves every Assignment as it was and rebuilds the snapshot. `stat-cache.test.ts:65` and the
+  gap at `engine/server.ts:1244` re-read with a Reassign naming only a done Ticket (`rebuiltSnapshot` in
+  `cases/config-support.ts`), which writes nothing.
+- **A pool log over the window** (`protocol.test.ts:149`, `:233`, `:247`) comes from a restored checkpoint,
+  one of the two ways the rows name: a first server rests and stops, its last checkpoint in console.db has
+  its log replaced by lines of the case's own, and the server under test restores them as it boots. The rest
+  of that checkpoint is as the first server wrote it. `:247` also reads the page's embedded boot, which
+  carries the same trimmed window.
+- **By reference** (`protocol.test.ts:97` and `:184`). Neighbours and untouched lists kept by reference are
+  the Console's apply, client code now in `ui/src/protocol.ts` (Decided 3); the cases pin the server's half,
+  that a delta resends none of them.
+- **The hostile title** (`protocol.test.ts:306`). The engine test counted one `</script>` in a page of its
+  own making. The built page carries its own module script, so the case pins that the boot element's text
+  holds no `<` at all, runs whole to the `</script></head>` that closes it, and parses back to GET
+  /api/state's snapshot with the title intact.
+- **The envelope** (`protocol.test.ts:258`, `:276`). The engine tests decoded frames in process; the cases
+  send them to a real server, on a finished pool so that a stop run by mistake would show. Request 3's reply
+  carries id 3, its kind, the socket's revision and the HTTP twin's refusal; the six frames that are not the
+  protocol's get nothing back, and the next request is answered. A frame sent as given, text or binary, goes
+  through `sendRaw`, which the socket fixture gained for these cases.
+- **Conversations** (`protocol.test.ts:130`, and the gap at `engine/ws.ts:681`) are started through POST
+  /api/conversations on the fake herdr, each waited for until its Turn rests, so the first is unchanged while
+  the second starts.
+
+### Hidden behaviour worth a Rust unit test
+
+- A socket counts as visible from its opening until its hello says otherwise. A live check that runs before a
+  hidden tab's hello lands sends it activity and peeks once, and a socket opening after a live check is sent
+  the whole live cache before its hello is read. The hidden-grades case counts only what follows its hello's
+  round trip. Rust unit test: *live check: a socket is visible until its hello says otherwise; once a hello
+  says visible false, no live frame it is sent carries activity or peeks, and a change of grades still
+  reaches it as a live frame with grades alone.*
+- A Ticket file that will not load leaves the server on the last Ticket list that did, for every route and
+  the snapshot alike, and each later read tries again. The draft case pins two readers of it. Rust unit test:
+  *pool meta: a read of issues/ that fails keeps the last list that loaded, and the next read that loads
+  replaces it.*
+
+### Observed while writing these, not pinned
+
+- An engine emit that changes nothing but `seq` goes out as a delta of `set.seq` alone (seen while a
+  Conversation starts, on its Turn polls).
+- The Steward routes answer a body that is not JSON with 400 `{reason: "invalid JSON body"}` too (C18's area).
+- GET / with no UI build answers 500, Bun's page for the missing `index.html`; the Rust binary embeds the UI,
+  so it never lacks one.
