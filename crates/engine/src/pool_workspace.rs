@@ -416,3 +416,188 @@ impl PoolWorkspace for EnginePoolWorkspace {
         Box::pin(reresolve_pool_workspace(&self.engine, stale_id))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The Pool workspace against the fake daemon: boot resolution, the re-resolve guards and the
+    //! relabel rule (engine.test.ts "the Pool workspace", whose cases are the `herdr` conformance area).
+
+    use serde_json::{Value, json};
+    use tokio::sync::watch;
+
+    use ac_io::herdr::fake::{FakeHerdr, Options, Recorded};
+
+    use super::*;
+
+    async fn rig(
+        options: Options,
+        remembered: Option<&str>,
+    ) -> (FakeHerdr, Engine, tempfile::TempDir) {
+        let fake = FakeHerdr::start(options).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root = ac_core::js::path_text(dir.path());
+        if let Some(remembered) = remembered {
+            std::fs::write(
+                dir.path().join("pool-workspace.json"),
+                format!("{remembered}\n"),
+            )
+            .unwrap();
+        }
+        let (publisher, snapshots) = watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.herdr_socket = ac_core::js::path_text(fake.herdr().socket_path());
+        session.runs_dir = root.clone();
+        session.pool_dir = root.clone();
+        session.cwd = root;
+        session.state.config =
+            ac_core::config::parse_config(Some(r#"{"terminal":"herdr"}"#), "/pool").unwrap();
+        session.pool_workspace =
+            PoolWorkspaceState::new(Some("w-launch".into()), "the pool".into());
+        let engine = Engine::spawn(session, snapshots, |s, engine| s.engine = Some(engine));
+        (fake, engine, dir)
+    }
+
+    fn calls(fake: &FakeHerdr, method: &str) -> Vec<Value> {
+        fake.requests()
+            .into_iter()
+            .filter(|Recorded { method: m, .. }| m == method)
+            .map(|r| r.params)
+            .collect()
+    }
+
+    async fn state(engine: &Engine) -> (Option<String>, bool, Option<String>, Vec<String>) {
+        engine
+            .call(|s| {
+                (
+                    s.pool_workspace.id.clone(),
+                    s.pool_workspace.created,
+                    s.pool_workspace.label.clone(),
+                    s.state.log.clone(),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn boot_creates_one_remembers_it_and_logs_it() {
+        let (fake, engine, dir) = rig(Options::default(), None).await;
+        // Unsettled until the resolution has decided.
+        engine
+            .call(|s| s.pool_workspace.ready.send_replace(false))
+            .await
+            .unwrap();
+        resolve_pool_workspace_for_session(&engine).await;
+        let (id, created, label, log) = state(&engine).await;
+        // The launch workspace the fake does not hold: a fresh one is created, unfocused.
+        assert_eq!(id.as_deref(), Some("w1"));
+        assert!(created);
+        assert_eq!(label.as_deref(), Some("the pool"));
+        assert_eq!(calls(&fake, "workspace.create").len(), 1);
+        assert_eq!(calls(&fake, "workspace.create")[0]["focus"], json!(false));
+        assert!(log.contains(&"Pool workspace w1 created for this pool's tabs".to_owned()));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("pool-workspace.json")).unwrap(),
+            "{\"workspace_id\":\"w1\",\"created\":true,\"label\":\"the pool\"}\n"
+        );
+        let ready = *engine
+            .call(|s| s.pool_workspace.ready.subscribe())
+            .await
+            .unwrap()
+            .borrow();
+        assert!(ready);
+    }
+
+    #[tokio::test]
+    async fn boot_keeps_the_remembered_workspace_and_never_relabels_one_it_did_not_make() {
+        let (fake, engine, _dir) = rig(
+            Options {
+                workspaces: vec![json!({"workspace_id": "w-kept", "label": "theirs"})],
+                ..Options::default()
+            },
+            Some(r#"{"workspace_id":"w-kept"}"#),
+        )
+        .await;
+        engine
+            .call(|s| s.pool_workspace.wanted = "a new title".into())
+            .await
+            .unwrap();
+        resolve_pool_workspace_for_session(&engine).await;
+        let (id, created, label, _) = state(&engine).await;
+        assert_eq!(
+            (id.as_deref(), created, label),
+            (Some("w-kept"), false, None)
+        );
+        assert!(calls(&fake, "workspace.create").is_empty());
+        assert!(calls(&fake, "workspace.rename").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_title_change_relabels_a_workspace_the_console_made_once_and_in_order() {
+        let (fake, engine, dir) = rig(
+            Options {
+                workspaces: vec![json!({"workspace_id": "w-mine", "label": "old"})],
+                ..Options::default()
+            },
+            Some(r#"{"workspace_id":"w-mine","created":true,"label":"old"}"#),
+        )
+        .await;
+        resolve_pool_workspace_for_session(&engine).await;
+        // The label it wants is the pool's name; the file says it carries "old": relabelled at boot.
+        assert_eq!(calls(&fake, "workspace.rename").len(), 1);
+        engine.retitle(Some("First".into())).await;
+        engine.retitle(Some("Second".into())).await;
+        engine.retitle(Some("Second".into())).await;
+        let labels: Vec<String> = calls(&fake, "workspace.rename")
+            .iter()
+            .map(|c| c["label"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(labels, ["the pool", "First", "Second"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("pool-workspace.json")).unwrap(),
+            "{\"workspace_id\":\"w-mine\",\"created\":true,\"label\":\"Second\"}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn racing_spawns_share_one_re_resolve_and_a_moved_id_needs_none() {
+        let (fake, engine, _dir) =
+            rig(Options::default(), Some(r#"{"workspace_id":"w-gone"}"#)).await;
+        // The remembered workspace is not at the daemon: boot creates w1.
+        resolve_pool_workspace_for_session(&engine).await;
+        assert_eq!(state(&engine).await.0.as_deref(), Some("w1"));
+        fake.remove_workspace("w1");
+        let (a, b, c) = tokio::join!(
+            reresolve_pool_workspace(&engine, "w1".into()),
+            reresolve_pool_workspace(&engine, "w1".into()),
+            reresolve_pool_workspace(&engine, "w1".into())
+        );
+        assert_eq!(
+            (a.as_deref(), b.as_deref(), c.as_deref()),
+            (Some("w2"), Some("w2"), Some("w2"))
+        );
+        // boot's one create plus the re-resolve's one.
+        assert_eq!(calls(&fake, "workspace.create").len(), 2);
+        // A spawn that lost the race is told where the tabs go now, with no RPC at all.
+        let before = fake.requests().len();
+        assert_eq!(
+            reresolve_pool_workspace(&engine, "w1".into())
+                .await
+                .as_deref(),
+            Some("w2")
+        );
+        assert_eq!(fake.requests().len(), before);
+        // A stale id that is still at the daemon means the refusal was something else.
+        assert_eq!(
+            reresolve_pool_workspace(&engine, "w2".into())
+                .await
+                .as_deref(),
+            Some("w2")
+        );
+        assert_eq!(calls(&fake, "workspace.create").len(), 2);
+        let log = state(&engine).await.3;
+        assert!(
+            log.contains(&"Pool workspace w1 is gone; the pool's tabs now open in w2".to_owned())
+        );
+    }
+}
