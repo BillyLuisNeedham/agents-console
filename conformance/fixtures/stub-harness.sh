@@ -8,8 +8,12 @@
 #
 # It records each launch, then does what the case scripted for it. A launch
 # is keyed by its outcome file: `01` for a Ticket's Attempt, `01.attempt-2`
-# for one Attempt of a verify round, `01-grader-1` for a grader; a launch
-# whose argv names no outcome file (a terminal-backed one) is `_<name>`.
+# for one Attempt of a verify round, `01-grader-1` for a grader. A
+# terminal-backed launch's argv names no outcome file: unless `_<name>` is
+# scripted, it waits, as a TUI does, for the prompt typed into its pane
+# (FAKE_HERDR_PANE_INPUT, which the fake herdr sets) and is keyed by the
+# outcome file that names. One scripted as `_<name>`, or whose prompt names
+# none within 90 seconds, is `_<name>`.
 #
 # CONFORMANCE_STUBS names the directory holding the scripts and the record:
 #   scripts/<key>/steps          how many launches are scripted; the last repeats
@@ -31,21 +35,41 @@ name="$1"
 shift
 stubs="${CONFORMANCE_STUBS:?CONFORMANCE_STUBS is not set}"
 
-# The prompt rides one argument of every batch argv. Its text names the
-# outcome file, and its first line ends in the Ticket file's path.
+# A prompt's text names the outcome file, and its first line ends in the
+# Ticket file's path. Sets both when the text is a prompt.
 issue=""
 outcome=""
-for arg in "$@"; do
-  case "$arg" in
+read_prompt() {
+  case "$1" in
     *"outcome as JSON at "*)
-      rest="${arg#*outcome as JSON at }"
+      rest="${1#*outcome as JSON at }"
       outcome="${rest%%:*}"
-      first="${arg%%$'\n'*}"
+      first="${1%%$'\n'*}"
       issue="${first##* }"
-      break
+      return 0
       ;;
   esac
+  return 1
+}
+
+# The prompt rides one argument of every batch argv.
+for arg in "$@"; do
+  read_prompt "$arg" && break
 done
+
+# A terminal-backed launch reads it from its pane instead, once the server
+# has typed it in and pressed Enter. It gives up early once the world is
+# deleted, so a launch the fake herdr's close left running ends with it.
+input="${FAKE_HERDR_PANE_INPUT:-}"
+if [ -z "$outcome" ] && [ -n "$input" ] && [ ! -d "$stubs/scripts/_$name" ]; then
+  give_up=$(( SECONDS + 90 ))
+  while [ "$SECONDS" -lt "$give_up" ] && [ -d "$stubs" ]; do
+    if [ -f "$input" ] && read_prompt "$(cat "$input")"; then
+      break
+    fi
+    sleep 0.1
+  done
+fi
 
 if [ -n "$outcome" ]; then
   key="$(basename "$outcome" .outcome.json)"
