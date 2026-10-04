@@ -277,3 +277,27 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   the string "5" (TypeScript keeps the number); a verify past u64 saturates; a non-string effort is
   coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
 - Its JavaScript helpers were folded into `ac_core::js` (5e6b558).
+
+### pool files in ac-core (r-formats-a, 5e6b558)
+
+- Modules: `js` (every JavaScript-compatible helper), `pool` (markers, loading, `write_markers`, spawned
+  Ticket text, `add_blocker_to_ticket`), `conversation_record`, `events`, `streamlog` (derived log, line
+  buffers, `rotate_attempt_log`, `list_attempt_logs`, `reconstruct_attempts`), `checkpoints`
+  (`CheckpointStore`, SQLite with busy_timeout 0 so a locked console.db fails at once with "database is
+  locked"; byte-identical schema and rows, round-tripped against Bun's store), `queued_answers`,
+  `spawn_proposals`, `spawn_ledger`, `pool_workspace`, `drive_errors`, `steward_notes`.
+- Tickets, Conversation records and events each have one process-wide cache behind a Mutex, as the
+  TypeScript modules held one map; `read_events` returns `Vec<Arc<TicketEvent>>`.
+- `js::utf16_prefix_lossy` is for text bound for a file (a cut surrogate pair becomes U+FFFD, as Bun
+  writes it); `js::utf16_prefix` drops the pair, for text bound for JSON.
+- Left for the owners: `attemptStreamPath` (needs the harness stream mode; three lines over
+  `events::attempt_stream_name`), the engine-flow writes into Ticket files (landCheckpointBrief,
+  extractBrief, Resume and Review note appends, the restart's reset and orphan notes, grader and
+  head-to-head templates).
+- Deviations, reachable only with hand-edited files: an events line with a non-integer attempt or with no
+  `at` or `payload` is skipped (TypeScript takes it) and extra keys are dropped; GET /api/events serves
+  lines verbatim in the TypeScript, so revisit if a case writes such a line. A held-spawns.json entry that
+  does not fit fails the load with "cannot be read" (TypeScript fails later at the first view); a
+  queued-answers.json record that does not fit starts the queue empty; reconstruct_attempts skips a log
+  whose stat fails (TypeScript throws); a Steward note with a non-string at or conversation reads "".
+- Kept on purpose: a Conversation record's tab=none and session=none read back as the id "none".
