@@ -131,11 +131,15 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     session.on_snapshot = options.on_snapshot.clone();
     session.parent_env = options.parent_env.clone();
     session.launch_cadence = options.launch_cadence;
-    session.pool_workspace = PoolWorkspaceState {
-        launch: options.herdr_workspace.clone(),
-        wanted: pool_workspace_label(title_of(&config).as_deref(), &pool_dir),
-        ..PoolWorkspaceState::default()
-    };
+    session.pool_workspace = PoolWorkspaceState::new(
+        options.herdr_workspace.clone(),
+        pool_workspace_label(title_of(&config).as_deref(), &pool_dir),
+    );
+    // Only a terminal-backed pool resolves a Pool workspace; a spawn that races the boot resolution
+    // waits for it (issue #94).
+    if config.terminal() == Some(ac_protocol::TerminalKind::Herdr) {
+        session.pool_workspace.ready.send_replace(false);
+    }
     session.last_config_text = last_config_text;
     session.jev = options.jev.clone().unwrap_or_else(Jev::unconfigured);
     session.enlist_poll_ms = options.enlist_poll_ms;
@@ -153,8 +157,13 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     let (turned, first_turn) = tokio::sync::oneshot::channel();
     engine
         .call(move |s| {
-            // The pane survey (issue #139) only has panes to list in a terminal-backed pool; it is
-            // the herdr panes port's (STUB in held).
+            // The pane survey (issue #139) only has panes to list in a terminal-backed pool. It lists
+            // on its cadence and whenever the engine holds a pane, so a Held pane from before a
+            // restart is looked for at once (seedHeldPanes asks).
+            if crate::tickets::attempt_env_of(s, None).terminal_backed {
+                let interval = s.pane_survey_ms;
+                crate::pane_survey::create_pane_survey(s, interval);
+            }
             crate::held::seed_held_panes(s);
             // Jev (ADR-0020): one boot line saying which path is live.
             s.log(if s.jev.configured() {
