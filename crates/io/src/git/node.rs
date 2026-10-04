@@ -252,6 +252,11 @@ mod tests {
         assert_eq!(js_number("0b11"), 3.0);
         assert_eq!(js_number("0o17"), 15.0);
         assert_eq!(js_number("-Infinity"), f64::NEG_INFINITY);
+        assert_eq!(js_number("1.e5"), 100000.0);
+        assert_eq!(js_number("+.5"), 0.5);
+        assert_eq!(js_number("0X1f"), 31.0);
+        assert_eq!(js_number("00012"), 12.0);
+        assert_eq!(js_number("1e400"), f64::INFINITY);
         for nan in [
             "abc",
             "1_0",
@@ -264,6 +269,8 @@ mod tests {
             "e1",
             "1 2",
             "Infinityx",
+            "-",
+            "\u{85}0",
         ] {
             assert!(js_number(nan).is_nan(), "{nan:?}");
         }

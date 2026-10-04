@@ -90,22 +90,26 @@ fn git_dir_of(repo_root: &str) -> String {
 /// ref moves the answers cannot move either, and git moves a ref by writing a lock file and renaming it
 /// over the old one, which always changes the stamp. `None` when it cannot vouch: a ref file written
 /// within the racy window, or a HEAD it cannot read.
-pub fn ref_stamp<S: AsRef<str>>(repo_root: impl AsRef<Path>, branches: &[S]) -> Option<String> {
+pub fn ref_stamp<I, S>(repo_root: impl AsRef<Path>, branches: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let root = path_text(repo_root.as_ref());
     let git_dir = git_dir_of(&root);
     let common = git_common_dir(&root);
     let head = fs::read(node_join(&[&git_dir, "HEAD"])).ok()?;
     let head = String::from_utf8_lossy(&head).into_owned();
-    let target = head_branch(&head);
+    let mut names: Vec<String> = branches
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect();
+    names.extend(head_branch(&head));
     let mut paths = vec![
         node_join(&[&common, "packed-refs"]),
         node_join(&[&common, "reftable", "tables.list"]),
     ];
-    let names = branches
-        .iter()
-        .map(|name| name.as_ref())
-        .chain(target.as_deref());
-    for name in names {
+    for name in &names {
         paths.extend([
             node_join(&[&git_dir, name]),
             node_join(&[&common, name]),
@@ -916,7 +920,7 @@ mod tests {
         let a = Repo::new();
         let b = a.second_checkout();
         quiet_tree(&a.root().join(".git"));
-        let stamp = ref_stamp(b.root(), &[] as &[&str]).unwrap();
+        let stamp = ref_stamp(b.root(), Vec::<String>::new()).unwrap();
         assert!(stamp.starts_with("ref: refs/heads/companion\n"), "{stamp}");
         // Its target's loose ref is among the stamped paths: moving it moves the stamp.
         git(
@@ -924,13 +928,13 @@ mod tests {
             ["commit", "-q", "--allow-empty", "-m", "on companion"],
         );
         quiet_tree(&a.root().join(".git"));
-        assert_ne!(ref_stamp(b.root(), &[] as &[&str]).unwrap(), stamp);
+        assert_ne!(ref_stamp(b.root(), Vec::<String>::new()).unwrap(), stamp);
     }
 
     #[test]
     fn cannot_vouch_without_a_readable_head() {
         let plain = Repo::bare_dir();
-        assert_eq!(ref_stamp(plain.root(), &["main"]), None);
+        assert_eq!(ref_stamp(plain.root(), ["main"]), None);
     }
 
     #[test]
