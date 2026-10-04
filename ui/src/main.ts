@@ -9,11 +9,8 @@
  */
 
 import "./styles.css";
-import {
-  EMBED_ELEMENT_ID,
-  readEmbeddedBoot,
-  WS_PATH,
-} from "../../engine/protocol.ts";
+import { EMBED_ELEMENT_ID, WS_PATH } from "../../engine/protocol.ts";
+import { readEmbeddedBoot } from "./protocol";
 import { createConsole } from "./console";
 import { POOL_TAB_COLORS, poolTabTitle } from "./project";
 import type { ConsoleSession } from "./session";

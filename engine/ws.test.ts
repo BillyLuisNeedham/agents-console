@@ -23,15 +23,13 @@ import {
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
   WS_PATH,
-  applyDelta,
-  readEmbeddedBoot,
-  toPushed,
   type LogPush,
   type PushedSnapshot,
   type RequestKind,
   type RequestPayload,
   type ServerMessage,
 } from "./protocol.ts";
+import { applyDelta, readEmbeddedBoot, toPushed } from "../ui/src/protocol.ts";
 import type { EnrichedSnapshot, TicketLogResponse } from "./wire.ts";
 import {
   answered,

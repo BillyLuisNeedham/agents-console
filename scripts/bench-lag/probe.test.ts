@@ -10,7 +10,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeClientMessage, encodeMessage, PROTOCOL_VERSION, WS_PATH } from "../../engine/protocol.ts";
+import { PROTOCOL_VERSION, WS_PATH } from "../../engine/protocol.ts";
+import { decodeClientMessage, encodeMessage } from "../../ui/src/protocol.ts";
 import { findChromium } from "./chromium.ts";
 import {
   cardFrameAfter,

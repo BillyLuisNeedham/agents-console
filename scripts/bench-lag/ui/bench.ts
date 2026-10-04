@@ -33,13 +33,9 @@ import "@console/styles.css";
 import { createConsole, type ConsoleApp } from "@console/console";
 import type { TicketLogResponse } from "@console/project";
 import {
-  decodeClientMessage,
-  diffSnapshot,
-  encodeMessage,
   HEARTBEAT_MS,
   LIVE_CHECK_MS,
   PROTOCOL_VERSION,
-  toPushed,
   type CardSubscription,
   type ClientMessage,
   type LogFollowResult,
@@ -48,6 +44,7 @@ import {
   type ServerMessage,
   type SocketLike,
 } from "@engine/protocol.ts";
+import { decodeClientMessage, diffSnapshot, encodeMessage, toPushed } from "@protocol";
 import {
   activity,
   bodyOf,

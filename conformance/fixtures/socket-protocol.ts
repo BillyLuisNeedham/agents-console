@@ -1,10 +1,11 @@
 /**
  * The Console's socket protocol (issue #161, ADR-0032) as a client reads it:
  * the envelope every server frame must have, and the delta apply that keeps
- * a client's copy of the snapshot current. engine/protocol.ts holds the
- * server's own copy of these rules, but conformance/ may import only its
- * types (ADR-0036), so the rules are restated here from what protocol.ts
- * documents. That is the point rather than a cost: a server whose frames
+ * a client's copy of the snapshot current. ui/src/protocol.ts holds the
+ * Console's own copy of these rules, which the TypeScript server runs too,
+ * but conformance/ may import only types from engine/protocol.ts and
+ * engine/wire.ts (ADR-0036), so the rules are restated here from what they
+ * document. That is the point rather than a cost: a server whose frames
  * only its own decoder accepts, or whose deltas only its own apply rebuilds,
  * fails here, whichever language it is written in.
  */

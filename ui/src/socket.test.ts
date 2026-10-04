@@ -4,17 +4,15 @@ import { describe, expect, it } from "bun:test";
 import {
   CLOSE_RESYNC,
   CLOSE_STOPPED,
-  diffSnapshot,
-  encodeMessage,
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
-  toPushed,
   type ClientMessage,
   type PushedSnapshot,
   type ServerMessage,
   type SnapshotDelta,
   type SocketLike,
 } from "../../engine/protocol.ts";
+import { diffSnapshot, encodeMessage, toPushed } from "./protocol";
 import type { EnrichedSnapshot, EnrichedTicketState } from "./project";
 import {
   CONNECTION_LOST,

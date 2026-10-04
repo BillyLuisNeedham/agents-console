@@ -16,6 +16,7 @@
     "paths": {
       "@console/*": ["../../../ui/src/*"],
       "@engine/*": ["../../../engine/*"],
+      "@protocol": ["../../../ui/src/protocol.ts"],
       "@bench/page": ["./bench.ts"],
       "@bench/frame": ["../../../ui/src/frame.ts"]
     }

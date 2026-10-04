@@ -2,22 +2,24 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+  HTTP_TWINS,
+  POOL_LOG_WINDOW,
+  PROTOCOL_VERSION,
+  type PushedSnapshot,
+} from "../../engine/protocol.ts";
+import {
   applyDelta,
   decodeClientMessage,
   decodeServerMessage,
   diffSnapshot,
   embedBoot,
   encodeMessage,
-  HTTP_TWINS,
-  POOL_LOG_WINDOW,
-  PROTOCOL_VERSION,
   ProtocolError,
   readEmbeddedBoot,
   toPushed,
   trimPoolLog,
-  type PushedSnapshot,
-} from "./protocol.ts";
-import type { ConversationView, EnrichedSnapshot, EnrichedTicketState } from "./wire.ts";
+} from "./protocol";
+import type { ConversationView, EnrichedSnapshot, EnrichedTicketState } from "../../engine/wire.ts";
 
 // A ticket as the snapshot carries one, with only the fields these tests
 // move filled in faithfully; the rest are plausible stand-ins.
