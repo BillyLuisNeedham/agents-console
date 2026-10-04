@@ -9,6 +9,7 @@ export const AREAS = {
   http: "the HTTP routes: status codes and JSON bodies",
   socket: "the WebSocket at /api/ws: hello, snapshot, delta, card, live and reply frames",
   disk: "the files in the pool directory: Ticket markers, events JSONL, console.json, console.db",
+  steward: "the Steward: its console.json entry, what it is told, its answers and their limits, its notes, routes and teaching",
 } as const;
 
 export type Area = keyof typeof AREAS;
