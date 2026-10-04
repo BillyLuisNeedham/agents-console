@@ -53,11 +53,13 @@ export interface Case {
    * key and its JEV_BASE_URL names that fake, so Jev answers as scripted;
    * without, it has no key and runs on its heuristics. `env` adds to or
    * overrides the world's environment for this server alone (a PWD it was
-   * launched with).
+   * launched with). With `pool` it runs that directory as its pool instead,
+   * spelled as given: a second pool in the world's repository, or the pool
+   * reached through a symlink.
    */
   start(
     world: World,
-    options?: { herdr?: HerdrProcess; jev?: ServedFakeJev; env?: Record<string, string> },
+    options?: { herdr?: HerdrProcess; jev?: ServedFakeJev; env?: Record<string, string>; pool?: string },
   ): Promise<CaseServer>;
   /** A socket on a server; with `hello`, the client's hello goes first. */
   socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
@@ -106,7 +108,7 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
         env.JEV_BASE_URL = options.jev.url;
       }
       Object.assign(env, options.env);
-      const running = await startServer({ pool: world.pool, env, choice });
+      const running = await startServer({ pool: options.pool ?? world.pool, env, choice });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);
       return server;

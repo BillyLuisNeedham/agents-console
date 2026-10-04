@@ -15,6 +15,7 @@ export const AREAS = {
   scheduling: "the drive loop: super-steps, the ready set, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
   spawns: "Spawns: proposals in Outcomes, adoption at the boundary, Pending and Held spawns, caps, the spawn routes",
   verify: "verify and Jev: the fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head",
+  merges: "pool worktrees and branches, merges, the Merge hold and Merge queue, the resolver, Ticket file reconcile",
 } as const;
 
 export type Area = keyof typeof AREAS;

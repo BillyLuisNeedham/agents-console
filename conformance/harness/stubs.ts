@@ -23,9 +23,12 @@ export interface ConformanceStubBehaviour extends StubBehaviour {
   /** Standard output, per launch when an array (the last repeats). */
   stdout?: string | string[];
   /**
-   * Bash the launch sources in its own directory, per launch when an array
-   * (the last repeats): what a case needs a harness to do that no field
-   * here says, like the commits a resolver makes.
+   * Bash the launch runs in its working directory, its own process, before
+   * its stdout, marker and outcome steps, per launch when an array (the last
+   * repeats): the work an agent does, a commit in its worktree or the
+   * commits a resolver makes, say. It sees STUB_KEY, STUB_N, STUB_ISSUE and
+   * STUB_OUTCOME, and may write the outcome itself; a script that fails
+   * ends the launch with exit 97 and no outcome.
    */
   run?: string | string[];
   /**
@@ -59,7 +62,7 @@ export interface Stubs {
   bin: string;
   /** CONFORMANCE_STUBS: the scripts and the record of launches. */
   dir: string;
-  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`), replacing any script it had. */
+  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`, `02.resolver`), replacing any script it had. */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
@@ -136,7 +139,7 @@ export function installStubs(root: string): Stubs {
         const run = Array.isArray(behaviour.run)
           ? behaviour.run[Math.min(k - 1, behaviour.run.length - 1)]
           : behaviour.run;
-        if (run !== undefined) writeFileSync(join(scriptDir, `${k}.run`), run);
+        if (run !== undefined) writeFileSync(join(scriptDir, `${k}.sh`), `set -euo pipefail\n${run}\n`);
         if (behaviour.hold !== undefined) writeFileSync(join(scriptDir, `${k}.hold`), `${behaviour.hold}\n`);
       }
     },

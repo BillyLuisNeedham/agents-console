@@ -9,8 +9,10 @@
 # It records each launch, then does what the case scripted for it. A launch
 # is keyed by its outcome file: `01` for a Ticket's Attempt, `01.attempt-2`
 # for one Attempt of a verify round, `01-grader-1` for a grader. A
-# terminal-backed launch's argv names no outcome file: unless `_<name>` is
-# scripted, it waits, as a TUI does, for the prompt typed into its pane
+# resolver's prompt names its outcome file differently, so it is keyed
+# `02.resolver` the same way, with no Ticket file. A terminal-backed
+# launch's argv names no outcome file: unless `_<name>` is scripted, it
+# waits, as a TUI does, for the prompt typed into its pane
 # (FAKE_HERDR_PANE_INPUT, which the fake herdr sets) and is keyed by the
 # outcome file that names. One scripted as `_<name>`, or whose prompt names
 # none within 90 seconds, is `_<name>`.
@@ -22,10 +24,15 @@
 #   scripts/<key>/<k>.marker     launch k's old-protocol misbehaviour: a status
 #                                it writes into the Ticket's marker itself
 #   scripts/<key>/<k>.stdout     launch k's standard output
+#   scripts/<key>/<k>.sh         launch k's own work, run by bash (its own
+#                                process) in the launch's working directory
+#                                after the wait and before the stdout, marker
+#                                and outcome steps: a commit in its worktree,
+#                                or the commits a resolver makes, say. It sees
+#                                STUB_KEY, STUB_N, STUB_ISSUE and STUB_OUTCOME
+#                                and may write the outcome itself; a failure
+#                                ends the launch with exit 97 and no outcome
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
-#   scripts/<key>/<k>.run        bash the case wrote, sourced in the launch's
-#                                directory after the stdout and marker steps
-#                                and before the outcome one
 #   scripts/<key>/<k>.hold       seconds launch k keeps running before it
 #                                exits, as a TUI does; it gives up early once
 #                                the world is deleted
@@ -41,8 +48,9 @@ name="$1"
 shift
 stubs="${CONFORMANCE_STUBS:?CONFORMANCE_STUBS is not set}"
 
-# A prompt's text names the outcome file, and its first line ends in the
-# Ticket file's path. Sets both when the text is a prompt.
+# A Ticket prompt's text names the outcome file, and its first line ends in
+# the Ticket file's path; a resolver prompt names only its outcome file. Sets
+# what it names when the text is a prompt.
 issue=""
 outcome=""
 read_prompt() {
@@ -52,6 +60,11 @@ read_prompt() {
       outcome="${rest%%:*}"
       first="${1%%$'\n'*}"
       issue="${first##* }"
+      return 0
+      ;;
+    *"Resolve the git merge conflict for ticket "*"write JSON to "*)
+      rest="${1#*write JSON to }"
+      outcome="${rest%%: *}"
       return 0
       ;;
   esac
@@ -129,6 +142,13 @@ if [ -f "$script/wait" ]; then
     sleep 0.05
   done
 fi
+if [ -f "$script/$k.sh" ]; then
+  STUB_KEY="$key" STUB_N="$n" STUB_ISSUE="$issue" STUB_OUTCOME="$outcome" bash "$script/$k.sh" || {
+    code=$?
+    echo "stub-harness: $key launch $n: its script exited $code" >&2
+    exit 97
+  }
+fi
 if [ -f "$script/$k.stdout" ]; then
   cat "$script/$k.stdout"
 fi
@@ -137,10 +157,6 @@ if [ -f "$script/$k.marker" ] && [ -n "$issue" ]; then
   # GNU sed spell differently.
   awk -v s="$(cat "$script/$k.marker")" 'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}' "$issue" > "$issue.new"
   mv "$issue.new" "$issue"
-fi
-if [ -f "$script/$k.run" ]; then
-  # shellcheck disable=SC1090
-  . "$script/$k.run"
 fi
 if [ -f "$script/$k.outcome" ] && [ -n "$outcome" ]; then
   cat "$script/$k.outcome" > "$outcome"
