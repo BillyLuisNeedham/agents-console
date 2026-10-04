@@ -5,10 +5,12 @@
 //! The skeleton's bodies refuse with "not ported yet"; each feature's port replaces its methods'
 //! bodies, keeping the signatures (change one only with the server port in step).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use ac_core::harness::Harnesses;
 use ac_protocol::{
     ConversationView, EnlistRequest, EnlistResponse, ResumeAction, RunPhase,
     StartConversationRequest, StewardAnswerAction, StewardStateResponse,
@@ -22,7 +24,44 @@ fn not_ported<T>(what: &str) -> Result<T, EngineError> {
     Err(EngineError::refused(format!("{what}: not ported yet")))
 }
 
+/// What the server starts a pool's run with (engine.ts `startPool`'s options as server.ts passes
+/// them). Every value was read at the CLI boundary; nothing below it reads the environment.
+#[derive(Clone)]
+pub struct PoolOptions {
+    /// The pool directory, `path.resolve`d from `--pool` (not realpath'd).
+    pub pool_dir: String,
+    /// The harness table (`{...defaultHarnesses, ...options.harnesses}`).
+    pub harnesses: Harnesses,
+    /// The herdr daemon's socket.
+    pub herdr_socket: PathBuf,
+    /// The herdr workspace the server was launched in (`HERDR_WORKSPACE_ID`, issue #94).
+    pub herdr_workspace: Option<String>,
+    /// Jev's key (`TYPESAFE_API_KEY`, ADR-0020); absent, the pool runs on its heuristics.
+    pub jev_api_key: Option<String>,
+    /// Where Jev's TypeSafe calls go (`JEV_BASE_URL`); absent, TypeSafe's own API.
+    pub jev_base_url: Option<String>,
+    /// Where the Steward's command reaches this server (`http://localhost:<port>`, ADR-0030).
+    pub console_url: String,
+    /// How often an enlisted attempt re-reads its pane (tests shrink it; 2 s otherwise).
+    pub enlist_poll: Option<Duration>,
+    /// How often a live Conversation re-reads its pane (tests shrink it; 2 s otherwise).
+    pub conversation_poll: Option<Duration>,
+    /// How long an enlist waits for a working pane to reach waiting (tests shrink it).
+    pub enlist_teaching_wait: Option<Duration>,
+    /// How often the pane survey lists herdr's panes (tests shrink it; 15 s otherwise).
+    pub pane_survey: Option<Duration>,
+}
+
 impl Engine {
+    /// `startPool` (with `snapshotHistory: 1`): load the pool, start its actor and drive, and resolve
+    /// once the first snapshot is published, so the server's `current()` is never null after a start.
+    /// A pool the first load refuses (a Ticket file that will not load, a config that does not resolve)
+    /// is the error, with the TypeScript's message; the CLI prints it and exits 1.
+    pub async fn start_pool(options: PoolOptions) -> Result<Engine, EngineError> {
+        let _ = options;
+        not_ported("startPool")
+    }
+
     /// `accept`: record an answer (ADR-0004) and kick processing; never waits for it. An idle pool
     /// drains it and starts a fresh drive inside this call, so the snapshot read right after holds
     /// the processed state.

@@ -20,6 +20,11 @@ axum.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
 chrono.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+libc.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio-tungstenite.workspace = true
