@@ -9,6 +9,9 @@
  *
  *   CONFORMANCE_SERVER     bun (the default) or rust
  *   CONFORMANCE_RUST_BIN   the Rust binary; default target/release/agent-console
+ *   CONFORMANCE_LEGS       the servers a takeover case's legs run, in order,
+ *                          comma-separated (bun,rust,bun); default three legs
+ *                          of CONFORMANCE_SERVER's
  */
 
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, statSync } from "node:fs";
@@ -26,11 +29,9 @@ export interface ServerChoice {
   rustBin: string | null;
 }
 
-/** The server the runner chose, from the environment. */
-export function serverChoice(env: Record<string, string | undefined> = process.env): ServerChoice {
-  const kind = env.CONFORMANCE_SERVER ?? "bun";
+function choiceOf(kind: string, variable: string, env: Record<string, string | undefined>): ServerChoice {
   if (kind !== "bun" && kind !== "rust") {
-    throw new Error(`CONFORMANCE_SERVER must be bun or rust, not ${kind}`);
+    throw new Error(`${variable} must name bun or rust, not ${kind}`);
   }
   if (kind === "bun") return { kind, rustBin: null };
   return {
@@ -39,10 +40,45 @@ export function serverChoice(env: Record<string, string | undefined> = process.e
   };
 }
 
+/** The server the runner chose, from the environment. */
+export function serverChoice(env: Record<string, string | undefined> = process.env): ServerChoice {
+  return choiceOf(env.CONFORMANCE_SERVER ?? "bun", "CONFORMANCE_SERVER", env);
+}
+
+/** How many legs a takeover case runs when CONFORMANCE_LEGS is not set:
+ *  enough for Bun, then Rust, then Bun again. */
+export const DEFAULT_LEG_COUNT = 3;
+
+/**
+ * The servers a takeover case's legs run, in order: CONFORMANCE_LEGS when
+ * it is set, else DEFAULT_LEG_COUNT legs of the run's own server. A
+ * takeover needs a server to hand over to, so fewer than two legs is an
+ * error.
+ */
+export function serverLegs(env: Record<string, string | undefined> = process.env): ServerChoice[] {
+  const named = env.CONFORMANCE_LEGS?.trim();
+  const legs = named
+    ? named.split(",").map((kind) => choiceOf(kind.trim(), "CONFORMANCE_LEGS", env))
+    : Array.from({ length: DEFAULT_LEG_COUNT }, () => serverChoice(env));
+  if (legs.length < 2) {
+    throw new Error(`CONFORMANCE_LEGS must name at least two legs, not ${legs.length}: ${named}`);
+  }
+  return legs;
+}
+
 /** Why the chosen server cannot run at all, or null when it can. */
 export function serverMissing(choice: ServerChoice): string | null {
   if (choice.kind === "rust" && !existsSync(choice.rustBin!)) {
     return `the Rust server binary is not built: no file at ${choice.rustBin}`;
+  }
+  return null;
+}
+
+/** Why one of a takeover case's legs cannot run at all, or null when all can. */
+export function legsMissing(legs: ServerChoice[]): string | null {
+  for (const [i, leg] of legs.entries()) {
+    const missing = serverMissing(leg);
+    if (missing) return `leg ${i + 1} of ${legs.map((choice) => choice.kind).join(",")} cannot run: ${missing}`;
   }
   return null;
 }

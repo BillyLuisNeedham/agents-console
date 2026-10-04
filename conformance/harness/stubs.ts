@@ -64,6 +64,14 @@ export interface Stubs {
   dir: string;
   /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`, `02.resolver`), replacing any script it had. */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
+  /**
+   * Script `key` as `behaviour`, but hold each launch open, before it does
+   * anything but record itself, until the case releases it. Unlike
+   * `waitFor`, which gives up after ten seconds, a held launch outlives any
+   * number of server restarts, and a server that stops meanwhile finds it
+   * has written nothing. A release lets every launch held at that moment go on.
+   */
+  hold(key: string, behaviour?: ConformanceStubBehaviour): StubHold;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
 }
@@ -95,6 +103,12 @@ function readCall(dir: string, name: string): StubCall | null {
     issue: readText(join(path, "issue")),
     outcome: readText(join(path, "outcome")),
   };
+}
+
+/** A held stub launch (Stubs.hold). */
+export interface StubHold {
+  /** Let the held launches go on; waits up to `ms` for one to be held. */
+  release(ms?: number): Promise<void>;
 }
 
 /** Write the wrappers into `<root>/bin` and make `<root>/stubs`. */
@@ -142,6 +156,24 @@ export function installStubs(root: string): Stubs {
         if (run !== undefined) writeFileSync(join(scriptDir, `${k}.sh`), `set -euo pipefail\n${run}\n`);
         if (behaviour.hold !== undefined) writeFileSync(join(scriptDir, `${k}.hold`), `${behaviour.hold}\n`);
       }
+    },
+    hold(key, behaviour = {}) {
+      this.script(key, behaviour);
+      const fifo = join(dir, "scripts", key, "hold");
+      const made = Bun.spawnSync(["mkfifo", fifo], { stderr: "pipe" });
+      if (made.exitCode !== 0) throw new Error(`mkfifo ${fifo} failed: ${made.stderr.toString()}`);
+      return {
+        async release(ms = 10_000) {
+          // Opening a FIFO to write blocks until a reader opens it, so the
+          // write runs in a process of its own, bounded.
+          const writer = Bun.spawn(["sh", "-c", 'echo release > "$0"', fifo]);
+          const written = await Promise.race([writer.exited.then(() => true), Bun.sleep(ms).then(() => false)]);
+          if (!written) {
+            writer.kill();
+            throw new Error(`no launch of ${key} was waiting to be released within ${ms} ms`);
+          }
+        },
+      };
     },
     calls() {
       const callsDir = join(dir, "calls");

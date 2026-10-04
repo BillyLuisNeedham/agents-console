@@ -1,38 +1,45 @@
 /**
  * The conformance suite's runner (ADR-0036):
  *
- *   bun run conformance --server bun|rust [--rust-bin <path>] [<bun test arguments>]
+ *   bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...]
+ *                       [<bun test arguments>]
  *
  * Runs every test under conformance/ against the chosen server, Bun's
  * (`bun run engine/server.ts`) or Rust's (`<binary> server`, by default
  * target/release/agent-console), and prints the pass share per contract
- * area. Anything after the options goes to `bun test` as it is: a file
- * filter, or `-t <pattern>` for a name.
+ * area. `--legs bun,rust,bun` names the server each leg of a takeover case
+ * runs, in order (CONFORMANCE_LEGS does the same); by default every leg
+ * runs the chosen server. Anything after the options goes to `bun test` as
+ * it is: a file filter, or `-t <pattern>` for a name.
  *
  * Exit codes: 0 when every case that ran passed; 1 when one failed or
- * `bun test` itself did; 2 when the chosen server cannot run at all (the
- * Rust binary not built yet), which is reported as such and never counted
- * as failures.
+ * `bun test` itself did; 2 when the chosen server, or a leg's, cannot run
+ * at all (the Rust binary not built yet), which is reported as such and
+ * never counted as failures.
  */
 
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countByArea, formatReport, parseJunit } from "./report.ts";
-import { serverChoice, serverMissing } from "./harness/server.ts";
+import { legsMissing, serverChoice, serverLegs, serverMissing } from "./harness/server.ts";
 
-const USAGE = "usage: bun run conformance --server bun|rust [--rust-bin <path>] [<bun test arguments>]";
+const USAGE =
+  "usage: bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...] [<bun test arguments>]";
 
 const args = process.argv.slice(2);
 const passthrough: string[] = [];
 let server: string | undefined;
 let rustBin: string | undefined;
+let legs: string | undefined;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
   if (arg === "--server") server = args[++i];
   else if (arg.startsWith("--server=")) server = arg.slice("--server=".length);
   else if (arg === "--rust-bin") rustBin = args[++i];
   else if (arg.startsWith("--rust-bin=")) rustBin = arg.slice("--rust-bin=".length);
+  else if (arg === "--legs") legs = args[++i];
+  else if (arg.startsWith("--legs=")) legs = arg.slice("--legs=".length);
   else if (arg === "--help" || arg === "-h") {
     console.log(USAGE);
     process.exit(0);
@@ -46,14 +53,27 @@ if (server !== "bun" && server !== "rust") {
 const env: Record<string, string | undefined> = { ...process.env, CONFORMANCE_SERVER: server };
 if (rustBin !== undefined) env.CONFORMANCE_RUST_BIN = rustBin;
 else delete env.CONFORMANCE_RUST_BIN;
+if (legs !== undefined) env.CONFORMANCE_LEGS = legs;
 const choice = serverChoice(env);
+let legChoices;
+try {
+  legChoices = serverLegs(env);
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  console.error(USAGE);
+  process.exit(1);
+}
 const missing = serverMissing(choice);
+const legMissing = missing ? null : legsMissing(legChoices);
+const legNames = legChoices.map((leg) => leg.kind).join(",");
 const title =
-  choice.kind === "bun"
+  (choice.kind === "bun"
     ? "conformance against the Bun server (engine/server.ts)"
-    : `conformance against the Rust server (${choice.rustBin})`;
+    : `conformance against the Rust server (${choice.rustBin})`) + `, takeover legs ${legNames}`;
 if (missing) {
   console.log(`${missing}.\nEvery case that needs a server is listed below as not run; none has failed.\n`);
+} else if (legMissing) {
+  console.log(`${legMissing}.\nEvery takeover case is listed below as not run; none has failed.\n`);
 }
 
 // Every temporary file of the run, worlds included, goes under one
@@ -86,5 +106,5 @@ console.log(`\n${formatReport(title, counts, results)}`);
 
 const failed = counts.some((count) => count.fail > 0);
 if (failed || code !== 0) process.exit(1);
-if (missing) process.exit(2);
+if (missing || legMissing) process.exit(2);
 process.exit(0);
