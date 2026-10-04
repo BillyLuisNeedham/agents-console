@@ -31,7 +31,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
 | protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
-| restart, Tickets and Attempts | C05 | wave 2 |
+| restart, Tickets and Attempts | C05 | landed, 55 cases |
 | restart, Conversations and panes | C06 | wave 2 |
 | Conversation Turn state and Notices | C17 | wave 2 |
 | verify with Jev | C22 | wave 2 |
@@ -199,3 +199,17 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   checks its paste with `recent` 200-line reads of the operator's pane, which moves their viewport.
 - Known load flakes outside C15: attempts-argv "a terminal-backed launch runs each harness's interactive
   argv" (timed out waiting for launches); engine attempt-run.test.ts "surfaces a botched spawn".
+
+### restart, Tickets and Attempts (C05)
+
+- Restart cases that start more than one server are takeover cases: each later server runs the next leg
+  of CONFORMANCE_LEGS, so `--legs bun,rust` has Rust boot on what Bun left.
+- merge-hold.test.ts:536 is a Rust unit test: boot never re-adopts a resolver's pane (`terminalAdoptable`
+  gives a resolver the headless orphan fate), so after a restart the Ticket reads needs-you.
+- On macOS a reused pid is stopped as an orphan: with no procfs, `orphanIsLive` trusts liveness alone and
+  boot TERMs then KILLs the process group of whatever now holds the recorded pid. Rust should check the
+  working directory on every platform (unit test drafted in NOT-PORTED.md).
+- A server whose store refuses every write still stops cleanly (exit 0, lock released) with no checkpoint
+  row; the next boot runs from the state lines alone (pinned).
+- children.test.ts:76 is a Rust unit test: a child registered after shutdown began gets TERM sent to its
+  process group as it arrives.
