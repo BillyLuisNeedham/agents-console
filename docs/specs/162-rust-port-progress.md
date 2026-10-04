@@ -29,7 +29,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | attempts, endings and logs | C13 | landed (1e39261), 30 cases |
 | herdr panes | C15 | landed (eecd384..1bee44e), 42 cases |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
-| protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
+| protocol and http outside route files | C02 | landed (d9db343), 31 cases |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
 | restart, Tickets and Attempts | C05 | landed, 55 cases |
 | restart, Conversations and panes | C06 | wave 2 |
@@ -55,7 +55,8 @@ briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
 - r-s-server: ac-server and the `server` subcommand (server.ts, ws.ts, ports.ts). Started from 5e6b558.
 - r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
   Started from 78e6eea.
-- m0-c02 (protocol/http cases), m0-c22 (verify with Jev), m0-c06 (restart, Conversations and panes).
+- m0-c22 (verify with Jev), m0-c06 (restart, Conversations and panes).
+- r-cli: the boot, steward and fleet subcommands (brief-r-cli.md). Started from d9db343.
 
 How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
 its worktree merged the branch itself), resolve NOT-PORTED.md conflicts by keeping both sides
@@ -113,6 +114,35 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - A Close is drained even while a Continued attempt holds the pool checkout.
 - Keep talking's "lost its terminal" and "lost its agent" refusals are dead code in the TypeScript (pinned
   as "has no terminal left to continue in").
+
+### protocol and HTTP reads (C02, d9db343)
+
+- A delta carries only what changed: a changed Ticket goes whole under `tickets.upsert`, `tickets.order` only
+  when ids are added, removed or reordered, removed ids under `tickets.remove`, changed state fields whole
+  under `delta.state`. Conversations follow the same rules. An emit that changes only `seq` still sends a
+  delta of `set.seq` alone (seen, not pinned). A Reassign that changes nothing sends no delta and replies
+  with the unchanged revision. An action's delta is flushed before its reply; `reply.rev` is the socket's.
+- Pool log: a pushed snapshot (socket and page embed) carries the last 500 lines with `logTotal` the full
+  count; a delta's log is `{append, total}` even past the 500 edge; GET /api/state carries every line.
+- The page embed escapes every `<` in the boot JSON as `\u003c`, and sits right before `</head>`.
+- Frames with no reply: non-JSON text, an array, an unknown type, a request with an unknown kind, no id or
+  a negative id, a subscribe with no card, any binary frame (a binary frame holding a valid stop is
+  dropped). Request ids are per socket.
+- Card with no Attempt: log null; a new Attempt brings a window naming it. Conversation card: body null,
+  events as GET /api/events serves them, window on `<id>.log`. Card log window is the last 65536 bytes; a
+  catch-up of 256 KiB or less goes as appends of at most 64 KiB; more behind gets a fresh window.
+- Grades go to hidden sockets as live frames with grades only. Quirk (Rust unit test, not pinnable): a
+  socket counts as visible until its hello lands, and the whole live cache goes out at open.
+- A Ticket file with no state line keeps the server on its last good list, retried on each read. Log reads
+  hold back at an unfinished escape (`"ok \x1b[31"` serves `"ok "`, nextOffset 3). Empty query params count
+  as absent. Activity's diff comes from the last spawned or resolver event with a cwd; a gone cwd gives
+  diff null with lastEventAt still served.
+- Refusal texts (400, nothing written): enlist "paneId is required", keep-talking "ticketId is required",
+  conversations/end "id is required", conversations 'role must be "steward" when given', settings/machine
+  "settings: defaults must be an object". terminal.focus refusal is 404 "no terminal-backed pane for ticket
+  <id>". Non-JSON body: resume and both settings PUTs 400 `{error:"Failed to parse JSON"}`, Reassign 500
+  with that text, every other JSON route 400 `{reason:"invalid JSON body"}`. Unknown paths answer 500
+  (pinned; 404 intended).
 
 ## Notes from the Rust port agents
 
