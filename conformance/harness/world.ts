@@ -35,6 +35,12 @@ export interface WorldSpec {
   poolFiles?: Record<string, string>;
   /** Further repository files, committed with the first commit. */
   repoFiles?: Record<string, string>;
+  /**
+   * False for a pool that does not run in git: the repository directory is
+   * never made a checkout, so the server finds no git around the pool.
+   * Default true.
+   */
+  git?: boolean;
 }
 
 export interface World {
@@ -74,6 +80,18 @@ function toolPath(bin: string): string {
   return [...new Set(dirs)].join(":");
 }
 
+/** Make the repository a checkout with one commit on main. */
+function initRepo(git: (args: string[]) => string): void {
+  git(["init", "-q", "-b", "main"]);
+  // In the repository's own config, so every git the server runs here, in
+  // the checkout or a worktree of it, commits as the same author.
+  git(["config", "user.email", "conformance@test"]);
+  git(["config", "user.name", "conformance"]);
+  git(["config", "commit.gpgsign", "false"]);
+  git(["add", "-A"]);
+  git(["commit", "-qm", "init"]);
+}
+
 export function makeWorld(spec: WorldSpec = {}): World {
   const root = makeTempDir("conformance-");
   const repo = join(root, "repo");
@@ -103,14 +121,7 @@ export function makeWorld(spec: WorldSpec = {}): World {
     mkdirSync(dirname(join(repo, path)), { recursive: true });
     writeFileSync(join(repo, path), content);
   }
-  git(["init", "-q", "-b", "main"]);
-  // In the repository's own config, so every git the server runs here, in
-  // the checkout or a worktree of it, commits as the same author.
-  git(["config", "user.email", "conformance@test"]);
-  git(["config", "user.name", "conformance"]);
-  git(["config", "commit.gpgsign", "false"]);
-  git(["add", "-A"]);
-  git(["commit", "-qm", "init"]);
+  if (spec.git !== false) initRepo(git);
 
   for (const ticket of spec.tickets ?? []) {
     writeFileSync(join(pool, "issues", ticket.file), ticketContent(ticket));

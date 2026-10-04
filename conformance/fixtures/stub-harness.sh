@@ -18,9 +18,20 @@
 #   scripts/<key>/<k>.marker     launch k's old-protocol misbehaviour: a status
 #                                it writes into the Ticket's marker itself
 #   scripts/<key>/<k>.stdout     launch k's standard output
+#   scripts/<key>/touch          a file to create first, before any wait
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
+#   scripts/<key>/work           a file to write in the working directory and
+#                                commit there, after the stdout and before the
+#                                outcome; work.line, work.overwrite and
+#                                work.message say what line, whether it
+#                                replaces the file, and the commit message
+#   scripts/<key>/hold           a file to wait for last, after the outcome, so
+#                                the process stays up the way an interactive
+#                                harness does; bounded at a minute, and over
+#                                at once when CONFORMANCE_STUBS is deleted
 #   calls/<key>.<n>/             launch n of the key: seq, argv, cwd, env,
-#                                issue and outcome
+#                                issue, outcome, and the head and branch of
+#                                the git checkout it ran in (empty outside one)
 # A key with no scripts writes a done outcome and exits 0, the same step
 # stubStep (conformance/fixtures/pool-fixture.ts) reads for no behaviour.
 #
@@ -77,6 +88,8 @@ printf '%s\0' "$name" "$@" > "$call/argv"
 printf '%s' "$PWD" > "$call/cwd"
 printf '%s' "$issue" > "$call/issue"
 printf '%s' "$outcome" > "$call/outcome"
+git rev-parse HEAD 2>/dev/null | tr -d '\n' > "$call/head"
+git branch --show-current 2>/dev/null | tr -d '\n' > "$call/branch"
 for var in $(compgen -e); do printf '%s=%s\0' "$var" "${!var}"; done > "$call/env"
 
 script="$stubs/scripts/$key"
@@ -92,6 +105,9 @@ fi
 
 steps="$(cat "$script/steps")"
 k=$(( n < steps ? n : steps ))
+if [ -f "$script/touch" ]; then
+  touch "$(cat "$script/touch")"
+fi
 if [ -f "$script/wait" ]; then
   wait_for="$(cat "$script/wait")"
   for _ in $(seq 1 200); do
@@ -108,7 +124,27 @@ if [ -f "$script/$k.marker" ] && [ -n "$issue" ]; then
   awk -v s="$(cat "$script/$k.marker")" 'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}' "$issue" > "$issue.new"
   mv "$issue.new" "$issue"
 fi
+if [ -f "$script/work" ]; then
+  work="$(cat "$script/work")"
+  line="$(cat "$script/work.line" 2>/dev/null || echo work)"
+  mkdir -p "$(dirname "$work")"
+  if [ -f "$script/work.overwrite" ]; then
+    printf '%s\n' "$line" > "$work"
+  else
+    printf '%s\n' "$line" >> "$work"
+  fi
+  git add "$work" && git commit -qm "$(cat "$script/work.message" 2>/dev/null || echo work)"
+fi
 if [ -f "$script/$k.outcome" ] && [ -n "$outcome" ]; then
   cat "$script/$k.outcome" > "$outcome"
 fi
-exit "$(cat "$script/$k.exit")"
+code="$(cat "$script/$k.exit")"
+if [ -f "$script/hold" ]; then
+  hold="$(cat "$script/hold")"
+  for _ in $(seq 1 1200); do
+    [ -e "$hold" ] && break
+    [ -d "$stubs" ] || break
+    sleep 0.05
+  done
+fi
+exit "$code"

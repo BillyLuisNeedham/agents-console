@@ -10,7 +10,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { stubStep, type StubBehaviour } from "../fixtures/pool-fixture.ts";
+import { stubStep, type StubBehaviour, type StubStep } from "../fixtures/pool-fixture.ts";
 
 /** The binaries a pool's default harnesses run, each stubbed. */
 export const STUBBED_BINARIES = ["claude", "opencode", "agent"] as const;
@@ -22,6 +22,20 @@ const SCRIPT = join(import.meta.dir, "..", "fixtures", "stub-harness.sh");
 export interface ConformanceStubBehaviour extends StubBehaviour {
   /** Standard output, per launch when an array (the last repeats). */
   stdout?: string | string[];
+  /** A file every launch creates first, before it waits for `waitFor`. */
+  touch?: string;
+  /**
+   * Work every launch commits in its working directory (an attempt's
+   * worktree, or the checkout): `line` appended to `file`, or written over
+   * it with `overwrite`, then committed with `message`.
+   */
+  work?: { file: string; line?: string; overwrite?: boolean; message?: string };
+  /**
+   * A file every launch waits for last, after its outcome, so it stays up
+   * the way an interactive harness does after its Outcome: until the file
+   * exists, the world is deleted, or a minute passes.
+   */
+  hold?: string;
 }
 
 /** One launch the server made, as the stub recorded it. */
@@ -41,6 +55,10 @@ export interface StubCall {
   issue: string;
   /** The outcome file its prompt names, or "" when it names none. */
   outcome: string;
+  /** HEAD of the git checkout it ran in, as it started; "" outside one. */
+  head: string;
+  /** The branch checked out where it ran; "" outside git or detached. */
+  branch: string;
 }
 
 export interface Stubs {
@@ -50,6 +68,12 @@ export interface Stubs {
   dir: string;
   /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`). */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
+  /**
+   * Script `key` launch by launch: launch k plays `behaviours[k-1]`, the
+   * last repeating, for a grader whose outcome differs from run to run.
+   * touch, waitFor, work and hold are the key's, read from the first.
+   */
+  launches(key: string, behaviours: ConformanceStubBehaviour[]): void;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
 }
@@ -80,7 +104,42 @@ function readCall(dir: string, name: string): StubCall | null {
     env,
     issue: readText(join(path, "issue")),
     outcome: readText(join(path, "outcome")),
+    head: readText(join(path, "head")),
+    branch: readText(join(path, "branch")),
   };
+}
+
+/**
+ * One key's script files: the key-wide fields from `behaviour`, then each of
+ * `steps` launches as `launch(k)` (from 0) says, in the layout
+ * stub-harness.sh reads.
+ */
+function writeScript(
+  scriptDir: string,
+  behaviour: ConformanceStubBehaviour,
+  steps: number,
+  launch: (k: number) => { step: StubStep; stdout: string | undefined },
+): void {
+  mkdirSync(scriptDir, { recursive: true });
+  writeFileSync(join(scriptDir, "steps"), `${steps}\n`);
+  if (behaviour.waitFor) writeFileSync(join(scriptDir, "wait"), behaviour.waitFor);
+  if (behaviour.touch) writeFileSync(join(scriptDir, "touch"), behaviour.touch);
+  if (behaviour.hold) writeFileSync(join(scriptDir, "hold"), behaviour.hold);
+  if (behaviour.work) {
+    writeFileSync(join(scriptDir, "work"), behaviour.work.file);
+    if (behaviour.work.line !== undefined) writeFileSync(join(scriptDir, "work.line"), behaviour.work.line);
+    if (behaviour.work.overwrite) writeFileSync(join(scriptDir, "work.overwrite"), "");
+    if (behaviour.work.message !== undefined) writeFileSync(join(scriptDir, "work.message"), behaviour.work.message);
+  }
+  for (let k = 1; k <= steps; k++) {
+    const { step, stdout } = launch(k - 1);
+    writeFileSync(join(scriptDir, `${k}.exit`), `${step.exitCode}\n`);
+    if (step.outcome !== "") writeFileSync(join(scriptDir, `${k}.outcome`), step.outcome);
+    if (step.status === "ready" || step.status === "marker-done") {
+      writeFileSync(join(scriptDir, `${k}.marker`), step.status.replace(/^marker-/, ""));
+    }
+    if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
+  }
 }
 
 /** Write the wrappers into `<root>/bin` and make `<root>/stubs`. */
@@ -104,22 +163,20 @@ export function installStubs(root: string): Stubs {
         behaviour.exitCodes?.length ?? 1,
         Array.isArray(behaviour.stdout) ? behaviour.stdout.length : 1,
       );
-      const scriptDir = join(dir, "scripts", key);
-      mkdirSync(scriptDir, { recursive: true });
-      writeFileSync(join(scriptDir, "steps"), `${steps}\n`);
-      if (behaviour.waitFor) writeFileSync(join(scriptDir, "wait"), behaviour.waitFor);
-      for (let k = 1; k <= steps; k++) {
-        const step = stubStep(key, behaviour, k - 1, null);
-        writeFileSync(join(scriptDir, `${k}.exit`), `${step.exitCode}\n`);
-        if (step.outcome !== "") writeFileSync(join(scriptDir, `${k}.outcome`), step.outcome);
-        if (step.status === "ready" || step.status === "marker-done") {
-          writeFileSync(join(scriptDir, `${k}.marker`), step.status.replace(/^marker-/, ""));
-        }
+      writeScript(join(dir, "scripts", key), behaviour, steps, (k) => {
         const stdout = Array.isArray(behaviour.stdout)
-          ? behaviour.stdout[Math.min(k - 1, behaviour.stdout.length - 1)]
+          ? behaviour.stdout[Math.min(k, behaviour.stdout.length - 1)]
           : behaviour.stdout;
-        if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
-      }
+        return { step: stubStep(key, behaviour, k, null), stdout };
+      });
+    },
+    launches(key, behaviours) {
+      if (behaviours.length === 0) throw new Error(`no launches scripted for ${key}`);
+      writeScript(join(dir, "scripts", key), behaviours[0]!, behaviours.length, (k) => {
+        const behaviour = behaviours[k]!;
+        const stdout = Array.isArray(behaviour.stdout) ? behaviour.stdout[0] : behaviour.stdout;
+        return { step: stubStep(key, behaviour, 0, null), stdout };
+      });
     },
     calls() {
       const callsDir = join(dir, "calls");
