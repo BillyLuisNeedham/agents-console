@@ -683,3 +683,58 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
 - `children.test.ts:76` stays a Rust unit test, as the inventory sorts it: *shutdown child stop: a harness child
   registered after the shutdown began is sent TERM to its process group on arrival, so a launch racing the stop
   cannot outlive it.*
+
+## `attempts`: endings and logs (C13)
+
+Every one of C13's 60 rows is a passing case under `conformance/cases/attempts-endings-pane.test.ts`,
+`attempts-endings-liveness.test.ts`, `attempts-endings-exits.test.ts` and `attempts-endings-logs.test.ts`, and so is
+the area's stderr gap (a headless Attempt's stderr reaches its log, never its Stream file, and never joins a stdout
+line part way through). One gap no list named is a case too: an exit-code file left in `runs/` from before a
+terminal-backed launch is removed as the wrapper is sent, so it never ends the new Attempt
+(`engine/pane-session.ts:314`). No row is left out. Of the twelve rows with a seam:
+
+- The eight that ask for short liveness and grace cadences (`attempt-ending.test.ts:120`, `:150`, `:167`, `:195`,
+  `:223`, `:452`, `:484`, `:491`) wait out the real 30 s sweep and 10 s grace window (Decided 2), in the two slow
+  cases of `attempts-endings-liveness.test.ts`, each of which runs its worlds side by side.
+- `attempt-ending.test.ts:80` and `herdr.test.ts:449` (the subscriber connections) use the fake's
+  `openConnections` (C14) and a new `listedPanes` control.
+- The fake herdr gained the rest: `delistPane` (a pane reaped from the listing while its process runs on,
+  `attempt-ending.test.ts:167`), `hangUpSubscribers` (a plain FIN on every subscriber, `herdr.test.ts:418`),
+  `endPaneOn(method, paneId, nth)` (a pane ended as a chosen call arrives, `herdr.test.ts:462`), `closeTab` and
+  `closePane` (an operator's own closes, `herdr.test.ts:337`, `:351`, `:398`, `:406`), and the fake's process a
+  `kill()` (a daemon that dies mid-Attempt, `herdr.test.ts:441`).
+
+Where the cases reach a row differently from its wording:
+
+- **Which `pane.list` is the sweep.** The ending's liveness sweep and the pane survey both list with `pane.list {}`,
+  so a case cannot tell one from the other. The "several sweeps" rows (`:120`, `:195`, `:223`) wait two sweep
+  periods from the moment the ending's wait began, and `:167` lets its stub exit 2 s after the first sweep is due,
+  inside the grace window (one run saw the sweep 30.0 s in and, with no exit, the pane-gone crash at 40.1 s). A
+  server whose sweep fires late finds the exit code through its file poll instead, and the case passes without
+  reaching the grace window. Rust unit test: *ending wait: an exit-code file that lands inside the grace window
+  after a sweep found the pane gone ends the Attempt with the file's code, never as pane gone.*
+- **Where the ending's wait begins.** A case finds it as the `events.subscribe` the server holds open once the
+  prompt's Enter is in, or, with every subscription dropped, the one made after the Enter. The Bun server
+  subscribes twice per launch, once for the readiness wait, let go before the prompt is typed; only
+  `herdr.test.ts:462` depends on that, arming the pane's end on the second `events.subscribe`.
+- **`streamlog.test.ts:199`** (the operator's keystrokes in the typescript): the fake herdr types nothing into a
+  pane's terminal, so the stub prints the echoed prompt line itself, as a TUI does.
+- **Splits across chunks** (`streamlog.test.ts:137`, `:144`, `:209`): the stub pauses 0.3 to 0.6 s inside the line,
+  the character or the escape. A server that reads both halves in one go passes without reassembling anything.
+  Rust unit test: *stream and transcript line buffers: a line, a UTF-8 character and an escape sequence split
+  across two chunks each come out whole, exactly once.*
+- **`attempt-ending.test.ts:435`** pins what `attempt-run.test.ts:420` (C11, `attempts-launch.test.ts`) already
+  does, plus the resolver's own log and Stream file. `engine.test.ts:5026` builds the conflict the way C11 does,
+  so the resolver's files are `01.resolver.*` rather than the row's `02.resolver.*`.
+- **`engine.test.ts:3825` and `:5163`** are one case on opencode: its raw log, a stream-json line and a carriage
+  return kept as they came, rotated to `01.attempt-1.log` by the re-run, and no Stream file for either attempt.
+
+Behaviour of the TypeScript server the cases tolerate rather than pin:
+
+- On Linux every terminal-backed Attempt's derived log carries util-linux script(1)'s own banner: a
+  `Script started on <local time> [COMMAND="..." <not executed on terminal>]` line before the harness's first
+  output and, once the harness exits, a blank line and `Script done on <local time> [COMMAND_EXIT_CODE="<n>"]`. So
+  do the exited and crash events' `logTail` and the crash Interrupt body. BSD's script, the Mac's, writes neither
+  under `-q`. The server does not strip them, and the cases read the transcript without them (`transcriptLines` in
+  `attempts-endings-support.ts`). A Rust server that runs the same `script` keeps them unless the port decides to
+  strip them.
