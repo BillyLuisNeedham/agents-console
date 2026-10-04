@@ -974,4 +974,130 @@ mod tests {
              attempt."
         );
     }
+
+    use ac_protocol::Interrupt;
+    use tokio::sync::watch;
+
+    fn session() -> Session {
+        let (publisher, _) = watch::channel(None);
+        crate::testkit::bare_session(publisher)
+    }
+
+    fn marker() -> TicketMarker {
+        TicketMarker {
+            id: "01".into(),
+            file: "/p/issues/01.md".into(),
+            blocked_by: Vec::new(),
+            status: TicketStatus::Checkpoint,
+            title: "t".into(),
+            spec: String::new(),
+            spawned_by: None,
+            enlisted_from: None,
+            spawn_assign: None,
+        }
+    }
+
+    fn checkpointed(session: &mut Session, held: bool) {
+        session.markers.push(marker());
+        session
+            .state
+            .tickets
+            .insert("01".into(), TicketStatus::Checkpoint);
+        session.state.interrupts.push(Interrupt {
+            ticket_id: "01".into(),
+            kind: InterruptKind::Checkpoint,
+            body: "b".into(),
+            candidates: None,
+            steward_note: None,
+        });
+        if held {
+            session.held.insert(
+                "01".into(),
+                HeldPane {
+                    attempt: 1,
+                    pane_id: "p1".into(),
+                    tab_id: Some("t1".into()),
+                    terminal_id: None,
+                    cwd: "/w".into(),
+                    branch: None,
+                    harness: "claude".into(),
+                    model: "m".into(),
+                    effort: None,
+                    work_attempt: 1,
+                    numbered: false,
+                    stream: None,
+                    spawned_at: "2026-10-04T00:00:00.000Z".into(),
+                    wrapped: true,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn keep_talking_refuses_what_is_not_waiting_at_a_checkpoint_with_a_pane_held() {
+        let mut s = session();
+        let words = |s: &Session| check(s, "01").unwrap_err().to_string();
+        assert_eq!(
+            words(&s),
+            "keep talking: ticket 01 is not waiting at a checkpoint"
+        );
+        checkpointed(&mut s, false);
+        assert_eq!(
+            words(&s),
+            "keep talking: ticket 01 has no terminal left to continue in"
+        );
+        checkpointed(&mut s, true);
+        s.state.interrupts.truncate(1);
+        assert_eq!(check(&s, "01").unwrap().1.pane_id, "p1");
+        // The state, not the marker object, says whether the ticket waits.
+        s.state
+            .tickets
+            .insert("01".into(), TicketStatus::InProgress);
+        assert_eq!(
+            words(&s),
+            "keep talking: ticket 01 is not waiting at a checkpoint"
+        );
+        s.state
+            .tickets
+            .insert("01".into(), TicketStatus::Checkpoint);
+        s.state.interrupts[0].kind = InterruptKind::Review;
+        assert_eq!(
+            words(&s),
+            "keep talking: ticket 01 is not waiting at a checkpoint"
+        );
+    }
+
+    #[test]
+    fn a_verify_ticket_owes_the_lone_grade_of_a_continued_attempt_that_ended_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = session();
+        s.runs_dir = dir.path().to_string_lossy().into_owned();
+        s.cwd = "/repo".into();
+        let marker = marker();
+        let write = |attempt: u64, kind: TicketEventKind, payload: Value| {
+            let Value::Object(payload) = payload else {
+                unreachable!()
+            };
+            append_event(dir.path(), "01", &event_now(attempt, kind, payload)).unwrap();
+        };
+        assert!(owed_continued_grade(&s, &marker).is_none());
+        write(
+            2,
+            TicketEventKind::Spawned,
+            serde_json::json!({"pane_id": "p1", "cwd": "/w", "continued": true, "numbered": true,
+                "continues": 1, "work_attempt": 1}),
+        );
+        // Still running: no exit yet.
+        assert!(owed_continued_grade(&s, &marker).is_none());
+        write(
+            2,
+            TicketEventKind::Exited,
+            serde_json::json!({"code": 0, "status": "done"}),
+        );
+        let owed = owed_continued_grade(&s, &marker).unwrap();
+        assert_eq!((owed.ticket_id.as_str(), owed.attempt), ("01", 2));
+        assert_eq!(owed.work.pane_id, "p1");
+        write(2, TicketEventKind::Graded, serde_json::json!({"score": 8}));
+        assert!(owed_continued_grade(&s, &marker).is_none());
+    }
 }
