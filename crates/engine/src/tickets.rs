@@ -240,6 +240,9 @@ pub async fn close_tab_recorded(
                         &owner,
                         &event_now(attempt, TicketEventKind::TabClosed, payload),
                     );
+                    // The snapshot's Finished terminals count should not wait a cadence to drop the
+                    // tab just closed.
+                    crate::pane_survey::refresh_in_background(s);
                     true
                 }
                 Err(error) => {

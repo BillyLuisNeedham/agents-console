@@ -466,63 +466,264 @@ pub async fn close_finished_terminals(engine: &Engine) -> Result<u64, EngineErro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ac_io::herdr::HerdrPane;
+    //! engine/finished-terminals.test.ts.
 
-    fn tab(owner: &str, tab: &str, pane: Option<&str>) -> OpenedTab {
-        OpenedTab {
-            owner: owner.into(),
-            tab_id: tab.into(),
-            pane_id: pane.map(str::to_owned),
+    use super::*;
+    use ac_core::events::{append_event, event_now};
+    use ac_io::herdr::HerdrPane;
+    use serde_json::{Map, json};
+    use std::sync::Arc;
+
+    fn pane(id: &str, tab: Option<&str>) -> HerdrPane {
+        HerdrPane {
+            pane_id: id.into(),
+            tab_id: tab.map(str::to_owned),
+            workspace_id: None,
             cwd: None,
             terminal_id: None,
         }
     }
 
-    fn listing(panes: &[(&str, &str)]) -> PaneListing {
-        let panes: Vec<HerdrPane> = panes
-            .iter()
-            .map(|(pane, tab)| HerdrPane {
-                pane_id: (*pane).into(),
-                tab_id: Some((*tab).into()),
-                workspace_id: None,
-                cwd: None,
-                terminal_id: None,
-            })
-            .collect();
+    fn listing(panes: Vec<HerdrPane>) -> PaneListing {
         PaneListing {
             tabs: panes.iter().filter_map(|p| p.tab_id.clone()).collect(),
             panes: panes.into_iter().map(|p| (p.pane_id.clone(), p)).collect(),
         }
     }
 
+    fn tab(owner: &str, n: u32, cwd: Option<&str>, terminal: Option<&str>) -> OpenedTab {
+        OpenedTab {
+            owner: owner.into(),
+            tab_id: format!("t{n}"),
+            pane_id: Some(format!("p{n}")),
+            cwd: cwd.map(str::to_owned),
+            terminal_id: terminal.map(str::to_owned),
+        }
+    }
+
+    fn off(panes: &[&str], tabs: &[&str]) -> Untouchable {
+        Untouchable {
+            panes: panes.iter().map(|p| (*p).to_owned()).collect(),
+            tabs: tabs.iter().map(|t| (*t).to_owned()).collect(),
+        }
+    }
+
+    fn append(runs: &Path, owner: &str, attempt: u64, kind: TicketEventKind, payload: Value) {
+        let payload: Map<String, Value> = payload.as_object().cloned().unwrap_or_default();
+        append_event(runs, owner, &event_now(attempt, kind, payload)).unwrap();
+    }
+
+    fn tab_ids(tabs: Vec<OpenedTab>) -> Vec<String> {
+        tabs.into_iter().map(|t| t.tab_id).collect()
+    }
+
     #[test]
-    fn a_tab_is_finished_while_listed_and_nothing_untouchable_is_in_it() {
-        let opened = [
-            tab("01", "t1", Some("p1")),
-            tab("02", "t2", Some("p2")),
-            tab("03", "t3", Some("p3")),
-            tab("04", "t4", None),
-            tab("05", "t5", Some("gone")),
-        ];
-        let l = listing(&[("p1", "t1"), ("p2", "t2"), ("p3", "t3"), ("p3b", "t3")]);
-        let off = Untouchable {
-            panes: ["p2".to_owned(), "p3b".to_owned()].into(),
-            tabs: HashSet::new(),
-        };
-        let finished = finished_terminals(&opened, &l, &off, None);
-        assert_eq!(
-            finished
-                .iter()
-                .map(|t| t.owner.as_str())
-                .collect::<Vec<_>>(),
-            ["01"],
-            "02 is untouchable, 03 shares its tab with an untouchable pane, 04 never recorded a pane, 05 is not listed"
+    fn reads_every_tab_the_owners_spawned_events_name_once_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path();
+        append(
+            runs,
+            "01",
+            1,
+            TicketEventKind::Spawned,
+            json!({"cwd": "/w", "pane_id": "p1", "tab_id": "t1", "terminal_id": "term_a"}),
         );
-        let off_tabs = Untouchable {
-            panes: HashSet::new(),
-            tabs: ["t1".to_owned()].into(),
+        append(
+            runs,
+            "01",
+            2,
+            TicketEventKind::Spawned,
+            json!({"cwd": "/w", "pane_id": "p1", "tab_id": "t1", "continued": true}),
+        );
+        append(runs, "01", 3, TicketEventKind::Spawned, json!({"pid": 7}));
+        append(
+            runs,
+            "conv-1",
+            1,
+            TicketEventKind::Spawned,
+            json!({"pane_id": "pc", "tab_id": "tc"}),
+        );
+        append(
+            runs,
+            "enlist-1",
+            1,
+            TicketEventKind::Spawned,
+            json!({"pane_id": "pe", "tab_id": "te"}),
+        );
+        let opened = opened_tabs(runs, &["01".to_owned(), "conv-1".to_owned()]);
+        assert_eq!(
+            opened,
+            vec![
+                OpenedTab {
+                    owner: "01".into(),
+                    tab_id: "t1".into(),
+                    pane_id: Some("p1".into()),
+                    cwd: Some("/w".into()),
+                    terminal_id: None,
+                },
+                OpenedTab {
+                    owner: "conv-1".into(),
+                    tab_id: "tc".into(),
+                    pane_id: Some("pc".into()),
+                    cwd: None,
+                    terminal_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn counts_the_tabs_herdr_still_lists_whose_panes_nothing_is_using() {
+        let opened: Vec<OpenedTab> = (1..=5)
+            .map(|n| tab(&format!("0{n}"), n, None, None))
+            .collect();
+        let listed = listing(vec![
+            pane("p1", Some("t1")), // crashed, still open
+            pane("p2", Some("t2")), // a Live attempt's
+            pane("p3", Some("t3")), // a Held pane's
+            // p4 closed already
+            pane("p5", Some("t5")), // the operator split a busy pane into t5
+            pane("p5b", Some("t5")),
+        ]);
+        let untouchable = off(&["p2", "p3", "p5b"], &[]);
+        assert_eq!(
+            tab_ids(finished_terminals(&opened, &listed, &untouchable, None)),
+            ["t1"]
+        );
+    }
+
+    #[test]
+    fn never_counts_a_tab_someone_enlisted_from_whoever_opened_it() {
+        // A done ticket's still-open tab whose agent the operator then enlisted as a new Ticket: the
+        // tab is theirs now.
+        let opened = [tab("01", 1, None, None)];
+        let listed = listing(vec![pane("p1", Some("t1"))]);
+        assert!(finished_terminals(&opened, &listed, &off(&[], &["t1"]), None).is_empty());
+        assert!(finished_terminals(&opened, &listed, &off(&["p1"], &[]), None).is_empty());
+    }
+
+    #[test]
+    fn never_counts_a_tab_herdr_lists_differently_from_how_it_was_recorded() {
+        let opened = [tab("01", 1, Some("/pool/wt/01"), None)];
+        let none = off(&[], &[]);
+        // Recorded pane now sits in another tab: an id reused by a new pane.
+        assert!(
+            finished_terminals(&opened, &listing(vec![pane("p1", Some("t9"))]), &none, None)
+                .is_empty()
+        );
+        // Outside the Pool workspace.
+        let mut elsewhere = pane("p1", Some("t1"));
+        elsewhere.workspace_id = Some("w-other".into());
+        assert!(
+            finished_terminals(&opened, &listing(vec![elsewhere]), &none, Some("w1")).is_empty()
+        );
+        // In another directory.
+        let mut moved = pane("p1", Some("t1"));
+        moved.cwd = Some("/elsewhere".into());
+        assert!(finished_terminals(&opened, &listing(vec![moved]), &none, None).is_empty());
+        // As recorded, fields the daemon does not report are not held against it.
+        let mut as_recorded = pane("p1", Some("t1"));
+        as_recorded.workspace_id = Some("w1".into());
+        as_recorded.cwd = Some("/pool/wt/01/".into());
+        assert_eq!(
+            finished_terminals(&opened, &listing(vec![as_recorded]), &none, Some("w1")).len(),
+            1
+        );
+        assert_eq!(
+            finished_terminals(&opened, &listing(vec![pane("p1", None)]), &none, Some("w1")).len(),
+            1
+        );
+        assert!(finished_terminals(&opened, &listing(vec![]), &none, None).is_empty());
+    }
+
+    #[test]
+    fn never_counts_a_tab_whose_terminal_herdr_now_names_differently() {
+        let opened = [tab("01", 1, None, Some("term_65b1"))];
+        let none = off(&[], &[]);
+        let with_terminal = |terminal: &str| {
+            let mut p = pane("p1", Some("t1"));
+            p.terminal_id = Some(terminal.into());
+            listing(vec![p])
         };
-        assert_eq!(finished_terminals(&opened, &l, &off_tabs, None).len(), 2);
+        // Same pane and tab ids, another terminal behind them: not ours.
+        assert!(finished_terminals(&opened, &with_terminal("term_ffff"), &none, None).is_empty());
+        assert_eq!(
+            finished_terminals(&opened, &with_terminal("term_65b1"), &none, None).len(),
+            1
+        );
+        // A record from before herdr gave terminal ids falls back to the other checks.
+        assert_eq!(
+            finished_terminals(
+                &[tab("01", 1, None, None)],
+                &with_terminal("term_ffff"),
+                &none,
+                None
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn knows_a_tab_closed_by_its_terminal_id_when_one_was_recorded_by_its_tab_id_otherwise() {
+        let closed = |payload: Value| {
+            vec![Arc::new(ac_protocol::TicketEvent {
+                at: "2026-09-25T10:00:00.000Z".into(),
+                attempt: 1,
+                kind: TicketEventKind::TabClosed,
+                payload: payload.as_object().cloned().unwrap(),
+            })]
+        };
+        // The same short tab id, reused by a later terminal: not the one closed.
+        assert!(!tab_recorded_closed(
+            &closed(json!({"tab_id": "t1", "terminal_id": "term_a"})),
+            "t1",
+            Some("term_b")
+        ));
+        assert!(tab_recorded_closed(
+            &closed(json!({"tab_id": "t1", "terminal_id": "term_a"})),
+            "t9",
+            Some("term_a")
+        ));
+        // Records without terminal ids fall back to the tab id.
+        assert!(tab_recorded_closed(
+            &closed(json!({"tab_id": "t1"})),
+            "t1",
+            Some("term_b")
+        ));
+        assert!(tab_recorded_closed(
+            &closed(json!({"tab_id": "t1", "terminal_id": "term_a"})),
+            "t1",
+            None
+        ));
+        assert!(!tab_recorded_closed(&[], "t1", None));
+    }
+
+    #[test]
+    fn leaves_out_a_tab_its_owners_events_record_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path();
+        append(
+            runs,
+            "01",
+            1,
+            TicketEventKind::Spawned,
+            json!({"pane_id": "p1", "tab_id": "t1", "terminal_id": "term_a"}),
+        );
+        append(
+            runs,
+            "01",
+            2,
+            TicketEventKind::Spawned,
+            json!({"pane_id": "p2", "tab_id": "t2"}),
+        );
+        append(
+            runs,
+            "01",
+            1,
+            TicketEventKind::TabClosed,
+            json!({"tab_id": "t1", "terminal_id": "term_a"}),
+        );
+        assert_eq!(tab_ids(opened_tabs(runs, &["01".to_owned()])), ["t2"]);
     }
 }

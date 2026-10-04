@@ -32,7 +32,9 @@ use crate::actor::Engine;
 use crate::attempt_ending::{
     EXIT_CODE_PANE_GONE, EXIT_CODE_UNREADABLE, exited_phrase, read_attempt_result,
 };
-use crate::checkout_gate::{DeferredMerge, through_pool_checkout_gate};
+use crate::checkout_gate::{
+    DeferredMerge, hold_pool_checkout, release_pool_checkout, through_pool_checkout_gate,
+};
 use crate::conversations::EnlistConversationRegistration;
 use crate::enlist::{FoundPane, find_enlistable_pane};
 use crate::enlisted::{EnlistedEnding, RegisterEnlisted, register_enlisted};
@@ -439,7 +441,7 @@ struct UnwindState {
 /// is best-effort so one failure cannot block the rest of the unwind. The found branch and directory
 /// are never touched.
 fn unwind_enlist(session: &mut Session, id: &str, state: UnwindState) {
-    session.enlisted.release(id);
+    crate::enlisted::release(session, id);
     crate::live_attempts::clear(session, id, 1);
     session.markers.retain(|marker| marker.id != id);
     session.state.tickets.shift_remove(id);
@@ -813,7 +815,7 @@ impl Engine {
 /// ordinary pool assignment for its id, with verify stripped (an enlisted id never fans out,
 /// `planSuperStep` says so too). Used where a pane-gone checkpoint hands the ticket back to the
 /// ordinary engine-launched path.
-fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result<Assignment> {
+pub fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result<Assignment> {
     let mut resolved =
         resolve_ticket_assignment(marker, &session.state.config, &session.harnesses)?;
     resolved.verify = None;
@@ -822,7 +824,7 @@ fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result
 
 /// `createdBranchNote`: the re-run of a created-branch enlist (spec story 11) needs the branch free: a
 /// Brief that offers the re-run says so up front.
-fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
+pub fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
     match session.enlisted_work.get(ticket_id) {
         Some(work)
             if work.branch == branch && branch == branch_for(&session.cwd, ticket_id, None) =>
@@ -1068,7 +1070,7 @@ pub fn end_enlisted_attempt(
                 ac_protocol::SpawnKind::Ticket,
             );
         }
-        chain_enlisted_merge(session, marker, attempt, branch);
+        chain_enlisted_merge(session, &marker, attempt, &branch);
         return Ok(());
     }
     finish_adopted_finalize(session);
@@ -1079,7 +1081,13 @@ pub fn end_enlisted_attempt(
 /// chain so its git work never runs concurrently with the drive's merges (ADR-0014's adopted-finalize
 /// reasoning). On success the found directory and branch are left alone, unlike an ordinary ticket's
 /// merge; on a conflict the existing merge-conflict machinery takes over in the found checkout.
-fn chain_enlisted_merge(session: &mut Session, marker: TicketMarker, attempt: u64, branch: String) {
+pub fn chain_enlisted_merge(
+    session: &mut Session,
+    marker: &TicketMarker,
+    attempt: u64,
+    branch: &str,
+) {
+    let (marker, branch) = (marker.clone(), branch.to_owned());
     session.merge_line.taken(&marker.id);
     // The found branch is merged in place; a merge a shutdown drops at the pool checkout's gate names
     // the found directory, for the next boot.
@@ -1115,11 +1123,21 @@ fn chain_enlisted_merge(session: &mut Session, marker: TicketMarker, attempt: u6
                     ));
                     return Ok(None);
                 }
-                Ok(Some(merge))
+                // A conflict is handled inside the gate in the TypeScript (the resolver included), so
+                // the merge stays counted as a writer in the pool checkout until it is settled.
+                let hold = hold_pool_checkout(
+                    s,
+                    format!(
+                        "a merge of {} into the pool checkout is in flight",
+                        merge_marker.id
+                    ),
+                );
+                Ok(Some((merge, hold)))
             })
             .await;
-            if let Ok(Some(Some(conflict))) = merged {
+            if let Ok(Some(Some((conflict, hold)))) = merged {
                 let _ = handle_merge_conflict(&engine, marker, conflict, attempt).await;
+                let _ = engine.call(move |s| release_pool_checkout(s, hold)).await;
             }
             let _ = engine.call(finish_adopted_finalize).await;
         }
@@ -1145,4 +1163,117 @@ pub fn record_enlisted_trailing_exit(session: &mut Session, ticket_id: &str) {
     ));
     let phase = session.current_phase();
     crate::snapshot::emit_snapshot(session, phase);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ac_core::pool::TicketMarker;
+
+    fn marker(id: &str) -> TicketMarker {
+        TicketMarker {
+            id: id.to_owned(),
+            file: std::path::PathBuf::from(format!("/p/issues/{id}.md")),
+            blocked_by: Vec::new(),
+            status: TicketStatus::Ready,
+            title: id.to_owned(),
+            spec: String::new(),
+            spawned_by: None,
+            enlisted_from: None,
+            spawn_assign: None,
+        }
+    }
+
+    #[test]
+    fn the_next_enlist_id_is_one_past_the_highest_in_the_pool() {
+        assert_eq!(next_enlist_id(&[]), "enlist-1");
+        assert_eq!(
+            next_enlist_id(&[marker("01"), marker("enlist-3")]),
+            "enlist-4"
+        );
+        // Only the reserved namespace counts: a Spawn's id never does.
+        assert_eq!(
+            next_enlist_id(&[
+                marker("enlist-2"),
+                marker("enlist-9-spawn-1"),
+                marker("x-enlist-7")
+            ]),
+            "enlist-3"
+        );
+    }
+
+    #[test]
+    fn the_enlisted_ticket_file_carries_its_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (publisher, _snapshots) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.issues_dir = js::path_text(&dir.path().join("issues"));
+        write_enlist_ticket(
+            &session,
+            "enlist-1",
+            &EnlistTicketFile {
+                title: "  Fix the thing ",
+                spec: "\nDo it.\n\n",
+                pane_id: "w1:p2",
+                harness: "claude",
+                session_id: Some("sess-9"),
+                directory: "/work/x",
+                branch: "pool/k/enlist-1",
+                created: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("issues/enlist-1.md")).unwrap(),
+            "<!-- state: id=enlist-1 blocked-by=none status=in-progress enlisted-from=w1:p2 -->\n\n\
+             # enlist-1: Fix the thing\n\n\
+             **Enlisted** (issue #101) from herdr pane w1:p2 (harness claude, session sess-9) in /work/x, on \
+             branch pool/k/enlist-1. The pool branch pool/k/enlist-1 was created at that HEAD and checked out \
+             there, so uncommitted changes came with it.\n\nDo it.\n"
+        );
+        write_enlist_ticket(
+            &session,
+            "enlist-2",
+            &EnlistTicketFile {
+                title: "Other",
+                spec: "",
+                pane_id: "w1:p3",
+                harness: "opencode",
+                session_id: None,
+                directory: "/work/y",
+                branch: "feature/y",
+                created: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("issues/enlist-2.md")).unwrap(),
+            "<!-- state: id=enlist-2 blocked-by=none status=in-progress enlisted-from=w1:p3 -->\n\n\
+             # enlist-2: Other\n\n\
+             **Enlisted** (issue #101) from herdr pane w1:p3 (harness opencode) in /work/y, on branch \
+             feature/y. The branch was used as found; nothing in the checkout moved.\n\n\n"
+        );
+    }
+
+    #[test]
+    fn a_pane_gone_brief_offers_the_re_run_and_says_when_it_needs_the_branch_free() {
+        let (publisher, _snapshots) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        let created = branch_for(&session.cwd, "enlist-1", None);
+        session.enlisted_work.insert(
+            "enlist-1".into(),
+            EnlistedWork {
+                branch: created.clone(),
+                directory: "/w".into(),
+            },
+        );
+        let plain = pane_gone_brief(&session, "enlist-1", "feature/x");
+        assert!(plain.starts_with("The herdr pane this enlisted attempt was running in went away"));
+        assert!(plain.ends_with("or leave it parked and finish the work by hand."));
+        let note = pane_gone_brief(&session, "enlist-1", &created);
+        assert!(note.ends_with(&format!(
+            " The enlist created {created} in that checkout, and a re-run needs the branch free: check \
+             another branch out there first, or the re-run waits as a checkpoint until you do."
+        )));
+    }
 }

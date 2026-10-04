@@ -124,7 +124,7 @@ impl Engine {
         let _ = self
             .call(|s| {
                 crate::conversations::dispose(s);
-                s.enlisted.dispose();
+                crate::enlisted::dispose(s);
                 crate::keep_talking::release_continued_attempts(s);
                 crate::pane_survey::stop_pane_survey(s);
                 crate::persist::close_store(s);

@@ -527,3 +527,431 @@ pub fn restore_assignment(session: &mut Session, marker: &TicketMarker) {
         session.assignments.insert(marker.id.clone(), previous);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! engine/held-panes.test.ts.
+
+    use super::*;
+    use serde_json::json;
+
+    const AT: &str = "2026-09-25T10:00:00.000Z";
+
+    fn event(attempt: u64, kind: TicketEventKind, payload: Value) -> Arc<TicketEvent> {
+        Arc::new(TicketEvent {
+            at: AT.to_owned(),
+            attempt,
+            kind,
+            payload: payload.as_object().cloned().unwrap_or_default(),
+        })
+    }
+
+    fn numbered_cwd(n: u64) -> String {
+        format!("/pool/.git/pool-worktrees/01-attempt-{n}")
+    }
+
+    #[test]
+    fn reads_a_checkpointed_attempts_pane_place_and_assignment_off_its_spawned_event() {
+        let events = [
+            event(
+                1,
+                TicketEventKind::Spawned,
+                json!({
+                    "argv": ["bash", "-c", "claude"],
+                    "cwd": "/pool/.git/pool-worktrees/01",
+                    "branch": "pool/p/01",
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "terminal_id": "term_65b1",
+                    "harness": "claude",
+                    "model": "opus",
+                }),
+            ),
+            event(
+                1,
+                TicketEventKind::Exited,
+                json!({"code": 0, "status": "checkpoint"}),
+            ),
+            event(1, TicketEventKind::Checkpoint, json!({})),
+        ];
+        assert_eq!(
+            held_pane_of(&events, 1, numbered_cwd),
+            Some(HeldPane {
+                attempt: 1,
+                pane_id: "w1:p1".into(),
+                tab_id: Some("w1:t1".into()),
+                terminal_id: Some("term_65b1".into()),
+                cwd: "/pool/.git/pool-worktrees/01".into(),
+                branch: Some("pool/p/01".into()),
+                harness: "claude".into(),
+                model: "opus".into(),
+                effort: None,
+                work_attempt: 1,
+                numbered: false,
+                stream: None,
+                spawned_at: AT.into(),
+                wrapped: true,
+            })
+        );
+    }
+
+    #[test]
+    fn knows_a_verify_candidate_by_the_attempt_worktree_it_ran_in() {
+        let events = [event(
+            3,
+            TicketEventKind::Spawned,
+            json!({
+                "cwd": numbered_cwd(3),
+                "branch": "pool/p/01-attempt-3",
+                "pane_id": "w1:p3",
+                "tab_id": "w1:t3",
+            }),
+        )];
+        let held = held_pane_of(&events, 3, numbered_cwd).unwrap();
+        assert!(held.numbered);
+        assert_eq!(held.work_attempt, 3);
+        assert_eq!((held.harness.as_str(), held.model.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn follows_a_continued_attempt_back_to_the_attempt_whose_worktree_and_stream_file_it_uses() {
+        let events = [
+            event(
+                2,
+                TicketEventKind::Spawned,
+                json!({"cwd": numbered_cwd(2), "pane_id": "w1:p2", "tab_id": "w1:t2"}),
+            ),
+            event(
+                3,
+                TicketEventKind::Spawned,
+                json!({
+                    "cwd": numbered_cwd(2),
+                    "pane_id": "w1:p2",
+                    "tab_id": "w1:t2",
+                    "continued": true,
+                    "continues": 2,
+                    "work_attempt": 2,
+                    "numbered": true,
+                    "stream": "/pool/runs/01.attempt-2.stream.jsonl",
+                }),
+            ),
+        ];
+        let held = held_pane_of(&events, 3, numbered_cwd).unwrap();
+        assert_eq!(held.attempt, 3);
+        assert_eq!(held.pane_id, "w1:p2");
+        assert_eq!(held.work_attempt, 2);
+        assert!(held.numbered);
+        assert_eq!(
+            held.stream.as_deref(),
+            Some("/pool/runs/01.attempt-2.stream.jsonl")
+        );
+    }
+
+    #[test]
+    fn holds_nothing_for_a_headless_attempt_a_fallback_a_resolver_or_an_attempt_never_spawned() {
+        assert_eq!(
+            held_pane_of(
+                &[event(
+                    1,
+                    TicketEventKind::Spawned,
+                    json!({"cwd": "/pool", "pid": 42})
+                )],
+                1,
+                numbered_cwd
+            ),
+            None
+        );
+        assert_eq!(
+            held_pane_of(
+                &[event(
+                    1,
+                    TicketEventKind::Spawned,
+                    json!({"cwd": "/pool", "pane_id": null, "terminal_error": "x"})
+                )],
+                1,
+                numbered_cwd
+            ),
+            None
+        );
+        assert_eq!(
+            held_pane_of(
+                &[
+                    event(2, TicketEventKind::Resolver, json!({})),
+                    event(
+                        2,
+                        TicketEventKind::Spawned,
+                        json!({"cwd": "/pool", "pane_id": "w1:p2", "tab_id": "w1:t2"})
+                    ),
+                ],
+                2,
+                numbered_cwd
+            ),
+            None
+        );
+        assert_eq!(held_pane_of(&[], 1, numbered_cwd), None);
+    }
+
+    #[test]
+    fn reads_back_the_attempt_the_latest_checkpoint_was_raised_for() {
+        assert_eq!(
+            last_checkpoint_attempt(&[
+                event(1, TicketEventKind::Checkpoint, json!({})),
+                event(2, TicketEventKind::Spawned, json!({})),
+                event(3, TicketEventKind::Checkpoint, json!({})),
+            ]),
+            Some(3)
+        );
+        assert_eq!(
+            last_checkpoint_attempt(&[event(1, TicketEventKind::Spawned, json!({}))]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_spawn_without_a_wrapped_flag_is_wrapped_when_it_has_an_argv() {
+        let spawned = |extra: Value| {
+            let mut payload = json!({"cwd": "/w", "pane_id": "p", "tab_id": "t"});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            [event(1, TicketEventKind::Spawned, payload)]
+        };
+        let wrapped = |extra: Value| {
+            held_pane_of(&spawned(extra), 1, numbered_cwd)
+                .unwrap()
+                .wrapped
+        };
+        assert!(wrapped(json!({"argv": ["bash"]})));
+        assert!(!wrapped(json!({"argv": []})));
+        assert!(!wrapped(json!({})));
+        assert!(!wrapped(json!({"wrapped": false, "argv": ["bash"]})));
+        assert!(wrapped(json!({"wrapped": true})));
+    }
+
+    // The survey and the hold over a real session: the hidden rows of the herdr area.
+    mod surveyed {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use futures::FutureExt;
+        use tokio::sync::watch;
+
+        use ac_core::events::{append_event, event_now};
+        use ac_io::herdr::HerdrPane;
+        use ac_protocol::{Interrupt, InterruptKind};
+
+        use super::*;
+        use crate::actor::Engine;
+        use crate::live_attempts::LiveAttemptEntry;
+        use crate::pane_survey::{Lister, create_pane_survey_over};
+
+        fn marker(id: &str, status: TicketStatus) -> TicketMarker {
+            TicketMarker {
+                id: id.to_owned(),
+                file: std::path::PathBuf::from(format!("/nonexistent/{id}.md")),
+                blocked_by: Vec::new(),
+                status,
+                title: id.to_owned(),
+                spec: String::new(),
+                spawned_by: None,
+                enlisted_from: None,
+                spawn_assign: None,
+            }
+        }
+
+        fn pane(id: &str, tab: &str) -> HerdrPane {
+            HerdrPane {
+                pane_id: id.to_owned(),
+                tab_id: Some(tab.to_owned()),
+                workspace_id: None,
+                cwd: None,
+                terminal_id: None,
+            }
+        }
+
+        fn spawned(runs: &Path, owner: &str, attempt: u64, payload: Value) {
+            let payload: Map<String, Value> = payload.as_object().cloned().unwrap();
+            append_event(
+                runs,
+                owner,
+                &event_now(attempt, TicketEventKind::Spawned, payload),
+            )
+            .unwrap();
+        }
+
+        struct Rig {
+            engine: Engine,
+            dir: tempfile::TempDir,
+            panes: Arc<Mutex<Vec<HerdrPane>>>,
+            answers: Arc<AtomicBool>,
+        }
+
+        async fn rig(markers: Vec<TicketMarker>) -> Rig {
+            let dir = tempfile::tempdir().unwrap();
+            let root = ac_core::js::path_text(dir.path());
+            let (publisher, snapshots) = watch::channel(None);
+            let mut session = crate::testkit::bare_session(publisher);
+            session.runs_dir = root.clone();
+            session.pool_dir = root;
+            session.state.tickets = markers.iter().map(|m| (m.id.clone(), m.status)).collect();
+            session.markers = markers;
+            let engine = Engine::spawn(session, snapshots, |s, engine| s.engine = Some(engine));
+            let panes: Arc<Mutex<Vec<HerdrPane>>> = Arc::new(Mutex::new(Vec::new()));
+            let answers = Arc::new(AtomicBool::new(true));
+            let (source, answering) = (Arc::clone(&panes), Arc::clone(&answers));
+            let lister: Lister = Arc::new(move || {
+                let listed = answering
+                    .load(Ordering::SeqCst)
+                    .then(|| source.lock().unwrap().clone());
+                async move { listed }.boxed()
+            });
+            engine
+                .call(move |s| create_pane_survey_over(s, None, lister))
+                .await
+                .unwrap();
+            Rig {
+                engine,
+                dir,
+                panes,
+                answers,
+            }
+        }
+
+        #[tokio::test]
+        async fn opened_tabs_are_recomputed_only_when_the_survey_lists_even_when_the_listing_fails()
+        {
+            let rig = rig(vec![marker("01", TicketStatus::Done)]).await;
+            let runs = rig.dir.path().to_path_buf();
+            spawned(&runs, "01", 1, json!({"pane_id": "p1", "tab_id": "t1"}));
+            let tabs = |engine: Engine| async move {
+                engine
+                    .call(|s| {
+                        s.opened_tabs
+                            .iter()
+                            .map(|t| t.tab_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap()
+            };
+            assert!(tabs(rig.engine.clone()).await.is_empty());
+            rig.panes.lock().unwrap().push(pane("p1", "t1"));
+            assert!(rig.engine.refresh_pane_survey().await);
+            assert_eq!(tabs(rig.engine.clone()).await, ["t1"]);
+
+            // A tab the events name later is not seen until the survey lists again.
+            spawned(&runs, "01", 2, json!({"pane_id": "p2", "tab_id": "t2"}));
+            assert_eq!(tabs(rig.engine.clone()).await, ["t1"]);
+            // A listing the daemon cannot answer still refreshes the opened tabs, while the old
+            // listing stays.
+            rig.answers.store(false, Ordering::SeqCst);
+            assert!(!rig.engine.refresh_pane_survey().await);
+            assert_eq!(tabs(rig.engine.clone()).await, ["t1", "t2"]);
+            let listed = rig
+                .engine
+                .call(|s| {
+                    s.pane_survey
+                        .as_ref()
+                        .and_then(|survey| survey.latest())
+                        .map(|l| l.panes.len())
+                })
+                .await
+                .unwrap();
+            assert_eq!(listed, Some(1));
+        }
+
+        #[tokio::test]
+        async fn the_untouchable_panes_are_read_at_every_emit_not_only_at_a_listing() {
+            let rig = rig(vec![marker("01", TicketStatus::Done)]).await;
+            spawned(
+                rig.dir.path(),
+                "01",
+                1,
+                json!({"pane_id": "p1", "tab_id": "t1"}),
+            );
+            rig.panes.lock().unwrap().push(pane("p1", "t1"));
+            assert!(rig.engine.refresh_pane_survey().await);
+            let finished = |engine: Engine| async move {
+                engine.call(|s| finished_terminals_now(s)).await.unwrap()
+            };
+            assert_eq!(finished(rig.engine.clone()).await, 1);
+            // The pane comes into use: the count drops at the next emit with no new listing.
+            rig.engine
+                .call(|s| {
+                    crate::live_attempts::register(
+                        s,
+                        "01",
+                        LiveAttemptEntry::new(2, Some("p1".into()), Some("t1".into())),
+                    )
+                })
+                .await
+                .unwrap();
+            assert_eq!(finished(rig.engine.clone()).await, 0);
+            assert_eq!(
+                rig.engine
+                    .call(|s| s
+                        .pane_survey
+                        .as_ref()
+                        .unwrap()
+                        .latest()
+                        .unwrap()
+                        .panes
+                        .len())
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn a_held_panes_tui_exit_is_checked_at_every_emit_but_the_hold_goes_only_at_a_listing()
+         {
+            let rig = rig(vec![marker("01", TicketStatus::Checkpoint)]).await;
+            let runs = rig.dir.path().to_path_buf();
+            spawned(
+                &runs,
+                "01",
+                1,
+                json!({"pane_id": "p1", "tab_id": "t1", "cwd": "/nonexistent/w", "argv": ["bash"]}),
+            );
+            rig.panes.lock().unwrap().push(pane("p1", "t1"));
+            assert!(rig.engine.refresh_pane_survey().await);
+            rig.engine
+                .call(|s| {
+                    s.state.interrupts.push(Interrupt {
+                        ticket_id: "01".into(),
+                        kind: InterruptKind::Checkpoint,
+                        body: "b".into(),
+                        candidates: None,
+                        steward_note: None,
+                    });
+                    let events = read_events(Path::new(&s.runs_dir), "01");
+                    let held = held_pane_of(&events, 1, |_| String::new()).unwrap();
+                    s.held.insert("01".into(), held);
+                })
+                .await
+                .unwrap();
+            let records = |engine: Engine| async move {
+                engine
+                    .call(|s| (held_pane_records(s).len(), s.held.len()))
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(records(rig.engine.clone()).await, (1, 1));
+            // The wrapper writes its exit-code file after the attempt began: the TUI exited.
+            std::fs::write(runs.join("01.exitcode"), "0").unwrap();
+            assert_eq!(
+                records(rig.engine.clone()).await,
+                (0, 1),
+                "hidden at the emit, kept"
+            );
+            assert!(rig.engine.refresh_pane_survey().await);
+            assert_eq!(
+                records(rig.engine.clone()).await,
+                (0, 0),
+                "let go at the listing"
+            );
+        }
+    }
+}

@@ -36,6 +36,7 @@ use ac_protocol::TurnSide;
 
 use crate::actor::Engine;
 use crate::pane_session::{READINESS_TIMEOUT_MS, still_working_reason, type_verified};
+use crate::session::Session;
 
 /// How often an enlisted attempt re-reads its pane, unless a test shortens it.
 pub const ENLISTED_POLL_MS: u64 = 2_000;
@@ -166,20 +167,28 @@ pub struct EnlistedAttempts {
 }
 
 impl EnlistedAttempts {
-    /// `release`: stop the tick and drop the runtime (the agent identity is the caller's).
-    pub fn release(&mut self, id: &str) -> Option<Arc<EnlistedRuntime>> {
-        let runtime = self.runtimes.remove(id)?;
+    fn stop(runtime: &EnlistedRuntime) {
         runtime.tick.cancel();
         runtime.release.cancel();
-        Some(runtime)
     }
+}
 
-    /// `dispose`: stop every enlisted loop this process runs; the panes are the operator's and stay.
-    pub fn dispose(&mut self) {
-        for runtime in self.runtimes.values() {
-            runtime.tick.cancel();
-            runtime.release.cancel();
-        }
+/// `release`: stop the tick, forget the pane's recorded read with it, and drop the runtime (the agent
+/// identity is the caller's).
+pub fn release(session: &mut Session, id: &str) {
+    if let Some(runtime) = session.enlisted.runtimes.remove(id) {
+        EnlistedAttempts::stop(&runtime);
+        session.pane_reads.forget(&runtime.pane_id);
+    }
+}
+
+/// `dispose`: stop every enlisted loop this process runs and forget every recorded read; the panes are
+/// the operator's and stay.
+pub fn dispose(session: &mut Session) {
+    let runtimes: Vec<_> = session.enlisted.runtimes.values().cloned().collect();
+    for runtime in runtimes {
+        EnlistedAttempts::stop(&runtime);
+        session.pane_reads.forget(&runtime.pane_id);
     }
 }
 
@@ -222,6 +231,11 @@ impl EnlistedRuntime {
             .peek_pane(&self.pane_id, PaneReadSource::Visible)
             .await
             .map_err(|error| error.to_string())?;
+        // A read that was in flight when the tick stopped must not record after the register forgot
+        // the pane: nothing may serve a viewport frozen at the last tick.
+        if self.tick.is_cancelled() {
+            return Ok(());
+        }
         let at = js::now_iso();
         let (pane, recorded, stamp) = (self.pane_id.clone(), text.clone(), at.clone());
         let _ = self
@@ -507,4 +521,198 @@ async fn watch_trailing_exit(runtime: Arc<EnlistedRuntime>, poll_ms: u64) {
             crate::enlist_flow::record_enlisted_trailing_exit(s, &id);
         })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    //! engine/enlisted.test.ts: the module on its own, against the fake daemon with an operator-opened
+    //! pane on it. Registration with `teaching: None` (a boot re-adoption's shape) is the claim with no
+    //! Turn to type, so every read the fake sees is the module's own Turn-state read and nothing
+    //! else's.
+
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+    use tokio::sync::watch;
+
+    use ac_io::herdr::fake::{FakeHerdr, Options, Recorded, Reply};
+
+    use super::*;
+
+    const OPENCODE_WAITING: &str = "opencode\nctrl+p commands";
+    const OPENCODE_WORKING: &str = "opencode\nworking on it";
+
+    struct Rig {
+        fake: FakeHerdr,
+        frame: Arc<Mutex<String>>,
+        engine: Engine,
+        _dir: tempfile::TempDir,
+        outcome: String,
+    }
+
+    async fn rig(frame: &str, fail_reads: bool, teaching_wait_ms: u64) -> Rig {
+        let shown = Arc::new(Mutex::new(frame.to_owned()));
+        let scripted = Arc::clone(&shown);
+        let fake = FakeHerdr::start(Options {
+            foreign_panes: vec![json!({ "pane_id": "pane-op", "tab_id": "t-op" })],
+            fail: if fail_reads {
+                vec![("pane.read", json!({ "code": -1, "message": "pane.read refused" }))]
+            } else {
+                Vec::new()
+            },
+            script: Some(Arc::new(move |method: &str, _params: &Value| {
+                (method == "pane.read" && !fail_reads).then(|| {
+                    Reply::Line(
+                        json!({ "id": "1", "result": { "read": { "text": scripted.lock().unwrap().clone() } } })
+                            .to_string(),
+                    )
+                })
+            })),
+            ..Options::default()
+        })
+        .await;
+        let socket = ac_core::js::path_text(fake.herdr().socket_path());
+        let (publisher, snapshots) = watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.herdr_socket = socket;
+        session.enlist_poll_ms = Some(20);
+        session.teaching_wait_ms = Some(teaching_wait_ms);
+        let engine = Engine::spawn(session, snapshots, |s, engine| s.engine = Some(engine));
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = format!("{}/outcome.json", ac_core::js::path_text(dir.path()));
+        Rig {
+            fake,
+            frame: shown,
+            engine,
+            _dir: dir,
+            outcome,
+        }
+    }
+
+    fn registration(rig: &Rig, teaching: Option<&str>) -> RegisterEnlisted {
+        RegisterEnlisted {
+            id: "enlist-1".into(),
+            pane_id: "pane-op".into(),
+            tab_id: None,
+            harness: "opencode".into(),
+            title: "Do the thing".into(),
+            branch: "feature/x".into(),
+            directory: "/tmp".into(),
+            outcome_path: rig.outcome.clone(),
+            teaching: teaching.map(str::to_owned),
+        }
+    }
+
+    async fn latest_read(engine: &Engine) -> Option<String> {
+        engine
+            .call(|s| s.pane_reads.latest("pane-op"))
+            .await
+            .unwrap()
+            .map(|read| read.text)
+    }
+
+    async fn until_read(engine: &Engine, wanted: &str) {
+        for _ in 0..200 {
+            if latest_read(engine)
+                .await
+                .is_some_and(|text| text.contains(wanted))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for the tick to record {wanted:?}");
+    }
+
+    #[tokio::test]
+    async fn every_turn_state_read_is_of_the_viewport_only_and_the_register_holds_the_latest_one_until_release()
+     {
+        let rig = rig(OPENCODE_WAITING, false, 60_000).await;
+        assert_eq!(
+            register_enlisted(&rig.engine, registration(&rig, None)).await,
+            Ok(())
+        );
+        // The claim's settling reads already recorded what the pane shows.
+        assert_eq!(
+            latest_read(&rig.engine).await.as_deref(),
+            Some(OPENCODE_WAITING)
+        );
+
+        // The tick keeps the entry current.
+        *rig.frame.lock().unwrap() = "opencode\nstill here\nctrl+p commands".to_owned();
+        until_read(&rig.engine, "still here").await;
+
+        // Not one read reached into scrollback: the operator sits in this pane, and a `recent` read
+        // moves their viewport. `visible` takes no line count, so none is sent.
+        let reads: Vec<Recorded> = rig
+            .fake
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "pane.read")
+            .collect();
+        assert!(!reads.is_empty());
+        for read in reads {
+            assert_eq!(
+                read.params,
+                json!({"pane_id": "pane-op", "source": "visible", "format": "text", "strip_ansi": true})
+            );
+        }
+
+        // Release stops the tick, and the entry goes with it: nothing watches the pane now, so
+        // nothing may serve a viewport frozen at the last tick.
+        rig.engine.call(|s| release(s, "enlist-1")).await.unwrap();
+        assert_eq!(latest_read(&rig.engine).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_claim_leaves_no_entry_behind_though_its_settling_reads_recorded() {
+        // A pane still working past the teaching bound: the claim is refused (spec, "Failed enlist
+        // leaves nothing") and no tick follows, so the reads it made must not be served either.
+        let rig = rig(OPENCODE_WORKING, false, 40).await;
+        let result = register_enlisted(&rig.engine, registration(&rig, Some("teach me"))).await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(result.unwrap_err().contains("still working"),);
+        assert!(rig.fake.methods().iter().any(|m| m == "pane.read"));
+        assert_eq!(latest_read(&rig.engine).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_pane_the_daemon_refuses_to_read_is_refused_without_an_entry() {
+        let rig = rig(OPENCODE_WAITING, true, 60_000).await;
+        let refused = register_enlisted(&rig.engine, registration(&rig, None)).await;
+        assert!(refused.unwrap_err().contains("could not be read"));
+        assert_eq!(latest_read(&rig.engine).await, None);
+    }
+
+    #[tokio::test]
+    async fn dispose_forgets_a_live_entry_and_stops_its_tick() {
+        let rig = rig(OPENCODE_WAITING, false, 60_000).await;
+        assert_eq!(
+            register_enlisted(&rig.engine, registration(&rig, None)).await,
+            Ok(())
+        );
+        assert!(latest_read(&rig.engine).await.is_some());
+        // The engine's shutdown: every tick stops, every entry goes.
+        rig.engine.call(dispose).await.unwrap();
+        assert_eq!(latest_read(&rig.engine).await, None);
+        // A tick already running on another worker when dispose aborts it may still issue its one
+        // read; count from after that settles.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let reads = rig
+            .fake
+            .methods()
+            .iter()
+            .filter(|m| *m == "pane.read")
+            .count();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            rig.fake
+                .methods()
+                .iter()
+                .filter(|m| *m == "pane.read")
+                .count(),
+            reads,
+            "no tick reads the pane after dispose"
+        );
+    }
 }

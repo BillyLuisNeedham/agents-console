@@ -734,4 +734,19 @@ mod tests {
         assert_eq!(build(1, true), expected["a"].as_str().unwrap());
         assert_eq!(build(5, false), expected["b"].as_str().unwrap());
     }
+
+    // The whole teaching, byte for byte as the TypeScript renders it (prompt.ts buildEnlistTeaching).
+    #[test]
+    fn renders_the_enlist_teaching_as_the_typescript_does() {
+        assert_eq!(
+            build_enlist_teaching(&EnlistTeachingParts {
+                id: "enlist-1",
+                issue_path: "/p/issues/enlist-1.md",
+                outcome_path: "/p/runs/enlist-1.outcome.json",
+                branch: "feature/x",
+                ledger_path: "/p/runs/spawn-ledger.md",
+            }),
+            "---\n\nYou have been enlisted into the pool as Ticket enlist-1. This terminal is now the attempt for that ticket; nothing about your checkout has moved.\n\nYour Ticket file of record is /p/issues/enlist-1.md: read it for the spec and append your notes there. The engine owns its line-1 status marker; never edit it.\n\nCommit your work on the branch already checked out here (feature/x). Leave the branch and the directory as they are: the engine never removes the directory or deletes the branch.\n\nWhen the work is done, record your outcome as JSON at /p/runs/enlist-1.outcome.json: {\"status\": \"done\" or \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the sha of your commit, or null\"}. On a checkpoint, add \"brief\": \"what the human has to do next\".\n\nYou may propose follow-up tickets in that same outcome JSON by adding a \"spawn\" array, one entry per follow-up, each shaped {\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...]}, the body carrying at least 20 characters of intent for a fresh agent to work from. A follow-up that must run before other work may add \"blocks\": [\"id\", ...] to make those tickets wait for it, or \"blocks\": \"all\" to make every ticket that has not started yet wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The engine assigns the ids, writes the ticket files and schedules them. You never write pool state yourself: no ticket files, no ids, no statuses. You propose; the engine writes.\n\nBefore you propose anything, read the Spawn ledger at /p/runs/spawn-ledger.md: every Ticket and Conversation in the pool, and every proposal still waiting to land or held for the operator. Do not propose work it already lists. If a proposal still overlaps something there, add \"overlaps\": [\"id\", ...] naming what it overlaps: it is then held for the operator to decide instead of landing."
+        );
+    }
 }
