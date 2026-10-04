@@ -757,7 +757,7 @@ fn end_continued_attempt(
             && valid.outcome.status == OutcomeStatus::Done
             && let Some(proposals) = valid.outcome.spawn.as_ref().filter(|p| !p.is_empty())
         {
-            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket);
+            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
         }
         return record_adopted_exit(
             session,
@@ -802,7 +802,7 @@ fn end_continued_attempt(
             ..PoolUpdate::default()
         });
         if let Some(proposals) = outcome.spawn.as_ref().filter(|p| !p.is_empty()) {
-            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket);
+            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
         }
         finish_adopted_finalize(session);
         return Ok(());
@@ -1100,25 +1100,4 @@ mod tests {
         write(2, TicketEventKind::Graded, serde_json::json!({"score": 8}));
         assert!(owed_continued_grade(&s, &marker).is_none());
     }
-}
-
-/// The Steward choosing Keep talking (ADR-0030): its message is typed after the teaching Turn, and
-/// the answer is its own, counted on its budget.
-#[derive(Debug, Clone)]
-pub struct StewardTalk {
-    pub conversation: String,
-    pub message: String,
-}
-
-/// `keepTalking`: continue a ticket's checkpointed Attempt in its Held pane as a Continued attempt;
-/// the new Attempt's number. STUB(keep_talking): refuses.
-pub async fn keep_talking(
-    engine: &Engine,
-    ticket_id: String,
-    steward: Option<StewardTalk>,
-) -> Result<u64, crate::error::EngineError> {
-    let _ = (engine, steward);
-    Err(crate::error::EngineError::refused(format!(
-        "keep talking: ticket {ticket_id} is in a pool that is not terminal-backed"
-    )))
 }

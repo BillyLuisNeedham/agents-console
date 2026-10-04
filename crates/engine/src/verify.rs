@@ -1062,12 +1062,13 @@ fn outcome_of(session: &Session, ticket_id: &str, attempt: u64) -> Result<ValidO
     )
 }
 
-fn take_proposals(session: &mut Session, ticket_id: &str, outcome: &Outcome) {
+fn take_proposals(session: &mut Session, ticket_id: &str, outcome: &Outcome) -> anyhow::Result<()> {
     if let Some(proposals) = &outcome.spawn
         && !proposals.is_empty()
     {
-        take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket);
+        take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
     }
+    Ok(())
 }
 
 /// `resolveLoneAttempt`: a verify: 1 ticket's grade decides at the ticket instead of at Review. A flag
@@ -1115,7 +1116,7 @@ pub fn resolve_lone_attempt(
                 outcomes: Some(IndexMap::from([(marker.id.clone(), valid.outcome.clone())])),
                 ..PoolUpdate::default()
             });
-            take_proposals(session, &marker.id, &valid.outcome);
+            take_proposals(session, &marker.id, &valid.outcome)?;
         }
         return Ok(());
     }
@@ -1358,9 +1359,7 @@ fn complete_lone_attempt(
         close_attempt_tab(session, &marker.id, attempt);
         let range = (!before_sha.is_empty())
             .then(|| format!("{before_sha}..{}", merge_target_ref(session)));
-        session
-            .conversations
-            .ticket_ended(marker, &worktree.branch, range);
+        crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
         log = format!(
             "ticket {}: attempt {attempt} passed grading; merged {} onto the working branch",
             marker.id, worktree.branch
@@ -1374,7 +1373,7 @@ fn complete_lone_attempt(
     };
     if let Ok(valid) = outcome {
         update.outcomes = Some(IndexMap::from([(marker.id.clone(), valid.outcome.clone())]));
-        take_proposals(session, &marker.id, &valid.outcome);
+        take_proposals(session, &marker.id, &valid.outcome)?;
     }
     session.apply(update);
     emit_running(session);
@@ -1870,7 +1869,7 @@ fn complete_selection(
     // buffer with it.
     if let Ok(valid) = outcome_of(session, &marker.id, attempt) {
         update.outcomes = Some(IndexMap::from([(marker.id.clone(), valid.outcome.clone())]));
-        take_proposals(session, &marker.id, &valid.outcome);
+        take_proposals(session, &marker.id, &valid.outcome)?;
     }
     session.apply(update);
     if emit {
