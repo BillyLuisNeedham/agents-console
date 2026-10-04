@@ -266,8 +266,11 @@ pub fn read_console_config(pool_dir: &str) -> Result<Map<String, Value>, String>
     if !js::exists(&file) {
         return Ok(Map::new());
     }
-    let text = js::read_text(&file).map_err(|err| err.to_string())?;
-    match js::parse(&text) {
+    // A file that cannot be read is refused in the same words as one that does not parse.
+    let parsed = js::read_text(&file)
+        .map_err(|err| err.to_string())
+        .and_then(|text| js::parse(&text).map_err(|err| err.to_string()));
+    match parsed {
         Err(err) => Err(format!(
             "{file} does not parse as JSON ({err}); fix it or move it aside, then boot again"
         )),
@@ -656,6 +659,15 @@ mod tests {
         assert_eq!(
             read_console_config(&dir),
             Err(format!("{dir}/console.json must be a JSON object"))
+        );
+        std::fs::remove_file(pool.path().join("console.json")).unwrap();
+        std::fs::create_dir(pool.path().join("console.json")).unwrap();
+        assert_eq!(
+            read_console_config(&dir),
+            Err(format!(
+                "{dir}/console.json does not parse as JSON (EISDIR: illegal operation on a \
+                 directory, read); fix it or move it aside, then boot again"
+            ))
         );
     }
 

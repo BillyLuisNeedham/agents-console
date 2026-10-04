@@ -991,10 +991,11 @@ the inventory already says.
 
 Boot starts the server as this same binary, `agent-console server --pool <dir> [--port <n>]`, in the engine
 checkout, detached in its own session with both streams appended to `runs/server.log`, where the TypeScript
-ran `bun run engine/server.ts` with the same arguments. When Machine defaults name no engine checkout that
-exists, the engine checkout is the one the binary was built from (where the TypeScript took the one its
-source sat in); it is where Boot reads `skills/my-console-runner/` and what the `detected:` line and a first
-Machine defaults file name.
+ran `bun run engine/server.ts` with the same arguments. So the Machine defaults' `engine` no longer chooses
+which server code runs; it still names the checkout Boot reads `skills/my-console-runner/` from, runs the
+server in, prints on the `detected:` line and writes into a first Machine defaults file. When it names no
+directory that exists, that checkout is the one the binary was built from, where the TypeScript took the one
+its source sat in.
 
 The Steward command's usage names the command it is: its first line reads `usage: agent-console steward
 --pool <pool-dir> [--url <console-url>] --as <conversation> <verb> ...` where steward-cli.ts printed
