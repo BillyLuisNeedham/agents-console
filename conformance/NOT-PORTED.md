@@ -1007,3 +1007,58 @@ those. Boot's own usage line is the TypeScript's, word for word.
 Both of the area's hidden rows are unit tests in `crates/cli/src/boot/config.rs`:
 `removes_the_port_pin_on_an_explicit_auto_and_the_terminal_key_on_a_no` (`boot-cli.test.ts:348`) and
 `returns_nothing_to_write_when_the_template_itself_has_no_marker` (`boot-cli.test.ts:451`).
+
+## `verify` with Jev (C22)
+
+Every one of C22's 29 rows is a passing case on the Jev fake at `JEV_BASE_URL`: `engine.test.ts:2428` in
+`cases/jev.test.ts`, the other 28 under `cases/verify-jev-grading.test.ts`, `verify-jev-rubric.test.ts` and
+`verify-jev-fallbacks.test.ts`. Four cases no row names are there too: the whole request one Attempt sends (the
+rubric's nine questions word for word, and its Evidence object whole: the Ticket text as it reads mid-round, the
+summary claim, the `-U0` diff with a lockfile's section dropped, the log with its escape sequences stripped, and
+both notes), the Evidence of a pool outside git (`no diff: the pool does not run in git`), a widening re-ask that
+fails, and the statuses no cause names (408 after its retries and 404 at once, both `unreachable`). The fake
+gained `failFor`, a status served by the Evidence a request carries, and its server no longer cuts a held
+response at Bun's 10 s idle limit, which raced the client's own 10 s timeout.
+
+Where the cases reach a row differently from its wording, or pin less than the server does:
+
+- **`jev.test.ts:191`, a label not offered.** The rubric asks only Scores and Nouls, so the server never asks a
+  Choice, and no answer can carry a label it did not offer. The case pins the wrong-type half. Rust unit test:
+  *Jev answer check: a Choice answered with a label outside its criteria falls back as malformed, detail
+  `<id>: choice is not one of the labels`.*
+- **`engine.test.ts:13466`, "Turn state reads or grades".** Grading is the only place today's server asks Jev, so
+  the four asks are four verify: 1 Tickets run one after another, the first two refused with 429.
+- **The SDK's message in a detail** (`jev.test.ts:159`, `:166`). For a 400 or a 422 the detail is `HTTP <status>: `
+  and then the TypeSafe SDK's own error message, which the cases pin only as carrying the API's words. Today it
+  repeats the status and adds the body's `error`, `message`, `detail` or `detail.message` string, or the body as
+  JSON cut at 200 characters when it has none: `HTTP 400: 400 question set refused`,
+  `HTTP 400: 400 {"detail":{"error_type":"max_tokens_exceeded"}}`. Rust unit test: *Jev error detail: a refused
+  request's detail names its status and the message its body gives.*
+- **A dead network's detail** (`jev.test.ts:144`) is the HTTP client's own error, under Bun
+  `Connection error: Unable to connect. Is the computer able to access the url?`. The case pins the cause only.
+- **`jev.test.ts:186`, a body that is not JSON.** The SDK hands back the unparsed text, so the detail is the
+  server's own shape check, `response is not an object`, and the case pins it whole. A client that fails the
+  parse itself must still say `malformed`, with that detail.
+- **The waits between retries.** The cases pin how often each failure is asked (three times for 408, 429, any 5xx
+  and a timeout; once for 400, 401, 403, 404 and 422) and the 10 s per-try timeout (`no answer within 10000ms`,
+  a slow case that waits it out three times), not the waits between tries. The SDK backs off 500 ms, then 1 s,
+  each less up to a quarter at random and capped at 5 s, and honours a `retry-after-ms` or `Retry-After` header up
+  to 60 s. Rust unit test: *Jev retry policy: two retries of 408, 429, 5xx, connection errors and timeouts, with
+  that backoff and that header rule.*
+
+Hidden behaviour the cases cannot show, for the Rust port:
+
+- **The size check before the wire** (`jev.test.ts:225`, `:235`, `:247`, hidden rows) cannot fire from outside:
+  the Evidence builder caps Evidence at 100,000 characters, about 28,600 tokens at 3.5 characters per token, and
+  the longest rubric question adds about 400, under the 32,000-token limit. The builder's 100,000-character cap
+  and its 2,000-character diff and 4,000-character log floors (`jev-evidence.test.ts`) are out of reach for the
+  same reason. Both stay Rust unit tests, as the inventory sorts them.
+- **The composed score's rounding.** The score is `round(sum * 10 * 10) / 10` in floating point, summed ticket
+  fit, then claim fidelity, then log health. The rubric case at level 0 depends on it: the fake's expected levels
+  sit a hair under 0.25, 0.2 and 0.2, the sum a hair under 0.065, and the score is 0.6, not 0.7. A Rust server
+  summing `f64` in the same order and rounding half up matches.
+- **A Score answered outside its levels** (inference, from reading `engine/jev-rubric.ts`). The answer check
+  accepts any finite score, so a ticket fit of 4.6 on its five levels normalises to 1.15, the composed score can
+  pass 10, and the reason reads `ticket fit: level 4.6`. No case pins it, since the API answers within the
+  levels. Intended behaviour (inference): a score outside `0..levels-1` is malformed. Rust unit test: *Jev answer
+  check: a Score outside its levels falls back as malformed.*
