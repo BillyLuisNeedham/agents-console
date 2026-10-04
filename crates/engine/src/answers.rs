@@ -362,7 +362,7 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         crate::restart::abandon_adoption(session, &record.ticket_id);
     }
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
-    session.held.remove(&record.ticket_id);
+    session.held.shift_remove(&record.ticket_id);
     if marker.status != TicketStatus::Done {
         write_marker_status(&marker.file, TicketStatus::Ready)?;
         if let Some(m) = session.marker_mut(&marker.id) {
@@ -423,7 +423,7 @@ pub fn close_ticket(
     if session.adopted.contains_key(&marker.id) {
         crate::restart::abandon_adoption(session, &marker.id);
     }
-    session.held.remove(&marker.id);
+    session.held.shift_remove(&marker.id);
     let enlisted = was_enlisted(session, &marker.id);
     let work = if enlisted {
         "enlisted, so its branch, directory and pane were left as found".to_owned()

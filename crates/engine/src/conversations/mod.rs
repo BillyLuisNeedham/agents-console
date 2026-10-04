@@ -306,6 +306,18 @@ pub struct Launch {
     pub at: String,
 }
 
+impl Launch {
+    /// The pane as the pane survey compares it with a listing.
+    pub(crate) fn recorded(&self) -> crate::pane_survey::RecordedPane {
+        crate::pane_survey::RecordedPane {
+            pane_id: self.pane_id.clone(),
+            tab_id: self.tab_id.clone(),
+            cwd: self.cwd.clone(),
+            terminal_id: self.terminal_id.clone(),
+        }
+    }
+}
+
 pub(crate) fn launch_of(s: &Session, id: &str) -> Option<Launch> {
     let events = read_events(runs_dir(s), id);
     let spawned = events.iter().rev().find(|e| {

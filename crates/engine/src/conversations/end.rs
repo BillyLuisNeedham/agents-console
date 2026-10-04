@@ -7,7 +7,7 @@ use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
 use ac_io::herdr::{Herdr, is_tab_not_found};
 use ac_protocol::{AnswerBy, ConversationStatus, Interrupt, InterruptKind, TicketEventKind};
 
-use super::adopt::{PaneListing, listed_as_recorded, pane_listing};
+use super::adopt::pane_listing;
 use super::*;
 use crate::actor::Engine;
 use crate::attempt_ending::PaneEnding;
@@ -17,6 +17,7 @@ use crate::checkout_gate::{
 };
 use crate::error::EngineError;
 use crate::interrupts::{clear_interrupt, interrupt, raise_interrupt};
+use crate::pane_survey::{PaneListing, listed_as_recorded};
 
 fn ending_text(ending: PaneEnding) -> &'static str {
     match ending {
@@ -101,10 +102,8 @@ fn mark_crashed(s: &mut Session, rt: &Rt, ending: PaneEnding) {
 
 // A tab this module closed: the pane survey lists again, so the snapshot's Finished terminals count
 // drops at once.
-//
-// STUB(held): the pane survey's refresh (`paneSurvey?.refresh()`) belongs to the herdr panes port.
 fn tab_closed(s: &mut Session) {
-    let _ = s;
+    crate::pane_survey::refresh_in_background(s);
 }
 
 /// Close one of a Conversation's tabs and record it closed (issue #139), so the ending's sweep of every
@@ -290,7 +289,7 @@ async fn detached_runtime(
     };
     let pane_ours = match (&launch, &listing) {
         (Some(launch), Some(listing)) => {
-            !listed || listed_as_recorded(listing, launch, workspace_id.as_deref())
+            !listed || listed_as_recorded(listing, &launch.recorded(), workspace_id.as_deref())
         }
         _ => false,
     };

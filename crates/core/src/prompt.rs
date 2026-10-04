@@ -480,6 +480,65 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
     lines.join("\n")
 }
 
+/// What the enlist teaching names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnlistTeachingParts<'a> {
+    pub id: &'a str,
+    pub issue_path: &'a str,
+    pub outcome_path: &'a str,
+    pub branch: &'a str,
+    pub ledger_path: &'a str,
+}
+
+/// The teaching Turn an enlisted pane starts with (issue #101): the protocol the agent was never
+/// launched with. It names the Ticket id, the file of record to read and annotate, the branch to
+/// commit on, and the Outcome contract (done or checkpoint with a Brief, an optional Spawn array), so
+/// an enlisted ticket can end the ordinary way rather than only by the tab closing. The engine types
+/// it into the pane, never writes it to a file.
+pub fn build_enlist_teaching(parts: &EnlistTeachingParts<'_>) -> String {
+    [
+        "---".to_owned(),
+        String::new(),
+        format!(
+            "You have been enlisted into the pool as Ticket {}. This terminal is now the attempt for \
+             that ticket; nothing about your checkout has moved.",
+            parts.id
+        ),
+        String::new(),
+        format!(
+            "Your Ticket file of record is {}: read it for the spec and append your notes there. The \
+             engine owns its line-1 status marker; never edit it.",
+            parts.issue_path
+        ),
+        String::new(),
+        format!(
+            "Commit your work on the branch already checked out here ({}). Leave the branch and the \
+             directory as they are: the engine never removes the directory or deletes the branch.",
+            parts.branch
+        ),
+        String::new(),
+        format!(
+            "When the work is done, record your outcome as JSON at {}: {{\"status\": \"done\" or \
+             \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the \
+             sha of your commit, or null\"}}. On a checkpoint, add \"brief\": \"what the human has to do \
+             next\".",
+            parts.outcome_path
+        ),
+        String::new(),
+        format!(
+            "You may propose follow-up tickets in that same outcome JSON by adding a \"spawn\" array, \
+             one entry per follow-up, each shaped {{\"title\": \"...\", \"body\": \"...\", \
+             \"blockedBy\": [\"id\", ...]}}, the body carrying at least {SPAWN_BODY_MIN_CHARS} \
+             characters of intent for a fresh agent to work from. {SPAWN_BLOCKS_TEACHING} The engine \
+             assigns the ids, writes the ticket files and schedules them. You never write pool state \
+             yourself: no ticket files, no ids, no statuses. You propose; the engine writes."
+        ),
+        String::new(),
+        spawn_ledger_teaching(parts.ledger_path),
+    ]
+    .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

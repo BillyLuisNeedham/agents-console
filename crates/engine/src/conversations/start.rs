@@ -404,7 +404,13 @@ pub struct EnlistConversationRegistration {
     pub branch: String,
     pub session_id: Option<String>,
     /// Enlisted as the Steward (ADR-0030).
-    pub role: Option<ConversationRole>,
+    pub steward: bool,
+}
+
+impl EnlistConversationRegistration {
+    fn role(&self) -> Option<ConversationRole> {
+        self.steward.then_some(ConversationRole::Steward)
+    }
 }
 
 /// The view of the Conversation an enlist made, or the reason it could not.
@@ -431,7 +437,7 @@ fn enlist_claim(
     let Some(descriptor) = harness_descriptor(&harness) else {
         return Err("no harness the engine knows".to_owned());
     };
-    let is_steward = req.role == Some(ConversationRole::Steward);
+    let is_steward = req.role() == Some(ConversationRole::Steward);
     if is_steward && let Some(on_duty) = steward_on_duty(s) {
         return Err(second_steward_reason(&on_duty));
     }
@@ -452,7 +458,7 @@ fn enlist_claim(
             title: &req.title,
             directory: &req.directory,
             branch: &req.branch,
-            role: req.role,
+            role: req.role(),
         },
     );
     Ok(EnlistClaim {
@@ -479,7 +485,7 @@ pub async fn enlist(
     engine: &Engine,
     req: EnlistConversationRegistration,
 ) -> EnlistConversationResult {
-    let (claim_req, id, role) = (req.clone(), req.id.clone(), req.role);
+    let (claim_req, id, role) = (req.clone(), req.id.clone(), req.role());
     let claim = match engine.call(move |s| enlist_claim(s, &claim_req)).await {
         Ok(Ok(claim)) => claim,
         Ok(Err(reason)) => return Err(reason),
@@ -658,7 +664,7 @@ fn enlist_record(
         effort: None,
         drivers: DEFAULT_DRIVERS.to_owned(),
         enlisted: Some(found),
-        role: req.role,
+        role: req.role(),
     };
     // The record lands before delivery: deliver reads it for the harness descriptor, and the card must
     // exist the moment the enlist does.
@@ -668,7 +674,7 @@ fn enlist_record(
     let teaching = teaching_for(
         s,
         &req.id,
-        req.role,
+        req.role(),
         &Assignment {
             harness: harness.to_owned(),
             model: String::new(),

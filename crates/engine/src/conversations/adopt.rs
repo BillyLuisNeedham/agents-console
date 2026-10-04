@@ -4,7 +4,7 @@
 //! closed only when the tab is still its own. Only one with no pane to ask about (a headless pool, or a
 //! record with no launch on it) is crashed here, at once.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use ac_core::assignment::{Assignment, DEFAULT_DRIVERS};
@@ -12,7 +12,7 @@ use ac_core::conversation_record::{ConversationRecord, write_conversation_status
 use ac_core::events::attempt_exit_code_name;
 use ac_core::harness::{HarnessDescriptor, harness_descriptor};
 use ac_core::js;
-use ac_io::herdr::{Herdr, HerdrPane, PaneAgentState};
+use ac_io::herdr::{Herdr, PaneAgentState};
 use ac_protocol::{AnswerBy, ConversationStatus, InterruptKind, TicketEventKind};
 use serde_json::json;
 
@@ -22,64 +22,7 @@ use super::*;
 use crate::actor::Engine;
 use crate::interrupts::{interrupt, raise_interrupt};
 use crate::live_attempts::LiveAttemptEntry;
-
-/// One listing of herdr's panes: every listed pane by id, and every tab a listed pane sits in.
-///
-/// STUB(held): the pane survey's listing (pane-survey.ts) belongs to the herdr panes port; this is the
-/// part of it a Conversation reads.
-#[derive(Debug, Clone, Default)]
-pub struct PaneListing {
-    pub panes: HashMap<String, HerdrPane>,
-    #[allow(dead_code)]
-    pub tabs: HashSet<String>,
-}
-
-// A directory as herdr reports it: the physical path, so the recorded one is resolved the same way
-// before they are compared.
-fn trim_slash(path: &str) -> String {
-    let physical = js::canonical_dir(path);
-    if physical.chars().count() > 1 {
-        physical.trim_end_matches('/').to_owned()
-    } else {
-        physical
-    }
-}
-
-/// `listedAsRecorded` (pane-survey.ts): whether the listing still has the pane the engine recorded, and
-/// it is the same pane (issue #139).
-///
-/// STUB(held): see [`PaneListing`].
-pub fn listed_as_recorded(
-    listing: &PaneListing,
-    recorded: &Launch,
-    workspace_id: Option<&str>,
-) -> bool {
-    let Some(listed) = listing.panes.get(&recorded.pane_id) else {
-        return false;
-    };
-    if let (Some(recorded_terminal), Some(listed_terminal)) = (
-        recorded.terminal_id.as_deref().filter(|id| !id.is_empty()),
-        listed.terminal_id.as_deref().filter(|id| !id.is_empty()),
-    ) {
-        return listed_terminal == recorded_terminal;
-    }
-    if let (Some(recorded_tab), Some(listed_tab)) = (&recorded.tab_id, &listed.tab_id)
-        && listed_tab != recorded_tab
-    {
-        return false;
-    }
-    if let (Some(workspace), Some(listed_workspace)) = (workspace_id, &listed.workspace_id)
-        && listed_workspace != workspace
-    {
-        return false;
-    }
-    if let (Some(recorded_cwd), Some(listed_cwd)) = (&recorded.cwd, &listed.cwd)
-        && trim_slash(listed_cwd) != trim_slash(recorded_cwd)
-    {
-        return false;
-    }
-    true
-}
+use crate::pane_survey::{PaneListing, listed_as_recorded};
 
 /// One listing of herdr's panes, or `None` when the daemon could not be asked.
 pub(crate) async fn pane_listing(engine: &Engine) -> Option<PaneListing> {
@@ -227,7 +170,7 @@ where
 
 /// Try both adoptions again for live records a boot could not settle (the daemon did not answer, or a
 /// pane could not be read); a no-op when there are none or a try is in flight.
-pub async fn readopt_pending(engine: &Engine) {
+pub async fn readopt_pending(engine: &Engine) -> Result<(), String> {
     let go = engine
         .call(|s| {
             if s.conversations.retrying || !terminal_backed(s) {
@@ -245,7 +188,7 @@ pub async fn readopt_pending(engine: &Engine) {
         })
         .await;
     if go != Ok(true) {
-        return;
+        return Ok(());
     }
     serially(engine, |engine| async move {
         adopt_enlisted_pass(&engine).await;
@@ -253,6 +196,7 @@ pub async fn readopt_pending(engine: &Engine) {
     })
     .await;
     let _ = engine.call(|s| s.conversations.retrying = false).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +268,7 @@ fn decide_started(
             .map(|meta| js::mtime_ms(&meta) >= launched_at)
             .unwrap_or(false);
     let listed = listing.panes.contains_key(&launch.pane_id);
-    let ours = listed_as_recorded(listing, &launch, workspace_id);
+    let ours = listed_as_recorded(listing, &launch.recorded(), workspace_id);
     if listed && !ours {
         let _ = write_conversation_status(&rec.file, ConversationStatus::Crashed);
         event1(
