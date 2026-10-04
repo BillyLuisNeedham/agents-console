@@ -110,9 +110,7 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   `.context(...)` only where the TypeScript's text changed too. `is_tab_not_found` takes anything Display.
 - `Herdr::rpc` returns `Option<Value>`: `None` is JavaScript's undefined, `Some(Null)` is null; they print
   differently in shape errors.
-- `crates/io/src/herdr/js.rs` holds JavaScript-compatible helpers (number printing, JSON.stringify of a
-  Value, String(), trim, UTF-16 length and prefix), private for now: move them to `ac_core::js` once it
-  exists and point herdr at it.
+- herdr's JavaScript helpers now live in `ac_core::js` (5e6b558).
 - `crates/io/src/herdr/fake.rs` is a test-only port of the fake herdr; share it behind a test-support
   feature if engine unit tests need one.
 - The RPC watchdog is a fixed 10 s; tests that need it to fire use `#[tokio::test(start_paused = true)]`.
@@ -132,8 +130,7 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   `merge_base`, `show_file`, `merge_file`). Left for M4: the activity diff's 1.5 s TTL cache.
 - `pool_key_for` is total (hashes the given path when realpath fails); the functions that change disk use
   `try_pool_key_for`, which fails first with Bun's lstat ENOENT text, as the TypeScript does.
-- `node.rs` holds crate-private JS/Node helpers (trim, Number, path join and relative, realpath, Bun's fs
-  error texts): candidates for `ac_core::js` together with herdr's `js.rs`.
+- git's JS/Node helpers now live in `ac_core::js` (5e6b558).
 - engine.ts:10279-10281's enlist capture ports as `pane_top.is_some() && pane_top == cwd_top`.
 - `merge_file`: an exit code above 127 is git's error, `None` is killed by a signal.
 - This box's git config enables rerere (autoupdate): a conflict's stderr starts "Recorded preimage", which
@@ -279,5 +276,4 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Deviations (edges, nothing pins them): a hand-written non-string Assignment field (`model: 5`) becomes
   the string "5" (TypeScript keeps the number); a verify past u64 saturates; a non-string effort is
   coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
-- `js_compat.rs` is a private copy of the JavaScript helpers, to fold into `ac_core::js` with herdr's
-  `js.rs` and git's `node.rs`.
+- Its JavaScript helpers were folded into `ac_core::js` (5e6b558).
