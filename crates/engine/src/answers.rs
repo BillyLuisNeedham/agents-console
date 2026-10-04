@@ -356,7 +356,7 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
     }
     // Answering an adoption checkpoint abandons the re-adopted attempt (ADR-0014).
     if session.adopted.contains_key(&record.ticket_id) {
-        crate::restart::abandon_adoption(session, &record.ticket_id);
+        crate::restart::abandon_adoption(session, &record.ticket_id)?;
     }
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
     session.held.remove(&record.ticket_id);
@@ -418,7 +418,7 @@ pub fn close_ticket(
     record: &QueuedAnswer,
 ) -> anyhow::Result<()> {
     if session.adopted.contains_key(&marker.id) {
-        crate::restart::abandon_adoption(session, &marker.id);
+        crate::restart::abandon_adoption(session, &marker.id)?;
     }
     session.held.remove(&marker.id);
     let enlisted = was_enlisted(session, &marker.id);
