@@ -62,6 +62,5 @@ pub mod verify;
 pub use actor::{Engine, EngineGone};
 pub use boot::start_pool;
 pub use error::EngineError;
-pub use handle::PoolOptions;
 pub use options::RunOptions;
 pub use snapshot::{PoolSnapshot, PoolState};
