@@ -32,7 +32,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | protocol and http outside route files | C02 | landed (d9db343), 31 cases |
 | server lifecycle | C03 | landed (490a174..e890464), 37 cases |
 | restart, Tickets and Attempts | C05 | landed, 55 cases |
-| restart, Conversations and panes | C06 | wave 2 |
+| restart, Conversations and panes | C06 | landed (f0eef0a), 30 cases |
 | Conversation Turn state and Notices | C17 | landed, 22 cases |
 | verify with Jev | C22 | wave 2 |
 | the failing scheduling case | | fixed in 879b564: the case now waits for the settled frame (a read's reply can overtake a coalesced push) |
@@ -55,7 +55,7 @@ briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
 - r-s-server: ac-server and the `server` subcommand (server.ts, ws.ts, ports.ts). Started from 5e6b558.
 - r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
   Started from 78e6eea.
-- m0-c22 (verify with Jev), m0-c06 (restart, Conversations and panes).
+- m0-c22 (verify with Jev).
 - r-cli: the boot, steward and fleet subcommands (brief-r-cli.md). Started from d9db343.
 
 How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
@@ -143,6 +143,21 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   <id>". Non-JSON body: resume and both settings PUTs 400 `{error:"Failed to parse JSON"}`, Reassign 500
   with that text, every other JSON route 400 `{reason:"invalid JSON body"}`. Unknown paths answer 500
   (pinned; 404 intended).
+
+### restart, Conversations and panes (C06, f0eef0a)
+
+- Pinned as Bun does it: boot reconciliation looks for Ticket orphans only in the Pool workspace, so a
+  pane the operator moved to another workspace reads as gone (Attempt crashed, agent released, Ticket re-run
+  in a new tab in the same worktree). Conversations and enlisted Tickets are looked up daemon-wide. A merge
+  redone at boot appends a second merge-deferred when it meets the gate again.
+- Rust unit tests: Conversation claims are serialised per id (two Ends, or an End and the survey's
+  re-adoption, build one runtime and record the ending once). An End on an unadopted record whose pane
+  herdr lists as another terminal releases no agent and closes no tab. Unadopted Conversations are retried
+  on every survey listing, cadence or on-demand (`readoptPending` from `surveyListed`). A Conversation's TUI
+  counts as exited at boot only if its exit-code file's mtime is no older than its spawned event's `at`.
+- Not pinned: while a redone merge waits at the pool checkout's gate, the phase stays "running" until the
+  Continued attempt ends; cases wait for "merge dropped at the last shutdown chained again" and mergeState
+  "queued" instead.
 
 ## Notes from the Rust port agents
 
