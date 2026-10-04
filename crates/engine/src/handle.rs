@@ -2,8 +2,8 @@
 //! the server asks of a running pool. Each method is one job on the actor (or a flow that sends jobs),
 //! and refuses with the TypeScript's message as an [`EngineError`].
 //!
-//! The skeleton's bodies refuse with "not ported yet"; each feature's port replaces its methods'
-//! bodies, keeping the signatures (change one only with the server port in step).
+//! Ported: accept, answer, settled, shutdown, close, reload_config, pane_read. The rest refuse with
+//! "not ported yet" until their feature's port replaces the body, keeping the signature.
 
 use std::time::Duration;
 
@@ -15,11 +15,19 @@ use ac_protocol::{
 };
 
 use crate::actor::Engine;
+use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
 
 fn not_ported<T>(what: &str) -> Result<T, EngineError> {
     Err(EngineError::refused(format!("{what}: not ported yet")))
+}
+
+// What an answer waits on once accepted: the next settle at once (a retry of an answer already
+// processed), or its processing first.
+enum Accepted {
+    Processed,
+    Waiting(tokio::sync::oneshot::Receiver<Result<(), EngineError>>),
 }
 
 impl Engine {
@@ -33,8 +41,18 @@ impl Engine {
         action: ResumeAction,
         attempt: Option<u32>,
     ) -> Result<(), EngineError> {
-        let _ = (ticket_id, note, action, attempt);
-        not_ported("accept")
+        self.call(move |s| {
+            crate::answers::accept_answer(
+                s,
+                &ticket_id,
+                note,
+                action,
+                attempt.map(u64::from),
+                None,
+            )?;
+            crate::answers::kick_processing(s).map_err(|e| EngineError::refused(e.to_string()))
+        })
+        .await?
     }
 
     /// `resume`, `approve`, `reject`, `closeTicket` and `adopt`: accept, wait for the answer to be
@@ -46,23 +64,75 @@ impl Engine {
         action: ResumeAction,
         attempt: Option<u32>,
     ) -> Result<RunPhase, EngineError> {
-        let _ = (ticket_id, note, action, attempt);
-        not_ported("answer")
+        let accepted = self
+            .call(move |s| -> Result<Accepted, EngineError> {
+                let record = crate::answers::accept_answer(
+                    s,
+                    &ticket_id,
+                    note,
+                    action,
+                    attempt.map(u64::from),
+                    None,
+                )?;
+                // A retry of an answer that was already processed: nothing new to wait for.
+                if record.processed_at.is_some() {
+                    return Ok(Accepted::Processed);
+                }
+                // The waiter registers before the kick: an idle kick drains at once.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                s.answer_waiters.entry(record.seq).or_default().push(tx);
+                crate::answers::kick_processing(s)
+                    .map_err(|e| EngineError::refused(e.to_string()))?;
+                Ok(Accepted::Waiting(rx))
+            })
+            .await??;
+        if let Accepted::Waiting(processed) = accepted {
+            processed
+                .await
+                .unwrap_or(Err(EngineError::from(crate::actor::EngineGone::Stopped)))?;
+        }
+        self.settled().await
     }
 
     /// `settled`: the phase at the drive's next settle (at once when no drive is in flight).
     pub async fn settled(&self) -> Result<RunPhase, EngineError> {
-        not_ported("settled")
+        let settle: Settle = self.call(next_settle).await?;
+        settle.phase().await
     }
 
     /// `shutdown` (ADR-0017): stop the headless attempts (TERM, the grace, then KILL), let the drive
     /// join its super-step (bounded), close the store, and emit the `stopped` farewell.
     pub async fn shutdown(&self, grace: Option<Duration>) {
-        let _ = grace;
+        crate::children::stop_all(self, grace).await;
+        if let Ok(settle) = self
+            .call(|s| {
+                s.children.stopping = true;
+                s.driving.then(|| next_settle(s))
+            })
+            .await
+            && let Some(settle) = settle
+        {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(SHUTDOWN_SETTLE_WAIT_MS),
+                settle.phase(),
+            )
+            .await;
+        }
+        let _ = self
+            .call(|s| {
+                s.conversations.dispose();
+                s.enlisted.dispose();
+                crate::persist::close_store(s);
+                // The farewell: one `stopped` snapshot carrying the final state (issue #97).
+                crate::snapshot::emit_snapshot(s, RunPhase::Stopped);
+            })
+            .await;
     }
 
     /// `close`: close the checkpoint store.
-    pub async fn close(&self) {}
+    pub async fn close(&self) {
+        let _ = self.call(crate::persist::close_store).await;
+    }
 
     /// `startConversation` (conversations.ts).
     pub async fn start_conversation(
@@ -115,7 +185,11 @@ impl Engine {
     }
 
     /// `reloadConfig` (issue #149): an idle pool runs the boundary's Config reload now and emits.
-    pub async fn reload_config(&self) {}
+    pub async fn reload_config(&self) {
+        let _ = self
+            .call(crate::config_reload::reload_config_when_idle)
+            .await;
+    }
 
     /// `adoptHeldSpawn` (ADR-0029).
     pub async fn adopt_held_spawn(&self, id: String) -> Result<(), EngineError> {

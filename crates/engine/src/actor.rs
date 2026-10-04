@@ -120,18 +120,10 @@ fn panic_message(panic: &Box<dyn Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane_reads::PaneReadRegister;
 
     fn session() -> (Session, watch::Receiver<Option<Arc<PoolSnapshot>>>) {
         let (publisher, snapshots) = watch::channel(None);
-        (
-            Session {
-                engine: None,
-                publisher,
-                pane_reads: PaneReadRegister::default(),
-            },
-            snapshots,
-        )
+        (crate::testkit::bare_session(publisher), snapshots)
     }
 
     #[tokio::test]
