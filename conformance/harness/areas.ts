@@ -19,6 +19,7 @@ export const AREAS = {
   cli: "the boot, fleet and steward command lines: what they print, write, exit with and launch",
   restart: "restart and takeover: a server picking up a pool another server process left on disk",
   config: "Assignments and settings: what console.json resolves each Ticket to, and Config reload",
+  herdr: "the pool's herdr panes: the RPC client, the Pool workspace, tab labels and closing, agent reporting",
 } as const;
 
 export type Area = keyof typeof AREAS;

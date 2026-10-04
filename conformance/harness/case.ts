@@ -71,20 +71,20 @@ export interface Case {
    * to that fake; without, its HERDR_SOCKET_PATH names a socket nobody
    * listens on, so the pool runs headless. With `jev` it holds a TypeSafe
    * key and its JEV_BASE_URL names that fake, so Jev answers as scripted;
-   * without, it has no key and runs on its heuristics. `env` adds to or
-   * overrides the world's environment for this server alone (a PWD it was
-   * launched with). With `pool` it runs that directory as its pool instead,
-   * spelled as given: a second pool in the world's repository, or the pool
-   * reached through a symlink. `leg` picks the server from `legs` (default
-   * 0); another server on the same pool must have stopped first, since the
-   * pool lock admits one.
+   * without, it has no key and runs on its heuristics. `env` changes the
+   * world's environment for this server alone (a PWD it was launched with):
+   * a string sets a variable, null unsets it. With `pool` it runs that
+   * directory as its pool instead, spelled as given: a second pool in the
+   * world's repository, or the pool reached through a symlink. `leg` picks
+   * the server from `legs` (default 0); another server on the same pool
+   * must have stopped first, since the pool lock admits one.
    */
   start(
     world: World,
     options?: {
       herdr?: HerdrProcess;
       jev?: ServedFakeJev;
-      env?: Record<string, string>;
+      env?: Record<string, string | null>;
       pool?: string;
       leg?: number;
     },
@@ -152,7 +152,10 @@ function caseContext(legs: ServerChoice[]): { t: Case; teardown(failed: boolean)
         env.TYPESAFE_API_KEY = CONFORMANCE_JEV_KEY;
         env.JEV_BASE_URL = options.jev.url;
       }
-      Object.assign(env, options.env);
+      for (const [name, value] of Object.entries(options.env ?? {})) {
+        if (value === null) delete env[name];
+        else env[name] = value;
+      }
       const running = await startServer({ pool: options.pool ?? world.pool, env, choice: leg });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);

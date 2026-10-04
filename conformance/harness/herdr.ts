@@ -15,6 +15,8 @@ const PROCESS = join(import.meta.dir, "..", "fixtures", "herdr-process.ts");
 export interface HerdrCall {
   method: string;
   params: Record<string, unknown>;
+  /** The connection it arrived on, numbered from 1 in arrival order. */
+  connection: number;
 }
 
 export interface HerdrProcess {

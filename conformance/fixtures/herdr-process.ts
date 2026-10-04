@@ -11,7 +11,8 @@
  *
  *   READY <socket path>          once, when the socket listens
  *   REQUEST <json>               each call the daemon receives, in order:
- *                                {"method": ..., "params": {...}}
+ *                                {"method": ..., "params": {...},
+ *                                "connection": <n>}
  *   REPLY <id> <json>            the answer to a control line:
  *                                {"ok": true, "value": ...} or
  *                                {"ok": false, "error": "..."}
@@ -42,6 +43,19 @@ const CONTROLS: Record<string, Control> = {
   removeWorkspace: (fake, [workspaceId]) => fake.removeWorkspace(String(workspaceId)),
   failNextCall: (fake, [method, times]) =>
     fake.failNextCall(String(method), times === undefined ? undefined : Number(times)),
+  /** Never answer a method from now on (`on` true), or answer it again (false). */
+  hang: (fake, [method, on]) => {
+    if (on === false) fake.hang.delete(String(method));
+    else fake.hang.add(String(method));
+  },
+  /**
+   * Close a workspace the moment the next call of `method` arrives, before
+   * the daemon answers it: an operator closing it at an exact point in the
+   * server's run, where a timer would race the server.
+   */
+  removeWorkspaceOn: (_fake, [method, workspaceId]) => {
+    removals.push({ method: String(method), workspaceId: String(workspaceId) });
+  },
   /** Refuse a method from now on (`on` true) or answer it again (false). */
   fail: (fake, [method, on]) => {
     if (on === false) fake.fail.delete(String(method));
@@ -49,6 +63,7 @@ const CONTROLS: Record<string, Control> = {
   },
   delay: (fake, [method, ms]) => fake.delay(String(method), Number(ms)),
   workspaceIds: (fake) => fake.workspaceIds(),
+  openConnections: (fake) => fake.openConnections(),
   workspaceLabel: (fake, [workspaceId]) => fake.workspaceLabel(String(workspaceId)),
   tabLabel: (fake, [tabId]) => fake.tabLabel(String(tabId)),
   submitted: (fake) => fake.submitted,
@@ -63,11 +78,18 @@ function emit(line: string): void {
   process.stdout.write(`${line}\n`);
 }
 
+// The workspace closes armed by `removeWorkspaceOn`, each spent on its call.
+const removals: { method: string; workspaceId: string }[] = [];
+
 const raw = option("--options");
 const options = (raw ? JSON.parse(raw) : {}) as Omit<ExecutingFakeHerdrOptions, "onRequest">;
-const fake = await startExecutingFakeHerdr({
+const fake: ExecutingFakeHerdr = await startExecutingFakeHerdr({
   ...options,
-  onRequest: (method, params) => emit(`REQUEST ${JSON.stringify({ method, params })}`),
+  onRequest: (method, params, connection) => {
+    emit(`REQUEST ${JSON.stringify({ method, params, connection })}`);
+    const armed = removals.findIndex((removal) => removal.method === method);
+    if (armed >= 0) fake.removeWorkspace(removals.splice(armed, 1)[0]!.workspaceId);
+  },
 });
 
 let closing: Promise<void> | null = null;
