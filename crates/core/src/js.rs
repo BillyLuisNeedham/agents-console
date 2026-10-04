@@ -564,14 +564,18 @@ pub fn decode_utf8(bytes: &[u8]) -> String {
 }
 
 /// `readFileSync(path, "utf8")`: the file as text, every invalid sequence a U+FFFD and a byte-order
-/// mark kept. Its error reads as Bun's (`ENOENT: no such file or directory, open '<path>'`).
+/// mark kept. Its error reads as Bun's (`ENOENT: no such file or directory, open '<path>'`, or
+/// `EISDIR: illegal operation on a directory, read` for a directory).
 pub fn read_text(path: &Path) -> Result<String, FsError> {
-    std::fs::read(path)
-        .map(|bytes| match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
-        })
-        .map_err(|err| FsError::new(&err, "open", path))
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|err| FsError::new(&err, "open", path))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| FsError::bare(&err, "read"))?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +592,21 @@ pub struct FsError {
 }
 
 impl FsError {
+    /// A failed call Bun names with no path (`ENOENT: no such file or directory, open` from
+    /// `appendFileSync`, `EISDIR: illegal operation on a directory, read`).
+    pub fn bare(err: &io::Error, syscall: &str) -> Self {
+        match errno_text(err) {
+            Some((code, description)) => FsError {
+                message: format!("{code}: {description}, {syscall}"),
+                code: Some(code),
+            },
+            None => FsError {
+                message: err.to_string(),
+                code: None,
+            },
+        }
+    }
+
     pub fn new(err: &io::Error, syscall: &str, path: &Path) -> Self {
         let path = path.display();
         match errno_text(err) {
@@ -648,19 +667,23 @@ pub fn mkdir_all(dir: &Path) -> Result<(), FsError> {
 
 /// `writeFileSync(path, text)`.
 pub fn write_file(path: &Path, text: &str) -> Result<(), FsError> {
-    std::fs::write(path, text).map_err(|err| FsError::new(&err, "open", path))
+    use std::io::Write;
+    std::fs::File::create(path)
+        .map_err(|err| FsError::new(&err, "open", path))?
+        .write_all(text.as_bytes())
+        .map_err(|err| FsError::bare(&err, "write"))
 }
 
-/// `appendFileSync(path, text)`.
+/// `appendFileSync(path, text)`. Bun names no path when it fails.
 pub fn append_file(path: &Path, text: &str) -> Result<(), FsError> {
     use std::io::Write;
     std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)
-        .map_err(|err| FsError::new(&err, "open", path))?
+        .map_err(|err| FsError::bare(&err, "open"))?
         .write_all(text.as_bytes())
-        .map_err(|err| FsError::new(&err, "write", path))
+        .map_err(|err| FsError::bare(&err, "write"))
 }
 
 /// `renameSync(from, to)`.
@@ -902,6 +925,32 @@ mod tests {
             "ENOENT: no such file or directory, rename '/nonexistent-dir-for-test/x' -> '/nonexistent-dir-for-test/y'"
         );
         assert_eq!(err.code, Some("ENOENT"));
+        assert_eq!(
+            append_file(missing, "x").unwrap_err().to_string(),
+            "ENOENT: no such file or directory, open"
+        );
+        assert_eq!(
+            write_file(missing, "x").unwrap_err().to_string(),
+            "ENOENT: no such file or directory, open '/nonexistent-dir-for-test/x'"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_text(dir.path()).unwrap_err().to_string(),
+            "EISDIR: illegal operation on a directory, read"
+        );
+        let file = dir.path().join("f");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(
+            mkdir_all(&file.join("sub")).unwrap_err().to_string(),
+            format!(
+                "ENOTDIR: not a directory, mkdir '{}'",
+                file.join("sub").display()
+            )
+        );
+        assert_eq!(
+            read_dir_names(&file).unwrap_err().to_string(),
+            format!("ENOTDIR: not a directory, scandir '{}'", file.display())
+        );
     }
 
     #[test]
