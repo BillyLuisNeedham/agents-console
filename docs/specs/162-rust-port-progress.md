@@ -238,3 +238,22 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Known race in tests reading "notice delivered" events: the fake records the submitted Turn before the
   engine appends the event (steward.test.ts engine tests; conformance steward/notices "a Steward enlisted
   beside a checkpoint is told it once ...").
+
+### ac-protocol (r-protocol, 2e17992..bacc23b)
+
+- Every wire type and protocol.ts in `crates/protocol/src/{wire,protocol}.rs`, re-exported at the crate
+  root; serde helpers in `json.rs` (`True` for `ok: true`, `js_number` for floats so 8 prints 8,
+  absent/null/set as `Option<Option<T>>`, `Unchecked<T>` for raw passed-through values); declare new wire
+  types with `wire_struct!`, `wire_enum!`, `wire_union!` so the generator covers them.
+- `ac_protocol::typescript::generate()` writes wire.ts and protocol.ts (`cargo run -p ac-protocol --bin
+  gen-typescript -- <dir>`); `crates/protocol/tests/typescript.rs` checks them against engine/wire.ts and
+  engine/protocol.ts with the repository's tsc (identical types both ways, export names, the UI's strict
+  settings, constant values). Real Bun frames and bodies in `crates/protocol/testdata/bun` round-trip
+  byte for byte.
+- Left to others: the snapshot diff and its hidden rows protocol.test.ts:161 and :169 (ac-core or the
+  server), the envelope decode (server). The server checks the envelope on a `serde_json::Value` and hands
+  the raw payload to the handler (a bad payload is a 400 refusal, as ui/src/protocol.ts does), never a
+  typed decode into ClientMessage.
+- Typed as declared, not reproduced: `?offset=abc` giving null offsets, a missing or non-string
+  `lastEventAt`, extra keys on hand-written event lines (the server should pass event lines through as
+  raw JSON to keep them).
