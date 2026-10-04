@@ -298,7 +298,11 @@ conformance("attempts", "a terminal-backed launch runs each harness's interactiv
 
   const key = poolKey(world.repo);
   const runs = join(world.pool, "runs");
-  const calls = world.stubs.calls();
+  // A launch's record is whole only once it has written its env, which can
+  // land after its prompt was typed: wait for every one.
+  const calls = await until(() => world.stubs.calls(), (c) => c.length >= MATRIX.length, {
+    what: "every launch recorded",
+  });
   for (const m of MATRIX) {
     const worktree = join(world.repo, ".git", "pool-worktrees", key, m.id);
     const call = calls.find((c) => c.cwd === worktree)!;

@@ -60,6 +60,10 @@ function gitTerminalWorld(
  * releases it, so the case can write the Outcome before the TUI goes.
  */
 function holdInteractiveOpencode(world: World): void {
+  // Scripted under its own name, a terminal-backed launch is keyed
+  // `_opencode` rather than waiting on its pane for the prompt; the case
+  // writes the Outcome itself.
+  world.stubs.script("_opencode", {});
   const wrapper = join(world.stubs.bin, "opencode");
   writeFileSync(
     wrapper,

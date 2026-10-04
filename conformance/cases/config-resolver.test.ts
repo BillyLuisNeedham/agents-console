@@ -98,12 +98,12 @@ conformance("config", "with no resolver key the resolver runs on the Machine def
   writeFileSync(join(world.home, ".issue-runner"), "harness=opencode\n");
   mkdirSync(join(world.home, ".agent-graphs"), { recursive: true });
   writeFileSync(join(world.home, ".agent-graphs", "defaults.json"), JSON.stringify({ effort: "low" }));
-  world.stubs.script("_opencode", { waitFor: holdFile(world, "_opencode") });
+  world.stubs.script("02.resolver", { outcome: null, waitFor: holdFile(world, "02.resolver") });
   const server = await t.start(world);
   await conflict(world);
-  const [resolver] = await untilLaunched(world, "_opencode");
+  const [resolver] = await untilLaunched(world, "02.resolver");
   resolveAs(world, resolver!, "via default");
-  release(world, "_opencode");
+  release(world, "02.resolver");
 
   const approval = await untilSnapshot(
     server,
@@ -114,7 +114,7 @@ conformance("config", "with no resolver key the resolver runs on the Machine def
   expect(flagValue(resolver!.argv, "--model")).toBe("m");
   expect(flagValue(resolver!.argv, "--variant")).toBe("low");
   await approveResolution(server);
-  expect(world.stubs.calls().filter((call) => call.key.startsWith("_"))).toHaveLength(1);
+  expect(world.stubs.calls().filter((call) => call.key.endsWith(".resolver"))).toHaveLength(1);
 }, { timeoutMs: 90_000 });
 
 conformance("config", "the resolver's object form pins its own model and effort over the pool defaults'", async (t) => {
@@ -122,15 +122,15 @@ conformance("config", "the resolver's object form pins its own model and effort 
     defaults: { harness: "claude", model: "m", effort: "high" },
     resolver: { harness: "opencode", model: "resolver-model", effort: "max" },
   });
-  world.stubs.script("_opencode", { waitFor: holdFile(world, "_opencode") });
+  world.stubs.script("02.resolver", { outcome: null, waitFor: holdFile(world, "02.resolver") });
   const server = await t.start(world);
   await conflict(world);
-  const [resolver] = await untilLaunched(world, "_opencode");
+  const [resolver] = await untilLaunched(world, "02.resolver");
   resolveAs(world, resolver!, "via pinned model");
-  release(world, "_opencode");
+  release(world, "02.resolver");
   await approveResolution(server);
 
-  expect(world.stubs.calls().filter((call) => call.key.startsWith("_"))).toHaveLength(1);
+  expect(world.stubs.calls().filter((call) => call.key.endsWith(".resolver"))).toHaveLength(1);
   expect(flagValue(resolver!.argv, "--model")).toBe("resolver-model");
   expect(flagValue(resolver!.argv, "--variant")).toBe("max");
   expect(readFileSync(join(world.repo, "shared.txt"), "utf8")).toBe("resolved\n");
@@ -146,7 +146,7 @@ conformance("config", "an explicit resolver naming an unknown harness kills the 
   expect(dead.state.log).toContain(`pool dead: ${message}`);
   const errors = readFileSync(join(world.pool, "runs", "errors.jsonl"), "utf8");
   expect(errors).toContain(message);
-  expect(world.stubs.calls().filter((call) => call.key.startsWith("_"))).toEqual([]);
+  expect(world.stubs.calls().filter((call) => call.key.endsWith(".resolver"))).toEqual([]);
 }, { timeoutMs: 90_000 });
 
 conformance("config", "an unknown harness the Machine defaults name takes the manual path, never killing the pool", async (t) => {
@@ -161,7 +161,7 @@ conformance("config", "an unknown harness the Machine defaults name takes the ma
   );
 
   expect(manual.phase).not.toBe("dead");
-  expect(world.stubs.calls().filter((call) => call.key.startsWith("_"))).toEqual([]);
+  expect(world.stubs.calls().filter((call) => call.key.endsWith(".resolver"))).toEqual([]);
 }, { timeoutMs: 90_000 });
 
 conformance("config", "a resolver set mid-run reaches the next conflict through Config reload", async (t) => {
@@ -171,15 +171,15 @@ conformance("config", "a resolver set mid-run reaches the next conflict through 
     repoFiles: { "shared.txt": "base\n" },
   });
   for (const id of ["01", "02", "03"]) world.stubs.script(id, { waitFor: holdFile(world, id) });
-  world.stubs.script("_claude", { waitFor: holdFile(world, "_claude") });
+  world.stubs.script("03.resolver", { outcome: null, waitFor: holdFile(world, "03.resolver") });
   const server = await t.start(world);
   await untilLaunched(world, "01");
   writeConfig(world, { defaults: { harness: "claude", model: "m" }, resolver: "claude" });
   release(world, "01");
   await conflict(world, "02", "03");
-  const [resolver] = await untilLaunched(world, "_claude");
+  const [resolver] = await untilLaunched(world, "03.resolver");
   const reloaded = await untilSnapshot(server, (s) => s.state.log.includes("config reloaded: resolver"), "the reload's log line");
-  release(world, "_claude");
+  release(world, "03.resolver");
 
   expect(resolver!.cwd).toContain("03");
   expect(existsSync(join(world.pool, "runs", "03.resolver.log"))).toBe(true);

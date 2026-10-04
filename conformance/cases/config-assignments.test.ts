@@ -538,6 +538,9 @@ conformance("config", "a Conversation with no effort anywhere starts without one
     tickets: [doneTicket("01")],
     config: { defaults: { harness: "claude", model: "opus" }, terminal: "herdr" },
   });
+  // Scripted under its own name, a Conversation's launch is recorded as
+  // `_claude` at once instead of waiting on its pane for an Attempt prompt.
+  world.stubs.script("_claude", {});
   const server = await t.start(world, { herdr: await t.herdr(world) });
   const plain = await server.http.post("/api/conversations", { title: "Plain" });
   const empty = await server.http.post("/api/conversations", { title: "Empty", assign: { effort: "" } });
