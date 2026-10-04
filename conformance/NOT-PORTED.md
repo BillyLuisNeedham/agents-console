@@ -610,3 +610,76 @@ Behaviour of the TypeScript server the cases pin as it is today, each worth a lo
 - The enlist claim's teaching Turn reads the scrollback of the operator's pane to check its paste, which moves
   the viewport of an operator sitting in it: what issue #122 stopped the Turn-state reads from doing. Not
   pinned either way; the case for `enlisted.test.ts:69` counts only the reads after the claim.
+
+## `restart`: Tickets and Attempts (C05)
+
+Forty-nine of C05's 50 rows are passing cases under `conformance/cases/restart-tickets-durability.test.ts`,
+`restart-tickets-orphans.test.ts`, `restart-tickets-terminal.test.ts`, `restart-tickets-answers.test.ts`,
+`restart-tickets-spawns.test.ts`, `restart-tickets-verify.test.ts` and `restart-tickets-merges.test.ts`. A case
+that starts more than one server on its pool is a takeover case (`restartCase` in `restart-support.ts`): each
+server after the first runs the next leg of CONFORMANCE_LEGS, so `--legs bun,rust` has the Rust server boot on
+what the Bun one left. The five rows that stop at an Interrupt and resume with nothing changed between servers
+(`engine.test.ts:7647`, `:9881`, `:13877`, `:1327`, `:3354`) run on the takeover harness itself and are matched
+against the same run uninterrupted. Seven of the area's nine gaps are cases there too; the two about the
+remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `engine/engine.ts:2929`, a torn
+`runs/pool-workspace.json`) belong with the Pool workspace rows of ticket C06 and are left to it.
+
+### Left out
+
+- **`merge-hold.test.ts:536`**, *reads a live resolver as resolving even when the engine never took the merge on
+  (a boot adoption)*. The row's premise does not hold on the Bun server: boot never re-adopts a resolver's
+  pane. `terminalAdoptable` in `engine/engine.ts` gives a resolver Attempt the headless orphan fate and releases
+  its agent (the case for `engine.test.ts:6228` pins exactly that), so after a restart the Ticket's merge-conflict
+  Interrupt stands and its `mergeState` reads needs-you. Every resolver the server does launch is one whose merge
+  it took and marked resolving before the launch, so a live resolver the merge line never took cannot be made from
+  outside. Rust unit test: *merge queue: a held ticket whose resolver Attempt is live reads resolving, not
+  needs-you, even when the merge line never took it and its merge-conflict Interrupt is on record.*
+
+### Pinned short
+
+- **The crash Interrupt of a re-adopted Attempt decided at boot** (`attempt-ending.test.ts:248`, `:390`). The
+  body is pinned at its head (the reason and the log path) and its foot (the outcome file line) only, and the
+  crash event's `logTail` only as an array: the lines between come from the pane's Stream file, where util-linux
+  `script` writes its own start and done lines and BSD `script -q` writes none, as C08 found for Continued
+  attempts.
+- **The reused-pid and gone-worktree orphan checks run on Linux only** (`children.test.ts:86`,
+  `engine.test.ts:13235`). The server reads a pid's working directory from `/proc` (`processCwd` in
+  `engine/children.ts`); with no procfs it trusts liveness alone, so on macOS these two cases are skipped, not
+  failed. See the first entry below.
+
+### Pinned as the TypeScript server does it today, each worth a look before the port copies it
+
+- **On macOS a reused pid is stopped as an orphan.** With no procfs, `orphanIsLive` treats any live process
+  holding a recorded pid as the previous server's harness, so a boot TERMs, then KILLs, the process group of
+  whatever unrelated process has since been given that pid, and also stops a recorded pid whose worktree is gone.
+  Intended behaviour (inference): the cwd check holds on every platform (macOS has `proc_pidinfo`). Rust unit
+  test: *orphan liveness: a live pid whose working directory is not the recorded worktree, or whose worktree is
+  gone, is never an orphan, on Linux and macOS alike.*
+- **A store that refuses every write does not stop a server from stopping in order** (`engine.test.ts:7114`). The
+  server stopped while the case holds its exclusive lock on `console.db` exits 0 and releases the pool lock, with
+  no checkpoint row ever written; the next boot runs from the state lines alone. The case pins that.
+
+### Where the cases reach a row differently from its wording
+
+- **`engine.test.ts:10346`** (a SIGKILL mid-super-step). A SIGKILL stops nothing, so 02's held stub outlives the
+  server in its worktree, and the next boot stops it as an orphan before it puts 02 back to ready: the "back to
+  ready" line the row names is the orphan line (`... is still running from the previous engine process; stopping
+  it before scheduling, ticket back to ready`), which the case pins with the stub's pid.
+- **`engine.test.ts:12561`** (an answered Interrupt across a SIGKILL). The resumed attempt the kill left running is
+  let go and waited out before the restart, so the boot finds no agent alive and takes the plain reset; left
+  running, it would take the orphan path of `engine.test.ts:13174` instead.
+- **`merge-hold.test.ts:526`** (a restart's merge queue). The one merge the restart takes on must stay queued long
+  enough to read, and a merge is one synchronous git run inside the server. The only thing that holds one from
+  outside is the pool checkout's gate: the case continues Ticket 01 in the pool checkout by Keep talking, stops,
+  writes 03, 07 and 09 done on branches main lacks with 07's events ending in `merge-deferred`, and restarts. The
+  re-adopted Continued attempt holds 07's re-chained merge at the gate, so the queue reads 07 queued, then 03 and
+  09 stalled, beside the Continued attempt's adoption checkpoint, the one Interrupt up.
+- **`children.test.ts:62`** (a harness that ignores TERM). The stub is made to ignore TERM by its own wrapper
+  (`trap '' TERM` before its exec), since the stop signals the whole process group and the stub script itself
+  must outlive the TERM for the KILL to be what ends it (exit 137).
+
+### Hidden
+
+- `children.test.ts:76` stays a Rust unit test, as the inventory sorts it: *shutdown child stop: a harness child
+  registered after the shutdown began is sent TERM to its process group on arrival, so a launch racing the stop
+  cannot outlive it.*
