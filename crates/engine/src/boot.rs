@@ -206,8 +206,16 @@ fn start_boot_reconcile(session: &mut Session, done: watch::Sender<bool>) {
         return;
     }
     let engine = session.engine();
+    // With no orphan to stop and no Conversation to re-adopt, the reconciliation is the only work, and
+    // the merges to redo follow it with nothing in between, as the TypeScript's microtasks run them.
+    let alone = session.orphans.is_empty() && !live_conversation_recorded(session);
     tokio::spawn(async move {
         crate::pool_workspace::resolve_pool_workspace_for_session(&engine).await;
+        if alone {
+            let _ = crate::restart::reconcile_terminal_attempts_then_redo_merges(&engine).await;
+            let _ = done.send(true);
+            return;
+        }
         futures::join!(
             crate::restart::reconcile_terminal_attempts(&engine),
             crate::restart::reap_headless_orphans(&engine),
@@ -217,6 +225,18 @@ fn start_boot_reconcile(session: &mut Session, done: watch::Sender<bool>) {
         let _ = engine.call(crate::restart::redo_deferred_merges).await;
         let _ = done.send(true);
     });
+}
+
+// Whether any Conversation record reads live: the boot adoptions of Conversations have work to do.
+fn live_conversation_recorded(session: &Session) -> bool {
+    load_conversations(&Path::new(&session.pool_dir).join("conversations")).map_or(
+        true,
+        |records| {
+            records
+                .iter()
+                .any(|rec| rec.status == ac_protocol::ConversationStatus::Live)
+        },
+    )
 }
 
 // The enlist `spawned` event of an enlisted Ticket or Conversation: the one carrying the found

@@ -159,7 +159,7 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
         }
     }
     hold_watch_emitted(session, &hold);
-    session.publisher.send_replace(Some(snapshot.clone()));
+    session.unpublished = Some(snapshot.clone());
     if let Some(hook) = &session.on_snapshot {
         hook(&snapshot);
     }

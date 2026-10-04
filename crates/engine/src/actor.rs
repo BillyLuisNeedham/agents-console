@@ -67,6 +67,8 @@ impl Engine {
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let _ = catch_unwind(AssertUnwindSafe(|| job(&mut session)));
+                // What the job emitted is visible once it ends, never part way through it.
+                session.publish_now();
             }
         });
         engine
@@ -82,6 +84,8 @@ impl Engine {
         let wrapped: Job = Box::new(move |session| {
             let result = catch_unwind(AssertUnwindSafe(|| job(session)))
                 .map_err(|panic| EngineGone::Panicked(panic_message(&panic)));
+            // The caller reads the state its job left, so the job's emits are out before it hears.
+            session.publish_now();
             let _ = reply.send(result);
         });
         self.jobs.send(wrapped).map_err(|_| EngineGone::Stopped)?;

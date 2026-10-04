@@ -135,8 +135,11 @@ pub struct Session {
     /// This session's own handle, set by the actor before its first job, so session functions can
     /// start flows.
     pub engine: Option<Engine>,
-    /// Where every emit publishes its snapshot.
+    /// Where every emit publishes its snapshot, at the end of the job that emitted.
     pub publisher: SnapshotPublisher,
+    /// The latest snapshot the running job emitted, published when the job ends: the TypeScript's
+    /// synchronous stretch emits as often as it likes and a reader sees only where it ends.
+    pub unpublished: Option<Arc<PoolSnapshot>>,
     pub pool_dir: String,
     pub issues_dir: String,
     pub runs_dir: String,
@@ -277,6 +280,7 @@ impl Session {
         Session {
             engine: None,
             publisher: base.publisher,
+            unpublished: None,
             issues_dir: ac_core::js::path_join(&[&base.pool_dir, "issues"]),
             answers: QueuedAnswerStore::open(runs),
             steward_notes: ac_core::steward_notes::load_steward_notes(runs),
@@ -354,6 +358,15 @@ impl Session {
         self.engine
             .clone()
             .expect("the session's engine is attached before its first job")
+    }
+
+    /// Publish what the running job has emitted so far. A job does this before it tells anyone outside
+    /// what it did (a reply, a settle), so what they read next agrees with it; the actor does it
+    /// again, harmlessly, when the job ends.
+    pub fn publish_now(&mut self) {
+        if let Some(snapshot) = self.unpublished.take() {
+            self.publisher.send_replace(Some(snapshot));
+        }
     }
 
     /// Add one pool log line.

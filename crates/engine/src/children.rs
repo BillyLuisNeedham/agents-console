@@ -160,18 +160,49 @@ pub fn process_is_live(pid: u32) -> bool {
     }
 }
 
-/// The working directory of a live process, or `None` when the platform cannot say (no procfs) or the
-/// process is gone or not ours to read.
+/// The working directory of a live process, or `None` when the platform cannot say or the process is
+/// gone or not ours to read.
+#[cfg(not(target_os = "macos"))]
 pub fn process_cwd(pid: u32) -> Option<String> {
     std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
         .map(|cwd| js::path_text(&cwd))
 }
 
+/// The working directory of a live process, or `None` when it is gone or not ours to read: macOS has
+/// no procfs, so the directory comes from `proc_pidinfo`, which keeps the reused-pid check of an
+/// orphan on every platform the engine runs on.
+#[cfg(target_os = "macos")]
+pub fn process_cwd(pid: u32) -> Option<String> {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+
+    let pid = c_int::try_from(pid).ok()?;
+    let size = c_int::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()).ok()?;
+    // SAFETY: `proc_vnodepathinfo` is plain data that `proc_pidinfo` fills; an all-zero value is valid.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is `size` bytes of a live, exclusively borrowed struct.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast::<c_void>(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel writes a NUL-terminated path into the fixed-size buffer.
+    let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast::<c_char>()) };
+    let path = path.to_string_lossy().into_owned();
+    (!path.is_empty()).then_some(path)
+}
+
 /// Whether a pid recorded on an attempt's spawned event is that attempt's harness still running: live,
 /// and working in the attempt's worktree. A live pid whose cwd is elsewhere is a reused pid, not an
-/// orphan; one whose cwd cannot be read (no procfs) is trusted on liveness alone, the same bet the pool
-/// lock makes on `server.pid`.
+/// orphan; one whose cwd cannot be read is trusted on liveness alone, the same bet the pool lock makes
+/// on `server.pid`.
 pub fn orphan_is_live(pid: u32, cwd: &str) -> bool {
     if !process_is_live(pid) {
         return false;
@@ -330,7 +361,7 @@ mod tests {
         let wt = format!("{root}/wt");
         std::fs::create_dir(&wt).unwrap();
         let orphan = sleeper(&wt, "sleep 60 & wait");
-        if cfg!(target_os = "linux") {
+        {
             assert!(orphan_is_live(orphan.pid, &wt));
             // Alive elsewhere: a reused pid, never an orphan of this worktree.
             assert!(!orphan_is_live(orphan.pid, &root));

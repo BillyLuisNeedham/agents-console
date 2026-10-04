@@ -1092,3 +1092,18 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
   moves their viewport; copied as the TypeScript has it (see `herdr` panes above).
 - **A refused `tab.close` outside the bulk close** writes its pool-log line and a `tab-close-failed` event with no
   snapshot emitted; copied as is.
+
+## `restart`: what the Rust port does differently (r-restart)
+
+- **The tab of a boot-adopted or boot-redone merge's attempt is recorded closed sooner in Rust.** Two cases read
+  a Ticket's events right after its `merged` event, and expect them to end there: the one for
+  `attempt-ending.test.ts:405` (a re-adopted attempt that wrote a done Outcome while no server ran; read at the
+  Review) and the one for `keep-talking.test.ts:832` (a merge held at the gate and redone after a restart; read
+  as soon as `merged` shows). On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after
+  `merged` in a world with a fake herdr: the close is a round trip over a fresh socket that waits behind the
+  synchronous merges of the same burst. In Rust the close runs on its own task, and its event follows `merged` by
+  a few milliseconds. Nothing about the Ticket differs, only when the event is written. The cases pass on Rust
+  only where the read is slower than the close.
+- **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
+  resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
+  merge's resolver names a different writer.

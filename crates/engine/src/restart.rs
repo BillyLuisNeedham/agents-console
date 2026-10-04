@@ -9,7 +9,7 @@
 //!
 //! Some of what adoption calls belongs to other ports (the Continued attempts, the enlisted runtime).
 //! Those calls go through the small functions in [`peers`], each named for the TypeScript it stands
-//! for, so the port that owns it replaces one body.
+//! for.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -184,6 +184,10 @@ fn record_stopped_orphan(
             "could not be stopped at boot"
         }
     )]));
+    // The TypeScript's drive emits in the microtasks right after, so no reader sees the crash on the
+    // events file and the pool log without this line; here the drive's emit is a few jobs off.
+    let phase = session.current_phase();
+    emit_snapshot(session, phase);
     Ok(())
 }
 
@@ -274,10 +278,22 @@ enum MarkerStep {
 /// interrupt up. Never fails: reconciliation is advisory boot work, and a daemon that cannot be asked
 /// changes nothing about the pool's ordinary recovery.
 pub async fn reconcile_terminal_attempts(engine: &Engine) {
-    let _ = reconcile(engine).await;
+    let _ = reconcile(engine, false).await;
 }
 
-async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
+/// [`reconcile_terminal_attempts`] followed by [`redo_deferred_merges`], for a boot with nothing else
+/// to reconcile: the TypeScript runs the second in the microtasks after the first, so nothing sees the
+/// adoption without the merges taken on beside it, and here the last stretch of the reconciliation
+/// takes them on in the same job. Fails only when the engine is gone.
+pub async fn reconcile_terminal_attempts_then_redo_merges(engine: &Engine) -> anyhow::Result<()> {
+    if !reconcile(engine, true).await.unwrap_or(false) {
+        engine.call(redo_deferred_merges).await?;
+    }
+    Ok(())
+}
+
+// Whether the deferred merges were redone, in the last job of the reconciliation.
+async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
     let (terminal_backed, socket, workspace) = engine
         .call(|s| {
             (
@@ -288,7 +304,7 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
         })
         .await?;
     if !terminal_backed {
-        return Ok(());
+        return Ok(false);
     }
     let herdr = Herdr::new(&socket);
     // Scoped to the Pool workspace when there is one (issue #94): this pool's orphans can only be in
@@ -301,36 +317,24 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
                 ]))
             })
             .await?;
-        return Ok(());
+        return Ok(false);
     };
     let live: HashSet<String> = live.into_iter().collect();
     // An enlisted pane is the one orphan the scoped listing cannot answer for (issue #101): the
     // operator opened its tab in their own workspace. The daemon-wide listing is the only honest
     // answer, fetched once and only when an enlisted marker needs it.
     let mut enlisted_panes: Option<HashSet<String>> = None;
-    let ids: Vec<String> = engine
-        .call(|s| s.markers.iter().map(|m| m.id.clone()).collect())
-        .await?;
-    let mut log: Vec<String> = Vec::new();
-    for id in ids {
-        let first = {
-            let (id, live) = (id.clone(), live.clone());
-            engine
-                .call(move |s| reconcile_marker(s, &id, &live, None))
-                .await??
-        };
-        let (MarkerStep::NeedsEnlistedLiveness, _) = first else {
-            log.extend(first.1);
-            continue;
-        };
-        let pane_id = {
-            let id = id.clone();
-            engine
-                .call(move |s| terminal_orphan(s, &id).map(|o| o.pane_id))
-                .await?
-        };
-        let Some(pane_id) = pane_id else {
-            continue;
+    // The markers run as one job each time, up to a marker that needs the daemon: the TypeScript's
+    // stretch between two awaits, which nothing can interleave with.
+    let mut pass = Pass::default();
+    loop {
+        let (taken, live) = (pass, live.clone());
+        let next = engine
+            .call(move |s| reconcile_markers(s, &live, taken, then_redo))
+            .await??;
+        let (pane_id, resumed) = match next {
+            Reconciled::Finished => return Ok(then_redo),
+            Reconciled::NeedsEnlistedLiveness { pane_id, pass } => (pane_id, pass),
         };
         let is_live = if let Some(panes) = &enlisted_panes {
             panes.contains(&pane_id)
@@ -348,16 +352,59 @@ async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
                 Err(_) => true,
             }
         };
-        let live = live.clone();
-        let (_, lines) = engine
-            .call(move |s| reconcile_marker(s, &id, &live, Some(is_live)))
-            .await??;
-        log.extend(lines);
+        pass = Pass {
+            enlisted_live: Some(is_live),
+            ..resumed
+        };
     }
-    if !log.is_empty() {
-        engine.call(move |s| s.apply(PoolUpdate::log(log))).await?;
+}
+
+// Where a pass over the markers stands.
+#[derive(Default)]
+struct Pass {
+    // The next marker to reconcile.
+    next: usize,
+    log: Vec<String>,
+    // The daemon's answer for the marker at `next`, once asked.
+    enlisted_live: Option<bool>,
+}
+
+enum Reconciled {
+    Finished,
+    NeedsEnlistedLiveness { pane_id: String, pass: Pass },
+}
+
+// The markers from `pass.next` on, until one needs the daemon's word on an enlisted pane; the log
+// lands once, at the end, as the TypeScript's does.
+fn reconcile_markers(
+    session: &mut Session,
+    live: &HashSet<String>,
+    mut pass: Pass,
+    then_redo: bool,
+) -> anyhow::Result<Reconciled> {
+    while pass.next < session.markers.len() {
+        let id = session.markers[pass.next].id.clone();
+        let (step, lines) = reconcile_marker(session, &id, live, pass.enlisted_live.take())?;
+        if let MarkerStep::NeedsEnlistedLiveness = step {
+            let Some(orphan) = terminal_orphan(session, &id) else {
+                pass.next += 1;
+                continue;
+            };
+            return Ok(Reconciled::NeedsEnlistedLiveness {
+                pane_id: orphan.pane_id,
+                pass,
+            });
+        }
+        pass.log.extend(lines);
+        pass.next += 1;
     }
-    Ok(())
+    if !pass.log.is_empty() {
+        session.apply(PoolUpdate::log(pass.log));
+    }
+    if then_redo {
+        redo_deferred_merges(session);
+    }
+    Ok(Reconciled::Finished)
 }
 
 // One marker's reconciliation, the TypeScript's loop body: everything between two awaits, so one job.
@@ -1220,6 +1267,7 @@ pub fn finish_adopted_finalize(session: &mut Session) {
 /// the resolver machinery as any merge does, and takes its place in the Merge queue rather than
 /// standing there stalled.
 pub fn redo_deferred_merges(session: &mut Session) {
+    let mut taken = false;
     for index in 0..session.markers.len() {
         let marker = session.markers[index].clone();
         if session.status_of(&marker.id) != Some(TicketStatus::Done) {
@@ -1279,6 +1327,7 @@ pub fn redo_deferred_merges(session: &mut Session) {
             continue;
         }
         session.merge_line.taken(&marker.id);
+        taken = true;
         drop(merge_done_ticket(
             session,
             marker,
@@ -1288,15 +1337,22 @@ pub fn redo_deferred_merges(session: &mut Session) {
             true,
         ));
     }
+    // The Merge queue now has a place taken in it, which the TypeScript's drive shows in its next emit,
+    // a microtask away. Here the drive's next emit is a few jobs off, so a reader would see the
+    // adoption without the merges taken on beside it.
+    if taken {
+        let phase = session.current_phase();
+        emit_snapshot(session, phase);
+    }
 }
 
-/// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime.
-/// Each function is named for the TypeScript it stands for and holds the narrowest behaviour of a pool
-/// without that feature in flight; the port that owns the feature replaces the body.
-#[allow(dead_code)] // stubs until the owning ports land
+/// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime,
+/// each named for the TypeScript it stands for.
 mod peers {
     use ac_core::assignment::Assignment;
     use ac_core::pool::TicketMarker;
+    use ac_io::herdr::Herdr;
+    use tokio_util::sync::CancellationToken;
 
     use crate::actor::Engine;
     use crate::session::{EnlistedWork, Session};
@@ -1339,45 +1395,33 @@ mod peers {
         crate::keep_talking::release_continued(session, ticket_id)
     }
 
-    /// How an enlisted attempt ended (enlisted.ts `EnlistedEnding`). PEER(enlisted).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum EnlistedEnding {
-        Outcome,
-        PaneGone,
-    }
+    pub use crate::enlisted::EnlistedEnding;
+    use crate::enlisted::{ENLISTED_POLL_MS, RegisterEnlisted};
 
-    /// `endEnlistedAttempt`. PEER(enlist_flow): records nothing.
+    /// `endEnlistedAttempt`.
     pub fn end_enlisted_attempt(
         session: &mut Session,
         ticket_id: &str,
         ending: EnlistedEnding,
         attempt: u64,
     ) -> anyhow::Result<()> {
-        let _ = (session, ticket_id, ending, attempt);
-        Ok(())
+        crate::enlist_flow::end_enlisted_attempt(session, ticket_id, ending, Some(attempt))
     }
 
-    /// `chainEnlistedMerge`. PEER(enlist_flow).
+    /// `chainEnlistedMerge`.
     pub fn chain_enlisted_merge(
         session: &mut Session,
         marker: &TicketMarker,
         attempt: u64,
         branch: &str,
     ) {
-        let _ = (session, marker, attempt, branch);
+        crate::enlist_flow::chain_enlisted_merge(session, marker, attempt, branch);
     }
 
-    /// What `session.enlisted.register` takes for a re-adopted pane.
+    /// What `session.enlisted.register` takes for a re-adopted pane: the pane was taught before the
+    /// restart, so no teaching is queued and no tab is known.
     #[derive(Debug, Clone)]
-    pub struct EnlistedRegistration {
-        pub id: String,
-        pub pane_id: String,
-        pub harness: String,
-        pub title: String,
-        pub branch: String,
-        pub directory: String,
-        pub outcome_path: String,
-    }
+    pub struct EnlistedRegistration(RegisterEnlisted);
 
     impl EnlistedRegistration {
         /// The registration, or `None` when there is no found work or no harness on record.
@@ -1390,75 +1434,51 @@ mod peers {
             outcome_path: String,
         ) -> Option<Self> {
             let (work, harness) = (work?, harness?);
-            Some(EnlistedRegistration {
+            Some(EnlistedRegistration(RegisterEnlisted {
                 id: id.to_owned(),
                 pane_id: pane_id.to_owned(),
+                tab_id: None,
                 harness,
                 title,
                 branch: work.branch,
                 directory: work.directory,
                 outcome_path,
-            })
+                teaching: None,
+            }))
         }
     }
 
     /// `session.enlisted.register`: claim the pane's runtime; the reason when it cannot be claimed.
-    /// PEER(enlisted).
     pub async fn register_enlisted(
         engine: &Engine,
         registration: EnlistedRegistration,
     ) -> Result<(), String> {
-        let _ = (engine, registration);
-        Err("the enlisted runtime is not ported yet".to_owned())
+        crate::enlisted::register_enlisted(engine, registration.0).await
     }
 
-    /// `session.enlisted.release`. PEER(enlisted).
+    /// `session.enlisted.release`.
     pub fn release_enlisted(session: &mut Session, ticket_id: &str) {
-        let _ = (session, ticket_id);
+        crate::enlisted::release(session, ticket_id);
     }
 
-    /// `waitForEnlistedEnding`: the two-form race, Outcome against pane gone; `None` when the wait
-    /// threw. PEER(enlisted).
+    /// `waitForEnlistedEnding`: the two-form race, Outcome against pane gone.
     pub async fn wait_for_enlisted_ending(
         herdr_socket: &str,
         pane_id: &str,
         outcome_path: &str,
         poll_ms: Option<u64>,
     ) -> Option<EnlistedEnding> {
-        let _ = (herdr_socket, pane_id, outcome_path, poll_ms);
-        None
-    }
-
-    /// `createdBranchNote`: the re-run of a created-branch enlist (spec story 11) needs the branch
-    /// free: a Brief that offers the re-run says so up front.
-    pub fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
-        let Some(work) = session.enlisted_work.get(ticket_id) else {
-            return String::new();
-        };
-        if work.branch != branch || branch != ac_io::git::branch_for(&session.cwd, ticket_id, None)
-        {
-            return String::new();
-        }
-        format!(
-            " The enlist created {branch} in that checkout, and a re-run needs the branch free: \
-             check another branch out there first, or the re-run waits as a checkpoint until you do."
+        crate::enlisted::wait_for_enlisted_ending(
+            &Herdr::new(herdr_socket),
+            pane_id,
+            outcome_path,
+            &CancellationToken::new(),
+            poll_ms.unwrap_or(ENLISTED_POLL_MS),
         )
+        .await
     }
 
-    /// `reRunAssignment`: the Assignment a ticket that stopped being an enlisted attempt runs on: the
-    /// ordinary pool assignment for its id, with verify stripped (an enlisted id never fans out).
-    pub fn re_run_assignment(
-        session: &Session,
-        marker: &TicketMarker,
-    ) -> anyhow::Result<Assignment> {
-        let mut resolved = ac_core::assignment::resolve_ticket_assignment(
-            marker,
-            &session.state.config,
-            &session.harnesses,
-        )?;
-        resolved.verify = None;
-        Ok(resolved)
-    }
+    pub(super) use crate::enlist_flow::{created_branch_note, re_run_assignment};
 }
 
 #[cfg(test)]
