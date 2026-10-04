@@ -6,8 +6,9 @@
  *
  *   bun run scripts/bench-lag.ts [--repo <checkout>] [--out <file.json>]
  *       [--duration <s>] [--tabs <n>] [--rtt <ms>] [--ui-duration <s>] [--skip-ui] [--skip-server]
+ *       [--server bun|rust] [--rust-bin <path>]
  *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>]
- *       [--idle <s>] [--out <file.json>]
+ *       [--idle <s>] [--out <file.json>] [--server bun|rust] [--rust-bin <path>]
  *
  * `--repo` points it at any checkout of this repository (default: the one
  * this script lives in) whose root and ui/ have had `bun install`: the
@@ -35,6 +36,17 @@
  * fetch and stream seams) and measures render cost, long tasks,
  * click-to-Detail and drag under the same churn, at the snapshot rate the
  * server half measured.
+ *
+ * `--server rust` (issue #162) runs the Rust binary, `--rust-bin` (default
+ * `<repo>/target/release/agent-console`), as the pool server instead of the
+ * checkout's TypeScript one, in both halves and in `--e2e`, with the same pool,
+ * fake herdr, load and gates (scripts/bench-lag/rust-server.ts says how its
+ * harnesses and UI are met). The measures that read Bun internals, the
+ * server's event-loop lag and time blocked in synchronous spawns, have no
+ * Rust counterpart and are reported "n/a (rust)"; no gate reads them. The
+ * end-to-end run serves the UI the binary serves: a release build embeds it,
+ * a debug build reads `ui/dist` of the checkout it was built in, which the
+ * bench builds there when it is missing.
  *
  * `--rtt` adds a simulated round trip to every tab request (not the
  * responsiveness probe), for a browser on another machine; the default is
@@ -67,12 +79,21 @@
  * pure parts are, in scripts/bench-lag/*.test.ts.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HOVER_DWELL_MS, PROTOCOL_VERSION } from "../engine/protocol.ts";
 import { decodeServerMessage, encodeMessage } from "../ui/src/protocol.ts";
 import { buildPool, modeFor, type BenchPool } from "./bench-lag/pool.ts";
+import {
+  defaultRustBin,
+  installHarnesses,
+  NOT_RUST,
+  parseServerKind,
+  startRustServer,
+  type ServerHandle,
+  type ServerKind,
+} from "./bench-lag/rust-server.ts";
 import {
   CONNECTIONS_PER_HOST,
   ConnectionPool,
@@ -113,6 +134,17 @@ const skipUi = e2e || argv.includes("--skip-ui");
 const skipServer = e2e || argv.includes("--skip-server");
 const rttMs = Number(flag("rtt") ?? 0);
 setSimulatedRtt(rttMs);
+const chosenServer = parseServerKind(flag("server") ?? "bun");
+if (!chosenServer) {
+  console.error(`--server must name bun or rust, not ${flag("server")}`);
+  process.exit(2);
+}
+const serverKind: ServerKind = chosenServer;
+const rustBin = resolve(flag("rust-bin") ?? defaultRustBin(repo));
+if (serverKind === "rust" && !existsSync(rustBin)) {
+  console.error(`the Rust server binary is not built: no file at ${rustBin} (cargo build --release, or pass --rust-bin)`);
+  process.exit(2);
+}
 /** The end-to-end run's idle window, no input at all; the polling gate needs at least 10 s. */
 const idleS = Number(flag("idle") ?? 15);
 
@@ -164,6 +196,7 @@ async function waitFor<T>(what: string, timeoutMs: number, probe: () => Promise<
 async function child(
   args: string[],
   label: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<{ proc: Bun.Subprocess; ready: string; ask: (msg: unknown, kind: string) => Promise<any> }> {
   const pending = new Map<string, (value: unknown) => void>();
   const proc = Bun.spawn(["bun", "run", ...args], {
@@ -177,6 +210,7 @@ async function child(
       TYPESAFE_API_KEY: "",
       HERDR_WORKSPACE_ID: "",
       CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+      ...extraEnv,
     },
     ipc(message) {
       const kind = (message as { kind?: string }).kind ?? "";
@@ -227,6 +261,8 @@ interface ServerResult {
   durationS: number;
   tabs: number;
   rttMs: number;
+  /** Which server ran: the checkout's TypeScript one or the Rust binary. */
+  serverKind: ServerKind;
   /** What the server spoke to the tabs. */
   protocol: Protocol;
   pool: { tickets: number; done: number; inProgress: number; ready: number; conversations: number; mergeHold: number; interrupts: number };
@@ -243,9 +279,10 @@ interface ServerResult {
     rssStartMb: number;
     rssEndMb: number;
     cpuPercent: number;
-    loopLagMs: { p50: number; p95: number; p99: number; max: number; over50ms: number };
-    syncSpawn: { calls: number; totalMs: number; blockedPercent: number; byCommand: { cmd: string; calls: number; totalMs: number; maxMs: number }[] };
-    asyncSpawns: number;
+    /** Bun internals: null on the Rust server, which has no event loop to read. */
+    loopLagMs: { p50: number; p95: number; p99: number; max: number; over50ms: number } | null;
+    syncSpawn: { calls: number; totalMs: number; blockedPercent: number; byCommand: { cmd: string; calls: number; totalMs: number; maxMs: number }[] } | null;
+    asyncSpawns: number | null;
   };
   herdrRequests: Record<string, number>;
 }
@@ -263,30 +300,69 @@ type Snap = {
 /** The checkout's pool server and fake herdr, the pool worked into its realistic state. */
 interface RunningPool {
   base: string;
-  serve: Awaited<ReturnType<typeof child>>;
+  /** A static file the responsiveness probe reads. */
+  pingPath: string;
+  serve: Pick<ServerHandle, "proc" | "ready" | "ask">;
   herdr: Awaited<ReturnType<typeof child>>;
   state: () => Promise<Snap>;
   kill: () => Promise<void>;
 }
 
 async function startPool(pool: BenchPool): Promise<RunningPool> {
-  const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr");
   const modes = Object.fromEntries(
     [...pool.quick, ...pool.conflicting, ...pool.live, ...pool.blocked].map((id) => [id, modeFor(pool, id)]),
   );
-  const serve = await child(
-    [
-      join(here, "serve.ts"),
-      "--repo", repo,
-      "--pool", pool.poolDir,
-      "--herdr", herdr.ready,
-      "--script", pool.harnessScript,
-      "--release", pool.releaseFile,
-      "--home", join(root, "home"),
-      "--modes", JSON.stringify(modes),
-    ],
-    "pool server",
-  );
+  // The Rust server's harnesses are real binary names (rust-server.ts): the
+  // wrappers go first on PATH for the server and for the fake herdr, whose
+  // panes inherit its environment.
+  const rustEnv: Record<string, string> =
+    serverKind === "rust"
+      ? { PATH: `${installHarnesses(root, pool.harnessScript, pool.releaseFile, modes)}:${process.env.PATH ?? ""}` }
+      : {};
+  const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr", rustEnv);
+  let serve: ServerHandle;
+  if (serverKind === "rust") {
+    const home = join(root, "home");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(join(root, "claude-config"), { recursive: true });
+    try {
+      serve = await startRustServer({
+        bin: rustBin,
+        cwd: repo,
+        poolDir: pool.poolDir,
+        logPath: join(root, "rust-server.log"),
+        env: {
+          ...(process.env as Record<string, string>),
+          ...rustEnv,
+          HOME: home,
+          TYPESAFE_API_KEY: "",
+          HERDR_WORKSPACE_ID: "",
+          CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+          HERDR_SOCKET_PATH: herdr.ready,
+        },
+      });
+    } catch (err) {
+      herdr.proc.kill("SIGKILL");
+      throw err;
+    }
+  } else {
+    serve = {
+      ...(await child(
+        [
+          join(here, "serve.ts"),
+          "--repo", repo,
+          "--pool", pool.poolDir,
+          "--herdr", herdr.ready,
+          "--script", pool.harnessScript,
+          "--release", pool.releaseFile,
+          "--home", join(root, "home"),
+          "--modes", JSON.stringify(modes),
+        ],
+        "pool server",
+      )),
+      pingPath: "/ping.txt",
+    };
+  }
   const base = serve.ready;
   const killNow = () => {
     writeFileSync(pool.releaseFile, "");
@@ -335,7 +411,7 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
         ...(ready.state.conversations ?? []).map((c) => ({ paneId: c.paneId!, kind: "conversation" })),
       ],
     });
-    return { base, serve, herdr, state, kill };
+    return { base, pingPath: serve.pingPath, serve, herdr, state, kill };
   } catch (err) {
     await kill();
     throw err;
@@ -347,11 +423,11 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
  * server (never through a tab's connections or the proxy), whose latency is
  * the server's event loop and nothing else.
  */
-async function pingUntil(base: string, end: number): Promise<{ pings: number[]; failures: number }> {
+async function pingUntil(base: string, end: number, pingPath: string): Promise<{ pings: number[]; failures: number }> {
   const pings: number[] = [];
   let failures = 0;
   while (performance.now() < end) {
-    const t = await timedFetch(null, `${base}/ping.txt`);
+    const t = await timedFetch(null, `${base}${pingPath}`);
     if (t.status === 200) pings.push(t.totalMs);
     else failures++;
     await Bun.sleep(25);
@@ -360,7 +436,7 @@ async function pingUntil(base: string, end: number): Promise<{ pings: number[]; 
 }
 
 async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
-  const { base, serve, herdr, state, kill } = await startPool(pool);
+  const { base, pingPath, serve, herdr, state, kill } = await startPool(pool);
   try {
     // 3. The tabs: the first has a live Ticket open in the Detail, the
     //    second a done one, as an operator's two windows would, sharing
@@ -383,7 +459,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
     const t0 = performance.now();
     const end = t0 + durationS * 1000;
 
-    const pinger = pingUntil(base, end);
+    const pinger = pingUntil(base, end, pingPath);
 
     // A click every 3 s on the first tab, round the cards an operator moves
     // between: a live Ticket, a done one, a held one, a blocked one.
@@ -451,6 +527,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
       durationS: Math.round(elapsedS),
       tabs: tabCount,
       rttMs,
+      serverKind,
       protocol,
       pool: {
         tickets: statuses.length,
@@ -483,7 +560,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
         rssEndMb: mb(rssEnd),
         cpuPercent: Math.round(report.cpuPercent * 10) / 10,
         loopLagMs: report.loopLagMs,
-        syncSpawn: {
+        syncSpawn: report.syncSpawn && {
           calls: report.syncSpawn.calls,
           totalMs: Math.round(report.syncSpawn.totalMs),
           blockedPercent: Math.round(report.syncSpawn.blockedPercent * 10) / 10,
@@ -506,6 +583,8 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
 // --- the end-to-end half ---------------------------------------------------------
 
 interface E2eHalfResult extends E2eResult {
+  /** Which server ran: the checkout's TypeScript one or the Rust binary. */
+  serverKind: ServerKind;
   /** What the pool server spoke; `protocol` is what the page did. */
   serverProtocol: Protocol;
   snapshots: { perSec: number; meanBytes: number };
@@ -513,8 +592,9 @@ interface E2eHalfResult extends E2eResult {
     pingMs: Summary;
     pingFailures: number;
     cpuPercent: number;
-    loopLagMs: { p50: number; p95: number; p99: number; max: number; over50ms: number };
-    syncSpawnBlockedPercent: number;
+    /** Bun internals: null on the Rust server. */
+    loopLagMs: { p50: number; p95: number; p99: number; max: number; over50ms: number } | null;
+    syncSpawnBlockedPercent: number | null;
   };
   herdrRequests: Record<string, number>;
   /** How late the proxy's timers handed on each half-tripped chunk, by direction. */
@@ -592,16 +672,21 @@ type Armed = { x: number; y: number; park: { x: number; y: number } | null } | n
 
 async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
   // 1. The checkout's own UI, built by its own build script into the
-  //    directory the server serves (serve.ts adds the ping file after).
-  console.error("building the checkout's UI…");
-  const build = Bun.spawnSync(["bun", "run", "build", "--outDir", join(root, "home", "dist"), "--emptyOutDir"], {
-    cwd: join(repo, "ui"),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) throw new Error(`building ${repo}/ui failed:\n${build.stdout}\n${build.stderr}`);
+  //    directory the server serves (serve.ts adds the ping file after). The
+  //    Rust binary serves its own UI: embedded in a release build, read from
+  //    ui/dist of the checkout it was built in by a debug one, so that
+  //    directory is built here when it is missing and nothing else is.
+  const rust = serverKind === "rust";
+  if (!rust || !existsSync(join(repo, "ui", "dist", "index.html"))) {
+    console.error("building the checkout's UI…");
+    const build = Bun.spawnSync(
+      rust ? ["bun", "run", "build"] : ["bun", "run", "build", "--outDir", join(root, "home", "dist"), "--emptyOutDir"],
+      { cwd: join(repo, "ui"), stdout: "pipe", stderr: "pipe" },
+    );
+    if (build.exitCode !== 0) throw new Error(`building ${repo}/ui failed:\n${build.stdout}\n${build.stderr}`);
+  }
 
-  const { base, serve, herdr, kill } = await startPool(pool);
+  const { base, pingPath, serve, herdr, kill } = await startPool(pool);
   const proxy = await child([join(here, "proxy.ts"), "--target", base, "--rtt", String(rttMs)], "proxy");
   const browser = await ConsoleBrowser.launch({ profileDir: join(root, "chromium") });
   try {
@@ -689,7 +774,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const stream = countSnapshots(base, serverProtocol);
     const t0 = performance.now();
     const end = t0 + durationS * 1000;
-    const pinger = pingUntil(base, end);
+    const pinger = pingUntil(base, end, pingPath);
     const unreachable = { cold: 0, hover: 0, focus: 0 };
     const clicker = (async () => {
       let k = 0;
@@ -749,6 +834,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     const measured = summarizeE2e(reports, { before, after }, { rttMs, socketTrips, unreachable, tickets: ticketCount, hoverMs });
     return {
       ...measured,
+      serverKind,
       serverProtocol,
       snapshots: {
         perSec: Math.round((streamed.count / elapsedS) * 100) / 100,
@@ -759,7 +845,7 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
         pingFailures: failures,
         cpuPercent: Math.round(report.cpuPercent * 10) / 10,
         loopLagMs: report.loopLagMs,
-        syncSpawnBlockedPercent: Math.round(report.syncSpawn.blockedPercent * 10) / 10,
+        syncSpawnBlockedPercent: report.syncSpawn && Math.round(report.syncSpawn.blockedPercent * 10) / 10,
       },
       herdrRequests: herdrCounts,
       proxyLatenessMs: { up: summarize(proxied.lateness.up), down: summarize(proxied.lateness.down) },
@@ -810,6 +896,8 @@ const result = {
   at: new Date().toISOString(),
   repo,
   revision: gitHead(repo),
+  serverKind,
+  rustBin: serverKind === "rust" ? rustBin : null,
   // The box's load when the run began: other work on the machine (another
   // agent's suite, say) moves every number here, so a comparison should
   // check the two runs started on similarly quiet machines.
@@ -834,8 +922,18 @@ if (serverResult) {
     [socket ? "Open in herdr (request -> reply)" : "Open in herdr (focus)", `${ms(s.focusMs)}  queued mean ${s.focusMs.queuedMean} ms  server p50 ${s.focusMs.serverP50} ms  n=${s.focusMs.n}${s.unanswered ? `  UNANSWERED ${s.unanswered}` : ""}`],
     [socket ? "snapshots (snapshot+delta)" : "snapshots", `${s.snapshots.perSec}/s  mean ${Math.round(s.snapshots.meanBytes / 1024)} KiB  max ${Math.round(s.snapshots.maxBytes / 1024)} KiB  gap p50 ${s.snapshots.gapP50Ms} ms`],
     ["server", `RSS ${s.server.rssStartMb} -> ${s.server.rssEndMb} MB  CPU ${s.server.cpuPercent}%`],
-    ["server loop lag", `p50 ${s.server.loopLagMs.p50}  p95 ${s.server.loopLagMs.p95}  p99 ${s.server.loopLagMs.p99}  max ${Math.round(s.server.loopLagMs.max)} ms  >50ms ${s.server.loopLagMs.over50ms}x`],
-    ["server sync spawns", `${s.server.syncSpawn.calls} calls, ${s.server.syncSpawn.totalMs} ms blocked (${s.server.syncSpawn.blockedPercent}% of the window); top: ${s.server.syncSpawn.byCommand.slice(0, 4).map((c) => `${c.cmd} ${c.calls}x/${c.totalMs}ms`).join(", ")}`],
+    [
+      "server loop lag",
+      s.server.loopLagMs
+        ? `p50 ${s.server.loopLagMs.p50}  p95 ${s.server.loopLagMs.p95}  p99 ${s.server.loopLagMs.p99}  max ${Math.round(s.server.loopLagMs.max)} ms  >50ms ${s.server.loopLagMs.over50ms}x`
+        : NOT_RUST,
+    ],
+    [
+      "server sync spawns",
+      s.server.syncSpawn
+        ? `${s.server.syncSpawn.calls} calls, ${s.server.syncSpawn.totalMs} ms blocked (${s.server.syncSpawn.blockedPercent}% of the window); top: ${s.server.syncSpawn.byCommand.slice(0, 4).map((c) => `${c.cmd} ${c.calls}x/${c.totalMs}ms`).join(", ")}`
+        : NOT_RUST,
+    ],
   );
   for (const [kind, r] of Object.entries(s.requestsByKind).sort()) {
     rows.push([`  ${kind}`, `${r.perSec}/s  ${ms(r)}  queued mean ${r.queuedMean} ms  ${Math.round(r.meanBytes / 1024)} KiB`]);
@@ -913,7 +1011,10 @@ if (e2eResult) {
     ["e2e socket frames received", e.ws ? tally(e.ws.received) : na],
     ["e2e idle window", e.idle.tabs.map((t, i) => `tab ${i + 1}: ${Math.round(t.ms / 100) / 10} s, ${t.resources} resources, ${t.fetches} fetches, ${t.socketFramesSent} frames sent`).join("; ")],
     ["e2e   idle frames received", e.ws ? tally(e.idle.received) : na],
-    ["e2e server", `ping ${ms(e.server.pingMs)}  CPU ${e.server.cpuPercent}%  loop lag p95 ${e.server.loopLagMs.p95} ms  sync spawns ${e.server.syncSpawnBlockedPercent}% of the window`],
+    [
+      "e2e server",
+      `${e.serverKind}  ping ${ms(e.server.pingMs)}  CPU ${e.server.cpuPercent}%  loop lag p95 ${e.server.loopLagMs ? `${e.server.loopLagMs.p95} ms` : NOT_RUST}  sync spawns ${e.server.syncSpawnBlockedPercent === null ? NOT_RUST : `${e.server.syncSpawnBlockedPercent}% of the window`}`,
+    ],
     ["e2e proxy timer lateness", e.rttMs > 0 ? `up ${ms(e.proxyLatenessMs.up)}; down ${ms(e.proxyLatenessMs.down)}` : "none (RTT 0)"],
     ...e.slowAnswers.slice(0, 12).map((s): [string, string] => ["e2e slow answer", describeSlow(s)]),
   );
@@ -922,7 +1023,7 @@ if (e2eResult) {
   }
 }
 const width = Math.max(...rows.map(([k]) => k.length));
-console.log(`\nlag bench: ${result.revision} (${repo}), load average at start ${loadavgAtStart.join(" ")}`);
+console.log(`\nlag bench: ${result.revision} (${repo}), server ${serverKind}${serverKind === "rust" ? ` (${rustBin})` : ""}, load average at start ${loadavgAtStart.join(" ")}`);
 for (const [k, v] of rows) console.log(`${k.padEnd(width)}  ${v}`);
 
 // The gates: an end-to-end run fails when any one is missed.
