@@ -322,9 +322,12 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         InterruptKind::MergeConflict | InterruptKind::MergeApproval
     ) && session.conversations.is_live(&record.ticket_id)
     {
-        return session
-            .conversations
-            .answer_merge(&record.ticket_id, &pending, record.approve);
+        return crate::conversations::answer_merge(
+            session,
+            &record.ticket_id,
+            &pending,
+            record.approve,
+        );
     }
     let Some(marker) = session.marker(&record.ticket_id).cloned() else {
         anyhow::bail!(
@@ -450,9 +453,7 @@ pub fn close_ticket(
         let id = marker.id.clone();
         tokio::spawn(async move { crate::terminals::close_ticket_tabs(&engine, &id).await });
     }
-    session
-        .conversations
-        .ticket_closed(marker, record.note.as_deref());
+    crate::conversations::ticket_closed(session, marker, record.note.as_deref());
     let cascaded = close_engine_tickets(session, &marker.id)?;
     let mut closed = vec![marker.id.clone()];
     closed.extend(cascaded.iter().cloned());

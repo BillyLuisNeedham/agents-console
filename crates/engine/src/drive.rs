@@ -606,9 +606,7 @@ fn after_join(
         let branch = git::branch_for(&session.cwd, id, None);
         let range = (!merge.before_sha.is_empty())
             .then(|| format!("{}..{}", merge.before_sha, merge_target_ref(session)));
-        session
-            .conversations
-            .ticket_ended(&merge.marker, &branch, range);
+        crate::conversations::ticket_ended(session, &merge.marker, &branch, range);
         session.log(format!(
             "ticket {id}: merged {branch} onto the working branch{}",
             if merge.result.detail.ends_with("is gone") {

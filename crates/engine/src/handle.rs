@@ -187,7 +187,7 @@ impl Engine {
         }
         let _ = self
             .call(|s| {
-                s.conversations.dispose();
+                crate::conversations::dispose(s);
                 s.enlisted.dispose();
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
@@ -206,8 +206,7 @@ impl Engine {
         &self,
         request: StartConversationRequest,
     ) -> Result<ConversationView, EngineError> {
-        let _ = request;
-        not_ported("startConversation")
+        crate::conversations::start(self, request).await
     }
 
     /// `endConversation` (conversations.ts).
@@ -216,8 +215,7 @@ impl Engine {
         id: String,
         closing: Option<String>,
     ) -> Result<(), EngineError> {
-        let _ = (id, closing);
-        not_ported("endConversation")
+        crate::conversations::end(self, &id, closing, ac_protocol::AnswerBy::Operator).await
     }
 
     /// `enlist` (issue #101): a live herdr pane as a Ticket, a Conversation or the Steward.

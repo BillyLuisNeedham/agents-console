@@ -57,7 +57,7 @@ pub fn note_answered(session: &mut Session, ticket_id: &str, by: AnswerBy) {
         session.steward_used.shift_remove(ticket_id);
     }
     let _ = session.steward_notes.clear(ticket_id);
-    session.conversations.steward_forget(ticket_id);
+    crate::conversations::steward_forget(session, ticket_id);
 }
 
 /// steward.ts `stewardBudgetUsed`: the Steward's answers since the operator last answered, counted
