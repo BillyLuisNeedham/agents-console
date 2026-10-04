@@ -27,8 +27,6 @@ tempfile = { workspace = true, optional = true }
 
 [features]
 test-support = ["dep:tempfile"]
-
-[features]
 # The Jev port fake (`ac_io::jev::fake`), for the engine's own tests.
 fake = []
 
