@@ -152,10 +152,9 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
         if engine.call(|s| s.children.stopping).await? {
             break;
         }
-        let Some(ready) = super_step_boundary(engine).await? else {
+        let Some(step) = super_step_boundary(engine).await? else {
             break;
         };
-        let step = engine.call(move |s| plan_super_step(s, ready)).await??;
         if run_super_step(engine, step).await? == StepEnd::Stop {
             break;
         }
@@ -198,35 +197,43 @@ pub fn ready_set(
 
 /// `superStepBoundary`: everything a super-step in flight must not do, then the ready set, run through
 /// the wait-and-recompute rule so the whole boundary runs again once a hold lifts. `None` is the
-/// close.
-pub async fn super_step_boundary(engine: &Engine) -> anyhow::Result<Option<Vec<TicketMarker>>> {
+/// close. The plan of a ready set is made in the same job that found it: in the TypeScript no
+/// request is served between the boundary and the plan, so none may be here (a request between them
+/// would read the files an adoption just wrote beside a snapshot older than they are).
+pub async fn super_step_boundary(engine: &Engine) -> anyhow::Result<Option<SuperStepPlan>> {
     let host = EngineHoldHost(engine);
-    let ready = through_merge_hold(
+    let step = through_merge_hold(
         &host,
         || {
             let engine = engine.clone();
             async move {
                 engine
-                    .call(|s| -> anyhow::Result<(Vec<TicketMarker>, Vec<String>)> {
-                        crate::interrupts::reconcile_deadlocks(s)?;
-                        // Config reload (ADR-0018), before the drain and adoption below.
-                        crate::config_reload::reload_config_at_boundary(s)?;
-                        // Answers accepted while the previous super-step was in flight.
-                        crate::answers::drain_answers(s)?;
-                        // A Close the drain just applied leaves its dependents unable to run.
-                        crate::interrupts::reconcile_deadlocks(s)?;
-                        // Spawn adoption (ADR-0010) rides the same boundary.
-                        crate::spawns::adopt_spawn_proposals(s)?;
-                        let markers = s.markers.clone();
-                        Ok(ready_set(s, &markers))
-                    })
+                    .call(
+                        |s| -> anyhow::Result<(Option<SuperStepPlan>, Vec<String>)> {
+                            crate::interrupts::reconcile_deadlocks(s)?;
+                            // Config reload (ADR-0018), before the drain and adoption below.
+                            crate::config_reload::reload_config_at_boundary(s)?;
+                            // Answers accepted while the previous super-step was in flight.
+                            crate::answers::drain_answers(s)?;
+                            // A Close the drain just applied leaves its dependents unable to run.
+                            crate::interrupts::reconcile_deadlocks(s)?;
+                            // Spawn adoption (ADR-0010) rides the same boundary.
+                            crate::spawns::adopt_spawn_proposals(s)?;
+                            let markers = s.markers.clone();
+                            let (ready, hold) = ready_set(s, &markers);
+                            if ready.is_empty() || !hold.is_empty() {
+                                return Ok((None, hold));
+                            }
+                            Ok((Some(plan_super_step(s, ready)?), hold))
+                        },
+                    )
                     .await?
             }
         },
         hold_poll(),
     )
     .await?;
-    Ok((!ready.is_empty()).then_some(ready))
+    Ok(step)
 }
 
 /// One super-step, planned.
@@ -495,7 +502,7 @@ fn on_ticket_exit(
             &result.marker.id,
             proposals,
             SpawnKind::Ticket,
-        );
+        )?;
     }
     if result.plan.verify {
         session.apply(result.update.clone());

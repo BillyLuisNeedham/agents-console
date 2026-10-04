@@ -670,17 +670,22 @@ async fn a_drive_that_cannot_go_on_dies_with_a_record_and_a_dead_phase() {
     // AGENT.md is read at every spawn: a directory there fails the read and kills the drive.
     std::fs::create_dir(pool.file("AGENT.md")).unwrap();
     let engine = pool.start().await;
-    let error = tokio::time::timeout(std::time::Duration::from_secs(30), engine.settled())
+    // The drive plans its first super-step in the job that finds it ready, so it may already be dead
+    // when this asks: a settle then answers the dead phase, the death itself being on record.
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(30), engine.settled())
         .await
-        .unwrap()
-        .unwrap_err();
+        .unwrap();
     let snap = last(&engine);
     assert_eq!(snap.phase, RunPhase::Dead);
     let line = snap.state.log.last().unwrap();
-    assert_eq!(line, &format!("pool dead: {error}"));
     let record = pool.read("runs/errors.jsonl");
     let parsed: serde_json::Value = serde_json::from_str(record.trim()).unwrap();
-    assert_eq!(parsed["error"], error.to_string());
+    let error = parsed["error"].as_str().unwrap().to_owned();
+    assert_eq!(line, &format!("pool dead: {error}"));
+    match settled {
+        Err(refused) => assert_eq!(refused.to_string(), error),
+        Ok(phase) => assert_eq!(phase, RunPhase::Dead),
+    }
     assert_eq!(
         pool.store.closed.load(std::sync::atomic::Ordering::SeqCst),
         1

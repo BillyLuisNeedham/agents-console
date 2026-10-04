@@ -12,13 +12,28 @@ use crate::actor::Engine;
 
 /// The Conversation runtimes of one pool.
 #[derive(Debug, Default)]
-pub struct Conversations {}
+pub struct Conversations {
+    /// Ids reserved for starts still in flight (spawn adoption reserves the id it mints).
+    reserved: std::collections::HashSet<String>,
+}
 
 impl Conversations {
     /// Whether a Conversation with this id is live.
     pub fn is_live(&self, id: &str) -> bool {
         let _ = id;
         false
+    }
+
+    /// `reservedIds`: the ids reserved for starts still in flight, so a Spawn counter never mints one
+    /// twice before its record reaches disk.
+    pub fn reserved_ids(&self) -> Vec<String> {
+        self.reserved.iter().cloned().collect()
+    }
+
+    /// Reserve an id for a start about to be fired (idempotent). STUB(conversations): nothing ever
+    /// releases it.
+    pub fn reserve(&mut self, id: &str) {
+        self.reserved.insert(id.to_owned());
     }
 
     /// Every Conversation the pool knows about, live or not, as the snapshot carries them.
@@ -84,4 +99,17 @@ pub async fn adopt_enlisted_at_boot(engine: &Engine) {
 /// A started Conversation's pane, re-adopted at boot while its TUI runs (issue #140).
 pub async fn adopt_started_at_boot(engine: &Engine) {
     let _ = engine;
+}
+
+/// `conversations.end(id, closing, "steward")`: the Steward ends itself, closing line included.
+/// STUB(conversations): refuses as the operator's End of an id that is not live does.
+pub async fn end_conversation_by_steward(
+    engine: &Engine,
+    id: String,
+    closing: Option<String>,
+) -> Result<(), crate::error::EngineError> {
+    let _ = (engine, closing);
+    Err(crate::error::EngineError::refused(format!(
+        "no live conversation {id}"
+    )))
 }
