@@ -59,6 +59,7 @@ import {
   interactiveHarnessCommand,
   spawnEnv,
   type HarnessCommand,
+  type HarnessMode,
   type SpawnContext,
 } from "./spawn.ts";
 import {
@@ -504,14 +505,18 @@ export async function launchAttempt<R extends { ok: true }>(
   // terminal-backed launch that falls back to headless after the seed
   // leaves its add-only entry behind, and the event says so.
   let folderTrust: FolderTrustSeed | undefined;
+  // The mode is the caller's to say: every headless fallback runs the batch
+  // argv, whether it learned of the failure from the tab open (on
+  // `terminal.error`) or from the wrapper send (on `terminalError`).
   const recordSpawned = (
     argv: string[],
+    mode: HarnessMode,
     terminal: AttemptTerminal | undefined,
     terminalError?: string,
     pid?: number,
   ): void => {
     const at = new Date().toISOString();
-    const headlessRun = terminal === undefined || terminalError !== undefined;
+    const headlessRun = mode === "batch";
     appendEvent(env.runsDir, id, {
       at,
       attempt: spec.attempt,
@@ -526,7 +531,7 @@ export async function launchAttempt<R extends { ok: true }>(
               effort_applied: effortApplies(
                 env.harnesses,
                 spec.harness,
-                headlessRun ? "batch" : "interactive",
+                mode,
               ),
             }
           : {}),
@@ -537,8 +542,8 @@ export async function launchAttempt<R extends { ok: true }>(
     // records: a fallback that nulled the event's pane_id is headless here
     // too, so the registry can never point at the pane the fallback closed.
     env.liveAttempts.register(id, spec.attempt, {
-      paneId: headlessRun ? null : terminal.paneId,
-      tabId: headlessRun ? null : terminal.tabId,
+      paneId: headlessRun ? null : (terminal?.paneId ?? null),
+      tabId: headlessRun ? null : (terminal?.tabId ?? null),
       role: spec.naming.resolver ? "resolver" : "agent",
       startedAt: at,
     });
@@ -553,7 +558,7 @@ export async function launchAttempt<R extends { ok: true }>(
     let pid: number | undefined;
     const headlessExit = spawnToLog(argv, ctx, env.children, (spawnedPid) => {
       pid = spawnedPid;
-      recordSpawned(argv, terminal, terminalError, spawnedPid);
+      recordSpawned(argv, "batch", terminal, terminalError, spawnedPid);
     });
     return {
       kind: "live",
@@ -643,7 +648,7 @@ export async function launchAttempt<R extends { ok: true }>(
     });
     void closeTab(env.herdrSocket, terminal.tabId).catch(() => {});
   }
-  recordSpawned(interactiveArgv, terminal);
+  recordSpawned(interactiveArgv, "interactive", terminal);
   if (!landed) {
     // Every try was botched: the launch is over before any harness ran.
     // The pane is closed the way a readiness timeout's is, so the operator
