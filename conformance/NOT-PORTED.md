@@ -971,3 +971,38 @@ left out, and no harness or fixture changed.
   `spawned` event, so a stale file never crashes a live talk. No case makes a stale file appear after a launch. Rust
   unit test: *Conversation boot adoption: an exit-code file older than the recorded launch is not read as the TUI
   exiting, and the Conversation is re-adopted.*
+
+## `cli`: Boot, the Steward's command and the fleet list (C04)
+
+### Changed on purpose (ADR-0036, "Scope")
+
+Boot no longer builds the Console. The release binary embeds the UI and the shim (`bin/agent-console`)
+rebuilds the binary when it is stale, so `buildConsole`, its staleness check (`needsRebuild`, `distMtime`,
+`uiSourceCommitMs`) and Boot's prose about building have no Rust counterpart. These are the lines the
+TypeScript Boot printed that the Rust Boot never prints:
+
+- `the Console build is missing or stale; rebuilding` (stdout, when `ui/dist/index.html` was missing or older
+  than the last commit touching `ui/src`).
+- Everything `bun install` and `bun run build` printed in the engine's `ui/`, on both streams.
+- `the Console build failed; fix it and boot again` (stderr, then exit 1).
+
+`boot-cli.test.ts:536` (rebuilds when there is no build and when the source is newer) is dropped with them, as
+the inventory already says.
+
+Boot starts the server as this same binary, `agent-console server --pool <dir> [--port <n>]`, in the engine
+checkout, detached in its own session with both streams appended to `runs/server.log`, where the TypeScript
+ran `bun run engine/server.ts` with the same arguments. When Machine defaults name no engine checkout that
+exists, the engine checkout is the one the binary was built from (where the TypeScript took the one its
+source sat in); it is where Boot reads `skills/my-console-runner/` and what the `detected:` line and a first
+Machine defaults file name.
+
+The Steward command's usage names the command it is: its first line reads `usage: agent-console steward
+--pool <pool-dir> [--url <console-url>] --as <conversation> <verb> ...` where steward-cli.ts printed
+`usage: bun steward-cli.ts --pool ...`. The verb lines are unchanged, and `cli-steward.test.ts` pins only
+those. Boot's own usage line is the TypeScript's, word for word.
+
+### Hidden: Rust unit tests
+
+Both of the area's hidden rows are unit tests in `crates/cli/src/boot/config.rs`:
+`removes_the_port_pin_on_an_explicit_auto_and_the_terminal_key_on_a_no` (`boot-cli.test.ts:348`) and
+`returns_nothing_to_write_when_the_template_itself_has_no_marker` (`boot-cli.test.ts:451`).
