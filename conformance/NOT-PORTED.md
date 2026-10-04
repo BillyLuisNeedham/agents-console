@@ -738,3 +738,71 @@ Behaviour of the TypeScript server the cases tolerate rather than pin:
   under `-q`. The server does not strip them, and the cases read the transcript without them (`transcriptLines` in
   `attempts-endings-support.ts`). A Rust server that runs the same `script` keeps them unless the port decides to
   strip them.
+
+## `conversations`: Turn state and Notices (C17)
+
+Every one of C17's 38 rows is a passing case under `conformance/cases/conversations-turns-state.test.ts`,
+`conversations-turns-lines.test.ts`, `conversations-notices-texts.test.ts` and
+`conversations-notices-delivery.test.ts`, on the shared setup in `conversations-support.ts`. So is the gap the C16
+section above leaves here, a Notice still queued when its parent ends (`engine/conversations.ts:2386-2390`), and two
+more no list named: a checkpoint Notice from a pool with no git checkout, and the placeholder Brief a checkpoint
+written without one is told with (the visible side of the hidden row `notices.test.ts:73`). Every Notice typed or
+dropped is compared whole, byte for byte, with its text written out in the case (Decided 4). No harness or fixture
+changed. The area's four hidden rows (`turn-state.test.ts:39`, `:97`, `:316`, `notices.test.ts:73`) stay Rust unit
+tests, as the inventory sorts them: a publish that changes nothing on the wire sends no frame, so whether the server
+signalled one cannot be seen.
+
+How the cases see a Turn, which binds the Rust server:
+
+- A Conversation's Turn-state reads are the only viewport reads (`pane.read` with `source: visible`) of its pane;
+  readiness and paste checks read `recent`. The cases count them to tell which read did what, so a Rust server that
+  reads a Conversation's viewport for anything else, or more than once a tick, fails them.
+- The flip to waiting is pinned by its idleSince: no earlier than the third read of the idle frame reaching herdr
+  and no later than the fourth. The Bun server stamps it as the third read returns.
+- "Publishes nothing" is pinned as no socket frame that changes the Conversation's `turn`.
+
+Where the cases reach a row differently from its wording:
+
+- **`notices.test.ts:139`'s seam** (a diff git cannot compute) is reached without one: the case plays an agent that
+  renames its own branch before it pauses, so the branch the server names in `git diff --stat
+  <target>...<branch>` no longer exists and git refuses the diff.
+- **`notices.test.ts:44`, `:130`**: a lone spawned Ticket runs in the pool checkout and never merges (see below),
+  so the case spawns two at once, which gives each a worktree, and pauses the second. Its done and checkpoint
+  Notices are each matched whole, in either order: the pause is told at its exit and the merge at the end of the
+  super-step.
+- **`notices.test.ts:86`** and every other spawned Ticket's Notice: the title is the heading the server writes into
+  a spawned Ticket's file, which leads with its id (`conv-1-spawn-2: Old idea`), not the proposal's title alone.
+- **`notices.test.ts:668`, `:744`, `:813`**: the spawned Ticket runs in a pane on the claude TUI stand-in like its
+  parent, not headless on a stub, and the case plays its agent. Under `verify: 1` its Attempt's prompt names
+  `conv-1-spawn-1.attempt-1.outcome.json`, and the Notice names that Attempt's branch, `pool/<key>/conv-1-spawn-1.attempt-1`.
+- **`notices.test.ts:744`**: the failed delivery's `error` is pinned as `pane.send_input failed: ` followed by the
+  daemon's error body, which is the fake's own, so only its message is checked inside it.
+- **`turn-state.test.ts:119`**: a frame with content stands between the all-chrome frame and the empty one, so
+  each of the two publishes its own empty last line.
+- **`steward.test.ts:671`** is pinned on the Steward, as worded. The delivery failure shown on the view and its
+  pool log lines are the same for any Conversation; the case for `notices.test.ts:744` pins them on a plain one.
+
+Behaviour of the TypeScript server the cases pin as it is today, each worth a look before the port copies it:
+
+- A spawned Ticket's Notice repeats its id inside the title, `Ticket conv-1-spawn-1 ("conv-1-spawn-1: Checkpointing
+  child") ended: checkpoint.`, since the title is the file's heading.
+- A lone spawned Ticket runs in the pool checkout, on no branch of its own, yet its checkpoint Notice names
+  `Branch: pool/<key>/<id>`, a branch that does not exist, and `(no changes)` as its diff, because git cannot
+  compute one against a missing branch.
+
+Observed while writing these, not pinned:
+
+- **A lone spawned Ticket that finishes done tells its parent nothing.** It ran in the pool checkout, so nothing
+  merges, and only the merge paths call `ticketEnded` (`engine/engine.ts`). No Notice is queued, typed or dropped:
+  a run with the parent waiting saw none in twelve seconds after the Ticket's done. The teaching tells the agent a
+  spawned Ticket reports back once it ends, done included. Intended behaviour (inference): a done Notice whose
+  diff is the range the Attempt added to the working branch. Rust unit test, once decided: *a spawned Ticket that
+  ends done in the pool checkout queues a ticket-ended Notice to its parent.*
+- **The third drop reason**, `parent conversation is ending`, needs a child's Notice raised after its parent's End
+  began and before it finished, and an End with nothing to merge takes no time a case can hold open from outside.
+  Rust unit test: *Notice queue: a Notice for a parent whose End is under way is dropped at once, logged on the
+  child's latest attempt with reason `parent conversation is ending` and the Notice's text.*
+- Rust unit tests for what the delivery does inside one drain, which no case can time: *Notice delivery: the queue
+  is claimed whole before the first Turn is typed, so a tick and an enqueue racing it never type a Notice twice;
+  a Turn that fails puts itself and the rest of the claimed queue back at the front, in order; a read that throws
+  leaves the Turn state as it was, and the next tick reads as usual.*
