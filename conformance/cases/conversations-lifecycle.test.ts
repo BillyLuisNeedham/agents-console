@@ -975,7 +975,13 @@ conformance("conversations", "a pane closed without End crashes the Conversation
   await herdr.control("endPane", view.paneId);
 
   await until(() => recordStatus(world, "conv-1"), (status) => status === "crashed", { what: "conv-1 crashed" });
-  expect(eventOf(readEvents(world.pool, "conv-1"), "crash").payload).toEqual({
+  // The record turns crashed a moment before the crash event is appended, so the event is waited for too.
+  const events = await until(
+    () => readEvents(world.pool, "conv-1"),
+    (read) => read.some((event) => event.kind === "crash"),
+    { what: "conv-1's crash event" },
+  );
+  expect(eventOf(events, "crash").payload).toEqual({
     reason: "pane lost without End (pane-end)",
   });
   expect(branches(world)).toContain(branch);
