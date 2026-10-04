@@ -156,7 +156,15 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
             // The pane survey (issue #139) only has panes to list in a terminal-backed pool; it is
             // the herdr panes port's (STUB in held).
             crate::held::seed_held_panes(s);
-            // Jev (ADR-0020): one boot line saying which path is live.
+            // Jev (ADR-0020): one boot line saying which path is live, then one line per fallback
+            // cause as the port's own dedupe announces them, never one per call. The subscription is
+            // released with the store at close. The listener runs on the task that asked; the line
+            // joins the log in the actor's order.
+            let notices = s.engine();
+            s.jev_unsubscribe = s.jev.subscribe(Box::new(move |notice| {
+                let line = crate::jev::jev_notice_line(notice);
+                notices.cast(move |s| s.log(line));
+            }));
             s.log(if s.jev.configured() {
                 format!("Jev configured ({JEV_MODEL})")
             } else {
