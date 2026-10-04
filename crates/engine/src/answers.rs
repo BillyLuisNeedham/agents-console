@@ -256,18 +256,21 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
             .unwrap_or_default();
         if let Err(error) = process_answer(session, &record) {
             session.answers.mark_processed(record.seq)?;
+            session.publish_now();
             for waiter in waiters {
                 let _ = waiter.send(Err(EngineError::refused(error.to_string())));
             }
             continue;
         }
         if let Err(error) = crate::persist::persist(session) {
+            session.publish_now();
             for waiter in waiters {
                 let _ = waiter.send(Err(EngineError::refused(error.to_string())));
             }
             return Err(error);
         }
         session.answers.mark_processed(record.seq)?;
+        session.publish_now();
         for waiter in waiters {
             let _ = waiter.send(Ok(()));
         }

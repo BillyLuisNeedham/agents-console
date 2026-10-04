@@ -64,6 +64,7 @@ pub fn start_drive(session: &mut Session) {
 /// The boot's drive has reached its first real wait, or settled: start_pool may return.
 pub fn drive_turned(session: &mut Session) {
     if let Some(turned) = session.first_turn.take() {
+        session.publish_now();
         let _ = turned.send(());
     }
 }
@@ -106,6 +107,7 @@ pub fn settle_drive(session: &mut Session, phase: Option<RunPhase>, error: Optio
         session.settled_phase = Some(phase);
     }
     let settled = session.idle_phase();
+    session.publish_now();
     for waiter in session.settle_waiters.drain(..) {
         let _ = waiter.send(match error {
             Some(error) => Err(EngineError::refused(error)),

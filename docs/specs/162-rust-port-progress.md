@@ -462,3 +462,26 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Unreachable in Rust, so tested only through a seam: a pushed version that "no longer encodes" (ws.ts
   :685; values are immutable once pushed) and an unencodable request result (an `Answer` whose result
   failed to serialize).
+
+### Restart: orphans, adoption and deferred merges (r-restart)
+
+- Module `restart` holds `headlessOrphans`, `reapHeadlessOrphans`, `terminalOrphan`, `terminalAdoptable`,
+  `reconcileTerminalAttempts`, `adoptTerminalAttempt`, `finalizeAdoptedAttempt`, `recordAdoptedExit`,
+  `abandonAdoption`, `mergeDoneTicket`, `finishAdoptedFinalize` and `redoDeferredMerges`. What adoption calls
+  in other ports (Continued attempts, the enlisted runtime and its endings) goes through the small `peers`
+  functions at its foot, one line each. `record_adopted_exit` and `merge_done_ticket` are public for the
+  Continued attempt's ending, which `what` names.
+- The adopted attempt's merge holds the pool checkout only for the merge itself: the TypeScript's gate
+  callback also covers the resolver that a conflict starts, the Rust gate's closure cannot await. The only
+  difference is Keep talking's refusal text while that resolver runs.
+- JavaScript runs everything between two awaits before any reader looks, and a `tokio` actor does not, so
+  three places say what the microtasks said. (1) The snapshot an emit builds is published when the actor's
+  job ends (`Session::unpublished`, `Session::publish_now`, which a job calls before it replies or settles
+  a waiter), so a job's emits are one stretch to a reader. (2) A boot with no headless orphan and no live
+  Conversation record settles the adoptions and the deferred merges in one job
+  (`reconcile_terminal_attempts_then_redo_merges`). (3) `redo_deferred_merges` and the stop of a headless
+  orphan each emit once more, where the TypeScript's drive emits in the next microtask: a reader would
+  otherwise see the adoption without the Merge queue taken on beside it, or the crash event without its pool
+  log line. Snapshot `seq` is stripped from the takeover comparison, so the extra emits cost nothing there.
+- On macOS `process_cwd` reads the working directory through `proc_pidinfo`, so a reused pid is never an
+  orphan there either (written without a mac to run it on; the Linux path is unchanged).

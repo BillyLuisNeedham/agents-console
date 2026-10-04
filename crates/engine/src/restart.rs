@@ -184,6 +184,10 @@ fn record_stopped_orphan(
             "could not be stopped at boot"
         }
     )]));
+    // The TypeScript's drive emits in the microtasks right after, so no reader sees the crash on the
+    // events file and the pool log without this line; here the drive's emit is a few jobs off.
+    let phase = session.current_phase();
+    emit_snapshot(session, phase);
     Ok(())
 }
 
@@ -1264,6 +1268,7 @@ pub fn finish_adopted_finalize(session: &mut Session) {
 /// the resolver machinery as any merge does, and takes its place in the Merge queue rather than
 /// standing there stalled.
 pub fn redo_deferred_merges(session: &mut Session) {
+    let mut taken = false;
     for index in 0..session.markers.len() {
         let marker = session.markers[index].clone();
         if session.status_of(&marker.id) != Some(TicketStatus::Done) {
@@ -1323,6 +1328,7 @@ pub fn redo_deferred_merges(session: &mut Session) {
             continue;
         }
         session.merge_line.taken(&marker.id);
+        taken = true;
         drop(merge_done_ticket(
             session,
             marker,
@@ -1331,6 +1337,13 @@ pub fn redo_deferred_merges(session: &mut Session) {
             "attempt",
             true,
         ));
+    }
+    // The Merge queue now has a place taken in it, which the TypeScript's drive shows in its next emit,
+    // a microtask away. Here the drive's next emit is a few jobs off, so a reader would see the
+    // adoption without the merges taken on beside it.
+    if taken {
+        let phase = session.current_phase();
+        emit_snapshot(session, phase);
     }
 }
 

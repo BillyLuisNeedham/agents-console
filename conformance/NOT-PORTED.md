@@ -1063,3 +1063,15 @@ Hidden behaviour the cases cannot show, for the Rust port:
   pass 10, and the reason reads `ticket fit: level 4.6`. No case pins it, since the API answers within the
   levels. Intended behaviour (inference): a score outside `0..levels-1` is malformed. Rust unit test: *Jev answer
   check: a Score outside its levels falls back as malformed.*
+
+## `restart`: what the Rust port does differently (r-restart)
+
+- **The tab of a boot-adopted attempt closes before the Review in Rust.** The case for
+  `attempt-ending.test.ts:405` (a re-adopted attempt that wrote a done Outcome while no server ran) expects each
+  Ticket's events to end at `merged`. On Bun the `tab-closed` event lands after the Review is raised: the tab close
+  is a socket round trip, and the loop is busy with the second Ticket's synchronous merge and the Review until it
+  ends. In Rust the close runs on another thread and records its event while the actor merges the second Ticket, so
+  `tab-closed` lands first. Nothing about the Ticket differs; only the instant the event is written.
+- **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
+  resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
+  merge's resolver names a different writer.
