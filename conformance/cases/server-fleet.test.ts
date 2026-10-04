@@ -128,6 +128,41 @@ serverCase("fleet registry upsert › records the pool directory absolute and no
   await server.stop();
 });
 
+serverCase("fleet registry upsert › keeps every well-formed entry of another pool, live or not and whole, drops the rest, and puts its own last", async (t, rig) => {
+  const world = doneWorld(t);
+  const at = "2026-10-03T00:00:00.000Z";
+  const pool = (name: string): string => {
+    const dir = join(world.root, name);
+    mkdirSync(dir);
+    return dir;
+  };
+  const live = { poolDir: pool("live"), port: 8788, pid: rig.livePid(), startedAt: at };
+  const dead = { poolDir: pool("dead"), port: 8789, pid: await rig.deadPid(), startedAt: at };
+  const gone = { poolDir: join(world.root, "gone"), port: 8790, pid: rig.livePid(), startedAt: at };
+  // A key beside the four survives the rewrite.
+  const extra = { poolDir: pool("extra"), port: 8791, pid: rig.livePid(), startedAt: at, note: "kept whole" };
+  seedGraphs(
+    world,
+    "pools.json",
+    JSON.stringify([
+      // This pool's own entry, left by a server that has gone.
+      { poolDir: world.pool, port: 8792, pid: await rig.deadPid(), startedAt: at },
+      live,
+      { poolDir: pool("port-text"), port: "8793", pid: rig.livePid(), startedAt: at },
+      dead,
+      { poolDir: pool("no-start"), port: 8794, pid: rig.livePid() },
+      gone,
+      "not an entry",
+      null,
+      extra,
+    ]),
+  );
+  const server = rig.launch(world, ["--port", "0"]);
+  const port = await server.booted();
+  expect(registryEntries(world) as unknown[]).toEqual([live, dead, gone, extra, entryFor(world.pool, port, server.pid)]);
+  await server.stop();
+});
+
 // engine/fleet.test.ts:152
 serverCase("fleet registry upsert › clears a registry lock a crashed writer left, registering without waiting on it", async (t, rig) => {
   const world = doneWorld(t);

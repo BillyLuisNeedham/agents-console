@@ -458,7 +458,9 @@ but the half of `ports.test.ts:15` that a C00 case pins already. All seven of th
 pinned by C00 already, and `cases/server-boot.test.ts` and `server-restart.test.ts` hold the rest: the boot
 line, what a refused start leaves, and the Restart hand-off end to end through the real Boot. Some extras ride
 along: a console.json port out of range, a registry lock a live writer holds and one left empty (both
-`[slow]`, ten real seconds each), and a `--pool` spelt with `..` and a trailing slash.
+`[slow]`, ten real seconds each), a `--pool` spelt with `..` and a trailing slash, and which entries a
+registration keeps (every well-formed one of another pool, dead or with its directory gone, extra keys and
+all; nothing malformed).
 
 ### Pinned by a C00 case already
 
