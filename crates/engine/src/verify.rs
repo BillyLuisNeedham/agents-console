@@ -1732,9 +1732,9 @@ pub fn adopt_candidate(
         }
     };
     if session.adopted.contains_key(&marker.id) {
-        abandon_adoption(session, &marker.id);
+        abandon_adoption(session, &marker.id)?;
     }
-    session.held.remove(&marker.id);
+    session.held.shift_remove(&marker.id);
     let note = record
         .note
         .as_deref()

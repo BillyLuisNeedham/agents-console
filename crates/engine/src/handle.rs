@@ -191,6 +191,7 @@ impl Engine {
             .call(|s| {
                 s.conversations.dispose();
                 s.enlisted.dispose();
+                crate::keep_talking::release_continued_attempts(s);
                 crate::pane_survey::stop_pane_survey(s);
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
@@ -234,8 +235,8 @@ impl Engine {
     /// `keepTalking` (issue #139): continue a checkpointed Attempt in its Held pane; the new Attempt's
     /// number.
     pub async fn keep_talking(&self, ticket_id: String) -> Result<u32, EngineError> {
-        let _ = ticket_id;
-        not_ported("keepTalking")
+        let attempt = crate::keep_talking::keep_talking(self, ticket_id, None).await?;
+        Ok(u32::try_from(attempt).unwrap_or(u32::MAX))
     }
 
     /// `closeFinishedTerminals` (issue #139): how many closed.

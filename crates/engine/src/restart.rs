@@ -798,7 +798,7 @@ pub fn abandon_adoption(session: &mut Session, ticket_id: &str) -> anyhow::Resul
             release_pane_agent_quietly(&session.herdr_socket, &adopted.pane_id, &harness);
         }
         session.enlisted_work.remove(ticket_id);
-        session.held.remove(ticket_id);
+        session.held.shift_remove(ticket_id);
         // Recorded, so a restart does not restore the found work from the enlist's event and take the
         // let-go pane back as the Ticket's.
         let mut payload = Map::new();
