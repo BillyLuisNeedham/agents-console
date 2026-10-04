@@ -399,3 +399,34 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   before the first Turn is typed (a racing tick never types one twice); a failed Turn puts itself and the
   rest of the claimed queue back at the front, in order; a Turn-state read that throws leaves the state as
   it was.
+- `js_compat.rs` is a private copy of the JavaScript helpers, to fold into `ac_core::js` with herdr's
+  `js.rs` and git's `node.rs`.
+
+### ac-engine core (F1-engine)
+
+- Modules beyond the design's map: `checkout_gate` (engine.ts 4480-4611, the pool checkout's gate,
+  which the drive and the merges need), `options` (RunOptions), `testkit` and `e2e_tests` (test only:
+  a git pool, a scripted stub harness, an in-memory store that fails on demand). ac-core gained
+  `merge_hold` (derivation, memo, the watch's bookkeeping, the Merge line), `outcome` (validateOutcome
+  and Spawn proposal validation) and `prompt` (the Ticket and resolver prompts; the other prompts join
+  it with their ports).
+- `Session::new(SessionBase)` builds a session with every runtime empty; boot sets the rest.
+  `PoolState.config` is `ac_core::config::PoolConfig`.
+- Every TypeScript `await` of a promise that settles with no I/O lets no HTTP handler in; every
+  `engine.call` boundary does. The one place that mattered: an answer accepted after the last
+  boundary's drain, while the drive closes, would sit queued until an unrelated kick. The session's
+  `queued_since_drain` flag makes the closing drive kick the next one, as it does for spawns waiting
+  to land.
+- The merge chain is a `Shared` future per link (`Session::merge_chain`); a super-step's own queue is
+  a link that fails once a merge before it threw, so later merges of that step are skipped and the
+  step's join fails, as the TypeScript's local promise chain does.
+- STUB modules, for their owners: `attempt_run`, `attempt_ending`, `live_attempts`, `children`,
+  `pane_session` (attempt launch: `run_attempt(&AttemptEnv, AttemptSpec<R>, fn(&Value) ->
+  Result<R, String>) -> anyhow::Result<AttemptRun<R>>`, a minimal headless run so the drive can be
+  tested; the Live attempts registry and the children are reached through `AttemptEnv::engine`);
+  `conversations`, `enlisted`, `held`, `terminals`, `pool_workspace`, `keep_talking`, `restart`
+  (orphans and adoption), `spawns` (taking and adopting proposals; the ledger refresh is ported),
+  `steward_actions` (the actions; the answer and snapshot helpers are ported), `verify` (grading and
+  Selection; the acceptance checks are ported), `jev`.
+- While `spawns::adopt_spawn_proposals` is a stub, a pool with a Pending spawn on disk never lands it:
+  every drive closes quiescent and kicks the next, a busy loop. The spawns port ends it.

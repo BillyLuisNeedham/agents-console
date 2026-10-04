@@ -20,6 +20,21 @@ use crate::conversation_record::load_conversations;
 use crate::js;
 use crate::stat_cache::StampCache;
 
+/// The pool files' gate, one per process. The TypeScript engine changes the pool's files on its one
+/// thread, so no reader ever sees a change half made (the Ticket file a merge steps aside, a state line
+/// mid-rewrite). The Rust engine holds the gate for writing through every job on its actor, and a
+/// reader on another thread (the server's ticket and Conversation loads) holds it for reading, so the
+/// reader sees the files between two jobs, as the TypeScript's readers do. Never held across an await.
+pub static POOL_FILES: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Hold the pool files' gate for reading while `read` runs.
+pub fn reading_pool_files<T>(read: impl FnOnce() -> T) -> T {
+    let _gate = POOL_FILES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read()
+}
+
 /// A ticket that will never run again: done, or closed at an Interrupt without merging (issue #154).
 /// Only done satisfies a `blocked-by`; this is for the run's own end and the Review gate, which wait on
 /// neither.

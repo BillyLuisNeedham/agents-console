@@ -3,6 +3,7 @@
 
 mod boot;
 mod fleet;
+mod server_cli;
 mod steward;
 
 fn main() {
@@ -11,10 +12,7 @@ fn main() {
         Some("boot") => std::process::exit(boot::run(args[1..].to_vec())),
         Some("steward") => std::process::exit(steward::run(args[1..].to_vec())),
         Some("fleet") => std::process::exit(fleet::run(args[1..].to_vec())),
-        Some("server") => {
-            eprintln!("agent-console {}: not ported yet", args[0]);
-            std::process::exit(1);
-        }
+        Some("server") => server_cli::run(args[1..].to_vec()),
         _ => {
             eprintln!("usage: agent-console boot|server|steward|fleet [args]");
             std::process::exit(1);

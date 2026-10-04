@@ -61,6 +61,11 @@ impl Engine {
             while let Some(job) = inbox.recv().await {
                 // A panic is reported through the job's own reply channel (see `call`); here it only
                 // must not end the loop.
+                // The pool files' gate (ac_core::pool::POOL_FILES): a reader on another thread sees
+                // the pool's files between two jobs, never mid-job.
+                let _files = ac_core::pool::POOL_FILES
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let _ = catch_unwind(AssertUnwindSafe(|| job(&mut session)));
             }
         });
@@ -120,20 +125,10 @@ fn panic_message(panic: &Box<dyn Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane_reads::PaneReadRegister;
 
     fn session() -> (Session, watch::Receiver<Option<Arc<PoolSnapshot>>>) {
         let (publisher, snapshots) = watch::channel(None);
-        (
-            Session {
-                engine: None,
-                publisher,
-                pane_reads: PaneReadRegister::default(),
-                children: Default::default(),
-                live_attempts: Default::default(),
-            },
-            snapshots,
-        )
+        (crate::testkit::bare_session(publisher), snapshots)
     }
 
     #[tokio::test]
