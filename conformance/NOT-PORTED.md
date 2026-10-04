@@ -53,3 +53,46 @@ Every one of C11's 68 rows is a passing case under `conformance/cases/attempts-a
   bound, `pane.report_agent` and `pane.release_agent`, `terminal_id` on the spawned event) are C12's scope, and
   the stderr-in-the-log-not-the-Stream entry is C13's. The headless git-checkout entry (harness, model and
   commitSha on the spawned event) is already pinned by `cases/disk.test.ts` and `attempts-argv.test.ts`.
+
+## `formats`: on-disk formats (C01)
+
+Every one of C01's 44 rows is a passing case under `conformance/cases/formats-markdown.test.ts`,
+`formats-events.test.ts`, `formats-ledger.test.ts` and `formats-home.test.ts`, and seven of the area's
+eight gaps are cases there too. Left out or pinned short of the row:
+
+- **The resolver's exit-code file** (`attempt-run.test.ts:398`). The row's pool is terminal-backed,
+  where the wrapper the engine sends to the pane writes `runs/01.resolver.exitcode`. The conformance
+  stub cannot finish a terminal-backed Attempt yet (its prompt is pasted into the pane, so the stub
+  never learns its result path; conv-1-spawn-2-spawn-1 adds that), so the case runs the resolver
+  headless and pins `01.resolver.log`, `.stream.jsonl` and `.outcome.json` only. Add the `.exitcode`
+  file to the case once a terminal-backed resolver can finish. Rust unit test implied: the
+  exit-code file name of a resolver run is `<id>.resolver.exitcode`.
+- **A verify fan-out with a leftover base log** (`attempt-run.test.ts:374`). The row says the
+  leftover `runs/01.log` keeps its bytes because Candidates rotate nothing. On the Bun server the
+  pool's first launch still rotates a log from before events existed, so the leftover moves to
+  `runs/01.attempt-0.log` with its bytes. The case pins what the server does: no Candidate writes
+  the base log, and the leftover lands at attempt-0. The row described the Candidate's own launch,
+  which rotates nothing; that stays a Rust unit test of the Candidate launch.
+- **The current implement attempt after a resolver run** (seen in the case for
+  `engine.test.ts:12034`). Every resolver run records a `spawned` event of its own, and
+  `listAttemptLogs` in `engine/server.ts` takes the highest `spawned` attempt as the current
+  implement attempt. So once a resolver has run after the last implement attempt, `GET /api/log`
+  lists that implement attempt as not current and names `<id>.attempt-N.log`, a file that does not
+  exist, while its log is still `<id>.log` (inference from the code, matched by a run: attempt 3 of
+  02 listed `02.attempt-3.log`). Intended behaviour (inference): the current implement attempt is
+  the highest attempt with an `exited` event, served from the well-known name, as
+  `rotateAttemptLog` already keys on. The case pins only the resolver rows of that listing. A fix
+  belongs with Decided 5's bug ticket.
+- **Grader and head-to-head Ticket files byte for byte** (the gap at `engine/engine.ts:7450-7488`
+  and `8635-8671`). Not written here: it needs a verify round graded close enough to call a
+  head-to-head, and the two templates copied whole. It is left to the verify ticket (C21), which
+  builds those rounds anyway.
+
+Observed while writing these, not pinned (each is another area's to decide):
+
+- A spawn proposal whose body is under 20 characters is dropped as thin, so the cases give every
+  proposal a longer body.
+- A Ticket's `spawn-assign` effort shows in `assignment.effort`, but `reassign.sources.effort`
+  reads `unset` rather than `requested` for a spawned Ticket that has not run (`config`, C19/C20).
+- An `overlaps` mark naming a sibling proposal from the same Outcome is held with that id listed as
+  not in the pool (`spawns`, C10).

@@ -11,6 +11,7 @@ export const AREAS = {
   disk: "the files in the pool directory: Ticket markers, events JSONL, console.json, console.db",
   attempts: "Attempts and harness launch: argv, env, cwd, the ticket prompt, spawned and exited facts, fallbacks",
   conversations: "Conversations: storage, start and launch, ending, spawn.json adoption, the teaching Turn, Seeded Pools",
+  formats: "on-disk formats: the state line, Ticket and Conversation markdown, events JSONL, log and Stream file names, the ledger and spawn files, fleet and Machine defaults files",
 } as const;
 
 export type Area = keyof typeof AREAS;
