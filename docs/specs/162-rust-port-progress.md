@@ -71,3 +71,30 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - NOT-PORTED.md's formats note that a spawn-assign effort makes reassign.sources.effort read unset does not
   reproduce at 7e67446: a spawned Ticket that has not run reads `requested` (the case for
   reassign.test.ts:154 pins requested).
+
+## Notes from the Rust port agents
+
+### ac_io::herdr (r-herdr, 1c8824d)
+
+- A Rust future sends nothing until it is awaited or spawned: every herdr call the TypeScript fires and
+  forgets (`void closeTab(...)`, `void releasePaneAgent(...).catch(() => {})`) is a `tokio::spawn` of an
+  `async move` block owning a `Herdr` clone.
+- AbortController is `tokio_util::sync::CancellationToken`: pass `Some(&token)` to `wait_for_pane_end`;
+  dropping the wait's future also closes its subscription. ac-engine needs `tokio-util.workspace = true`.
+- Only the CLI reads the environment: `default_socket_path(HERDR_SOCKET_PATH, home)` (home as Node's
+  `os.homedir()`: $HOME, else the password database); `HERDR_WORKSPACE_ID` is the launch candidate for
+  `resolve_pool_workspace`.
+- `wait_for_pane_end` runs its liveness `pane.list` checks on detached tasks, as the TypeScript's floating
+  promises did, so the daemon sees the same calls.
+- `HerdrError`'s Display is the TypeScript's `err.message` exactly: no "Error: " prefix, and wrap it with
+  `.context(...)` only where the TypeScript's text changed too. `is_tab_not_found` takes anything Display.
+- `Herdr::rpc` returns `Option<Value>`: `None` is JavaScript's undefined, `Some(Null)` is null; they print
+  differently in shape errors.
+- `crates/io/src/herdr/js.rs` holds JavaScript-compatible helpers (number printing, JSON.stringify of a
+  Value, String(), trim, UTF-16 length and prefix), private for now: move them to `ac_core::js` once it
+  exists and point herdr at it.
+- `crates/io/src/herdr/fake.rs` is a test-only port of the fake herdr; share it behind a test-support
+  feature if engine unit tests need one.
+- The RPC watchdog is a fixed 10 s; tests that need it to fire use `#[tokio::test(start_paused = true)]`.
+- Connect failures read `connect ENOENT <path>` for every cause, as Bun 1.3.14 reports them; a label cut
+  that would split a surrogate pair drops the character; a `null` entry in `agent.list` is skipped.
