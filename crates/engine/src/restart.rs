@@ -9,7 +9,7 @@
 //!
 //! Some of what adoption calls belongs to other ports (the Continued attempts, the enlisted runtime).
 //! Those calls go through the small functions in [`peers`], each named for the TypeScript it stands
-//! for, so the port that owns it replaces one body.
+//! for.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -1291,13 +1291,13 @@ pub fn redo_deferred_merges(session: &mut Session) {
     }
 }
 
-/// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime.
-/// Each function is named for the TypeScript it stands for and holds the narrowest behaviour of a pool
-/// without that feature in flight; the port that owns the feature replaces the body.
-#[allow(dead_code)] // stubs until the owning ports land
+/// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime,
+/// each named for the TypeScript it stands for.
 mod peers {
     use ac_core::assignment::Assignment;
     use ac_core::pool::TicketMarker;
+    use ac_io::herdr::Herdr;
+    use tokio_util::sync::CancellationToken;
 
     use crate::actor::Engine;
     use crate::session::{EnlistedWork, Session};
@@ -1340,45 +1340,38 @@ mod peers {
         crate::keep_talking::release_continued(session, ticket_id)
     }
 
-    /// How an enlisted attempt ended (enlisted.ts `EnlistedEnding`). PEER(enlisted).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum EnlistedEnding {
-        Outcome,
-        PaneGone,
-    }
+    pub use crate::enlisted::EnlistedEnding;
+    use crate::enlisted::{ENLISTED_POLL_MS, RegisterEnlisted};
 
-    /// `endEnlistedAttempt`. PEER(enlist_flow): records nothing.
+    /// `endEnlistedAttempt`.
     pub fn end_enlisted_attempt(
         session: &mut Session,
         ticket_id: &str,
         ending: EnlistedEnding,
         attempt: u64,
     ) -> anyhow::Result<()> {
-        let _ = (session, ticket_id, ending, attempt);
-        Ok(())
+        crate::enlist_flow::end_enlisted_attempt(session, ticket_id, ending, Some(attempt))
     }
 
-    /// `chainEnlistedMerge`. PEER(enlist_flow).
+    /// `chainEnlistedMerge`.
     pub fn chain_enlisted_merge(
         session: &mut Session,
         marker: &TicketMarker,
         attempt: u64,
         branch: &str,
     ) {
-        let _ = (session, marker, attempt, branch);
+        crate::enlist_flow::chain_enlisted_merge(
+            session,
+            marker.clone(),
+            attempt,
+            branch.to_owned(),
+        );
     }
 
-    /// What `session.enlisted.register` takes for a re-adopted pane.
+    /// What `session.enlisted.register` takes for a re-adopted pane: the pane was taught before the
+    /// restart, so no teaching is queued and no tab is known.
     #[derive(Debug, Clone)]
-    pub struct EnlistedRegistration {
-        pub id: String,
-        pub pane_id: String,
-        pub harness: String,
-        pub title: String,
-        pub branch: String,
-        pub directory: String,
-        pub outcome_path: String,
-    }
+    pub struct EnlistedRegistration(RegisterEnlisted);
 
     impl EnlistedRegistration {
         /// The registration, or `None` when there is no found work or no harness on record.
@@ -1391,75 +1384,51 @@ mod peers {
             outcome_path: String,
         ) -> Option<Self> {
             let (work, harness) = (work?, harness?);
-            Some(EnlistedRegistration {
+            Some(EnlistedRegistration(RegisterEnlisted {
                 id: id.to_owned(),
                 pane_id: pane_id.to_owned(),
+                tab_id: None,
                 harness,
                 title,
                 branch: work.branch,
                 directory: work.directory,
                 outcome_path,
-            })
+                teaching: None,
+            }))
         }
     }
 
     /// `session.enlisted.register`: claim the pane's runtime; the reason when it cannot be claimed.
-    /// PEER(enlisted).
     pub async fn register_enlisted(
         engine: &Engine,
         registration: EnlistedRegistration,
     ) -> Result<(), String> {
-        let _ = (engine, registration);
-        Err("the enlisted runtime is not ported yet".to_owned())
+        crate::enlisted::register_enlisted(engine, registration.0).await
     }
 
-    /// `session.enlisted.release`. PEER(enlisted).
+    /// `session.enlisted.release`.
     pub fn release_enlisted(session: &mut Session, ticket_id: &str) {
-        let _ = (session, ticket_id);
+        session.enlisted.release(ticket_id);
     }
 
-    /// `waitForEnlistedEnding`: the two-form race, Outcome against pane gone; `None` when the wait
-    /// threw. PEER(enlisted).
+    /// `waitForEnlistedEnding`: the two-form race, Outcome against pane gone.
     pub async fn wait_for_enlisted_ending(
         herdr_socket: &str,
         pane_id: &str,
         outcome_path: &str,
         poll_ms: Option<u64>,
     ) -> Option<EnlistedEnding> {
-        let _ = (herdr_socket, pane_id, outcome_path, poll_ms);
-        None
-    }
-
-    /// `createdBranchNote`: the re-run of a created-branch enlist (spec story 11) needs the branch
-    /// free: a Brief that offers the re-run says so up front.
-    pub fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
-        let Some(work) = session.enlisted_work.get(ticket_id) else {
-            return String::new();
-        };
-        if work.branch != branch || branch != ac_io::git::branch_for(&session.cwd, ticket_id, None)
-        {
-            return String::new();
-        }
-        format!(
-            " The enlist created {branch} in that checkout, and a re-run needs the branch free: \
-             check another branch out there first, or the re-run waits as a checkpoint until you do."
+        crate::enlisted::wait_for_enlisted_ending(
+            &Herdr::new(herdr_socket),
+            pane_id,
+            outcome_path,
+            &CancellationToken::new(),
+            poll_ms.unwrap_or(ENLISTED_POLL_MS),
         )
+        .await
     }
 
-    /// `reRunAssignment`: the Assignment a ticket that stopped being an enlisted attempt runs on: the
-    /// ordinary pool assignment for its id, with verify stripped (an enlisted id never fans out).
-    pub fn re_run_assignment(
-        session: &Session,
-        marker: &TicketMarker,
-    ) -> anyhow::Result<Assignment> {
-        let mut resolved = ac_core::assignment::resolve_ticket_assignment(
-            marker,
-            &session.state.config,
-            &session.harnesses,
-        )?;
-        resolved.verify = None;
-        Ok(resolved)
-    }
+    pub(super) use crate::enlist_flow::{created_branch_note, re_run_assignment};
 }
 
 #[cfg(test)]
